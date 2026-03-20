@@ -1,9 +1,9 @@
-# Orchestrator Skill v2 — Multi-Agent Orchestration for Claude Code
+# Agent Baton — Multi-Agent Orchestration for Claude Code
 
-A multi-agent orchestration system that intelligently decides what should be a
-subagent (its own context window) vs a skill (inline procedure) vs a reference
-document (shared knowledge). The result: fewer agents, less token waste, better
-information fidelity, and safety governance built into the architecture.
+A multi-agent orchestration system with a Python engine, distributable agent
+definitions, and a CLI toolkit. Intelligently decides what should be a subagent
+(its own context window) vs a skill (inline procedure) vs a reference document
+(shared knowledge).
 
 ---
 
@@ -16,222 +16,193 @@ information loss when summarizing results back. These costs are justified only
 when the work is substantial, independence matters, or the output would
 overwhelm the caller's context.
 
-Everything else — research procedures, stack detection, communication
-templates, low-risk guardrails — runs inline as skills the orchestrator
-executes in its own context. This keeps the orchestrator's planning detail at
-full fidelity instead of reading summaries-of-summaries.
-
-See `references/decision-framework.md` for the full framework, including the
-five-test decision flowchart.
+See `references/decision-framework.md` for the full five-test decision flowchart.
 
 ---
 
 ## Architecture
 
 ```
-                    ┌─────────────────────────────┐
-                    │        ORCHESTRATOR          │
-                    │                              │
-                    │  Inline skills:              │
-                    │  • Research procedures       │
-                    │  • Agent routing/mapping     │
-                    │  • Comms protocols           │
-                    │  • Low-risk guardrails       │
-                    └──────────┬──────────────────┘
-                               │
-              ┌────────────────┼────────────────┐
-              │                │                │
-              ▼                ▼                ▼
-     ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
-     │   AUDITOR    │ │     SME      │ │   TALENT     │
-     │ (independent │ │  (domain     │ │   BUILDER    │
-     │  veto power) │ │  judgment)   │ │ (creates new │
-     └──────────────┘ └──────────────┘ │  capabilities│
-                                        └──────────────┘
-              ┌─────────────────────────────────┐
-              │        SPECIALIST AGENTS         │
-              │  Backend · Frontend · Architect  │
-              │  DevOps · Testing · Data Eng     │
-              │  Data Sci · Analyst · Viz Expert │
-              │  Security · Code Review          │
-              └─────────────────────────────────┘
-
-     ┌─────────────────────────────────────────────┐
-     │           REFERENCE DOCUMENTS                │
-     │  (shared knowledge — read by multiple agents)│
-     │                                              │
-     │  decision-framework · research-procedures    │
-     │  agent-routing · guardrail-presets            │
-     │  comms-protocols                              │
-     └─────────────────────────────────────────────┘
-```
-
-### What Changed from v1 (and Why)
-
-**Removed as subagents, now inline skills:**
-
-| Was | Now | Why |
-|-----|-----|-----|
-| `researcher` agent | Research procedures (inline) | Orchestrator is the consumer of research. Subagent meant findings were summarized and lost detail the orchestrator needs for planning. Fails Test 3 (caller needs full detail). |
-| `talent-mapper` agent | Agent routing (inline) | Stack detection is a lookup procedure, not judgment. Reading `package.json` and matching a table doesn't need its own context window. Fails Test 1 (not substantial) and Test 4 (procedure, not judgment). |
-| `comms-controller` agent | Comms protocols (inline) | Templates, mission log entries, and handoff briefs are fill-in-the-blank procedures. Adding a subagent created coordination overhead with zero reasoning benefit. Fails Test 1 and Test 4. |
-
-**Restructured:**
-
-| Agent | Change | Why |
-|-------|--------|-----|
-| `auditor` | Now dual: inline process (LOW risk) + subagent (MEDIUM+ risk) | Prevents the auditor from being either a bottleneck (reviewing trivial changes) or absent (skipped because "too heavy"). Low-risk tasks use guardrail presets inline; high-risk tasks get independent review. |
-| `talent-builder` | Now applies decision framework before creating anything | Prevents subagent sprawl. New capabilities get triaged: subagent, skill, or reference doc — whichever tier fits. |
-
-**Net result:** 19 agent files (down from 22), 5 reference documents added.
-Token savings of ~3 context windows per task that previously spawned
-researcher + mapper + comms-controller.
-
----
-
-## File Structure
-
-```
-orchestrator-v2/
-├── agents/                              ← Subagents (own context window)
-│   ├── orchestrator.md                  ← PM — plans, coordinates, runs inline skills
-│   ├── auditor.md                       ← Independent safety reviewer (veto power)
-│   ├── talent-builder.md                ← Creates new agents/skills/references
-│   ├── architect.md                     ← System design
-│   ├── backend-engineer.md              ← Server-side (generic)
-│   │   ├── backend-engineer--node.md
-│   │   └── backend-engineer--python.md
-│   ├── frontend-engineer.md             ← Client-side (generic)
-│   │   ├── frontend-engineer--react.md
-│   │   └── frontend-engineer--dotnet.md
-│   ├── devops-engineer.md               ← Infrastructure
-│   ├── test-engineer.md                 ← Testing
-│   ├── data-engineer.md                 ← Schemas, pipelines, migrations
-│   ├── data-scientist.md                ← ML, statistics, modeling
-│   ├── data-analyst.md                  ← SQL, KPIs, business questions
-│   ├── visualization-expert.md          ← Charts, dashboards
-│   ├── subject-matter-expert.md         ← Business domain expertise
-│   ├── security-reviewer.md             ← Security audit
-│   └── code-reviewer.md                 ← Quality review
+agent-baton/
+├── agent_baton/             ← Python package (orchestration engine)
+│   ├── models/              ← Data models (dataclasses)
+│   │   ├── enums.py         ← RiskLevel, TrustLevel, BudgetTier, ExecutionMode, ...
+│   │   ├── agent.py         ← AgentDefinition
+│   │   ├── plan.py          ← ExecutionPlan, Phase, AgentAssignment, QAGate
+│   │   ├── usage.py         ← TaskUsageRecord, AgentUsageRecord
+│   │   ├── retrospective.py ← Retrospective, AgentOutcome, KnowledgeGap
+│   │   └── reference.py     ← ReferenceDocument
+│   ├── core/                ← Business logic
+│   │   ├── registry.py      ← AgentRegistry: load/query agent definitions
+│   │   ├── router.py        ← AgentRouter: stack detection → flavor matching
+│   │   ├── plan.py          ← PlanBuilder: execution plans + risk assessment
+│   │   ├── context.py       ← ContextManager: team-context file I/O
+│   │   ├── validator.py     ← AgentValidator: format correctness checks
+│   │   ├── usage.py         ← UsageLogger: JSONL usage tracking
+│   │   ├── retrospective.py ← RetrospectiveEngine: task retrospectives
+│   │   ├── vcs.py           ← AgentVersionControl: changelog + backups
+│   │   ├── scoring.py       ← PerformanceScorer: agent scorecards
+│   │   └── dashboard.py     ← DashboardGenerator: usage dashboard
+│   ├── cli/                 ← CLI interface (`baton` command)
+│   │   └── main.py          ← 11 commands: agents, detect, route, status,
+│   │                           install, validate, changelog, usage, scores,
+│   │                           dashboard, retro
+│   └── utils/
+│       └── frontmatter.py   ← YAML frontmatter parser
 │
-├── references/                          ← Skills & shared knowledge
-│   ├── decision-framework.md            ← When to use subagent vs skill vs reference
-│   ├── research-procedures.md           ← 4 research modes (orchestrator runs inline)
-│   ├── agent-routing.md                 ← Stack detection + flavor matching
-│   ├── guardrail-presets.md             ← Risk triage + standard guardrail configs
-│   └── comms-protocols.md               ← Delegation, handoff, logging templates
+├── agents/                  ← Distributable agent definitions (19 agents)
+├── references/              ← Distributable reference docs (12 docs)
+├── templates/               ← CLAUDE.md + settings.json for installation
+├── scripts/                 ← Install scripts (Linux + Windows)
+├── tests/                   ← pytest suite (329+ tests)
 │
-├── install.sh                           ← Setup script
-└── README.md
+├── .claude/                 ← Project-specific orchestration setup
+│   ├── agents/              ← 11 agents tailored for developing agent-baton
+│   ├── knowledge/
+│   │   ├── agent-baton/     ← Architecture, format, workflow docs
+│   │   ├── ai-orchestration/← Multi-agent patterns, prompt engineering,
+│   │   │                       context economics, evaluation frameworks
+│   │   └── case-studies/    ← Framework comparisons, failure modes, scaling
+│   ├── references/          ← Symlink → ../references/
+│   └── settings.json        ← Project hooks
+│
+└── reference_files/         ← Input docs / roadmap
 ```
 
 ---
 
-## The Decision Framework (Summary)
+## Python Package (`agent_baton`)
 
-Full version in `references/decision-framework.md`.
+### Core Classes
 
-**Five tests, applied in order:**
+| Class | Module | Purpose |
+|-------|--------|---------|
+| `AgentRegistry` | core.registry | Load + query agent definitions from disk |
+| `AgentRouter` | core.router | Detect project stack, route to agent flavors |
+| `PlanBuilder` | core.plan | Create execution plans with risk assessment |
+| `ContextManager` | core.context | Manage team-context files (plan, context, mission log) |
+| `AgentValidator` | core.validator | Validate agent .md files for format correctness |
+| `UsageLogger` | core.usage | JSONL usage tracking per orchestrated task |
+| `RetrospectiveEngine` | core.retrospective | Structured task retrospectives |
+| `AgentVersionControl` | core.vcs | Agent prompt changelog + backups |
+| `PerformanceScorer` | core.scoring | Per-agent scorecards from usage + retro data |
+| `DashboardGenerator` | core.dashboard | Markdown usage dashboard |
 
-1. **Substantial independent work product?** Yes → subagent. No → next.
-2. **Independence from caller needed?** Yes → subagent. No → next.
-3. **Caller needs full detail?** Yes → skill (inline). No → subagent.
-4. **Procedure or judgment?** Procedure → skill. Judgment → subagent.
-5. **Used by multiple agents?** Yes → reference document. No → embed.
+### CLI Commands
 
-**Three tiers:**
-
-| Tier | What | Cost | When |
-|------|------|------|------|
-| Subagent | Own context window, own prompt, own tools | High (200K tokens, latency, summary loss) | Substantial work, independence, or large output |
-| Skill | Procedure the orchestrator runs inline | Low (stays in orchestrator's context) | Lookup, detection, templates, checklists |
-| Reference | Shared doc multiple agents read | Minimal | Knowledge used by >1 agent |
+```
+baton agents                     # List available agents
+baton detect                     # Detect project stack
+baton route [ROLES]              # Route roles to agent flavors
+baton status                     # Show team-context file status
+baton install --scope user       # Install agents + references
+baton validate agents/           # Validate agent definitions
+baton usage                      # Usage statistics summary
+baton usage --agent NAME         # Per-agent stats
+baton scores                     # Agent performance scorecards
+baton scores --write             # Write scorecard report to disk
+baton dashboard                  # Generate usage dashboard
+baton dashboard --write          # Write dashboard to disk
+baton retro                      # List recent retrospectives
+baton retro --search KEYWORD     # Search retrospectives
+baton retro --recommendations    # Extract roster recommendations
+baton changelog                  # Show agent change history
+baton changelog --backups        # List backup files
+```
 
 ---
 
-## The Auditor's Dual Nature
+## Project Agent Roster
 
-The auditor is both a **process** and an **agent**:
+Agents in `.claude/agents/` tailored for developing agent-baton:
 
-**As a process** (LOW risk): The orchestrator applies guardrail presets from
-`references/guardrail-presets.md` inline. Quick risk triage, standard
-boundaries, no subagent overhead.
+| Agent | Role | Domain |
+|-------|------|--------|
+| `orchestrator` | Coordinate multi-step tasks | Project-aware |
+| `backend-engineer--python` | Python implementation | Knows agent_baton package |
+| `ai-systems-architect` | AI orchestration design | Multi-agent patterns, context economics |
+| `prompt-engineer` | Agent prompt optimization | Prompt engineering research |
+| `ai-product-strategist` | Product decisions | Value/cost analysis, adoption paths |
+| `agent-definition-engineer` | Agent .md files | Format, conventions, decision framework |
+| `architect` | Generic system design | Standard |
+| `test-engineer` | Testing | Standard |
+| `code-reviewer` | Quality review | Standard |
+| `auditor` | Safety review | Standard |
+| `talent-builder` | Create new agents | Standard |
 
-**As a subagent** (MEDIUM+ risk): Independent review with veto authority.
-The auditor is a separate context window specifically so it can disagree with
-the orchestrator's plan without being influenced by the planner's reasoning.
+## Knowledge Packs
 
-**Risk triage signals:**
-- LOW: Simple code changes, no regulated data, read-only analysis
-- MEDIUM: Multiple agents writing, Bash access, database changes
-- HIGH: Infrastructure, production systems, security-sensitive
-- CRITICAL: Regulatory-reportable data, schema migrations on production
+### AI Orchestration (`.claude/knowledge/ai-orchestration/`)
+- **multi-agent-patterns.md** — Supervisor, router, hierarchical, fan-out patterns
+- **prompt-engineering-principles.md** — Effective agent prompts, anti-patterns
+- **context-economics.md** — Token cost models, information loss curves
+- **agent-evaluation.md** — Scoring frameworks, A/B testing, health ratings
+
+### Case Studies (`.claude/knowledge/case-studies/`)
+- **orchestration-frameworks.md** — LangGraph, CrewAI, AutoGen, Claude agents compared
+- **failure-modes.md** — 10 failure modes with mitigations
+- **scaling-patterns.md** — 3→15 agents, 1→many projects, 1→team users
+
+### Agent Baton (`.claude/knowledge/agent-baton/`)
+- **architecture.md** — Package layout, class responsibilities, data flow
+- **agent-format.md** — YAML frontmatter format, field reference
+- **development-workflow.md** — Setup, testing, commit conventions
 
 ---
 
-## Agent Flavoring
+## Roadmap Status
 
-Specialists have base (generic) and flavored (stack-specific) variants:
+### Wave 0: Foundation — COMPLETE
+- [x] 0.1 Usage Logger (JSONL tracking)
+- [x] 0.2 Retrospective Engine (structured task retrospectives)
+- [x] 0.3 Agent Prompt VCS (changelog + backups)
+- [x] 0.4 Decision Journal (delegation prompt template update)
 
-```
-backend-engineer.md           ← Any backend
-backend-engineer--node.md     ← Node.js / TypeScript patterns
-backend-engineer--python.md   ← Python / FastAPI / Django patterns
-```
+### Wave 1: Measure — COMPLETE
+- [x] 1.1 Agent Performance Scoring (per-agent scorecards)
+- [x] 1.2 Cost & Usage Dashboard (markdown dashboard)
 
-The orchestrator detects the stack inline (using `references/agent-routing.md`)
-and routes to the best flavor. If a needed flavor doesn't exist, the
-`talent-builder` creates it — after verifying it justifies a full context
-window per the decision framework.
+### Wave 1: Deliver — COMPLETE
+- [x] 1.5 Document Generation Pipeline (reference doc + templates)
+
+### Wave 1: Govern — PLANNED
+- [ ] 1.3 Sensitive Data Classification
+- [ ] 1.4 Compliance Report Generator
+
+### Wave 2: Optimize + Scale — PLANNED
+- [ ] 2.1 Prompt Evolution
+- [ ] 2.2 Cross-Project Knowledge Transfer
+- [ ] 2.3 Multi-User Agent Sharing
 
 ---
 
 ## Setup
 
 ```bash
-# Extract
-tar xzf orchestrator-v2.tar.gz
-cd orchestrator-v2
+# Install Python package
+pip install -e ".[dev]"
 
-# Install (choose user-level or project-level)
-chmod +x install.sh
-./install.sh
+# Install agents globally
+baton install --scope user
+
+# Or use the interactive script
+scripts/install.sh
 
 # Verify
-claude agents   # or /agents in a session
+baton agents
+baton validate agents/
 ```
 
 ---
 
-## Usage
+## Quick Start
 
-### Automatic
+```bash
+# In any project with Claude Code:
+# 1. Describe a complex task
+"Use the orchestrator to build a health check API with tests"
 
-Describe a complex task naturally:
-
-> "Build a compliance tracking system — needs API endpoints, a dashboard,
-> data validation against regulatory requirements, and tests."
-
-The orchestrator activates, researches inline, consults the SME, triages
-risk (CRITICAL → invokes auditor), maps agent flavors, and delegates.
-
-### Direct Specialist Invocation
-
-> "Use the data-analyst to investigate our resource utilization trends."
-
-> "Use the security-reviewer to audit our authentication flow."
-
----
-
-## Tips
-
-- **The system self-expands.** First time on a Go project? The talent-builder
-  creates `backend-engineer--go`. Next time, the routing table finds it.
-- **Watch for subagent sprawl.** If you keep creating agents, periodically
-  review the roster against the decision framework. Can any be downgraded?
-- **The decision framework is the north star.** When in doubt about how to
-  implement something, read `references/decision-framework.md`.
-- **3-5 specialists per task.** More than that and coordination overhead
-  outweighs benefits.
-- **Token cost: ~4-7x** per subagent over single-agent work. Inline skills
-  cost nothing extra. Design accordingly.
+# 2. The orchestrator reads references, detects stack, plans, and delegates
+# 3. Specialist agents implement, test, and review
+# 4. Mission log tracks everything at .claude/team-context/mission-log.md
+```

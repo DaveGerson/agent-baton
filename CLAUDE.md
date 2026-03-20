@@ -1,45 +1,59 @@
-# Project Orchestration Rules
+# Agent Baton — Development Guide
 
-This project uses a multi-agent orchestration system. Agent definitions are
-in `.claude/agents/` and reference procedures are in `.claude/references/`.
+This repo contains the source for Agent Baton, a multi-agent orchestration
+system for Claude Code.
 
-## Orchestrator Behavior (MANDATORY)
+## Repository Structure
 
-When the orchestrator agent is invoked:
+```
+agent_baton/       ← Python package (orchestration engine)
+agents/            ← Distributable agent definitions (19 .md files)
+references/        ← Distributable reference docs (11 .md files)
+templates/         ← CLAUDE.md + settings.json installed to target projects
+scripts/           ← Install scripts (Linux + Windows)
+tests/             ← Test suite (pytest)
+.claude/           ← Project-specific orchestration setup:
+  agents/          ← Tailored agents for developing agent-baton
+  references/      ← Symlink → ../references/ (canonical source)
+  knowledge/       ← Knowledge packs about agent-baton itself
+  settings.json    ← Hooks for this project
+```
 
-1. **Read ALL reference documents** in `.claude/references/` before planning.
-   This is not optional. The references contain procedures you execute inline.
-   Read them at the start of every orchestrated task.
+## Key Rules
 
-2. **Write the execution plan to disk** at `.claude/team-context/plan.md`
-   before delegating to any agents. This enables session recovery if the
-   session is interrupted.
+- `agents/` and `references/` are the **distributable** source of truth.
+  Changes here affect all users who install agent-baton.
+- `.claude/agents/` contains **project-specific** agents tailored for
+  developing agent-baton. These are NOT distributed.
+- `.claude/references/` is a symlink to `references/` — edits to canonical
+  references are immediately available to the project's orchestrator.
+- The `agent_baton` Python package reads agent definitions at runtime.
 
-3. **Create the shared context document** at `.claude/team-context/context.md`
-   before dispatching agents. Every delegation prompt must include:
-   "Read `.claude/team-context/context.md` for shared project context."
+## Agent Roster (for this project)
 
-4. **Update the mission log** at `.claude/team-context/mission-log.md` after
-   every agent completes. Write it to disk, do not hold it only in memory.
+| Agent | Role |
+|-------|------|
+| `orchestrator` | Coordinate multi-step development tasks |
+| `backend-engineer--python` | Python implementation in agent_baton/ |
+| `architect` | Design decisions, module boundaries |
+| `test-engineer` | Write and organize pytest tests |
+| `code-reviewer` | Quality review before commits |
+| `auditor` | Safety review for guardrail/hook changes |
+| `talent-builder` | Create new distributable agent definitions |
+| `agent-definition-engineer` | Edit agent .md files, references, knowledge packs |
 
-5. **Follow the git strategy**: create a feature branch before dispatching
-   agents, commit each agent's work individually with the commit message
-   convention from `.claude/references/git-strategy.md`.
+## Development
 
-## Regulated Domain Rules
+```bash
+pip install -e ".[dev]"    # Install in editable mode
+pytest                     # Run tests
+scripts/install.sh         # Re-install globally after editing agents/references
+```
 
-Any work touching regulated data, compliance systems, audit-controlled
-records, or industry-specific business rules MUST:
-- Involve the `subject-matter-expert` agent for domain context
-- Involve the `auditor` agent for pre-execution and post-execution review
-- Follow the Regulated Data guardrail preset
+## Orchestrator Usage
 
-## Agent Invocation
+For complex tasks involving 3+ files across different layers, use the
+orchestrator agent. For simple single-file changes, work directly.
 
-For complex tasks involving 3+ files across different domains, use the
-`orchestrator` agent. Do not attempt to handle multi-domain tasks directly —
-delegate to the orchestrator which will plan, research, and coordinate
-specialist agents.
-
-For simple, single-domain tasks (bug fixes, small features, utility
-functions), work directly without the orchestrator.
+Changes to distributable files (`agents/`, `references/`) are MEDIUM risk
+and should involve the auditor when substantial.

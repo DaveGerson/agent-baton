@@ -86,6 +86,21 @@ Retry result: [success/fail]
    YOUR TASK: Fix/complete only the following: [specific gap]
    ```
 
+### Partial Capability → Adaptive Decomposition
+
+When an agent's capabilities assessment indicates it can handle some but
+not all of the task:
+
+1. **Don't treat this as a failure.** This is healthy self-awareness.
+2. **Let the agent proceed** with the portion it can handle.
+3. **Route the gap** to another agent using the orchestrator's routing
+   procedure (see comms-protocols.md, Adaptive Task Decomposition).
+4. **Merge the outputs** in the next phase — the gap-filler's output
+   becomes a handoff for integration.
+
+This is better than an agent attempting work outside its expertise,
+which typically results in a Quality Failure requiring a full retry.
+
 ## Cascade Failure Handling
 
 When a failed step has downstream dependencies:

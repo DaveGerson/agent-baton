@@ -1,4 +1,4 @@
-# Quickstart — Do This Tomorrow
+# Agent Baton — Quickstart
 
 ## Install (5 minutes)
 
@@ -16,24 +16,26 @@ my project root. Then run /agents to verify they loaded.
 
 Claude Code will do the file operations for you. No scripts needed.
 
-### Option B: PowerShell (Windows)
-
-```powershell
-cd path\to\orchestrator-v2
-powershell -ExecutionPolicy Bypass -File install.ps1
-```
-
-Choose option 2 (project-level) when prompted.
-
-### Option C: Bash (if available in your terminal)
+### Option B: Bash (Linux/macOS)
 
 ```bash
-cd /path/to/orchestrator-v2
-chmod +x install.sh
-./install.sh
+cd /path/to/agent-baton
+chmod +x scripts/install.sh
+scripts/install.sh
 ```
 
-Choose option 2 (project-level) when prompted.
+Choose option 1 (user-level) for global install, or option 2 (project-level)
+for a single project.
+
+### Option C: PowerShell (Windows)
+
+```powershell
+cd path\to\agent-baton
+powershell -ExecutionPolicy Bypass -File scripts\install.ps1
+```
+
+Choose option 1 (user-level) for global install, or option 2 (project-level)
+for a single project.
 
 ## Verify (30 seconds)
 

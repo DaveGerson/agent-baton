@@ -41,7 +41,8 @@ reference documents are missing and ask them to verify installation.
 7. `git-strategy.md` — Branch and commit strategy for multi-agent work
 8. `cost-budget.md` — Model selection, budget tiers, context management
 9. `hooks-enforcement.md` — Mechanical enforcement via hooks
-10. `task-sequencing.md` — Phased delivery with QA gates between phases — Mechanical enforcement via hooks
+10. `task-sequencing.md` — Phased delivery with QA gates between phases
+11. `doc-generation.md` — Phased workflow for generating documents (specs, ADRs, runbooks)
 
 These references contain the procedures you execute directly. They are NOT
 subagents — they run in your context because you need the full detail.

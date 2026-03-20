@@ -1,0 +1,23 @@
+# IDE
+.idea/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+*.egg
+
+
+# Claude Code runtime state (regenerated per session)
+.claude/*
+.claude/agents/*
+.claude/team-context/
+reference_files/*
+
+# OS
+.DS_Store
+Thumbs.db
