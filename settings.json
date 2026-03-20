@@ -1,0 +1,54 @@
+{
+  "hooks": {
+    "SubagentStart": [
+      {
+        "matcher": "orchestrator",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '⚙ Orchestrator started — remember: read .claude/references/ before planning, write plan to .claude/team-context/plan.md before delegating'"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "mkdir -p .claude/team-context"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'TIMESTAMP=$(date -Iseconds); AGENT=\"$CLAUDE_AGENT_NAME\"; echo \"### $TIMESTAMP — $AGENT — COMPLETE\" >> .claude/team-context/mission-log.md 2>/dev/null; echo \"✓ Mission log updated for agent completion\"'"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'FILE=\"$CLAUDE_TOOL_INPUT_FILE_PATH\"; if echo \"$FILE\" | grep -qE \"(\\.env|secrets/|node_modules/)\"; then echo \"BLOCKED: Write to protected path: $FILE\" >&2; exit 2; fi; exit 0'"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'if [ -f .claude/team-context/mission-log.md ]; then echo \"📋 Mission log: .claude/team-context/mission-log.md\"; fi'"
+          }
+        ]
+      }
+    ]
+  }
+}
