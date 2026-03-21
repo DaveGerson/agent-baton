@@ -1,37 +1,36 @@
 # Project Orchestration Rules
 
-This project uses a multi-agent orchestration system. Agent definitions are
-in `.claude/agents/` and reference procedures are in `.claude/references/`.
+This project uses a multi-agent orchestration system powered by the
+agent-baton execution engine. Agent definitions are in `.claude/agents/`
+and reference procedures are in `.claude/references/`.
 
 ## Orchestrator Behavior (MANDATORY)
 
-When the orchestrator agent is invoked:
+When the orchestrator agent is invoked, it drives tasks through the
+execution engine:
 
-1. **Read ALL reference documents** in `.claude/references/` before planning.
-   This is not optional. The references contain procedures you execute inline.
-   Read them at the start of every orchestrated task.
+1. **Create a plan** using `baton plan "task description" --save --explain`.
+   The engine handles agent routing, risk assessment, budget selection,
+   and phase sequencing. It writes `plan.json` and `plan.md` to
+   `.claude/team-context/`.
 
-2. **Write the execution plan to disk** at `.claude/team-context/plan.md`
-   before delegating to any agents. This enables session recovery if the
-   session is interrupted.
+2. **Start execution** with `baton execute start`. The engine initializes
+   tracing, state persistence, and returns the first action.
 
-3. **Create the shared context document** at `.claude/team-context/context.md`
-   before dispatching agents. Every delegation prompt must include:
-   "Read `.claude/team-context/context.md` for shared project context."
+3. **Drive the execution loop**: the engine returns DISPATCH, GATE, or
+   COMPLETE actions. For DISPATCH, spawn the agent with the provided
+   prompt. For GATE, run the specified check. Record results with
+   `baton execute record` and `baton execute gate`.
 
-4. **Update the mission log** at `.claude/team-context/mission-log.md` after
-   every agent completes. Write it to disk, do not hold it only in memory.
+4. **Finalize** with `baton execute complete`. The engine automatically
+   writes trace data, usage logs, and retrospectives that feed the
+   learning pipeline.
 
 5. **Follow the git strategy**: create a feature branch before dispatching
-   agents, commit each agent's work individually with the commit message
-   convention from `.claude/references/git-strategy.md`.
+   agents, commit each agent's work individually.
 
-6. **Log decisions**: include the DECISION LOGGING instruction in every
-   delegation prompt (see `.claude/references/comms-protocols.md`).
-
-7. **For document tasks**: use the doc-generation pipeline in
-   `.claude/references/doc-generation.md` instead of the standard
-   implementation workflow.
+6. **Session recovery**: if a session crashes, `baton execute resume`
+   picks up where it left off using the saved execution state.
 
 ## Regulated Domain Rules
 

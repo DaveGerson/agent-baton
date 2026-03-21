@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo '⚙ Orchestrator started — remember: read .claude/references/ before planning, write plan to .claude/team-context/plan.md before delegating'"
+            "command": "echo '⚙ Orchestrator started — use baton plan + baton execute to drive tasks through the execution engine.'"
           }
         ]
       },
