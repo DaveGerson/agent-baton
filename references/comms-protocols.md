@@ -135,6 +135,110 @@ Constraints from this work: [e.g., "API returns this shape, consume these fields
 - Agent outputs are always summarized before handoff. Raw Bash output, full
   file contents, and verbose logs stay INTERNAL.
 
+## Chain Context Template
+
+For chained delivery (see `task-sequencing.md` Mode 4 and
+`adaptive-execution.md`). Write to `.claude/team-context/context.md`
+before executing the chain.
+
+```markdown
+# Chain Context — [Initiative Name]
+
+## Initiative
+[What this chain accomplishes — e.g., "Phase A2: No-Regrets UI Foundation"]
+
+## Activity Manifest
+
+| # | Activity | Level | Files | Notes |
+|---|----------|-------|-------|-------|
+| 1 | [Name] | Direct | [paths] | |
+| 2 | [Name] | Coordinated | [paths] | Shares files with #4 |
+| 3 | [Name] | Full | [paths] | Depends on #1 |
+
+## Cross-Cutting Concerns
+[Files touched by multiple activities. Sequencing constraints.]
+
+## Guardrails
+- ALLOWED: [paths all activities may write]
+- BLOCKED: [paths off-limits for the chain]
+
+## Chain Updates
+[Appended after each activity completes — see below]
+```
+
+### Chain Update Entry (appended after each activity)
+
+```markdown
+## Chain Update — Activity N: [Name]
+- Status: COMPLETE | SKIPPED | FAILED
+- Files created/modified: [paths]
+- Patterns established: [e.g., "used border-l-4 for entity type colors"]
+- Utilities created: [e.g., "new SkeletonCard.tsx component"]
+- Notes for later activities: [e.g., "import entityColors from utils/"]
+```
+
+## Chain Mission Log
+
+For chains, the mission log tracks activity-level progress:
+
+```markdown
+# Mission Log — Chain: [Initiative Name]
+
+Started: [timestamp]
+Activities: [N total, M completed]
+
+---
+
+### Activity 1: [Name] — [Level 1: Direct] — COMPLETE
+Agent: [agent-name]
+Result: [1-2 sentences]
+Files: [paths]
+Commit: [hash]
+
+### Activity 2: [Name] — [Level 2: Coordinated] — COMPLETE
+Agent: [agent-name]
+Result: [1-2 sentences]
+Files: [paths]
+Build gate: PASS
+Commit: [hash]
+
+### Chain Gate — PASS
+Build: PASS
+Tests: PASS (N passed, 0 failed)
+Integration: PASS
+
+### Chain Review — code-reviewer — COMPLETE
+Verdict: SHIP | SHIP WITH NOTES | REVISE
+Notes: [if any]
+```
+
+## Chain Completion Report
+
+```markdown
+## Chain Completion — [Initiative Name]
+
+### Summary
+[What was accomplished across all activities]
+
+### Activities
+| # | Activity | Level | Status | Commit |
+|---|----------|-------|--------|--------|
+| 1 | [Name] | Direct | COMPLETE | [hash] |
+| 2 | [Name] | Coordinated | COMPLETE | [hash] |
+
+### Chain Gate Result
+Build: PASS | Tests: PASS | Integration: PASS
+
+### Code Review
+Verdict: [SHIP / SHIP WITH NOTES / REVISE]
+Notes: [if any]
+
+### Follow-ups
+[Skipped activities, PASS WITH NOTES items, issues discovered]
+```
+
+---
+
 ## Completion Report Template
 
 Produce after all agents finish and auditor signs off:

@@ -64,6 +64,66 @@ Phase 1: Foundation          Phase 2: Implementation      Phase 3: Quality
 **Use when:** Work has natural phases where upstream output shapes
 downstream work.
 
+### Mode 4: Chained Delivery (for batches of related tasks)
+
+Multiple self-contained activities execute sequentially as a single
+orchestrated unit. Each activity runs at its own engagement level (Direct,
+Coordinated, or Full — see `adaptive-execution.md`), but the chain
+provides shared context, combined QA, and cross-cutting detection.
+
+```
+Chain: "Phase A2 — No-Regrets UI Foundation"
+│
+├── Setup: Load profile, write chain context, create branch
+│
+├── Activity 1: Entity Type Colors ─── [Level 1: Direct]
+│   └── 1 agent → commit
+│
+├── Activity 2: Amber/Indigo Accent ── [Level 2: Coordinated]
+│   └── 1 agent → build gate → commit
+│
+├── Activity 3: Better Empty States ── [Level 1: Direct]
+│   └── 1 agent → commit
+│
+├── Activity 4: Sidebar Filter ─────── [Level 2: Coordinated]
+│   └── 1 agent → build gate → commit
+│
+├── Activity 5: Loading Skeletons ──── [Level 1: Direct]
+│   └── 1 agent → commit
+│
+├── Activity 6: Breadcrumbs ────────── [Level 1: Direct]
+│   └── 1 agent → commit
+│
+├── Chain Gate: Build + Test + Integration
+│
+└── Chain Review: code-reviewer (full diff)
+```
+
+**Use when:** User provides a batch of related tasks (e.g., an
+implementation plan phase, a list of bug fixes, a set of related
+improvements). Each task is independently completable but shares context
+with the others.
+
+**Key differences from Phased Delivery:**
+- Activities are complete tasks, not dependent steps of one task
+- Each activity has its own engagement level
+- QA gates run at the chain level, not between every activity
+- Context accumulates — later activities benefit from earlier output
+- Failure in one activity doesn't necessarily block others
+
+**Chain ordering rules:**
+1. Dependencies first (if Activity 3 needs Activity 1's output)
+2. Shared-file activities in sequence (avoid merge conflicts)
+3. Level 1 before Level 2 before Level 3 (when unconstrained)
+4. Type/utility work before component work
+
+**Chain gates:**
+- **Per-activity gates** (Level 2+ only): lightweight build check after
+  each coordinated or full activity
+- **Chain gate** (after all activities): build + test + integration.
+  Covers the combined output of all activities.
+- **Chain review**: code-reviewer gets the full chain diff in one pass
+
 ---
 
 ## QA Gates
@@ -192,6 +252,29 @@ Phase 4: Validation
 Phase 5: Visualization (if needed)
   - visualization-expert: dashboards, charts
   Gate: Renders correctly with real data
+```
+
+### Template: Implementation Plan Phase (Chained Delivery)
+
+```
+Chain Setup:
+  - Classify all activities by engagement level
+  - Detect cross-cutting concerns (shared files)
+  - Order: dependencies → shared files → Level 1 → 2 → 3
+  - Write chain context, create branch
+
+Activities (executed sequentially):
+  Level 1 tasks:
+    - Single agent dispatch, verify, commit
+  Level 2 tasks:
+    - Agent dispatch with boundaries, build gate, commit
+  Level 3 tasks:
+    - Full orchestration pipeline for this activity
+    - Per-phase QA gates within the activity
+    - Commit per agent
+
+Chain Gate: Build + Test + Integration
+Chain Review: code-reviewer (full diff)
 ```
 
 ### Template: Analysis / Report
