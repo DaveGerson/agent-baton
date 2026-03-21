@@ -17,6 +17,7 @@ from agent_baton.core.learn.pattern_learner import PatternLearner
 from agent_baton.core.orchestration.plan import PlanBuilder
 from agent_baton.core.orchestration.registry import AgentRegistry
 from agent_baton.core.orchestration.router import AgentRouter
+from agent_baton.models.enums import RiskLevel
 from agent_baton.models.execution import MachinePlan, PlanGate, PlanPhase, PlanStep
 from agent_baton.models.pattern import LearnedPattern
 
@@ -121,17 +122,18 @@ class IntelligentPlanner:
 
         Steps:
         1. Generate task_id from timestamp + summary slug.
-        2. Assess risk level via PlanBuilder.assess_risk.
-        3. Detect project stack if project_root is given.
-        4. Infer or use the provided task_type.
-        5. Look for a high-confidence pattern that matches the task_type.
-        6. Build phase list — from pattern, from override, or from defaults.
-        7. Route base agent names to flavored variants.
-        8. Check PerformanceScorer; warn about low-scoring agents.
-        9. Apply budget tier recommendation if one exists.
-        10. Add QA gates between phases.
-        11. Build shared_context string.
-        12. Return MachinePlan.
+        2. Detect project stack if project_root is given.
+        3. Infer or use the provided task_type.
+        4. Look for a high-confidence pattern that matches the task_type.
+        5. Determine agents list — from explicit override, pattern, or defaults.
+        6. Route base agent names to flavored variants.
+        7. Assess risk via _assess_risk (keywords + structural signals from agents).
+        8. Derive git strategy from risk level.
+        9. Build phase list — from override, pattern, or defaults.
+        10. Check PerformanceScorer; warn about low-scoring agents.
+        11. Apply budget tier recommendation if one exists.
+        12. Add QA gates between phases.
+        13. Build shared_context string and return MachinePlan.
 
         Args:
             task_summary: One-line human description of the task.
@@ -153,15 +155,7 @@ class IntelligentPlanner:
         # 1. Task ID
         task_id = self._generate_task_id(task_summary)
 
-        # 2. Risk
-        risk_level_enum = self._plan_builder.assess_risk(task_summary)
-        risk_level = risk_level_enum.value
-
-        # 3. Git strategy — derived from risk
-        from agent_baton.core.orchestration.plan import PlanBuilder as _PB
-        git_strategy = _PB._select_git_strategy(risk_level_enum).value
-
-        # 4. Detect stack (best effort)
+        # 2. Detect stack (best effort) — needed before agent resolution
         stack_profile = None
         if project_root is not None:
             try:
@@ -169,10 +163,10 @@ class IntelligentPlanner:
             except Exception:
                 pass
 
-        # 5. Task type
+        # 3. Task type
         inferred_type = task_type or self._infer_task_type(task_summary)
 
-        # 6. Pattern lookup
+        # 4. Pattern lookup
         pattern: LearnedPattern | None = None
         if not agents and not phases:
             try:
@@ -192,7 +186,7 @@ class IntelligentPlanner:
             except Exception:
                 pass
 
-        # 7. Determine agents list
+        # 5. Determine agents list
         if agents is None:
             if pattern is not None:
                 resolved_agents = list(pattern.recommended_agents)
@@ -201,8 +195,16 @@ class IntelligentPlanner:
         else:
             resolved_agents = list(agents)
 
-        # 8. Route agents
+        # 6. Route agents
         resolved_agents = self._route_agents(resolved_agents, project_root)
+
+        # 7. Risk — assessed after routing so structural signals use final agents
+        risk_level = self._assess_risk(task_summary, resolved_agents)
+        risk_level_enum = RiskLevel(risk_level)
+
+        # 8. Git strategy — derived from risk
+        from agent_baton.core.orchestration.plan import PlanBuilder as _PB
+        git_strategy = _PB._select_git_strategy(risk_level_enum).value
 
         # 9. Build phases
         if phases is not None:
@@ -226,6 +228,7 @@ class IntelligentPlanner:
                 phase.gate = self._default_gate(phase.name)
 
         # 13. Shared context
+        # Build a temporary plan to generate the context string
         # Build a temporary plan to generate the context string
         tmp_plan = MachinePlan(
             task_id=task_id,
@@ -583,6 +586,83 @@ class IntelligentPlanner:
         if agent_count <= 5:
             return "standard"
         return "full"
+
+    # ------------------------------------------------------------------
+    # Private helpers — risk assessment
+    # ------------------------------------------------------------------
+
+    def _assess_risk(self, task_summary: str, agents: list[str]) -> str:
+        """Assess risk level from task description and structural signals.
+
+        Combines keyword matching (delegated to PlanBuilder) with structural
+        indicators drawn from the agent list:
+
+        - Agent count: >5 agents raises score to at least MEDIUM.
+        - Sensitive agent types (security-reviewer, auditor, devops-*): at
+          least MEDIUM.
+        - Destructive action verbs in the description: at least MEDIUM.
+        - Read-only first-word indicators (review, analyze, inspect, …): caps
+          score at LOW when no sensitive agents are present.  This prevents
+          false positives such as "Review the production code" being flagged
+          HIGH solely because of the word "production".
+
+        Returns:
+            One of "LOW", "MEDIUM", or "HIGH".
+        """
+        # ── Score-based accumulator ──────────────────────────────────────────
+        # 0 = LOW, 1 = MEDIUM, 2 = HIGH
+        score = 0
+
+        # ── Keyword signals (via PlanBuilder for consistency) ─────────────────
+        risk_enum = self._plan_builder.assess_risk(task_summary)
+        keyword_score = {
+            RiskLevel.LOW: 0,
+            RiskLevel.MEDIUM: 1,
+            RiskLevel.HIGH: 2,
+            RiskLevel.CRITICAL: 2,
+        }.get(risk_enum, 0)
+        score = max(score, keyword_score)
+
+        # ── Structural signals ────────────────────────────────────────────────
+
+        # Agent count: many agents = higher coordination risk
+        if len(agents) > 5:
+            score = max(score, 1)
+
+        # Sensitive agent types involved
+        _SENSITIVE_AGENTS = {"security-reviewer", "auditor", "devops-engineer"}
+        if any(a in _SENSITIVE_AGENTS or a.startswith("devops") for a in agents):
+            score = max(score, 1)
+
+        # Destructive action verbs in description
+        _DESTRUCTIVE_VERBS = {
+            "delete", "remove", "drop", "destroy", "reset",
+            "purge", "wipe", "truncate",
+        }
+        desc_words = set(task_summary.lower().split())
+        if desc_words & _DESTRUCTIVE_VERBS:
+            score = max(score, 1)
+
+        # ── Read-only dampening ───────────────────────────────────────────────
+        # When the first word of the description is a read-only indicator and no
+        # sensitive agents are involved, cap the score at LOW.  This prevents
+        # false positives like "Review the production code" being flagged HIGH
+        # merely because the word "production" appears in the description.
+        _READONLY_FIRST_WORDS = {
+            "review", "analyze", "analyse", "investigate", "audit",
+            "inspect", "check", "examine", "read", "list",
+            "show", "report", "summarize",
+        }
+        desc_lower_words = task_summary.lower().split()
+        first_word = desc_lower_words[0] if desc_lower_words else ""
+        sensitive_agents_present = any(
+            a in _SENSITIVE_AGENTS or a.startswith("devops") for a in agents
+        )
+        if first_word in _READONLY_FIRST_WORDS and not sensitive_agents_present:
+            score = min(score, 0)
+
+        _LEVELS = {0: "LOW", 1: "MEDIUM", 2: "HIGH"}
+        return _LEVELS[score]
 
     # ------------------------------------------------------------------
     # Private helpers — shared context

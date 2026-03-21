@@ -23,3 +23,6 @@ baton = "agent_baton.cli.main:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["agent_baton*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,4 +1,7 @@
-"""ComplianceReportGenerator — generate and manage compliance artifacts."""
+"""ComplianceReportGenerator — generate and manage compliance artifacts.
+
+**Status: Experimental** — built and tested but not yet validated with real usage data.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field

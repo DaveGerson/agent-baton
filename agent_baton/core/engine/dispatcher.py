@@ -153,6 +153,41 @@ class PromptDispatcher:
 
         return "\n".join(parts)
 
+    @staticmethod
+    def build_path_enforcement(step: PlanStep) -> str | None:
+        """Generate a bash guard command that blocks writes outside allowed paths.
+
+        Returns a bash command suitable for a PreToolUse hook, or None if the
+        step has no path restrictions.  The command exits 2 (BLOCK) when the
+        target file is outside the allowed set or inside the blocked set.
+        """
+        if not step.allowed_paths and not step.blocked_paths:
+            return None
+
+        parts = []
+        if step.allowed_paths:
+            # Build a regex that matches any of the allowed path prefixes
+            allowed_pattern = "|".join(
+                p.replace(".", "\\.").replace("*", ".*")
+                for p in step.allowed_paths
+            )
+            parts.append(
+                f'if ! echo "$FILE" | grep -qE "^({allowed_pattern})"; then '
+                f'echo "BLOCKED: Step {step.step_id} \u2014 write outside allowed paths: $FILE" >&2; exit 2; fi'
+            )
+        if step.blocked_paths:
+            blocked_pattern = "|".join(
+                p.replace(".", "\\.").replace("*", ".*")
+                for p in step.blocked_paths
+            )
+            parts.append(
+                f'if echo "$FILE" | grep -qE "^({blocked_pattern})"; then '
+                f'echo "BLOCKED: Step {step.step_id} \u2014 write to blocked path: $FILE" >&2; exit 2; fi'
+            )
+
+        inner = "; ".join(parts)
+        return f'bash -c \'FILE="$CLAUDE_TOOL_INPUT_FILE_PATH"; {inner}; exit 0\''
+
     def build_action(
         self,
         step: PlanStep,
@@ -176,7 +211,8 @@ class PromptDispatcher:
 
         Returns:
             An ExecutionAction with action_type=DISPATCH and a fully-built
-            delegation_prompt.
+            delegation_prompt.  path_enforcement is populated whenever the
+            step declares allowed_paths or blocked_paths.
         """
         prompt = self.build_delegation_prompt(
             step,
@@ -185,6 +221,7 @@ class PromptDispatcher:
             project_description=project_description,
             task_summary=task_summary,
         )
+        enforcement = self.build_path_enforcement(step)
 
         return ExecutionAction(
             action_type=ActionType.DISPATCH.value,
@@ -193,4 +230,5 @@ class PromptDispatcher:
             agent_model=step.model,
             delegation_prompt=prompt,
             step_id=step.step_id,
+            path_enforcement=enforcement or "",
         )

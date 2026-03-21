@@ -20,6 +20,7 @@ from agent_baton.models.execution import (
     StepResult,
 )
 from agent_baton.models.usage import AgentUsageRecord, TaskUsageRecord
+from agent_baton.core.engine.dispatcher import PromptDispatcher
 from agent_baton.core.observe.trace import TraceRecorder
 from agent_baton.core.observe.usage import UsageLogger
 from agent_baton.core.observe.retrospective import RetrospectiveEngine
@@ -653,6 +654,7 @@ class ExecutionEngine:
     def _dispatch_action(self, step: PlanStep, state: ExecutionState) -> ExecutionAction:
         """Build a DISPATCH action for *step*."""
         prompt = _build_delegation_prompt(step, state.plan)
+        enforcement = PromptDispatcher.build_path_enforcement(step)
         return ExecutionAction(
             action_type=ActionType.DISPATCH.value,
             message=f"Dispatch agent '{step.agent_name}' for step {step.step_id}.",
@@ -660,6 +662,7 @@ class ExecutionEngine:
             agent_model=step.model,
             delegation_prompt=prompt,
             step_id=step.step_id,
+            path_enforcement=enforcement or "",
         )
 
     @staticmethod

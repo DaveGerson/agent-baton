@@ -282,3 +282,125 @@ class TestBuildAction:
         assert d["agent_name"] == "test-engineer"
         assert d["step_id"] == "3.1"
         assert "delegation_prompt" in d
+
+    def test_action_path_enforcement_empty_when_no_restrictions(
+        self, dispatcher: PromptDispatcher
+    ) -> None:
+        step = _make_step()
+        action = dispatcher.build_action(step)
+        assert action.path_enforcement == ""
+
+    def test_action_path_enforcement_populated_when_allowed_paths(
+        self, dispatcher: PromptDispatcher
+    ) -> None:
+        step = _make_step(allowed_paths=["agent_baton/"])
+        action = dispatcher.build_action(step)
+        assert action.path_enforcement != ""
+        assert "BLOCKED" in action.path_enforcement
+
+    def test_action_to_dict_includes_path_enforcement(
+        self, dispatcher: PromptDispatcher
+    ) -> None:
+        step = _make_step(step_id="4.1", allowed_paths=["src/"])
+        action = dispatcher.build_action(step)
+        d = action.to_dict()
+        assert "path_enforcement" in d
+        assert d["path_enforcement"] != ""
+
+
+# ---------------------------------------------------------------------------
+# build_path_enforcement — mechanical path guard generation
+# ---------------------------------------------------------------------------
+
+
+class TestBuildPathEnforcement:
+    """Tests for mechanical path enforcement generation."""
+
+    def test_no_restrictions_returns_none(self) -> None:
+        step = PlanStep(step_id="1.1", agent_name="backend", task_description="work")
+        assert PromptDispatcher.build_path_enforcement(step) is None
+
+    def test_allowed_paths_generates_guard(self) -> None:
+        step = PlanStep(
+            step_id="1.1", agent_name="backend", task_description="work",
+            allowed_paths=["agent_baton/", "tests/"],
+        )
+        result = PromptDispatcher.build_path_enforcement(step)
+        assert result is not None
+        assert "BLOCKED" in result
+        assert "agent_baton/" in result or "agent_baton" in result
+
+    def test_blocked_paths_generates_guard(self) -> None:
+        step = PlanStep(
+            step_id="1.1", agent_name="backend", task_description="work",
+            blocked_paths=[".env", "secrets/"],
+        )
+        result = PromptDispatcher.build_path_enforcement(step)
+        assert result is not None
+        assert "BLOCKED" in result
+        assert "blocked path" in result
+
+    def test_both_paths_generates_combined_guard(self) -> None:
+        step = PlanStep(
+            step_id="1.1", agent_name="backend", task_description="work",
+            allowed_paths=["src/"],
+            blocked_paths=["src/secrets/"],
+        )
+        result = PromptDispatcher.build_path_enforcement(step)
+        assert result is not None
+        assert "allowed" in result.lower() or "outside" in result.lower()
+        assert "blocked" in result.lower()
+
+    def test_enforcement_in_dispatch_action(self, tmp_path: "Path") -> None:
+        """ExecutionEngine includes path_enforcement in DISPATCH actions."""
+        from pathlib import Path
+        from agent_baton.core.engine.executor import ExecutionEngine
+        from agent_baton.models.execution import MachinePlan, PlanPhase, ActionType
+
+        plan = MachinePlan(
+            task_id="test-enforce",
+            task_summary="test",
+            phases=[PlanPhase(phase_id=1, name="Build", steps=[
+                PlanStep(
+                    step_id="1.1", agent_name="backend",
+                    task_description="work",
+                    allowed_paths=["src/"],
+                ),
+            ])],
+        )
+        engine = ExecutionEngine(team_context_root=tmp_path)
+        action = engine.start(plan)
+        assert action.action_type == ActionType.DISPATCH.value
+        assert action.path_enforcement != ""
+        assert "BLOCKED" in action.path_enforcement
+
+    def test_allowed_paths_dots_escaped_in_pattern(self) -> None:
+        """Dots in path names are escaped so they match literally, not as regex wildcards."""
+        step = PlanStep(
+            step_id="2.1", agent_name="backend", task_description="work",
+            allowed_paths=["agent_baton/models/execution.py"],
+        )
+        result = PromptDispatcher.build_path_enforcement(step)
+        assert result is not None
+        # The dot before 'py' should be escaped as '\.'
+        assert "execution\\.py" in result
+
+    def test_allowed_paths_wildcard_expanded_in_pattern(self) -> None:
+        """An asterisk in a path entry becomes '.*' in the regex."""
+        step = PlanStep(
+            step_id="2.2", agent_name="backend", task_description="work",
+            allowed_paths=["agent_baton/*.py"],
+        )
+        result = PromptDispatcher.build_path_enforcement(step)
+        assert result is not None
+        assert ".*\\.py" in result
+
+    def test_step_id_embedded_in_guard_message(self) -> None:
+        """The step_id appears in the BLOCKED error message for traceability."""
+        step = PlanStep(
+            step_id="3.5", agent_name="backend", task_description="work",
+            blocked_paths=["secrets/"],
+        )
+        result = PromptDispatcher.build_path_enforcement(step)
+        assert result is not None
+        assert "3.5" in result

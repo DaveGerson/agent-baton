@@ -1,4 +1,7 @@
-"""PatternLearner — derive recurring orchestration patterns from usage logs."""
+"""PatternLearner — derive recurring orchestration patterns from usage logs.
+
+**Status: Experimental** — built and tested but not yet validated with real usage data.
+"""
 from __future__ import annotations
 
 import json

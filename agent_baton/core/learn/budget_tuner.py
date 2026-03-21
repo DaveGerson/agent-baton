@@ -1,4 +1,7 @@
-"""BudgetTuner — analyse historical token usage and recommend budget tier changes."""
+"""BudgetTuner — analyse historical token usage and recommend budget tier changes.
+
+**Status: Experimental** — built and tested but not yet validated with real usage data.
+"""
 from __future__ import annotations
 
 import json

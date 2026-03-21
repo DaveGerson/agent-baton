@@ -1,4 +1,7 @@
-"""Incident Response — manage incident workflows with phased templates."""
+"""Incident Response — manage incident workflows with phased templates.
+
+**Status: Experimental** — built and tested but not yet validated with real usage data.
+"""
 from __future__ import annotations
 
 import re

@@ -765,3 +765,107 @@ class TestQAGates:
         review_phases = [p for p in plan.phases if p.name == "Review"]
         if review_phases:
             assert review_phases[0].gate is None
+
+
+# ---------------------------------------------------------------------------
+# Risk assessment — structural signals
+# ---------------------------------------------------------------------------
+
+class TestRiskAssessmentStructural:
+    """Tests for structural risk signals beyond keyword matching."""
+
+    def test_many_agents_elevates_to_medium(self, planner: IntelligentPlanner):
+        plan = planner.create_plan(
+            "Add a simple feature",
+            agents=["a", "b", "c", "d", "e", "f"],  # 6 agents
+        )
+        assert plan.risk_level in ("MEDIUM", "HIGH")
+
+    def test_devops_agent_elevates_to_medium(self, planner: IntelligentPlanner):
+        plan = planner.create_plan(
+            "Add a simple feature",
+            agents=["devops-engineer"],
+        )
+        assert plan.risk_level in ("MEDIUM", "HIGH")
+
+    def test_review_task_stays_low(self, planner: IntelligentPlanner):
+        plan = planner.create_plan(
+            "Review the production code for style issues",
+            agents=["code-reviewer"],
+        )
+        assert plan.risk_level == "LOW"
+
+    def test_delete_verb_elevates_risk(self, planner: IntelligentPlanner):
+        plan = planner.create_plan(
+            "Remove unused database tables",
+            agents=["backend-engineer"],
+        )
+        assert plan.risk_level in ("MEDIUM", "HIGH")
+
+    def test_auditor_agent_elevates_to_medium(self, planner: IntelligentPlanner):
+        plan = planner.create_plan(
+            "Add a simple feature",
+            agents=["auditor"],
+        )
+        assert plan.risk_level in ("MEDIUM", "HIGH")
+
+    def test_security_reviewer_agent_elevates_to_medium(
+        self, planner: IntelligentPlanner
+    ):
+        plan = planner.create_plan(
+            "Add a simple feature",
+            agents=["security-reviewer"],
+        )
+        assert plan.risk_level in ("MEDIUM", "HIGH")
+
+    def test_analyze_task_stays_low(self, planner: IntelligentPlanner):
+        plan = planner.create_plan(
+            "Analyze the production logs for anomalies",
+            agents=["backend-engineer"],
+        )
+        assert plan.risk_level == "LOW"
+
+    def test_review_with_auditor_stays_medium_not_dampened(
+        self, planner: IntelligentPlanner
+    ):
+        # Sensitive agent overrides read-only dampening: stays at MEDIUM
+        plan = planner.create_plan(
+            "Review the production code",
+            agents=["auditor"],
+        )
+        assert plan.risk_level in ("MEDIUM", "HIGH")
+
+    def test_five_agents_not_elevated(self, planner: IntelligentPlanner):
+        # Threshold is >5 — exactly 5 should not elevate
+        plan = planner.create_plan(
+            "Add a simple feature",
+            agents=["a", "b", "c", "d", "e"],  # 5 agents
+        )
+        # 5 agents alone should not push above LOW (no other signals)
+        assert plan.risk_level == "LOW"
+
+    def test_devops_prefix_agent_elevates(self, planner: IntelligentPlanner):
+        plan = planner.create_plan(
+            "Add a simple feature",
+            agents=["devops-specialist"],
+        )
+        assert plan.risk_level in ("MEDIUM", "HIGH")
+
+    def test_destroy_verb_elevates_risk(self, planner: IntelligentPlanner):
+        plan = planner.create_plan(
+            "Destroy the old test environment",
+            agents=["backend-engineer"],
+        )
+        assert plan.risk_level in ("MEDIUM", "HIGH")
+
+    def test_plain_low_risk_task_stays_low(self, planner: IntelligentPlanner):
+        plan = planner.create_plan(
+            "Add a helper utility function",
+            agents=["backend-engineer"],
+        )
+        assert plan.risk_level == "LOW"
+
+    def test_direct_assess_risk_method(self, planner: IntelligentPlanner):
+        """_assess_risk is callable directly; returns a string risk level."""
+        result = planner._assess_risk("Add a helper function", ["backend-engineer"])
+        assert result in ("LOW", "MEDIUM", "HIGH")

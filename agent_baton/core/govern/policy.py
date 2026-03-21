@@ -1,4 +1,7 @@
-"""Unified Policy Engine — evaluate agent assignments against guardrail policy rules."""
+"""Unified Policy Engine — evaluate agent assignments against guardrail policy rules.
+
+**Status: Experimental** — built and tested but not yet validated with real usage data.
+"""
 from __future__ import annotations
 
 import fnmatch

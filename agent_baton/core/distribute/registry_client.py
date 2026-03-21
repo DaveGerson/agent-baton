@@ -1,4 +1,7 @@
-"""Registry client — publish and pull agent-baton packages via a local registry repo."""
+"""Registry client — publish and pull agent-baton packages via a local registry repo.
+
+**Status: Experimental** — built and tested but not yet validated with real usage data.
+"""
 from __future__ import annotations
 
 import json

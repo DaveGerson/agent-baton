@@ -385,6 +385,8 @@ class ExecutionAction:
     agent_model: str = ""
     delegation_prompt: str = ""
     step_id: str = ""
+    # Path enforcement hook command (for PreToolUse):
+    path_enforcement: str = ""
 
     # For GATE actions:
     gate_type: str = ""
@@ -405,6 +407,7 @@ class ExecutionAction:
                 "agent_model": self.agent_model,
                 "delegation_prompt": self.delegation_prompt,
                 "step_id": self.step_id,
+                "path_enforcement": self.path_enforcement,
             })
         elif self.action_type == ActionType.GATE.value:
             d.update({

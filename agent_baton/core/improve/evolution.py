@@ -1,4 +1,7 @@
-"""Prompt evolution engine — data-driven agent prompt improvement proposals."""
+"""Prompt evolution engine — data-driven agent prompt improvement proposals.
+
+**Status: Experimental** — built and tested but not yet validated with real usage data.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field

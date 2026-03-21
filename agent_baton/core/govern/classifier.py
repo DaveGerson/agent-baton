@@ -1,4 +1,7 @@
-"""Sensitive data classifier — auto-classifies task risk level and guardrail preset."""
+"""Sensitive data classifier — auto-classifies task risk level and guardrail preset.
+
+**Status: Experimental** — built and tested but not yet validated with real usage data.
+"""
 from __future__ import annotations
 
 import subprocess

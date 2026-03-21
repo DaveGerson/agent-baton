@@ -1,4 +1,7 @@
-"""Agent Sharing / Packaging — create and install distributable .tar.gz archives."""
+"""Agent Sharing / Packaging — create and install distributable .tar.gz archives.
+
+**Status: Experimental** — built and tested but not yet validated with real usage data.
+"""
 from __future__ import annotations
 
 import json
