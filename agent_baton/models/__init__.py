@@ -31,6 +31,19 @@ from agent_baton.models.pattern import LearnedPattern
 from agent_baton.models.budget import BudgetRecommendation
 from agent_baton.models.context_profile import AgentContextProfile, TaskContextProfile
 from agent_baton.models.registry import RegistryEntry, RegistryIndex
+from agent_baton.models.execution import (
+    MachinePlan,
+    PlanPhase,
+    PlanStep,
+    PlanGate,
+    ExecutionState,
+    StepResult,
+    GateResult,
+    ExecutionAction,
+    ActionType,
+    StepStatus,
+    PhaseStatus,
+)
 
 __all__ = [
     "AgentDefinition",
@@ -64,4 +77,15 @@ __all__ = [
     "TaskContextProfile",
     "RegistryEntry",
     "RegistryIndex",
+    "MachinePlan",
+    "PlanPhase",
+    "PlanStep",
+    "PlanGate",
+    "ExecutionState",
+    "StepResult",
+    "GateResult",
+    "ExecutionAction",
+    "ActionType",
+    "StepStatus",
+    "PhaseStatus",
 ]

@@ -37,6 +37,7 @@ from agent_baton.core.distribute import (
 )
 from agent_baton.core.observe import TraceRecorder, TraceRenderer, ContextProfiler
 from agent_baton.core.learn import PatternLearner, BudgetTuner
+from agent_baton.core.engine import ExecutionEngine, IntelligentPlanner, PromptDispatcher, GateRunner
 
 __all__ = [
     "AgentRegistry",
@@ -86,4 +87,8 @@ __all__ = [
     "ContextProfiler",
     "PatternLearner",
     "BudgetTuner",
+    "ExecutionEngine",
+    "IntelligentPlanner",
+    "PromptDispatcher",
+    "GateRunner",
 ]
