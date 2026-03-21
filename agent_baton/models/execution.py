@@ -332,6 +332,10 @@ class ExecutionState:
     def failed_step_ids(self) -> set[str]:
         return {r.step_id for r in self.step_results if r.status == "failed"}
 
+    @property
+    def dispatched_step_ids(self) -> set[str]:
+        return {r.step_id for r in self.step_results if r.status == "dispatched"}
+
     def get_step_result(self, step_id: str) -> StepResult | None:
         for r in self.step_results:
             if r.step_id == step_id:
@@ -390,6 +394,9 @@ class ExecutionAction:
     # For COMPLETE/FAILED actions:
     summary: str = ""
 
+    # For batch dispatch (parallel steps):
+    parallel_actions: list[ExecutionAction] = field(default_factory=list)
+
     def to_dict(self) -> dict:
         d = {"action_type": self.action_type, "message": self.message}
         if self.action_type == ActionType.DISPATCH.value:
@@ -407,4 +414,6 @@ class ExecutionAction:
             })
         elif self.action_type in (ActionType.COMPLETE.value, ActionType.FAILED.value):
             d["summary"] = self.summary
+        if self.parallel_actions:
+            d["parallel_actions"] = [a.to_dict() for a in self.parallel_actions]
         return d

@@ -883,3 +883,260 @@ class TestStatePersistence:
         loaded = engine._load_state()
         assert len(loaded.gate_results) == 1
         assert loaded.gate_results[0].passed is True
+
+
+# ---------------------------------------------------------------------------
+# Phase-advance regression (1-based phase_ids, matching planner output)
+# ---------------------------------------------------------------------------
+
+class TestPhaseAdvanceWithOneBasedIds:
+    """Regression tests for the gate phase-advance bug.
+
+    The planner creates phases with 1-based phase_ids (1, 2, 3, ...) while
+    current_phase is a 0-based index.  The old buggy code used
+    ``state.current_phase = phase_id + 1`` which skipped phases when IDs
+    were 1-based.
+    """
+
+    def test_three_phases_two_gates_no_skip(self, tmp_path: Path) -> None:
+        """A→gate→B→gate→C must dispatch all three phases, not skip B."""
+        plan = _plan(
+            phases=[
+                _phase(phase_id=1, name="Design", steps=[_step("1.1")], gate=_gate()),
+                _phase(phase_id=2, name="Implement", steps=[_step("2.1")], gate=_gate()),
+                _phase(phase_id=3, name="Review", steps=[_step("3.1")]),
+            ]
+        )
+        engine = _engine(tmp_path)
+        dispatched: list[str] = []
+
+        action = engine.start(plan)
+        for _ in range(30):
+            if action.action_type == ActionType.COMPLETE.value:
+                break
+            if action.action_type == ActionType.FAILED.value:
+                break
+            if action.action_type == ActionType.DISPATCH.value:
+                dispatched.append(action.step_id)
+                engine.record_step_result(action.step_id, action.agent_name)
+            elif action.action_type == ActionType.GATE.value:
+                engine.record_gate_result(action.phase_id, passed=True)
+            action = engine.next_action()
+
+        assert dispatched == ["1.1", "2.1", "3.1"], (
+            f"Expected all 3 phases dispatched in order, got {dispatched}"
+        )
+
+    def test_gate_on_phase1_reaches_phase2(self, tmp_path: Path) -> None:
+        """Gate on 1-based phase_id=1 must advance to phase at index 1."""
+        plan = _plan(
+            phases=[
+                _phase(phase_id=1, steps=[_step("1.1")], gate=_gate()),
+                _phase(phase_id=2, steps=[_step("2.1")]),
+            ]
+        )
+        engine = _engine(tmp_path)
+        engine.start(plan)
+        engine.record_step_result("1.1", "backend-engineer")
+        action = engine.next_action()  # GATE
+        assert action.action_type == ActionType.GATE.value
+
+        engine.record_gate_result(action.phase_id, passed=True)
+        action = engine.next_action()
+        assert action.action_type == ActionType.DISPATCH.value
+        assert action.step_id == "2.1"
+
+    def test_four_phases_all_gated_dispatches_all(self, tmp_path: Path) -> None:
+        """4 phases each with a gate — every phase must be visited."""
+        plan = _plan(
+            phases=[
+                _phase(phase_id=1, name="A", steps=[_step("1.1")], gate=_gate()),
+                _phase(phase_id=2, name="B", steps=[_step("2.1")], gate=_gate()),
+                _phase(phase_id=3, name="C", steps=[_step("3.1")], gate=_gate()),
+                _phase(phase_id=4, name="D", steps=[_step("4.1")]),
+            ]
+        )
+        engine = _engine(tmp_path)
+        dispatched = []
+        gates_run = []
+
+        action = engine.start(plan)
+        for _ in range(40):
+            if action.action_type in (ActionType.COMPLETE.value, ActionType.FAILED.value):
+                break
+            if action.action_type == ActionType.DISPATCH.value:
+                dispatched.append(action.step_id)
+                engine.record_step_result(action.step_id, action.agent_name)
+            elif action.action_type == ActionType.GATE.value:
+                gates_run.append(action.phase_id)
+                engine.record_gate_result(action.phase_id, passed=True)
+            action = engine.next_action()
+
+        assert dispatched == ["1.1", "2.1", "3.1", "4.1"]
+        assert len(gates_run) == 3
+
+
+# ---------------------------------------------------------------------------
+# Status validation
+# ---------------------------------------------------------------------------
+
+class TestStepStatusValidation:
+    """record_step_result must reject invalid status values."""
+
+    def test_invalid_status_raises_value_error(self, tmp_path: Path) -> None:
+        plan = _plan(phases=[_phase(phase_id=0, steps=[_step("1.1")])])
+        engine = _engine(tmp_path)
+        engine.start(plan)
+        with pytest.raises(ValueError, match="Invalid step status 'success'"):
+            engine.record_step_result("1.1", "backend-engineer", status="success")
+
+    def test_valid_statuses_accepted(self, tmp_path: Path) -> None:
+        for status in ("complete", "failed"):
+            plan = _plan(phases=[_phase(phase_id=0, steps=[_step("1.1")])])
+            engine = _engine(tmp_path)
+            engine.start(plan)
+            engine.record_step_result("1.1", "backend-engineer", status=status)
+
+
+# ---------------------------------------------------------------------------
+# Parallel step dispatch
+# ---------------------------------------------------------------------------
+
+class TestParallelDispatch:
+    """Tests for dependency-aware parallel step dispatch."""
+
+    def test_independent_steps_dispatch_in_order(self, tmp_path: Path) -> None:
+        """Steps with no depends_on dispatch in phase order."""
+        plan = _plan(phases=[_phase(phase_id=1, steps=[
+            _step("1.1", agent_name="a"),
+            _step("1.2", agent_name="b"),
+        ])])
+        engine = _engine(tmp_path)
+        action = engine.start(plan)
+        assert action.step_id == "1.1"
+
+    def test_dispatched_step_not_redispatched(self, tmp_path: Path) -> None:
+        """A step marked as dispatched should not be returned again."""
+        plan = _plan(phases=[_phase(phase_id=1, steps=[
+            _step("1.1", agent_name="a"),
+            _step("1.2", agent_name="b"),
+        ])])
+        engine = _engine(tmp_path)
+        engine.start(plan)
+        engine.mark_dispatched("1.1", "a")
+        action = engine.next_action()
+        assert action.action_type == ActionType.DISPATCH.value
+        assert action.step_id == "1.2"
+
+    def test_blocked_step_returns_wait(self, tmp_path: Path) -> None:
+        """Step blocked by dependency returns WAIT when all runnable are dispatched."""
+        plan = _plan(phases=[_phase(phase_id=1, steps=[
+            _step("1.1", agent_name="a"),
+            PlanStep(step_id="1.2", agent_name="b",
+                     task_description="depends on 1.1", depends_on=["1.1"]),
+        ])])
+        engine = _engine(tmp_path)
+        engine.start(plan)
+        engine.mark_dispatched("1.1", "a")
+        action = engine.next_action()
+        assert action.action_type == ActionType.WAIT.value
+
+    def test_dependency_satisfied_enables_dispatch(self, tmp_path: Path) -> None:
+        """Once dependency completes, blocked step becomes dispatchable."""
+        plan = _plan(phases=[_phase(phase_id=1, steps=[
+            _step("1.1", agent_name="a"),
+            PlanStep(step_id="1.2", agent_name="b",
+                     task_description="depends on 1.1", depends_on=["1.1"]),
+        ])])
+        engine = _engine(tmp_path)
+        engine.start(plan)
+        engine.record_step_result("1.1", "a")
+        action = engine.next_action()
+        assert action.action_type == ActionType.DISPATCH.value
+        assert action.step_id == "1.2"
+
+    def test_next_actions_returns_all_runnable(self, tmp_path: Path) -> None:
+        """next_actions() returns all steps with satisfied dependencies."""
+        plan = _plan(phases=[_phase(phase_id=1, steps=[
+            _step("1.1", agent_name="a"),
+            _step("1.2", agent_name="b"),
+            PlanStep(step_id="1.3", agent_name="c",
+                     task_description="depends on both", depends_on=["1.1", "1.2"]),
+        ])])
+        engine = _engine(tmp_path)
+        engine.start(plan)
+        actions = engine.next_actions()
+        step_ids = {a.step_id for a in actions}
+        assert step_ids == {"1.1", "1.2"}
+        assert "1.3" not in step_ids
+
+    def test_next_actions_empty_when_all_dispatched(self, tmp_path: Path) -> None:
+        """next_actions() returns empty when all runnable steps are dispatched."""
+        plan = _plan(phases=[_phase(phase_id=1, steps=[
+            _step("1.1"), _step("1.2"),
+        ])])
+        engine = _engine(tmp_path)
+        engine.start(plan)
+        engine.mark_dispatched("1.1", "backend-engineer")
+        engine.mark_dispatched("1.2", "backend-engineer")
+        actions = engine.next_actions()
+        assert actions == []
+
+    def test_next_actions_unlocks_after_completion(self, tmp_path: Path) -> None:
+        """Completing a dependency unlocks blocked steps in next_actions()."""
+        plan = _plan(phases=[_phase(phase_id=1, steps=[
+            _step("1.1", agent_name="a"),
+            PlanStep(step_id="1.2", agent_name="b",
+                     task_description="dep", depends_on=["1.1"]),
+        ])])
+        engine = _engine(tmp_path)
+        engine.start(plan)
+        engine.record_step_result("1.1", "a")
+        actions = engine.next_actions()
+        assert len(actions) == 1
+        assert actions[0].step_id == "1.2"
+
+    def test_dispatched_then_completed_advances(self, tmp_path: Path) -> None:
+        """Full parallel flow: dispatch both -> complete both -> gate/complete."""
+        plan = _plan(phases=[_phase(phase_id=1, steps=[
+            _step("1.1", agent_name="a"),
+            _step("1.2", agent_name="b"),
+        ])])
+        engine = _engine(tmp_path)
+        engine.start(plan)
+        engine.mark_dispatched("1.1", "a")
+        engine.mark_dispatched("1.2", "b")
+        # Both in flight -- should WAIT
+        action = engine.next_action()
+        assert action.action_type == ActionType.WAIT.value
+        # Complete both
+        engine.record_step_result("1.1", "a")
+        engine.record_step_result("1.2", "b")
+        action = engine.next_action()
+        assert action.action_type == ActionType.COMPLETE.value
+
+    def test_mark_dispatched_is_valid_status(self, tmp_path: Path) -> None:
+        """mark_dispatched uses 'dispatched' status which is accepted."""
+        plan = _plan(phases=[_phase(phase_id=1, steps=[_step("1.1")])])
+        engine = _engine(tmp_path)
+        engine.start(plan)
+        engine.mark_dispatched("1.1", "backend-engineer")
+        state = engine._load_state()
+        assert "1.1" in state.dispatched_step_ids
+
+    def test_backward_compat_no_depends_on(self, tmp_path: Path) -> None:
+        """Plans without depends_on work exactly as before (sequential dispatch)."""
+        plan = _plan(phases=[_phase(phase_id=1, steps=[
+            _step("1.1"), _step("1.2"), _step("1.3"),
+        ])])
+        engine = _engine(tmp_path)
+        dispatched = []
+        action = engine.start(plan)
+        for _ in range(10):
+            if action.action_type == ActionType.COMPLETE.value:
+                break
+            if action.action_type == ActionType.DISPATCH.value:
+                dispatched.append(action.step_id)
+                engine.record_step_result(action.step_id, action.agent_name)
+            action = engine.next_action()
+        assert dispatched == ["1.1", "1.2", "1.3"]

@@ -25,8 +25,10 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         help="Path to plan.json (default: .claude/team-context/plan.json)",
     )
 
-    # baton execute next
-    sub.add_parser("next", help="Get the next action to perform")
+    # baton execute next [--all]
+    next_p = sub.add_parser("next", help="Get the next action to perform")
+    next_p.add_argument("--all", action="store_true", dest="all_actions",
+                        help="Return all dispatchable actions (for parallel dispatch)")
 
     # baton execute record --step-id ID --agent NAME [--status S] [--outcome O] [--tokens N] [--duration N] [--error E]
     p_record = sub.add_parser("record", help="Record a step completion")
@@ -39,6 +41,11 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     p_record.add_argument("--error", default="", help="Error message if failed")
     p_record.add_argument("--files", default="", help="Comma-separated files changed")
     p_record.add_argument("--commit", default="", help="Commit hash")
+
+    # baton execute dispatched --step-id ID --agent NAME
+    dispatched_p = sub.add_parser("dispatched", help="Mark a step as dispatched (in-flight)")
+    dispatched_p.add_argument("--step-id", required=True)
+    dispatched_p.add_argument("--agent", required=True)
 
     # baton execute gate --phase-id N --result pass|fail [--output TEXT]
     p_gate = sub.add_parser("gate", help="Record a QA gate result")
@@ -96,7 +103,7 @@ def _print_action(action: dict) -> None:
 
 def handler(args: argparse.Namespace) -> None:
     if args.subcommand is None:
-        print("error: supply a subcommand: start, next, record, gate, complete, status, resume")
+        print("error: supply a subcommand: start, next, record, dispatched, gate, complete, status, resume")
         sys.exit(1)
 
     engine = ExecutionEngine()
@@ -113,8 +120,22 @@ def handler(args: argparse.Namespace) -> None:
         _print_action(action.to_dict())
 
     elif args.subcommand == "next":
-        action = engine.next_action()
-        _print_action(action.to_dict())
+        if args.all_actions:
+            actions = engine.next_actions()
+            if actions:
+                result = [a.to_dict() for a in actions]
+            else:
+                # Fall back to single next_action for terminal states
+                action = engine.next_action()
+                result = [action.to_dict()]
+            print(json.dumps(result, indent=2))
+        else:
+            action = engine.next_action()
+            _print_action(action.to_dict())
+
+    elif args.subcommand == "dispatched":
+        engine.mark_dispatched(step_id=args.step_id, agent_name=args.agent)
+        print(json.dumps({"status": "dispatched", "step_id": args.step_id}))
 
     elif args.subcommand == "record":
         files = [f.strip() for f in args.files.split(",") if f.strip()] if args.files else []

@@ -1,6 +1,7 @@
 """Incident Response — manage incident workflows with phased templates."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -228,7 +229,7 @@ class IncidentManager:
         template = self.get_template(severity)
         self._dir.mkdir(parents=True, exist_ok=True)
 
-        safe_id = incident_id.replace("/", "-").replace(" ", "-")
+        safe_id = re.sub(r'[^a-zA-Z0-9_.-]', '-', incident_id)
         path = self._dir / f"{safe_id}.md"
 
         lines = [
@@ -252,7 +253,7 @@ class IncidentManager:
 
     def load_incident(self, incident_id: str) -> str | None:
         """Read an incident document by ID. Returns markdown content or None."""
-        safe_id = incident_id.replace("/", "-").replace(" ", "-")
+        safe_id = re.sub(r'[^a-zA-Z0-9_.-]', '-', incident_id)
         path = self._dir / f"{safe_id}.md"
         if path.exists():
             return path.read_text(encoding="utf-8")

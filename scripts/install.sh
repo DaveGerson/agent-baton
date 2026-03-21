@@ -14,6 +14,13 @@ if [ ! -d "$AGENTS_DIR" ]; then
     exit 1
 fi
 
+UPGRADE=false
+for arg in "$@"; do
+    case "$arg" in
+        --upgrade) UPGRADE=true ;;
+    esac
+done
+
 echo ""
 echo "  Agent Baton — Claude Code"
 echo "  ====================================="
@@ -62,24 +69,28 @@ done
 
 echo "  + Dirs:      team-context/, knowledge/, skills/"
 
-# CLAUDE.md
-if [ -f "$CLAUDE_MD" ] && [ "$SCOPE" = "project" ]; then
-    if [ -f "CLAUDE.md" ]; then
-        echo "  ! CLAUDE.md exists — merge manually from: $CLAUDE_MD"
-    else
-        cp "$CLAUDE_MD" "CLAUDE.md"
-        echo "  + CLAUDE.md copied to project root"
-    fi
-elif [ -f "$CLAUDE_MD" ] && [ "$SCOPE" = "user" ]; then
-    if [ -f "$BASE/CLAUDE.md" ]; then
-        echo "  ! ~/.claude/CLAUDE.md exists — merge manually"
-    else
-        cp "$CLAUDE_MD" "$BASE/CLAUDE.md"
-        echo "  + CLAUDE.md copied to ~/.claude/"
+# CLAUDE.md — skip on upgrade (user may have customized it)
+if [ "$UPGRADE" = true ]; then
+    echo "  ~ CLAUDE.md:  preserved (upgrade mode)"
+else
+    if [ -f "$CLAUDE_MD" ] && [ "$SCOPE" = "project" ]; then
+        if [ -f "CLAUDE.md" ]; then
+            echo "  ! CLAUDE.md exists — merge manually from: $CLAUDE_MD"
+        else
+            cp "$CLAUDE_MD" "CLAUDE.md"
+            echo "  + CLAUDE.md copied to project root"
+        fi
+    elif [ -f "$CLAUDE_MD" ] && [ "$SCOPE" = "user" ]; then
+        if [ -f "$BASE/CLAUDE.md" ]; then
+            echo "  ! ~/.claude/CLAUDE.md exists — merge manually"
+        else
+            cp "$CLAUDE_MD" "$BASE/CLAUDE.md"
+            echo "  + CLAUDE.md copied to ~/.claude/"
+        fi
     fi
 fi
 
-# settings.json (hooks)
+# settings.json (hooks) — merge on upgrade, copy on fresh install
 if [ -f "$SETTINGS_JSON" ]; then
     if [ "$SCOPE" = "project" ]; then
         settings_path=".claude/settings.json"
@@ -87,7 +98,19 @@ if [ -f "$SETTINGS_JSON" ]; then
         settings_path="$BASE/settings.json"
     fi
 
-    if [ -f "$settings_path" ]; then
+    if [ "$UPGRADE" = true ] && [ -f "$settings_path" ]; then
+        # Merge hooks using Python (preserves user keys)
+        python3 -c "
+import json, sys
+src = json.loads(open('$SETTINGS_JSON').read())
+dst = json.loads(open('$settings_path').read())
+src_hooks = src.get('hooks', {})
+if src_hooks:
+    dst.setdefault('hooks', {}).update(src_hooks)
+open('$settings_path', 'w').write(json.dumps(dst, indent=2) + '\n')
+print('  merge: settings.json hooks (' + str(len(src_hooks)) + ' events)')
+" 2>/dev/null || echo "  ! settings.json merge failed — merge hooks manually"
+    elif [ -f "$settings_path" ]; then
         echo "  ! $settings_path exists — merge hooks manually"
     else
         cp "$SETTINGS_JSON" "$settings_path"
@@ -138,9 +161,22 @@ esac
 # ── Summary ────────────────────────────────────────────────
 echo ""
 echo "  ====================================="
-echo "  Installation Complete ($SCOPE-level)"
+if [ "$UPGRADE" = true ]; then
+    echo "  Upgrade Complete ($SCOPE-level)"
+else
+    echo "  Installation Complete ($SCOPE-level)"
+fi
 echo "  ====================================="
 echo ""
 echo "  VERIFY:     Start Claude Code, run /agents"
 echo "  FIRST RUN:  'Use the orchestrator to [describe task]'"
+
+# Auto-verify if baton CLI is available
+if command -v baton &>/dev/null || python3 -m agent_baton.cli.main --help &>/dev/null 2>&1; then
+    echo ""
+    echo "  Running post-install verification..."
+    python3 -m agent_baton.cli.main validate "$AGENT_TARGET" 2>/dev/null && \
+        echo "  All agents validated successfully" || \
+        echo "  ! Some agents have validation issues"
+fi
 echo ""

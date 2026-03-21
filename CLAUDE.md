@@ -7,11 +7,21 @@ system for Claude Code.
 
 ```
 agent_baton/       ← Python package (orchestration engine)
+  models/          ← Data models (14 modules: agent, plan, execution, usage, ...)
+  core/            ← Business logic (6 sub-packages)
+    engine/        ← Execution engine (planner, executor, dispatcher, gates)
+    orchestration/ ← Context, plan, registry, router
+    govern/        ← Classifier, compliance, escalation, policy, validation
+    observe/       ← Trace, usage, dashboard, retrospective, telemetry
+    improve/       ← Evolution, scoring, VCS
+    learn/         ← Pattern learner, budget tuner
+    distribute/    ← Async dispatch, packaging, sharing, transfer
+  cli/             ← CLI interface (31 commands via `baton`)
 agents/            ← Distributable agent definitions (19 .md files)
-references/        ← Distributable reference docs (11 .md files)
+references/        ← Distributable reference docs (12 .md files)
 templates/         ← CLAUDE.md + settings.json installed to target projects
 scripts/           ← Install scripts (Linux + Windows)
-tests/             ← Test suite (pytest)
+tests/             ← Test suite (1730 tests, pytest)
 .claude/           ← Project-specific orchestration setup:
   agents/          ← Tailored agents for developing agent-baton
   references/      ← Symlink → ../references/ (canonical source)
@@ -28,6 +38,9 @@ tests/             ← Test suite (pytest)
 - `.claude/references/` is a symlink to `references/` — edits to canonical
   references are immediately available to the project's orchestrator.
 - The `agent_baton` Python package reads agent definitions at runtime.
+- `core/engine/` is the execution engine — changes here affect the runtime
+  behavior of all orchestrated tasks.
+- Backward-compatible shims exist at `core/*.py` for Epic 1 module paths.
 
 ## Agent Roster (for this project)
 
@@ -36,17 +49,20 @@ tests/             ← Test suite (pytest)
 | `orchestrator` | Coordinate multi-step development tasks |
 | `backend-engineer--python` | Python implementation in agent_baton/ |
 | `architect` | Design decisions, module boundaries |
+| `ai-systems-architect` | Multi-agent orchestration design |
 | `test-engineer` | Write and organize pytest tests |
 | `code-reviewer` | Quality review before commits |
 | `auditor` | Safety review for guardrail/hook changes |
 | `talent-builder` | Create new distributable agent definitions |
 | `agent-definition-engineer` | Edit agent .md files, references, knowledge packs |
+| `prompt-engineer` | Agent prompt optimization |
+| `ai-product-strategist` | Product decisions, value/cost analysis |
 
 ## Development
 
 ```bash
 pip install -e ".[dev]"    # Install in editable mode
-pytest                     # Run tests
+pytest                     # Run tests (1730 tests)
 scripts/install.sh         # Re-install globally after editing agents/references
 ```
 
@@ -57,3 +73,6 @@ orchestrator agent. For simple single-file changes, work directly.
 
 Changes to distributable files (`agents/`, `references/`) are MEDIUM risk
 and should involve the auditor when substantial.
+
+Changes to `core/engine/` affect the execution runtime and should have
+corresponding test coverage.

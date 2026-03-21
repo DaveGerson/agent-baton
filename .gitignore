@@ -21,3 +21,11 @@ reference_files/*
 # OS
 .DS_Store
 Thumbs.db
+
+# Secrets (should never be committed)
+.env
+.env.*
+*.pem
+*.key
+credentials.json
+secrets/

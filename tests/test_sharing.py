@@ -398,3 +398,68 @@ class TestInstallPackage:
         builder = PackageBuilder(source_root=tmp_path)
         with pytest.raises(KeyError):
             builder.install_package(archive)
+
+
+# ---------------------------------------------------------------------------
+# _safe_extractall
+# ---------------------------------------------------------------------------
+
+class TestSafeExtractall:
+    """Verify _safe_extractall rejects path traversal attacks."""
+
+    def test_rejects_dotdot_path(self, tmp_path: Path) -> None:
+        """Archive member with ../../ prefix must raise ValueError."""
+        from agent_baton.core.distribute.sharing import _safe_extractall
+
+        archive = tmp_path / "evil.tar.gz"
+        with tarfile.open(archive, "w:gz") as tar:
+            import io
+            data = b"malicious content"
+            info = tarfile.TarInfo(name="../../etc/passwd")
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+
+        dest = tmp_path / "extract"
+        dest.mkdir()
+        with tarfile.open(archive, "r:gz") as tar:
+            with pytest.raises(ValueError, match="Path traversal"):
+                _safe_extractall(tar, dest)
+
+    def test_rejects_absolute_path(self, tmp_path: Path) -> None:
+        """Archive member with absolute path must raise ValueError."""
+        from agent_baton.core.distribute.sharing import _safe_extractall
+
+        archive = tmp_path / "evil.tar.gz"
+        with tarfile.open(archive, "w:gz") as tar:
+            import io
+            data = b"malicious content"
+            info = tarfile.TarInfo(name="/tmp/evil")
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+
+        dest = tmp_path / "extract"
+        dest.mkdir()
+        with tarfile.open(archive, "r:gz") as tar:
+            with pytest.raises(ValueError, match="Path traversal"):
+                _safe_extractall(tar, dest)
+
+    def test_allows_normal_paths(self, tmp_path: Path) -> None:
+        """Normal archive members should extract without error."""
+        from agent_baton.core.distribute.sharing import _safe_extractall
+
+        archive = tmp_path / "good.tar.gz"
+        with tarfile.open(archive, "w:gz") as tar:
+            import io
+            for name in ("manifest.json", "agents/test.md", "references/ref.md"):
+                data = b"content"
+                info = tarfile.TarInfo(name=name)
+                info.size = len(data)
+                tar.addfile(info, io.BytesIO(data))
+
+        dest = tmp_path / "extract"
+        dest.mkdir()
+        with tarfile.open(archive, "r:gz") as tar:
+            _safe_extractall(tar, dest)
+
+        assert (dest / "manifest.json").exists()
+        assert (dest / "agents" / "test.md").exists()

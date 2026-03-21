@@ -152,6 +152,47 @@ class ExecutionEngine:
         self._save_state(state)
         return action
 
+    def next_actions(self) -> list[ExecutionAction]:
+        """Return ALL currently dispatchable actions for parallel execution.
+
+        Unlike :meth:`next_action` which returns a single action, this method
+        returns every step whose dependencies are satisfied and that has not
+        yet been dispatched, completed, or failed.  The caller can spawn all
+        returned agents in parallel.
+
+        Returns an empty list if no steps are dispatchable (caller should
+        check :meth:`next_action` for WAIT / GATE / COMPLETE / FAILED).
+        """
+        state = self._load_state()
+        if state is None:
+            return []
+
+        if state.status in ("complete", "failed", "gate_pending"):
+            return []
+
+        if state.current_phase >= len(state.plan.phases):
+            return []
+
+        phase_obj = state.current_phase_obj
+        if phase_obj is None or not phase_obj.steps:
+            return []
+
+        completed = state.completed_step_ids
+        dispatched = state.dispatched_step_ids
+        occupied = completed | state.failed_step_ids | dispatched
+
+        actions: list[ExecutionAction] = []
+        for step in phase_obj.steps:
+            if step.step_id in occupied:
+                continue
+            if step.depends_on and not all(
+                dep in completed for dep in step.depends_on
+            ):
+                continue
+            actions.append(self._dispatch_action(step, state))
+
+        return actions
+
     def record_step_result(
         self,
         step_id: str,
@@ -170,6 +211,12 @@ class ExecutionEngine:
         - Emits trace events (``agent_complete`` or ``agent_failed``).
         - Saves state to disk.
         """
+        _VALID_STEP_STATUSES = {"complete", "failed", "dispatched"}
+        if status not in _VALID_STEP_STATUSES:
+            raise ValueError(
+                f"Invalid step status '{status}'. Must be one of: {_VALID_STEP_STATUSES}"
+            )
+
         state = self._load_state()
         if state is None:
             raise RuntimeError(
@@ -213,6 +260,19 @@ class ExecutionEngine:
             )
 
         self._save_state(state)
+
+    def mark_dispatched(self, step_id: str, agent_name: str) -> None:
+        """Record that a step has been dispatched (in-flight, not yet complete).
+
+        This allows the engine to track which steps are currently running
+        so it can correctly determine what to dispatch next in parallel
+        execution scenarios.
+        """
+        self.record_step_result(
+            step_id=step_id,
+            agent_name=agent_name,
+            status="dispatched",
+        )
 
     def record_gate_result(
         self,
@@ -264,8 +324,10 @@ class ExecutionEngine:
         if not passed:
             state.status = "failed"
         else:
-            # Advance to next phase.
-            state.current_phase = phase_id + 1
+            # Advance to next phase.  current_phase is a 0-based index into
+            # plan.phases, whereas phase_id is a 1-based identifier — so we
+            # must increment the index, not derive it from phase_id.
+            state.current_phase += 1
             state.current_step_index = 0
             state.status = "running"
 
@@ -539,17 +601,37 @@ class ExecutionEngine:
                     summary=msg,
                 )
 
-        # Find the next pending step (not yet in completed or running).
+        # Find the next dispatchable step — must not be completed, failed, or
+        # already dispatched, and all dependencies must be satisfied.
         completed = state.completed_step_ids
+        dispatched = state.dispatched_step_ids
+        occupied = completed | state.failed_step_ids | dispatched
+
         next_step: PlanStep | None = None
         for step in steps:
-            if step.step_id not in completed:
-                next_step = step
-                break
+            if step.step_id in occupied:
+                continue
+            # Check dependency satisfaction: all depends_on must be completed.
+            if step.depends_on and not all(
+                dep in completed for dep in step.depends_on
+            ):
+                continue
+            next_step = step
+            break
 
         if next_step is not None:
             # There is still work to do in this phase.
             return self._dispatch_action(next_step, state)
+
+        # If no step is dispatchable but some are still pending (dispatched or
+        # blocked by dependencies), return WAIT.
+        pending = {s.step_id for s in steps} - completed - state.failed_step_ids
+        if pending:
+            return ExecutionAction(
+                action_type=ActionType.WAIT.value,
+                message="Waiting for in-flight steps to complete before proceeding.",
+                summary=f"Steps in flight or blocked: {', '.join(sorted(pending))}",
+            )
 
         # All steps in this phase are complete.
         if phase_obj.gate and not self._gate_passed_for_phase(state, phase_obj.phase_id):

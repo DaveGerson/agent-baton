@@ -8,7 +8,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from agent_baton.core.distribute.sharing import PackageBuilder
+from agent_baton.core.distribute.sharing import PackageBuilder, _safe_extractall
 from agent_baton.models.registry import RegistryEntry, RegistryIndex
 
 
@@ -137,7 +137,7 @@ class RegistryClient:
         with tempfile.TemporaryDirectory(prefix="baton-publish-") as tmp_str:
             tmp_dir = Path(tmp_str)
             with tarfile.open(archive_path, "r:gz") as tar:
-                tar.extractall(tmp_dir)  # noqa: S202 — local temp dir
+                _safe_extractall(tar, tmp_dir)
 
             # Copy manifest.json
             src_manifest = tmp_dir / "manifest.json"

@@ -3,7 +3,8 @@
 
 param(
     [ValidateSet("user", "project", "")]
-    [string]$Scope = ""
+    [string]$Scope = "",
+    [switch]$Upgrade
 )
 
 Write-Host ""
@@ -124,9 +125,11 @@ switch ($mcpChoice) {
         Write-Host ""
         Write-Host "  ── Databricks Configuration ──" -ForegroundColor Cyan
         $dbHost = Read-Host "  Databricks workspace URL (e.g., https://your-org.cloud.databricks.com)"
-        $dbToken = Read-Host "  Personal Access Token (dapi...)" -AsSecureString
-        $dbTokenPlain = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(
-            [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($dbToken))
+        Write-Host "  Personal Access Token:" -ForegroundColor White
+        Write-Host "  Set the DATABRICKS_TOKEN environment variable with your PAT." -ForegroundColor Yellow
+        Write-Host "  Example: `$env:DATABRICKS_TOKEN = 'dapi...'" -ForegroundColor DarkGray
+        Write-Host ""
+        $dbTokenRef = "`$env:DATABRICKS_TOKEN"
         $dbCatalog = Read-Host "  Catalog name (e.g., main)"
         $dbSchema = Read-Host "  Schema name (e.g., knowledge)"
 
@@ -146,7 +149,7 @@ switch ($mcpChoice) {
         $mcpConfig["databricks-vector-search"] = @{
             type = "streamable-http"
             url = $vsUrl
-            headers = @{ Authorization = "Bearer $dbTokenPlain" }
+            headers = @{ Authorization = "Bearer $dbTokenRef" }
         }
         Write-Host "  + Vector Search: $vsUrl" -ForegroundColor Green
 
@@ -155,7 +158,7 @@ switch ($mcpChoice) {
             $mcpConfig["databricks-sql"] = @{
                 type = "streamable-http"
                 url = $sqlUrl
-                headers = @{ Authorization = "Bearer $dbTokenPlain" }
+                headers = @{ Authorization = "Bearer $dbTokenRef" }
             }
             Write-Host "  + SQL: $sqlUrl" -ForegroundColor Green
         }
@@ -166,7 +169,7 @@ switch ($mcpChoice) {
             $mcpConfig["databricks-genie"] = @{
                 type = "streamable-http"
                 url = $genieUrl
-                headers = @{ Authorization = "Bearer $dbTokenPlain" }
+                headers = @{ Authorization = "Bearer $dbTokenRef" }
             }
             Write-Host "  + Genie: $genieUrl" -ForegroundColor Green
         }
@@ -177,7 +180,7 @@ switch ($mcpChoice) {
             $mcpConfig["databricks-functions"] = @{
                 type = "streamable-http"
                 url = $funcUrl
-                headers = @{ Authorization = "Bearer $dbTokenPlain" }
+                headers = @{ Authorization = "Bearer $dbTokenRef" }
             }
             Write-Host "  + UC Functions: $funcUrl" -ForegroundColor Green
         }

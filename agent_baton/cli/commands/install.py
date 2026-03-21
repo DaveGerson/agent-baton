@@ -57,6 +57,53 @@ def _merge_settings(src_path: Path, dst_path: Path) -> bool:
     return True
 
 
+def _verify_install(base: Path, agents_dir: Path, refs_dir: Path, team_ctx: Path) -> None:
+    """Post-install health check."""
+    issues: list[str] = []
+
+    # Check agents directory
+    agent_files = list(agents_dir.glob("*.md"))
+    if not agent_files:
+        issues.append("No agent .md files found in " + str(agents_dir))
+    else:
+        # Verify each agent has valid YAML frontmatter
+        from agent_baton.utils.frontmatter import parse_frontmatter
+        for f in agent_files:
+            try:
+                meta, _ = parse_frontmatter(f.read_text(encoding="utf-8"))
+                if not meta:
+                    issues.append(f"Agent {f.name}: missing YAML frontmatter")
+            except Exception as e:
+                issues.append(f"Agent {f.name}: parse error — {e}")
+
+    # Check references directory
+    ref_files = list(refs_dir.glob("*.md"))
+    if not ref_files:
+        issues.append("No reference .md files found in " + str(refs_dir))
+
+    # Check team-context is writable
+    try:
+        test_file = team_ctx / ".verify-test"
+        test_file.write_text("ok", encoding="utf-8")
+        test_file.unlink()
+    except OSError as e:
+        issues.append(f"team-context directory not writable: {e}")
+
+    # Check settings.json exists
+    settings = base / "settings.json"
+    if not settings.exists():
+        issues.append("settings.json not found — hooks will not be active")
+
+    if issues:
+        print(f"\nVerification found {len(issues)} issue(s):")
+        for issue in issues:
+            print(f"  - {issue}")
+    else:
+        count_agents = len(agent_files)
+        count_refs = len(ref_files)
+        print(f"\nVerification passed: {count_agents} agents, {count_refs} references, team-context writable")
+
+
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     p = subparsers.add_parser("install", help="Install agents and references")
     p.add_argument(
@@ -80,6 +127,11 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         action="store_true",
         help="Upgrade: overwrite agents + references but preserve settings, "
         "CLAUDE.md, knowledge packs, and team-context",
+    )
+    p.add_argument(
+        "--verify",
+        action="store_true",
+        help="Run post-install verification: check agents load, references readable, dirs writable",
     )
     return p
 
@@ -158,3 +210,6 @@ def handler(args: argparse.Namespace) -> None:
 
     action = "Upgraded" if upgrade else "Installed"
     print(f"{action}: {agent_count} agents + {ref_count} references to {scope}")
+
+    if args.verify:
+        _verify_install(base, agent_target, ref_target, team_ctx)

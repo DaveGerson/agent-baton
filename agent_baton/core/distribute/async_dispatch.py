@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -63,7 +64,7 @@ class AsyncDispatcher:
         return self._dir
 
     def _task_path(self, task_id: str) -> Path:
-        safe_id = task_id.replace("/", "-").replace(" ", "-")
+        safe_id = re.sub(r'[^a-zA-Z0-9_.-]', '-', task_id)
         return self._dir / f"{safe_id}.json"
 
     def _write_task(self, task: AsyncTask) -> Path:

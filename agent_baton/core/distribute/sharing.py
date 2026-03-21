@@ -10,6 +10,22 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
+def _safe_extractall(tar: tarfile.TarFile, dest: Path) -> None:
+    """Extract tar members after validating no path traversal.
+
+    Prevents CVE-2007-4559 class attacks where crafted archives contain
+    members with ``..`` or absolute paths that write outside *dest*.
+    """
+    dest_resolved = dest.resolve()
+    for member in tar.getmembers():
+        member_path = (dest / member.name).resolve()
+        if not member_path.is_relative_to(dest_resolved):
+            raise ValueError(
+                f"Path traversal detected in archive member: {member.name}"
+            )
+    tar.extractall(dest)
+
+
 @dataclass
 class PackageManifest:
     """Manifest for a distributable agent-baton package."""
@@ -185,14 +201,20 @@ class PackageBuilder:
         Raises:
             FileNotFoundError: If archive_path does not exist.
             KeyError: If manifest.json is not present in the archive.
+
+        Note:
+            When *target_dir* is not provided, a temporary directory is created.
+            The caller is responsible for cleaning it up when done.
         """
         if not archive_path.is_file():
             raise FileNotFoundError(f"Archive not found: {archive_path}")
 
+        # When no target_dir is given, the caller is responsible for cleanup
+        # of the returned directory.
         dest = target_dir or Path(tempfile.mkdtemp(prefix="baton-pkg-"))
 
         with tarfile.open(archive_path, "r:gz") as tar:
-            tar.extractall(dest)  # noqa: S202 — local temp dir, not user input
+            _safe_extractall(tar, dest)
 
         manifest_path = dest / "manifest.json"
         if not manifest_path.exists():
@@ -231,7 +253,7 @@ class PackageBuilder:
             tmp_dir = Path(tmp_str)
 
             with tarfile.open(archive_path, "r:gz") as tar:
-                tar.extractall(tmp_dir)  # noqa: S202
+                _safe_extractall(tar, tmp_dir)
 
             manifest_path = tmp_dir / "manifest.json"
             if not manifest_path.exists():
