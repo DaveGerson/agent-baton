@@ -26,6 +26,11 @@ from agent_baton.models.retrospective import (
     RosterRecommendation,
     SequencingNote,
 )
+from agent_baton.models.trace import TraceEvent, TaskTrace
+from agent_baton.models.pattern import LearnedPattern
+from agent_baton.models.budget import BudgetRecommendation
+from agent_baton.models.context_profile import AgentContextProfile, TaskContextProfile
+from agent_baton.models.registry import RegistryEntry, RegistryIndex
 
 __all__ = [
     "AgentDefinition",
@@ -51,4 +56,12 @@ __all__ = [
     "Retrospective",
     "RosterRecommendation",
     "SequencingNote",
+    "TraceEvent",
+    "TaskTrace",
+    "LearnedPattern",
+    "BudgetRecommendation",
+    "AgentContextProfile",
+    "TaskContextProfile",
+    "RegistryEntry",
+    "RegistryIndex",
 ]

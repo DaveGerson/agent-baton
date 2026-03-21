@@ -30,7 +30,13 @@ from agent_baton.core.distribute import (
     IncidentPhase,
     AsyncDispatcher,
     AsyncTask,
+    PackageVerifier,
+    EnhancedManifest,
+    PackageValidationResult,
+    RegistryClient,
 )
+from agent_baton.core.observe import TraceRecorder, TraceRenderer, ContextProfiler
+from agent_baton.core.learn import PatternLearner, BudgetTuner
 
 __all__ = [
     "AgentRegistry",
@@ -71,4 +77,13 @@ __all__ = [
     "IncidentPhase",
     "AsyncDispatcher",
     "AsyncTask",
+    "PackageVerifier",
+    "EnhancedManifest",
+    "PackageValidationResult",
+    "RegistryClient",
+    "TraceRecorder",
+    "TraceRenderer",
+    "ContextProfiler",
+    "PatternLearner",
+    "BudgetTuner",
 ]
