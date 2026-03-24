@@ -73,14 +73,30 @@ class PmoScanner:
         for state in states:
             cards.append(self._state_to_card(state, project))
 
-        # Also check for a saved plan (plan.json) without execution state → queued
+        # Check for saved plans without execution state → queued
+        # Scan both legacy root plan.json and task-scoped plan files
+        import json
+        from agent_baton.models.execution import MachinePlan
+
         seen_task_ids = {c.card_id for c in cards}
-        plan_path = context_root / "plan.json"
-        if plan_path.exists():
-            import json
+
+        plan_paths: list[Path] = []
+        # Legacy root plan.json
+        root_plan = context_root / "plan.json"
+        if root_plan.exists():
+            plan_paths.append(root_plan)
+        # Task-scoped plan files (executions/<task-id>/plan.json)
+        exec_dir = context_root / "executions"
+        if exec_dir.is_dir():
+            for task_dir in exec_dir.iterdir():
+                if task_dir.is_dir():
+                    scoped_plan = task_dir / "plan.json"
+                    if scoped_plan.exists():
+                        plan_paths.append(scoped_plan)
+
+        for plan_path in plan_paths:
             try:
                 data = json.loads(plan_path.read_text(encoding="utf-8"))
-                from agent_baton.models.execution import MachinePlan
                 plan = MachinePlan.from_dict(data)
                 if plan.task_id not in seen_task_ids:
                     card = PmoCard(
@@ -95,6 +111,7 @@ class PmoScanner:
                         created_at=plan.created_at,
                     )
                     cards.append(card)
+                    seen_task_ids.add(plan.task_id)
             except (json.JSONDecodeError, KeyError, TypeError):
                 pass
 
