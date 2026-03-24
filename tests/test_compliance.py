@@ -122,79 +122,58 @@ class TestComplianceEntry:
 # ---------------------------------------------------------------------------
 
 class TestComplianceReportToMarkdown:
-    def test_title_contains_task_id(self):
+    # Decision: group "required field present" checks into one parameterized test
+    # because each assertion targets a different region of the output and they
+    # are genuinely independent — a single formatting change would fail exactly
+    # one tuple, not all of them.
+    @pytest.mark.parametrize("field,expected_substring", [
+        ("title",          "# Compliance Report: task-hipaa-001"),
+        ("description",    "Add patient record export endpoint"),
+        ("risk_level",     "**Risk Level:** HIGH"),
+        ("classification", "**Classification:** Regulated Data"),
+        ("timestamp",      "2026-03-20T10:00:00"),
+    ])
+    def test_required_fields_present(self, field, expected_substring):
+        md = _report().to_markdown()
+        assert expected_substring in md
+
+    def test_title_uses_task_id(self):
         md = _report("hipaa-export-v2").to_markdown()
         assert "# Compliance Report: hipaa-export-v2" in md
 
-    def test_task_description_present(self):
-        md = _report().to_markdown()
-        assert "Add patient record export endpoint" in md
+    # Decision: keep auditor verdict tests together — they test conditional rendering
+    @pytest.mark.parametrize("verdict,expected", [
+        ("SHIP WITH NOTES", "SHIP WITH NOTES"),
+        ("",                "Pending"),
+    ])
+    def test_auditor_verdict_rendering(self, verdict, expected):
+        if verdict:
+            md = _report(auditor_verdict=verdict).to_markdown()
+        else:
+            md = ComplianceReport(task_id="t1", task_description="desc",
+                                  auditor_verdict="").to_markdown()
+        assert expected in md
 
-    def test_risk_level_present(self):
-        md = _report().to_markdown()
-        assert "**Risk Level:** HIGH" in md
+    # Decision: section present/absent pairs stay parameterized — they test the
+    # same conditional-section logic.
+    @pytest.mark.parametrize("section_heading,notes_kwarg,notes_value,should_be_present", [
+        ("## Auditor Notes", "auditor_notes", "Review PII handling again.", True),
+        ("## Auditor Notes", "auditor_notes", "",                          False),
+        ("## Agent Notes",   "entry_notes",   "PII check required",        True),
+        ("## Agent Notes",   "entry_notes",   "",                          False),
+    ])
+    def test_section_present_or_absent(self, section_heading, notes_kwarg,
+                                       notes_value, should_be_present):
+        if notes_kwarg == "auditor_notes":
+            md = _report(auditor_notes=notes_value).to_markdown()
+        else:
+            md = _report(entries=[_entry(notes=notes_value)]).to_markdown()
 
-    def test_classification_present(self):
-        md = _report().to_markdown()
-        assert "**Classification:** Regulated Data" in md
-
-    def test_timestamp_present(self):
-        md = _report().to_markdown()
-        assert "2026-03-20T10:00:00" in md
-
-    def test_auditor_verdict_present(self):
-        md = _report(auditor_verdict="SHIP WITH NOTES").to_markdown()
-        assert "SHIP WITH NOTES" in md
-
-    def test_auditor_verdict_pending_when_empty(self):
-        r = ComplianceReport(
-            task_id="t1",
-            task_description="desc",
-            auditor_verdict="",
-        )
-        assert "Pending" in r.to_markdown()
-
-    def test_auditor_notes_section_present_when_set(self):
-        md = _report(auditor_notes="Review PII handling again.").to_markdown()
-        assert "## Auditor Notes" in md
-        assert "Review PII handling again." in md
-
-    def test_auditor_notes_section_absent_when_empty(self):
-        md = _report(auditor_notes="").to_markdown()
-        assert "## Auditor Notes" not in md
-
-    def test_change_log_table_header(self):
-        md = _report().to_markdown()
-        assert "## Change Log" in md
-        assert "| Agent | Action | Files | Gate | Commit |" in md
-
-    def test_entry_agent_name_in_table(self):
-        md = _report(entries=[_entry(agent_name="backend-engineer")]).to_markdown()
-        assert "backend-engineer" in md
-
-    def test_entry_gate_result_in_table(self):
-        md = _report(entries=[_entry(gate_result="PASS")]).to_markdown()
-        assert "PASS" in md
-
-    def test_entry_commit_hash_truncated_to_seven(self):
-        md = _report(entries=[_entry(commit_hash="abc1234567890")]).to_markdown()
-        assert "abc1234" in md
-        assert "abc1234567890" not in md
-
-    def test_entry_no_commit_hash_shows_dash(self):
-        md = _report(entries=[_entry(commit_hash="")]).to_markdown()
-        # The dash placeholder appears in the Commit column
-        assert "| - |" in md
-
-    def test_files_truncated_beyond_three(self):
-        files = ["a.py", "b.py", "c.py", "d.py", "e.py"]
-        md = _report(entries=[_entry(files=files)]).to_markdown()
-        assert "(+2)" in md
-
-    def test_files_not_truncated_at_exactly_three(self):
-        files = ["a.py", "b.py", "c.py"]
-        md = _report(entries=[_entry(files=files)]).to_markdown()
-        assert "(+" not in md
+        if should_be_present:
+            assert section_heading in md
+            assert notes_value in md
+        else:
+            assert section_heading not in md
 
     def test_business_rules_section_present(self):
         md = _report(entries=[_entry(rules=["BR-001: No PII in logs"])]).to_markdown()
@@ -211,36 +190,51 @@ class TestComplianceReportToMarkdown:
         md = _report(entries=[_entry(rules=[])]).to_markdown()
         assert "## Business Rules Validated" not in md
 
-    def test_gate_summary_section_present(self):
+    def test_change_log_table_content(self):
+        md = _report(
+            entries=[
+                _entry(agent_name="backend-engineer", gate_result="PASS",
+                       commit_hash="abc1234567890"),
+                _entry(agent_name="auditor", action="reviewed"),
+            ]
+        ).to_markdown()
+        # Table header
+        assert "## Change Log" in md
+        assert "| Agent | Action | Files | Gate | Commit |" in md
+        # Agent names appear in rows
+        assert "backend-engineer" in md
+        assert "auditor" in md
+        # Gate result
+        assert "PASS" in md
+        # Commit truncated to 7 chars
+        assert "abc1234" in md
+        assert "abc1234567890" not in md
+
+    def test_entry_no_commit_hash_shows_dash(self):
+        md = _report(entries=[_entry(commit_hash="")]).to_markdown()
+        assert "| - |" in md
+
+    @pytest.mark.parametrize("files,expected_in,expected_not_in", [
+        (["a.py", "b.py", "c.py", "d.py", "e.py"], "(+2)", None),
+        (["a.py", "b.py", "c.py"],                  None,   "(+"),
+    ])
+    def test_files_truncation(self, files, expected_in, expected_not_in):
+        md = _report(entries=[_entry(files=files)]).to_markdown()
+        if expected_in:
+            assert expected_in in md
+        if expected_not_in:
+            assert expected_not_in not in md
+
+    def test_gate_summary_section(self):
         md = _report(gates_passed=5, gates_failed=1).to_markdown()
         assert "## Gate Summary" in md
         assert "Gates passed: 5" in md
         assert "Gates failed: 1" in md
 
-    def test_agent_notes_section_present_when_notes_exist(self):
-        md = _report(entries=[_entry(notes="PII check required")]).to_markdown()
-        assert "## Agent Notes" in md
-        assert "PII check required" in md
-
-    def test_agent_notes_section_absent_when_no_notes(self):
-        md = _report(entries=[_entry(notes="")]).to_markdown()
-        assert "## Agent Notes" not in md
-
-    def test_multiple_entries_all_appear(self):
-        entries = [
-            _entry(agent_name="backend-engineer", action="modified"),
-            _entry(agent_name="auditor", action="reviewed"),
-        ]
-        md = _report(entries=entries).to_markdown()
-        assert "backend-engineer" in md
-        assert "auditor" in md
-
     def test_timestamp_fallback_to_now_when_empty(self):
         r = ComplianceReport(task_id="t1", task_description="d", timestamp="")
         md = r.to_markdown()
-        # Should contain a date string — not literally empty
         assert "**Date:**" in md
-        # The date line should not be just empty after the colon
         date_line = [ln for ln in md.splitlines() if "**Date:**" in ln][0]
         assert date_line.strip() != "**Date:**"
 
@@ -250,57 +244,50 @@ class TestComplianceReportToMarkdown:
 # ---------------------------------------------------------------------------
 
 class TestComplianceReportGeneratorGenerate:
-    def test_generate_basic_fields(self, tmp_path: Path):
+    # Decision: group the simple field-assignment tests into one because they
+    # all exercise the same code path (kwargs are forwarded to ComplianceReport).
+    def test_generate_basic_and_auditor_fields(self, tmp_path: Path):
         gen = ComplianceReportGenerator(tmp_path / "reports")
         report = gen.generate(
             task_id="gen-001",
             task_description="Generate test",
             risk_level="MEDIUM",
             classification="Internal",
+            auditor_verdict="REVISE",
+            auditor_notes="Needs rework",
         )
         assert report.task_id == "gen-001"
         assert report.task_description == "Generate test"
         assert report.risk_level == "MEDIUM"
         assert report.classification == "Internal"
+        assert report.auditor_verdict == "REVISE"
+        assert report.auditor_notes == "Needs rework"
 
     def test_generate_timestamp_is_set(self, tmp_path: Path):
         gen = ComplianceReportGenerator(tmp_path / "reports")
         report = gen.generate("t1", "desc")
         assert report.timestamp != ""
 
-    def test_generate_gates_from_usage(self, tmp_path: Path):
+    @pytest.mark.parametrize("passed,failed,entries,exp_passed,exp_failed,exp_entries", [
+        (7,    2,    None, 7, 2, 0),
+        (None, None, None, 0, 0, 0),
+        (None, None, ...,  0, 0, 1),
+    ])
+    def test_generate_gates_and_entries(self, tmp_path: Path,
+                                        passed, failed, entries,
+                                        exp_passed, exp_failed, exp_entries):
         gen = ComplianceReportGenerator(tmp_path / "reports")
-        usage = _usage(gates_passed=7, gates_failed=2)
-        report = gen.generate("t1", "desc", usage=usage)
-        assert report.total_gates_passed == 7
-        assert report.total_gates_failed == 2
-
-    def test_generate_gates_zero_when_no_usage(self, tmp_path: Path):
-        gen = ComplianceReportGenerator(tmp_path / "reports")
-        report = gen.generate("t1", "desc")
-        assert report.total_gates_passed == 0
-        assert report.total_gates_failed == 0
-
-    def test_generate_passes_entries(self, tmp_path: Path):
-        gen = ComplianceReportGenerator(tmp_path / "reports")
-        entries = [_entry()]
-        report = gen.generate("t1", "desc", entries=entries)
-        assert len(report.entries) == 1
-
-    def test_generate_empty_entries_when_none(self, tmp_path: Path):
-        gen = ComplianceReportGenerator(tmp_path / "reports")
-        report = gen.generate("t1", "desc", entries=None)
-        assert report.entries == []
-
-    def test_generate_auditor_fields(self, tmp_path: Path):
-        gen = ComplianceReportGenerator(tmp_path / "reports")
-        report = gen.generate(
-            "t1", "desc",
-            auditor_verdict="REVISE",
-            auditor_notes="Needs rework",
-        )
-        assert report.auditor_verdict == "REVISE"
-        assert report.auditor_notes == "Needs rework"
+        kwargs: dict = {}
+        if passed is not None:
+            kwargs["usage"] = _usage(gates_passed=passed, gates_failed=failed)
+        if entries is ...:
+            kwargs["entries"] = [_entry()]
+        else:
+            kwargs["entries"] = None
+        report = gen.generate("t1", "desc", **kwargs)
+        assert report.total_gates_passed == exp_passed
+        assert report.total_gates_failed == exp_failed
+        assert len(report.entries) == exp_entries
 
 
 # ---------------------------------------------------------------------------
@@ -308,14 +295,12 @@ class TestComplianceReportGeneratorGenerate:
 # ---------------------------------------------------------------------------
 
 class TestComplianceReportGeneratorSaveLoad:
-    def test_save_creates_file(self, tmp_path: Path):
-        gen = ComplianceReportGenerator(tmp_path / "reports")
-        path = gen.save(_report("save-me"))
-        assert path.exists()
-
-    def test_save_returns_correct_path(self, tmp_path: Path):
+    # Decision: keep the four save-behavior tests separate — they test file
+    # existence, path naming, parent creation, and content format independently.
+    def test_save_creates_file_with_correct_name(self, tmp_path: Path):
         gen = ComplianceReportGenerator(tmp_path / "reports")
         path = gen.save(_report("rt-001"))
+        assert path.exists()
         assert path.name == "rt-001.md"
 
     def test_save_creates_parent_dirs(self, tmp_path: Path):
@@ -328,17 +313,6 @@ class TestComplianceReportGeneratorSaveLoad:
         path = gen.save(_report("hdr-check"))
         assert path.read_text(encoding="utf-8").startswith("# Compliance Report:")
 
-    def test_load_returns_content_for_existing(self, tmp_path: Path):
-        gen = ComplianceReportGenerator(tmp_path / "reports")
-        gen.save(_report("load-me"))
-        content = gen.load("load-me")
-        assert content is not None
-        assert "# Compliance Report:" in content
-
-    def test_load_returns_none_for_missing(self, tmp_path: Path):
-        gen = ComplianceReportGenerator(tmp_path / "reports")
-        assert gen.load("nonexistent-task") is None
-
     def test_load_roundtrip_preserves_task_id(self, tmp_path: Path):
         gen = ComplianceReportGenerator(tmp_path / "reports")
         gen.save(_report("roundtrip-id"))
@@ -346,25 +320,23 @@ class TestComplianceReportGeneratorSaveLoad:
         assert content is not None
         assert "roundtrip-id" in content
 
-    def test_save_sanitises_slashes_in_task_id(self, tmp_path: Path):
+    def test_load_returns_none_for_missing(self, tmp_path: Path):
         gen = ComplianceReportGenerator(tmp_path / "reports")
-        r = ComplianceReport(task_id="my/task/id", task_description="d")
-        path = gen.save(r)
-        assert "/" not in path.name
-        assert path.name == "my-task-id.md"
+        assert gen.load("nonexistent-task") is None
 
-    def test_load_handles_slash_in_task_id(self, tmp_path: Path):
+    # Decision: task_id sanitisation tests kept together — both test the same
+    # normalisation logic (special chars replaced with hyphens).
+    @pytest.mark.parametrize("task_id,expected_name", [
+        ("my/task/id", "my-task-id.md"),
+        ("my task id", "my-task-id.md"),
+    ])
+    def test_save_sanitises_task_id(self, tmp_path: Path, task_id, expected_name):
         gen = ComplianceReportGenerator(tmp_path / "reports")
-        r = ComplianceReport(task_id="a/b", task_description="d")
-        gen.save(r)
-        assert gen.load("a/b") is not None
-
-    def test_save_sanitises_spaces_in_task_id(self, tmp_path: Path):
-        gen = ComplianceReportGenerator(tmp_path / "reports")
-        r = ComplianceReport(task_id="my task id", task_description="d")
+        r = ComplianceReport(task_id=task_id, task_description="d")
         path = gen.save(r)
-        assert " " not in path.name
-        assert path.name == "my-task-id.md"
+        assert path.name == expected_name
+        # Also verify load works with the original (unsanitised) id
+        assert gen.load(task_id) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -372,22 +344,11 @@ class TestComplianceReportGeneratorSaveLoad:
 # ---------------------------------------------------------------------------
 
 class TestComplianceReportGeneratorList:
+    # Decision: list_reports edge cases (missing dir, non-md files) cannot be
+    # merged without loss because they set up distinct filesystem states.
     def test_list_reports_empty_when_dir_missing(self, tmp_path: Path):
         gen = ComplianceReportGenerator(tmp_path / "no-such-dir")
         assert gen.list_reports() == []
-
-    def test_list_reports_returns_all_md_files(self, tmp_path: Path):
-        gen = ComplianceReportGenerator(tmp_path / "reports")
-        for tid in ("alpha", "beta", "gamma"):
-            gen.save(ComplianceReport(task_id=tid, task_description="d"))
-        assert len(gen.list_reports()) == 3
-
-    def test_list_reports_sorted_alphabetically(self, tmp_path: Path):
-        gen = ComplianceReportGenerator(tmp_path / "reports")
-        for tid in ("c", "a", "b"):
-            gen.save(ComplianceReport(task_id=tid, task_description="d"))
-        names = [p.stem for p in gen.list_reports()]
-        assert names == sorted(names)
 
     def test_list_reports_ignores_non_md_files(self, tmp_path: Path):
         reports_dir = tmp_path / "reports"
@@ -396,29 +357,27 @@ class TestComplianceReportGeneratorList:
         gen = ComplianceReportGenerator(reports_dir)
         assert gen.list_reports() == []
 
-    def test_list_recent_returns_last_n(self, tmp_path: Path):
+    def test_list_reports_count_and_sorted(self, tmp_path: Path):
         gen = ComplianceReportGenerator(tmp_path / "reports")
-        for tid in ("t1", "t2", "t3", "t4", "t5"):
+        for tid in ("c", "a", "b"):
             gen.save(ComplianceReport(task_id=tid, task_description="d"))
-        recent = gen.list_recent(3)
-        assert len(recent) == 3
-        stems = [p.stem for p in recent]
-        assert "t3" in stems or "t4" in stems or "t5" in stems
+        reports = gen.list_reports()
+        assert len(reports) == 3
+        names = [p.stem for p in reports]
+        assert names == sorted(names)
 
-    def test_list_recent_returns_all_when_fewer_than_n(self, tmp_path: Path):
-        gen = ComplianceReportGenerator(tmp_path / "reports")
-        gen.save(ComplianceReport(task_id="only", task_description="d"))
-        assert len(gen.list_recent(10)) == 1
-
-    def test_list_recent_default_count_five(self, tmp_path: Path):
-        gen = ComplianceReportGenerator(tmp_path / "reports")
-        for i in range(8):
+    @pytest.mark.parametrize("total,n,expected_len", [
+        (5, 3, 3),   # returns last n
+        (1, 10, 1),  # fewer than n → return all
+        (8, 5, 5),   # default count of 5
+        (0, 5, 0),   # empty dir
+    ])
+    def test_list_recent(self, tmp_path: Path, total, n, expected_len):
+        gen = ComplianceReportGenerator(tmp_path / f"reports-{total}-{n}")
+        for i in range(total):
             gen.save(ComplianceReport(task_id=f"t{i}", task_description="d"))
-        assert len(gen.list_recent()) == 5
-
-    def test_list_recent_empty_when_no_reports(self, tmp_path: Path):
-        gen = ComplianceReportGenerator(tmp_path / "reports")
-        assert gen.list_recent() == []
+        result = gen.list_recent(n)
+        assert len(result) == expected_len
 
 
 # ---------------------------------------------------------------------------

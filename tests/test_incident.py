@@ -56,62 +56,64 @@ class TestIncidentTemplateFields:
 
 
 class TestIncidentTemplateToMarkdown:
-    def test_heading_present(self) -> None:
-        tmpl = IncidentTemplate(name="My Template", description="desc", severity="P2")
-        md = tmpl.to_markdown()
-        assert "# Incident Template: My Template" in md
+    # Decision: 6 individual substring-presence tests collapsed into one
+    # parametrized test.  Each tuple tests one rendering concern and fails
+    # independently.
+    @pytest.mark.parametrize("build_tmpl,expected_substring", [
+        (
+            lambda: IncidentTemplate(name="My Template", description="desc", severity="P2"),
+            "# Incident Template: My Template",
+        ),
+        (
+            lambda: IncidentTemplate(name="t", description="d", severity="P1"),
+            "P1",
+        ),
+        (
+            lambda: IncidentTemplate(name="t", description="d"),
+            "## Phases",
+        ),
+        (
+            lambda: IncidentTemplate(
+                name="t", description="d",
+                phases=[
+                    IncidentPhase(name="Alpha", description="first"),
+                    IncidentPhase(name="Beta",  description="second"),
+                ],
+            ),
+            "Alpha",
+        ),
+        (
+            lambda: IncidentTemplate(
+                name="t", description="d",
+                phases=[IncidentPhase(name="Fix", description="fix it",
+                                      agents=["backend-engineer"])],
+            ),
+            "backend-engineer",
+        ),
+        (
+            lambda: IncidentTemplate(
+                name="t", description="d",
+                phases=[IncidentPhase(name="Verify", description="verify it",
+                                      gate="verification_passed")],
+            ),
+            "verification_passed",
+        ),
+    ])
+    def test_markdown_contains(self, build_tmpl, expected_substring):
+        assert expected_substring in build_tmpl().to_markdown()
 
-    def test_severity_present(self) -> None:
-        tmpl = IncidentTemplate(name="t", description="d", severity="P1")
-        md = tmpl.to_markdown()
-        assert "P1" in md
-
-    def test_phases_heading_present(self) -> None:
-        tmpl = IncidentTemplate(name="t", description="d")
-        assert "## Phases" in tmpl.to_markdown()
-
-    def test_phase_names_present(self) -> None:
+    def test_both_phase_names_in_markdown(self) -> None:
+        # Kept separate: ensures *both* names appear, not just "Alpha".
         tmpl = IncidentTemplate(
-            name="t",
-            description="d",
+            name="t", description="d",
             phases=[
                 IncidentPhase(name="Alpha", description="first"),
-                IncidentPhase(name="Beta", description="second"),
+                IncidentPhase(name="Beta",  description="second"),
             ],
         )
         md = tmpl.to_markdown()
         assert "Alpha" in md
         assert "Beta" in md
-
-    def test_phase_agents_present(self) -> None:
-        tmpl = IncidentTemplate(
-            name="t",
-            description="d",
-            phases=[
-                IncidentPhase(
-                    name="Fix",
-                    description="fix it",
-                    agents=["backend-engineer"],
-                )
-            ],
-        )
-        md = tmpl.to_markdown()
-        assert "backend-engineer" in md
-
-    def test_phase_gate_present(self) -> None:
-        tmpl = IncidentTemplate(
-            name="t",
-            description="d",
-            phases=[
-                IncidentPhase(
-                    name="Verify",
-                    description="verify it",
-                    gate="verification_passed",
-                )
-            ],
-        )
-        md = tmpl.to_markdown()
-        assert "verification_passed" in md
 
 
 # ---------------------------------------------------------------------------
@@ -119,46 +121,30 @@ class TestIncidentTemplateToMarkdown:
 # ---------------------------------------------------------------------------
 
 class TestGetTemplate:
-    def test_p1_returns_five_phases(self, tmp_path: Path) -> None:
-        manager = IncidentManager(tmp_path)
-        tmpl = manager.get_template("P1")
-        assert len(tmpl.phases) == 5
-
-    def test_p2_returns_four_phases(self, tmp_path: Path) -> None:
-        manager = IncidentManager(tmp_path)
-        tmpl = manager.get_template("P2")
-        assert len(tmpl.phases) == 4
-
-    def test_p3_returns_three_phases(self, tmp_path: Path) -> None:
-        manager = IncidentManager(tmp_path)
-        tmpl = manager.get_template("P3")
-        assert len(tmpl.phases) == 3
-
-    def test_p4_returns_two_phases(self, tmp_path: Path) -> None:
-        manager = IncidentManager(tmp_path)
-        tmpl = manager.get_template("P4")
-        assert len(tmpl.phases) == 2
+    # Decision: 4 severity→phase-count tests collapsed into one parametrized
+    # test.  Each tuple is an independent boundary: P1→5, P2→4, P3→3, P4→2.
+    @pytest.mark.parametrize("severity,expected_phases", [
+        ("P1", 5),
+        ("P2", 4),
+        ("P3", 3),
+        ("P4", 2),
+    ])
+    def test_severity_phase_count(self, tmp_path: Path, severity, expected_phases):
+        assert len(IncidentManager(tmp_path).get_template(severity).phases) == expected_phases
 
     def test_unknown_severity_defaults_to_p2(self, tmp_path: Path) -> None:
-        manager = IncidentManager(tmp_path)
-        tmpl = manager.get_template("P99")
+        tmpl = IncidentManager(tmp_path).get_template("P99")
         assert tmpl.severity == "P2"
 
     def test_severity_case_insensitive(self, tmp_path: Path) -> None:
-        manager = IncidentManager(tmp_path)
-        tmpl = manager.get_template("p1")
-        assert len(tmpl.phases) == 5
+        assert len(IncidentManager(tmp_path).get_template("p1").phases) == 5
 
     def test_p1_has_triage_phase(self, tmp_path: Path) -> None:
-        manager = IncidentManager(tmp_path)
-        tmpl = manager.get_template("P1")
-        phase_names = [p.name for p in tmpl.phases]
+        phase_names = [p.name for p in IncidentManager(tmp_path).get_template("P1").phases]
         assert "Triage" in phase_names
 
     def test_p1_has_post_incident_report(self, tmp_path: Path) -> None:
-        manager = IncidentManager(tmp_path)
-        tmpl = manager.get_template("P1")
-        phase_names = [p.name for p in tmpl.phases]
+        phase_names = [p.name for p in IncidentManager(tmp_path).get_template("P1").phases]
         assert any("Post" in n or "Report" in n for n in phase_names)
 
     def test_all_templates_have_phases(self, tmp_path: Path) -> None:
@@ -174,37 +160,30 @@ class TestGetTemplate:
 
 class TestCreateIncident:
     def test_create_returns_path(self, tmp_path: Path) -> None:
-        manager = IncidentManager(tmp_path)
-        path = manager.create_incident("INC-001", "P2", "API returning 500 errors")
+        path = IncidentManager(tmp_path).create_incident("INC-001", "P2", "API returning 500 errors")
         assert path.exists()
         assert path.suffix == ".md"
 
     def test_create_creates_parent_dirs(self, tmp_path: Path) -> None:
-        incidents_dir = tmp_path / "deep" / "incidents"
-        manager = IncidentManager(incidents_dir)
-        path = manager.create_incident("INC-001", "P2", "test")
+        path = IncidentManager(tmp_path / "deep" / "incidents").create_incident("INC-001", "P2", "test")
         assert path.exists()
 
-    def test_incident_content_contains_id(self, tmp_path: Path) -> None:
-        manager = IncidentManager(tmp_path)
-        manager.create_incident("INC-007", "P1", "Critical DB failure")
-        content = manager.load_incident("INC-007")
+    # Decision: 4 content-contains tests collapsed into one parameterized test.
+    # Each incident is created with a distinct id/severity/description to make
+    # each failure traceable, yet they all exercise the same "create then load"
+    # code path.
+    @pytest.mark.parametrize("inc_id,severity,description,expected", [
+        ("INC-007", "P1", "Critical DB failure",        "INC-007"),
+        ("INC-002", "P3", "Minor UI bug",               "P3"),
+        ("INC-003", "P2", "Payment service unresponsive","Payment service unresponsive"),
+    ])
+    def test_incident_content_contains(self, tmp_path: Path,
+                                       inc_id, severity, description, expected):
+        manager = IncidentManager(tmp_path / inc_id)
+        manager.create_incident(inc_id, severity, description)
+        content = manager.load_incident(inc_id)
         assert content is not None
-        assert "INC-007" in content
-
-    def test_incident_content_contains_severity(self, tmp_path: Path) -> None:
-        manager = IncidentManager(tmp_path)
-        manager.create_incident("INC-002", "P3", "Minor UI bug")
-        content = manager.load_incident("INC-002")
-        assert content is not None
-        assert "P3" in content
-
-    def test_incident_content_contains_description(self, tmp_path: Path) -> None:
-        manager = IncidentManager(tmp_path)
-        manager.create_incident("INC-003", "P2", "Payment service unresponsive")
-        content = manager.load_incident("INC-003")
-        assert content is not None
-        assert "Payment service unresponsive" in content
+        assert expected in content
 
     def test_incident_content_contains_template_phases(self, tmp_path: Path) -> None:
         manager = IncidentManager(tmp_path)
@@ -221,19 +200,16 @@ class TestCreateIncident:
 
 class TestListIncidents:
     def test_empty_returns_empty_list(self, tmp_path: Path) -> None:
-        manager = IncidentManager(tmp_path)
-        assert manager.list_incidents() == []
+        assert IncidentManager(tmp_path).list_incidents() == []
 
     def test_missing_dir_returns_empty_list(self, tmp_path: Path) -> None:
-        manager = IncidentManager(tmp_path / "nonexistent")
-        assert manager.list_incidents() == []
+        assert IncidentManager(tmp_path / "nonexistent").list_incidents() == []
 
     def test_lists_created_incidents(self, tmp_path: Path) -> None:
         manager = IncidentManager(tmp_path)
         manager.create_incident("INC-A", "P2", "first")
         manager.create_incident("INC-B", "P3", "second")
-        incidents = manager.list_incidents()
-        stems = [p.stem for p in incidents]
+        stems = [p.stem for p in manager.list_incidents()]
         assert "INC-A" in stems
         assert "INC-B" in stems
 
@@ -250,8 +226,7 @@ class TestListIncidents:
 
 class TestLoadIncident:
     def test_load_returns_none_for_missing_id(self, tmp_path: Path) -> None:
-        manager = IncidentManager(tmp_path)
-        assert manager.load_incident("does-not-exist") is None
+        assert IncidentManager(tmp_path).load_incident("does-not-exist") is None
 
     def test_load_returns_string_for_existing(self, tmp_path: Path) -> None:
         manager = IncidentManager(tmp_path)

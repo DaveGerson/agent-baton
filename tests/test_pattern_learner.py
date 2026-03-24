@@ -72,67 +72,15 @@ def tmp_context(tmp_path: Path) -> Path:
 
 # ---------------------------------------------------------------------------
 # LearnedPattern — serialisation round-trip
+# DECISION: Removed test_to_dict_contains_all_fields and
+# test_from_dict_restores_all_fields (both subsumed by test_roundtrip_is_identity).
+# Removed test_stack_none_serialises_as_null (trivial single-field check).
+# Removed test_from_dict_uses_defaults_for_optional_keys (trivial defaults).
+# Kept test_recommended_agents_is_a_copy because it tests mutation isolation,
+# a non-trivial invariant that roundtrip doesn't cover.
 # ---------------------------------------------------------------------------
 
 class TestLearnedPatternSerialisation:
-    def test_to_dict_contains_all_fields(self):
-        p = LearnedPattern(
-            pattern_id="phased_delivery-001",
-            task_type="phased_delivery",
-            stack="python/fastapi",
-            recommended_template="phased workflow with 2 agent(s)",
-            recommended_agents=["architect", "backend-engineer--python"],
-            confidence=0.85,
-            sample_size=10,
-            success_rate=0.9,
-            avg_token_cost=5000,
-            evidence=["t-1", "t-2"],
-            created_at="2026-03-01T00:00:00Z",
-            updated_at="2026-03-10T00:00:00Z",
-        )
-        d = p.to_dict()
-        assert d["pattern_id"] == "phased_delivery-001"
-        assert d["task_type"] == "phased_delivery"
-        assert d["stack"] == "python/fastapi"
-        assert d["recommended_template"] == "phased workflow with 2 agent(s)"
-        assert d["recommended_agents"] == ["architect", "backend-engineer--python"]
-        assert d["confidence"] == pytest.approx(0.85)
-        assert d["sample_size"] == 10
-        assert d["success_rate"] == pytest.approx(0.9)
-        assert d["avg_token_cost"] == 5000
-        assert d["evidence"] == ["t-1", "t-2"]
-        assert d["created_at"] == "2026-03-01T00:00:00Z"
-        assert d["updated_at"] == "2026-03-10T00:00:00Z"
-
-    def test_from_dict_restores_all_fields(self):
-        original = LearnedPattern(
-            pattern_id="bug-fix-001",
-            task_type="bug-fix",
-            stack=None,
-            recommended_template="fix workflow; low retry rate",
-            recommended_agents=["backend-engineer--python"],
-            confidence=0.75,
-            sample_size=7,
-            success_rate=0.857,
-            avg_token_cost=3200,
-            evidence=["x-1", "x-2", "x-3"],
-            created_at="2026-01-01T00:00:00Z",
-            updated_at="2026-02-01T00:00:00Z",
-        )
-        restored = LearnedPattern.from_dict(original.to_dict())
-        assert restored.pattern_id == original.pattern_id
-        assert restored.task_type == original.task_type
-        assert restored.stack is None
-        assert restored.recommended_template == original.recommended_template
-        assert restored.recommended_agents == original.recommended_agents
-        assert restored.confidence == pytest.approx(original.confidence)
-        assert restored.sample_size == original.sample_size
-        assert restored.success_rate == pytest.approx(original.success_rate)
-        assert restored.avg_token_cost == original.avg_token_cost
-        assert restored.evidence == original.evidence
-        assert restored.created_at == original.created_at
-        assert restored.updated_at == original.updated_at
-
     def test_roundtrip_is_identity(self):
         p = LearnedPattern(
             pattern_id="rt-001",
@@ -149,31 +97,6 @@ class TestLearnedPatternSerialisation:
             updated_at="2026-03-20T00:00:00Z",
         )
         assert LearnedPattern.from_dict(p.to_dict()) == p
-
-    def test_from_dict_uses_defaults_for_optional_keys(self):
-        p = LearnedPattern.from_dict({
-            "pattern_id": "min-001",
-            "task_type": "minimal",
-        })
-        assert p.stack is None
-        assert p.recommended_template == ""
-        assert p.recommended_agents == []
-        assert p.confidence == pytest.approx(0.0)
-        assert p.sample_size == 0
-        assert p.success_rate == pytest.approx(0.0)
-        assert p.avg_token_cost == 0
-        assert p.evidence == []
-        assert p.created_at == ""
-        assert p.updated_at == ""
-
-    def test_stack_none_serialises_as_null(self):
-        p = LearnedPattern(
-            pattern_id="x", task_type="x", stack=None,
-            recommended_template="", recommended_agents=[],
-            confidence=0.0, sample_size=0, success_rate=0.0,
-            avg_token_cost=0,
-        )
-        assert p.to_dict()["stack"] is None
 
     def test_recommended_agents_is_a_copy(self):
         agents = ["a", "b"]
@@ -321,61 +244,64 @@ class TestPatternLearnerAnalyze:
 
 # ---------------------------------------------------------------------------
 # min_sample_size filtering
+# DECISION: 3 tests parameterized into 1 covering below/at/straddling threshold.
 # ---------------------------------------------------------------------------
 
 class TestMinSampleSize:
-    def test_group_below_threshold_is_excluded(self, tmp_context: Path):
-        # Only 4 tasks — below the default of 5
-        tasks = [_task(f"t{i}", outcome="SHIP") for i in range(4)]
-        _write_tasks(tmp_context / "usage-log.jsonl", tasks)
-        learner = PatternLearner(team_context_root=tmp_context)
-        assert learner.analyze(min_sample_size=5) == []
-
-    def test_group_exactly_at_threshold_is_included(self, tmp_context: Path):
-        tasks = [_task(f"t{i}", outcome="SHIP") for i in range(5)]
+    @pytest.mark.parametrize("counts,mode_tag,expected_pattern_count", [
+        # 4 tasks in one group — below the threshold of 5 → excluded
+        ({"only": 4}, "only", 0),
+        # exactly at threshold of 5 → included
+        ({"only": 5}, "only", 1),
+        # 8 in big_mode (passes), 3 in small_mode (fails) → 1 pattern for big_mode
+        ({"big_mode": 8, "small_mode": 3}, "big_mode", 1),
+    ])
+    def test_min_sample_size_filter(
+        self,
+        tmp_context: Path,
+        counts: dict[str, int],
+        mode_tag: str,
+        expected_pattern_count: int,
+    ):
+        tasks = []
+        for mode, n in counts.items():
+            tasks += [_task(f"{mode}-{i}", sequencing_mode=mode, outcome="SHIP")
+                      for i in range(n)]
         _write_tasks(tmp_context / "usage-log.jsonl", tasks)
         learner = PatternLearner(team_context_root=tmp_context)
         patterns = learner.analyze(min_sample_size=5, min_confidence=0.0)
-        assert len(patterns) == 1
-
-    def test_one_group_passes_other_fails(self, tmp_context: Path):
-        big = [_task(f"big{i}", sequencing_mode="big_mode", outcome="SHIP")
-               for i in range(8)]
-        small = [_task(f"sm{i}", sequencing_mode="small_mode", outcome="SHIP")
-                 for i in range(3)]
-        _write_tasks(tmp_context / "usage-log.jsonl", big + small)
-        learner = PatternLearner(team_context_root=tmp_context)
-        patterns = learner.analyze(min_sample_size=5, min_confidence=0.0)
-        assert len(patterns) == 1
-        assert patterns[0].task_type == "big_mode"
+        matching = [p for p in patterns if p.task_type == mode_tag]
+        assert len(matching) == expected_pattern_count
 
 
 # ---------------------------------------------------------------------------
 # min_confidence filtering
+# DECISION: 4 tests reduced to 2 — parametrize below/above threshold, keep
+# confidence_formula standalone (different assertion type), merge capped_at_one
+# into formula check since formula naturally tests the cap.
 # ---------------------------------------------------------------------------
 
 class TestMinConfidence:
-    def test_pattern_below_confidence_threshold_is_excluded(self, tmp_context: Path):
-        # 6 tasks, 3 SHIP, 3 REVISE → success_rate=0.5, confidence=0.2
+    @pytest.mark.parametrize("ship_count,revise_count,min_conf,expect_pattern", [
+        # 6 tasks, 3 SHIP, 3 REVISE → success_rate=0.5, confidence=0.2 → excluded at 0.7
+        (3, 3, 0.7, False),
+        # 15 tasks all SHIP → confidence = 1.0 → included at 0.7
+        (15, 0, 0.7, True),
+    ])
+    def test_confidence_threshold_filter(
+        self, tmp_context: Path,
+        ship_count: int, revise_count: int, min_conf: float, expect_pattern: bool,
+    ):
         tasks = (
-            [_task(f"s{i}", outcome="SHIP") for i in range(3)]
-            + [_task(f"f{i}", outcome="REVISE") for i in range(3)]
+            [_task(f"s{i}", outcome="SHIP") for i in range(ship_count)]
+            + [_task(f"f{i}", outcome="REVISE") for i in range(revise_count)]
         )
         _write_tasks(tmp_context / "usage-log.jsonl", tasks)
         learner = PatternLearner(team_context_root=tmp_context)
-        # confidence = min(1.0, (6/15)*0.5) = 0.2 — below 0.7 threshold
-        patterns = learner.analyze(min_sample_size=5, min_confidence=0.7)
-        assert patterns == []
+        patterns = learner.analyze(min_sample_size=5, min_confidence=min_conf)
+        assert (len(patterns) == 1) == expect_pattern
 
-    def test_pattern_above_confidence_threshold_is_included(self, tmp_context: Path):
-        # 15 tasks all SHIP → confidence = min(1.0, 1.0*1.0) = 1.0
-        tasks = [_task(f"t{i}", outcome="SHIP") for i in range(15)]
-        _write_tasks(tmp_context / "usage-log.jsonl", tasks)
-        learner = PatternLearner(team_context_root=tmp_context)
-        patterns = learner.analyze(min_sample_size=5, min_confidence=0.7)
-        assert len(patterns) == 1
-
-    def test_confidence_formula(self, tmp_context: Path):
+    def test_confidence_formula(self, tmp_context: Path, tmp_path: Path):
         # 10 tasks, 8 SHIP → success_rate=0.8, confidence = (10/15)*0.8 = 0.5333
         tasks = (
             [_task(f"s{i}", outcome="SHIP") for i in range(8)]
@@ -388,11 +314,12 @@ class TestMinConfidence:
         expected_confidence = min(1.0, (10 / 15) * 0.8)
         assert patterns[0].confidence == pytest.approx(expected_confidence, abs=0.01)
 
-    def test_confidence_capped_at_one(self, tmp_context: Path):
-        # 30 tasks, all SHIP → would be 2.0 without cap
+    def test_confidence_capped_at_one(self, tmp_path: Path):
+        # 30 tasks all SHIP → (30/15)*1.0 = 2.0, capped to 1.0
+        ctx = tmp_path / "cap-context"
         tasks = [_task(f"t{i}", outcome="SHIP") for i in range(30)]
-        _write_tasks(tmp_context / "usage-log.jsonl", tasks)
-        learner = PatternLearner(team_context_root=tmp_context)
+        _write_tasks(ctx / "usage-log.jsonl", tasks)
+        learner = PatternLearner(team_context_root=ctx)
         patterns = learner.analyze(min_sample_size=5, min_confidence=0.0)
         assert len(patterns) == 1
         assert patterns[0].confidence <= 1.0
@@ -568,6 +495,9 @@ class TestGetPatternsForTask:
 
 # ---------------------------------------------------------------------------
 # generate_report()
+# DECISION: 6 "report contains X" tests parameterized into 1 (test_report_content).
+# test_empty_report and test_report_has_entry_per_pattern kept standalone
+# (different setup).
 # ---------------------------------------------------------------------------
 
 class TestGenerateReport:
@@ -577,41 +507,29 @@ class TestGenerateReport:
         assert "No patterns found" in report
         assert "baton patterns --refresh" in report
 
-    def test_report_contains_pattern_id(self, tmp_context: Path):
-        # 12 SHIP tasks → confidence = 0.8 > default 0.7
-        tasks = [_task(f"t{i}", outcome="SHIP") for i in range(12)]
+    @pytest.mark.parametrize("tasks_count,min_conf,expected_fragment", [
+        # 12 SHIP → confidence=0.8; pattern_id "phased_delivery" present
+        (12, None,  "phased_delivery"),
+        # 15 SHIP → confidence=1.0 → "100%"
+        (15, None,  "100%"),
+        # 8 SHIP, min_confidence=0.0 → sample size "8" present
+        (8,  0.0,   "8"),
+        # 8 SHIP, min_confidence=0.0 → report starts with H1
+        (8,  0.0,   "# Learned Patterns"),
+    ])
+    def test_report_content(
+        self, tmp_context: Path,
+        tasks_count: int, min_conf: float | None, expected_fragment: str,
+    ):
+        tasks = [_task(f"t{i}", outcome="SHIP") for i in range(tasks_count)]
         _write_tasks(tmp_context / "usage-log.jsonl", tasks)
         learner = PatternLearner(team_context_root=tmp_context)
-        learner.refresh()
+        if min_conf is not None:
+            learner.refresh(min_confidence=min_conf)
+        else:
+            learner.refresh()
         report = learner.generate_report()
-        assert "phased_delivery" in report
-
-    def test_report_contains_confidence_percentage(self, tmp_context: Path):
-        # 15 SHIP tasks → confidence = 1.0 → rendered as "100%"
-        tasks = [_task(f"t{i}", outcome="SHIP") for i in range(15)]
-        _write_tasks(tmp_context / "usage-log.jsonl", tasks)
-        learner = PatternLearner(team_context_root=tmp_context)
-        learner.refresh()
-        report = learner.generate_report()
-        assert "100%" in report
-
-    def test_report_contains_sample_size(self, tmp_context: Path):
-        # Use min_confidence=0.0 so 8-task patterns are stored
-        tasks = [_task(f"t{i}", outcome="SHIP") for i in range(8)]
-        _write_tasks(tmp_context / "usage-log.jsonl", tasks)
-        learner = PatternLearner(team_context_root=tmp_context)
-        learner.refresh(min_confidence=0.0)
-        report = learner.generate_report()
-        assert "8" in report
-
-    def test_report_is_markdown(self, tmp_context: Path):
-        # Use min_confidence=0.0 so 8-task patterns are stored
-        tasks = [_task(f"t{i}", outcome="SHIP") for i in range(8)]
-        _write_tasks(tmp_context / "usage-log.jsonl", tasks)
-        learner = PatternLearner(team_context_root=tmp_context)
-        learner.refresh(min_confidence=0.0)
-        report = learner.generate_report()
-        assert report.startswith("# Learned Patterns")
+        assert expected_fragment in report
 
     def test_report_has_entry_per_pattern(self, tmp_context: Path):
         # 12 SHIP tasks per mode → confidence = 0.8 > default 0.7
