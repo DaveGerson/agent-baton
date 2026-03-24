@@ -55,6 +55,8 @@ _ROUTE_MODULES: list[tuple[str, str, str, list[str]]] = [
     ("agent_baton.api.routes.executions", "router", "/api/v1", ["executions"]),
     ("agent_baton.api.routes.agents", "router", "/api/v1", ["agents"]),
     ("agent_baton.api.routes.observe", "router", "/api/v1", ["observe"]),
+    ("agent_baton.api.routes.decisions", "router", "/api/v1", ["decisions"]),
+    ("agent_baton.api.routes.events", "router", "/api/v1", ["events"]),
 ]
 
 
