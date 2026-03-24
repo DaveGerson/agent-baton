@@ -23,7 +23,7 @@ Additionally, the planner never consults agent definitions during plan creation.
 
 ### Current Problem
 
-`_STEP_TEMPLATES` in `planner.py` (lines 118-258) contains ~50 agent+phase template entries. They are method-prescriptive:
+`_STEP_TEMPLATES` in `planner.py` (lines 118-258) contains ~24 agent+phase template entries across 13 agent keys. They are method-prescriptive:
 
 ```
 # Current architect/design template:
@@ -262,6 +262,8 @@ class StepResult:
     deviations: list[str] = field(default_factory=list)
 ```
 
+**Serialization:** Update `StepResult.to_dict()` to include `deviations` and `StepResult.from_dict()` to read it (defaulting to `[]` for backward compatibility with existing `execution-state.json` files). This constitutes a minor schema addition to `execution-state.json` — old files remain readable (missing key defaults to empty list).
+
 ### Change 2: Deviation Extraction in Executor
 
 When the orchestrator records a step outcome via `baton execute record --outcome "..."`, the executor scans the outcome text for a `## Deviations` or `## Deviation` section header and extracts the content into the `deviations` list.
@@ -305,16 +307,17 @@ learning loop — deviations improve future plans.
 
 ### Change 4: Retrospective Integration
 
-In `RetrospectiveEngine.generate_from_usage()`, when step results contain deviations, include them as `sequencing_notes` in the `RetrospectiveFeedback`:
+In `ExecutionEngine._build_retrospective_data()`, when step results contain deviations, include them as `sequencing_notes` passed to `RetrospectiveEngine.generate_from_usage()`:
 
 ```python
-for result in step_results:
+# In _build_retrospective_data(), build deviation notes:
+for result in state.step_results:
     if result.deviations:
         for dev in result.deviations:
-            feedback.sequencing_notes.append(
+            sequencing_notes.append(
                 SequencingNote(
-                    description=f"Agent {result.agent_name} deviated: {dev}",
-                    source_task=task_id,
+                    phase="deviation",
+                    observation=f"Agent {result.agent_name} deviated: {dev}",
                 )
             )
 ```
@@ -340,6 +343,7 @@ This closes the feedback loop: deviations from this execution inform the planner
 - Execution flow (DISPATCH/GATE/COMPLETE cycle) — unchanged
 - Agent definitions — unchanged (they're already good)
 - `baton execute record` CLI interface — backward compatible (deviations extracted from outcome text, no new flags needed)
+- `execution-state.json` — minor additive change: `StepResult` gains optional `deviations` list (defaults to `[]`, old files load without error)
 
 ## Scope Boundaries
 
