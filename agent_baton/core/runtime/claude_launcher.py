@@ -33,7 +33,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from agent_baton.core.orchestration.registry import AgentRegistry
 from agent_baton.core.runtime.launcher import LaunchResult
+from agent_baton.models.agent import AgentDefinition
 
 logger = logging.getLogger(__name__)
 
@@ -158,8 +160,13 @@ class ClaudeCodeLauncher:
       interpolated into a flag.
     """
 
-    def __init__(self, config: ClaudeCodeConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: ClaudeCodeConfig | None = None,
+        registry: AgentRegistry | None = None,
+    ) -> None:
         self._config = config or ClaudeCodeConfig()
+        self._registry = registry
 
         # Validate claude binary.
         resolved = shutil.which(self._config.claude_path)
@@ -196,7 +203,10 @@ class ClaudeCodeLauncher:
         start = time.monotonic()
         pre_commit = await self._git_rev_parse()
 
-        cmd = self._build_command(model)
+        agent: AgentDefinition | None = None
+        if self._registry is not None:
+            agent = self._registry.get(agent_name)
+        cmd = self._build_command(model, agent)
         env = self._build_env()
         timeout = self._resolve_timeout(model)
         use_stdin = len(prompt.encode()) > self._config.prompt_file_threshold
@@ -250,18 +260,34 @@ class ClaudeCodeLauncher:
 
     # ── Private helpers ──────────────────────────────────────────────────────
 
-    def _build_command(self, model: str) -> list[str]:
+    def _build_command(
+        self, model: str, agent: AgentDefinition | None = None
+    ) -> list[str]:
         """Return the base ``claude`` command list (without the prompt).
 
         The prompt is appended separately as ``["-p", prompt]`` by the caller,
         ensuring it is never interpolated into a shell string.
+
+        When *agent* is provided, agent-specific flags are injected:
+
+        - ``--system-prompt`` when the agent has non-empty instructions.
+        - ``--permission-mode`` when set to something other than ``"default"``.
+        - ``--allowedTools`` when the agent declares a non-empty tool list.
         """
-        return [
+        cmd: list[str] = [
             self._claude_bin,
             "--print",
             "--model", model,
             "--output-format", "json",
         ]
+        if agent is not None:
+            if agent.instructions and agent.instructions.strip():
+                cmd.extend(["--system-prompt", agent.instructions])
+            if agent.permission_mode and agent.permission_mode != "default":
+                cmd.extend(["--permission-mode", agent.permission_mode])
+            if agent.tools:
+                cmd.extend(["--allowedTools", ",".join(agent.tools)])
+        return cmd
 
     def _build_env(self) -> dict[str, str]:
         """Return a fresh, whitelisted environment dict for the subprocess.

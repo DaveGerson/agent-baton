@@ -20,7 +20,9 @@ import pytest
 
 import agent_baton.core.runtime.claude_launcher as _mod
 from agent_baton.core.runtime.claude_launcher import ClaudeCodeConfig, ClaudeCodeLauncher
+from agent_baton.core.orchestration.registry import AgentRegistry
 from agent_baton.core.runtime.launcher import AgentLauncher, LaunchResult
+from agent_baton.models.agent import AgentDefinition
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +93,24 @@ def _launcher(monkeypatch: pytest.MonkeyPatch, config: ClaudeCodeConfig | None =
     """Construct a ClaudeCodeLauncher with the claude binary patched away."""
     _patch_which(monkeypatch)
     return ClaudeCodeLauncher(config)
+
+
+def _launcher_with_registry(
+    monkeypatch: pytest.MonkeyPatch,
+    registry: AgentRegistry,
+    config: ClaudeCodeConfig | None = None,
+) -> ClaudeCodeLauncher:
+    """Construct a ClaudeCodeLauncher with both the claude binary and a registry."""
+    _patch_which(monkeypatch)
+    return ClaudeCodeLauncher(config, registry=registry)
+
+
+def _registry_with(*agents: AgentDefinition) -> AgentRegistry:
+    """Return an AgentRegistry pre-populated with the given AgentDefinition objects."""
+    registry = AgentRegistry()
+    for agent in agents:
+        registry._agents[agent.name] = agent
+    return registry
 
 
 # ---------------------------------------------------------------------------
@@ -785,3 +805,158 @@ class TestRedactStderr:
             assert "sk-ant-***REDACTED***" in result.error
 
         asyncio.run(_run())
+
+
+# ===========================================================================
+# TestAgentSpecialization — registry-driven flag injection
+# ===========================================================================
+
+class TestAgentSpecialization:
+    """Tests for the daemon agent specialization fix.
+
+    When a ClaudeCodeLauncher is constructed with an AgentRegistry, _build_command
+    looks up the agent and injects --system-prompt, --permission-mode, and
+    --allowedTools flags.  When no registry is present (or the agent is unknown),
+    the command stays vanilla.
+    """
+
+    def test_system_prompt_injected_when_registry_has_agent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--system-prompt is added to the command when the agent has instructions."""
+        agent = AgentDefinition(
+            name="test-agent",
+            description="Test agent",
+            model="sonnet",
+            instructions="You are a Python expert.",
+        )
+        registry = _registry_with(agent)
+        launcher = _launcher_with_registry(monkeypatch, registry)
+
+        cmd = launcher._build_command("sonnet", agent)
+
+        assert "--system-prompt" in cmd
+        idx = cmd.index("--system-prompt")
+        assert cmd[idx + 1] == "You are a Python expert."
+
+    def test_permission_mode_injected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """--permission-mode <value> appears in the command for non-default modes."""
+        agent = AgentDefinition(
+            name="test-agent",
+            description="Test agent",
+            model="sonnet",
+            instructions="You are an expert.",
+            permission_mode="auto-edit",
+        )
+        registry = _registry_with(agent)
+        launcher = _launcher_with_registry(monkeypatch, registry)
+
+        cmd = launcher._build_command("sonnet", agent)
+
+        assert "--permission-mode" in cmd
+        idx = cmd.index("--permission-mode")
+        assert cmd[idx + 1] == "auto-edit"
+
+    def test_allowed_tools_injected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """--allowedTools <comma-list> appears in the command when the agent declares tools."""
+        agent = AgentDefinition(
+            name="test-agent",
+            description="Test agent",
+            model="sonnet",
+            instructions="You are an expert.",
+            tools=["Read", "Write", "Bash"],
+        )
+        registry = _registry_with(agent)
+        launcher = _launcher_with_registry(monkeypatch, registry)
+
+        cmd = launcher._build_command("sonnet", agent)
+
+        assert "--allowedTools" in cmd
+        idx = cmd.index("--allowedTools")
+        assert cmd[idx + 1] == "Read,Write,Bash"
+
+    def test_no_registry_falls_back_to_vanilla(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When registry=None the command contains no agent-specific flags."""
+        launcher = _launcher(monkeypatch)  # no registry argument
+
+        cmd = launcher._build_command("sonnet", None)
+
+        assert "--system-prompt" not in cmd
+        assert "--permission-mode" not in cmd
+        assert "--allowedTools" not in cmd
+
+    def test_unknown_agent_falls_back_to_vanilla(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When the agent name is not in the registry, launch() uses a vanilla command.
+
+        The registry contains one agent, but launch() is called with a different name.
+        The captured subprocess args must contain no extra flags.
+        """
+        known_agent = AgentDefinition(
+            name="known-agent",
+            description="Known",
+            model="sonnet",
+            instructions="Known agent instructions.",
+            permission_mode="auto-edit",
+            tools=["Read"],
+        )
+        registry = _registry_with(known_agent)
+        captured_args: list[tuple] = []
+
+        async def capturing_exec(*args: Any, **kwargs: Any) -> FakeProcess:
+            captured_args.append(args)
+            return FakeProcess(stdout=_ok_json(), returncode=0)
+
+        _patch_which(monkeypatch)
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", capturing_exec)
+        launcher = ClaudeCodeLauncher(registry=registry)
+        launcher._git_bin = None
+
+        async def _run():
+            await launcher.launch("unknown-agent", "sonnet", "do something", "spec.5")
+
+        asyncio.run(_run())
+
+        assert len(captured_args) == 1
+        call_argv = list(captured_args[0])
+        assert "--system-prompt" not in call_argv
+        assert "--permission-mode" not in call_argv
+        assert "--allowedTools" not in call_argv
+
+    def test_empty_instructions_omits_system_prompt(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When agent.instructions is empty, --system-prompt must not be added."""
+        agent = AgentDefinition(
+            name="test-agent",
+            description="Test agent",
+            model="sonnet",
+            instructions="",
+        )
+        registry = _registry_with(agent)
+        launcher = _launcher_with_registry(monkeypatch, registry)
+
+        cmd = launcher._build_command("sonnet", agent)
+
+        assert "--system-prompt" not in cmd
+
+    def test_default_permission_mode_omitted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When permission_mode is 'default', --permission-mode must not be added."""
+        agent = AgentDefinition(
+            name="test-agent",
+            description="Test agent",
+            model="sonnet",
+            instructions="You are an expert.",
+            permission_mode="default",
+        )
+        registry = _registry_with(agent)
+        launcher = _launcher_with_registry(monkeypatch, registry)
+
+        cmd = launcher._build_command("sonnet", agent)
+
+        assert "--permission-mode" not in cmd

@@ -90,7 +90,7 @@ class ExecutionEngine:
         team_context_root: Path | None = None,
         bus: EventBus | None = None,
     ) -> None:
-        self._root = team_context_root or self._DEFAULT_CONTEXT_ROOT
+        self._root = (team_context_root or self._DEFAULT_CONTEXT_ROOT).resolve()
         self._persistence = StatePersistence(self._root)
         self._bus = bus
         # If bus provided, auto-wire persistence as a subscriber.

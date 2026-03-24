@@ -262,8 +262,11 @@ def handler(args: argparse.Namespace) -> None:
             launcher = DryRunLauncher()
         else:
             try:
+                from agent_baton.core.orchestration.registry import AgentRegistry
                 from agent_baton.core.runtime.claude_launcher import ClaudeCodeLauncher
-                launcher = ClaudeCodeLauncher()
+                registry = AgentRegistry()
+                registry.load_default_paths()
+                launcher = ClaudeCodeLauncher(registry=registry)
             except RuntimeError as exc:
                 print(f"Error: {exc}")
                 print("Install Claude Code CLI or use --dry-run.")
