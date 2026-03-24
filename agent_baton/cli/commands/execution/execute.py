@@ -26,28 +26,33 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         "execute",
         help="Drive an orchestrated task through the execution engine",
     )
-    p.add_argument(
+    # Shared parent parser so --task-id works before OR after the subcommand
+    _task_id_parent = argparse.ArgumentParser(add_help=False)
+    _task_id_parent.add_argument(
         "--task-id",
         default=None,
         help="Target a specific execution by task ID (default: active execution)",
     )
     sub = p.add_subparsers(dest="subcommand")
 
-    # baton execute start [--plan PATH]
-    p_start = sub.add_parser("start", help="Start execution from a saved plan")
+    # baton execute start [--plan PATH] [--task-id ID]
+    p_start = sub.add_parser("start", parents=[_task_id_parent],
+                             help="Start execution from a saved plan")
     p_start.add_argument(
         "--plan",
         default=".claude/team-context/plan.json",
         help="Path to plan.json (default: .claude/team-context/plan.json)",
     )
 
-    # baton execute next [--all]
-    next_p = sub.add_parser("next", help="Get the next action to perform")
+    # baton execute next [--all] [--task-id ID]
+    next_p = sub.add_parser("next", parents=[_task_id_parent],
+                            help="Get the next action to perform")
     next_p.add_argument("--all", action="store_true", dest="all_actions",
                         help="Return all dispatchable actions (for parallel dispatch)")
 
     # baton execute record --step ID --agent NAME [--status S] [--outcome O] [--tokens N] [--duration N] [--error E]
-    p_record = sub.add_parser("record", help="Record a step completion")
+    p_record = sub.add_parser("record", parents=[_task_id_parent],
+                              help="Record a step completion")
     p_record.add_argument("--step", "--step-id", required=True, dest="step_id", help="Step ID (e.g. 1.1)")
     p_record.add_argument("--agent", required=True, help="Agent name")
     p_record.add_argument("--status", default="complete", choices=["complete", "failed"], help="complete or failed")
@@ -59,18 +64,21 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     p_record.add_argument("--commit", default="", help="Commit hash")
 
     # baton execute dispatched --step ID --agent NAME
-    dispatched_p = sub.add_parser("dispatched", help="Mark a step as dispatched (in-flight)")
+    dispatched_p = sub.add_parser("dispatched", parents=[_task_id_parent],
+                                  help="Mark a step as dispatched (in-flight)")
     dispatched_p.add_argument("--step", "--step-id", required=True, dest="step_id")
     dispatched_p.add_argument("--agent", required=True)
 
     # baton execute gate --phase-id N --result pass|fail [--output TEXT]
-    p_gate = sub.add_parser("gate", help="Record a QA gate result")
+    p_gate = sub.add_parser("gate", parents=[_task_id_parent],
+                            help="Record a QA gate result")
     p_gate.add_argument("--phase-id", type=int, required=True, help="Phase ID")
     p_gate.add_argument("--result", required=True, choices=["pass", "fail"], help="Gate result")
     p_gate.add_argument("--output", default="", help="Gate command output")
 
     # baton execute approve --phase-id N --result approve|reject|approve-with-feedback [--feedback TEXT]
-    p_approve = sub.add_parser("approve", help="Record a human approval decision")
+    p_approve = sub.add_parser("approve", parents=[_task_id_parent],
+                               help="Record a human approval decision")
     p_approve.add_argument("--phase-id", type=int, required=True, help="Phase ID requiring approval")
     p_approve.add_argument("--result", required=True,
                            choices=["approve", "reject", "approve-with-feedback"],
@@ -78,7 +86,8 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     p_approve.add_argument("--feedback", default="", help="Feedback text (for approve-with-feedback)")
 
     # baton execute amend --description TEXT [--add-phase NAME:AGENT] [--after-phase N] [--add-step PHASE_ID:AGENT:DESC]
-    p_amend = sub.add_parser("amend", help="Amend the running plan")
+    p_amend = sub.add_parser("amend", parents=[_task_id_parent],
+                             help="Amend the running plan")
     p_amend.add_argument("--description", required=True, help="Why this amendment is needed")
     p_amend.add_argument("--add-phase", action="append", default=[],
                          help="Add phase as NAME:AGENT (repeatable)")
@@ -88,7 +97,8 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
                          help="Add step as PHASE_ID:AGENT:DESCRIPTION (repeatable)")
 
     # baton execute team-record --step-id S --member-id M --agent NAME [--status S] [--outcome O] [--files F]
-    p_team = sub.add_parser("team-record", help="Record a team member completion")
+    p_team = sub.add_parser("team-record", parents=[_task_id_parent],
+                            help="Record a team member completion")
     p_team.add_argument("--step-id", required=True, dest="step_id", help="Parent team step ID")
     p_team.add_argument("--member-id", required=True, dest="member_id", help="Team member ID")
     p_team.add_argument("--agent", required=True, help="Agent name")
@@ -96,14 +106,17 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     p_team.add_argument("--outcome", default="", help="Summary of work done")
     p_team.add_argument("--files", default="", help="Comma-separated files changed")
 
-    # baton execute complete
-    sub.add_parser("complete", help="Finalize execution (writes usage, trace, retrospective)")
+    # baton execute complete [--task-id ID]
+    sub.add_parser("complete", parents=[_task_id_parent],
+                   help="Finalize execution (writes usage, trace, retrospective)")
 
-    # baton execute status
-    sub.add_parser("status", help="Show current execution state")
+    # baton execute status [--task-id ID]
+    sub.add_parser("status", parents=[_task_id_parent],
+                   help="Show current execution state")
 
-    # baton execute resume
-    sub.add_parser("resume", help="Resume execution after a crash")
+    # baton execute resume [--task-id ID]
+    sub.add_parser("resume", parents=[_task_id_parent],
+                   help="Resume execution after a crash")
 
     # baton execute list
     sub.add_parser("list", help="List all executions (active and completed)")
