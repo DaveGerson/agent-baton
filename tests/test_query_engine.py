@@ -1007,8 +1007,8 @@ class TestContextCLIHandler:
         parser = argparse.ArgumentParser()
         sub = parser.add_subparsers(dest="command")
         register(sub)
-        # --db must precede the subcommand so the parent parser catches it
-        args = parser.parse_args(["context", "--db", str(db_path)] + args_list)
+        # --db is now a per-subcommand flag so it goes after the subcommand keyword
+        args = parser.parse_args(["context"] + args_list + ["--db", str(db_path)])
         handler(args)
         return capsys.readouterr().out
 
@@ -1082,5 +1082,14 @@ class TestContextCLIHandler:
     def test_no_subcommand_prints_help(
         self, db_path: Path, capsys: pytest.CaptureFixture
     ) -> None:
-        out = self._run([], db_path, capsys)
+        import argparse
+        from agent_baton.cli.commands.observe.context_cmd import register, handler
+
+        parser = argparse.ArgumentParser()
+        sub = parser.add_subparsers(dest="command")
+        register(sub)
+        # No subcommand — parse only ["context"] to trigger the help path
+        args = parser.parse_args(["context"])
+        handler(args)
+        out = capsys.readouterr().out
         assert "Usage" in out or "usage" in out or "baton context" in out
