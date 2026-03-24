@@ -4,7 +4,8 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from agent_baton.models.plan import ExecutionPlan, MissionLogEntry
+from agent_baton.models.execution import MachinePlan
+from agent_baton.models.plan import MissionLogEntry
 
 
 class ContextManager:
@@ -34,7 +35,7 @@ class ContextManager:
     def plan_path(self) -> Path:
         return self._dir / "plan.md"
 
-    def write_plan(self, plan: ExecutionPlan) -> Path:
+    def write_plan(self, plan: MachinePlan) -> Path:
         """Write an execution plan to disk."""
         self.ensure_dir()
         self.plan_path.write_text(plan.to_markdown(), encoding="utf-8")

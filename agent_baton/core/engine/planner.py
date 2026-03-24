@@ -14,12 +14,49 @@ from pathlib import Path
 from agent_baton.core.improve.scoring import AgentScorecard, PerformanceScorer
 from agent_baton.core.learn.budget_tuner import BudgetTuner
 from agent_baton.core.learn.pattern_learner import PatternLearner
-from agent_baton.core.orchestration.plan import PlanBuilder
 from agent_baton.core.orchestration.registry import AgentRegistry
 from agent_baton.core.orchestration.router import AgentRouter
-from agent_baton.models.enums import RiskLevel
+from agent_baton.models.enums import GitStrategy, RiskLevel
 from agent_baton.models.execution import MachinePlan, PlanGate, PlanPhase, PlanStep
 from agent_baton.models.pattern import LearnedPattern
+
+
+# ---------------------------------------------------------------------------
+# Risk signal keywords → risk level
+# ---------------------------------------------------------------------------
+
+_RISK_SIGNALS: dict[str, RiskLevel] = {
+    "production": RiskLevel.HIGH,
+    "infrastructure": RiskLevel.HIGH,
+    "docker": RiskLevel.HIGH,
+    "ci/cd": RiskLevel.HIGH,
+    "deploy": RiskLevel.HIGH,
+    "terraform": RiskLevel.HIGH,
+    "compliance": RiskLevel.HIGH,
+    "regulated": RiskLevel.HIGH,
+    "audit": RiskLevel.HIGH,
+    "migration": RiskLevel.MEDIUM,
+    "database": RiskLevel.MEDIUM,
+    "schema": RiskLevel.MEDIUM,
+    "bash": RiskLevel.MEDIUM,
+    "security": RiskLevel.HIGH,
+    "authentication": RiskLevel.HIGH,
+    "secrets": RiskLevel.HIGH,
+}
+
+_RISK_ORDINAL: dict[RiskLevel, int] = {
+    RiskLevel.LOW: 0,
+    RiskLevel.MEDIUM: 1,
+    RiskLevel.HIGH: 2,
+    RiskLevel.CRITICAL: 3,
+}
+
+
+def _select_git_strategy(risk: RiskLevel) -> GitStrategy:
+    """Return the appropriate git strategy for a given risk level."""
+    if risk in (RiskLevel.HIGH, RiskLevel.CRITICAL):
+        return GitStrategy.BRANCH_PER_AGENT
+    return GitStrategy.COMMIT_PER_AGENT
 
 
 # ---------------------------------------------------------------------------
@@ -94,7 +131,6 @@ class IntelligentPlanner:
         self._pattern_learner = PatternLearner(team_context_root)
         self._scorer = PerformanceScorer()
         self._budget_tuner = BudgetTuner(team_context_root)
-        self._plan_builder = PlanBuilder()
         registry = AgentRegistry()
         registry.load_default_paths()
         self._registry = registry
@@ -203,8 +239,7 @@ class IntelligentPlanner:
         risk_level_enum = RiskLevel(risk_level)
 
         # 8. Git strategy — derived from risk
-        from agent_baton.core.orchestration.plan import PlanBuilder as _PB
-        git_strategy = _PB._select_git_strategy(risk_level_enum).value
+        git_strategy = _select_git_strategy(risk_level_enum).value
 
         # 9. Build phases
         if phases is not None:
@@ -594,7 +629,7 @@ class IntelligentPlanner:
     def _assess_risk(self, task_summary: str, agents: list[str]) -> str:
         """Assess risk level from task description and structural signals.
 
-        Combines keyword matching (delegated to PlanBuilder) with structural
+        Combines keyword matching (via _RISK_SIGNALS) with structural
         indicators drawn from the agent list:
 
         - Agent count: >5 agents raises score to at least MEDIUM.
@@ -613,14 +648,14 @@ class IntelligentPlanner:
         # 0 = LOW, 1 = MEDIUM, 2 = HIGH
         score = 0
 
-        # ── Keyword signals (via PlanBuilder for consistency) ─────────────────
-        risk_enum = self._plan_builder.assess_risk(task_summary)
-        keyword_score = {
-            RiskLevel.LOW: 0,
-            RiskLevel.MEDIUM: 1,
-            RiskLevel.HIGH: 2,
-            RiskLevel.CRITICAL: 2,
-        }.get(risk_enum, 0)
+        # ── Keyword signals ────────────────────────────────────────────────────
+        description_lower = task_summary.lower()
+        keyword_risk = RiskLevel.LOW
+        for keyword, level in _RISK_SIGNALS.items():
+            if keyword in description_lower:
+                if _RISK_ORDINAL[level] > _RISK_ORDINAL[keyword_risk]:
+                    keyword_risk = level
+        keyword_score = min(_RISK_ORDINAL.get(keyword_risk, 0), 2)
         score = max(score, keyword_score)
 
         # ── Structural signals ────────────────────────────────────────────────

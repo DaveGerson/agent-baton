@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from agent_baton.core.orchestration import AgentRegistry, AgentRouter, PlanBuilder, ContextManager
+from agent_baton.core.orchestration import AgentRegistry, AgentRouter, ContextManager
 from agent_baton.core.govern import EscalationManager, AgentValidator
 from agent_baton.core.observe import UsageLogger, RetrospectiveEngine, DashboardGenerator
 from agent_baton.core.improve import AgentVersionControl, ChangelogEntry, PerformanceScorer, AgentScorecard
@@ -38,24 +38,10 @@ from agent_baton.core.distribute import (
 from agent_baton.core.observe import TraceRecorder, TraceRenderer, ContextProfiler
 from agent_baton.core.learn import PatternLearner, BudgetTuner
 from agent_baton.core.engine import ExecutionEngine, IntelligentPlanner, PromptDispatcher, GateRunner
-from agent_baton.core.events import EventBus, EventPersistence, TaskView, PhaseView, StepView, project_task_view
-from agent_baton.core.runtime import (
-    AgentLauncher,
-    DryRunLauncher,
-    LaunchResult,
-    ClaudeCodeLauncher,
-    ClaudeCodeConfig,
-    StepScheduler,
-    SchedulerConfig,
-    TaskWorker,
-    DecisionManager,
-    WorkerSupervisor,
-)
 
 __all__ = [
     "AgentRegistry",
     "AgentRouter",
-    "PlanBuilder",
     "ContextManager",
     "EscalationManager",
     "AgentValidator",
@@ -104,20 +90,4 @@ __all__ = [
     "IntelligentPlanner",
     "PromptDispatcher",
     "GateRunner",
-    "EventBus",
-    "EventPersistence",
-    "TaskView",
-    "PhaseView",
-    "StepView",
-    "project_task_view",
-    "AgentLauncher",
-    "DryRunLauncher",
-    "LaunchResult",
-    "ClaudeCodeLauncher",
-    "ClaudeCodeConfig",
-    "StepScheduler",
-    "SchedulerConfig",
-    "TaskWorker",
-    "DecisionManager",
-    "WorkerSupervisor",
 ]
