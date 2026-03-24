@@ -6,6 +6,7 @@ perform.  State is persisted to disk between calls for crash recovery.
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -340,6 +341,42 @@ class ExecutionEngine:
 
         return actions
 
+    @staticmethod
+    def _extract_deviations(outcome: str) -> list[str]:
+        """Extract deviation notes from agent outcome text.
+
+        Looks for ``## Deviation`` or ``## Deviations`` section headers
+        (levels 1-3) and collects the content until the next heading or
+        end of text.  Multiple Deviation sections are each returned as a
+        separate entry.
+
+        Returns:
+            List of deviation strings; empty list if none found.
+        """
+        lines = outcome.split("\n")
+        in_deviation = False
+        current: list[str] = []
+        deviations: list[str] = []
+        for line in lines:
+            if re.match(r"^#{1,3}\s+[Dd]eviation", line):
+                if current:
+                    deviations.append("\n".join(current).strip())
+                    current = []
+                in_deviation = True
+                continue
+            if in_deviation:
+                if re.match(r"^#{1,3}\s+", line) and not re.match(
+                    r"^#{1,3}\s+[Dd]eviation", line
+                ):
+                    deviations.append("\n".join(current).strip())
+                    current = []
+                    in_deviation = False
+                else:
+                    current.append(line)
+        if in_deviation and current:
+            deviations.append("\n".join(current).strip())
+        return [d for d in deviations if d]
+
     def record_step_result(
         self,
         step_id: str,
@@ -381,6 +418,7 @@ class ExecutionEngine:
             duration_seconds=duration_seconds,
             error=error,
             completed_at=_utcnow(),
+            deviations=self._extract_deviations(outcome),
         )
         state.step_results.append(result)
 
@@ -1055,6 +1093,17 @@ class ExecutionEngine:
                         ),
                     ))
 
+        # ── Deviation notes → sequencing notes ────────────────────────────
+        # Agents can signal plan misfit via a Deviation section in their outcome.
+        # These feed the retrospective learning loop to improve future plans.
+        for result in state.step_results:
+            if result.deviations:
+                for dev in result.deviations:
+                    sequencing_notes.append(SequencingNote(
+                        phase="deviation",
+                        observation=f"Agent {result.agent_name} deviated: {dev}",
+                    ))
+
         # ── Gate outcomes → sequencing notes ──────────────────────────────
         for gate_result in state.gate_results:
             phase = next(
@@ -1296,6 +1345,7 @@ class ExecutionEngine:
             shared_context=state.plan.shared_context,
             handoff_from=handoff,
             task_summary=state.plan.task_summary,
+            task_type=state.plan.task_type,
         )
         enforcement = PromptDispatcher.build_path_enforcement(step)
         return ExecutionAction(

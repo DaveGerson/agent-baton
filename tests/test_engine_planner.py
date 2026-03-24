@@ -789,32 +789,39 @@ class TestStepDescriptionDecomposition:
 
     def test_architect_design_uses_template(self, planner: IntelligentPlanner):
         desc = planner._step_description("Design", "architect", "Add OAuth2 login")
-        assert "architecture" in desc.lower()
+        # Outcome-oriented template: describes what to achieve, not how
         assert "Add OAuth2 login" in desc
+        assert "design" in desc.lower() or "produce" in desc.lower()
         # Should NOT be the generic fallback format
         assert "(as architect)" not in desc
 
     def test_backend_implement_uses_template(self, planner: IntelligentPlanner):
         desc = planner._step_description("Implement", "backend-engineer", "Add OAuth2 login")
-        assert "server-side" in desc.lower()
+        # Outcome-oriented: "Implement: {task}" not "Implement the server-side..."
         assert "Add OAuth2 login" in desc
+        assert "implement" in desc.lower()
 
     def test_backend_python_flavor_matches_base(self, planner: IntelligentPlanner):
         """Flavored agent name (--python) should match the base agent template."""
         desc = planner._step_description("Implement", "backend-engineer--python", "Add OAuth2 login")
-        assert "server-side" in desc.lower()
+        assert "Add OAuth2 login" in desc
+        assert "implement" in desc.lower()
 
     def test_test_engineer_test_uses_template(self, planner: IntelligentPlanner):
         desc = planner._step_description("Test", "test-engineer", "Add OAuth2 login")
-        assert "comprehensive tests" in desc.lower()
+        # Outcome-oriented: "Verify: {task}. Deliver tests that would catch regressions."
+        assert "Add OAuth2 login" in desc
+        assert "verify" in desc.lower() or "test" in desc.lower()
 
     def test_code_reviewer_review_uses_template(self, planner: IntelligentPlanner):
         desc = planner._step_description("Review", "code-reviewer", "Add OAuth2 login")
-        assert "code quality" in desc.lower()
+        # Outcome-oriented: "Review: {task}. Approve or flag issues blocking merge."
+        assert "Add OAuth2 login" in desc
+        assert "review" in desc.lower() or "approve" in desc.lower() or "flag" in desc.lower()
 
     def test_security_reviewer_uses_template(self, planner: IntelligentPlanner):
         desc = planner._step_description("Review", "security-reviewer", "Add OAuth2 login")
-        assert "owasp" in desc.lower() or "security" in desc.lower()
+        assert "security" in desc.lower() or "audit" in desc.lower() or "vulnerabilities" in desc.lower()
 
     def test_unknown_agent_falls_back_to_verb(self, planner: IntelligentPlanner):
         desc = planner._step_description("Implement", "custom-agent", "Do something")
@@ -862,7 +869,8 @@ class TestStepDescriptionDecomposition:
         arch_desc = planner._step_description("Design", "architect", task)
         be_desc = planner._step_description("Design", "backend-engineer", task)
         assert arch_desc != be_desc
-        assert "architecture" in arch_desc.lower() or "module boundaries" in arch_desc.lower()
+        # Architect design description should be outcome-oriented
+        assert "design" in arch_desc.lower() or "produce" in arch_desc.lower()
         assert "endpoint" in be_desc.lower() or "backend" in be_desc.lower()
 
 

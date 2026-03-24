@@ -118,160 +118,126 @@ _PHASE_VERBS: dict[str, str] = {
 _STEP_TEMPLATES: dict[str, dict[str, str]] = {
     "architect": {
         "design": (
-            "Design the architecture for: {task}. "
-            "Define module boundaries, interfaces, and data flow. "
-            "Document key design decisions and identify affected components."
+            "Produce a design for: {task} that the implementation team can build from without further clarification."
         ),
         "research": (
-            "Research existing patterns and constraints for: {task}. "
-            "Identify risks, dependencies, and technical trade-offs."
+            "Assess feasibility and constraints for: {task}. Surface anything that would change the implementation approach."
         ),
         "review": (
-            "Review the implementation of: {task} for architectural consistency. "
-            "Verify design adherence, module boundaries, and maintainability."
+            "Review: {task} for architectural fitness. Approve or flag structural issues."
         ),
     },
     "backend-engineer": {
         "implement": (
-            "Implement the server-side components for: {task}. "
-            "Write clean, tested code following project conventions. "
-            "Focus on API endpoints, business logic, and data access."
+            "Implement: {task}. Deliver working, tested code."
         ),
         "fix": (
-            "Diagnose and fix: {task}. "
-            "Identify root cause, apply a targeted fix, and add a regression test."
+            "Fix: {task}. Include a regression test."
         ),
         "design": (
-            "Design the backend approach for: {task}. "
-            "Define endpoints, data models, and business logic flow."
+            "Design the backend approach for: {task}."
         ),
         "investigate": (
-            "Investigate: {task}. "
-            "Trace the issue through the codebase, identify root cause, "
-            "and document findings with reproduction steps."
+            "Investigate: {task}. Document root cause and reproduction steps."
         ),
     },
     "frontend-engineer": {
         "implement": (
-            "Implement the UI for: {task}. "
-            "Create components, wire up state management, and handle user interactions. "
-            "Ensure accessibility and responsive behavior."
+            "Implement the UI for: {task}. Deliver working, accessible components."
         ),
         "design": (
-            "Design the frontend approach for: {task}. "
-            "Plan component hierarchy, state management, and user flow."
+            "Design the frontend approach for: {task}."
         ),
     },
     "test-engineer": {
         "test": (
-            "Write comprehensive tests for: {task}. "
-            "Cover happy paths, edge cases, error scenarios, and boundary conditions. "
-            "Include both unit and integration tests where appropriate."
+            "Verify: {task}. Deliver tests that would catch regressions."
         ),
         "implement": (
-            "Build test infrastructure for: {task}. "
-            "Create fixtures, helpers, and test utilities as needed."
+            "Build test infrastructure for: {task}."
         ),
         "review": (
-            "Review test coverage for: {task}. "
-            "Identify untested code paths and missing edge cases."
+            "Review test coverage for: {task}. Flag gaps."
         ),
     },
     "code-reviewer": {
         "review": (
-            "Review the implementation of: {task}. "
-            "Check code quality, error handling, naming consistency, "
-            "and adherence to project conventions. Flag security concerns."
+            "Review: {task}. Approve or flag issues blocking merge."
         ),
     },
     "security-reviewer": {
         "review": (
-            "Security audit: {task}. "
-            "Check for OWASP top 10 vulnerabilities, auth gaps, "
-            "input validation issues, and secrets exposure."
+            "Security audit: {task}. Flag vulnerabilities and required fixes."
         ),
     },
     "devops-engineer": {
         "implement": (
-            "Set up infrastructure for: {task}. "
-            "Configure deployment, CI/CD pipelines, Docker, and environment as needed."
+            "Set up infrastructure for: {task}."
         ),
         "review": (
-            "Review infrastructure changes for: {task}. "
-            "Verify security, reliability, and operational readiness."
+            "Review infrastructure for: {task}. Flag operational risks."
         ),
     },
     "data-engineer": {
         "design": (
-            "Design the data architecture for: {task}. "
-            "Define schemas, migrations, indexes, and data flow."
+            "Design the data layer for: {task}."
         ),
         "implement": (
-            "Implement the data layer for: {task}. "
-            "Create schemas, write migrations, optimize queries, and build ETL as needed."
+            "Implement the data layer for: {task}."
         ),
     },
     "data-analyst": {
         "design": (
-            "Plan the analysis approach for: {task}. "
-            "Define metrics, data sources, and query strategy."
+            "Plan the analysis for: {task}."
         ),
         "implement": (
-            "Execute the analysis for: {task}. "
-            "Write queries, compute metrics, and prepare findings for stakeholders."
+            "Execute the analysis for: {task}. Deliver findings."
         ),
     },
     "data-scientist": {
         "design": (
-            "Design the modeling approach for: {task}. "
-            "Define features, model selection criteria, and evaluation methodology."
+            "Design the modeling approach for: {task}."
         ),
         "implement": (
-            "Build and evaluate models for: {task}. "
-            "Implement feature engineering, model training, and evaluation pipeline."
+            "Build and evaluate models for: {task}."
         ),
     },
     "auditor": {
         "review": (
-            "Audit the implementation of: {task}. "
-            "Verify compliance, safety, and governance requirements. "
-            "Flag risks and provide pass/fail determination."
+            "Audit: {task}. Provide pass/fail with findings."
         ),
     },
     "visualization-expert": {
         "implement": (
-            "Create visualizations for: {task}. "
-            "Design clear, accurate charts or dashboards that communicate insights effectively."
+            "Create visualizations for: {task}."
         ),
     },
     "subject-matter-expert": {
         "research": (
-            "Provide domain expertise for: {task}. "
-            "Document applicable business rules, regulatory requirements, "
-            "and industry standards."
+            "Provide domain context for: {task}."
         ),
         "review": (
-            "Validate domain correctness of: {task}. "
-            "Verify business logic, terminology, and compliance with industry standards."
+            "Validate domain correctness of: {task}."
         ),
     },
 }
 
 # Default deliverables by agent base name — used when step has no explicit deliverables
+# and the agent definition does not already specify output format.
 _AGENT_DELIVERABLES: dict[str, list[str]] = {
-    "architect": ["Design document with module boundaries and interfaces"],
-    "backend-engineer": ["Implementation source files", "Tests for changed code"],
-    "frontend-engineer": ["UI component files", "Tests for changed code"],
-    "test-engineer": ["Test files with comprehensive coverage"],
-    "code-reviewer": ["Review summary with findings and approval status"],
-    "security-reviewer": ["Security audit report with findings and risk ratings"],
-    "devops-engineer": ["Infrastructure and deployment configuration files"],
-    "data-engineer": ["Schema definitions and migration files"],
-    "data-analyst": ["Analysis results and supporting queries"],
-    "data-scientist": ["Model artifacts and evaluation results"],
-    "auditor": ["Audit report with compliance findings"],
-    "visualization-expert": ["Visualization files or dashboard components"],
-    "subject-matter-expert": ["Domain requirements document"],
+    "architect": ["Design document"],
+    "backend-engineer": ["Working implementation with tests"],
+    "frontend-engineer": ["Working UI components with tests"],
+    "test-engineer": ["Test suite"],
+    "code-reviewer": ["Review verdict with findings"],
+    "security-reviewer": ["Security audit report"],
+    "devops-engineer": ["Infrastructure configuration"],
+    "data-engineer": ["Schema and migrations"],
+    "data-analyst": ["Analysis results"],
+    "data-scientist": ["Model with evaluation results"],
+    "auditor": ["Audit verdict"],
+    "visualization-expert": ["Visualizations"],
+    "subject-matter-expert": ["Domain context document"],
 }
 
 # Keyword sets for task type inference (checked in order — first match wins).
@@ -554,6 +520,27 @@ class IntelligentPlanner:
                 if not step.context_files:
                     step.context_files = ["CLAUDE.md"]
 
+        # 13b. Model inheritance — inherit model preference from agent definition.
+        # If the agent definition specifies a model, use it; otherwise keep the
+        # PlanStep default ("sonnet").
+        for phase in plan_phases:
+            for step in phase.steps:
+                agent_def = self._registry.get(step.agent_name)
+                if agent_def and agent_def.model:
+                    step.model = agent_def.model
+
+        # 13c. Context richness — extract file paths from task summary and append
+        # to every step's context_files (deduplicated).
+        extracted_paths = self._extract_file_paths(task_summary)
+        if extracted_paths:
+            for phase in plan_phases:
+                for step in phase.steps:
+                    existing = set(step.context_files)
+                    for path in extracted_paths:
+                        if path not in existing:
+                            step.context_files.append(path)
+                            existing.add(path)
+
         # 14. Shared context
         tmp_plan = MachinePlan(
             task_id=task_id,
@@ -563,6 +550,7 @@ class IntelligentPlanner:
             git_strategy=git_strategy,
             phases=plan_phases,
             pattern_source=pattern.pattern_id if pattern else None,
+            task_type=inferred_type,
         )
         shared_context = self._build_shared_context(tmp_plan)
         tmp_plan.shared_context = shared_context
@@ -693,6 +681,31 @@ class IntelligentPlanner:
     # Private helpers — task ID and type inference
     # ------------------------------------------------------------------
 
+    def _extract_file_paths(self, text: str) -> list[str]:
+        """Extract file path candidates from task summary text.
+
+        Scans for tokens that look like file paths — must contain a ``/``
+        or end with a known code/config extension to reduce false positives.
+
+        Returns:
+            Deduplicated list of path-like strings found in *text*.
+        """
+        _CODE_EXTENSIONS = {
+            ".py", ".ts", ".md", ".json", ".yaml", ".yml", ".toml",
+            ".cfg", ".txt", ".html", ".css", ".js", ".jsx", ".tsx",
+        }
+        pattern = r'(?:^|[\s(])([a-zA-Z0-9_./-]+(?:\.[a-zA-Z0-9]+|/))'
+        candidates = re.findall(pattern, text)
+        seen: set[str] = set()
+        result: list[str] = []
+        for c in candidates:
+            last_part = c.split("/")[-1]
+            ext_match = "." in last_part and f".{last_part.rsplit('.', 1)[-1]}" in _CODE_EXTENSIONS
+            if ("/" in c or ext_match) and c not in seen:
+                seen.add(c)
+                result.append(c)
+        return result
+
     def _generate_task_id(self, summary: str) -> str:
         """Create a collision-free task ID.
 
@@ -752,14 +765,47 @@ class IntelligentPlanner:
                             f" from phase {prev.phase_id} ({prev_agents})."
                         )
 
-                # Default deliverables
+                # Default deliverables — skip if agent definition already specifies
+                # output format (to avoid duplicating what the agent already knows).
                 if not step.deliverables:
                     base_agent = step.agent_name.split("--")[0]
                     defaults = _AGENT_DELIVERABLES.get(base_agent)
-                    if defaults:
+                    if defaults and not self._agent_has_output_spec(step.agent_name):
                         step.deliverables = list(defaults)
 
         return phases
+
+    def _agent_expertise_level(self, agent_name: str) -> str:
+        """Assess agent expertise from definition richness.
+
+        Consults the registry to determine how much guidance this agent needs
+        in its delegation prompt.
+
+        Returns:
+            "expert"   — rich definition (>200 words); agent knows its craft,
+                         use minimal task-only description.
+            "standard" — has a definition; use the full outcome template.
+            "minimal"  — no definition found; use template plus light hints.
+        """
+        agent_def = self._registry.get(agent_name)
+        if agent_def is None:
+            return "minimal"
+        word_count = len(agent_def.instructions.split())
+        return "expert" if word_count > 200 else "standard"
+
+    def _agent_has_output_spec(self, agent_name: str) -> bool:
+        """Return True if the agent definition already specifies its output format.
+
+        Checks for common section headers/keywords that indicate the agent
+        already knows what to produce.  When True, the planner skips adding
+        ``_AGENT_DELIVERABLES`` defaults to avoid duplication.
+        """
+        agent_def = self._registry.get(agent_name)
+        if agent_def is None:
+            return False
+        instructions_lower = agent_def.instructions.lower()
+        output_markers = ("output format", "when you finish", "return:", "deliverables")
+        return any(marker in instructions_lower for marker in output_markers)
 
     def _step_description(
         self, phase_name: str, agent_name: str, task_summary: str
@@ -768,15 +814,21 @@ class IntelligentPlanner:
 
         Uses ``_STEP_TEMPLATES`` for agent+phase combinations that have a
         dedicated template, falling back to ``_PHASE_VERBS`` for unknown
-        combinations.
+        combinations.  Prompt weight scales with agent expertise level:
+
+        - **expert** agents (rich definitions, >200 words) receive just the
+          outcome phrase — their definition already carries the methodology.
+        - **standard** agents receive the full outcome template.
+        - **minimal** agents (no definition) receive the template plus a brief
+          method hint so they have enough guidance to proceed.
 
         Examples::
 
             _step_description("implement", "backend-engineer--python", "Add OAuth2 login")
-            # -> "Implement the server-side components for: Add OAuth2 login. ..."
+            # -> "Implement: Add OAuth2 login. Deliver working, tested code."
 
             _step_description("design", "architect", "Add OAuth2 login")
-            # -> "Design the architecture for: Add OAuth2 login. ..."
+            # -> "Produce a design for: Add OAuth2 login ..."
 
         Falls back to ``"<phase> phase — <agent>"`` when ``task_summary`` is empty.
         """
@@ -785,17 +837,35 @@ class IntelligentPlanner:
 
         base_agent = agent_name.split("--")[0]
         phase_lower = phase_name.lower()
+        expertise = self._agent_expertise_level(agent_name)
 
-        # Try agent+phase specific template first
+        # Expert agents: minimal task-only description — their definition carries
+        # the methodology.  Use verb + task rather than the full template to avoid
+        # period-truncation issues when the task summary contains dots.
+        if expertise == "expert":
+            verb = _PHASE_VERBS.get(phase_lower, phase_name)
+            return f"{verb}: {task_summary}."
+
+        # Standard agents: full outcome template
         agent_templates = _STEP_TEMPLATES.get(base_agent, {})
         template = agent_templates.get(phase_lower)
-
         if template:
-            return template.format(task=task_summary)
+            description = template.format(task=task_summary)
+            if expertise == "minimal":
+                # Append a light method hint so agents without definitions have guidance
+                verb = _PHASE_VERBS.get(phase_lower, phase_name.lower())
+                description += (
+                    f" Apply sound {verb.lower().split(':')[0].strip()} practices"
+                    f" and document your approach."
+                )
+            return description
 
         # Fallback to generic verb + task
         verb = _PHASE_VERBS.get(phase_lower, phase_name)
-        return f"{verb}: {task_summary} (as {agent_name})"
+        base_desc = f"{verb}: {task_summary} (as {agent_name})"
+        if expertise == "minimal":
+            base_desc += " Document your approach and decisions."
+        return base_desc
 
     def _default_phases(self, task_type: str, agents: list[str], task_summary: str = "") -> list[PlanPhase]:
         """Build the default PlanPhase list for a task type.

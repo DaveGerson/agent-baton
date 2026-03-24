@@ -196,6 +196,7 @@ class MachinePlan:
     shared_context: str = ""            # pre-built context for agents
     pattern_source: str | None = None   # pattern_id that influenced this plan
     created_at: str = ""
+    task_type: str = ""                 # inferred task type (bug-fix, new-feature, etc.)
 
     def __post_init__(self) -> None:
         if not self.created_at:
@@ -225,6 +226,7 @@ class MachinePlan:
             "shared_context": self.shared_context,
             "pattern_source": self.pattern_source,
             "created_at": self.created_at,
+            "task_type": self.task_type,
         }
 
     @classmethod
@@ -240,6 +242,7 @@ class MachinePlan:
             shared_context=data.get("shared_context", ""),
             pattern_source=data.get("pattern_source"),
             created_at=data.get("created_at", ""),
+            task_type=data.get("task_type", ""),
         )
 
     def to_markdown(self) -> str:
@@ -394,6 +397,7 @@ class StepResult:
     error: str = ""
     completed_at: str = ""
     member_results: list[TeamStepResult] = field(default_factory=list)  # team step results
+    deviations: list[str] = field(default_factory=list)  # plan deviations reported by agent
 
     def to_dict(self) -> dict:
         d = {
@@ -408,6 +412,7 @@ class StepResult:
             "retries": self.retries,
             "error": self.error,
             "completed_at": self.completed_at,
+            "deviations": self.deviations,
         }
         if self.member_results:
             d["member_results"] = [m.to_dict() for m in self.member_results]
@@ -418,8 +423,11 @@ class StepResult:
         member_results = [
             TeamStepResult.from_dict(m) for m in data.pop("member_results", [])
         ]
+        # Extract deviations before passing remaining fields to __init__
+        deviations = data.pop("deviations", [])
         obj = cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
         obj.member_results = member_results
+        obj.deviations = deviations
         return obj
 
 
