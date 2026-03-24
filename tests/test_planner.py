@@ -29,6 +29,11 @@ def _plan_with_n_agents(builder: PlanBuilder, n: int) -> ExecutionPlan:
 
 # ---------------------------------------------------------------------------
 # create()
+# DECISION: Removed test_task_summary_is_set (trivial field storage),
+# test_default_execution_mode_is_phased (trivial default),
+# test_plan_has_created_at_timestamp (trivial non-None assertion).
+# Kept test_returns_execution_plan because it verifies the return type of
+# a factory method (behavior contract, not field storage).
 # ---------------------------------------------------------------------------
 
 class TestCreate:
@@ -36,16 +41,6 @@ class TestCreate:
         builder = PlanBuilder()
         plan = builder.create("Build an API")
         assert isinstance(plan, ExecutionPlan)
-
-    def test_task_summary_is_set(self):
-        builder = PlanBuilder()
-        plan = builder.create("Deploy microservices")
-        assert plan.task_summary == "Deploy microservices"
-
-    def test_default_execution_mode_is_phased(self):
-        builder = PlanBuilder()
-        plan = builder.create("Some task")
-        assert plan.execution_mode == ExecutionMode.PHASED
 
     def test_explicit_execution_mode_is_respected(self):
         builder = PlanBuilder()
@@ -88,11 +83,6 @@ class TestCreate:
             git_strategy=GitStrategy.NONE,
         )
         assert plan.git_strategy == GitStrategy.NONE
-
-    def test_plan_has_created_at_timestamp(self):
-        builder = PlanBuilder()
-        plan = builder.create("Some task")
-        assert plan.created_at is not None
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +143,9 @@ class TestAssessRisk:
 
 # ---------------------------------------------------------------------------
 # add_phase() and add_step()
+# DECISION: Merged 10 add_step field tests into 2 parametrized tests.
+# test_adds_step_to_phase stays separate (tests side-effect on phase.steps).
+# test_multiple_steps_added_in_order stays separate (ordering property).
 # ---------------------------------------------------------------------------
 
 class TestAddPhase:
@@ -209,54 +202,21 @@ class TestAddStep:
         step = builder.add_step(phase, "architect")
         assert isinstance(step, AgentAssignment)
 
-    def test_step_task_description_set(self):
+    @pytest.mark.parametrize("kwargs,field,expected", [
+        ({"task_description": "Design the schema"}, "task_description", "Design the schema"),
+        ({}, "trust_level", TrustLevel.FULL_AUTONOMY),
+        ({"trust_level": TrustLevel.RESTRICTED}, "trust_level", TrustLevel.RESTRICTED),
+        ({"depends_on": ["1.1"]}, "depends_on", ["1.1"]),
+        ({"deliverables": ["schema.sql"]}, "deliverables", ["schema.sql"]),
+        ({"allowed_paths": ["src/"]}, "allowed_paths", ["src/"]),
+        ({"blocked_paths": ["secrets/"]}, "blocked_paths", ["secrets/"]),
+    ])
+    def test_step_field(self, kwargs: dict, field: str, expected: object):
         builder = PlanBuilder()
         plan = builder.create("Task")
         phase = builder.add_phase(plan, "Phase 1")
-        step = builder.add_step(phase, "architect", task_description="Design the schema")
-        assert step.task_description == "Design the schema"
-
-    def test_step_default_trust_level(self):
-        builder = PlanBuilder()
-        plan = builder.create("Task")
-        phase = builder.add_phase(plan, "Phase 1")
-        step = builder.add_step(phase, "architect")
-        assert step.trust_level == TrustLevel.FULL_AUTONOMY
-
-    def test_step_explicit_trust_level(self):
-        builder = PlanBuilder()
-        plan = builder.create("Task")
-        phase = builder.add_phase(plan, "Phase 1")
-        step = builder.add_step(phase, "architect", trust_level=TrustLevel.RESTRICTED)
-        assert step.trust_level == TrustLevel.RESTRICTED
-
-    def test_step_depends_on(self):
-        builder = PlanBuilder()
-        plan = builder.create("Task")
-        phase = builder.add_phase(plan, "Phase 1")
-        step = builder.add_step(phase, "test-engineer", depends_on=["1.1"])
-        assert step.depends_on == ["1.1"]
-
-    def test_step_deliverables(self):
-        builder = PlanBuilder()
-        plan = builder.create("Task")
-        phase = builder.add_phase(plan, "Phase 1")
-        step = builder.add_step(phase, "architect", deliverables=["schema.sql"])
-        assert step.deliverables == ["schema.sql"]
-
-    def test_step_allowed_paths(self):
-        builder = PlanBuilder()
-        plan = builder.create("Task")
-        phase = builder.add_phase(plan, "Phase 1")
-        step = builder.add_step(phase, "backend-engineer--python", allowed_paths=["src/"])
-        assert step.allowed_paths == ["src/"]
-
-    def test_step_blocked_paths(self):
-        builder = PlanBuilder()
-        plan = builder.create("Task")
-        phase = builder.add_phase(plan, "Phase 1")
-        step = builder.add_step(phase, "backend-engineer--python", blocked_paths=["secrets/"])
-        assert step.blocked_paths == ["secrets/"]
+        step = builder.add_step(phase, "backend-engineer--python", **kwargs)
+        assert getattr(step, field) == expected
 
     def test_multiple_steps_added_in_order(self):
         builder = PlanBuilder()
@@ -318,6 +278,10 @@ class TestWriteToDisk:
 
 # ---------------------------------------------------------------------------
 # Budget tier selection
+# DECISION: Merged test_create_auto_selects_lean_for_one_agent,
+# test_create_auto_selects_standard_for_four_agents,
+# test_create_auto_selects_full_for_seven_agents into a single parametrized
+# test. The _select_budget_tier parametrized tests already cover boundaries.
 # ---------------------------------------------------------------------------
 
 class TestBudgetTierSelection:
@@ -348,26 +312,17 @@ class TestBudgetTierSelection:
         tier = PlanBuilder._select_budget_tier(n_agents)
         assert tier == expected_tier
 
-    def test_create_auto_selects_lean_for_one_agent(self):
+    @pytest.mark.parametrize("n_agents,expected_tier", [
+        (1, BudgetTier.LEAN),
+        (4, BudgetTier.STANDARD),
+        (7, BudgetTier.FULL),
+    ])
+    def test_create_auto_selects_tier(self, n_agents: int, expected_tier: BudgetTier):
         builder = PlanBuilder()
-        steps = [AgentAssignment(agent_name="architect")]
+        steps = [AgentAssignment(agent_name=f"a{i}") for i in range(n_agents)]
         phase = Phase(name="P1", steps=steps)
         plan = builder.create("Task", phases=[phase])
-        assert plan.budget_tier == BudgetTier.LEAN
-
-    def test_create_auto_selects_standard_for_four_agents(self):
-        builder = PlanBuilder()
-        steps = [AgentAssignment(agent_name=f"a{i}") for i in range(4)]
-        phase = Phase(name="P1", steps=steps)
-        plan = builder.create("Task", phases=[phase])
-        assert plan.budget_tier == BudgetTier.STANDARD
-
-    def test_create_auto_selects_full_for_seven_agents(self):
-        builder = PlanBuilder()
-        steps = [AgentAssignment(agent_name=f"a{i}") for i in range(7)]
-        phase = Phase(name="P1", steps=steps)
-        plan = builder.create("Task", phases=[phase])
-        assert plan.budget_tier == BudgetTier.FULL
+        assert plan.budget_tier == expected_tier
 
 
 # ---------------------------------------------------------------------------

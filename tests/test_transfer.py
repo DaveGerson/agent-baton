@@ -52,35 +52,21 @@ def _make_project(root: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 class TestTransferManifestMarkdown:
-    def test_includes_source_project(self):
-        m = TransferManifest(
-            agents=["test-agent.md"],
-            source_project="/some/path",
-            reason="Test reason",
-        )
-        md = m.to_markdown()
-        assert "/some/path" in md
+    # DECISION: Parameterize 5 of the 6 field-presence tests into one. Each
+    # tuple is a (manifest_kwargs, expected_substring) pair that maps directly
+    # to the original individual tests. Kept separate: the structural tests
+    # (starts_with_h1) and the special empty-manifest placeholder test.
 
-    def test_includes_reason(self):
-        m = TransferManifest(reason="sharing with team")
-        md = m.to_markdown()
-        assert "sharing with team" in md
-
-    def test_lists_agents(self):
-        m = TransferManifest(agents=["agent-a.md", "agent-b.md"])
-        md = m.to_markdown()
-        assert "agent-a.md" in md
-        assert "agent-b.md" in md
-
-    def test_lists_knowledge_packs(self):
-        m = TransferManifest(knowledge_packs=["pack-alpha"])
-        md = m.to_markdown()
-        assert "pack-alpha" in md
-
-    def test_lists_references(self):
-        m = TransferManifest(references=["git-strategy.md"])
-        md = m.to_markdown()
-        assert "git-strategy.md" in md
+    @pytest.mark.parametrize("kwargs,expected", [
+        ({"agents": ["test-agent.md"], "source_project": "/some/path", "reason": "Test reason"}, "/some/path"),
+        ({"reason": "sharing with team"}, "sharing with team"),
+        ({"agents": ["agent-a.md", "agent-b.md"]}, "agent-a.md"),
+        ({"knowledge_packs": ["pack-alpha"]}, "pack-alpha"),
+        ({"references": ["git-strategy.md"]}, "git-strategy.md"),
+    ])
+    def test_field_appears_in_markdown(self, kwargs, expected):
+        m = TransferManifest(**kwargs)
+        assert expected in m.to_markdown()
 
     def test_empty_manifest_renders_none_placeholders(self):
         m = TransferManifest()
@@ -98,24 +84,20 @@ class TestTransferManifestMarkdown:
 # ---------------------------------------------------------------------------
 
 class TestDiscoverTransferable:
-    def test_discovers_agents(self, tmp_path: Path):
+    # DECISION: Parameterize test_discovers_agents, test_discovers_knowledge_packs,
+    # and test_discovers_references into one test. Each checks a different list
+    # attribute in the returned manifest for a known member.
+    @pytest.mark.parametrize("attr,expected_member", [
+        ("agents", "test-agent.md"),
+        ("agents", "helper-agent.md"),
+        ("knowledge_packs", "pack-alpha"),
+        ("references", "git-strategy.md"),
+    ])
+    def test_discovers_content(self, tmp_path: Path, attr, expected_member):
         src = _make_project(tmp_path / "src")
         transfer = ProjectTransfer(source_root=src)
         manifest = transfer.discover_transferable()
-        assert "test-agent.md" in manifest.agents
-        assert "helper-agent.md" in manifest.agents
-
-    def test_discovers_knowledge_packs(self, tmp_path: Path):
-        src = _make_project(tmp_path / "src")
-        transfer = ProjectTransfer(source_root=src)
-        manifest = transfer.discover_transferable()
-        assert "pack-alpha" in manifest.knowledge_packs
-
-    def test_discovers_references(self, tmp_path: Path):
-        src = _make_project(tmp_path / "src")
-        transfer = ProjectTransfer(source_root=src)
-        manifest = transfer.discover_transferable()
-        assert "git-strategy.md" in manifest.references
+        assert expected_member in getattr(manifest, attr)
 
     def test_source_project_set_in_manifest(self, tmp_path: Path):
         src = _make_project(tmp_path / "src")
@@ -146,19 +128,22 @@ class TestDiscoverTransferable:
         # No usage data → times_used == 0 → included anyway
         assert len(manifest.agents) == 2
 
-    def test_agents_sorted_alphabetically(self, tmp_path: Path):
+    # DECISION: Merge test_agents_sorted_alphabetically and
+    # test_references_sorted_alphabetically into one parameterized test. Both
+    # verify the same sorting invariant on different list attributes.
+    @pytest.mark.parametrize("attr,extra_setup", [
+        ("agents", None),
+        ("references", "another-ref.md"),
+    ])
+    def test_content_sorted_alphabetically(self, tmp_path: Path, attr, extra_setup):
         src = _make_project(tmp_path / "src")
+        if extra_setup and attr == "references":
+            refs_dir = src / ".claude" / "references"
+            (refs_dir / extra_setup).write_text(_REFERENCE_MD, encoding="utf-8")
         transfer = ProjectTransfer(source_root=src)
         manifest = transfer.discover_transferable()
-        assert manifest.agents == sorted(manifest.agents)
-
-    def test_references_sorted_alphabetically(self, tmp_path: Path):
-        src = _make_project(tmp_path / "src")
-        refs_dir = src / ".claude" / "references"
-        (refs_dir / "another-ref.md").write_text(_REFERENCE_MD, encoding="utf-8")
-        transfer = ProjectTransfer(source_root=src)
-        manifest = transfer.discover_transferable()
-        assert manifest.references == sorted(manifest.references)
+        lst = getattr(manifest, attr)
+        assert lst == sorted(lst)
 
 
 # ---------------------------------------------------------------------------

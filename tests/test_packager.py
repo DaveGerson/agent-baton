@@ -217,17 +217,18 @@ class TestComputeChecksums:
         for digest in checksums.values():
             assert len(digest) == 64
 
-    def test_includes_agents_member(self, tmp_path: Path):
+    # DECISION: Parameterize test_includes_agents_member + test_includes_references_member
+    # into one test. Both call compute_checksums on the same archive and assert a
+    # member key exists; the member name is the only varying input.
+    @pytest.mark.parametrize("expected_member", [
+        "agents/test-agent.md",
+        "references/git-strategy.md",
+    ])
+    def test_includes_archive_member(self, tmp_path: Path, expected_member):
         archive = _build_archive(tmp_path)
         verifier = PackageVerifier()
         checksums = verifier.compute_checksums(archive)
-        assert "agents/test-agent.md" in checksums
-
-    def test_includes_references_member(self, tmp_path: Path):
-        archive = _build_archive(tmp_path)
-        verifier = PackageVerifier()
-        checksums = verifier.compute_checksums(archive)
-        assert "references/git-strategy.md" in checksums
+        assert expected_member in checksums
 
     def test_checksums_are_deterministic(self, tmp_path: Path):
         archive = _build_archive(tmp_path)
@@ -504,26 +505,32 @@ class TestPackageValidationResult:
 
 
 class TestVerifyPackageCommand:
-    def test_handler_exits_0_for_valid_package(self, tmp_path: Path, capsys):
+    # DECISION: Parameterize the valid/invalid handler exit-code tests into one.
+    # The two scenarios (valid archive → no exit, invalid → SystemExit(1)) are
+    # preserved as parameter tuples. Other tests (checksums flag, error details,
+    # register, discover) test distinct behaviours and stay separate.
+    @pytest.mark.parametrize("archive_fn,expect_exit,exit_code", [
+        ("valid", False, None),
+        ("invalid", True, 1),
+    ])
+    def test_handler_exit_code(self, tmp_path: Path, capsys, archive_fn, expect_exit, exit_code):
         from agent_baton.cli.commands.verify_package import handler
         import argparse
 
-        archive = _build_archive(tmp_path)
-        args = argparse.Namespace(archive=str(archive), checksums=False)
-        # Should not raise SystemExit
-        handler(args)
-        out = capsys.readouterr().out
-        assert "PASS" in out
+        if archive_fn == "valid":
+            archive = _build_archive(tmp_path)
+        else:
+            archive = _make_archive_without_manifest(tmp_path)
 
-    def test_handler_exits_1_for_invalid_package(self, tmp_path: Path, capsys):
-        from agent_baton.cli.commands.verify_package import handler
-        import argparse
-
-        archive = _make_archive_without_manifest(tmp_path)
         args = argparse.Namespace(archive=str(archive), checksums=False)
-        with pytest.raises(SystemExit) as exc_info:
+        if expect_exit:
+            with pytest.raises(SystemExit) as exc_info:
+                handler(args)
+            assert exc_info.value.code == exit_code
+        else:
             handler(args)
-        assert exc_info.value.code == 1
+            out = capsys.readouterr().out
+            assert "PASS" in out
 
     def test_handler_prints_checksums_when_flag_set(self, tmp_path: Path, capsys):
         from agent_baton.cli.commands.verify_package import handler

@@ -33,62 +33,40 @@ def validator() -> SpecValidator:
 
 # ---------------------------------------------------------------------------
 # SpecCheck / SpecValidationResult dataclass
+# DECISION: Removed test_passed_empty_checks and test_summary_empty —
+# both are trivial default/boundary checks that are covered by the parametrize
+# below. Kept test_passed_all_pass / test_passed_one_fail as they directly
+# exercise the `passed` property logic.
 # ---------------------------------------------------------------------------
 
 
 class TestSpecValidationResultDataclass:
-    def test_passed_all_pass(self):
-        r = SpecValidationResult(
-            checks=[
-                SpecCheck("a", passed=True),
-                SpecCheck("b", passed=True),
-            ]
-        )
-        assert r.passed is True
+    @pytest.mark.parametrize("checks,expected_passed", [
+        ([SpecCheck("a", True), SpecCheck("b", True)], True),
+        ([SpecCheck("a", True), SpecCheck("b", False)], False),
+        ([], False),
+    ])
+    def test_passed_property(self, checks: list, expected_passed: bool):
+        r = SpecValidationResult(checks=checks)
+        assert r.passed is expected_passed
 
-    def test_passed_one_fail(self):
-        r = SpecValidationResult(
-            checks=[
-                SpecCheck("a", passed=True),
-                SpecCheck("b", passed=False),
-            ]
-        )
-        assert r.passed is False
-
-    def test_passed_empty_checks(self):
-        r = SpecValidationResult()
-        assert r.passed is False
-
-    def test_summary_all_pass(self):
-        r = SpecValidationResult(
-            checks=[SpecCheck("a", True), SpecCheck("b", True)]
-        )
-        assert r.summary == "2/2 checks passed"
-
-    def test_summary_partial(self):
-        r = SpecValidationResult(
-            checks=[SpecCheck("a", True), SpecCheck("b", False)]
-        )
-        assert r.summary == "1/2 checks passed"
-
-    def test_summary_empty(self):
-        r = SpecValidationResult()
-        assert r.summary == "0/0 checks passed"
+    @pytest.mark.parametrize("checks,expected_summary", [
+        ([SpecCheck("a", True), SpecCheck("b", True)], "2/2 checks passed"),
+        ([SpecCheck("a", True), SpecCheck("b", False)], "1/2 checks passed"),
+        ([], "0/0 checks passed"),
+    ])
+    def test_summary_property(self, checks: list, expected_summary: str):
+        r = SpecValidationResult(checks=checks)
+        assert r.summary == expected_summary
 
 
 class TestToMarkdown:
-    def test_returns_string(self):
-        r = SpecValidationResult(
-            checks=[SpecCheck("check-one", True), SpecCheck("check-two", False, message="bad")]
-        )
-        md = r.to_markdown()
-        assert isinstance(md, str)
-
     def test_contains_pass_fail_labels(self):
         r = SpecValidationResult(
             checks=[SpecCheck("ok", True), SpecCheck("nope", False, message="missing")]
         )
         md = r.to_markdown()
+        assert isinstance(md, str)
         assert "PASS" in md
         assert "FAIL" in md
 
@@ -122,6 +100,11 @@ class TestToMarkdown:
 
 # ---------------------------------------------------------------------------
 # validate_json_against_schema
+# DECISION: Merged 11 tests into 2 parametrized groups:
+# - pass/fail by data content (7 tests → 1 parametrized)
+# - file/IO errors (3 tests → 1 parametrized)
+# test_spec_path_set_to_schema and test_integer_not_confused_with_boolean
+# kept separate (non-obvious correctness properties worth highlighting).
 # ---------------------------------------------------------------------------
 
 
@@ -142,99 +125,71 @@ SIMPLE_SCHEMA = {
 
 
 class TestValidateJsonAgainstSchema:
-    def test_valid_data_passes(self, tmp_path: Path, validator: SpecValidator):
-        data = {"name": "my-app", "version": 1.0, "active": True, "status": "draft"}
+    @pytest.mark.parametrize("data,should_pass,error_hint", [
+        # valid data
+        ({"name": "my-app", "version": 1.0, "active": True, "status": "draft"}, True, None),
+        # valid enum value
+        ({"name": "app", "version": 1, "status": "published"}, True, None),
+        # valid boolean field
+        ({"name": "app", "version": 1, "active": True}, True, None),
+        # missing required field
+        ({"name": "my-app"}, False, "version"),
+        # wrong type for 'name'
+        ({"name": 42, "version": 1.0}, False, "name"),
+        # invalid enum value
+        ({"name": "app", "version": 1, "status": "pending"}, False, "enum"),
+        # array item wrong type
+        ({"name": "app", "version": 2, "tags": ["good", 123]}, False, None),
+    ])
+    def test_schema_validation(
+        self,
+        tmp_path: Path,
+        validator: SpecValidator,
+        data: dict,
+        should_pass: bool,
+        error_hint: str | None,
+    ):
         data_path = _write_json(tmp_path, "data.json", data)
         schema_path = _write_json(tmp_path, "schema.json", SIMPLE_SCHEMA)
-
         result = validator.validate_json_against_schema(data_path, schema_path)
-        assert result.passed
+        assert result.passed is should_pass
+        if error_hint:
+            failed_names = [c.name for c in result.checks if not c.passed]
+            assert any(error_hint in n for n in failed_names)
 
-    def test_missing_required_field_fails(self, tmp_path: Path, validator: SpecValidator):
-        data = {"name": "my-app"}  # missing 'version'
-        data_path = _write_json(tmp_path, "data.json", data)
-        schema_path = _write_json(tmp_path, "schema.json", SIMPLE_SCHEMA)
-
-        result = validator.validate_json_against_schema(data_path, schema_path)
+    @pytest.mark.parametrize("missing_data,missing_schema,expected_msg", [
+        (True, False, "cannot read"),
+        (False, True, None),
+        (False, False, "not valid JSON"),  # invalid JSON in data file
+    ])
+    def test_file_io_errors(
+        self,
+        tmp_path: Path,
+        validator: SpecValidator,
+        missing_data: bool,
+        missing_schema: bool,
+        expected_msg: str | None,
+    ):
+        if missing_data:
+            schema_path = _write_json(tmp_path, "schema.json", SIMPLE_SCHEMA)
+            result = validator.validate_json_against_schema(tmp_path / "nope.json", schema_path)
+        elif missing_schema:
+            data_path = _write_json(tmp_path, "data.json", {"x": 1})
+            result = validator.validate_json_against_schema(data_path, tmp_path / "nope_schema.json")
+        else:
+            # invalid JSON data
+            data_path = _write_text(tmp_path, "data.json", "not json {{{")
+            schema_path = _write_json(tmp_path, "schema.json", SIMPLE_SCHEMA)
+            result = validator.validate_json_against_schema(data_path, schema_path)
         assert not result.passed
-        failed_names = [c.name for c in result.checks if not c.passed]
-        assert any("version" in n for n in failed_names)
-
-    def test_wrong_type_fails(self, tmp_path: Path, validator: SpecValidator):
-        data = {"name": 42, "version": 1.0}  # name should be a string
-        data_path = _write_json(tmp_path, "data.json", data)
-        schema_path = _write_json(tmp_path, "schema.json", SIMPLE_SCHEMA)
-
-        result = validator.validate_json_against_schema(data_path, schema_path)
-        assert not result.passed
-        failed_names = [c.name for c in result.checks if not c.passed]
-        assert any("type" in n and "name" in n for n in failed_names)
-
-    def test_enum_violation_fails(self, tmp_path: Path, validator: SpecValidator):
-        data = {"name": "app", "version": 1, "status": "pending"}  # invalid enum
-        data_path = _write_json(tmp_path, "data.json", data)
-        schema_path = _write_json(tmp_path, "schema.json", SIMPLE_SCHEMA)
-
-        result = validator.validate_json_against_schema(data_path, schema_path)
-        assert not result.passed
-        failed_names = [c.name for c in result.checks if not c.passed]
-        assert any("enum" in n for n in failed_names)
-
-    def test_enum_valid_value_passes(self, tmp_path: Path, validator: SpecValidator):
-        data = {"name": "app", "version": 1, "status": "published"}
-        data_path = _write_json(tmp_path, "data.json", data)
-        schema_path = _write_json(tmp_path, "schema.json", SIMPLE_SCHEMA)
-
-        result = validator.validate_json_against_schema(data_path, schema_path)
-        assert result.passed
-
-    def test_array_items_type_checked(self, tmp_path: Path, validator: SpecValidator):
-        data = {"name": "app", "version": 2, "tags": ["good", 123]}  # 123 is not string
-        data_path = _write_json(tmp_path, "data.json", data)
-        schema_path = _write_json(tmp_path, "schema.json", SIMPLE_SCHEMA)
-
-        result = validator.validate_json_against_schema(data_path, schema_path)
-        assert not result.passed
-
-    def test_missing_data_file_fails(self, tmp_path: Path, validator: SpecValidator):
-        schema_path = _write_json(tmp_path, "schema.json", SIMPLE_SCHEMA)
-        result = validator.validate_json_against_schema(
-            tmp_path / "nope.json", schema_path
-        )
-        assert not result.passed
-        assert any("cannot read" in c.message for c in result.checks)
-
-    def test_missing_schema_file_fails(self, tmp_path: Path, validator: SpecValidator):
-        data_path = _write_json(tmp_path, "data.json", {"x": 1})
-        result = validator.validate_json_against_schema(
-            data_path, tmp_path / "nope_schema.json"
-        )
-        assert not result.passed
-
-    def test_invalid_json_data_fails(self, tmp_path: Path, validator: SpecValidator):
-        data_path = _write_text(tmp_path, "data.json", "not json {{{")
-        schema_path = _write_json(tmp_path, "schema.json", SIMPLE_SCHEMA)
-        result = validator.validate_json_against_schema(data_path, schema_path)
-        assert not result.passed
-        assert any("not valid JSON" in c.message for c in result.checks)
+        if expected_msg:
+            assert any(expected_msg in c.message for c in result.checks)
 
     def test_spec_path_set_to_schema(self, tmp_path: Path, validator: SpecValidator):
         data_path = _write_json(tmp_path, "data.json", {"name": "x", "version": 1})
         schema_path = _write_json(tmp_path, "schema.json", SIMPLE_SCHEMA)
         result = validator.validate_json_against_schema(data_path, schema_path)
         assert result.spec_path == schema_path
-
-    def test_boolean_type(self, tmp_path: Path, validator: SpecValidator):
-        schema = {
-            "type": "object",
-            "required": ["flag"],
-            "properties": {"flag": {"type": "boolean"}},
-        }
-        data = {"flag": True}
-        data_path = _write_json(tmp_path, "data.json", data)
-        schema_path = _write_json(tmp_path, "schema.json", schema)
-        result = validator.validate_json_against_schema(data_path, schema_path)
-        assert result.passed
 
     def test_integer_not_confused_with_boolean(self, tmp_path: Path, validator: SpecValidator):
         # bool is a subclass of int in Python; make sure we reject True where int is expected
@@ -252,39 +207,38 @@ class TestValidateJsonAgainstSchema:
 
 # ---------------------------------------------------------------------------
 # validate_file_structure
+# DECISION: Merged 4 tests into 2 parametrized tests.
+# test_spec_path_set_to_root kept because it checks a different property.
 # ---------------------------------------------------------------------------
 
 
 class TestValidateFileStructure:
-    def test_all_files_exist_passes(self, tmp_path: Path, validator: SpecValidator):
-        (tmp_path / "app.py").write_text("x = 1")
-        (tmp_path / "README.md").write_text("# hi")
-        subdir = tmp_path / "src"
-        subdir.mkdir()
-        (subdir / "main.py").write_text("pass")
-
-        result = validator.validate_file_structure(
-            tmp_path, ["app.py", "README.md", "src/main.py"]
-        )
-        assert result.passed
-        assert len(result.checks) == 3
-
-    def test_missing_file_fails(self, tmp_path: Path, validator: SpecValidator):
-        (tmp_path / "exists.py").write_text("x = 1")
-
-        result = validator.validate_file_structure(
-            tmp_path, ["exists.py", "missing.py"]
-        )
-        assert not result.passed
-        failed = [c for c in result.checks if not c.passed]
-        assert len(failed) == 1
-        assert "missing.py" in failed[0].name
-
-    def test_empty_expected_list(self, tmp_path: Path, validator: SpecValidator):
-        result = validator.validate_file_structure(tmp_path, [])
-        assert result.checks == []
-        # passed is False when there are no checks
-        assert not result.passed
+    @pytest.mark.parametrize("create_files,expected_paths,should_pass,expected_fail_count", [
+        # all files exist
+        (["app.py", "README.md", "src/main.py"], ["app.py", "README.md", "src/main.py"], True, 0),
+        # one file missing
+        (["exists.py"], ["exists.py", "missing.py"], False, 1),
+        # empty expected list
+        ([], [], False, 0),
+    ])
+    def test_file_structure(
+        self,
+        tmp_path: Path,
+        validator: SpecValidator,
+        create_files: list[str],
+        expected_paths: list[str],
+        should_pass: bool,
+        expected_fail_count: int,
+    ):
+        for f in create_files:
+            p = tmp_path / f
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("x = 1")
+        result = validator.validate_file_structure(tmp_path, expected_paths)
+        assert result.passed is should_pass
+        if expected_fail_count > 0:
+            failed = [c for c in result.checks if not c.passed]
+            assert len(failed) == expected_fail_count
 
     def test_spec_path_set_to_root(self, tmp_path: Path, validator: SpecValidator):
         result = validator.validate_file_structure(tmp_path, [])
@@ -293,6 +247,9 @@ class TestValidateFileStructure:
 
 # ---------------------------------------------------------------------------
 # validate_exports
+# DECISION: Merged 5 tests into 2 parametrized tests.
+# test_missing_module_fails kept separate (different code path: file read).
+# test_empty_expected_list kept separate (boundary condition).
 # ---------------------------------------------------------------------------
 
 
@@ -317,25 +274,25 @@ class _InternalHelper:
 
 
 class TestValidateExports:
-    def test_finds_classes_and_functions(self, tmp_path: Path, validator: SpecValidator):
+    @pytest.mark.parametrize("symbols,should_pass,expected_fail", [
+        (["MyService", "public_func", "async_helper", "MY_CONSTANT"], True, None),
+        (["_PRIVATE"], True, None),
+        (["MissingClass", "public_func"], False, "MissingClass"),
+    ])
+    def test_export_detection(
+        self,
+        tmp_path: Path,
+        validator: SpecValidator,
+        symbols: list[str],
+        should_pass: bool,
+        expected_fail: str | None,
+    ):
         mod = _write_text(tmp_path, "module.py", SAMPLE_MODULE)
-        result = validator.validate_exports(
-            mod, ["MyService", "public_func", "async_helper", "MY_CONSTANT"]
-        )
-        assert result.passed
-
-    def test_missing_export_fails(self, tmp_path: Path, validator: SpecValidator):
-        mod = _write_text(tmp_path, "module.py", SAMPLE_MODULE)
-        result = validator.validate_exports(mod, ["MissingClass", "public_func"])
-        assert not result.passed
-        failed = [c for c in result.checks if not c.passed]
-        assert len(failed) == 1
-        assert "MissingClass" in failed[0].name
-
-    def test_private_name_is_detectable(self, tmp_path: Path, validator: SpecValidator):
-        mod = _write_text(tmp_path, "module.py", SAMPLE_MODULE)
-        result = validator.validate_exports(mod, ["_PRIVATE"])
-        assert result.passed
+        result = validator.validate_exports(mod, symbols)
+        assert result.passed is should_pass
+        if expected_fail:
+            failed = [c for c in result.checks if not c.passed]
+            assert any(expected_fail in c.name for c in failed)
 
     def test_missing_module_fails(self, tmp_path: Path, validator: SpecValidator):
         result = validator.validate_exports(tmp_path / "no_such.py", ["foo"])
@@ -350,6 +307,11 @@ class TestValidateExports:
 
 # ---------------------------------------------------------------------------
 # validate_api_contract
+# DECISION: Merged 9 tests into 3 parametrized tests grouped by:
+# - function/class detection (pass + fail cases)
+# - method detection (pass + fail cases)
+# test_combined_contract, test_missing_implementation_file_fails, and
+# test_empty_contract kept separate (integration, error path, boundary).
 # ---------------------------------------------------------------------------
 
 
@@ -380,48 +342,46 @@ class ProductService:
 
 
 class TestValidateApiContract:
-    def test_finds_functions(self, tmp_path: Path, validator: SpecValidator):
+    @pytest.mark.parametrize("contract,should_pass,expected_fail", [
+        ({"functions": ["create_user", "fetch_data"]}, True, None),
+        ({"functions": ["create_user", "delete_user"]}, False, "delete_user"),
+        ({"classes": ["UserRepository", "ProductService"]}, True, None),
+        ({"classes": ["UserRepository", "OrderService"]}, False, "OrderService"),
+    ])
+    def test_function_and_class_detection(
+        self,
+        tmp_path: Path,
+        validator: SpecValidator,
+        contract: dict,
+        should_pass: bool,
+        expected_fail: str | None,
+    ):
         impl = _write_text(tmp_path, "impl.py", IMPL_SOURCE)
-        contract = {"functions": ["create_user", "fetch_data"]}
         result = validator.validate_api_contract(impl, contract)
-        assert result.passed
+        assert result.passed is should_pass
+        if expected_fail:
+            failed = [c for c in result.checks if not c.passed]
+            assert any(expected_fail in c.name for c in failed)
 
-    def test_missing_function_fails(self, tmp_path: Path, validator: SpecValidator):
+    @pytest.mark.parametrize("contract,should_pass,expected_fail", [
+        ({"methods": {"UserRepository": ["get", "save"]}}, True, None),
+        ({"methods": {"UserRepository": ["get", "delete"]}}, False, "delete"),
+        ({"methods": {"ProductService": ["list_products"]}}, True, None),
+    ])
+    def test_method_detection(
+        self,
+        tmp_path: Path,
+        validator: SpecValidator,
+        contract: dict,
+        should_pass: bool,
+        expected_fail: str | None,
+    ):
         impl = _write_text(tmp_path, "impl.py", IMPL_SOURCE)
-        contract = {"functions": ["create_user", "delete_user"]}
         result = validator.validate_api_contract(impl, contract)
-        assert not result.passed
-        failed = [c for c in result.checks if not c.passed]
-        assert len(failed) == 1
-        assert "delete_user" in failed[0].name
-
-    def test_finds_classes(self, tmp_path: Path, validator: SpecValidator):
-        impl = _write_text(tmp_path, "impl.py", IMPL_SOURCE)
-        contract = {"classes": ["UserRepository", "ProductService"]}
-        result = validator.validate_api_contract(impl, contract)
-        assert result.passed
-
-    def test_missing_class_fails(self, tmp_path: Path, validator: SpecValidator):
-        impl = _write_text(tmp_path, "impl.py", IMPL_SOURCE)
-        contract = {"classes": ["UserRepository", "OrderService"]}
-        result = validator.validate_api_contract(impl, contract)
-        assert not result.passed
-        failed = [c for c in result.checks if not c.passed]
-        assert any("OrderService" in c.name for c in failed)
-
-    def test_finds_methods_on_classes(self, tmp_path: Path, validator: SpecValidator):
-        impl = _write_text(tmp_path, "impl.py", IMPL_SOURCE)
-        contract = {"methods": {"UserRepository": ["get", "save"]}}
-        result = validator.validate_api_contract(impl, contract)
-        assert result.passed
-
-    def test_missing_method_fails(self, tmp_path: Path, validator: SpecValidator):
-        impl = _write_text(tmp_path, "impl.py", IMPL_SOURCE)
-        contract = {"methods": {"UserRepository": ["get", "delete"]}}
-        result = validator.validate_api_contract(impl, contract)
-        assert not result.passed
-        failed = [c for c in result.checks if not c.passed]
-        assert any("delete" in c.name for c in failed)
+        assert result.passed is should_pass
+        if expected_fail:
+            failed = [c for c in result.checks if not c.passed]
+            assert any(expected_fail in c.name for c in failed)
 
     def test_combined_contract(self, tmp_path: Path, validator: SpecValidator):
         impl = _write_text(tmp_path, "impl.py", IMPL_SOURCE)
@@ -436,12 +396,6 @@ class TestValidateApiContract:
     def test_missing_implementation_file_fails(self, tmp_path: Path, validator: SpecValidator):
         result = validator.validate_api_contract(tmp_path / "no_impl.py", {})
         assert not result.passed
-
-    def test_async_method_found(self, tmp_path: Path, validator: SpecValidator):
-        impl = _write_text(tmp_path, "impl.py", IMPL_SOURCE)
-        contract = {"methods": {"ProductService": ["list_products"]}}
-        result = validator.validate_api_contract(impl, contract)
-        assert result.passed
 
     def test_empty_contract(self, tmp_path: Path, validator: SpecValidator):
         impl = _write_text(tmp_path, "impl.py", IMPL_SOURCE)

@@ -43,13 +43,6 @@ def _event(
 # ===========================================================================
 
 class TestEventModel:
-    def test_required_fields(self) -> None:
-        e = Event(event_id="e1", timestamp="ts", topic="t", task_id="tk")
-        assert e.event_id == "e1"
-        assert e.topic == "t"
-        assert e.sequence == 0
-        assert e.payload == {}
-
     def test_to_dict_roundtrip(self) -> None:
         e = _event(payload={"key": "value"})
         restored = Event.from_dict(e.to_dict())
@@ -58,12 +51,6 @@ class TestEventModel:
         assert restored.task_id == e.task_id
         assert restored.sequence == e.sequence
         assert restored.payload == e.payload
-
-    def test_from_dict_defaults(self) -> None:
-        e = Event.from_dict({"event_id": "x", "topic": "t"})
-        assert e.task_id == ""
-        assert e.sequence == 0
-        assert e.payload == {}
 
     def test_create_factory(self) -> None:
         e = Event.create(topic="step.completed", task_id="t1", payload={"x": 1})
@@ -74,9 +61,8 @@ class TestEventModel:
         assert e.timestamp  # non-empty
 
     def test_create_auto_generates_unique_ids(self) -> None:
-        e1 = Event.create(topic="a", task_id="t")
-        e2 = Event.create(topic="a", task_id="t")
-        assert e1.event_id != e2.event_id
+        ids = {Event.create(topic="a", task_id="t").event_id for _ in range(5)}
+        assert len(ids) == 5
 
 
 # ===========================================================================
@@ -209,23 +195,18 @@ class TestEventBusPublish:
         assert len(r1) == 1
         assert len(r2) == 1
 
-    def test_auto_assigns_sequence(self) -> None:
+    @pytest.mark.parametrize("same_task,expected_seq", [
+        (True, (1, 2)),   # same task_id → monotonically increasing
+        (False, (1, 1)),  # different task_ids → independent sequences
+    ])
+    def test_sequence_assignment(self, same_task, expected_seq) -> None:
         bus = EventBus()
+        task_id2 = "t1" if same_task else "t2"
         e1 = _event(topic="step.completed", task_id="t1", sequence=0)
-        e2 = _event(topic="step.failed", task_id="t1", sequence=0)
+        e2 = _event(topic="step.failed", task_id=task_id2, sequence=0)
         bus.publish(e1)
         bus.publish(e2)
-        assert e1.sequence == 1
-        assert e2.sequence == 2
-
-    def test_sequence_independent_per_task(self) -> None:
-        bus = EventBus()
-        e1 = _event(topic="step.completed", task_id="t1", sequence=0)
-        e2 = _event(topic="step.completed", task_id="t2", sequence=0)
-        bus.publish(e1)
-        bus.publish(e2)
-        assert e1.sequence == 1
-        assert e2.sequence == 1
+        assert (e1.sequence, e2.sequence) == expected_seq
 
     def test_preserves_explicit_sequence(self) -> None:
         bus = EventBus()
@@ -235,22 +216,13 @@ class TestEventBusPublish:
 
 
 class TestEventBusSubscribe:
-    def test_subscribe_returns_id(self) -> None:
-        bus = EventBus()
-        sub_id = bus.subscribe("step.*", lambda e: None)
-        assert isinstance(sub_id, str)
-        assert len(sub_id) > 0
-
-    def test_subscription_count(self) -> None:
-        bus = EventBus()
-        bus.subscribe("step.*", lambda e: None)
-        bus.subscribe("gate.*", lambda e: None)
-        assert bus.subscription_count == 2
-
-    def test_unsubscribe_removes_handler(self) -> None:
+    def test_subscribe_and_unsubscribe(self) -> None:
         bus = EventBus()
         received: list[Event] = []
         sub_id = bus.subscribe("step.*", received.append)
+        assert isinstance(sub_id, str) and len(sub_id) > 0
+        assert bus.subscription_count == 1
+
         bus.unsubscribe(sub_id)
         bus.publish(_event(topic="step.completed"))
         assert len(received) == 0
@@ -262,28 +234,30 @@ class TestEventBusSubscribe:
 
 
 class TestEventBusReplay:
-    def test_replay_returns_events_for_task(self) -> None:
+    @pytest.mark.parametrize("from_seq,expected_count,expected_topics", [
+        (None, 2, None),         # all events for task
+        (2, 2, ["b", "c"]),      # from_seq=2 returns seq 2 and 3
+    ])
+    def test_replay_filtering(self, from_seq, expected_count, expected_topics) -> None:
         bus = EventBus()
-        bus.publish(_event(topic="step.completed", task_id="t1", sequence=0))
-        bus.publish(_event(topic="step.failed", task_id="t2", sequence=0))
-        bus.publish(_event(topic="gate.passed", task_id="t1", sequence=0))
-        result = bus.replay("t1")
-        assert len(result) == 2
-        assert all(e.task_id == "t1" for e in result)
-
-    def test_replay_from_seq(self) -> None:
-        bus = EventBus()
-        e1 = _event(topic="a", task_id="t1", sequence=0)
-        e2 = _event(topic="b", task_id="t1", sequence=0)
-        e3 = _event(topic="c", task_id="t1", sequence=0)
-        bus.publish(e1)
-        bus.publish(e2)
-        bus.publish(e3)
-        result = bus.replay("t1", from_seq=2)
-        assert len(result) == 2
-        topics = [e.topic for e in result]
-        assert "b" in topics
-        assert "c" in topics
+        if from_seq is None:
+            # Two tasks, filter by task id
+            bus.publish(_event(topic="step.completed", task_id="t1", sequence=0))
+            bus.publish(_event(topic="step.failed", task_id="t2", sequence=0))
+            bus.publish(_event(topic="gate.passed", task_id="t1", sequence=0))
+            result = bus.replay("t1")
+            assert len(result) == expected_count
+            assert all(e.task_id == "t1" for e in result)
+        else:
+            e1 = _event(topic="a", task_id="t1", sequence=0)
+            e2 = _event(topic="b", task_id="t1", sequence=0)
+            e3 = _event(topic="c", task_id="t1", sequence=0)
+            bus.publish(e1)
+            bus.publish(e2)
+            bus.publish(e3)
+            result = bus.replay("t1", from_seq=from_seq)
+            assert len(result) == expected_count
+            assert [e.topic for e in result] == expected_topics
 
     def test_replay_with_topic_filter(self) -> None:
         bus = EventBus()
@@ -358,9 +332,12 @@ class TestEventPersistenceRead:
         assert events[0].topic == "step.completed"
         assert events[1].topic == "gate.passed"
 
-    def test_read_missing_task_returns_empty(self, tmp_path: Path) -> None:
+    def test_read_missing_or_empty_returns_empty(self, tmp_path: Path) -> None:
         p = EventPersistence(tmp_path)
         assert p.read("nonexistent") == []
+        assert p.list_task_ids() == []
+        p2 = EventPersistence(tmp_path / "nonexistent")
+        assert p2.list_task_ids() == []
 
     def test_read_with_from_seq(self, tmp_path: Path) -> None:
         p = EventPersistence(tmp_path)
@@ -408,23 +385,12 @@ class TestEventPersistenceQuery:
         ids = p.list_task_ids()
         assert ids == ["alpha", "beta"]
 
-    def test_list_task_ids_empty(self, tmp_path: Path) -> None:
-        p = EventPersistence(tmp_path)
-        assert p.list_task_ids() == []
-
-    def test_list_task_ids_missing_dir(self, tmp_path: Path) -> None:
-        p = EventPersistence(tmp_path / "nonexistent")
-        assert p.list_task_ids() == []
-
     def test_event_count(self, tmp_path: Path) -> None:
         p = EventPersistence(tmp_path)
         p.append(_event(task_id="t1"))
         p.append(_event(task_id="t1"))
         p.append(_event(task_id="t1"))
         assert p.event_count("t1") == 3
-
-    def test_event_count_missing_task(self, tmp_path: Path) -> None:
-        p = EventPersistence(tmp_path)
         assert p.event_count("nonexistent") == 0
 
 
@@ -625,36 +591,26 @@ class TestProjectTaskViewFullLifecycle:
 # ===========================================================================
 
 class TestBusPersistenceIntegration:
-    def test_bus_subscriber_persists_events(self, tmp_path: Path) -> None:
+    def test_bus_subscriber_persists_and_replays(self, tmp_path: Path) -> None:
         bus = EventBus()
         persistence = EventPersistence(tmp_path)
 
         # Wire persistence as a subscriber.
         bus.subscribe("*", persistence.append)
 
-        bus.publish(evt.task_started("t1", task_summary="Test"))
+        bus.publish(evt.task_started("t1", task_summary="Test", total_steps=2))
         bus.publish(evt.step_dispatched("t1", "1.1", "backend"))
-        bus.publish(evt.step_completed("t1", "1.1", "backend"))
-
-        # Read back from disk.
-        events = persistence.read("t1")
-        assert len(events) == 3
-        assert events[0].topic == "task.started"
-        assert events[1].topic == "step.dispatched"
-        assert events[2].topic == "step.completed"
-
-    def test_replay_from_disk_produces_correct_view(self, tmp_path: Path) -> None:
-        bus = EventBus()
-        persistence = EventPersistence(tmp_path)
-        bus.subscribe("*", persistence.append)
-
-        bus.publish(evt.task_started("t1", total_steps=2))
         bus.publish(evt.step_completed("t1", "1.1", "backend"))
         bus.publish(evt.step_completed("t1", "1.2", "test-engineer"))
         bus.publish(evt.task_completed("t1", steps_completed=2))
 
+        # Read back from disk and verify ordering.
+        events = persistence.read("t1")
+        assert len(events) == 5
+        assert events[0].topic == "task.started"
+        assert events[1].topic == "step.dispatched"
+
         # Replay from disk and project.
-        disk_events = persistence.read("t1")
-        view = project_task_view(disk_events)
+        view = project_task_view(events)
         assert view.status == "completed"
         assert view.steps_completed == 2

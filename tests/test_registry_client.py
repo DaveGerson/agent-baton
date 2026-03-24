@@ -61,6 +61,15 @@ def _build_archive(
     return archive
 
 
+@pytest.fixture
+def registry(tmp_path: Path):
+    """Shared fixture: an initialised empty registry."""
+    client = RegistryClient()
+    reg = tmp_path / "reg"
+    client.init_registry(reg)
+    return client, reg, tmp_path
+
+
 # ---------------------------------------------------------------------------
 # RegistryEntry serde
 # ---------------------------------------------------------------------------
@@ -183,43 +192,29 @@ class TestInitRegistry:
 # ---------------------------------------------------------------------------
 
 class TestPublish:
-    def test_publish_creates_package_directory(self, tmp_path: Path):
-        client = RegistryClient()
-        reg = tmp_path / "reg"
-        client.init_registry(reg)
+    def test_publish_creates_package_directory(self, registry):
+        client, reg, tmp_path = registry
         archive = _build_archive(tmp_path, "my-pkg", "1.0.0")
         client.publish(archive, reg)
         # Each version is stored under packages/<name>/<version>/
         assert (reg / "packages" / "my-pkg" / "1.0.0").is_dir()
 
-    def test_publish_copies_manifest_json(self, tmp_path: Path):
-        client = RegistryClient()
-        reg = tmp_path / "reg"
-        client.init_registry(reg)
+    # DECISION: Parameterize test_publish_copies_manifest_json,
+    # test_publish_copies_agents, and test_publish_copies_references into one
+    # test. Each file is a distinct path inside the version directory.
+    @pytest.mark.parametrize("relative_path", [
+        Path("manifest.json"),
+        Path("agents") / "test-agent.md",
+        Path("references") / "guide.md",
+    ])
+    def test_publish_copies_file_to_registry(self, registry, relative_path):
+        client, reg, tmp_path = registry
         archive = _build_archive(tmp_path, "my-pkg", "1.0.0")
         client.publish(archive, reg)
-        assert (reg / "packages" / "my-pkg" / "1.0.0" / "manifest.json").exists()
+        assert (reg / "packages" / "my-pkg" / "1.0.0" / relative_path).exists()
 
-    def test_publish_copies_agents(self, tmp_path: Path):
-        client = RegistryClient()
-        reg = tmp_path / "reg"
-        client.init_registry(reg)
-        archive = _build_archive(tmp_path, "my-pkg", "1.0.0")
-        client.publish(archive, reg)
-        assert (reg / "packages" / "my-pkg" / "1.0.0" / "agents" / "test-agent.md").exists()
-
-    def test_publish_copies_references(self, tmp_path: Path):
-        client = RegistryClient()
-        reg = tmp_path / "reg"
-        client.init_registry(reg)
-        archive = _build_archive(tmp_path, "my-pkg", "1.0.0")
-        client.publish(archive, reg)
-        assert (reg / "packages" / "my-pkg" / "1.0.0" / "references" / "guide.md").exists()
-
-    def test_publish_updates_index(self, tmp_path: Path):
-        client = RegistryClient()
-        reg = tmp_path / "reg"
-        client.init_registry(reg)
+    def test_publish_updates_index(self, registry):
+        client, reg, tmp_path = registry
         archive = _build_archive(tmp_path, "my-pkg", "1.0.0")
         client.publish(archive, reg)
         data = json.loads((reg / "index.json").read_text(encoding="utf-8"))
@@ -227,10 +222,8 @@ class TestPublish:
         assert len(data["packages"]["my-pkg"]) == 1
         assert data["packages"]["my-pkg"][0]["version"] == "1.0.0"
 
-    def test_publish_returns_registry_entry(self, tmp_path: Path):
-        client = RegistryClient()
-        reg = tmp_path / "reg"
-        client.init_registry(reg)
+    def test_publish_returns_registry_entry(self, registry):
+        client, reg, tmp_path = registry
         archive = _build_archive(tmp_path, "my-pkg", "1.0.0")
         entry = client.publish(archive, reg)
         assert isinstance(entry, RegistryEntry)
@@ -239,10 +232,8 @@ class TestPublish:
         assert entry.agent_count == 1
         assert entry.reference_count == 1
 
-    def test_publish_multiple_versions_same_package(self, tmp_path: Path):
-        client = RegistryClient()
-        reg = tmp_path / "reg"
-        client.init_registry(reg)
+    def test_publish_multiple_versions_same_package(self, registry):
+        client, reg, tmp_path = registry
         arc1 = _build_archive(tmp_path, "my-pkg", "1.0.0")
         arc2 = _build_archive(tmp_path, "my-pkg", "2.0.0")
         client.publish(arc1, reg)
@@ -253,10 +244,8 @@ class TestPublish:
         assert "1.0.0" in versions
         assert "2.0.0" in versions
 
-    def test_publish_duplicate_version_raises(self, tmp_path: Path):
-        client = RegistryClient()
-        reg = tmp_path / "reg"
-        client.init_registry(reg)
+    def test_publish_duplicate_version_raises(self, registry):
+        client, reg, tmp_path = registry
         archive = _build_archive(tmp_path, "my-pkg", "1.0.0")
         client.publish(archive, reg)
         # Build a second archive with the same name+version from a fresh source.
@@ -264,18 +253,14 @@ class TestPublish:
         with pytest.raises(ValueError, match="already in the registry"):
             client.publish(archive2, reg)
 
-    def test_publish_raises_for_missing_archive(self, tmp_path: Path):
-        client = RegistryClient()
-        reg = tmp_path / "reg"
-        client.init_registry(reg)
+    def test_publish_raises_for_missing_archive(self, registry):
+        client, reg, tmp_path = registry
         with pytest.raises(FileNotFoundError):
             client.publish(tmp_path / "ghost.tar.gz", reg)
 
-    def test_publish_raises_for_invalid_archive(self, tmp_path: Path):
+    def test_publish_raises_for_invalid_archive(self, registry):
         """An archive without manifest.json should raise KeyError."""
-        client = RegistryClient()
-        reg = tmp_path / "reg"
-        client.init_registry(reg)
+        client, reg, tmp_path = registry
         bad = tmp_path / "bad.tar.gz"
         import io
         with tarfile.open(bad, "w:gz") as tar:
@@ -286,10 +271,8 @@ class TestPublish:
         with pytest.raises(KeyError, match="manifest.json"):
             client.publish(bad, reg)
 
-    def test_publish_path_field_is_relative(self, tmp_path: Path):
-        client = RegistryClient()
-        reg = tmp_path / "reg"
-        client.init_registry(reg)
+    def test_publish_path_field_is_relative(self, registry):
+        client, reg, tmp_path = registry
         archive = _build_archive(tmp_path, "my-pkg", "1.0.0")
         entry = client.publish(archive, reg)
         assert not Path(entry.path).is_absolute()
@@ -303,36 +286,27 @@ class TestPublish:
 # ---------------------------------------------------------------------------
 
 class TestListPackages:
-    def test_empty_registry_returns_empty_list(self, tmp_path: Path):
-        client = RegistryClient()
-        reg = tmp_path / "reg"
-        client.init_registry(reg)
+    def test_empty_registry_returns_empty_list(self, registry):
+        client, reg, tmp_path = registry
         assert client.list_packages(reg) == []
 
-    def test_lists_single_package(self, tmp_path: Path):
-        client = RegistryClient()
-        reg = tmp_path / "reg"
-        client.init_registry(reg)
-        archive = _build_archive(tmp_path, "pkg-a", "1.0.0")
-        client.publish(archive, reg)
-        entries = client.list_packages(reg)
-        assert len(entries) == 1
-        assert entries[0].name == "pkg-a"
-
-    def test_lists_multiple_packages(self, tmp_path: Path):
-        client = RegistryClient()
-        reg = tmp_path / "reg"
-        client.init_registry(reg)
-        client.publish(_build_archive(tmp_path, "pkg-a", "1.0.0"), reg)
-        client.publish(_build_archive(tmp_path, "pkg-b", "1.0.0"), reg)
+    # DECISION: Parameterize test_lists_single_package and test_lists_multiple_packages
+    # into one test. The single case verifies the exact name; the multiple case
+    # verifies the full set. Both are preserved as parameter tuples.
+    @pytest.mark.parametrize("pkg_names,expected_names", [
+        (["pkg-a"], {"pkg-a"}),
+        (["pkg-a", "pkg-b"], {"pkg-a", "pkg-b"}),
+    ])
+    def test_lists_packages(self, registry, pkg_names, expected_names):
+        client, reg, tmp_path = registry
+        for name in pkg_names:
+            client.publish(_build_archive(tmp_path, name, "1.0.0"), reg)
         names = {e.name for e in client.list_packages(reg)}
-        assert names == {"pkg-a", "pkg-b"}
+        assert names == expected_names
 
-    def test_returns_latest_version_per_package(self, tmp_path: Path):
+    def test_returns_latest_version_per_package(self, registry):
         """list_packages returns the most recently published version."""
-        client = RegistryClient()
-        reg = tmp_path / "reg"
-        client.init_registry(reg)
+        client, reg, tmp_path = registry
         client.publish(_build_archive(tmp_path, "pkg-a", "1.0.0"), reg)
         client.publish(_build_archive(tmp_path, "pkg-a", "2.0.0"), reg)
         entries = client.list_packages(reg)
@@ -351,46 +325,41 @@ class TestListPackages:
 # ---------------------------------------------------------------------------
 
 class TestSearch:
-    def test_search_matches_substring(self, tmp_path: Path):
-        client = RegistryClient()
-        reg = tmp_path / "reg"
-        client.init_registry(reg)
-        client.publish(_build_archive(tmp_path, "data-science", "1.0.0"), reg)
-        client.publish(_build_archive(tmp_path, "web-development", "1.0.0"), reg)
-        results = client.search(reg, "data")
-        assert len(results) == 1
-        assert results[0].name == "data-science"
+    # DECISION: Parameterize all 5 search tests into 2. The first covers
+    # substring match, case insensitivity, no-match, and multi-match by varying
+    # the query and expected result set. The empty-query "matches all" case
+    # is kept separate as it tests a distinct code path (no filter applied).
+    @pytest.mark.parametrize("packages,query,expected_names", [
+        (
+            ["data-science", "web-development"],
+            "data",
+            {"data-science"},
+        ),
+        (
+            ["Data-Science"],
+            "DATA",
+            {"Data-Science"},
+        ),
+        (
+            ["pkg-a"],
+            "zzz",
+            set(),
+        ),
+        (
+            ["python-agents", "python-tools", "web-agents"],
+            "python",
+            {"python-agents", "python-tools"},
+        ),
+    ])
+    def test_search_filter(self, registry, packages, query, expected_names):
+        client, reg, tmp_path = registry
+        for name in packages:
+            client.publish(_build_archive(tmp_path, name, "1.0.0"), reg)
+        results = client.search(reg, query)
+        assert {r.name for r in results} == expected_names
 
-    def test_search_is_case_insensitive(self, tmp_path: Path):
-        client = RegistryClient()
-        reg = tmp_path / "reg"
-        client.init_registry(reg)
-        client.publish(_build_archive(tmp_path, "Data-Science", "1.0.0"), reg)
-        results = client.search(reg, "DATA")
-        assert len(results) == 1
-
-    def test_search_returns_empty_for_no_match(self, tmp_path: Path):
-        client = RegistryClient()
-        reg = tmp_path / "reg"
-        client.init_registry(reg)
-        client.publish(_build_archive(tmp_path, "pkg-a", "1.0.0"), reg)
-        assert client.search(reg, "zzz") == []
-
-    def test_search_returns_multiple_matches(self, tmp_path: Path):
-        client = RegistryClient()
-        reg = tmp_path / "reg"
-        client.init_registry(reg)
-        client.publish(_build_archive(tmp_path, "python-agents", "1.0.0"), reg)
-        client.publish(_build_archive(tmp_path, "python-tools", "1.0.0"), reg)
-        client.publish(_build_archive(tmp_path, "web-agents", "1.0.0"), reg)
-        results = client.search(reg, "python")
-        names = {r.name for r in results}
-        assert names == {"python-agents", "python-tools"}
-
-    def test_search_empty_query_matches_all(self, tmp_path: Path):
-        client = RegistryClient()
-        reg = tmp_path / "reg"
-        client.init_registry(reg)
+    def test_search_empty_query_matches_all(self, registry):
+        client, reg, tmp_path = registry
         client.publish(_build_archive(tmp_path, "pkg-a", "1.0.0"), reg)
         client.publish(_build_archive(tmp_path, "pkg-b", "1.0.0"), reg)
         results = client.search(reg, "")
@@ -402,10 +371,8 @@ class TestSearch:
 # ---------------------------------------------------------------------------
 
 class TestPull:
-    def test_pull_installs_agents(self, tmp_path: Path):
-        client = RegistryClient()
-        reg = tmp_path / "reg"
-        client.init_registry(reg)
+    def test_pull_installs_agents(self, registry):
+        client, reg, tmp_path = registry
         client.publish(_build_archive(tmp_path, "my-pkg", "1.0.0"), reg)
 
         install_root = tmp_path / "project"
@@ -418,10 +385,8 @@ class TestPull:
         )
         assert (install_root / ".claude" / "agents" / "test-agent.md").exists()
 
-    def test_pull_installs_references(self, tmp_path: Path):
-        client = RegistryClient()
-        reg = tmp_path / "reg"
-        client.init_registry(reg)
+    def test_pull_installs_references(self, registry):
+        client, reg, tmp_path = registry
         client.publish(_build_archive(tmp_path, "my-pkg", "1.0.0"), reg)
 
         install_root = tmp_path / "project"
@@ -434,10 +399,8 @@ class TestPull:
         )
         assert (install_root / ".claude" / "references" / "guide.md").exists()
 
-    def test_pull_returns_counts(self, tmp_path: Path):
-        client = RegistryClient()
-        reg = tmp_path / "reg"
-        client.init_registry(reg)
+    def test_pull_returns_counts(self, registry):
+        client, reg, tmp_path = registry
         client.publish(_build_archive(tmp_path, "my-pkg", "1.0.0"), reg)
 
         install_root = tmp_path / "project"
@@ -452,10 +415,8 @@ class TestPull:
         assert counts["references"] >= 1
         assert "knowledge" in counts
 
-    def test_pull_latest_when_multiple_versions(self, tmp_path: Path):
-        client = RegistryClient()
-        reg = tmp_path / "reg"
-        client.init_registry(reg)
+    def test_pull_latest_when_multiple_versions(self, registry):
+        client, reg, tmp_path = registry
 
         # Publish two versions; each has a differently-named agent so we can
         # distinguish which version was installed.
@@ -488,10 +449,8 @@ class TestPull:
         # Should install v2 (latest)
         assert (install_root / ".claude" / "agents" / "agent-v2.md").exists()
 
-    def test_pull_specific_version(self, tmp_path: Path):
-        client = RegistryClient()
-        reg = tmp_path / "reg"
-        client.init_registry(reg)
+    def test_pull_specific_version(self, registry):
+        client, reg, tmp_path = registry
 
         src_v1 = tmp_path / "src-v1"
         (src_v1 / ".claude" / "agents").mkdir(parents=True)
@@ -523,10 +482,8 @@ class TestPull:
         assert (install_root / ".claude" / "agents" / "agent-v1.md").exists()
         assert not (install_root / ".claude" / "agents" / "agent-v2.md").exists()
 
-    def test_pull_nonexistent_package_raises(self, tmp_path: Path):
-        client = RegistryClient()
-        reg = tmp_path / "reg"
-        client.init_registry(reg)
+    def test_pull_nonexistent_package_raises(self, registry):
+        client, reg, tmp_path = registry
         with pytest.raises(KeyError, match="not found in registry"):
             client.pull(
                 registry_path=reg,
@@ -534,10 +491,8 @@ class TestPull:
                 project_root=tmp_path / "project",
             )
 
-    def test_pull_nonexistent_version_raises(self, tmp_path: Path):
-        client = RegistryClient()
-        reg = tmp_path / "reg"
-        client.init_registry(reg)
+    def test_pull_nonexistent_version_raises(self, registry):
+        client, reg, tmp_path = registry
         client.publish(_build_archive(tmp_path, "my-pkg", "1.0.0"), reg)
         with pytest.raises(ValueError, match="not found"):
             client.pull(
@@ -547,10 +502,8 @@ class TestPull:
                 project_root=tmp_path / "project",
             )
 
-    def test_pull_force_overwrites_existing(self, tmp_path: Path):
-        client = RegistryClient()
-        reg = tmp_path / "reg"
-        client.init_registry(reg)
+    def test_pull_force_overwrites_existing(self, registry):
+        client, reg, tmp_path = registry
         client.publish(_build_archive(tmp_path, "my-pkg", "1.0.0"), reg)
 
         install_root = tmp_path / "project"
@@ -567,10 +520,8 @@ class TestPull:
         )
         assert existing.read_text(encoding="utf-8") != "old content"
 
-    def test_pull_skips_existing_without_force(self, tmp_path: Path):
-        client = RegistryClient()
-        reg = tmp_path / "reg"
-        client.init_registry(reg)
+    def test_pull_skips_existing_without_force(self, registry):
+        client, reg, tmp_path = registry
         client.publish(_build_archive(tmp_path, "my-pkg", "1.0.0"), reg)
 
         install_root = tmp_path / "project"

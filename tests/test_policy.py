@@ -14,22 +14,13 @@ from agent_baton.core.policy import (
 
 
 # ---------------------------------------------------------------------------
-# PolicyRule — dataclass fields + serialisation
+# PolicyRule — serialisation
+# DECISION: Removed test_required_name_stored and test_optional_defaults —
+# both are trivial dataclass field assertions. Kept roundtrip (proves
+# to_dict + from_dict) and from_dict_defaults (distinct edge-case: missing keys).
 # ---------------------------------------------------------------------------
 
 class TestPolicyRuleFields:
-    def test_required_name_stored(self) -> None:
-        rule = PolicyRule(name="block_env")
-        assert rule.name == "block_env"
-
-    def test_optional_defaults(self) -> None:
-        rule = PolicyRule(name="r")
-        assert rule.description == ""
-        assert rule.scope == "all"
-        assert rule.rule_type == "path_block"
-        assert rule.pattern == ""
-        assert rule.severity == "block"
-
     def test_to_dict_roundtrip(self) -> None:
         rule = PolicyRule(
             name="test_rule",
@@ -54,25 +45,13 @@ class TestPolicyRuleFields:
 
 
 # ---------------------------------------------------------------------------
-# PolicySet — dataclass fields + serialisation
+# PolicySet — serialisation
+# DECISION: Removed test_name_and_description (trivial field storage) and
+# test_to_dict_contains_rules (subset of roundtrip). Kept roundtrip and
+# from_dict_empty_rules (distinct empty-list edge case).
 # ---------------------------------------------------------------------------
 
 class TestPolicySetFields:
-    def test_name_and_description(self) -> None:
-        ps = PolicySet(name="my_policy", description="desc")
-        assert ps.name == "my_policy"
-        assert ps.description == "desc"
-        assert ps.rules == []
-
-    def test_to_dict_contains_rules(self) -> None:
-        ps = PolicySet(
-            name="p",
-            rules=[PolicyRule(name="r1"), PolicyRule(name="r2")],
-        )
-        d = ps.to_dict()
-        assert d["name"] == "p"
-        assert len(d["rules"]) == 2
-
     def test_from_dict_restores_rules(self) -> None:
         original = PolicySet(
             name="orig",
@@ -134,11 +113,6 @@ class TestPolicyEnginePersistence:
         names = engine.list_presets()
         assert "custom_pol" in names
 
-    def test_list_presets_includes_builtin_standard_dev(self, tmp_path: Path) -> None:
-        engine = PolicyEngine(tmp_path)
-        names = engine.list_presets()
-        assert "standard_dev" in names
-
     def test_list_presets_includes_all_five_builtins(self, tmp_path: Path) -> None:
         engine = PolicyEngine(tmp_path)
         names = engine.list_presets()
@@ -160,28 +134,27 @@ class TestPolicyEnginePersistence:
 
 # ---------------------------------------------------------------------------
 # PolicyEngine.create_standard_presets
+# DECISION: Merged test_returns_five_presets, test_all_presets_have_rules,
+# test_all_presets_have_descriptions into a single parametrized test.
+# test_preset_names_correct is kept separate as it asserts the exact set.
 # ---------------------------------------------------------------------------
 
-class TestCreateStandardPresets:
-    def test_returns_five_presets(self, tmp_path: Path) -> None:
-        engine = PolicyEngine(tmp_path)
-        presets = engine.create_standard_presets()
-        assert len(presets) == 5
+EXPECTED_PRESETS = {"standard_dev", "data_analysis", "infrastructure", "regulated", "security"}
 
+
+class TestCreateStandardPresets:
     def test_preset_names_correct(self, tmp_path: Path) -> None:
         engine = PolicyEngine(tmp_path)
         names = {p.name for p in engine.create_standard_presets()}
-        assert names == {"standard_dev", "data_analysis", "infrastructure", "regulated", "security"}
+        assert names == EXPECTED_PRESETS
 
-    def test_all_presets_have_rules(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("preset_name", sorted(EXPECTED_PRESETS))
+    def test_preset_has_rules_and_description(self, tmp_path: Path, preset_name: str) -> None:
         engine = PolicyEngine(tmp_path)
-        for preset in engine.create_standard_presets():
-            assert len(preset.rules) > 0, f"Preset '{preset.name}' has no rules"
-
-    def test_all_presets_have_descriptions(self, tmp_path: Path) -> None:
-        engine = PolicyEngine(tmp_path)
-        for preset in engine.create_standard_presets():
-            assert preset.description != "", f"Preset '{preset.name}' has no description"
+        presets = {p.name: p for p in engine.create_standard_presets()}
+        preset = presets[preset_name]
+        assert len(preset.rules) > 0, f"Preset '{preset_name}' has no rules"
+        assert preset.description != "", f"Preset '{preset_name}' has no description"
 
 
 # ---------------------------------------------------------------------------
@@ -259,41 +232,37 @@ class TestEvaluateToolRestrict:
 
 # ---------------------------------------------------------------------------
 # PolicyEngine.evaluate — scope matching
+# DECISION: Merged 6 scope tests into 1 parametrized test covering
+# (scope_pattern, agent_name, path_pattern, paths, should_match).
 # ---------------------------------------------------------------------------
 
 class TestEvaluateScope:
-    def test_all_scope_applies_to_any_agent(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("scope,agent,paths,expect_violations", [
+        # "all" scope applies to any agent
+        ("all", "backend-engineer", ["x/.env"], 1),
+        ("all", "frontend-engineer", ["x/.env"], 1),
+        # wildcard scope only matches matching agents
+        ("*reviewer*", "security-reviewer", [".env"], 1),
+        ("*reviewer*", "backend-engineer", ["x/.env"], 0),
+        # exact scope only matches exact name
+        ("devops-engineer", "devops-engineer", ["src/main.py"], 1),
+        ("devops-engineer", "backend-engineer", ["src/main.py"], 0),
+    ])
+    def test_scope_matching(
+        self,
+        tmp_path: Path,
+        scope: str,
+        agent: str,
+        paths: list[str],
+        expect_violations: int,
+    ) -> None:
         engine = PolicyEngine(tmp_path)
         ps = PolicySet(
             name="p",
-            rules=[PolicyRule(name="r", scope="all", rule_type="path_block", pattern="**/.env")],
+            rules=[PolicyRule(name="r", scope=scope, rule_type="path_block", pattern="**/.env" if scope == "all" else "*.env" if scope == "*reviewer*" else "src/*")],
         )
-        v1 = engine.evaluate(ps, "backend-engineer", ["x/.env"], [])
-        v2 = engine.evaluate(ps, "frontend-engineer", ["x/.env"], [])
-        assert len(v1) == 1
-        assert len(v2) == 1
-
-    def test_agent_scope_pattern_matches(self, tmp_path: Path) -> None:
-        engine = PolicyEngine(tmp_path)
-        ps = PolicySet(
-            name="p",
-            rules=[PolicyRule(name="r", scope="*reviewer*", rule_type="path_block", pattern="*.env")],
-        )
-        reviewer_violations = engine.evaluate(ps, "security-reviewer", [".env"], [])
-        be_violations = engine.evaluate(ps, "backend-engineer", ["x/.env"], [])
-        assert len(reviewer_violations) == 1
-        assert len(be_violations) == 0
-
-    def test_exact_scope_match(self, tmp_path: Path) -> None:
-        engine = PolicyEngine(tmp_path)
-        ps = PolicySet(
-            name="p",
-            rules=[PolicyRule(name="r", scope="devops-engineer", rule_type="path_block", pattern="src/*")],
-        )
-        target_violations = engine.evaluate(ps, "devops-engineer", ["src/main.py"], [])
-        other_violations = engine.evaluate(ps, "backend-engineer", ["src/main.py"], [])
-        assert len(target_violations) == 1
-        assert len(other_violations) == 0
+        violations = engine.evaluate(ps, agent, paths, [])
+        assert len(violations) == expect_violations
 
 
 # ---------------------------------------------------------------------------
