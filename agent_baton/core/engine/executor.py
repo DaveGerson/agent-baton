@@ -11,12 +11,17 @@ from pathlib import Path
 
 from agent_baton.models.execution import (
     ActionType,
+    ApprovalResult,
     ExecutionAction,
     ExecutionState,
     GateResult,
     MachinePlan,
+    PlanAmendment,
+    PlanGate,
+    PlanPhase,
     PlanStep,
     StepResult,
+    TeamStepResult,
 )
 from agent_baton.models.events import Event
 from agent_baton.models.usage import AgentUsageRecord, TaskUsageRecord
@@ -200,7 +205,7 @@ class ExecutionEngine:
         if state is None:
             return []
 
-        if state.status in ("complete", "failed", "gate_pending"):
+        if state.status in ("complete", "failed", "gate_pending", "approval_pending"):
             return []
 
         if state.current_phase >= len(state.plan.phases):
@@ -514,6 +519,226 @@ class ExecutionEngine:
 
         return recovered
 
+    # ── Approval, amendment, and team APIs ─────────────────────────────────
+
+    def record_approval_result(
+        self,
+        phase_id: int,
+        result: str,
+        feedback: str = "",
+    ) -> None:
+        """Record a human approval decision for a phase.
+
+        Args:
+            phase_id: The phase_id requiring approval.
+            result: One of ``"approve"``, ``"reject"``,
+                ``"approve-with-feedback"``.
+            feedback: Free-text feedback (used when result is
+                ``"approve-with-feedback"`` to trigger a plan amendment).
+        """
+        _VALID_RESULTS = {"approve", "reject", "approve-with-feedback"}
+        if result not in _VALID_RESULTS:
+            raise ValueError(
+                f"Invalid approval result '{result}'. Must be one of: {_VALID_RESULTS}"
+            )
+
+        state = self._persistence.load()
+        if state is None:
+            raise RuntimeError(
+                "record_approval_result() called with no active execution state."
+            )
+
+        approval = ApprovalResult(
+            phase_id=phase_id,
+            result=result,
+            feedback=feedback,
+        )
+        state.approval_results.append(approval)
+
+        if self._trace is not None:
+            self._tracer.record_event(
+                self._trace,
+                "approval_result",
+                agent_name=None,
+                phase=phase_id,
+                step=0,
+                details={"result": result, "feedback": feedback},
+            )
+
+        if result == "reject":
+            state.status = "failed"
+        elif result == "approve":
+            state.status = "running"
+        elif result == "approve-with-feedback":
+            # Insert a remediation phase after the current phase.
+            # Save state first so amend_plan sees the approval result.
+            self._persistence.save(state)
+            self._amend_from_feedback(state, phase_id, feedback)
+            # Reload state — amend_plan saved its own copy with the
+            # amendment applied.  We must pick up those changes.
+            state = self._persistence.load() or state
+            state.status = "running"
+
+        self._persistence.save(state)
+
+    def amend_plan(
+        self,
+        description: str,
+        new_phases: list[PlanPhase] | None = None,
+        insert_after_phase: int | None = None,
+        add_steps_to_phase: int | None = None,
+        new_steps: list[PlanStep] | None = None,
+        trigger: str = "manual",
+        trigger_phase_id: int = 0,
+        feedback: str = "",
+    ) -> PlanAmendment:
+        """Amend the running plan by adding phases or steps.
+
+        The plan inside ``ExecutionState`` is mutated in place.  An audit
+        record (:class:`PlanAmendment`) is appended to ``state.amendments``.
+
+        Args:
+            description: Human-readable explanation of the amendment.
+            new_phases: New :class:`PlanPhase` objects to insert.
+            insert_after_phase: Insert *new_phases* after this phase_id.
+                If ``None``, appends after the current phase.
+            add_steps_to_phase: Phase_id to add *new_steps* to.
+            new_steps: New :class:`PlanStep` objects for an existing phase.
+            trigger: What caused this amendment.
+            trigger_phase_id: Which phase triggered it.
+            feedback: Reviewer feedback text.
+
+        Returns:
+            The :class:`PlanAmendment` record.
+        """
+        state = self._persistence.load()
+        if state is None:
+            raise RuntimeError(
+                "amend_plan() called with no active execution state."
+            )
+
+        amendment = PlanAmendment(
+            amendment_id=f"amend-{len(state.amendments) + 1}",
+            trigger=trigger,
+            trigger_phase_id=trigger_phase_id,
+            description=description,
+            feedback=feedback,
+        )
+
+        if new_phases:
+            # Determine insertion index.
+            if insert_after_phase is not None:
+                insert_idx = next(
+                    (i + 1 for i, p in enumerate(state.plan.phases)
+                     if p.phase_id == insert_after_phase),
+                    len(state.plan.phases),
+                )
+            else:
+                # Default: insert after the current phase.
+                insert_idx = state.current_phase + 1
+
+            for i, phase in enumerate(new_phases):
+                state.plan.phases.insert(insert_idx + i, phase)
+                amendment.phases_added.append(phase.phase_id)
+
+            self._renumber_phases(state)
+
+        if new_steps and add_steps_to_phase is not None:
+            target = next(
+                (p for p in state.plan.phases if p.phase_id == add_steps_to_phase),
+                None,
+            )
+            if target is not None:
+                for step in new_steps:
+                    target.steps.append(step)
+                    amendment.steps_added.append(step.step_id)
+
+        state.amendments.append(amendment)
+
+        if self._trace is not None:
+            self._tracer.record_event(
+                self._trace,
+                "replan",
+                agent_name=None,
+                phase=trigger_phase_id,
+                step=0,
+                details={
+                    "amendment_id": amendment.amendment_id,
+                    "description": description,
+                    "phases_added": amendment.phases_added,
+                    "steps_added": amendment.steps_added,
+                },
+            )
+
+        self._persistence.save(state)
+        return amendment
+
+    def record_team_member_result(
+        self,
+        step_id: str,
+        member_id: str,
+        agent_name: str,
+        status: str = "complete",
+        outcome: str = "",
+        files_changed: list[str] | None = None,
+    ) -> None:
+        """Record the result of a single team member within a team step.
+
+        When all members have completed, the parent step is automatically
+        marked as complete.  If any member fails, the parent step fails.
+        """
+        state = self._persistence.load()
+        if state is None:
+            raise RuntimeError(
+                "record_team_member_result() called with no active execution state."
+            )
+
+        # Find or create the parent StepResult for this team step.
+        parent = state.get_step_result(step_id)
+        if parent is None:
+            parent = StepResult(
+                step_id=step_id, agent_name="team", status="dispatched",
+            )
+            state.step_results.append(parent)
+
+        member_result = TeamStepResult(
+            member_id=member_id,
+            agent_name=agent_name,
+            status=status,
+            outcome=outcome,
+            files_changed=files_changed or [],
+        )
+        parent.member_results.append(member_result)
+
+        # Check if all team members are done.
+        plan_step = self._find_step(state, step_id)
+        if plan_step and plan_step.team:
+            all_member_ids = {m.member_id for m in plan_step.team}
+            completed_ids = {
+                m.member_id for m in parent.member_results
+                if m.status == "complete"
+            }
+            failed_ids = {
+                m.member_id for m in parent.member_results
+                if m.status == "failed"
+            }
+
+            if failed_ids:
+                parent.status = "failed"
+                parent.error = f"Team member(s) failed: {', '.join(sorted(failed_ids))}"
+                parent.completed_at = _utcnow()
+            elif completed_ids >= all_member_ids:
+                parent.status = "complete"
+                parent.outcome = "; ".join(
+                    m.outcome for m in parent.member_results if m.outcome
+                )
+                parent.files_changed = [
+                    f for m in parent.member_results for f in m.files_changed
+                ]
+                parent.completed_at = _utcnow()
+
+        self._persistence.save(state)
+
     # ── Internal helpers ────────────────────────────────────────────────────
 
     # Event ownership: Engine publishes task-level and phase-level events.
@@ -619,6 +844,12 @@ class ExecutionEngine:
                 summary=msg,
             )
 
+        # approval_pending — waiting for human approval before proceeding.
+        if state.status == "approval_pending":
+            phase_obj = state.current_phase_obj
+            if phase_obj and phase_obj.approval_required:
+                return self._approval_action(state, phase_obj)
+
         # gate_pending — a gate was requested but result not yet recorded.
         if state.status == "gate_pending":
             phase_obj = state.current_phase_obj
@@ -709,6 +940,8 @@ class ExecutionEngine:
 
         if next_step is not None:
             # There is still work to do in this phase.
+            if next_step.team:
+                return self._team_dispatch_action(next_step, state)
             return self._dispatch_action(next_step, state)
 
         # If no step is dispatchable but some are still pending (dispatched or
@@ -722,6 +955,12 @@ class ExecutionEngine:
             )
 
         # All steps in this phase are complete.
+        # Check approval requirement BEFORE gate.
+        if (phase_obj.approval_required
+                and not self._approval_passed_for_phase(state, phase_obj.phase_id)):
+            state.status = "approval_pending"
+            return self._approval_action(state, phase_obj)
+
         if phase_obj.gate and not self._gate_passed_for_phase(state, phase_obj.phase_id):
             state.status = "gate_pending"
             return ExecutionAction(
@@ -786,6 +1025,180 @@ class ExecutionEngine:
             if g.phase_id == phase_id and g.passed:
                 return True
         return False
+
+    @staticmethod
+    def _approval_passed_for_phase(state: ExecutionState, phase_id: int) -> bool:
+        """Return True if an approval result (approve or approve-with-feedback) exists."""
+        for a in state.approval_results:
+            if a.phase_id == phase_id and a.result in ("approve", "approve-with-feedback"):
+                return True
+        return False
+
+    def _approval_action(
+        self, state: ExecutionState, phase_obj: PlanPhase,
+    ) -> ExecutionAction:
+        """Build an APPROVAL action for a phase requiring human review."""
+        context = phase_obj.approval_description or self._build_approval_context(
+            state, phase_obj,
+        )
+        return ExecutionAction(
+            action_type=ActionType.APPROVAL,
+            message=(
+                f"Phase {phase_obj.phase_id} ({phase_obj.name}) "
+                f"requires approval before proceeding."
+            ),
+            phase_id=phase_obj.phase_id,
+            approval_context=context,
+            approval_options=["approve", "reject", "approve-with-feedback"],
+        )
+
+    @staticmethod
+    def _build_approval_context(
+        state: ExecutionState, phase_obj: PlanPhase,
+    ) -> str:
+        """Build a markdown summary of phase output for the human reviewer."""
+        lines = [
+            f"## Phase {phase_obj.phase_id}: {phase_obj.name} — Review Summary",
+            "",
+        ]
+        # Gather step results for this phase.
+        phase_step_ids = {s.step_id for s in phase_obj.steps}
+        for result in state.step_results:
+            if result.step_id in phase_step_ids and result.status == "complete":
+                lines.append(f"### Step {result.step_id}: {result.agent_name}")
+                if result.outcome:
+                    lines.append(result.outcome)
+                if result.files_changed:
+                    lines.append(f"**Files changed**: {', '.join(result.files_changed)}")
+                lines.append("")
+        return "\n".join(lines)
+
+    def _team_dispatch_action(
+        self, step: PlanStep, state: ExecutionState,
+    ) -> ExecutionAction:
+        """Build a DISPATCH action with parallel_actions for each team member."""
+        dispatcher = PromptDispatcher()
+
+        # Build team overview for context.
+        team_overview = ", ".join(
+            f"{m.agent_name} ({m.role})" for m in step.team
+        )
+
+        # Find completed member IDs (if any members already recorded).
+        parent = state.get_step_result(step.step_id)
+        completed_members = set()
+        if parent:
+            completed_members = {
+                m.member_id for m in parent.member_results
+                if m.status == "complete"
+            }
+
+        member_actions: list[ExecutionAction] = []
+        for member in step.team:
+            if member.member_id in completed_members:
+                continue
+            # Check member-level dependencies.
+            if member.depends_on and not all(
+                dep in completed_members for dep in member.depends_on
+            ):
+                continue
+
+            prompt = dispatcher.build_team_delegation_prompt(
+                step=step,
+                member=member,
+                shared_context=state.plan.shared_context,
+                task_summary=state.plan.task_summary,
+                team_overview=team_overview,
+            )
+            member_actions.append(ExecutionAction(
+                action_type=ActionType.DISPATCH,
+                message=f"Team member '{member.agent_name}' ({member.role}) for step {step.step_id}.",
+                agent_name=member.agent_name,
+                agent_model=member.model,
+                delegation_prompt=prompt,
+                step_id=member.member_id,
+            ))
+
+        if not member_actions:
+            # All dispatchable members are blocked — WAIT.
+            return ExecutionAction(
+                action_type=ActionType.WAIT,
+                message=f"Waiting for team members in step {step.step_id}.",
+                summary=f"Team step {step.step_id} has members in flight.",
+            )
+
+        # Return the first member action with the rest as parallel_actions.
+        first = member_actions[0]
+        if len(member_actions) > 1:
+            first.parallel_actions = member_actions[1:]
+        return first
+
+    def _amend_from_feedback(
+        self, state: ExecutionState, phase_id: int, feedback: str,
+    ) -> None:
+        """Insert a remediation phase based on approval feedback.
+
+        Creates a new phase with a single step assigned to the most
+        appropriate agent, inserted after the current phase.
+        """
+        # Determine which agent should handle remediation.
+        phase_obj = state.current_phase_obj
+        if phase_obj and phase_obj.steps:
+            agent = phase_obj.steps[0].agent_name
+        else:
+            agent = "backend-engineer"
+
+        # Build a new phase_id (will be renumbered by amend_plan).
+        new_phase = PlanPhase(
+            phase_id=0,  # placeholder — renumbered in amend_plan
+            name="Remediation",
+            steps=[PlanStep(
+                step_id="0.1",  # placeholder
+                agent_name=agent,
+                task_description=f"Address feedback from phase {phase_id} review: {feedback}",
+            )],
+        )
+        self.amend_plan(
+            description=f"Remediation from approval feedback on phase {phase_id}",
+            new_phases=[new_phase],
+            trigger="approval_feedback",
+            trigger_phase_id=phase_id,
+            feedback=feedback,
+        )
+
+    @staticmethod
+    def _find_step(state: ExecutionState, step_id: str) -> PlanStep | None:
+        """Locate a PlanStep by step_id in the plan."""
+        for phase in state.plan.phases:
+            for step in phase.steps:
+                if step.step_id == step_id:
+                    return step
+        return None
+
+    @staticmethod
+    def _renumber_phases(state: ExecutionState) -> None:
+        """Re-assign sequential phase_id values (1-based) after insertion.
+
+        Also updates step_ids to match new phase numbering, and fixes
+        references in gate_results and approval_results.
+        """
+        old_to_new: dict[int, int] = {}
+        for idx, phase in enumerate(state.plan.phases):
+            new_id = idx + 1
+            old_to_new[phase.phase_id] = new_id
+            phase.phase_id = new_id
+            # Renumber step_ids within this phase.
+            for si, step in enumerate(phase.steps):
+                step.step_id = f"{new_id}.{si + 1}"
+                # Renumber team member IDs if present.
+                for mi, member in enumerate(step.team):
+                    member.member_id = f"{new_id}.{si + 1}.{chr(97 + mi)}"
+
+        # Update phase_id references in gate and approval results.
+        for gr in state.gate_results:
+            gr.phase_id = old_to_new.get(gr.phase_id, gr.phase_id)
+        for ar in state.approval_results:
+            ar.phase_id = old_to_new.get(ar.phase_id, ar.phase_id)
 
     @staticmethod
     def _locate_step(state: ExecutionState, step_id: str) -> tuple[int, int]:

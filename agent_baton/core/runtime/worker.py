@@ -108,6 +108,10 @@ class TaskWorker:
                 await asyncio.sleep(0.5)
                 continue
 
+            if action.action_type == ActionType.APPROVAL:
+                await self._handle_approval(action)
+                continue
+
             if action.action_type == ActionType.GATE:
                 await self._handle_gate(action)
                 continue
@@ -267,6 +271,58 @@ class TaskWorker:
                     phase_id=phase_id,
                     passed=False,
                     output="Gate aborted: shutdown requested",
+                )
+                return
+
+            await asyncio.sleep(self._gate_poll_interval)
+
+    async def _handle_approval(self, action: object) -> None:
+        """Handle an APPROVAL action.
+
+        Routes through the :class:`DecisionManager` when configured;
+        otherwise auto-approves.
+        """
+        phase_id = getattr(action, "phase_id", 0)
+
+        if self._decision_manager is None:
+            self._engine.record_approval_result(
+                phase_id=phase_id,
+                result="approve",
+                feedback="auto-approved (no decision manager)",
+            )
+            return
+
+        task_id = self._engine.status().get("task_id", "")
+        req = DecisionRequest.create(
+            task_id=task_id,
+            decision_type="phase_approval",
+            summary=getattr(action, "message", f"Phase {phase_id} requires approval"),
+            options=["approve", "reject", "approve-with-feedback"],
+        )
+        self._decision_manager.request(req)
+
+        while True:
+            resolved = self._decision_manager.get(req.request_id)
+            if resolved is not None and resolved.status == "resolved":
+                res_data = self._decision_manager.get_resolution(req.request_id)
+                if res_data is not None:
+                    result = res_data.get("chosen_option", "approve")
+                    feedback = res_data.get("rationale", "")
+                else:
+                    result = "approve"
+                    feedback = ""
+                self._engine.record_approval_result(
+                    phase_id=phase_id,
+                    result=result,
+                    feedback=feedback,
+                )
+                return
+
+            if self._shutdown_event is not None and self._shutdown_event.is_set():
+                self._engine.record_approval_result(
+                    phase_id=phase_id,
+                    result="reject",
+                    feedback="Approval aborted: shutdown requested",
                 )
                 return
 

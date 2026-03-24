@@ -23,6 +23,9 @@ control API between Claude and the engine.
 | `baton execute record --step-id ... --agent ... --status ...` | Record a completed step result |
 | `baton execute gate --phase-id ... --result pass/fail` | Record a gate result |
 | `baton execute complete` | Finalize execution |
+| `baton execute approve --phase-id ... --result ...` | Record a human approval decision |
+| `baton execute amend --description ... [--add-phase ...]` | Amend the running plan |
+| `baton execute team-record --step-id ... --member-id ...` | Record a team member completion |
 | `baton execute status` | Check current execution state |
 | `baton execute resume` | Recover execution after a session crash |
 
@@ -57,6 +60,20 @@ ACTION: <TYPE>
 --- End Prompt ---
 ```
 
+For APPROVAL actions (human-in-the-loop checkpoint):
+
+```
+ACTION: APPROVAL
+  Phase:   <phase-id>
+  Message: <one-line summary>
+
+--- Approval Context ---
+<summary of phase output for reviewer>
+--- End Context ---
+
+Options: approve, reject, approve-with-feedback
+```
+
 For terminal actions (COMPLETE, WAIT, GATE_FAILED):
 
 ```
@@ -69,6 +86,7 @@ ACTION: COMPLETE
 | Value | Meaning |
 |-------|---------|
 | `ACTION: DISPATCH` | Claude should invoke the named agent with the delegation prompt |
+| `ACTION: APPROVAL` | Execution paused for human review; respond with `baton execute approve` |
 | `ACTION: COMPLETE` | All phases done; execution is finished |
 | `ACTION: WAIT` | All pending steps are dispatched; wait for results |
 | `ACTION: GATE_FAILED` | A phase gate failed; Claude should not proceed |
@@ -81,9 +99,11 @@ ACTION: COMPLETE
    the wrong action is taken.
 3. Section delimiters (`--- Delegation Prompt ---`, `--- End Prompt ---`) must
    remain verbatim.
-4. The `ActionType` enum `.value` strings (`DISPATCH`, `COMPLETE`, `WAIT`,
-   `GATE_FAILED`) must match the uppercase labels above. If `ActionType` values
-   change, `_print_action()` must be updated simultaneously.
+4. The `ActionType` enum `.value` strings (`DISPATCH`, `APPROVAL`, `COMPLETE`,
+   `WAIT`, `GATE_FAILED`) must match the uppercase labels above. If `ActionType`
+   values change, `_print_action()` must be updated simultaneously.
+5. Section delimiters for APPROVAL (`--- Approval Context ---`,
+   `--- End Context ---`) must remain verbatim.
 
 **Safeguard**: A regression test asserts that `_print_action()` produces
 exactly the expected text for each `ActionType` value. The test uses fixture
@@ -119,7 +139,9 @@ Claude Code session is interrupted mid-execution.
 | `completed_step_ids` | list[str] | Steps already recorded as complete |
 | `dispatched_step_ids` | list[str] | Steps sent to agents not yet complete |
 | `gate_results` | dict | Phase gate outcomes keyed by phase ID |
-| `status` | str | One of: `running`, `complete`, `failed`, `gate_failed` |
+| `approval_results` | list[dict] | Phase approval outcomes |
+| `amendments` | list[dict] | Plan amendment audit trail |
+| `status` | str | One of: `running`, `complete`, `failed`, `gate_failed`, `approval_pending` |
 
 ### Companion files
 

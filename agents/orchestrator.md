@@ -226,20 +226,61 @@ The engine returns action types. Follow instructions for each:
 
 #### ACTION: DISPATCH
 1. Spawn the agent using the Agent tool with the provided prompt
-2. Record the result:
+2. **Team steps:** If the action includes `parallel_actions`, the step has
+   a team of agents working together. Spawn each member concurrently using
+   the Agent tool. Record each member individually:
+   ```bash
+   baton execute team-record \
+     --step-id "STEP_ID" --member-id "MEMBER_ID" \
+     --agent "AGENT_NAME" --status complete|failed \
+     --outcome "Brief summary"
+   ```
+   The parent step auto-completes when all members are recorded. Then call
+   `baton execute next`.
+3. For single-agent steps, record the result:
    ```bash
    baton execute record \
      --step-id "STEP_ID" --agent "AGENT_NAME" \
      --status complete --outcome "Brief summary" \
      --tokens ESTIMATED_TOKENS --files "file1.py,file2.py"
    ```
-3. Get next action: `baton execute next`
+4. Get next action: `baton execute next`
 
 #### ACTION: GATE
 Run the gate command, record result:
 ```bash
 baton execute gate --phase-id PHASE_ID --result pass
 ```
+
+#### ACTION: APPROVAL
+A phase with `approval_required` has completed. Present the context to the
+user and collect a decision before continuing.
+
+1. Show the approval context exactly as the engine formats it — from
+   `--- Approval Context ---` to `--- End Context ---`
+2. Ask the user: **approve**, **reject**, or **approve-with-feedback**?
+   - `approve-with-feedback` requires a reason. Collect it.
+   - `reject` stops execution. Ask the user how to proceed.
+3. Record the decision:
+   ```bash
+   baton execute approve \
+     --phase-id PHASE_ID \
+     --result approve|reject|approve-with-feedback \
+     [--feedback "User's feedback text"]
+   ```
+4. Continue: `baton execute next`
+
+**Plan amendments:** When a user chooses `approve-with-feedback`, the
+engine automatically inserts a remediation phase. After recording, `baton
+execute next` will return the new DISPATCH actions for that phase — handle
+them normally. You can also amend the plan manually at any point:
+```bash
+baton execute amend \
+  --description "Why the plan is changing" \
+  --add-phase "phase-name:agent-name" \
+  [--after-phase PHASE_ID]
+```
+Amendments are recorded in the execution state audit trail.
 
 #### ACTION: COMPLETE
 ```bash
@@ -311,6 +352,7 @@ activities unless they need revision.
 | Gate fails | Fix the issue (retry the step), re-run the gate, stop after 2 failures |
 | Wrong plan | `baton plan` again with overrides |
 | Session crashes | `baton execute resume` picks up where you left off |
+| Approval rejected | Report rejection to user, ask how to proceed — amend plan or abort |
 | Engine unavailable | Fall back to manual orchestration using `.claude/references/` docs |
 | Task harder than classified | Upgrade engagement level (see above) |
 | Chain activity blocks others | Pause chain, fix the blocking activity, resume |

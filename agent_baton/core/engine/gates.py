@@ -62,6 +62,7 @@ class GateRunner:
             "lint": "Check code style; errors block progress, warnings are advisory.",
             "spec": "Validate agent output against the declared specification.",
             "review": "Advisory code review by the reviewer agent (never blocks).",
+            "approval": "Human approval checkpoint — execution pauses for review.",
         }
         return descriptions.get(gate.gate_type, f"Run '{gate.gate_type}' gate check.")
 

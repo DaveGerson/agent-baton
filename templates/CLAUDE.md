@@ -24,8 +24,8 @@ execution engine:
 3. **Start execution** with `baton execute start`. The engine initializes
    tracing, state persistence, and returns the first action.
 
-4. **Drive the execution loop**: the engine returns DISPATCH, GATE, WAIT,
-   or COMPLETE actions. Handle each action type as follows:
+4. **Drive the execution loop**: the engine returns DISPATCH, GATE, APPROVAL,
+   WAIT, or COMPLETE actions. Handle each action type as follows:
 
    **For DISPATCH actions — you MUST use the Agent tool:**
    - Read the `delegation_prompt` from the engine output (between the
@@ -55,6 +55,19 @@ execution engine:
      ```
      baton execute gate --phase-id N --result pass|fail --output "output"
      ```
+   - Then call `baton execute next`
+
+   **For APPROVAL actions (human-in-the-loop checkpoint):**
+   - Present the approval context (between `--- Approval Context ---`
+     and `--- End Context ---`) to the user
+   - Ask the user to choose: approve, reject, or approve-with-feedback
+   - Record the decision:
+     ```
+     baton execute approve --phase-id N --result approve|reject|approve-with-feedback \
+         [--feedback "text"]
+     ```
+   - `approve` continues execution; `reject` stops; `approve-with-feedback`
+     inserts a remediation phase then continues
    - Then call `baton execute next`
 
    **For COMPLETE actions:**
@@ -97,6 +110,13 @@ loop:
             --result pass|fail --output "output"
         action = baton execute next
 
+    elif action.type == APPROVAL:
+        # Present context to user, get decision
+        baton execute approve --phase-id N \
+            --result approve|reject|approve-with-feedback \
+            --feedback "optional feedback"
+        action = baton execute next
+
     elif action.type == COMPLETE:
         baton execute complete
         break
@@ -105,6 +125,15 @@ loop:
         # report failure, stop
         break
 ```
+
+**Plan amendments**: If the user provides feedback during approval
+(`approve-with-feedback`), the engine inserts a remediation phase. The
+loop will encounter new DISPATCH actions for the remediation work. You
+can also amend the plan manually:
+`baton execute amend --description "why" --add-phase NAME:AGENT`
+
+**Team steps**: Some steps dispatch multiple agents as a coordinated
+team. Record each member separately with `baton execute team-record`.
 
 For the full command reference, error list, and file layout, read
 `.claude/references/baton-engine.md`.

@@ -8,7 +8,7 @@ from pathlib import Path
 
 from agent_baton.core.engine.executor import ExecutionEngine
 from agent_baton.core.orchestration.context import ContextManager
-from agent_baton.models.execution import MachinePlan, ActionType
+from agent_baton.models.execution import MachinePlan, ActionType, PlanPhase, PlanStep
 from agent_baton.models.plan import MissionLogEntry
 
 
@@ -55,6 +55,33 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     p_gate.add_argument("--result", required=True, choices=["pass", "fail"], help="Gate result")
     p_gate.add_argument("--output", default="", help="Gate command output")
 
+    # baton execute approve --phase-id N --result approve|reject|approve-with-feedback [--feedback TEXT]
+    p_approve = sub.add_parser("approve", help="Record a human approval decision")
+    p_approve.add_argument("--phase-id", type=int, required=True, help="Phase ID requiring approval")
+    p_approve.add_argument("--result", required=True,
+                           choices=["approve", "reject", "approve-with-feedback"],
+                           help="Approval decision")
+    p_approve.add_argument("--feedback", default="", help="Feedback text (for approve-with-feedback)")
+
+    # baton execute amend --description TEXT [--add-phase NAME:AGENT] [--after-phase N] [--add-step PHASE_ID:AGENT:DESC]
+    p_amend = sub.add_parser("amend", help="Amend the running plan")
+    p_amend.add_argument("--description", required=True, help="Why this amendment is needed")
+    p_amend.add_argument("--add-phase", action="append", default=[],
+                         help="Add phase as NAME:AGENT (repeatable)")
+    p_amend.add_argument("--after-phase", type=int, default=None,
+                         help="Insert new phases after this phase_id")
+    p_amend.add_argument("--add-step", action="append", default=[],
+                         help="Add step as PHASE_ID:AGENT:DESCRIPTION (repeatable)")
+
+    # baton execute team-record --step-id S --member-id M --agent NAME [--status S] [--outcome O] [--files F]
+    p_team = sub.add_parser("team-record", help="Record a team member completion")
+    p_team.add_argument("--step-id", required=True, dest="step_id", help="Parent team step ID")
+    p_team.add_argument("--member-id", required=True, dest="member_id", help="Team member ID")
+    p_team.add_argument("--agent", required=True, help="Agent name")
+    p_team.add_argument("--status", default="complete", choices=["complete", "failed"])
+    p_team.add_argument("--outcome", default="", help="Summary of work done")
+    p_team.add_argument("--files", default="", help="Comma-separated files changed")
+
     # baton execute complete
     sub.add_parser("complete", help="Finalize execution (writes usage, trace, retrospective)")
 
@@ -96,6 +123,18 @@ def _print_action(action: dict) -> None:
         print(f"  Phase:   {action.get('phase_id', '')}")
         print(f"  Command: {action.get('gate_command', '')}")
         print(f"  Message: {msg}")
+
+    elif atype == ActionType.APPROVAL.value:
+        print(f"ACTION: APPROVAL")
+        print(f"  Phase:   {action.get('phase_id', '')}")
+        print(f"  Message: {msg}")
+        print()
+        print("--- Approval Context ---")
+        print(action.get("approval_context", ""))
+        print("--- End Context ---")
+        print()
+        options = action.get("approval_options", ["approve", "reject", "approve-with-feedback"])
+        print(f"Options: {', '.join(options)}")
 
     elif atype == ActionType.COMPLETE.value:
         print(f"ACTION: COMPLETE")
@@ -183,6 +222,38 @@ def handler(args: argparse.Namespace) -> None:
         status = "PASS" if passed else "FAIL"
         print(f"Gate recorded: phase {args.phase_id} — {status}")
 
+    elif args.subcommand == "approve":
+        engine.record_approval_result(
+            phase_id=args.phase_id,
+            result=args.result,
+            feedback=args.feedback,
+        )
+        print(f"Approval recorded: phase {args.phase_id} — {args.result}")
+
+    elif args.subcommand == "amend":
+        new_phases = _parse_add_phases(args.add_phase) or None
+        add_steps_to, new_steps = _parse_add_steps(args.add_step)
+        amendment = engine.amend_plan(
+            description=args.description,
+            new_phases=new_phases,
+            insert_after_phase=args.after_phase,
+            add_steps_to_phase=add_steps_to,
+            new_steps=new_steps or None,
+        )
+        print(f"Plan amended: {amendment.amendment_id} — {amendment.description}")
+
+    elif args.subcommand == "team-record":
+        files = [f.strip() for f in args.files.split(",") if f.strip()] if args.files else []
+        engine.record_team_member_result(
+            step_id=args.step_id,
+            member_id=args.member_id,
+            agent_name=args.agent,
+            status=args.status,
+            outcome=args.outcome,
+            files_changed=files,
+        )
+        print(f"Team member recorded: {args.member_id} ({args.agent}) — {args.status}")
+
     elif args.subcommand == "complete":
         summary = engine.complete()
         print(summary)
@@ -204,3 +275,53 @@ def handler(args: argparse.Namespace) -> None:
     elif args.subcommand == "resume":
         action = engine.resume()
         _print_action(action.to_dict())
+
+
+# ---------------------------------------------------------------------------
+# CLI parsing helpers for amend subcommand
+# ---------------------------------------------------------------------------
+
+def _parse_add_phases(specs: list[str]) -> list[PlanPhase]:
+    """Parse --add-phase NAME:AGENT specs into PlanPhase objects."""
+    phases: list[PlanPhase] = []
+    for i, spec in enumerate(specs, start=1):
+        parts = spec.split(":", 1)
+        name = parts[0].strip()
+        agent = parts[1].strip() if len(parts) > 1 else "backend-engineer"
+        phases.append(PlanPhase(
+            phase_id=0,  # placeholder — renumbered by amend_plan
+            name=name,
+            steps=[PlanStep(
+                step_id=f"0.{i}",
+                agent_name=agent,
+                task_description=f"{name} phase work",
+            )],
+        ))
+    return phases
+
+
+def _parse_add_steps(specs: list[str]) -> tuple[int | None, list[PlanStep]]:
+    """Parse --add-step PHASE_ID:AGENT:DESCRIPTION specs.
+
+    Returns (target_phase_id, list_of_steps).  All steps target the same phase
+    (the phase_id from the first spec).
+    """
+    if not specs:
+        return None, []
+    steps: list[PlanStep] = []
+    target_phase: int | None = None
+    for i, spec in enumerate(specs, start=1):
+        parts = spec.split(":", 2)
+        if len(parts) < 2:
+            continue
+        phase_id = int(parts[0].strip())
+        agent = parts[1].strip()
+        desc = parts[2].strip() if len(parts) > 2 else f"Additional work in phase {phase_id}"
+        if target_phase is None:
+            target_phase = phase_id
+        steps.append(PlanStep(
+            step_id=f"{phase_id}.{100 + i}",  # high number to avoid collisions
+            agent_name=agent,
+            task_description=desc,
+        ))
+    return target_phase, steps

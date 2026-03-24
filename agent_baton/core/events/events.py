@@ -290,3 +290,95 @@ def phase_completed(
             "phase_name": phase_name,
         },
     )
+
+
+# ── Approvals ──────────────────────────────────────────────────────────────
+
+def approval_required(
+    task_id: str,
+    phase_id: int,
+    phase_name: str = "",
+    description: str = "",
+    sequence: int = 0,
+) -> Event:
+    """Execution paused for human approval."""
+    return Event.create(
+        topic="approval.required",
+        task_id=task_id,
+        sequence=sequence,
+        payload={
+            "phase_id": phase_id,
+            "phase_name": phase_name,
+            "description": description,
+        },
+    )
+
+
+def approval_resolved(
+    task_id: str,
+    phase_id: int,
+    result: str,
+    feedback: str = "",
+    sequence: int = 0,
+) -> Event:
+    """Human approval decision recorded."""
+    return Event.create(
+        topic="approval.resolved",
+        task_id=task_id,
+        sequence=sequence,
+        payload={
+            "phase_id": phase_id,
+            "result": result,
+            "feedback": feedback,
+        },
+    )
+
+
+# ── Plan amendments ────────────────────────────────────────────────────────
+
+def plan_amended(
+    task_id: str,
+    amendment_id: str,
+    description: str,
+    trigger: str = "manual",
+    phases_added: list[int] | None = None,
+    steps_added: list[str] | None = None,
+    sequence: int = 0,
+) -> Event:
+    """Plan was amended during execution."""
+    return Event.create(
+        topic="plan.amended",
+        task_id=task_id,
+        sequence=sequence,
+        payload={
+            "amendment_id": amendment_id,
+            "description": description,
+            "trigger": trigger,
+            "phases_added": phases_added or [],
+            "steps_added": steps_added or [],
+        },
+    )
+
+
+# ── Team steps ─────────────────────────────────────────────────────────────
+
+def team_member_completed(
+    task_id: str,
+    step_id: str,
+    member_id: str,
+    agent_name: str,
+    outcome: str = "",
+    sequence: int = 0,
+) -> Event:
+    """A team member finished their work."""
+    return Event.create(
+        topic="team.member_completed",
+        task_id=task_id,
+        sequence=sequence,
+        payload={
+            "step_id": step_id,
+            "member_id": member_id,
+            "agent_name": agent_name,
+            "outcome": outcome,
+        },
+    )

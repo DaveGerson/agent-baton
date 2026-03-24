@@ -21,7 +21,7 @@ agent_baton/       ← Python package (orchestration engine)
     events/        ← Event bus, domain events, persistence, projections
     runtime/       ← Async worker, supervisor, launcher, decisions,
                      ExecutionContext factory
-  cli/             ← CLI interface (34 commands via `baton`)
+  cli/             ← CLI interface (37 commands via `baton`)
     commands/
       execution/   ← execute, plan, status, daemon, async, decide
       observe/     ← dashboard, trace, usage, telemetry, context_profile, retro
@@ -80,7 +80,7 @@ tests/             ← Test suite (1732 tests, pytest)
 
 ```bash
 pip install -e ".[dev]"    # Install in editable mode
-pytest                     # Run tests (1732 tests)
+pytest                     # Run tests (2007 tests)
 scripts/install.sh         # Re-install globally after editing agents/references
 ```
 
@@ -105,6 +105,9 @@ loop:
   if GATE:
     run gate command
     baton execute gate --phase-id N --result pass
+  if APPROVAL:
+    → present context to user, get decision ←
+    baton execute approve --phase-id N --result approve
   if COMPLETE:
     baton execute complete
     break
@@ -113,6 +116,14 @@ loop:
 **For DISPATCH actions — you MUST use the Agent tool** to spawn the
 specified subagent with the delegation prompt. Do NOT do the work inline.
 Valid `--status` values: `complete` or `failed`.
+
+**For APPROVAL actions** — present the approval context to the user and
+record their decision with `baton execute approve`. Options: `approve`,
+`reject`, `approve-with-feedback` (inserts remediation phase).
+
+**Plan amendments** — use `baton execute amend` to add phases or steps
+during execution. **Team steps** — use `baton execute team-record` to
+record individual team member completions.
 
 See `references/baton-engine.md` for the full CLI reference and
 troubleshooting guide.

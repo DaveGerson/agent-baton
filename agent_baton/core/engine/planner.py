@@ -17,7 +17,7 @@ from agent_baton.core.learn.pattern_learner import PatternLearner
 from agent_baton.core.orchestration.registry import AgentRegistry
 from agent_baton.core.orchestration.router import AgentRouter
 from agent_baton.models.enums import GitStrategy, RiskLevel
-from agent_baton.models.execution import MachinePlan, PlanGate, PlanPhase, PlanStep
+from agent_baton.models.execution import MachinePlan, PlanGate, PlanPhase, PlanStep, TeamMember
 from agent_baton.models.pattern import LearnedPattern
 
 
@@ -442,6 +442,23 @@ class IntelligentPlanner:
         for phase in plan_phases:
             if phase.gate is None:
                 phase.gate = self._default_gate(phase.name)
+
+        # 12b. Set approval gates on critical phases for HIGH+ risk
+        if risk_level_enum in (RiskLevel.HIGH, RiskLevel.CRITICAL):
+            for phase in plan_phases:
+                if phase.name.lower() in ("design", "research"):
+                    phase.approval_required = True
+                    phase.approval_description = (
+                        f"Review {phase.name.lower()} output before "
+                        f"implementation begins. Approve to continue, "
+                        f"reject to stop, or approve-with-feedback to "
+                        f"add remediation steps."
+                    )
+
+        # 12c. Consolidate multi-agent Implement/Fix phases into team steps
+        for phase in plan_phases:
+            if phase.name.lower() in ("implement", "fix") and len(phase.steps) >= 2:
+                phase.steps = [self._consolidate_team_step(phase)]
 
         # 13. Populate context_files — every agent should read CLAUDE.md
         for phase in plan_phases:
@@ -886,6 +903,38 @@ class IntelligentPlanner:
             )
         # Review phases and everything else get no automated gate
         return None
+
+    @staticmethod
+    def _consolidate_team_step(phase: PlanPhase) -> PlanStep:
+        """Merge multiple steps in a phase into a single team step.
+
+        The first step's agent becomes the team lead; the rest become
+        implementers.  The original step descriptions become member
+        task descriptions.
+        """
+        members: list[TeamMember] = []
+        all_deliverables: list[str] = []
+        for i, step in enumerate(phase.steps):
+            role = "lead" if i == 0 else "implementer"
+            member_id = f"{phase.phase_id}.1.{chr(97 + i)}"
+            members.append(TeamMember(
+                member_id=member_id,
+                agent_name=step.agent_name,
+                role=role,
+                task_description=step.task_description,
+                model=step.model,
+                deliverables=step.deliverables,
+            ))
+            all_deliverables.extend(step.deliverables)
+
+        combined_desc = "; ".join(s.task_description for s in phase.steps)
+        return PlanStep(
+            step_id=f"{phase.phase_id}.1",
+            agent_name="team",
+            task_description=f"Team implementation: {combined_desc}",
+            team=members,
+            deliverables=all_deliverables,
+        )
 
     # ------------------------------------------------------------------
     # Private helpers — routing and scoring

@@ -33,11 +33,47 @@ class ActionType(Enum):
     COMPLETE = "complete"       # execution is finished
     FAILED = "failed"           # execution cannot continue
     WAIT = "wait"               # parallel steps still running
+    APPROVAL = "approval"       # pause for human review / approval
 
 
 # ---------------------------------------------------------------------------
 # Plan (machine-readable, JSON-serializable)
 # ---------------------------------------------------------------------------
+
+@dataclass
+class TeamMember:
+    """A member of a coordinated agent team within a step."""
+    member_id: str                          # e.g. "1.1.a"
+    agent_name: str
+    role: str = "implementer"               # "lead", "implementer", "reviewer"
+    task_description: str = ""
+    model: str = "sonnet"
+    depends_on: list[str] = field(default_factory=list)   # other member_ids
+    deliverables: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "member_id": self.member_id,
+            "agent_name": self.agent_name,
+            "role": self.role,
+            "task_description": self.task_description,
+            "model": self.model,
+            "depends_on": self.depends_on,
+            "deliverables": self.deliverables,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> TeamMember:
+        return cls(
+            member_id=data["member_id"],
+            agent_name=data["agent_name"],
+            role=data.get("role", "implementer"),
+            task_description=data.get("task_description", ""),
+            model=data.get("model", "sonnet"),
+            depends_on=data.get("depends_on", []),
+            deliverables=data.get("deliverables", []),
+        )
+
 
 @dataclass
 class PlanStep:
@@ -51,9 +87,10 @@ class PlanStep:
     allowed_paths: list[str] = field(default_factory=list)
     blocked_paths: list[str] = field(default_factory=list)
     context_files: list[str] = field(default_factory=list)  # files agent should read
+    team: list[TeamMember] = field(default_factory=list)    # non-empty = team step
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "step_id": self.step_id,
             "agent_name": self.agent_name,
             "task_description": self.task_description,
@@ -64,6 +101,9 @@ class PlanStep:
             "blocked_paths": self.blocked_paths,
             "context_files": self.context_files,
         }
+        if self.team:
+            d["team"] = [m.to_dict() for m in self.team]
+        return d
 
     @classmethod
     def from_dict(cls, data: dict) -> PlanStep:
@@ -77,6 +117,7 @@ class PlanStep:
             allowed_paths=data.get("allowed_paths", []),
             blocked_paths=data.get("blocked_paths", []),
             context_files=data.get("context_files", []),
+            team=[TeamMember.from_dict(m) for m in data.get("team", [])],
         )
 
 
@@ -113,6 +154,8 @@ class PlanPhase:
     name: str
     steps: list[PlanStep] = field(default_factory=list)
     gate: PlanGate | None = None
+    approval_required: bool = False         # pause for human approval after steps complete
+    approval_description: str = ""          # what the human should review
 
     def to_dict(self) -> dict:
         d: dict = {
@@ -122,6 +165,9 @@ class PlanPhase:
         }
         if self.gate:
             d["gate"] = self.gate.to_dict()
+        if self.approval_required:
+            d["approval_required"] = self.approval_required
+            d["approval_description"] = self.approval_description
         return d
 
     @classmethod
@@ -132,6 +178,8 @@ class PlanPhase:
             name=data["name"],
             steps=[PlanStep.from_dict(s) for s in data.get("steps", [])],
             gate=gate,
+            approval_required=data.get("approval_required", False),
+            approval_description=data.get("approval_description", ""),
         )
 
 
@@ -212,12 +260,25 @@ class MachinePlan:
         lines.append("")
 
         for phase in self.phases:
-            lines.append(f"## Phase {phase.phase_id}: {phase.name}")
+            approval_tag = " [APPROVAL REQUIRED]" if phase.approval_required else ""
+            lines.append(f"## Phase {phase.phase_id}: {phase.name}{approval_tag}")
             lines.append("")
+            if phase.approval_required and phase.approval_description:
+                lines.append(f"> {phase.approval_description}")
+                lines.append("")
             for step in phase.steps:
-                lines.append(f"### Step {step.step_id}: {step.agent_name}")
-                lines.append(f"- **Model**: {step.model}")
-                lines.append(f"- **Task**: {step.task_description}")
+                if step.team:
+                    lines.append(f"### Step {step.step_id}: Team")
+                    lines.append(f"- **Task**: {step.task_description}")
+                    lines.append(f"- **Members**:")
+                    for member in step.team:
+                        lines.append(f"  - {member.member_id}: {member.agent_name} ({member.role})")
+                        if member.task_description:
+                            lines.append(f"    {member.task_description}")
+                else:
+                    lines.append(f"### Step {step.step_id}: {step.agent_name}")
+                    lines.append(f"- **Model**: {step.model}")
+                    lines.append(f"- **Task**: {step.task_description}")
                 if step.depends_on:
                     lines.append(f"- **Depends on**: {', '.join(step.depends_on)}")
                 if step.deliverables:
@@ -240,15 +301,90 @@ class MachinePlan:
 
 
 # ---------------------------------------------------------------------------
+# Plan amendments (recorded modifications to the plan during execution)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PlanAmendment:
+    """A recorded modification to the plan during execution."""
+    amendment_id: str
+    trigger: str                    # "gate_feedback", "approval_feedback", "manual"
+    trigger_phase_id: int
+    description: str
+    phases_added: list[int] = field(default_factory=list)   # phase_ids of new phases
+    steps_added: list[str] = field(default_factory=list)    # step_ids of new steps
+    created_at: str = ""
+    feedback: str = ""              # reviewer/approver feedback that triggered this
+
+    def __post_init__(self) -> None:
+        if not self.created_at:
+            self.created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    def to_dict(self) -> dict:
+        return {
+            "amendment_id": self.amendment_id,
+            "trigger": self.trigger,
+            "trigger_phase_id": self.trigger_phase_id,
+            "description": self.description,
+            "phases_added": self.phases_added,
+            "steps_added": self.steps_added,
+            "created_at": self.created_at,
+            "feedback": self.feedback,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> PlanAmendment:
+        return cls(
+            amendment_id=data.get("amendment_id", ""),
+            trigger=data.get("trigger", "manual"),
+            trigger_phase_id=data.get("trigger_phase_id", 0),
+            description=data.get("description", ""),
+            phases_added=data.get("phases_added", []),
+            steps_added=data.get("steps_added", []),
+            created_at=data.get("created_at", ""),
+            feedback=data.get("feedback", ""),
+        )
+
+
+# ---------------------------------------------------------------------------
 # Execution State (persisted between CLI calls)
 # ---------------------------------------------------------------------------
+
+@dataclass
+class TeamStepResult:
+    """Result of a single team member's work within a team step."""
+    member_id: str
+    agent_name: str
+    status: str = "complete"        # complete, failed
+    outcome: str = ""
+    files_changed: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "member_id": self.member_id,
+            "agent_name": self.agent_name,
+            "status": self.status,
+            "outcome": self.outcome,
+            "files_changed": self.files_changed,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> TeamStepResult:
+        return cls(
+            member_id=data.get("member_id", ""),
+            agent_name=data.get("agent_name", ""),
+            status=data.get("status", "complete"),
+            outcome=data.get("outcome", ""),
+            files_changed=data.get("files_changed", []),
+        )
+
 
 @dataclass
 class StepResult:
     """Outcome of a single step execution."""
     step_id: str
     agent_name: str
-    status: str = "complete"        # complete, failed
+    status: str = "complete"        # complete, failed, dispatched
     outcome: str = ""               # free-text summary
     files_changed: list[str] = field(default_factory=list)
     commit_hash: str = ""
@@ -257,9 +393,10 @@ class StepResult:
     retries: int = 0
     error: str = ""
     completed_at: str = ""
+    member_results: list[TeamStepResult] = field(default_factory=list)  # team step results
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "step_id": self.step_id,
             "agent_name": self.agent_name,
             "status": self.status,
@@ -272,10 +409,48 @@ class StepResult:
             "error": self.error,
             "completed_at": self.completed_at,
         }
+        if self.member_results:
+            d["member_results"] = [m.to_dict() for m in self.member_results]
+        return d
 
     @classmethod
     def from_dict(cls, data: dict) -> StepResult:
-        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+        member_results = [
+            TeamStepResult.from_dict(m) for m in data.pop("member_results", [])
+        ]
+        obj = cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+        obj.member_results = member_results
+        return obj
+
+
+@dataclass
+class ApprovalResult:
+    """Outcome of a human approval checkpoint."""
+    phase_id: int
+    result: str                     # "approve", "reject", "approve-with-feedback"
+    feedback: str = ""
+    decided_at: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.decided_at:
+            self.decided_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    def to_dict(self) -> dict:
+        return {
+            "phase_id": self.phase_id,
+            "result": self.result,
+            "feedback": self.feedback,
+            "decided_at": self.decided_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> ApprovalResult:
+        return cls(
+            phase_id=data.get("phase_id", 0),
+            result=data.get("result", "approve"),
+            feedback=data.get("feedback", ""),
+            decided_at=data.get("decided_at", ""),
+        )
 
 
 @dataclass
@@ -308,9 +483,11 @@ class ExecutionState:
     plan: MachinePlan
     current_phase: int = 0              # index into plan.phases
     current_step_index: int = 0         # index into current phase's steps
-    status: str = "running"             # running, gate_pending, complete, failed
+    status: str = "running"             # running, gate_pending, approval_pending, complete, failed
     step_results: list[StepResult] = field(default_factory=list)
     gate_results: list[GateResult] = field(default_factory=list)
+    approval_results: list[ApprovalResult] = field(default_factory=list)
+    amendments: list[PlanAmendment] = field(default_factory=list)
     started_at: str = ""
     completed_at: str = ""
 
@@ -351,6 +528,8 @@ class ExecutionState:
             "status": self.status,
             "step_results": [r.to_dict() for r in self.step_results],
             "gate_results": [g.to_dict() for g in self.gate_results],
+            "approval_results": [a.to_dict() for a in self.approval_results],
+            "amendments": [a.to_dict() for a in self.amendments],
             "started_at": self.started_at,
             "completed_at": self.completed_at,
         }
@@ -365,6 +544,8 @@ class ExecutionState:
             status=data.get("status", "running"),
             step_results=[StepResult.from_dict(r) for r in data.get("step_results", [])],
             gate_results=[GateResult.from_dict(g) for g in data.get("gate_results", [])],
+            approval_results=[ApprovalResult.from_dict(a) for a in data.get("approval_results", [])],
+            amendments=[PlanAmendment.from_dict(a) for a in data.get("amendments", [])],
             started_at=data.get("started_at", ""),
             completed_at=data.get("completed_at", ""),
         )
@@ -393,10 +574,14 @@ class ExecutionAction:
     gate_command: str = ""
     phase_id: int = 0
 
+    # For APPROVAL actions:
+    approval_context: str = ""          # summary of phase output for reviewer
+    approval_options: list[str] = field(default_factory=list)
+
     # For COMPLETE/FAILED actions:
     summary: str = ""
 
-    # For batch dispatch (parallel steps):
+    # For batch dispatch (parallel steps / team members):
     parallel_actions: list[ExecutionAction] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -416,6 +601,12 @@ class ExecutionAction:
                 "gate_type": self.gate_type,
                 "gate_command": self.gate_command,
                 "phase_id": self.phase_id,
+            })
+        elif self.action_type == ActionType.APPROVAL:
+            d.update({
+                "phase_id": self.phase_id,
+                "approval_context": self.approval_context,
+                "approval_options": self.approval_options,
             })
         elif self.action_type in (ActionType.COMPLETE, ActionType.FAILED):
             d["summary"] = self.summary

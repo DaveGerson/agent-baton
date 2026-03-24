@@ -1,7 +1,13 @@
 """Prompt dispatcher — generates delegation prompts for agent subagents."""
 from __future__ import annotations
 
-from agent_baton.models.execution import ActionType, ExecutionAction, PlanGate, PlanStep
+from agent_baton.models.execution import (
+    ActionType,
+    ExecutionAction,
+    PlanGate,
+    PlanStep,
+    TeamMember,
+)
 
 
 class PromptDispatcher:
@@ -89,6 +95,66 @@ class PromptDispatcher:
             "under a 'Decisions' heading explaining why you chose this approach.",
         ]
 
+        return "\n".join(parts)
+
+    def build_team_delegation_prompt(
+        self,
+        step: PlanStep,
+        member: TeamMember,
+        *,
+        shared_context: str = "",
+        task_summary: str = "",
+        team_overview: str = "",
+    ) -> str:
+        """Build a delegation prompt for a single team member.
+
+        Includes the member's specific task, their role, the team
+        composition, and any dependencies on other members' output.
+        """
+        role = member.agent_name
+        project_line = task_summary or "this project"
+        article = "an" if role[0:1] in "aeiouAEIOU" else "a"
+
+        deps_text = ""
+        if member.depends_on:
+            deps_text = (
+                "\n## Dependencies\n"
+                "Wait for and build on the output from: "
+                + ", ".join(member.depends_on)
+            )
+
+        deliverables_text = (
+            "\n".join(f"- {d}" for d in member.deliverables)
+            if member.deliverables
+            else "_See task description._"
+        )
+
+        shared_block = shared_context.strip() if shared_context.strip() else "_No shared context._"
+
+        parts = [
+            f"You are {article} {role} working on {project_line}.",
+            f"You are part of a team: {team_overview}.",
+            f"Your role: **{member.role}**.",
+            "",
+            "## Shared Context",
+            shared_block,
+            "",
+            "Read `CLAUDE.md` for project conventions.",
+            "",
+            f"## Your Task (Step {step.step_id}, Member {member.member_id})",
+            (member.task_description or step.task_description).strip(),
+            "",
+            "## Deliverables",
+            deliverables_text,
+        ]
+        if deps_text:
+            parts.append(deps_text)
+        parts.extend([
+            "",
+            "## Decision Logging",
+            "When you make a non-obvious decision, document it in your output",
+            "under a 'Decisions' heading explaining why you chose this approach.",
+        ])
         return "\n".join(parts)
 
     def build_gate_prompt(

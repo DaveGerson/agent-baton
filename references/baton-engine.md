@@ -218,6 +218,106 @@ next` or `baton execute start`.  The GATE action output includes the
 
 ---
 
+### `baton execute approve`
+
+Record a human approval decision for a phase that has `approval_required=True`.
+
+```
+baton execute approve \
+    --phase-id N \
+    --result approve|reject|approve-with-feedback \
+    [--feedback TEXT]
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--phase-id N` | Yes | Phase ID requiring approval |
+| `--result` | Yes | Decision: `approve`, `reject`, or `approve-with-feedback` |
+| `--feedback TEXT` | No | Feedback text (required when `--result approve-with-feedback`) |
+
+**Output:** `Approval recorded: phase 1 — APPROVED`
+
+**State transitions:**
+- `approve` — execution continues to the gate (if any) or next phase.
+- `reject` — engine sets `status = failed`; next call to `baton execute next`
+  returns FAILED.
+- `approve-with-feedback` — engine inserts a remediation phase immediately
+  after the current phase and continues; the feedback text is injected into
+  the remediation step's delegation prompt.
+
+**When to call:** Only after receiving an APPROVAL action from
+`baton execute next`.  The APPROVAL action output includes the `phase_id`
+and a context summary for the reviewer.
+
+---
+
+### `baton execute amend`
+
+Amend the running plan by adding phases or steps during execution.
+
+```
+baton execute amend \
+    --description TEXT \
+    [--add-phase NAME:AGENT] \
+    [--after-phase N] \
+    [--add-step PHASE_ID:AGENT:DESCRIPTION]
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--description TEXT` | Yes | Why this amendment is needed (written to the amendment audit log) |
+| `--add-phase NAME:AGENT` | No | Add a phase as `NAME:AGENT`; repeatable for multiple phases |
+| `--after-phase N` | No | Insert new phases after this phase ID (default: append at end) |
+| `--add-step PHASE_ID:AGENT:DESCRIPTION` | No | Add a step to an existing phase; repeatable |
+
+**Output:** `Plan amended: added 1 phase(s), 0 step(s). Amendment recorded.`
+
+**Notes:**
+- Amendments are written to `execution-state.json` under `amendments[]` so
+  the audit trail is preserved even on crash recovery.
+- Use `--add-phase` when an unexpected dependency or gap requires a new
+  agent block.  Use `--add-step` to insert a single task into an existing
+  phase without restructuring the plan.
+- `--add-phase` and `--add-step` may be combined in one call.
+- After amending, call `baton execute next` to receive the first action of
+  the newly inserted content.
+
+---
+
+### `baton execute team-record`
+
+Record a team member completion within a team step (a step that coordinates
+multiple agents in parallel under one step ID).
+
+```
+baton execute team-record \
+    --step-id S \
+    --member-id M \
+    --agent NAME \
+    [--status complete|failed] \
+    [--outcome TEXT] \
+    [--files F]
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--step-id S` | Yes | Parent team step ID, e.g. `2.1` |
+| `--member-id M` | Yes | Team member ID, e.g. `2.1.a`, `2.1.b` |
+| `--agent NAME` | Yes | Agent name |
+| `--status` | No | `complete` or `failed` (default: `complete`) |
+| `--outcome TEXT` | No | Summary of work done |
+| `--files F` | No | Comma-separated files changed |
+
+**Output:** `Team member 2.1.a recorded: backend-engineer--python — complete`
+
+**When to use:** Team steps appear in the plan when the engine schedules
+multiple coordinated agents under a single logical step.  Call
+`baton execute team-record` for each member as they finish, then call
+`baton execute next` after all members are recorded.  See "Team Steps"
+below.
+
+---
+
 ### `baton execute complete`
 
 Finalise a completed execution run.
@@ -463,6 +563,42 @@ loop:
 
         action = baton execute next
 
+    elif action.type == APPROVAL:
+        # Present context to the human reviewer
+        # (action output includes the approval context block)
+        decision = human_review(action.context_summary)
+        # decision is one of: approve, reject, approve-with-feedback
+
+        if decision == "approve-with-feedback":
+            baton execute approve \
+                --phase-id {phase_id} \
+                --result approve-with-feedback \
+                --feedback "{feedback_text}"
+        else:
+            baton execute approve \
+                --phase-id {phase_id} \
+                --result {decision}
+
+        action = baton execute next
+
+    elif action.type == TEAM_DISPATCH:
+        # Engine returned multiple coordinated members under one step
+        for member in action.members:
+            baton execute dispatched --step-id {step_id} --agent {member.agent}
+            result = Agent(
+                agent_name = member.agent,
+                task       = member.delegation_prompt
+            )
+            baton execute team-record \
+                --step-id {step_id} \
+                --member-id {member.member_id} \
+                --agent {member.agent} \
+                --status complete \
+                --outcome "brief summary" \
+                --files "file1.py,file2.py"
+
+        action = baton execute next
+
     elif action.type == WAIT:
         # Parallel steps still running — poll after each agent completes
         # (only relevant in daemon/async mode; in sequential mode this
@@ -592,6 +728,33 @@ ACTION: WAIT
 In sequential execution this should not appear.  In parallel mode, poll
 with `baton execute next` after recording each returning agent's result.
 
+### APPROVAL
+
+Execution is paused for human review.  The engine sets
+`status = approval_pending` until a decision is recorded.
+
+```
+ACTION: APPROVAL
+  Phase:   <phase-id>
+  Message: <one-line summary>
+
+--- Approval Context ---
+<summary of phase output for reviewer>
+--- End Context ---
+
+Options: approve, reject, approve-with-feedback
+```
+
+| Field | Description |
+|-------|-------------|
+| `phase_id` | Phase requiring approval (pass to `baton execute approve --phase-id`) |
+| `message` | Human-readable description of why approval is needed |
+| `context_summary` | Output or evidence from the phase for the reviewer to evaluate |
+
+Present the context summary to the human reviewer and record the decision
+with `baton execute approve`.  Do not call `baton execute next` until the
+approval decision has been recorded.
+
 ---
 
 ## Common Errors and Fixes
@@ -719,9 +882,24 @@ Written by the engine on every state transition.  Never write this file
 manually — it is the engine's authoritative state.
 
 Fields: `task_id`, `plan` (embedded copy), `current_phase`, `status`,
-`step_results[]`, `gate_results[]`, `started_at`, `completed_at`.
+`step_results[]`, `gate_results[]`, `approval_results[]`, `amendments[]`,
+`started_at`, `completed_at`.
 
-`status` values: `running`, `gate_pending`, `complete`, `failed`.
+`status` values: `running`, `gate_pending`, `approval_pending`, `complete`, `failed`.
+
+| Status | Set by | Cleared by |
+|--------|--------|------------|
+| `running` | `baton execute start` | next phase transition |
+| `gate_pending` | phase completion with gate | `baton execute gate --result pass` |
+| `approval_pending` | phase with `approval_required=True` | `baton execute approve` |
+| `complete` | `baton execute complete` | — |
+| `failed` | failed step, failed gate, or rejected approval | — |
+
+**`approval_results[]`** — list of approval decision records.  Each entry
+contains `phase_id`, `result`, `feedback` (if any), `decided_at`.
+
+**`amendments[]`** — list of plan amendment audit records.  Each entry
+contains `description`, `phases_added`, `steps_added`, `amended_at`.
 
 If this file exists from a previous session (e.g., after a crash), use
 `baton execute resume` to pick up where it left off.
@@ -769,3 +947,61 @@ task outcome, agent performance summary, gate results, and suggested
 improvements for similar future tasks.
 
 Used by the `baton observe retro` command and the pattern learner.
+
+---
+
+## Plan Amendments
+
+Plans can evolve during execution.  Use `baton execute amend` when an
+unexpected dependency, gap, or error surfaces after execution has started
+and the original plan no longer covers what is needed.
+
+**Typical triggers:**
+
+| Situation | Amendment action |
+|-----------|-----------------|
+| An agent discovers an undocumented dependency | `--add-phase` with the dependency agent |
+| A step's scope expands beyond one agent | `--add-step` into the current phase |
+| A rejected approval requires rework | Engine inserts a remediation phase automatically (via `approve-with-feedback`) |
+| A gate failure reveals missing test coverage | `--add-phase` for a targeted fix phase |
+
+**Amendment audit trail:** Every call to `baton execute amend` writes a
+record to `amendments[]` in `execution-state.json` with the description,
+the phases and steps added, and a timestamp.  This trail is included in the
+final trace and retrospective so future runs can learn from mid-flight plan
+changes.
+
+**Constraints:** Amendments cannot remove or reorder phases that have
+already completed.  They can only add new content after the current phase
+or into phases not yet started.
+
+---
+
+## Team Steps
+
+A team step is a plan step that coordinates multiple agents under one
+logical step ID.  The engine emits a TEAM_DISPATCH action (instead of
+DISPATCH) when a step has two or more sub-members, each with their own
+agent assignment.
+
+**Member IDs** follow the pattern `{step_id}.{letter}`, e.g. `2.1.a`,
+`2.1.b`.  The parent step ID is `2.1`.
+
+**Orchestration pattern:**
+
+1. Receive TEAM_DISPATCH action — inspect `action.members` for the list
+   of member assignments.
+2. For each member: call `baton execute dispatched`, spawn the agent, wait
+   for completion.
+3. For each completed member: call `baton execute team-record` (not
+   `baton execute record`).
+4. After all members are recorded: call `baton execute next`.
+
+Members within a team step may be dispatched in parallel (if no inter-member
+`depends_on` constraints exist) or sequentially.  The engine does not
+advance past the team step until all members are in a terminal state
+(`complete` or `failed`).
+
+**Failure handling:** If any member records `--status failed`, the team
+step is marked failed and the engine sets `status = failed` on the next
+call to `baton execute next`.

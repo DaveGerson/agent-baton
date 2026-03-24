@@ -4,7 +4,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
-    from agent_baton.models.execution import ExecutionAction, MachinePlan
+    from agent_baton.models.execution import (
+        ExecutionAction,
+        MachinePlan,
+        PlanAmendment,
+        PlanPhase,
+        PlanStep,
+    )
 
 
 class ExecutionDriver(Protocol):
@@ -41,6 +47,35 @@ class ExecutionDriver(Protocol):
         phase_id: int,
         passed: bool,
         output: str = "",
+    ) -> None: ...
+
+    def record_approval_result(
+        self,
+        phase_id: int,
+        result: str,
+        feedback: str = "",
+    ) -> None: ...
+
+    def amend_plan(
+        self,
+        description: str,
+        new_phases: list[PlanPhase] | None = None,
+        insert_after_phase: int | None = None,
+        add_steps_to_phase: int | None = None,
+        new_steps: list[PlanStep] | None = None,
+        trigger: str = "manual",
+        trigger_phase_id: int = 0,
+        feedback: str = "",
+    ) -> PlanAmendment: ...
+
+    def record_team_member_result(
+        self,
+        step_id: str,
+        member_id: str,
+        agent_name: str,
+        status: str = "complete",
+        outcome: str = "",
+        files_changed: list[str] | None = None,
     ) -> None: ...
 
     def complete(self) -> str: ...
