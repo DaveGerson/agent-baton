@@ -6,8 +6,6 @@ perform.  State is persisted to disk between calls for crash recovery.
 """
 from __future__ import annotations
 
-import json
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -23,6 +21,7 @@ from agent_baton.models.execution import (
 from agent_baton.models.events import Event
 from agent_baton.models.usage import AgentUsageRecord, TaskUsageRecord
 from agent_baton.core.engine.dispatcher import PromptDispatcher
+from agent_baton.core.engine.persistence import StatePersistence
 from agent_baton.core.events.bus import EventBus
 from agent_baton.core.events import events as evt
 from agent_baton.core.events.persistence import EventPersistence
@@ -84,7 +83,6 @@ class ExecutionEngine:
                 break
     """
 
-    _STATE_FILENAME = "execution-state.json"
     _DEFAULT_CONTEXT_ROOT = Path(".claude/team-context")
 
     def __init__(
@@ -93,6 +91,7 @@ class ExecutionEngine:
         bus: EventBus | None = None,
     ) -> None:
         self._root = team_context_root or self._DEFAULT_CONTEXT_ROOT
+        self._persistence = StatePersistence(self._root)
         self._bus = bus
         # If bus provided, auto-wire persistence as a subscriber.
         if self._bus is not None:
@@ -152,7 +151,7 @@ class ExecutionEngine:
                 step_count=len(first_phase.steps),
             ))
 
-        self._save_state(state)
+        self._persistence.save(state)
         return self._determine_action(state)
 
     def next_action(self) -> ExecutionAction:
@@ -174,7 +173,7 @@ class ExecutionEngine:
         5. If all phases are exhausted → return COMPLETE.
         6. Save state before returning any mutable action.
         """
-        state = self._load_state()
+        state = self._persistence.load()
         if state is None:
             return ExecutionAction(
                 action_type=ActionType.FAILED.value,
@@ -183,7 +182,7 @@ class ExecutionEngine:
             )
 
         action = self._determine_action(state)
-        self._save_state(state)
+        self._persistence.save(state)
         return action
 
     def next_actions(self) -> list[ExecutionAction]:
@@ -197,7 +196,7 @@ class ExecutionEngine:
         Returns an empty list if no steps are dispatchable (caller should
         check :meth:`next_action` for WAIT / GATE / COMPLETE / FAILED).
         """
-        state = self._load_state()
+        state = self._persistence.load()
         if state is None:
             return []
 
@@ -251,7 +250,7 @@ class ExecutionEngine:
                 f"Invalid step status '{status}'. Must be one of: {_VALID_STEP_STATUSES}"
             )
 
-        state = self._load_state()
+        state = self._persistence.load()
         if state is None:
             raise RuntimeError(
                 "record_step_result() called with no active execution state."
@@ -293,7 +292,7 @@ class ExecutionEngine:
                 duration_seconds=duration_seconds if duration_seconds else None,
             )
 
-        self._save_state(state)
+        self._persistence.save(state)
 
     def mark_dispatched(self, step_id: str, agent_name: str) -> None:
         """Record that a step has been dispatched (in-flight, not yet complete).
@@ -322,7 +321,7 @@ class ExecutionEngine:
         - If *passed*: advances the phase pointer and resets step index.
         - Saves state.
         """
-        state = self._load_state()
+        state = self._persistence.load()
         if state is None:
             raise RuntimeError(
                 "record_gate_result() called with no active execution state."
@@ -377,7 +376,7 @@ class ExecutionEngine:
             state.current_step_index = 0
             state.status = "running"
 
-        self._save_state(state)
+        self._persistence.save(state)
 
     def complete(self) -> str:
         """Finalise execution.
@@ -388,13 +387,13 @@ class ExecutionEngine:
         - Generates and writes a retrospective via :class:`RetrospectiveEngine`.
         - Returns a human-readable completion summary string.
         """
-        state = self._load_state()
+        state = self._persistence.load()
         if state is None:
             return "No active execution state found."
 
         state.status = "complete"
         state.completed_at = _utcnow()
-        self._save_state(state)
+        self._persistence.save(state)
 
         # Finalise trace.
         trace_path: Path | None = None
@@ -444,7 +443,7 @@ class ExecutionEngine:
         ``steps_total``, ``gates_passed``, ``gates_failed``,
         ``elapsed_seconds``.
         """
-        state = self._load_state()
+        state = self._persistence.load()
         if state is None:
             return {"status": "no_active_execution"}
 
@@ -469,7 +468,7 @@ class ExecutionEngine:
         - Determines where execution left off.
         - Returns the appropriate next action.
         """
-        state = self._load_state()
+        state = self._persistence.load()
         if state is None:
             return ExecutionAction(
                 action_type=ActionType.FAILED.value,
@@ -500,7 +499,7 @@ class ExecutionEngine:
 
         Returns the number of recovered (re-dispatchable) steps.
         """
-        state = self._load_state()
+        state = self._persistence.load()
         if state is None:
             return 0
 
@@ -511,7 +510,7 @@ class ExecutionEngine:
         recovered = original_count - len(state.step_results)
 
         if recovered > 0:
-            self._save_state(state)
+            self._persistence.save(state)
 
         return recovered
 
@@ -526,32 +525,15 @@ class ExecutionEngine:
         if self._bus is not None:
             self._bus.publish(event)
 
+    # Backward-compatible shims — tests may call these directly.
     def _save_state(self, state: ExecutionState) -> Path:
-        """Write *state* to ``.claude/team-context/execution-state.json``.
-
-        Uses a tmp+rename pattern so a crash mid-write cannot corrupt the
-        state file.
-        """
-        self._root.mkdir(parents=True, exist_ok=True)
-        path = self._root / self._STATE_FILENAME
-        tmp_path = path.with_suffix(".tmp")
-        tmp_path.write_text(
-            json.dumps(state.to_dict(), indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        os.rename(str(tmp_path), str(path))
-        return path
+        """Delegate to :class:`StatePersistence`."""
+        self._persistence.save(state)
+        return self._persistence.path
 
     def _load_state(self) -> ExecutionState | None:
-        """Read state from disk; return ``None`` if no active execution."""
-        path = self._root / self._STATE_FILENAME
-        if not path.exists():
-            return None
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            return ExecutionState.from_dict(data)
-        except (json.JSONDecodeError, KeyError, TypeError):
-            return None
+        """Delegate to :class:`StatePersistence`."""
+        return self._persistence.load()
 
     def _build_usage_record(self, state: ExecutionState) -> TaskUsageRecord:
         """Convert *state* into a :class:`TaskUsageRecord` for the usage logger."""
