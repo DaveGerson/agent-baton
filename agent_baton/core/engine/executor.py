@@ -96,40 +96,127 @@ class ExecutionEngine:
         team_context_root: Path | None = None,
         bus: EventBus | None = None,
         task_id: str | None = None,
+        storage=None,  # SqliteStorage | FileStorage | None
     ) -> None:
         self._root = (team_context_root or self._DEFAULT_CONTEXT_ROOT).resolve()
         self._task_id = task_id
-        self._persistence = StatePersistence(self._root, task_id=task_id)
+        self._storage = storage  # May be None (legacy file mode)
         self._bus = bus
-        # Namespace events under the task directory when task_id is provided.
-        if task_id:
-            events_dir = self._root / "executions" / task_id / "events"
-        else:
-            events_dir = self._root / "events"
-        # If bus provided, auto-wire persistence as a subscriber.
-        if self._bus is not None:
-            self._event_persistence = EventPersistence(
-                events_dir=events_dir
-            )
-            self._bus.subscribe("*", self._event_persistence.append)
-        else:
+
+        if storage is not None:
+            # StorageBackend mode — all I/O goes through the storage backend.
+            # Legacy per-class objects are not created.
+            self._persistence = None  # not used in storage mode
+            self._usage_logger = None
+            self._telemetry = None
+            self._retro_engine = None
             self._event_persistence = None
+        else:
+            # Legacy file mode — existing behavior unchanged.
+            self._persistence = StatePersistence(self._root, task_id=task_id)
+            # Namespace events under the task directory when task_id is provided.
+            if task_id:
+                events_dir = self._root / "executions" / task_id / "events"
+            else:
+                events_dir = self._root / "events"
+            # If bus provided, auto-wire persistence as a subscriber.
+            if self._bus is not None:
+                self._event_persistence = EventPersistence(
+                    events_dir=events_dir
+                )
+                self._bus.subscribe("*", self._event_persistence.append)
+            else:
+                self._event_persistence = None
+            self._usage_logger = UsageLogger(
+                log_path=self._root / "usage-log.jsonl"
+            )
+            self._telemetry = AgentTelemetry(
+                log_path=self._root / "telemetry.jsonl"
+            )
+            self._retro_engine = RetrospectiveEngine(
+                retrospectives_dir=self._root / "retrospectives"
+            )
+
         self._tracer = TraceRecorder(team_context_root=self._root)
-        self._usage_logger = UsageLogger(
-            log_path=self._root / "usage-log.jsonl"
-        )
-        self._telemetry = AgentTelemetry(
-            log_path=self._root / "telemetry.jsonl"
-        )
-        self._retro_engine = RetrospectiveEngine(
-            retrospectives_dir=self._root / "retrospectives"
-        )
+
         # Wire telemetry as a catch-all EventBus subscriber so every domain
         # event is captured in the telemetry log.
         if self._bus is not None:
             self._bus.subscribe("*", self._on_event_for_telemetry)
+
         # In-memory trace object, populated during start() / resume().
         self._trace = None
+
+    # ── Storage routing helpers ──────────────────────────────────────────────
+
+    def _save_execution(self, state: ExecutionState) -> None:
+        """Persist execution state via storage backend or legacy file."""
+        if self._storage is not None:
+            try:
+                self._storage.save_execution(state)
+            except Exception:
+                pass
+        else:
+            self._persistence.save(state)
+
+    def _load_execution(self) -> ExecutionState | None:
+        """Load execution state via storage backend or legacy file."""
+        if self._storage is not None:
+            try:
+                task_id = self._task_id
+                if task_id:
+                    return self._storage.load_execution(task_id)
+                active = self._storage.get_active_task()
+                if active:
+                    return self._storage.load_execution(active)
+                return None
+            except Exception:
+                return None
+        else:
+            return self._persistence.load()
+
+    def _log_usage(self, record: TaskUsageRecord) -> None:
+        """Log a TaskUsageRecord via storage backend or legacy logger."""
+        if self._storage is not None:
+            try:
+                self._storage.log_usage(record)
+            except Exception:
+                pass
+        else:
+            self._usage_logger.log(record)
+
+    def _log_telemetry_event(self, tel_event: TelemetryEvent) -> None:
+        """Log a telemetry event via storage backend or legacy logger."""
+        if self._storage is not None:
+            try:
+                self._storage.log_telemetry({
+                    "timestamp": tel_event.timestamp,
+                    "agent_name": tel_event.agent_name,
+                    "event_type": tel_event.event_type,
+                    "tool_name": getattr(tel_event, "tool_name", ""),
+                    "file_path": getattr(tel_event, "file_path", ""),
+                    "duration_ms": getattr(tel_event, "duration_ms", 0),
+                    "details": getattr(tel_event, "details", ""),
+                    "task_id": self._task_id or "",
+                })
+            except Exception:
+                pass
+        else:
+            try:
+                self._telemetry.log_event(tel_event)
+            except Exception:
+                pass
+
+    def _save_retro(self, retro) -> "Path | None":
+        """Persist a retrospective via storage backend or legacy engine."""
+        if self._storage is not None:
+            try:
+                self._storage.save_retrospective(retro)
+            except Exception:
+                pass
+            return None
+        else:
+            return self._retro_engine.save(retro)
 
     # ── Public API ──────────────────────────────────────────────────────────
 
@@ -156,15 +243,12 @@ class ExecutionEngine:
             plan_snapshot=plan.to_dict(),
         )
 
-        try:
-            self._telemetry.log_event(TelemetryEvent(
-                timestamp=_utcnow(),
-                agent_name="engine",
-                event_type="execution_started",
-                details=f"task_id={plan.task_id} risk={plan.risk_level}",
-            ))
-        except Exception:
-            pass
+        self._log_telemetry_event(TelemetryEvent(
+            timestamp=_utcnow(),
+            agent_name="engine",
+            event_type="execution_started",
+            details=f"task_id={plan.task_id} risk={plan.risk_level}",
+        ))
 
         self._publish(evt.task_started(
             task_id=plan.task_id,
@@ -181,7 +265,7 @@ class ExecutionEngine:
                 step_count=len(first_phase.steps),
             ))
 
-        self._persistence.save(state)
+        self._save_execution(state)
         return self._determine_action(state)
 
     def next_action(self) -> ExecutionAction:
@@ -203,7 +287,7 @@ class ExecutionEngine:
         5. If all phases are exhausted → return COMPLETE.
         6. Save state before returning any mutable action.
         """
-        state = self._persistence.load()
+        state = self._load_execution()
         if state is None:
             return ExecutionAction(
                 action_type=ActionType.FAILED,
@@ -212,7 +296,7 @@ class ExecutionEngine:
             )
 
         action = self._determine_action(state)
-        self._persistence.save(state)
+        self._save_execution(state)
         return action
 
     def next_actions(self) -> list[ExecutionAction]:
@@ -226,7 +310,7 @@ class ExecutionEngine:
         Returns an empty list if no steps are dispatchable (caller should
         check :meth:`next_action` for WAIT / GATE / COMPLETE / FAILED).
         """
-        state = self._persistence.load()
+        state = self._load_execution()
         if state is None:
             return []
 
@@ -280,7 +364,7 @@ class ExecutionEngine:
                 f"Invalid step status '{status}'. Must be one of: {_VALID_STEP_STATUSES}"
             )
 
-        state = self._persistence.load()
+        state = self._load_execution()
         if state is None:
             raise RuntimeError(
                 "record_step_result() called with no active execution state."
@@ -323,26 +407,23 @@ class ExecutionEngine:
             )
 
         # Log telemetry event for this step.
-        try:
-            tel_event_type = (
-                "step_completed" if status == "complete" else "step_failed"
-            )
-            duration_ms = int(duration_seconds * 1000)
-            file_path = files_changed[0] if files_changed else ""
-            self._telemetry.log_event(TelemetryEvent(
-                timestamp=_utcnow(),
-                agent_name=agent_name,
-                event_type=tel_event_type,
-                duration_ms=duration_ms,
-                file_path=file_path,
-                details=f"step_id={step_id} outcome={outcome}" + (
-                    f" error={error}" if error else ""
-                ),
-            ))
-        except Exception:
-            pass
+        tel_event_type = (
+            "step_completed" if status == "complete" else "step_failed"
+        )
+        duration_ms = int(duration_seconds * 1000)
+        file_path = files_changed[0] if files_changed else ""
+        self._log_telemetry_event(TelemetryEvent(
+            timestamp=_utcnow(),
+            agent_name=agent_name,
+            event_type=tel_event_type,
+            duration_ms=duration_ms,
+            file_path=file_path,
+            details=f"step_id={step_id} outcome={outcome}" + (
+                f" error={error}" if error else ""
+            ),
+        ))
 
-        self._persistence.save(state)
+        self._save_execution(state)
 
     def mark_dispatched(self, step_id: str, agent_name: str) -> None:
         """Record that a step has been dispatched (in-flight, not yet complete).
@@ -371,7 +452,7 @@ class ExecutionEngine:
         - If *passed*: advances the phase pointer and resets step index.
         - Saves state.
         """
-        state = self._persistence.load()
+        state = self._load_execution()
         if state is None:
             raise RuntimeError(
                 "record_gate_result() called with no active execution state."
@@ -405,15 +486,12 @@ class ExecutionEngine:
             )
 
         # Log telemetry event for this gate.
-        try:
-            self._telemetry.log_event(TelemetryEvent(
-                timestamp=_utcnow(),
-                agent_name="engine",
-                event_type="gate_passed" if passed else "gate_failed",
-                details=f"phase_id={phase_id} gate_type={gate_type}",
-            ))
-        except Exception:
-            pass
+        self._log_telemetry_event(TelemetryEvent(
+            timestamp=_utcnow(),
+            agent_name="engine",
+            event_type="gate_passed" if passed else "gate_failed",
+            details=f"phase_id={phase_id} gate_type={gate_type}",
+        ))
 
         if not passed:
             self._publish(evt.gate_failed(
@@ -437,7 +515,7 @@ class ExecutionEngine:
             state.current_step_index = 0
             state.status = "running"
 
-        self._persistence.save(state)
+        self._save_execution(state)
 
     def complete(self) -> str:
         """Finalise execution.
@@ -448,13 +526,13 @@ class ExecutionEngine:
         - Generates and writes a retrospective via :class:`RetrospectiveEngine`.
         - Returns a human-readable completion summary string.
         """
-        state = self._persistence.load()
+        state = self._load_execution()
         if state is None:
             return "No active execution state found."
 
         state.status = "complete"
         state.completed_at = _utcnow()
-        self._persistence.save(state)
+        self._save_execution(state)
 
         # Finalise trace.
         trace_path: Path | None = None
@@ -464,11 +542,15 @@ class ExecutionEngine:
 
         # Build and log usage record.
         usage_record = self._build_usage_record(state)
-        self._usage_logger.log(usage_record)
+        self._log_usage(usage_record)
 
         # Build and save retrospective with rich qualitative data.
         retro_data = self._build_retrospective_data(state)
-        retro = self._retro_engine.generate_from_usage(
+        # generate_from_usage produces data only; does not persist.
+        retro_engine_for_gen = RetrospectiveEngine(
+            retrospectives_dir=self._root / "retrospectives"
+        )
+        retro = retro_engine_for_gen.generate_from_usage(
             usage=usage_record,
             task_name=retro_data.get("task_name", state.plan.task_summary),
             what_worked=retro_data.get("what_worked"),
@@ -477,7 +559,7 @@ class ExecutionEngine:
             roster_recommendations=retro_data.get("roster_recommendations"),
             sequencing_notes=retro_data.get("sequencing_notes"),
         )
-        retro_path = self._retro_engine.save(retro)
+        retro_path = self._save_retro(retro)
 
         # Compose summary string.
         steps_done = len(state.completed_step_ids)
@@ -491,19 +573,16 @@ class ExecutionEngine:
             elapsed_seconds=elapsed,
         ))
 
-        try:
-            self._telemetry.log_event(TelemetryEvent(
-                timestamp=_utcnow(),
-                agent_name="engine",
-                event_type="execution_completed",
-                duration_ms=int(elapsed * 1000),
-                details=(
-                    f"task_id={state.task_id} steps={steps_done}"
-                    f" gates_passed={gates_passed}"
-                ),
-            ))
-        except Exception:
-            pass
+        self._log_telemetry_event(TelemetryEvent(
+            timestamp=_utcnow(),
+            agent_name="engine",
+            event_type="execution_completed",
+            duration_ms=int(elapsed * 1000),
+            details=(
+                f"task_id={state.task_id} steps={steps_done}"
+                f" gates_passed={gates_passed}"
+            ),
+        ))
 
         summary_lines = [
             f"Task {state.task_id} completed.",
@@ -523,7 +602,7 @@ class ExecutionEngine:
         ``steps_total``, ``gates_passed``, ``gates_failed``,
         ``elapsed_seconds``.
         """
-        state = self._persistence.load()
+        state = self._load_execution()
         if state is None:
             return {"status": "no_active_execution"}
 
@@ -548,7 +627,7 @@ class ExecutionEngine:
         - Determines where execution left off.
         - Returns the appropriate next action.
         """
-        state = self._persistence.load()
+        state = self._load_execution()
         if state is None:
             return ExecutionAction(
                 action_type=ActionType.FAILED,
@@ -579,7 +658,7 @@ class ExecutionEngine:
 
         Returns the number of recovered (re-dispatchable) steps.
         """
-        state = self._persistence.load()
+        state = self._load_execution()
         if state is None:
             return 0
 
@@ -590,7 +669,7 @@ class ExecutionEngine:
         recovered = original_count - len(state.step_results)
 
         if recovered > 0:
-            self._persistence.save(state)
+            self._save_execution(state)
 
         return recovered
 
@@ -617,7 +696,7 @@ class ExecutionEngine:
                 f"Invalid approval result '{result}'. Must be one of: {_VALID_RESULTS}"
             )
 
-        state = self._persistence.load()
+        state = self._load_execution()
         if state is None:
             raise RuntimeError(
                 "record_approval_result() called with no active execution state."
@@ -647,14 +726,14 @@ class ExecutionEngine:
         elif result == "approve-with-feedback":
             # Insert a remediation phase after the current phase.
             # Save state first so amend_plan sees the approval result.
-            self._persistence.save(state)
+            self._save_execution(state)
             self._amend_from_feedback(state, phase_id, feedback)
             # Reload state — amend_plan saved its own copy with the
             # amendment applied.  We must pick up those changes.
-            state = self._persistence.load() or state
+            state = self._load_execution() or state
             state.status = "running"
 
-        self._persistence.save(state)
+        self._save_execution(state)
 
     def amend_plan(
         self,
@@ -686,7 +765,7 @@ class ExecutionEngine:
         Returns:
             The :class:`PlanAmendment` record.
         """
-        state = self._persistence.load()
+        state = self._load_execution()
         if state is None:
             raise RuntimeError(
                 "amend_plan() called with no active execution state."
@@ -745,7 +824,7 @@ class ExecutionEngine:
                 },
             )
 
-        self._persistence.save(state)
+        self._save_execution(state)
         return amendment
 
     def record_team_member_result(
@@ -762,7 +841,7 @@ class ExecutionEngine:
         When all members have completed, the parent step is automatically
         marked as complete.  If any member fails, the parent step fails.
         """
-        state = self._persistence.load()
+        state = self._load_execution()
         if state is None:
             raise RuntimeError(
                 "record_team_member_result() called with no active execution state."
@@ -812,7 +891,7 @@ class ExecutionEngine:
                 ]
                 parent.completed_at = _utcnow()
 
-        self._persistence.save(state)
+        self._save_execution(state)
 
     # ── Internal helpers ────────────────────────────────────────────────────
 
@@ -826,16 +905,13 @@ class ExecutionEngine:
         Called synchronously by the bus during publish().  Wrapped in
         try/except so a logging failure never crashes execution.
         """
-        try:
-            agent_name = event.payload.get("agent_name") or "engine"
-            self._telemetry.log_event(TelemetryEvent(
-                timestamp=event.timestamp,
-                agent_name=agent_name,
-                event_type=event.topic,
-                details=f"task_id={event.task_id} seq={event.sequence}",
-            ))
-        except Exception:
-            pass
+        agent_name = event.payload.get("agent_name") or "engine"
+        self._log_telemetry_event(TelemetryEvent(
+            timestamp=event.timestamp,
+            agent_name=agent_name,
+            event_type=event.topic,
+            details=f"task_id={event.task_id} seq={event.sequence}",
+        ))
 
     def _publish(self, event: Event) -> None:
         """Publish an event if a bus is configured."""

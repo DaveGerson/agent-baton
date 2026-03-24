@@ -6,12 +6,14 @@ Provides a ``StorageBackend`` protocol implemented by:
 
 Usage::
 
-    from agent_baton.core.storage import get_storage, detect_backend
+    from agent_baton.core.storage import get_project_storage, StorageBackend
 
-    backend = get_storage(project_root=Path("/my/project"))
-    backend.save_execution(state)
+    storage = get_project_storage(context_root)  # auto-detects backend
+    engine = ExecutionEngine(storage=storage)
 """
 from __future__ import annotations
+
+from agent_baton.core.storage.protocol import StorageBackend
 
 from pathlib import Path
 
