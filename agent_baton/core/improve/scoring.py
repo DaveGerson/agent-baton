@@ -169,7 +169,7 @@ class PerformanceScorer:
 
     def write_report(self, path: Path | None = None) -> Path:
         """Write the scorecard report to disk."""
-        out_path = path or Path(".claude/team-context/agent-scorecards.md")
+        out_path = (path or Path(".claude/team-context/agent-scorecards.md")).resolve()
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(self.generate_report(), encoding="utf-8")
         return out_path

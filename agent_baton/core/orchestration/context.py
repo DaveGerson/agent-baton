@@ -19,7 +19,7 @@ class ContextManager:
     """
 
     def __init__(self, team_context_dir: Path | None = None) -> None:
-        self._dir = team_context_dir or Path(".claude/team-context")
+        self._dir = (team_context_dir or Path(".claude/team-context")).resolve()
 
     @property
     def dir(self) -> Path:

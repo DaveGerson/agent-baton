@@ -46,7 +46,7 @@ class WorkerSupervisor:
     """
 
     def __init__(self, team_context_root: Path | None = None) -> None:
-        self._root = team_context_root or Path(".claude/team-context")
+        self._root = (team_context_root or Path(".claude/team-context")).resolve()
 
     @property
     def pid_path(self) -> Path:

@@ -62,7 +62,7 @@ def handler(args: argparse.Namespace) -> None:
     )
 
     if args.save:
-        ctx_dir = Path(".claude/team-context")
+        ctx_dir = Path(".claude/team-context").resolve()
         ctx_dir.mkdir(parents=True, exist_ok=True)
         json_path = ctx_dir / "plan.json"
         md_path = ctx_dir / "plan.md"

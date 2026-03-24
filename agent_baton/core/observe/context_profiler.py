@@ -33,7 +33,7 @@ class ContextProfiler:
     _DEFAULT_CONTEXT_ROOT = Path(".claude/team-context")
 
     def __init__(self, team_context_root: Path | None = None) -> None:
-        self._root = team_context_root or self._DEFAULT_CONTEXT_ROOT
+        self._root = (team_context_root or self._DEFAULT_CONTEXT_ROOT).resolve()
         self._recorder = TraceRecorder(self._root)
 
     @property

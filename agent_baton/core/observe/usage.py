@@ -19,7 +19,7 @@ class UsageLogger:
     _DEFAULT_LOG_PATH = Path(".claude/team-context/usage-log.jsonl")
 
     def __init__(self, log_path: Path | None = None) -> None:
-        self._log_path = log_path or self._DEFAULT_LOG_PATH
+        self._log_path = (log_path or self._DEFAULT_LOG_PATH).resolve()
 
     @property
     def log_path(self) -> Path:

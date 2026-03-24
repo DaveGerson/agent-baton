@@ -74,7 +74,7 @@ class PromptEvolutionEngine:
         self._retro = retro_engine or RetrospectiveEngine()
         self._vcs = vcs or AgentVersionControl()
         self._registry = registry or AgentRegistry()
-        self._proposals_dir = proposals_dir or Path(".claude/team-context/evolution-proposals")
+        self._proposals_dir = (proposals_dir or Path(".claude/team-context/evolution-proposals")).resolve()
 
     def analyze(self) -> list[EvolutionProposal]:
         """Analyze all agents and generate proposals for those needing improvement.
@@ -209,7 +209,7 @@ class PromptEvolutionEngine:
 
     def write_report(self, path: Path | None = None) -> Path:
         """Write the evolution report to disk."""
-        out_path = path or Path(".claude/team-context/evolution-report.md")
+        out_path = (path or Path(".claude/team-context/evolution-report.md")).resolve()
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(self.generate_report(), encoding="utf-8")
         return out_path

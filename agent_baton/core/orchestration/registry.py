@@ -57,7 +57,7 @@ class AgentRegistry:
             Total number of agents loaded.
         """
         global_dir = Path.home() / ".claude" / "agents"
-        project_dir = Path(".claude") / "agents"
+        project_dir = (Path(".claude") / "agents").resolve()
 
         count = self.load_directory(global_dir)
         count += self.load_directory(project_dir, override=True)

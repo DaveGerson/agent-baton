@@ -23,7 +23,7 @@ class RetrospectiveEngine:
     """
 
     def __init__(self, retrospectives_dir: Path | None = None) -> None:
-        self._dir = retrospectives_dir or Path(".claude/team-context/retrospectives")
+        self._dir = (retrospectives_dir or Path(".claude/team-context/retrospectives")).resolve()
 
     @property
     def dir(self) -> Path:

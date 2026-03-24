@@ -23,7 +23,7 @@ class EventPersistence:
     _DEFAULT_DIR = Path(".claude/team-context/events")
 
     def __init__(self, events_dir: Path | None = None) -> None:
-        self._dir = events_dir or self._DEFAULT_DIR
+        self._dir = (events_dir or self._DEFAULT_DIR).resolve()
 
     @property
     def events_dir(self) -> Path:

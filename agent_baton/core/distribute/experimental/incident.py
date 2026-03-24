@@ -204,7 +204,7 @@ class IncidentManager:
     _DEFAULT_INCIDENTS_DIR = Path(".claude/team-context/incidents")
 
     def __init__(self, incidents_dir: Path | None = None) -> None:
-        self._dir = incidents_dir or self._DEFAULT_INCIDENTS_DIR
+        self._dir = (incidents_dir or self._DEFAULT_INCIDENTS_DIR).resolve()
 
     @property
     def incidents_dir(self) -> Path:

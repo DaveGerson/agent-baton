@@ -120,7 +120,7 @@ class BudgetTuner:
     """
 
     def __init__(self, team_context_root: Path | None = None) -> None:
-        self._root = team_context_root or _DEFAULT_TEAM_CONTEXT
+        self._root = (team_context_root or _DEFAULT_TEAM_CONTEXT).resolve()
         self._log_path = self._root / "usage-log.jsonl"
         self._recs_path = self._root / _RECOMMENDATIONS_FILE
 

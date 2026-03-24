@@ -103,7 +103,7 @@ class ComplianceReportGenerator:
     """Generate and manage compliance reports."""
 
     def __init__(self, reports_dir: Path | None = None) -> None:
-        self._dir = reports_dir or Path(".claude/team-context/compliance-reports")
+        self._dir = (reports_dir or Path(".claude/team-context/compliance-reports")).resolve()
 
     @property
     def reports_dir(self) -> Path:

@@ -79,7 +79,7 @@ class EscalationManager:
     """Manage the escalation file at .claude/team-context/escalations.md."""
 
     def __init__(self, path: Path | None = None) -> None:
-        self._path: Path = path or Path(".claude/team-context/escalations.md")
+        self._path: Path = (path or Path(".claude/team-context/escalations.md")).resolve()
 
     @property
     def path(self) -> Path:

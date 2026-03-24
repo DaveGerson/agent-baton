@@ -57,7 +57,7 @@ class AsyncDispatcher:
     _DEFAULT_TASKS_DIR = Path(".claude/team-context/async-tasks")
 
     def __init__(self, tasks_dir: Path | None = None) -> None:
-        self._dir = tasks_dir or self._DEFAULT_TASKS_DIR
+        self._dir = (tasks_dir or self._DEFAULT_TASKS_DIR).resolve()
 
     @property
     def tasks_dir(self) -> Path:

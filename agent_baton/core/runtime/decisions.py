@@ -27,7 +27,7 @@ class DecisionManager:
         decisions_dir: Path | None = None,
         bus: EventBus | None = None,
     ) -> None:
-        self._dir = decisions_dir or self._DEFAULT_DIR
+        self._dir = (decisions_dir or self._DEFAULT_DIR).resolve()
         self._bus = bus
 
     @property

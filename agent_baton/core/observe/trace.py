@@ -26,7 +26,7 @@ class TraceRecorder:
     _DEFAULT_CONTEXT_ROOT = Path(".claude/team-context")
 
     def __init__(self, team_context_root: Path | None = None) -> None:
-        self._root = team_context_root or self._DEFAULT_CONTEXT_ROOT
+        self._root = (team_context_root or self._DEFAULT_CONTEXT_ROOT).resolve()
 
     @property
     def traces_dir(self) -> Path:

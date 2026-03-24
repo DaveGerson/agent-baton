@@ -147,7 +147,7 @@ class DashboardGenerator:
 
     def write(self, path: Path | None = None) -> Path:
         """Write the dashboard to disk."""
-        out_path = path or Path(".claude/team-context/usage-dashboard.md")
+        out_path = (path or Path(".claude/team-context/usage-dashboard.md")).resolve()
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(self.generate(), encoding="utf-8")
         return out_path

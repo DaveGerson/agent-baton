@@ -321,7 +321,7 @@ class PolicyEngine:
     _DEFAULT_POLICIES_DIR = Path(".claude/policies")
 
     def __init__(self, policies_dir: Path | None = None) -> None:
-        self._dir = policies_dir or self._DEFAULT_POLICIES_DIR
+        self._dir = (policies_dir or self._DEFAULT_POLICIES_DIR).resolve()
 
     @property
     def policies_dir(self) -> Path:
