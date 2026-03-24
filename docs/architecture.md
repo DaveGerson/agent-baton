@@ -55,7 +55,8 @@ agent_baton/
   |  __init__.py      3 canonical re-exports: AgentRegistry, AgentRouter,
   |                   ContextManager
   |
-  |  orchestration/   AgentRegistry, AgentRouter, ContextManager
+  |  orchestration/   AgentRegistry, AgentRouter, ContextManager,
+  |  |                KnowledgeRegistry
   |  govern/          DataClassifier, ComplianceReportGenerator, PolicyEngine,
   |  |                SpecValidator, AgentValidator, EscalationManager
   |  observe/         TraceRecorder, UsageLogger, RetrospectiveEngine,
@@ -66,7 +67,8 @@ agent_baton/
   |  |  experimental/ AsyncDispatcher, IncidentManager, ProjectTransfer
   |  events/          EventBus, EventPersistence, domain events, projections
   |  engine/          ExecutionEngine, IntelligentPlanner, PromptDispatcher,
-  |  |                GateRunner, StatePersistence, ExecutionDriver protocol
+  |  |                GateRunner, StatePersistence, ExecutionDriver protocol,
+  |  |                KnowledgeResolver, KnowledgeGap handler
   |  runtime/         TaskWorker, WorkerSupervisor, StepScheduler,
   |                   AgentLauncher, ClaudeCodeLauncher, DecisionManager,
   |                   ExecutionContext factory
@@ -239,6 +241,7 @@ The `models/` layer is the foundation. It has no imports from `core/`.
 | `mission_log.py` | `MissionLogEntry` — records per-step mission log entries |
 | `events.py` | Domain event types (published to `EventBus`) |
 | `decision.py` | `DecisionRecord` — structured decision log entries |
+| `knowledge.py` | `KnowledgeDocument`, `KnowledgePack`, `KnowledgeAttachment`, `KnowledgeGapSignal`, `KnowledgeGapRecord`, `ResolvedDecision` |
 
 `MachinePlan` is the canonical plan type. It is the only plan model in the
 system and is used by the engine, the runtime, the CLI, and all tests.
@@ -281,3 +284,106 @@ without changing the `baton` command surface.
 | Improvement | `improve/` | scores, evolve, patterns, budget, changelog |
 | Distribution | `distribute/` | package, publish, pull, verify-package, install, transfer |
 | Agents | `agents/` | agents, route, events, incident |
+
+---
+
+## 9. Knowledge Delivery Subsystem
+
+### 9.1 Overview
+
+The knowledge delivery subsystem ensures that agents receive curated,
+task-relevant knowledge at dispatch time, and that they can signal and
+resolve knowledge gaps at runtime. It is a layered pipeline integrated
+into the existing execution path — no new execution modes are introduced.
+
+```
+KnowledgeRegistry (curated packs)  ─┐
+                                     ├──→ KnowledgeResolver ──→ Dispatcher injection
+MCP RAG Server (broad org knowledge) ─┘     (match + budget)      (prompt assembly)
+```
+
+### 9.2 Components
+
+| Component | Location | Role |
+|-----------|----------|------|
+| `KnowledgeRegistry` | `core/orchestration/knowledge_registry.py` | Loads and indexes knowledge packs from `.claude/knowledge/` (project) and `~/.claude/knowledge/` (global). Provides exact lookups and query methods (tag match, TF-IDF relevance fallback). Parallel to `AgentRegistry`. |
+| `KnowledgeResolver` | `core/engine/knowledge_resolver.py` | Orchestration point. Takes a plan step's context (agent name, task description, task type, risk level) and produces `KnowledgeAttachment` objects with delivery decisions (inline vs. reference) based on a per-step token budget. |
+| `KnowledgeGap` handler | `core/engine/knowledge_gap.py` | Parses `KNOWLEDGE_GAP` signals from agent output. Consults an escalation matrix (gap type × risk level × intervention level) to decide: auto-resolve via registry/RAG, or queue for the next human gate. Records `ResolvedDecision` entries in execution state. |
+
+### 9.3 Discovery Layers (resolved at plan time)
+
+Layers execute in order. Documents resolved in an earlier layer are not duplicated:
+
+1. **Explicit** — user passes `--knowledge path/to/file.md` or `--knowledge-pack pack-name` to `baton plan`
+2. **Agent-declared** — agent frontmatter lists baseline packs via the `knowledge_packs` field
+3. **Planner-matched (strict)** — keywords extracted from task description + type are matched against registry tags
+4. **Planner-matched (relevance fallback)** — if strict matching returns nothing, TF-IDF over registry metadata corpus (or MCP RAG server if available)
+5. **Plan review** — `plan.md` shows each step's attachments with source tags; user can add/remove before execution starts
+
+### 9.4 Planner Integration
+
+`KnowledgeRegistry` is injected into `IntelligentPlanner.__init__()` as an
+optional parameter. Knowledge resolution runs as step 7.5 in the planning
+pipeline — after agent routing, before data classification. If the registry
+is `None`, the step is skipped entirely (graceful no-op for projects without
+knowledge packs).
+
+The planner also queries `PatternLearner.knowledge_gaps_for(agent_name,
+task_type)` to attach prior gap records as `gap-suggested` attachments.
+These appear in `plan.md` with a distinct tag so the user can confirm them
+at the plan review gate.
+
+### 9.5 Runtime Knowledge Acquisition Protocol
+
+Agents self-interrupt by emitting a structured signal in their outcome:
+
+```
+KNOWLEDGE_GAP: Need context on SOX audit trail requirements for financial data
+CONFIDENCE: none
+TYPE: contextual
+```
+
+The executor parses this in `ExecutionEngine.record_step_result()` before
+recording the step result. The escalation matrix:
+
+| Gap type | Registry match | Risk × Intervention | Action |
+|----------|---------------|---------------------|--------|
+| factual | found | any | Auto-resolve: amend re-dispatch step with resolved knowledge |
+| factual | not found | LOW + low intervention | Proceed best-effort, log gap in trace |
+| factual | not found | LOW + medium/high | Queue at next human gate |
+| factual | not found | MEDIUM+ any | Queue at next human gate |
+| contextual | — | any | Queue at next human gate |
+
+The interrupted step is recorded with `status: "interrupted"`. When a gap is
+auto-resolved or answered by the user, a `ResolvedDecision` is written to
+`execution_state.resolved_decisions`. Re-dispatched steps inject all resolved
+decisions as a final, non-revisitable block in the delegation prompt.
+
+The `--intervention low|medium|high` flag on `baton plan` shifts the
+escalation thresholds. `low` (default) maximizes autonomy; `high` escalates
+on any unresolved gap.
+
+### 9.6 Retrospective Feedback Loop
+
+Three channels feed the feedback loop:
+
+1. **Explicit gaps** — every `KNOWLEDGE_GAP` signal is recorded as a `KnowledgeGapRecord` in the retrospective JSON, regardless of resolution method.
+2. **Implicit gaps** — the retrospective engine scans narrative text for gap signals ("lacked context", "didn't know about") and flags them as candidate `KnowledgeGapRecord` entries with `resolution: "unresolved"`.
+3. **Gap-to-pack resolution** — `PatternLearner` indexes gap records by `agent_name + task_type`. Future plans with matching combinations receive `gap-suggested` attachments automatically.
+
+Over time, early executions have more gaps. The system learns which agents need which knowledge for which task types. Later executions auto-attach the right knowledge, with the user confirming at the plan review gate.
+
+`KnowledgeGapRecord` replaces the former `KnowledgeGap` model in
+`models/retrospective.py`. Old retrospective JSON files are handled by
+`from_dict()` defaulting the new fields.
+
+### 9.7 Dependency Graph Position
+
+`KnowledgeRegistry` sits in `core/orchestration/` alongside `AgentRegistry`
+and depends only on `models/`. `KnowledgeResolver` sits in `core/engine/`
+and depends on `models/` and `core/orchestration/`. This fits the existing
+layered dependency order without modification:
+
+```
+models  →  orchestration  →  engine  →  runtime  →  CLI
+```

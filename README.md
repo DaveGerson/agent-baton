@@ -17,6 +17,17 @@ They encode how to plan, what guardrails to apply, how agents communicate,
 when to commit, and how to handle failures. You never see them; they make
 the orchestrator smarter.
 
+**Knowledge delivery** — curated knowledge packs are resolved at plan time
+and injected into each agent's delegation prompt. Agents receive only the
+knowledge relevant to their task, not a global dump. Agents can signal
+knowledge gaps at runtime; the engine auto-resolves via registry or queues
+for human review. A feedback loop learns which agents need what knowledge
+for which task types, improving future plans automatically.
+
+**Smart Forge** — AI-driven task planning with interactive refinement.
+Propose tasks, get decomposed execution plans, and refine them before
+committing. Integrates with the PMO UI for a visual plan review experience.
+
 **Risk-tiered safety** — simple changes run fast with minimal overhead.
 Changes touching databases, production systems, or regulated data
 automatically involve the auditor agent, which has independent veto power.
@@ -184,6 +195,8 @@ This gives you the `baton` CLI:
 ```
 # Core workflow
 baton plan "task description" --save   # Create an execution plan
+baton plan "task" --knowledge path/to/doc.md --knowledge-pack compliance \
+                  --intervention medium  # Plan with explicit knowledge + escalation
 baton execute start                    # Drive the plan through phases
 baton execute next --all               # Get all parallel-dispatchable steps
 baton execute resume                   # Resume after crash/interruption
@@ -240,7 +253,7 @@ templates/         ← CLAUDE.md + settings.json for target projects
 scripts/           ← Install scripts (Linux + Windows)
 docs/              ← Architecture documentation
 agent_baton/       ← Optional Python package (CLI + execution engine)
-tests/             ← 1732 pytest tests
+tests/             ← ~3450+ pytest tests
 ```
 
 ## Contributing

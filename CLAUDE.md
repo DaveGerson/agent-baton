@@ -7,11 +7,13 @@ system for Claude Code.
 
 ```
 agent_baton/       ← Python package (orchestration engine)
-  models/          ← Data models (17 modules, incl. pmo.py)
+  models/          ← Data models (18 modules, incl. pmo.py, knowledge.py)
   core/            ← Business logic (10 sub-packages, no shim files)
     engine/        ← Execution core: planner, executor, dispatcher, gates,
-    │                persistence, protocols (ExecutionDriver)
-    orchestration/ ← Agent discovery: registry, router, context manager
+    │                persistence, protocols (ExecutionDriver),
+    │                knowledge_resolver, knowledge_gap
+    orchestration/ ← Agent discovery: registry, router, context manager,
+    │                knowledge_registry
     pmo/           ← PMO subsystem: store, scanner, forge
     govern/        ← Policy enforcement, compliance, validation
     observe/       ← Tracing, usage, dashboard, retrospective, telemetry
@@ -36,7 +38,7 @@ agents/            ← Distributable agent definitions (19 .md files)
 references/        ← Distributable reference docs (13 .md files)
 templates/         ← CLAUDE.md + settings.json installed to target projects
 scripts/           ← Install scripts (Linux + Windows)
-tests/             ← Test suite (2173 tests, pytest)
+tests/             ← Test suite (~3450+ tests, pytest)
 pmo-ui/            ← React/Vite PMO frontend (served at /pmo/)
 .claude/           ← Project-specific orchestration setup:
   agents/          ← Tailored agents for developing agent-baton (11)
@@ -78,12 +80,13 @@ pmo-ui/            ← React/Vite PMO frontend (served at /pmo/)
 | `agent-definition-engineer` | Edit agent .md files, references, knowledge packs |
 | `prompt-engineer` | Agent prompt optimization |
 | `ai-product-strategist` | Product decisions, value/cost analysis |
+| `spec-document-reviewer` | Review and validate specification documents |
 
 ## Development
 
 ```bash
 pip install -e ".[dev]"    # Install in editable mode
-pytest                     # Run tests (2007 tests)
+pytest                     # Run tests (~3450+ tests)
 scripts/install.sh         # Re-install globally after editing agents/references
 ```
 
@@ -94,7 +97,10 @@ orchestration. For complex tasks involving 3+ files across different
 layers, use the engine path:
 
 ```
-baton plan "task description" --save --explain
+baton plan "task description" --save --explain \
+    [--knowledge path/to/doc.md] \       # attach explicit knowledge document(s)
+    [--knowledge-pack pack-name] \       # attach explicit knowledge pack(s)
+    [--intervention low|medium|high]     # escalation threshold (default: low)
 # Review plan.md — present summary to user, adjust if needed
 baton execute start
 
