@@ -26,6 +26,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import time
 from dataclasses import dataclass, field
@@ -35,6 +36,14 @@ from typing import Any
 from agent_baton.core.runtime.launcher import LaunchResult
 
 logger = logging.getLogger(__name__)
+
+_API_KEY_RE = re.compile(r"sk-ant-[A-Za-z0-9_-]+")
+
+
+def _redact_stderr(text: str) -> str:
+    """Strip Anthropic API key patterns from error text."""
+    return _API_KEY_RE.sub("sk-ant-***REDACTED***", text)
+
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -336,11 +345,11 @@ class ClaudeCodeLauncher:
                 # Include both stderr and result_text so rate-limit
                 # detection works regardless of where the 429 appears.
                 if is_error and stderr_text:
-                    error = f"{stderr_text}\n{result_text}"
+                    error = _redact_stderr(f"{stderr_text}\n{result_text}")
                 elif is_error:
-                    error = result_text
+                    error = _redact_stderr(result_text)
                 else:
-                    error = stderr_text or f"exit code {exit_code}"
+                    error = _redact_stderr(stderr_text) or f"exit code {exit_code}"
                 return LaunchResult(
                     step_id=step_id,
                     agent_name=agent_name,
@@ -370,7 +379,7 @@ class ClaudeCodeLauncher:
                 status="failed",
                 outcome=outcome,
                 duration_seconds=elapsed,
-                error=stderr_text or f"exit code {exit_code}",
+                error=_redact_stderr(stderr_text) or f"exit code {exit_code}",
             )
 
         return LaunchResult(
@@ -443,6 +452,7 @@ class ClaudeCodeLauncher:
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
                 env=env,
+                start_new_session=True,
             )
         except OSError as exc:
             elapsed = time.monotonic() - start

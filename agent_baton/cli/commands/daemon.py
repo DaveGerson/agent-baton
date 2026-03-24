@@ -18,8 +18,8 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
 
     start = sub.add_parser("start", help="Start daemon execution")
     start.add_argument(
-        "--plan", metavar="FILE", required=True,
-        help="Path to the MachinePlan JSON file",
+        "--plan", metavar="FILE", default=None,
+        help="Path to the MachinePlan JSON file (required unless --resume)",
     )
     start.add_argument(
         "--max-parallel", metavar="N", type=int, default=3,
@@ -52,16 +52,22 @@ def handler(args: argparse.Namespace) -> None:
     supervisor = WorkerSupervisor()
 
     if args.daemon_action == "start":
-        plan_path = Path(args.plan)
-        if not plan_path.exists():
-            print(f"Error: plan file not found: {plan_path}")
+        if not args.resume and not args.plan:
+            print("Error: --plan is required (unless --resume is set)")
             return
-        try:
-            data = json.loads(plan_path.read_text(encoding="utf-8"))
-            plan = MachinePlan.from_dict(data)
-        except (json.JSONDecodeError, KeyError) as exc:
-            print(f"Error: invalid plan file: {exc}")
-            return
+
+        plan = None
+        if args.plan:
+            plan_path = Path(args.plan)
+            if not plan_path.exists():
+                print(f"Error: plan file not found: {plan_path}")
+                return
+            try:
+                data = json.loads(plan_path.read_text(encoding="utf-8"))
+                plan = MachinePlan.from_dict(data)
+            except (json.JSONDecodeError, KeyError) as exc:
+                print(f"Error: invalid plan file: {exc}")
+                return
 
         if args.dry_run:
             launcher = DryRunLauncher()
@@ -99,17 +105,23 @@ def handler(args: argparse.Namespace) -> None:
 
             from agent_baton.core.runtime.daemon import daemonize
 
-            print(f"Starting daemon for task '{plan.task_id}'...")
+            task_label = plan.task_id if plan else "resumed execution"
+            print(f"Starting daemon for task '{task_label}'...")
             daemonize()
         else:
-            print(f"Starting daemon for task '{plan.task_id}'...")
+            task_label = plan.task_id if plan else "resumed execution"
+            print(f"Starting daemon for task '{task_label}'...")
 
-        summary = supervisor.start(
-            plan=plan,
-            launcher=launcher,
-            max_parallel=args.max_parallel,
-            resume=args.resume,
-        )
+        try:
+            summary = supervisor.start(
+                plan=plan,
+                launcher=launcher,
+                max_parallel=args.max_parallel,
+                resume=args.resume,
+            )
+        except RuntimeError as exc:
+            print(f"Error: {exc}")
+            return
         # In foreground mode the process is still attached to the terminal and
         # can print the summary.  In daemon mode stdout has been redirected to
         # /dev/null so this is a no-op.

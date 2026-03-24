@@ -189,6 +189,13 @@ class DecisionManager:
     def _resolution_path(self, request_id: str) -> Path:
         return self._dir / f"{self._safe_id(request_id)}-resolution.json"
 
+    def get_resolution(self, request_id: str) -> dict | None:
+        """Return the resolution data for a resolved request, or ``None``."""
+        path = self._resolution_path(request_id)
+        if not path.exists():
+            return None
+        return json.loads(path.read_text(encoding="utf-8"))
+
     @staticmethod
     def _safe_id(request_id: str) -> str:
         """Sanitise a request_id so it is safe to use as a filename stem."""

@@ -590,7 +590,6 @@ class TestWorkerShutdownEvent:
 class TestDaemonizeFunction:
     def test_windows_raises_runtime_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """On Windows, daemonize() raises RuntimeError immediately."""
-        monkeypatch.setattr(sys, "platform", "win32")
         from agent_baton.core.runtime import daemon
         monkeypatch.setattr(daemon.sys, "platform", "win32")
         with pytest.raises(RuntimeError, match="POSIX"):

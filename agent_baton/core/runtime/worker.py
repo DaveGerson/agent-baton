@@ -55,6 +55,7 @@ class TaskWorker:
         max_parallel: int = 3,
         decision_manager: DecisionManager | None = None,
         shutdown_event: asyncio.Event | None = None,
+        gate_poll_interval: float = 2.0,
     ) -> None:
         self._engine = engine
         self._launcher = launcher
@@ -64,6 +65,7 @@ class TaskWorker:
         self._wait_event: asyncio.Event | None = None
         self._decision_manager = decision_manager
         self._shutdown_event = shutdown_event
+        self._gate_poll_interval = gate_poll_interval
 
     @property
     def is_running(self) -> bool:
@@ -244,9 +246,8 @@ class TaskWorker:
         while True:
             resolved = self._decision_manager.get(req.request_id)
             if resolved is not None and resolved.status == "resolved":
-                res_path = self._decision_manager._resolution_path(req.request_id)
-                if res_path.exists():
-                    res_data = json.loads(res_path.read_text(encoding="utf-8"))
+                res_data = self._decision_manager.get_resolution(req.request_id)
+                if res_data is not None:
                     passed = res_data.get("chosen_option") == "approve"
                 else:
                     passed = True  # resolved without resolution file → treat as approve
@@ -266,7 +267,7 @@ class TaskWorker:
                 )
                 return
 
-            await asyncio.sleep(2.0)
+            await asyncio.sleep(self._gate_poll_interval)
 
     def notify_resolution(self) -> None:
         """Signal that a pending decision has been resolved externally."""

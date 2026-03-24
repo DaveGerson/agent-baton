@@ -787,3 +787,48 @@ class TestClaudeCodeLauncherResolveTimeout:
         )
         launcher = _launcher(monkeypatch, cfg)
         assert launcher._resolve_timeout("unknown-model") == 42.0
+
+
+# ===========================================================================
+# TestRedactStderr
+# ===========================================================================
+
+class TestRedactStderr:
+    def test_strips_api_key_pattern(self) -> None:
+        text = "Error: auth failed for sk-ant-api03-abc123_DEF-xyz"
+        result = _mod._redact_stderr(text)
+        assert "sk-ant-api03-abc123_DEF-xyz" not in result
+        assert "sk-ant-***REDACTED***" in result
+
+    def test_strips_multiple_keys(self) -> None:
+        text = "key1=sk-ant-aaa key2=sk-ant-bbb"
+        result = _mod._redact_stderr(text)
+        assert result == "key1=sk-ant-***REDACTED*** key2=sk-ant-***REDACTED***"
+
+    def test_preserves_text_without_keys(self) -> None:
+        text = "normal error message with no keys"
+        assert _mod._redact_stderr(text) == text
+
+    def test_empty_string(self) -> None:
+        assert _mod._redact_stderr("") == ""
+
+    def test_redaction_applied_in_launch_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """API key in stderr must not appear in LaunchResult.error."""
+        proc = FakeProcess(
+            stdout=b"",
+            stderr=b"auth failed: sk-ant-api03-secret123",
+            returncode=1,
+        )
+        _patch_subprocess(monkeypatch, proc)
+        launcher = _launcher(monkeypatch)
+        launcher._git_bin = None
+
+        async def _run():
+            result = await launcher.launch("backend", "sonnet", "task", "redact.1")
+            assert result.status == "failed"
+            assert "sk-ant-api03-secret123" not in result.error
+            assert "sk-ant-***REDACTED***" in result.error
+
+        asyncio.run(_run())

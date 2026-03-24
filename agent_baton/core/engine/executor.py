@@ -7,6 +7,7 @@ perform.  State is persisted to disk between calls for crash recovery.
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -553,13 +554,19 @@ class ExecutionEngine:
             self._bus.publish(event)
 
     def _save_state(self, state: ExecutionState) -> Path:
-        """Write *state* to ``.claude/team-context/execution-state.json``."""
+        """Write *state* to ``.claude/team-context/execution-state.json``.
+
+        Uses a tmp+rename pattern so a crash mid-write cannot corrupt the
+        state file.
+        """
         self._root.mkdir(parents=True, exist_ok=True)
         path = self._root / self._STATE_FILENAME
-        path.write_text(
+        tmp_path = path.with_suffix(".tmp")
+        tmp_path.write_text(
             json.dumps(state.to_dict(), indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
+        os.rename(str(tmp_path), str(path))
         return path
 
     def _load_state(self) -> ExecutionState | None:
