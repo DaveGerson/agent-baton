@@ -1,5 +1,3 @@
-# Federated Sync Architecture — Implementation Plan
-
 Good. That's 29 project tables (including `_schema_version`) and 8 PMO tables (including `_schema_version`). Now I have everything I need to produce the comprehensive design. Let me write it.
 
 ---
