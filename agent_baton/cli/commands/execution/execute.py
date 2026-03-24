@@ -307,6 +307,15 @@ def handler(args: argparse.Namespace) -> None:
         summary = engine.complete()
         print(summary)
 
+        # Auto-sync to central.db (best-effort, non-blocking)
+        try:
+            from agent_baton.core.storage.sync import auto_sync_current_project
+            sync_result = auto_sync_current_project()
+            if sync_result and sync_result.rows_synced > 0:
+                print(f"Synced {sync_result.rows_synced} rows to central.db")
+        except Exception:
+            pass  # sync failure must never block execution completion
+
     elif args.subcommand == "status":
         st = engine.status()
         if not st:

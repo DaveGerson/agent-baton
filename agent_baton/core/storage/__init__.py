@@ -67,3 +67,23 @@ def get_pmo_storage(pmo_db_path: Path | None = None):
     from agent_baton.core.storage.pmo_sqlite import PmoSqliteStore
     path = pmo_db_path or (Path.home() / ".baton" / "pmo.db")
     return PmoSqliteStore(path)
+
+
+def get_central_storage(central_db_path: Path | None = None):
+    """Factory: return the CentralStore read-only query interface.
+
+    Args:
+        central_db_path: Path to central.db. Defaults to ~/.baton/central.db.
+    """
+    from agent_baton.core.storage.central import CentralStore
+    return CentralStore(central_db_path or (Path.home() / ".baton" / "central.db"))
+
+
+def get_sync_engine(central_db_path: Path | None = None):
+    """Factory: return a SyncEngine for one-way project → central sync.
+
+    Args:
+        central_db_path: Path to central.db. Defaults to ~/.baton/central.db.
+    """
+    from agent_baton.core.storage.sync import SyncEngine
+    return SyncEngine(central_db_path)
