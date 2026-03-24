@@ -1,8 +1,8 @@
-import type { PlanResponse } from '../api/types';
+import type { ForgePlanResponse } from '../api/types';
 import { T } from '../styles/tokens';
 
 interface PlanPreviewProps {
-  plan: PlanResponse;
+  plan: ForgePlanResponse;
 }
 
 export function PlanPreview({ plan }: PlanPreviewProps) {
@@ -12,17 +12,11 @@ export function PlanPreview({ plan }: PlanPreviewProps) {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
       {/* Summary stats */}
       <div style={{ display: 'flex', gap: 8 }}>
-        <StatTile label="Plan ID" value={plan.plan_id} mono />
+        <StatTile label="Task ID" value={plan.task_id} mono />
         <StatTile label="Phases" value={String(plan.phases.length)} />
         <StatTile label="Steps" value={String(totalSteps)} />
-        {plan.task_type && <StatTile label="Type" value={plan.task_type} />}
-        {plan.priority && (
-          <StatTile
-            label="Priority"
-            value={plan.priority}
-            color={plan.priority === 'P0' || plan.priority === 'critical' ? T.red : T.yellow}
-          />
-        )}
+        {plan.risk_level && <StatTile label="Risk" value={plan.risk_level} />}
+        {plan.budget_tier && <StatTile label="Budget" value={plan.budget_tier} />}
       </div>
 
       {/* Summary */}
@@ -45,7 +39,7 @@ export function PlanPreview({ plan }: PlanPreviewProps) {
       {/* Phases & steps */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
         {plan.phases.map((phase, pi) => (
-          <div key={phase.phase_id} style={{
+          <div key={String(phase.phase_id)} style={{
             background: T.bg1,
             borderRadius: 4,
             border: `1px solid ${T.border}`,
@@ -78,9 +72,6 @@ export function PlanPreview({ plan }: PlanPreviewProps) {
               </div>
               <div>
                 <div style={{ fontSize: 9, fontWeight: 700, color: T.text0 }}>{phase.name}</div>
-                {phase.description && (
-                  <div style={{ fontSize: 7, color: T.text3, marginTop: 1 }}>{phase.description}</div>
-                )}
               </div>
               <span style={{
                 marginLeft: 'auto',
@@ -123,15 +114,10 @@ export function PlanPreview({ plan }: PlanPreviewProps) {
                 </div>
                 <div style={{ flex: 1 }}>
                   <div style={{ fontSize: 9, color: T.text0, fontWeight: 500 }}>
-                    {step.name}
+                    {step.task_description}
                   </div>
-                  {step.description && (
-                    <div style={{ fontSize: 7, color: T.text3, marginTop: 1, lineHeight: 1.4 }}>
-                      {step.description}
-                    </div>
-                  )}
                 </div>
-                {step.agent && (
+                {step.agent_name && (
                   <span style={{
                     fontSize: 7,
                     color: T.cyan,
@@ -142,7 +128,7 @@ export function PlanPreview({ plan }: PlanPreviewProps) {
                     whiteSpace: 'nowrap',
                     flexShrink: 0,
                   }}>
-                    {step.agent}
+                    {step.agent_name}
                   </span>
                 )}
               </div>

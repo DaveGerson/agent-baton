@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { api } from '../api/client';
 import { PlanPreview } from './PlanPreview';
 import { T } from '../styles/tokens';
-import type { PmoProject, PmoSignal, PlanResponse } from '../api/types';
+import type { PmoProject, PmoSignal, ForgePlanResponse } from '../api/types';
 
 interface ForgePanelProps {
   onBack: () => void;
@@ -40,7 +40,7 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
   const [taskType, setTaskType] = useState('');
   const [priority, setPriority] = useState<number>(1);
 
-  const [plan, setPlan] = useState<PlanResponse | null>(null);
+  const [plan, setPlan] = useState<ForgePlanResponse | null>(null);
   const [generateError, setGenerateError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [savePath, setSavePath] = useState<string | null>(null);
