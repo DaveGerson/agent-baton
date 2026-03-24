@@ -15,6 +15,8 @@ agent_baton/       ← Python package (orchestration engine)
     orchestration/ ← Agent discovery: registry, router, context manager,
     │                knowledge_registry
     pmo/           ← PMO subsystem: store, scanner, forge
+    storage/       ← Central DB: sync.py (SyncEngine), central.py (CentralStore),
+    │                adapters/ (ExternalSourceAdapter protocol, AdoAdapter)
     govern/        ← Policy enforcement, compliance, validation
     observe/       ← Tracing, usage, dashboard, retrospective, telemetry
     improve/       ← Scoring, evolution, VCS
@@ -33,12 +35,15 @@ agent_baton/       ← Python package (orchestration engine)
       distribute/  ← package, publish, pull, verify_package, install, transfer
       agents/      ← agents, route, events, incident
       pmo_cmd      ← pmo serve, pmo status, pmo add, pmo health
+      sync_cmd     ← baton sync, baton sync --all, baton sync status
+      query_cmd    ← baton query (cross-project SQL against central.db)
+      source_cmd   ← baton source add/list/sync/remove/map (external adapters)
 docs/              ← Architecture documentation (architecture.md, design-decisions.md, invariants.md)
 agents/            ← Distributable agent definitions (19 .md files)
 references/        ← Distributable reference docs (13 .md files)
 templates/         ← CLAUDE.md + settings.json installed to target projects
 scripts/           ← Install scripts (Linux + Windows)
-tests/             ← Test suite (~3450+ tests, pytest)
+tests/             ← Test suite (~3675 tests, pytest)
 pmo-ui/            ← React/Vite PMO frontend (served at /pmo/)
 .claude/           ← Project-specific orchestration setup:
   agents/          ← Tailored agents for developing agent-baton (11)
@@ -86,7 +91,7 @@ pmo-ui/            ← React/Vite PMO frontend (served at /pmo/)
 
 ```bash
 pip install -e ".[dev]"    # Install in editable mode
-pytest                     # Run tests (~3450+ tests)
+pytest                     # Run tests (~3675 tests)
 scripts/install.sh         # Re-install globally after editing agents/references
 ```
 

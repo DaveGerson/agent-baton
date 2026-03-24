@@ -28,6 +28,17 @@ for which task types, improving future plans automatically.
 Propose tasks, get decomposed execution plans, and refine them before
 committing. Integrates with the PMO UI for a visual plan review experience.
 
+**Federated sync and cross-project queries** — execution data from all
+your projects flows into a central read replica at `~/.baton/central.db`.
+Query agent reliability, token costs, and knowledge gaps across every
+project with `baton query`. The PMO reads from central so its status view
+is always up to date, even across machines.
+
+**External source adapters** — connect Azure DevOps, Jira, GitHub, or
+Linear as external sources. Work items are pulled into `central.db` and
+linked to baton plans. See which ADO features have orchestration plans,
+and which plans have no external tracking.
+
 **Risk-tiered safety** — simple changes run fast with minimal overhead.
 Changes touching databases, production systems, or regulated data
 automatically involve the auditor agent, which has independent veto power.
@@ -214,6 +225,14 @@ baton detect                           # Detect project stack
 baton route [ROLES]                    # Route roles to agent flavors
 baton validate agents/                 # Validate agent definitions
 baton install --scope user --verify    # Install with health check
+
+# Cross-project and federated sync
+baton sync                             # Sync current project to central.db
+baton sync --all                       # Sync all registered projects
+baton query agents                     # Agent reliability across all projects
+baton query "SELECT ..."               # Ad-hoc SQL against central.db
+baton source add ado --org ORG ...     # Register an Azure DevOps source
+baton source sync <id>                 # Pull latest items from external source
 ```
 
 ## Tips
@@ -253,7 +272,7 @@ templates/         ← CLAUDE.md + settings.json for target projects
 scripts/           ← Install scripts (Linux + Windows)
 docs/              ← Architecture documentation
 agent_baton/       ← Optional Python package (CLI + execution engine)
-tests/             ← ~3450+ pytest tests
+tests/             ← ~3675 pytest tests
 ```
 
 ## Contributing

@@ -1823,10 +1823,9 @@ class ExecutionEngine:
                     new_step_id = (
                         f"{containing_phase.phase_id}.{len(containing_phase.steps) + 1}"
                     )
-                    # Build the handoff: partial outcome + all resolved decisions.
-                    handoff_text = _append_resolved_decisions(
-                        signal.partial_outcome, state.resolved_decisions
-                    )
+                    # Note: the handoff context (partial outcome + resolved decisions) is
+                    # injected at dispatch time by _dispatch_action → _append_resolved_decisions.
+                    # state.resolved_decisions already contains the decision we just recorded.
                     re_dispatch_step = PlanStep(
                         step_id=new_step_id,
                         agent_name=interrupted_plan_step.agent_name,
@@ -1875,7 +1874,6 @@ class ExecutionEngine:
                         "interrupted step %s for agent %s",
                         new_step_id, step_id, interrupted_plan_step.agent_name,
                     )
-                    _ = handoff_text  # available for future dispatcher use; logged above
 
         elif action == "best-effort":
             # Log and continue — nothing added to state.

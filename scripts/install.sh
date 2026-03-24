@@ -158,6 +158,25 @@ case "$mcp_choice" in
         ;;
 esac
 
+# ── Step 4: Central Database ─────────────────────────────
+echo ""
+echo "  STEP 4: Central Database"
+echo "  ────────────────────────"
+
+BATON_DIR="$HOME/.baton"
+mkdir -p "$BATON_DIR"
+
+if [ -f "$BATON_DIR/central.db" ]; then
+    echo "  ~ central.db exists — will be upgraded on next baton command"
+else
+    echo "  + central.db will be created on first baton command"
+fi
+
+# Migrate pmo.db if it exists
+if [ -f "$BATON_DIR/pmo.db" ] && [ ! -f "$BATON_DIR/.pmo-migrated" ]; then
+    echo "  ~ pmo.db detected — will be migrated to central.db on first use"
+fi
+
 # ── Summary ────────────────────────────────────────────────
 echo ""
 echo "  ====================================="

@@ -387,3 +387,138 @@ layered dependency order without modification:
 ```
 models  →  orchestration  →  engine  →  runtime  →  CLI
 ```
+
+---
+
+## 10. Federated Sync Architecture
+
+### 10.1 Overview
+
+The federated sync system aggregates execution data from multiple per-project
+SQLite databases into a single central read replica at `~/.baton/central.db`.
+This enables cross-project queries, a unified PMO view, and external source
+integration without changing the per-project execution path.
+
+```
+  Project A                   Project B                  Project C
+  .claude/team-context/       .claude/team-context/      .claude/team-context/
+  baton.db (29 tables)        baton.db (29 tables)       baton.db (29 tables)
+       |                           |                          |
+       |  baton sync               |  baton sync              |  auto on complete
+       +---------------------------+--------------------------+
+                                   |
+                                   v
+                          ~/.baton/central.db
+                          +-----------------------+
+                          | project-scoped mirror |
+                          | of all 27 sync tables |
+                          | + PMO tables (merged) |
+                          | + sync_watermarks     |
+                          | + sync_history        |
+                          | + external_items      |
+                          | + external_mappings   |
+                          | + cross-project views |
+                          +-----------------------+
+                                   |
+                                   v
+                          PMO UI / baton query / baton pmo status
+```
+
+**Core invariants:**
+
+- Per-project `baton.db` is the **sole write target** for execution. No execution code writes to `central.db`.
+- `central.db` is a **read replica** populated exclusively by the sync mechanism.
+- Sync is one-way: project → central. Never the reverse.
+- `pmo.db` is **absorbed** into `central.db`. The `projects`, `programs`, `signals`, `archived_cards`, `forge_sessions`, and `pmo_metrics` tables are merged into `central.db`.
+- Each synced row in `central.db` carries a `project_id TEXT` column not present in the per-project schema.
+
+### 10.2 Data Flow
+
+```
+baton plan "..."  -->  writes to project baton.db
+baton execute start --> writes to project baton.db
+  ...agent dispatches...
+baton execute complete
+  |
+  +--> executor.complete()   writes final state to project baton.db
+  +--> auto-sync hook        SyncEngine.push(project_id) copies new rows to central.db
+  |
+  +--> event: sync.completed published
+
+baton sync                   manual trigger, same SyncEngine.push()
+baton sync --all             iterates all registered projects
+
+baton pmo status             reads from central.db (not individual baton.dbs)
+baton query "..."            cross-project SQL against central.db
+```
+
+### 10.3 Components
+
+| Component | Location | Role |
+|-----------|----------|------|
+| `SyncEngine` | `core/storage/sync.py` | Incremental one-way sync. For each table, reads rows with `rowid > watermark` from the project DB, inserts them into `central.db` with `project_id` prepended, updates the watermark. Idempotent. |
+| `CentralStore` | `core/storage/central.py` | Read-only query interface for `central.db`. Provides typed methods for cross-project views and a raw `query(sql)` method for ad-hoc SQL. |
+| `ExternalSourceAdapter` | `core/storage/adapters/__init__.py` | `typing.Protocol` that external work-tracker adapters (ADO, Jira, GitHub) must satisfy. `AdapterRegistry` maps `source_type` strings to adapter classes. |
+| `AdoAdapter` | `core/storage/adapters/ado.py` | Azure DevOps adapter. Reads PAT from an env var (never stored in DB). Self-registers on import. |
+
+### 10.4 Sync Algorithm
+
+Sync is watermark-based and incremental:
+
+1. Read `sync_watermarks` for `(project_id, table_name)` — returns the last `rowid` synced.
+2. `SELECT rowid, * FROM <table> WHERE rowid > <watermark> ORDER BY rowid` from the project DB.
+3. `INSERT OR REPLACE INTO <table> (project_id, ...) VALUES (...)` into `central.db`.
+4. Update `sync_watermarks` to `max(rowid)` seen.
+
+Tables with `INTEGER PRIMARY KEY AUTOINCREMENT` use a dedup check (via `UNIQUE` constraint on natural key columns) rather than replacing by `(project_id, id)`, because central generates its own `id` sequence.
+
+Auto-sync fires at `baton execute complete` inside a best-effort `try/except`. Sync failure never blocks execution completion.
+
+### 10.5 PMO Migration
+
+When `~/.baton/pmo.db` exists and `central.db` has no projects, the first
+`baton pmo` or `baton sync` command triggers a one-time migration:
+
+- `ATTACH pmo.db` and `INSERT OR IGNORE INTO central.db` for all PMO tables.
+- Write `~/.baton/.pmo-migrated` marker to prevent re-migration.
+- Original `pmo.db` and `pmo-config.json` are preserved, not deleted.
+
+### 10.6 Cross-Project Views
+
+`central.db` ships with five predefined SQL views:
+
+| View | Purpose |
+|------|---------|
+| `v_agent_reliability` | Agent success rate, retry count, token cost, project count |
+| `v_cost_by_task_type` | Average tokens per task type across all projects |
+| `v_recurring_knowledge_gaps` | Gaps appearing in 2+ projects |
+| `v_project_failure_rate` | Failure rate per project |
+| `v_external_plan_mapping` | External work items linked to baton plans |
+
+### 10.7 New CLI Commands
+
+| Command | Purpose |
+|---------|---------|
+| `baton sync` | Sync current project to `central.db` |
+| `baton sync --all` | Sync all registered projects |
+| `baton sync --rebuild` | Full rebuild (delete + re-sync) |
+| `baton sync status` | Show sync watermarks for all projects |
+| `baton query "<SQL>"` | Ad-hoc SQL against `central.db` |
+| `baton query agents\|costs\|gaps\|failures\|mapping` | Shortcut queries |
+| `baton source add <type> ...` | Register an external source (ADO, Jira) |
+| `baton source sync <id>` | Pull latest items from an external source |
+| `baton source list\|remove\|map` | Manage external source registrations |
+
+### 10.8 Dependency Graph Position
+
+`core/storage/` depends only on `models/` and the stdlib `sqlite3`. It does
+not depend on `core/engine/` or `core/orchestration/`. The auto-sync hook in
+`cli/commands/execution/execute.py` imports `SyncEngine` lazily (inside the
+`try/except`) so the CLI remains functional even if `core/storage/` is absent
+or the central DB is inaccessible.
+
+```
+models  →  storage/  →  CLI (sync_cmd, query_cmd, source_cmd)
+                     ↑
+              execute.py (auto-sync hook, best-effort)
+```

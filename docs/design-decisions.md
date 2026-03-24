@@ -268,3 +268,90 @@ rather than requesting help.
   `from_dict()` defaulting the new fields.
 
 **Status**: Designed (2026-03-24)
+
+---
+
+## ADR-12: Federated Sync as a Central Read Replica (Not Central-Write-Through)
+
+**Decision**: Per-project `baton.db` files remain the sole write target for
+execution. A central database at `~/.baton/central.db` is a read replica
+populated exclusively by a one-way incremental sync mechanism (`SyncEngine`).
+The existing `pmo.db` is merged into `central.db` rather than kept separate.
+Sync uses row-level watermarks rather than file-level copy. External source
+data (ADO, Jira, GitHub) is ingested directly into `central.db` via the
+`ExternalSourceAdapter` protocol.
+
+**Context**: Agent Baton can be used across multiple projects simultaneously.
+The PMO scanner, performance scoring, and knowledge gap feedback loops all
+benefit from cross-project data, but there was no aggregation layer. Each
+project wrote to its own `baton.db` in `.claude/team-context/`, and the PMO
+scanned individual project directories at query time. With N projects this
+became O(N) filesystem reads per PMO status request.
+
+**Alternatives considered**:
+
+- **Central-write-through** (all projects write directly to `central.db`):
+  Rejected because it creates a single point of failure — if `central.db` is
+  corrupted or on a slow filesystem, every execution in every project blocks.
+  It also causes SQLite write-lock contention when multiple Claude sessions run
+  simultaneously across projects. The replica approach means projects always
+  work offline; `central.db` is rebuildable by re-running `baton sync --all`.
+
+- **SQLite ATTACH for cross-project queries** (attach all project `baton.db`
+  files at query time): Rejected because SQLite limits ATTACH to 10 databases
+  by default, requires all project files to be accessible at the same time
+  (fails for remote/archived projects), and provides no place for external
+  source mappings or PMO tables that span projects.
+
+- **Separate central database per concern** (keep `pmo.db` separate, add a
+  third file for external sources): Rejected because it multiplies the number
+  of files to manage, introduces cross-file joins that SQLite handles poorly,
+  and gives the PMO scanner N+2 databases to query instead of one. The merged
+  schema has a slightly larger DDL, which is an acceptable cost.
+
+- **File-level copy** (copy the entire `baton.db` to `central.db` on sync):
+  Rejected because it is O(total rows), not incremental. With large project
+  histories, every sync re-copies the entire database. Row-level sync with
+  watermarks is O(delta rows since last sync), idempotent on retry, and
+  naturally deduplicates on concurrent syncs.
+
+- **Event-sourcing sync** (replay the `events` table to build central
+  projections): Rejected because not all data is event-sourced — telemetry,
+  retrospectives, learned patterns, and budget recommendations are direct
+  writes that have no corresponding events. Row-level sync covers all tables
+  uniformly with the same algorithm.
+
+**Key trade-offs**:
+
+- **Row-level vs. file-level sync**: Row-level sync with watermarks is
+  O(delta), idempotent, and handles concurrent syncs gracefully via
+  SQLite's WAL mode + busy_timeout. File-level copy is simpler to implement
+  but O(n) on total data and requires merge logic when two sessions race.
+
+- **Merging pmo.db into central.db**: The PMO tables (`projects`, `programs`,
+  `signals`, `archived_cards`, `forge_sessions`, `pmo_metrics`) are already
+  global — they describe all projects, not any one. Keeping them in a
+  separate file requires cross-file joins for every PMO query. Merging them
+  eliminates the join and reduces the filesystem footprint to one central
+  file. The cost is a one-time migration and a slightly richer schema.
+
+- **Auto-sync on `baton execute complete`**: Sync fires automatically after
+  every execution completes, keeping `central.db` fresh without manual
+  intervention. The hook is wrapped in a best-effort `try/except` so sync
+  failure never blocks execution completion. If auto-sync is too slow
+  (threshold: 2s), it logs a warning and returns; the user can run
+  `baton sync` manually.
+
+- **ExternalSourceAdapter as a Protocol**: External integrations (ADO, Jira,
+  GitHub, Linear) have heterogeneous APIs but a uniform normalized output
+  (`ExternalItem`). The `typing.Protocol` approach means new adapters can be
+  added without modifying any central code — they self-register via
+  `AdapterRegistry.register()` on import. This also allows third-party
+  adapters without subclassing.
+
+- **PAT not stored in DB**: The ADO adapter reads the Personal Access Token
+  from an environment variable whose name is stored in the `config` JSON
+  column of `external_sources`. This means PAT rotation only requires
+  updating the environment variable — no database writes, no migration.
+
+**Status**: Designed (2026-03-24)
