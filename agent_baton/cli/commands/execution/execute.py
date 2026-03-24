@@ -66,8 +66,15 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
 
 
 def _print_action(action: dict) -> None:
-    """Print an execution action in a human-readable format."""
+    """Print an execution action in a human-readable format.
+
+    IMPORTANT: This output format is the control protocol between Claude Code
+    (the orchestrator) and the execution engine. Changes to action type strings,
+    field labels, or output structure will break the orchestrator's ability to
+    parse engine responses. Treat this function as a public API.
+    """
     atype = action.get("action_type", "")
+    assert isinstance(atype, str), f"action_type must be str from to_dict(), got {type(atype)}"
     msg = action.get("message", "")
 
     if atype == ActionType.DISPATCH.value:

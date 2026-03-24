@@ -10,17 +10,29 @@ from agent_baton.cli import commands as commands_pkg
 
 
 def discover_commands() -> dict[str, types.ModuleType]:
-    """Auto-discover all command modules in cli/commands/.
+    """Auto-discover all command modules in cli/commands/ and subdirectories.
 
     Each module must expose:
       - register(subparsers) -> ArgumentParser  (registers the subcommand)
       - handler(args)        -> None             (executes the command)
     """
     found: dict[str, types.ModuleType] = {}
+
+    # Scan top-level (for any remaining ungrouped commands)
     for info in pkgutil.iter_modules(commands_pkg.__path__):
-        mod = importlib.import_module(f"agent_baton.cli.commands.{info.name}")
-        if hasattr(mod, "register") and hasattr(mod, "handler"):
-            found[info.name] = mod
+        if info.ispkg:
+            # Scan subdirectory packages
+            subpkg = importlib.import_module(f"agent_baton.cli.commands.{info.name}")
+            for sub_info in pkgutil.iter_modules(subpkg.__path__):
+                mod = importlib.import_module(
+                    f"agent_baton.cli.commands.{info.name}.{sub_info.name}"
+                )
+                if hasattr(mod, "register") and hasattr(mod, "handler"):
+                    found[sub_info.name] = mod
+        else:
+            mod = importlib.import_module(f"agent_baton.cli.commands.{info.name}")
+            if hasattr(mod, "register") and hasattr(mod, "handler"):
+                found[info.name] = mod
     return found
 
 
