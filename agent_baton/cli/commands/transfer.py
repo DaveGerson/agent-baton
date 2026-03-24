@@ -5,7 +5,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from agent_baton.core.distribute.transfer import ProjectTransfer, TransferManifest
+from agent_baton.core.distribute.experimental.transfer import ProjectTransfer, TransferManifest
 
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:

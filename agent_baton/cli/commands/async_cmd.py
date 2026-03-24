@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import argparse
 
-from agent_baton.core.distribute.async_dispatch import AsyncDispatcher, AsyncTask
+from agent_baton.core.distribute.experimental.async_dispatch import AsyncDispatcher, AsyncTask
 
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
