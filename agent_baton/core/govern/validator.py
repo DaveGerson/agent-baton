@@ -25,6 +25,10 @@ _VALID_TOOLS = {
 }
 # kebab-case with optional double-dash flavor: e.g. backend-engineer--python
 _KEBAB_CASE_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*(--[a-z0-9]+(-[a-z0-9]+)*)?$")
+# MCP tool pattern: mcp__<server>__<tool> with optional wildcard suffix (*).
+# MCP tools are dynamically provided by MCP servers and cannot be enumerated
+# statically, so any name matching this pattern is accepted by the validator.
+_MCP_TOOL_RE = re.compile(r"^mcp__[a-zA-Z0-9_-]+__[a-zA-Z0-9_*-]+$")
 
 
 @dataclass
@@ -120,11 +124,17 @@ class AgentValidator:
                     f"(got '{permission_mode}')"
                 )
 
-        # tools: if present as a string, each tool must be valid
+        # tools: if present as a string, each tool must be valid.
+        # MCP tools follow the naming convention mcp__<server>__<tool> and are
+        # dynamically provided by MCP servers, so any tool matching that pattern
+        # is accepted without being listed in _VALID_TOOLS.
         tools_raw = metadata.get("tools")
         if tools_raw is not None and isinstance(tools_raw, str):
             tools = [t.strip() for t in tools_raw.split(",") if t.strip()]
-            bad_tools = [t for t in tools if t not in _VALID_TOOLS]
+            bad_tools = [
+                t for t in tools
+                if t not in _VALID_TOOLS and not _MCP_TOOL_RE.match(t)
+            ]
             if bad_tools:
                 errors.append(
                     f"invalid tool(s): {bad_tools}; "
