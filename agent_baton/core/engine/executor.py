@@ -459,11 +459,16 @@ class ExecutionEngine:
         usage_record = self._build_usage_record(state)
         self._usage_logger.log(usage_record)
 
-        # Build and save retrospective.
+        # Build and save retrospective with rich qualitative data.
         retro_data = self._build_retrospective_data(state)
         retro = self._retro_engine.generate_from_usage(
             usage=usage_record,
             task_name=retro_data.get("task_name", state.plan.task_summary),
+            what_worked=retro_data.get("what_worked"),
+            what_didnt=retro_data.get("what_didnt"),
+            knowledge_gaps=retro_data.get("knowledge_gaps"),
+            roster_recommendations=retro_data.get("roster_recommendations"),
+            sequencing_notes=retro_data.get("sequencing_notes"),
         )
         retro_path = self._retro_engine.save(retro)
 
@@ -893,11 +898,133 @@ class ExecutionEngine:
         )
 
     def _build_retrospective_data(self, state: ExecutionState) -> dict:
-        """Build a data dict used when generating a retrospective."""
+        """Build a rich data dict for the retrospective from execution state.
+
+        Extracts per-agent outcomes, knowledge gap signals, sequencing
+        observations, and roster recommendations from the step results,
+        gate results, and plan structure — turning raw execution data into
+        actionable learning feedback.
+        """
+        from agent_baton.models.retrospective import (
+            AgentOutcome,
+            KnowledgeGap,
+            RosterRecommendation,
+            SequencingNote,
+        )
+
+        what_worked: list[AgentOutcome] = []
+        what_didnt: list[AgentOutcome] = []
+        knowledge_gaps: list[KnowledgeGap] = []
+        sequencing_notes: list[SequencingNote] = []
+        roster_recs: list[RosterRecommendation] = []
+
+        # ── Per-agent outcomes from step results ──────────────────────────
+        agent_steps: dict[str, list] = {}
+        for result in state.step_results:
+            agent_steps.setdefault(result.agent_name, []).append(result)
+
+        for agent_name, results in agent_steps.items():
+            successes = [r for r in results if r.status == "complete"]
+            failures = [r for r in results if r.status == "failed"]
+            total_retries = sum(r.retries for r in results)
+            files_changed = []
+            for r in successes:
+                files_changed.extend(r.files_changed)
+
+            if successes and not failures:
+                worked_detail = f"Completed {len(successes)} step(s)"
+                if files_changed:
+                    worked_detail += f", changed {len(files_changed)} file(s)"
+                if total_retries == 0:
+                    worked_detail += " — first-pass success"
+                what_worked.append(AgentOutcome(
+                    name=agent_name,
+                    worked_well=worked_detail,
+                ))
+            elif failures:
+                fail = failures[-1]  # most recent failure
+                what_didnt.append(AgentOutcome(
+                    name=agent_name,
+                    issues=fail.error or f"Failed at step {fail.step_id}",
+                    root_cause=fail.error[:200] if fail.error else "",
+                ))
+                # Signal a knowledge gap if the agent failed with retries
+                if total_retries > 0 or len(failures) > 1:
+                    knowledge_gaps.append(KnowledgeGap(
+                        description=(
+                            f"{agent_name} struggled: "
+                            f"{len(failures)} failure(s), "
+                            f"{total_retries} retry(ies)"
+                        ),
+                        affected_agent=agent_name,
+                        suggested_fix=(
+                            "review agent prompt or add knowledge pack"
+                        ),
+                    ))
+                # Recommend improvement if retry rate is high
+                if total_retries >= 2:
+                    roster_recs.append(RosterRecommendation(
+                        action="improve",
+                        target=agent_name,
+                        reason=(
+                            f"High retry rate ({total_retries}) suggests "
+                            f"prompt or knowledge gap"
+                        ),
+                    ))
+
+        # ── Gate outcomes → sequencing notes ──────────────────────────────
+        for gate_result in state.gate_results:
+            phase = next(
+                (p for p in state.plan.phases
+                 if p.phase_id == gate_result.phase_id),
+                None,
+            )
+            phase_name = phase.name if phase else f"Phase {gate_result.phase_id}"
+            gate_type = gate_result.gate_type
+
+            if gate_result.passed:
+                sequencing_notes.append(SequencingNote(
+                    phase=phase_name,
+                    observation=f"Gate '{gate_type}' passed",
+                    keep=True,
+                ))
+            else:
+                sequencing_notes.append(SequencingNote(
+                    phase=phase_name,
+                    observation=(
+                        f"Gate '{gate_type}' FAILED"
+                        + (f": {gate_result.output[:100]}"
+                           if gate_result.output else "")
+                    ),
+                    keep=True,
+                ))
+
+        # ── Token efficiency signal ───────────────────────────────────────
+        total_tokens = sum(
+            r.estimated_tokens for r in state.step_results
+        )
+        total_steps = state.plan.total_steps
+        if total_steps > 0 and total_tokens > 0:
+            avg_per_step = total_tokens // total_steps
+            if avg_per_step > 50000:
+                knowledge_gaps.append(KnowledgeGap(
+                    description=(
+                        f"High token usage: ~{avg_per_step:,} tokens/step "
+                        f"({total_tokens:,} total). May indicate agents "
+                        f"exploring too broadly."
+                    ),
+                    suggested_fix="add context_files to reduce search scope",
+                ))
+
         return {
             "task_name": state.plan.task_summary,
             "task_id": state.task_id,
             "status": state.status,
+            "what_worked": what_worked,
+            "what_didnt": what_didnt,
+            "knowledge_gaps": knowledge_gaps,
+            "roster_recommendations": roster_recs,
+            "sequencing_notes": sequencing_notes,
         }
 
     # ── State machine logic ─────────────────────────────────────────────────
