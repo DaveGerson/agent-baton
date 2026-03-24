@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 
-from agent_baton.core.engine.executor import ExecutionEngine
+from agent_baton.core.engine.protocols import ExecutionDriver
 from agent_baton.core.events.bus import EventBus
 from agent_baton.core.events import events as evt
 from agent_baton.core.runtime.decisions import DecisionManager
@@ -49,7 +49,7 @@ class TaskWorker:
 
     def __init__(
         self,
-        engine: ExecutionEngine,
+        engine: ExecutionDriver,
         launcher: AgentLauncher,
         bus: EventBus | None = None,
         max_parallel: int = 3,

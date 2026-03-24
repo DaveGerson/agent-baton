@@ -19,6 +19,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from agent_baton.core.engine.executor import ExecutionEngine
+from agent_baton.core.engine.protocols import ExecutionDriver
 from agent_baton.core.events.bus import EventBus
 from agent_baton.core.events.persistence import EventPersistence
 from agent_baton.core.events.projections import project_task_view
@@ -277,7 +278,7 @@ class WorkerSupervisor:
         logger.addHandler(handler)
         logger.setLevel(logging.INFO)
 
-    def _write_status(self, engine: ExecutionEngine, summary: str = "") -> None:
+    def _write_status(self, engine: ExecutionDriver, summary: str = "") -> None:
         """Write a status snapshot to disk atomically.
 
         Writes to a temporary file first, then renames over the destination.
