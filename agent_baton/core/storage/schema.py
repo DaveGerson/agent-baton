@@ -6,10 +6,26 @@ CENTRAL_SCHEMA_DDL — global ~/.baton/central.db (read-replica + PMO + external
 MIGRATIONS — sequential migration scripts keyed by version
 """
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # Sequential migration scripts: {version: DDL_string}
-MIGRATIONS: dict[int, str] = {}
+MIGRATIONS: dict[int, str] = {
+    2: """
+-- v2: add knowledge-delivery columns to plans, plan_steps, and executions.
+-- Only applied to existing v1 databases; fresh databases start at v2 and
+-- already have these columns in their CREATE TABLE statements.
+
+ALTER TABLE plans ADD COLUMN explicit_knowledge_packs TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE plans ADD COLUMN explicit_knowledge_docs   TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE plans ADD COLUMN intervention_level        TEXT NOT NULL DEFAULT 'low';
+ALTER TABLE plans ADD COLUMN task_type                 TEXT;
+
+ALTER TABLE plan_steps ADD COLUMN knowledge_attachments TEXT NOT NULL DEFAULT '[]';
+
+ALTER TABLE executions ADD COLUMN pending_gaps         TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE executions ADD COLUMN resolved_decisions   TEXT NOT NULL DEFAULT '[]';
+""",
+}
 
 # =====================================================================
 # Per-project database schema (baton.db)
@@ -23,30 +39,36 @@ CREATE TABLE IF NOT EXISTS _schema_version (
 
 -- EXECUTIONS (replaces execution-state.json)
 CREATE TABLE IF NOT EXISTS executions (
-    task_id         TEXT PRIMARY KEY,
-    status          TEXT NOT NULL DEFAULT 'running',
-    current_phase   INTEGER NOT NULL DEFAULT 0,
-    current_step_index INTEGER NOT NULL DEFAULT 0,
-    started_at      TEXT NOT NULL,
-    completed_at    TEXT,
-    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    task_id              TEXT PRIMARY KEY,
+    status               TEXT NOT NULL DEFAULT 'running',
+    current_phase        INTEGER NOT NULL DEFAULT 0,
+    current_step_index   INTEGER NOT NULL DEFAULT 0,
+    started_at           TEXT NOT NULL,
+    completed_at         TEXT,
+    created_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    pending_gaps         TEXT NOT NULL DEFAULT '[]',
+    resolved_decisions   TEXT NOT NULL DEFAULT '[]'
 );
 CREATE INDEX IF NOT EXISTS idx_executions_status ON executions(status);
 CREATE INDEX IF NOT EXISTS idx_executions_started ON executions(started_at);
 
 -- PLANS (replaces plan.json)
 CREATE TABLE IF NOT EXISTS plans (
-    task_id           TEXT PRIMARY KEY,
-    task_summary      TEXT NOT NULL,
-    risk_level        TEXT NOT NULL DEFAULT 'LOW',
-    budget_tier       TEXT NOT NULL DEFAULT 'standard',
-    execution_mode    TEXT NOT NULL DEFAULT 'phased',
-    git_strategy      TEXT NOT NULL DEFAULT 'commit-per-agent',
-    shared_context    TEXT NOT NULL DEFAULT '',
-    pattern_source    TEXT,
-    plan_markdown     TEXT NOT NULL DEFAULT '',
-    created_at        TEXT NOT NULL,
+    task_id                    TEXT PRIMARY KEY,
+    task_summary               TEXT NOT NULL,
+    risk_level                 TEXT NOT NULL DEFAULT 'LOW',
+    budget_tier                TEXT NOT NULL DEFAULT 'standard',
+    execution_mode             TEXT NOT NULL DEFAULT 'phased',
+    git_strategy               TEXT NOT NULL DEFAULT 'commit-per-agent',
+    shared_context             TEXT NOT NULL DEFAULT '',
+    pattern_source             TEXT,
+    plan_markdown              TEXT NOT NULL DEFAULT '',
+    created_at                 TEXT NOT NULL,
+    explicit_knowledge_packs   TEXT NOT NULL DEFAULT '[]',
+    explicit_knowledge_docs    TEXT NOT NULL DEFAULT '[]',
+    intervention_level         TEXT NOT NULL DEFAULT 'low',
+    task_type                  TEXT,
     FOREIGN KEY (task_id) REFERENCES executions(task_id) ON DELETE CASCADE
 );
 
@@ -67,17 +89,18 @@ CREATE TABLE IF NOT EXISTS plan_phases (
 
 -- PLAN_STEPS
 CREATE TABLE IF NOT EXISTS plan_steps (
-    task_id           TEXT NOT NULL,
-    step_id           TEXT NOT NULL,
-    phase_id          INTEGER NOT NULL,
-    agent_name        TEXT NOT NULL,
-    task_description  TEXT NOT NULL DEFAULT '',
-    model             TEXT NOT NULL DEFAULT 'sonnet',
-    depends_on        TEXT NOT NULL DEFAULT '[]',
-    deliverables      TEXT NOT NULL DEFAULT '[]',
-    allowed_paths     TEXT NOT NULL DEFAULT '[]',
-    blocked_paths     TEXT NOT NULL DEFAULT '[]',
-    context_files     TEXT NOT NULL DEFAULT '[]',
+    task_id               TEXT NOT NULL,
+    step_id               TEXT NOT NULL,
+    phase_id              INTEGER NOT NULL,
+    agent_name            TEXT NOT NULL,
+    task_description      TEXT NOT NULL DEFAULT '',
+    model                 TEXT NOT NULL DEFAULT 'sonnet',
+    depends_on            TEXT NOT NULL DEFAULT '[]',
+    deliverables          TEXT NOT NULL DEFAULT '[]',
+    allowed_paths         TEXT NOT NULL DEFAULT '[]',
+    blocked_paths         TEXT NOT NULL DEFAULT '[]',
+    context_files         TEXT NOT NULL DEFAULT '[]',
+    knowledge_attachments TEXT NOT NULL DEFAULT '[]',
     PRIMARY KEY (task_id, step_id),
     FOREIGN KEY (task_id, phase_id) REFERENCES plan_phases(task_id, phase_id) ON DELETE CASCADE
 );
@@ -656,15 +679,17 @@ CREATE INDEX IF NOT EXISTS idx_ext_mappings_source ON external_mappings(source_i
 -- ================================================================
 
 CREATE TABLE IF NOT EXISTS executions (
-    project_id      TEXT NOT NULL,
-    task_id         TEXT NOT NULL,
-    status          TEXT NOT NULL DEFAULT 'running',
-    current_phase   INTEGER NOT NULL DEFAULT 0,
-    current_step_index INTEGER NOT NULL DEFAULT 0,
-    started_at      TEXT NOT NULL,
-    completed_at    TEXT,
-    created_at      TEXT NOT NULL DEFAULT '',
-    updated_at      TEXT NOT NULL DEFAULT '',
+    project_id           TEXT NOT NULL,
+    task_id              TEXT NOT NULL,
+    status               TEXT NOT NULL DEFAULT 'running',
+    current_phase        INTEGER NOT NULL DEFAULT 0,
+    current_step_index   INTEGER NOT NULL DEFAULT 0,
+    started_at           TEXT NOT NULL,
+    completed_at         TEXT,
+    created_at           TEXT NOT NULL DEFAULT '',
+    updated_at           TEXT NOT NULL DEFAULT '',
+    pending_gaps         TEXT NOT NULL DEFAULT '[]',
+    resolved_decisions   TEXT NOT NULL DEFAULT '[]',
     PRIMARY KEY (project_id, task_id)
 );
 CREATE INDEX IF NOT EXISTS idx_central_exec_status ON executions(status);
@@ -672,17 +697,21 @@ CREATE INDEX IF NOT EXISTS idx_central_exec_project ON executions(project_id);
 CREATE INDEX IF NOT EXISTS idx_central_exec_started ON executions(started_at);
 
 CREATE TABLE IF NOT EXISTS plans (
-    project_id      TEXT NOT NULL,
-    task_id         TEXT NOT NULL,
-    task_summary    TEXT NOT NULL,
-    risk_level      TEXT NOT NULL DEFAULT 'LOW',
-    budget_tier     TEXT NOT NULL DEFAULT 'standard',
-    execution_mode  TEXT NOT NULL DEFAULT 'phased',
-    git_strategy    TEXT NOT NULL DEFAULT 'commit-per-agent',
-    shared_context  TEXT NOT NULL DEFAULT '',
-    pattern_source  TEXT,
-    plan_markdown   TEXT NOT NULL DEFAULT '',
-    created_at      TEXT NOT NULL,
+    project_id                 TEXT NOT NULL,
+    task_id                    TEXT NOT NULL,
+    task_summary               TEXT NOT NULL,
+    risk_level                 TEXT NOT NULL DEFAULT 'LOW',
+    budget_tier                TEXT NOT NULL DEFAULT 'standard',
+    execution_mode             TEXT NOT NULL DEFAULT 'phased',
+    git_strategy               TEXT NOT NULL DEFAULT 'commit-per-agent',
+    shared_context             TEXT NOT NULL DEFAULT '',
+    pattern_source             TEXT,
+    plan_markdown              TEXT NOT NULL DEFAULT '',
+    created_at                 TEXT NOT NULL,
+    explicit_knowledge_packs   TEXT NOT NULL DEFAULT '[]',
+    explicit_knowledge_docs    TEXT NOT NULL DEFAULT '[]',
+    intervention_level         TEXT NOT NULL DEFAULT 'low',
+    task_type                  TEXT,
     PRIMARY KEY (project_id, task_id)
 );
 CREATE INDEX IF NOT EXISTS idx_central_plans_risk ON plans(risk_level);
@@ -703,18 +732,19 @@ CREATE TABLE IF NOT EXISTS plan_phases (
 );
 
 CREATE TABLE IF NOT EXISTS plan_steps (
-    project_id        TEXT NOT NULL,
-    task_id           TEXT NOT NULL,
-    step_id           TEXT NOT NULL,
-    phase_id          INTEGER NOT NULL,
-    agent_name        TEXT NOT NULL,
-    task_description  TEXT NOT NULL DEFAULT '',
-    model             TEXT NOT NULL DEFAULT 'sonnet',
-    depends_on        TEXT NOT NULL DEFAULT '[]',
-    deliverables      TEXT NOT NULL DEFAULT '[]',
-    allowed_paths     TEXT NOT NULL DEFAULT '[]',
-    blocked_paths     TEXT NOT NULL DEFAULT '[]',
-    context_files     TEXT NOT NULL DEFAULT '[]',
+    project_id            TEXT NOT NULL,
+    task_id               TEXT NOT NULL,
+    step_id               TEXT NOT NULL,
+    phase_id              INTEGER NOT NULL,
+    agent_name            TEXT NOT NULL,
+    task_description      TEXT NOT NULL DEFAULT '',
+    model                 TEXT NOT NULL DEFAULT 'sonnet',
+    depends_on            TEXT NOT NULL DEFAULT '[]',
+    deliverables          TEXT NOT NULL DEFAULT '[]',
+    allowed_paths         TEXT NOT NULL DEFAULT '[]',
+    blocked_paths         TEXT NOT NULL DEFAULT '[]',
+    context_files         TEXT NOT NULL DEFAULT '[]',
+    knowledge_attachments TEXT NOT NULL DEFAULT '[]',
     PRIMARY KEY (project_id, task_id, step_id)
 );
 CREATE INDEX IF NOT EXISTS idx_central_steps_agent ON plan_steps(agent_name);

@@ -403,7 +403,7 @@ class ExecutionEngine:
 
         completed = state.completed_step_ids
         dispatched = state.dispatched_step_ids
-        occupied = completed | state.failed_step_ids | dispatched
+        occupied = completed | state.failed_step_ids | dispatched | state.interrupted_step_ids
 
         actions: list[ExecutionAction] = []
         for step in phase_obj.steps:
@@ -1385,11 +1385,12 @@ class ExecutionEngine:
                     summary=msg,
                 )
 
-        # Find the next dispatchable step — must not be completed, failed, or
-        # already dispatched, and all dependencies must be satisfied.
+        # Find the next dispatchable step — must not be completed, failed,
+        # dispatched, or interrupted (interrupted steps have been superseded
+        # by a re-dispatch step inserted via the knowledge-gap amend flow).
         completed = state.completed_step_ids
         dispatched = state.dispatched_step_ids
-        occupied = completed | state.failed_step_ids | dispatched
+        occupied = completed | state.failed_step_ids | dispatched | state.interrupted_step_ids
 
         next_step: PlanStep | None = None
         for step in steps:
@@ -1411,7 +1412,14 @@ class ExecutionEngine:
 
         # If no step is dispatchable but some are still pending (dispatched or
         # blocked by dependencies), return WAIT.
-        pending = {s.step_id for s in steps} - completed - state.failed_step_ids
+        # Interrupted steps are excluded: they have been superseded by amended
+        # re-dispatch steps and must not hold the phase in a WAIT loop.
+        pending = (
+            {s.step_id for s in steps}
+            - completed
+            - state.failed_step_ids
+            - state.interrupted_step_ids
+        )
         if pending:
             return ExecutionAction(
                 action_type=ActionType.WAIT,
@@ -1743,6 +1751,7 @@ class ExecutionEngine:
         resolver = getattr(self, "_knowledge_resolver", None)
         resolution_found = False
         resolved_detail = ""
+        attachments: list = []
 
         if resolver is not None:
             try:
@@ -1790,6 +1799,83 @@ class ExecutionEngine:
                 "Auto-resolved knowledge gap for step %s: %r",
                 step_id, signal.description,
             )
+
+            # Amend the plan: insert a re-dispatch step for the same agent
+            # immediately after the interrupted step.  The interrupted step
+            # result is already in state.step_results (status="interrupted"),
+            # so _determine_action will skip it via interrupted_step_ids.
+            #
+            # We mutate state directly here instead of calling amend_plan()
+            # because record_step_result() has not yet flushed state to disk —
+            # amend_plan() would load a stale snapshot and lose the interrupted
+            # step result.  The amendment audit record is still created so the
+            # trace and amendment log remain complete.
+            interrupted_plan_step = self._find_step(state, step_id)
+            if interrupted_plan_step is not None:
+                # Locate the containing phase.
+                containing_phase: PlanPhase | None = None
+                for phase in state.plan.phases:
+                    if any(s.step_id == step_id for s in phase.steps):
+                        containing_phase = phase
+                        break
+
+                if containing_phase is not None:
+                    new_step_id = (
+                        f"{containing_phase.phase_id}.{len(containing_phase.steps) + 1}"
+                    )
+                    # Build the handoff: partial outcome + all resolved decisions.
+                    handoff_text = _append_resolved_decisions(
+                        signal.partial_outcome, state.resolved_decisions
+                    )
+                    re_dispatch_step = PlanStep(
+                        step_id=new_step_id,
+                        agent_name=interrupted_plan_step.agent_name,
+                        task_description=(
+                            interrupted_plan_step.task_description
+                            + "\n\nContinue from partial progress."
+                        ),
+                        model=interrupted_plan_step.model,
+                        knowledge=list(attachments) if attachments else [],
+                        context_files=list(interrupted_plan_step.context_files),
+                        allowed_paths=list(interrupted_plan_step.allowed_paths),
+                        blocked_paths=list(interrupted_plan_step.blocked_paths),
+                    )
+                    containing_phase.steps.append(re_dispatch_step)
+
+                    # Record the amendment for audit / trace.
+                    amendment = PlanAmendment(
+                        amendment_id=f"amend-{len(state.amendments) + 1}",
+                        trigger="knowledge_gap",
+                        trigger_phase_id=containing_phase.phase_id,
+                        description=(
+                            f"Re-dispatch after auto-resolved gap in step {step_id}: "
+                            f"{signal.description!r}"
+                        ),
+                        steps_added=[new_step_id],
+                    )
+                    state.amendments.append(amendment)
+
+                    if self._trace is not None:
+                        self._tracer.record_event(
+                            self._trace,
+                            "replan",
+                            agent_name=None,
+                            phase=containing_phase.phase_id,
+                            step=0,
+                            details={
+                                "amendment_id": amendment.amendment_id,
+                                "description": amendment.description,
+                                "phases_added": [],
+                                "steps_added": [new_step_id],
+                            },
+                        )
+
+                    logger.info(
+                        "Amended plan: inserted re-dispatch step %s after "
+                        "interrupted step %s for agent %s",
+                        new_step_id, step_id, interrupted_plan_step.agent_name,
+                    )
+                    _ = handoff_text  # available for future dispatcher use; logged above
 
         elif action == "best-effort":
             # Log and continue — nothing added to state.

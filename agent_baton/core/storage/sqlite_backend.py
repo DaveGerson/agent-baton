@@ -57,9 +57,11 @@ class SqliteStorage:
                 """
                 INSERT OR REPLACE INTO executions
                     (task_id, status, current_phase, current_step_index,
-                     started_at, completed_at, updated_at)
+                     started_at, completed_at, updated_at,
+                     pending_gaps, resolved_decisions)
                 VALUES (?, ?, ?, ?, ?, ?,
-                        strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+                        strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+                        ?, ?)
                 """,
                 (
                     state.task_id,
@@ -68,6 +70,8 @@ class SqliteStorage:
                     state.current_step_index,
                     state.started_at,
                     state.completed_at or None,
+                    json.dumps([g.to_dict() for g in state.pending_gaps]),
+                    json.dumps([d.to_dict() for d in state.resolved_decisions]),
                 ),
             )
 
@@ -199,6 +203,7 @@ class SqliteStorage:
             StepResult,
             TeamStepResult,
         )
+        from agent_baton.models.knowledge import KnowledgeGapSignal, ResolvedDecision
 
         conn = self._conn()
         row = conn.execute(
@@ -301,6 +306,10 @@ class SqliteStorage:
             ).fetchall()
         ]
 
+        exec_keys = row.keys() if hasattr(row, "keys") else []
+        raw_pg = row["pending_gaps"] if "pending_gaps" in exec_keys else "[]"
+        raw_rd = row["resolved_decisions"] if "resolved_decisions" in exec_keys else "[]"
+
         return ExecutionState(
             task_id=row["task_id"],
             plan=plan,
@@ -313,6 +322,14 @@ class SqliteStorage:
             amendments=amendments,
             started_at=row["started_at"],
             completed_at=row["completed_at"] or "",
+            pending_gaps=[
+                KnowledgeGapSignal.from_dict(g)
+                for g in json.loads(raw_pg or "[]")
+            ],
+            resolved_decisions=[
+                ResolvedDecision.from_dict(d)
+                for d in json.loads(raw_rd or "[]")
+            ],
         )
 
     def list_executions(self) -> list[str]:
@@ -1324,8 +1341,10 @@ def _upsert_plan(conn: sqlite3.Connection, plan: "MachinePlan") -> None:  # noqa
         INSERT OR REPLACE INTO plans
             (task_id, task_summary, risk_level, budget_tier,
              execution_mode, git_strategy, shared_context,
-             pattern_source, plan_markdown, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             pattern_source, plan_markdown, created_at,
+             explicit_knowledge_packs, explicit_knowledge_docs,
+             intervention_level, task_type)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             plan.task_id,
@@ -1338,6 +1357,10 @@ def _upsert_plan(conn: sqlite3.Connection, plan: "MachinePlan") -> None:  # noqa
             plan.pattern_source,
             plan.to_markdown(),
             plan.created_at,
+            json.dumps(plan.explicit_knowledge_packs),
+            json.dumps(plan.explicit_knowledge_docs),
+            plan.intervention_level,
+            plan.task_type,
         ),
     )
 
@@ -1375,8 +1398,8 @@ def _upsert_plan(conn: sqlite3.Connection, plan: "MachinePlan") -> None:  # noqa
                     (task_id, step_id, phase_id, agent_name,
                      task_description, model, depends_on,
                      deliverables, allowed_paths, blocked_paths,
-                     context_files)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     context_files, knowledge_attachments)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     plan.task_id,
@@ -1390,6 +1413,7 @@ def _upsert_plan(conn: sqlite3.Connection, plan: "MachinePlan") -> None:  # noqa
                     json.dumps(step.allowed_paths),
                     json.dumps(step.blocked_paths),
                     json.dumps(step.context_files),
+                    json.dumps([a.to_dict() for a in step.knowledge]),
                 ),
             )
 
@@ -1427,6 +1451,7 @@ def _load_plan_struct(
         PlanStep,
         TeamMember,
     )
+    from agent_baton.models.knowledge import KnowledgeAttachment
 
     plan_row = conn.execute(
         "SELECT * FROM plans WHERE task_id = ?", (task_id,)
@@ -1482,6 +1507,7 @@ def _load_plan_struct(
                 )
                 for mr in members_by_step.get(sr["step_id"], [])
             ]
+            raw_ka = sr["knowledge_attachments"] if "knowledge_attachments" in sr.keys() else "[]"
             steps.append(
                 PlanStep(
                     step_id=sr["step_id"],
@@ -1494,6 +1520,10 @@ def _load_plan_struct(
                     blocked_paths=json.loads(sr["blocked_paths"]),
                     context_files=json.loads(sr["context_files"]),
                     team=team,
+                    knowledge=[
+                        KnowledgeAttachment.from_dict(a)
+                        for a in json.loads(raw_ka or "[]")
+                    ],
                 )
             )
 
@@ -1508,6 +1538,13 @@ def _load_plan_struct(
             )
         )
 
+    # Read knowledge columns with graceful fallback for pre-v2 row factories
+    plan_keys = plan_row.keys() if hasattr(plan_row, "keys") else []
+    ekp = plan_row["explicit_knowledge_packs"] if "explicit_knowledge_packs" in plan_keys else "[]"
+    ekd = plan_row["explicit_knowledge_docs"] if "explicit_knowledge_docs" in plan_keys else "[]"
+    il = plan_row["intervention_level"] if "intervention_level" in plan_keys else "low"
+    tt = plan_row["task_type"] if "task_type" in plan_keys else None
+
     return MachinePlan(
         task_id=plan_row["task_id"],
         task_summary=plan_row["task_summary"],
@@ -1519,4 +1556,8 @@ def _load_plan_struct(
         shared_context=plan_row["shared_context"],
         pattern_source=plan_row["pattern_source"],
         created_at=plan_row["created_at"],
+        explicit_knowledge_packs=json.loads(ekp or "[]"),
+        explicit_knowledge_docs=json.loads(ekd or "[]"),
+        intervention_level=il or "low",
+        task_type=tt,
     )

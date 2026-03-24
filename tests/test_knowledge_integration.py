@@ -1816,78 +1816,450 @@ class TestKnowledgeGapRecordCompatAliases:
 
 
 # ---------------------------------------------------------------------------
-# 14. Skipped stubs — awaiting federated sync / SqliteStorage integration
+# 14. SqliteStorage knowledge-field round-trips (federated sync integration)
 # ---------------------------------------------------------------------------
 
-@pytest.mark.skip(reason="awaiting federated sync")
+import sqlite3
+import tempfile
+
+from agent_baton.core.storage.sqlite_backend import SqliteStorage
+from agent_baton.core.storage.sync import SyncEngine
+from agent_baton.models.execution import (
+    ExecutionState,
+    MachinePlan,
+    PlanPhase,
+    PlanStep,
+    StepResult,
+)
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers for this section
+# ---------------------------------------------------------------------------
+
+def _make_store(tmp_path: Path, subdir: str = "proj") -> tuple[Path, SqliteStorage]:
+    """Return (db_path, SqliteStorage) under tmp_path/<subdir>/baton.db."""
+    db_dir = tmp_path / subdir
+    db_dir.mkdir(parents=True, exist_ok=True)
+    db_path = db_dir / "baton.db"
+    return db_path, SqliteStorage(db_path)
+
+
+def _simple_plan(
+    task_id: str = "t-kn-001",
+    knowledge_packs: list[str] | None = None,
+    knowledge_docs: list[str] | None = None,
+    intervention_level: str = "low",
+    task_type: str | None = None,
+    step_knowledge: list[KnowledgeAttachment] | None = None,
+) -> MachinePlan:
+    step = PlanStep(
+        step_id="1.1",
+        agent_name="backend-engineer--python",
+        task_description="Implement",
+        model="sonnet",
+        knowledge=step_knowledge or [],
+    )
+    phase = PlanPhase(phase_id=1, name="Impl", steps=[step], approval_required=False)
+    return MachinePlan(
+        task_id=task_id,
+        task_summary="knowledge round-trip test",
+        risk_level="LOW",
+        budget_tier="standard",
+        execution_mode="phased",
+        git_strategy="commit-per-agent",
+        phases=[phase],
+        explicit_knowledge_packs=knowledge_packs or [],
+        explicit_knowledge_docs=knowledge_docs or [],
+        intervention_level=intervention_level,
+        task_type=task_type,
+    )
+
+
+def _simple_state(
+    task_id: str = "t-kn-001",
+    pending_gaps: list[KnowledgeGapSignal] | None = None,
+    resolved_decisions: list[ResolvedDecision] | None = None,
+) -> ExecutionState:
+    plan = _simple_plan(task_id)
+    return ExecutionState(
+        task_id=task_id,
+        plan=plan,
+        status="running",
+        current_phase=1,
+        current_step_index=0,
+        started_at="2026-01-01T00:00:00Z",
+        pending_gaps=pending_gaps or [],
+        resolved_decisions=resolved_decisions or [],
+    )
+
+
+def _get_column_names(db_path: Path, table: str) -> list[str]:
+    conn = sqlite3.connect(str(db_path))
+    try:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        return [r[1] for r in rows]
+    finally:
+        conn.close()
+
+
+def _make_project_db_for_sync(
+    tmp_path: Path, subdir: str = "proj"
+) -> tuple[Path, SqliteStorage]:
+    """Return (path, store) with a completed execution ready to sync."""
+    db_path, store = _make_store(tmp_path, subdir)
+    plan = _simple_plan(
+        task_id="sync-task-001",
+        knowledge_packs=["agent-baton", "compliance"],
+        knowledge_docs=["extra-doc.md"],
+        intervention_level="medium",
+        task_type="feature",
+        step_knowledge=[
+            _make_attachment("architecture", pack_name="agent-baton"),
+            _make_attachment("audit-checklist", pack_name="compliance"),
+        ],
+    )
+    state = ExecutionState(
+        task_id="sync-task-001",
+        plan=plan,
+        status="complete",
+        current_phase=1,
+        current_step_index=0,
+        started_at="2026-01-01T00:00:00Z",
+        completed_at="2026-01-01T01:00:00Z",
+    )
+    store.save_execution(state)
+    return db_path, store
+
+
+# ---------------------------------------------------------------------------
+# Group 1 — plans table round-trip via save_plan / load_plan
+# ---------------------------------------------------------------------------
+
 class TestSqliteStorageKnowledgeRoundTrip:
     """Knowledge fields survive SqliteStorage.save_plan() → load_plan()."""
 
-    def test_plan_knowledge_packs_persisted_in_sqlite(self) -> None:
-        raise NotImplementedError
+    def test_plan_knowledge_packs_persisted_in_sqlite(self, tmp_path: Path) -> None:
+        _, store = _make_store(tmp_path)
+        plan = _simple_plan(
+            task_id="t-packs",
+            knowledge_packs=["agent-baton", "compliance"],
+        )
+        store.save_plan(plan)
+        loaded = store.load_plan("t-packs")
+        assert loaded is not None
+        assert loaded.explicit_knowledge_packs == ["agent-baton", "compliance"]
 
-    def test_plan_knowledge_docs_persisted_in_sqlite(self) -> None:
-        raise NotImplementedError
+    def test_plan_knowledge_docs_persisted_in_sqlite(self, tmp_path: Path) -> None:
+        _, store = _make_store(tmp_path)
+        plan = _simple_plan(
+            task_id="t-docs",
+            knowledge_docs=["some/path/doc.md", "other/doc.md"],
+        )
+        store.save_plan(plan)
+        loaded = store.load_plan("t-docs")
+        assert loaded is not None
+        assert loaded.explicit_knowledge_docs == ["some/path/doc.md", "other/doc.md"]
 
-    def test_plan_intervention_level_persisted_in_sqlite(self) -> None:
-        raise NotImplementedError
+    def test_plan_intervention_level_persisted_in_sqlite(self, tmp_path: Path) -> None:
+        _, store = _make_store(tmp_path)
+        for level in ("low", "medium", "high"):
+            task_id = f"t-il-{level}"
+            plan = _simple_plan(task_id=task_id, intervention_level=level)
+            store.save_plan(plan)
+            loaded = store.load_plan(task_id)
+            assert loaded is not None
+            assert loaded.intervention_level == level
 
-    def test_plan_task_type_persisted_in_sqlite(self) -> None:
-        raise NotImplementedError
+    def test_plan_task_type_persisted_in_sqlite(self, tmp_path: Path) -> None:
+        _, store = _make_store(tmp_path)
 
-    def test_step_knowledge_attachments_persisted_in_sqlite(self) -> None:
-        raise NotImplementedError
+        # with a task type
+        plan = _simple_plan(task_id="t-tt-set", task_type="bug-fix")
+        store.save_plan(plan)
+        loaded = store.load_plan("t-tt-set")
+        assert loaded is not None
+        assert loaded.task_type == "bug-fix"
+
+        # without a task type (None)
+        plan2 = _simple_plan(task_id="t-tt-none", task_type=None)
+        store.save_plan(plan2)
+        loaded2 = store.load_plan("t-tt-none")
+        assert loaded2 is not None
+        assert loaded2.task_type is None
+
+    def test_step_knowledge_attachments_persisted_in_sqlite(self, tmp_path: Path) -> None:
+        _, store = _make_store(tmp_path)
+        attachment = _make_attachment(
+            document_name="architecture",
+            pack_name="agent-baton",
+            source="explicit",
+            delivery="inline",
+            path="/knowledge/agent-baton/architecture.md",
+            token_estimate=250,
+            grounding="Architecture reference for this task.",
+        )
+        plan = _simple_plan(task_id="t-step-ka", step_knowledge=[attachment])
+        store.save_plan(plan)
+        loaded = store.load_plan("t-step-ka")
+        assert loaded is not None
+        step = loaded.phases[0].steps[0]
+        assert len(step.knowledge) == 1
+        ka = step.knowledge[0]
+        assert ka.document_name == "architecture"
+        assert ka.pack_name == "agent-baton"
+        assert ka.source == "explicit"
+        assert ka.delivery == "inline"
+        assert ka.path == "/knowledge/agent-baton/architecture.md"
+        assert ka.token_estimate == 250
+        assert ka.grounding == "Architecture reference for this task."
 
 
-@pytest.mark.skip(reason="awaiting federated sync")
+# ---------------------------------------------------------------------------
+# Group 2 — executions table round-trip via save_execution / load_execution
+# ---------------------------------------------------------------------------
+
 class TestSqliteStorageExecutionKnowledgeRoundTrip:
     """Knowledge gap fields survive SqliteStorage.save_execution() → load_execution()."""
 
-    def test_pending_gaps_persisted(self) -> None:
-        raise NotImplementedError
+    def test_pending_gaps_persisted(self, tmp_path: Path) -> None:
+        _, store = _make_store(tmp_path)
+        gap = KnowledgeGapSignal(
+            description="Need compliance rules for GDPR",
+            confidence="none",
+            gap_type="factual",
+            step_id="1.1",
+            agent_name="backend-engineer--python",
+        )
+        state = _simple_state("t-pg", pending_gaps=[gap])
+        store.save_execution(state)
+        loaded = store.load_execution("t-pg")
+        assert loaded is not None
+        assert len(loaded.pending_gaps) == 1
+        assert loaded.pending_gaps[0].description == "Need compliance rules for GDPR"
 
-    def test_resolved_decisions_persisted(self) -> None:
-        raise NotImplementedError
+    def test_resolved_decisions_persisted(self, tmp_path: Path) -> None:
+        _, store = _make_store(tmp_path)
+        decision = ResolvedDecision(
+            gap_description="Need compliance rules for GDPR",
+            resolution="auto-resolved via compliance pack",
+            step_id="1.1",
+            timestamp="2026-01-01T00:05:00Z",
+        )
+        state = _simple_state("t-rd", resolved_decisions=[decision])
+        store.save_execution(state)
+        loaded = store.load_execution("t-rd")
+        assert loaded is not None
+        assert len(loaded.resolved_decisions) == 1
+        assert loaded.resolved_decisions[0].resolution == "auto-resolved via compliance pack"
 
-    def test_knowledge_gap_signal_fields_preserved(self) -> None:
-        raise NotImplementedError
+    def test_knowledge_gap_signal_fields_preserved(self, tmp_path: Path) -> None:
+        _, store = _make_store(tmp_path)
+        gap = KnowledgeGapSignal(
+            description="Unknown API contract for external service",
+            confidence="low",
+            gap_type="contextual",
+            step_id="2.1",
+            agent_name="architect",
+            partial_outcome="Partially designed the integration layer",
+        )
+        state = _simple_state("t-kgf", pending_gaps=[gap])
+        store.save_execution(state)
+        loaded = store.load_execution("t-kgf")
+        assert loaded is not None
+        g = loaded.pending_gaps[0]
+        assert g.description == "Unknown API contract for external service"
+        assert g.confidence == "low"
+        assert g.gap_type == "contextual"
+        assert g.step_id == "2.1"
+        assert g.agent_name == "architect"
+        assert g.partial_outcome == "Partially designed the integration layer"
 
-    def test_resolved_decision_timestamp_preserved(self) -> None:
-        raise NotImplementedError
+    def test_resolved_decision_timestamp_preserved(self, tmp_path: Path) -> None:
+        _, store = _make_store(tmp_path)
+        ts = "2026-03-24T14:30:00Z"
+        decision = ResolvedDecision(
+            gap_description="Unclear retry policy",
+            resolution="Use exponential backoff with max 3 retries",
+            step_id="1.1",
+            timestamp=ts,
+        )
+        state = _simple_state("t-rdt", resolved_decisions=[decision])
+        store.save_execution(state)
+        loaded = store.load_execution("t-rdt")
+        assert loaded is not None
+        assert loaded.resolved_decisions[0].timestamp == ts
 
 
-@pytest.mark.skip(reason="awaiting federated sync")
+# ---------------------------------------------------------------------------
+# Group 3 — central.db schema verification
+# ---------------------------------------------------------------------------
+
 class TestCentralDbKnowledgeSchema:
     """central.db schema includes knowledge-related columns."""
 
-    def test_plans_table_has_explicit_knowledge_packs_column(self) -> None:
-        raise NotImplementedError
+    @pytest.fixture
+    def central_db_path(self, tmp_path: Path) -> Path:
+        """Return path to a freshly initialized central.db."""
+        path = tmp_path / "central.db"
+        engine = SyncEngine(central_db_path=path)
+        # Trigger schema creation by accessing the connection
+        engine._conn_mgr.get_connection()
+        return path
 
-    def test_plans_table_has_explicit_knowledge_docs_column(self) -> None:
-        raise NotImplementedError
+    def test_plans_table_has_explicit_knowledge_packs_column(
+        self, central_db_path: Path
+    ) -> None:
+        cols = _get_column_names(central_db_path, "plans")
+        assert "explicit_knowledge_packs" in cols
 
-    def test_plans_table_has_intervention_level_column(self) -> None:
-        raise NotImplementedError
+    def test_plans_table_has_explicit_knowledge_docs_column(
+        self, central_db_path: Path
+    ) -> None:
+        cols = _get_column_names(central_db_path, "plans")
+        assert "explicit_knowledge_docs" in cols
 
-    def test_execution_state_table_has_pending_gaps_column(self) -> None:
-        raise NotImplementedError
+    def test_plans_table_has_intervention_level_column(
+        self, central_db_path: Path
+    ) -> None:
+        cols = _get_column_names(central_db_path, "plans")
+        assert "intervention_level" in cols
 
-    def test_execution_state_table_has_resolved_decisions_column(self) -> None:
-        raise NotImplementedError
+    def test_execution_state_table_has_pending_gaps_column(
+        self, central_db_path: Path
+    ) -> None:
+        cols = _get_column_names(central_db_path, "executions")
+        assert "pending_gaps" in cols
+
+    def test_execution_state_table_has_resolved_decisions_column(
+        self, central_db_path: Path
+    ) -> None:
+        cols = _get_column_names(central_db_path, "executions")
+        assert "resolved_decisions" in cols
 
 
-@pytest.mark.skip(reason="awaiting federated sync")
+# ---------------------------------------------------------------------------
+# Group 4 — auto-sync propagates knowledge metadata to central.db
+# ---------------------------------------------------------------------------
+
 class TestAutoSyncKnowledgeMetadata:
     """Auto-sync propagates knowledge metadata to central.db."""
 
-    def test_sync_includes_knowledge_pack_names(self) -> None:
-        raise NotImplementedError
+    @pytest.fixture
+    def sync_env(self, tmp_path: Path):
+        """Set up a project DB with knowledge data and a central DB, run sync."""
+        db_path, store = _make_project_db_for_sync(tmp_path, "proj")
+        central_path = tmp_path / "central.db"
 
-    def test_sync_includes_intervention_level(self) -> None:
-        raise NotImplementedError
+        # Register the project in central.db first
+        engine = SyncEngine(central_db_path=central_path)
+        central_conn = engine._conn_mgr.get_connection()
+        central_conn.execute(
+            "INSERT OR REPLACE INTO projects (project_id, name, path, program)"
+            " VALUES (?, ?, ?, ?)",
+            ("test-proj", "Test Project", str(tmp_path / "proj"), "test-program"),
+        )
+        central_conn.commit()
 
-    def test_sync_includes_knowledge_attachment_count_per_step(self) -> None:
-        raise NotImplementedError
+        # Run the sync
+        result = engine.push("test-proj", db_path)
+        return {"engine": engine, "central_path": central_path, "result": result}
 
-    def test_sync_handles_missing_knowledge_fields_gracefully(self) -> None:
-        raise NotImplementedError
+    def test_sync_includes_knowledge_pack_names(self, sync_env: dict) -> None:
+        central_path = sync_env["central_path"]
+        conn = sqlite3.connect(str(central_path))
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute(
+                "SELECT explicit_knowledge_packs FROM plans WHERE task_id = ?",
+                ("sync-task-001",),
+            ).fetchone()
+            assert row is not None, "plans row not found in central.db after sync"
+            import json as _json
+            packs = _json.loads(row["explicit_knowledge_packs"])
+            assert "agent-baton" in packs
+            assert "compliance" in packs
+        finally:
+            conn.close()
+
+    def test_sync_includes_intervention_level(self, sync_env: dict) -> None:
+        central_path = sync_env["central_path"]
+        conn = sqlite3.connect(str(central_path))
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute(
+                "SELECT intervention_level FROM plans WHERE task_id = ?",
+                ("sync-task-001",),
+            ).fetchone()
+            assert row is not None, "plans row not found in central.db after sync"
+            assert row["intervention_level"] == "medium"
+        finally:
+            conn.close()
+
+    def test_sync_includes_knowledge_attachment_count_per_step(
+        self, sync_env: dict
+    ) -> None:
+        central_path = sync_env["central_path"]
+        conn = sqlite3.connect(str(central_path))
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute(
+                "SELECT knowledge_attachments FROM plan_steps"
+                " WHERE task_id = ? AND step_id = ?",
+                ("sync-task-001", "1.1"),
+            ).fetchone()
+            assert row is not None, "plan_steps row not found in central.db after sync"
+            import json as _json
+            attachments = _json.loads(row["knowledge_attachments"])
+            assert len(attachments) == 2
+        finally:
+            conn.close()
+
+    def test_sync_handles_missing_knowledge_fields_gracefully(
+        self, tmp_path: Path
+    ) -> None:
+        """A plan saved without knowledge fields syncs without error."""
+        db_path, store = _make_store(tmp_path, "proj2")
+        # Save a plan with default (empty) knowledge fields
+        plan = _simple_plan(task_id="sync-bare-001")
+        state = ExecutionState(
+            task_id="sync-bare-001",
+            plan=plan,
+            status="complete",
+            current_phase=1,
+            current_step_index=0,
+            started_at="2026-01-01T00:00:00Z",
+            completed_at="2026-01-01T01:00:00Z",
+        )
+        store.save_execution(state)
+
+        central_path = tmp_path / "central2.db"
+        engine = SyncEngine(central_db_path=central_path)
+        central_conn = engine._conn_mgr.get_connection()
+        central_conn.execute(
+            "INSERT OR REPLACE INTO projects (project_id, name, path, program)"
+            " VALUES (?, ?, ?, ?)",
+            ("bare-proj", "Bare Project", str(tmp_path / "proj2"), "test"),
+        )
+        central_conn.commit()
+
+        result = engine.push("bare-proj", db_path)
+        assert result.success, f"Sync failed: {result.errors}"
+        assert result.rows_synced > 0
+
+        # Verify the plan row has empty-list defaults for knowledge fields
+        conn = sqlite3.connect(str(central_path))
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute(
+                "SELECT explicit_knowledge_packs, explicit_knowledge_docs,"
+                " intervention_level FROM plans WHERE task_id = ?",
+                ("sync-bare-001",),
+            ).fetchone()
+            assert row is not None
+            import json as _json
+            assert _json.loads(row["explicit_knowledge_packs"]) == []
+            assert _json.loads(row["explicit_knowledge_docs"]) == []
+            assert row["intervention_level"] == "low"
+        finally:
+            conn.close()
