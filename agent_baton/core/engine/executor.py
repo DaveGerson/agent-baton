@@ -6,6 +6,7 @@ perform.  State is persisted to disk between calls for crash recovery.
 """
 from __future__ import annotations
 
+import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +37,12 @@ from agent_baton.core.observe.trace import TraceRecorder
 from agent_baton.core.observe.usage import UsageLogger
 from agent_baton.core.observe.retrospective import RetrospectiveEngine
 
+
+# ---------------------------------------------------------------------------
+# Module logger
+# ---------------------------------------------------------------------------
+
+_log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -105,9 +112,11 @@ class ExecutionEngine:
         self._bus = bus
 
         if storage is not None:
-            # StorageBackend mode — all I/O goes through the storage backend.
-            # Legacy per-class objects are not created.
-            self._persistence = None  # not used in storage mode
+            # StorageBackend mode — primary I/O goes through the storage
+            # backend.  We still create a file persistence object for
+            # dual-write fallback so that file-based readers (scanner,
+            # list/switch) stay current during the SQLite transition.
+            self._persistence = StatePersistence(self._root, task_id=task_id)
             self._usage_logger = None
             self._telemetry = None
             self._retro_engine = None
@@ -155,8 +164,22 @@ class ExecutionEngine:
         if self._storage is not None:
             try:
                 self._storage.save_execution(state)
-            except Exception:
-                pass
+            except Exception as e:
+                _log.warning(
+                    "SQLite save failed, falling back to file persistence: %s", e
+                )
+                if self._persistence is not None:
+                    self._persistence.save(state)
+                return
+            # Dual-write: keep file-based readers current during transition
+            # (only when a file persistence layer exists alongside the backend).
+            if self._persistence is not None:
+                try:
+                    self._persistence.save(state)
+                except Exception as e:
+                    _log.warning(
+                        "File persistence dual-write failed (non-fatal): %s", e
+                    )
         else:
             self._persistence.save(state)
 
@@ -171,7 +194,12 @@ class ExecutionEngine:
                 if active:
                     return self._storage.load_execution(active)
                 return None
-            except Exception:
+            except Exception as e:
+                _log.warning(
+                    "SQLite load failed, falling back to file persistence: %s", e
+                )
+                if self._persistence is not None:
+                    return self._persistence.load()
                 return None
         else:
             return self._persistence.load()
@@ -181,8 +209,12 @@ class ExecutionEngine:
         if self._storage is not None:
             try:
                 self._storage.log_usage(record)
-            except Exception:
-                pass
+            except Exception as e:
+                _log.warning(
+                    "SQLite usage log failed, falling back to file logger: %s", e
+                )
+                if self._usage_logger is not None:
+                    self._usage_logger.log(record)
         else:
             self._usage_logger.log(record)
 
@@ -200,21 +232,33 @@ class ExecutionEngine:
                     "details": getattr(tel_event, "details", ""),
                     "task_id": self._task_id or "",
                 })
-            except Exception:
-                pass
+            except Exception as e:
+                _log.warning(
+                    "SQLite telemetry log failed, falling back to file logger: %s", e
+                )
+                if self._telemetry is not None:
+                    try:
+                        self._telemetry.log_event(tel_event)
+                    except Exception as fe:
+                        _log.warning("File telemetry fallback also failed: %s", fe)
         else:
             try:
                 self._telemetry.log_event(tel_event)
-            except Exception:
-                pass
+            except Exception as e:
+                _log.warning("File telemetry log failed: %s", e)
 
     def _save_retro(self, retro) -> "Path | None":
         """Persist a retrospective via storage backend or legacy engine."""
         if self._storage is not None:
             try:
                 self._storage.save_retrospective(retro)
-            except Exception:
-                pass
+            except Exception as e:
+                _log.warning(
+                    "SQLite retrospective save failed, falling back to file engine: %s",
+                    e,
+                )
+                if self._retro_engine is not None:
+                    return self._retro_engine.save(retro)
             return None
         else:
             return self._retro_engine.save(retro)
@@ -230,6 +274,22 @@ class ExecutionEngine:
         - Returns the first action (DISPATCH for the first step, or COMPLETE
           if the plan has no phases/steps)
         """
+        # Track the task_id for subsequent load/save calls.
+        self._task_id = plan.task_id
+        if self._storage is not None:
+            try:
+                self._storage.set_active_task(plan.task_id)
+            except Exception as exc:
+                _log.warning("Failed to set active task in storage: %s", exc)
+        # Keep file-based active marker in sync.
+        if self._persistence is not None:
+            try:
+                # Update persistence's task_id then write the active marker.
+                self._persistence._task_id = plan.task_id
+                self._persistence.set_active()
+            except Exception:
+                pass
+
         state = ExecutionState(
             task_id=plan.task_id,
             plan=plan,
@@ -1164,10 +1224,17 @@ class ExecutionEngine:
                     suggested_fix="add context_files to reduce search scope",
                 ))
 
+        gates_passed = len([g for g in state.gate_results if g.passed])
+        gates_failed = len([g for g in state.gate_results if not g.passed])
+        agent_count = len({r.agent_name for r in state.step_results})
+
         return {
             "task_name": state.plan.task_summary,
             "task_id": state.task_id,
             "status": state.status,
+            "gates_passed": gates_passed,
+            "gates_failed": gates_failed,
+            "agent_count": agent_count,
             "what_worked": what_worked,
             "what_didnt": what_didnt,
             "knowledge_gaps": knowledge_gaps,

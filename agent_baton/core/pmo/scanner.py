@@ -5,16 +5,20 @@ and maps ExecutionState.status to a PmoCard column.
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from agent_baton.core.engine.persistence import StatePersistence
 from agent_baton.core.pmo.store import PmoStore
+from agent_baton.core.storage import detect_backend, get_project_storage
 from agent_baton.models.pmo import (
     PmoCard,
     PmoProject,
     ProgramHealth,
     status_to_column,
 )
+
+_log = logging.getLogger(__name__)
 
 
 class PmoScanner:
@@ -62,16 +66,48 @@ class PmoScanner:
     def scan_project(self, project: PmoProject) -> list[PmoCard]:
         """Scan a single project for execution states and return cards.
 
+        Checks baton.db via SQLite backend first; falls back to file-based
+        StatePersistence scan for projects that have not yet migrated.
+
         Supports both namespaced executions (multiple plans per project)
         and legacy flat execution-state.json files.
         """
         context_root = Path(project.path) / ".claude" / "team-context"
         cards: list[PmoCard] = []
 
-        # Load all execution states (namespaced + legacy flat file)
-        states = StatePersistence.load_all(context_root)
-        for state in states:
-            cards.append(self._state_to_card(state, project))
+        backend = detect_backend(context_root)
+        if backend == "sqlite":
+            _log.debug(
+                "scan_project[%s]: using SQLite backend at %s",
+                project.project_id,
+                context_root / "baton.db",
+            )
+            try:
+                storage = get_project_storage(context_root, backend="sqlite")
+                task_ids = storage.list_executions()
+                for tid in task_ids:
+                    state = storage.load_execution(tid)
+                    if state is not None:
+                        cards.append(self._state_to_card(state, project))
+            except Exception:
+                _log.debug(
+                    "scan_project[%s]: SQLite load failed, falling back to files",
+                    project.project_id,
+                    exc_info=True,
+                )
+                states = StatePersistence.load_all(context_root)
+                for state in states:
+                    cards.append(self._state_to_card(state, project))
+        else:
+            _log.debug(
+                "scan_project[%s]: using file backend at %s",
+                project.project_id,
+                context_root,
+            )
+            # Load all execution states (namespaced + legacy flat file)
+            states = StatePersistence.load_all(context_root)
+            for state in states:
+                cards.append(self._state_to_card(state, project))
 
         # Check for saved plans without execution state → queued
         # Scan both legacy root plan.json and task-scoped plan files
