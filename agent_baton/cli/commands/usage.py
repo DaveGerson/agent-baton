@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import argparse
 
-from agent_baton.core.usage import UsageLogger
+from agent_baton.core.observe.usage import UsageLogger
 
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:

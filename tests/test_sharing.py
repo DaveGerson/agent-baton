@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_baton.core.sharing import PackageBuilder, PackageManifest
+from agent_baton.core.distribute.sharing import PackageBuilder, PackageManifest
 
 
 # ---------------------------------------------------------------------------

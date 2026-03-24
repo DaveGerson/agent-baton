@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_baton.core.transfer import ProjectTransfer, TransferManifest
+from agent_baton.core.distribute.transfer import ProjectTransfer, TransferManifest
 
 
 # ---------------------------------------------------------------------------

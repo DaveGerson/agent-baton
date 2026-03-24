@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import argparse
 
-from agent_baton.core.scoring import PerformanceScorer
+from agent_baton.core.improve.scoring import PerformanceScorer
 
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:

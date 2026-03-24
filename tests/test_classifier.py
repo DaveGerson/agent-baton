@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from agent_baton.core.classifier import ClassificationResult, DataClassifier
+from agent_baton.core.govern.classifier import ClassificationResult, DataClassifier
 from agent_baton.models.enums import RiskLevel
 
 

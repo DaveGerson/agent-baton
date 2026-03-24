@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_baton.core.incident import IncidentManager, IncidentPhase, IncidentTemplate
+from agent_baton.core.distribute.incident import IncidentManager, IncidentPhase, IncidentTemplate
 
 
 # ---------------------------------------------------------------------------

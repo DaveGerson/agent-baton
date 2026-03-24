@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from agent_baton.models.usage import AgentUsageRecord, TaskUsageRecord
-from agent_baton.core.usage import UsageLogger
+from agent_baton.core.observe.usage import UsageLogger
 
 
 # ---------------------------------------------------------------------------

@@ -13,7 +13,7 @@ from agent_baton.models.retrospective import (
     SequencingNote,
 )
 from agent_baton.models.usage import AgentUsageRecord, TaskUsageRecord
-from agent_baton.core.retrospective import RetrospectiveEngine
+from agent_baton.core.observe.retrospective import RetrospectiveEngine
 
 
 # ---------------------------------------------------------------------------

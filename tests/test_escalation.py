@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from agent_baton.models.escalation import Escalation
-from agent_baton.core.escalation import EscalationManager
+from agent_baton.core.govern.escalation import EscalationManager
 
 
 # ---------------------------------------------------------------------------

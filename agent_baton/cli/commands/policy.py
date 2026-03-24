@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import argparse
 
-from agent_baton.core.policy import PolicyEngine
+from agent_baton.core.govern.policy import PolicyEngine
 
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:

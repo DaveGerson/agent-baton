@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import argparse
 
-from agent_baton.core.classifier import DataClassifier
+from agent_baton.core.govern.classifier import DataClassifier
 
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:

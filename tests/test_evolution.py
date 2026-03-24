@@ -11,10 +11,10 @@ from agent_baton.models.retrospective import (
     KnowledgeGap,
     Retrospective,
 )
-from agent_baton.core.usage import UsageLogger
-from agent_baton.core.retrospective import RetrospectiveEngine
-from agent_baton.core.scoring import AgentScorecard, PerformanceScorer
-from agent_baton.core.evolution import EvolutionProposal, PromptEvolutionEngine
+from agent_baton.core.observe.usage import UsageLogger
+from agent_baton.core.observe.retrospective import RetrospectiveEngine
+from agent_baton.core.improve.scoring import AgentScorecard, PerformanceScorer
+from agent_baton.core.improve.evolution import EvolutionProposal, PromptEvolutionEngine
 
 
 # ---------------------------------------------------------------------------

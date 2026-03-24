@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import argparse
 
-from agent_baton.core.telemetry import AgentTelemetry
+from agent_baton.core.observe.telemetry import AgentTelemetry
 
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:

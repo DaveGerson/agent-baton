@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_baton.core.telemetry import AgentTelemetry, TelemetryEvent
+from agent_baton.core.observe.telemetry import AgentTelemetry, TelemetryEvent
 
 
 # ---------------------------------------------------------------------------

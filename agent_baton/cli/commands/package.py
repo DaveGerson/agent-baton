@@ -5,7 +5,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from agent_baton.core.sharing import PackageBuilder
+from agent_baton.core.distribute.sharing import PackageBuilder
 
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:

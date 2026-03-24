@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import argparse
 
-from agent_baton.core.dashboard import DashboardGenerator
+from agent_baton.core.observe.dashboard import DashboardGenerator
 
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:

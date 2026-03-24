@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_baton.core.policy import (
+from agent_baton.core.govern.policy import (
     PolicyEngine,
     PolicyRule,
     PolicySet,

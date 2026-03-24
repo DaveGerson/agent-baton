@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_baton.core.validator import AgentValidator, ValidationResult
+from agent_baton.core.govern.validator import AgentValidator, ValidationResult
 
 
 @pytest.fixture

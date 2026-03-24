@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_baton.core.registry import AgentRegistry
+from agent_baton.core.orchestration.registry import AgentRegistry
 
 
 # ---------------------------------------------------------------------------

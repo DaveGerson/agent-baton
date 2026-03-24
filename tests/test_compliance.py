@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_baton.core.compliance import (
+from agent_baton.core.govern.compliance import (
     ComplianceEntry,
     ComplianceReport,
     ComplianceReportGenerator,

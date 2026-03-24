@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_baton.core.spec_validator import SpecCheck, SpecValidationResult, SpecValidator
+from agent_baton.core.govern.spec_validator import SpecCheck, SpecValidationResult, SpecValidator
 
 
 # ---------------------------------------------------------------------------

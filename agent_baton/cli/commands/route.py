@@ -4,8 +4,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from agent_baton.core.registry import AgentRegistry
-from agent_baton.core.router import AgentRouter
+from agent_baton.core.orchestration.registry import AgentRegistry
+from agent_baton.core.orchestration.router import AgentRouter
 
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_baton.core.async_dispatch import AsyncDispatcher, AsyncTask
+from agent_baton.core.distribute.async_dispatch import AsyncDispatcher, AsyncTask
 
 
 # ---------------------------------------------------------------------------

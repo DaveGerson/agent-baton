@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import argparse
 
-from agent_baton.core.compliance import ComplianceReportGenerator
+from agent_baton.core.govern.compliance import ComplianceReportGenerator
 
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:

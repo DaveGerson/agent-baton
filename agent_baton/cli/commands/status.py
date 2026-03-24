@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import argparse
 
-from agent_baton.core.context import ContextManager
+from agent_baton.core.orchestration.context import ContextManager
 
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:

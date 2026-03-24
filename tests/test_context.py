@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_baton.core.context import ContextManager
+from agent_baton.core.orchestration.context import ContextManager
 from agent_baton.models.execution import MachinePlan
 from agent_baton.models.plan import MissionLogEntry
 

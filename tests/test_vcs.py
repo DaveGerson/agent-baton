@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_baton.core.vcs import AgentVersionControl, ChangelogEntry
+from agent_baton.core.improve.vcs import AgentVersionControl, ChangelogEntry
 
 
 # ---------------------------------------------------------------------------

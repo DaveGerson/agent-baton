@@ -5,7 +5,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from agent_baton.core.spec_validator import SpecValidator
+from agent_baton.core.govern.spec_validator import SpecValidator
 
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:

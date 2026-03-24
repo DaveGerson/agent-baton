@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import argparse
 
-from agent_baton.core.retrospective import RetrospectiveEngine
+from agent_baton.core.observe.retrospective import RetrospectiveEngine
 
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:

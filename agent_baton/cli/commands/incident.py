@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import argparse
 
-from agent_baton.core.incident import IncidentManager
+from agent_baton.core.distribute.incident import IncidentManager
 
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:

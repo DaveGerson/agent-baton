@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from agent_baton.core.registry import AgentRegistry
-from agent_baton.core.router import AgentRouter, StackProfile
+from agent_baton.core.orchestration.registry import AgentRegistry
+from agent_baton.core.orchestration.router import AgentRouter, StackProfile
 
 
 # ---------------------------------------------------------------------------

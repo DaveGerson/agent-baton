@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import argparse
 
-from agent_baton.core.evolution import PromptEvolutionEngine
+from agent_baton.core.improve.evolution import PromptEvolutionEngine
 
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:

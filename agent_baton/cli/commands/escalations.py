@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import argparse
 
-from agent_baton.core.escalation import EscalationManager
+from agent_baton.core.govern.escalation import EscalationManager
 
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
