@@ -30,3 +30,4 @@ Thumbs.db
 credentials.json
 secrets/
 /.superpowers/
+.worktrees/
