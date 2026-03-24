@@ -293,37 +293,6 @@ class ExecutionEngine:
                 duration_seconds=duration_seconds if duration_seconds else None,
             )
 
-        # Publish EventBus event for the step transition.
-        task_id = state.task_id
-        if status == "complete":
-            self._publish(evt.step_completed(
-                task_id=task_id,
-                step_id=step_id,
-                agent_name=agent_name,
-                outcome=outcome,
-                files_changed=files_changed or [],
-                commit_hash=commit_hash,
-                duration_seconds=duration_seconds,
-                estimated_tokens=estimated_tokens,
-            ))
-        elif status == "failed":
-            self._publish(evt.step_failed(
-                task_id=task_id,
-                step_id=step_id,
-                agent_name=agent_name,
-                error=error,
-                duration_seconds=duration_seconds,
-            ))
-        elif status == "dispatched":
-            # Determine model from the plan step for the dispatched event.
-            step_model = _model_for_step(state.plan, step_id)
-            self._publish(evt.step_dispatched(
-                task_id=task_id,
-                step_id=step_id,
-                agent_name=agent_name,
-                model=step_model,
-            ))
-
         self._save_state(state)
 
     def mark_dispatched(self, step_id: str, agent_name: str) -> None:
@@ -547,6 +516,10 @@ class ExecutionEngine:
         return recovered
 
     # ── Internal helpers ────────────────────────────────────────────────────
+
+    # Event ownership: Engine publishes task-level and phase-level events.
+    # Step-level events (step.dispatched, step.completed, step.failed) are
+    # published by the runtime layer (TaskWorker) to avoid duplication.
 
     def _publish(self, event: Event) -> None:
         """Publish an event if a bus is configured."""

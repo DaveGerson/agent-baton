@@ -124,6 +124,9 @@ class TaskWorker:
                 for a in actions:
                     self._engine.mark_dispatched(a.step_id, a.agent_name)
 
+                # Event ownership: Worker publishes step-level events.
+                # Task-level and phase-level events are published by ExecutionEngine.
+
                 # Publish step.dispatched events.
                 task_id = self._engine.status().get("task_id", "")
                 for a in actions:
