@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
+import logging
 import os
-import sys
 from pathlib import Path
 
 from agent_baton.core.runtime.supervisor import WorkerSupervisor
-from agent_baton.core.runtime.launcher import DryRunLauncher
+from agent_baton.core.runtime.launcher import DryRunLauncher, AgentLauncher
 from agent_baton.models.execution import MachinePlan
 
 
@@ -41,12 +42,200 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         "--project-dir", metavar="DIR", default=None,
         help="Project directory for execution (default: cwd)",
     )
+    # ── API integration flags ────────────────────────────────────────────────
+    start.add_argument(
+        "--serve", action="store_true", default=False,
+        help=(
+            "Also start the HTTP API server in the same process, sharing the "
+            "EventBus with the async worker."
+        ),
+    )
+    start.add_argument(
+        "--port", metavar="PORT", type=int, default=8741,
+        help="Port for the API server (only used with --serve, default: 8741)",
+    )
+    start.add_argument(
+        "--host", metavar="HOST", default="127.0.0.1",
+        help=(
+            "Bind address for the API server "
+            "(only used with --serve, default: 127.0.0.1)"
+        ),
+    )
+    start.add_argument(
+        "--token", metavar="TOKEN", default=None,
+        help="Bearer token for API authentication (only used with --serve)",
+    )
 
     sub.add_parser("status", help="Show daemon status")
     sub.add_parser("stop", help="Stop the running daemon")
 
     return p
 
+
+# ---------------------------------------------------------------------------
+# Combined daemon + API runner
+# ---------------------------------------------------------------------------
+
+async def _run_daemon_with_api(
+    *,
+    plan: MachinePlan | None,
+    launcher: AgentLauncher,
+    supervisor: WorkerSupervisor,
+    max_parallel: int,
+    resume: bool,
+    host: str,
+    port: int,
+    token: str | None,
+    team_context_root: Path,
+) -> str:
+    """Run the async worker and the HTTP API server concurrently.
+
+    Both share a single :class:`~agent_baton.core.events.bus.EventBus`
+    instance so events emitted by the worker are immediately visible to
+    connected API clients (SSE stream, webhook layer, observability routes).
+
+    The runner mirrors :meth:`WorkerSupervisor._run_with_signals` but adds a
+    third concurrent task for the uvicorn server.  On any signal the worker
+    and server are both cancelled gracefully.
+
+    Args:
+        plan: The execution plan.  Ignored when *resume* is True.
+        launcher: Agent launcher implementation.
+        supervisor: A pre-initialised :class:`WorkerSupervisor` (used for its
+            PID-file/logging setup that was already called by the caller).
+        max_parallel: Maximum concurrently dispatched agents.
+        resume: When True, resume from persisted engine state.
+        host: Bind address for uvicorn.
+        port: Port for uvicorn.
+        token: Optional Bearer token for API auth.
+        team_context_root: Root directory used by the engine and API.
+    """
+    from agent_baton.api.server import create_app
+    from agent_baton.core.events.bus import EventBus
+    from agent_baton.core.runtime.context import ExecutionContext
+    from agent_baton.core.runtime.signals import SignalHandler
+    from agent_baton.core.runtime.worker import TaskWorker
+    import uvicorn
+
+    logger = logging.getLogger("baton.daemon")
+
+    # ── Shared EventBus ──────────────────────────────────────────────────────
+    bus = EventBus()
+
+    # ── Execution engine + worker ────────────────────────────────────────────
+    ctx = ExecutionContext.build(
+        launcher=launcher,
+        team_context_root=team_context_root,
+        bus=bus,
+    )
+    engine = ctx.engine
+
+    if resume:
+        logger.info("Daemon resuming (with API): task=%s host=%s port=%d", "?", host, port)
+        engine.resume()
+    else:
+        task_id = plan.task_id if plan else "?"
+        logger.info(
+            "Daemon starting (with API): task=%s host=%s port=%d",
+            task_id, host, port,
+        )
+        engine.start(plan)
+
+    worker = TaskWorker(
+        engine=engine,
+        launcher=launcher,
+        bus=bus,
+        max_parallel=max_parallel,
+    )
+
+    # ── FastAPI app (shares the same bus) ────────────────────────────────────
+    app = create_app(
+        bus=bus,
+        host=host,
+        port=port,
+        token=token,
+        team_context_root=team_context_root,
+    )
+
+    # ── uvicorn server ───────────────────────────────────────────────────────
+    config = uvicorn.Config(
+        app,
+        host=host,
+        port=port,
+        log_level="warning",  # keep daemon log clean; baton.daemon logger owns INFO
+    )
+    server = uvicorn.Server(config)
+
+    # ── Signal handling ──────────────────────────────────────────────────────
+    signal_handler = SignalHandler()
+    signal_handler.install()
+
+    worker_task = asyncio.create_task(worker.run(), name="baton-worker")
+    server_task = asyncio.create_task(server.serve(), name="baton-api-server")
+    signal_task = asyncio.create_task(signal_handler.wait(), name="baton-signal")
+
+    summary = ""
+    try:
+        done, pending = await asyncio.wait(
+            {worker_task, server_task, signal_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+
+        if signal_task in done:
+            # Graceful shutdown: cancel worker + server, then wait for drain.
+            logger.info("Shutdown signal received — draining worker and API server.")
+            worker_task.cancel()
+            server.should_exit = True  # ask uvicorn to stop accepting new requests
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(worker_task, server_task, return_exceptions=True),
+                    timeout=30.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Drain timeout after 30 s — forcing exit.")
+            summary = "Daemon stopped by signal."
+
+        elif worker_task in done:
+            # Worker finished (or failed) — summary is its return value.
+            exc = worker_task.exception()
+            if exc is not None:
+                summary = f"Daemon failed: {exc}"
+                logger.exception("Worker raised an exception.", exc_info=exc)
+            else:
+                summary = worker_task.result()
+                logger.info("Worker finished: %s", summary)
+            # Shut the API server down gracefully; no more work to observe.
+            server.should_exit = True
+            signal_task.cancel()
+            try:
+                await asyncio.wait_for(server_task, timeout=10.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                pass
+
+        else:
+            # Server task completed first (shouldn't happen in normal operation).
+            logger.warning("API server exited unexpectedly; stopping worker.")
+            worker_task.cancel()
+            signal_task.cancel()
+            try:
+                summary = await asyncio.wait_for(worker_task, timeout=10.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                summary = "Daemon stopped: API server exited unexpectedly."
+
+    finally:
+        signal_handler.uninstall()
+        # Cancel any tasks still pending (defensive cleanup).
+        for task in (worker_task, server_task, signal_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(worker_task, server_task, signal_task, return_exceptions=True)
+
+    return summary
+
+
+# ---------------------------------------------------------------------------
+# CLI handler
+# ---------------------------------------------------------------------------
 
 def handler(args: argparse.Namespace) -> None:
     supervisor = WorkerSupervisor()
@@ -89,6 +278,13 @@ def handler(args: argparse.Namespace) -> None:
                 return
             os.chdir(project_dir)
 
+        # --serve is only meaningful in foreground mode or after daemonization.
+        # Validate it before forking so the user gets clear feedback.
+        serve = getattr(args, "serve", False)
+        host: str = getattr(args, "host", "127.0.0.1")
+        port: int = getattr(args, "port", 8741)
+        token: str | None = getattr(args, "token", None)
+
         # Single-instance check + daemonize (skipped with --foreground).
         if not args.foreground:
             if supervisor.pid_path.exists():
@@ -106,22 +302,83 @@ def handler(args: argparse.Namespace) -> None:
             from agent_baton.core.runtime.daemon import daemonize
 
             task_label = plan.task_id if plan else "resumed execution"
-            print(f"Starting daemon for task '{task_label}'...")
+            if serve:
+                print(
+                    f"Starting daemon for task '{task_label}' "
+                    f"with API server on {host}:{port}..."
+                )
+            else:
+                print(f"Starting daemon for task '{task_label}'...")
             daemonize()
         else:
             task_label = plan.task_id if plan else "resumed execution"
-            print(f"Starting daemon for task '{task_label}'...")
+            if serve:
+                print(
+                    f"Starting daemon for task '{task_label}' "
+                    f"with API server on {host}:{port}..."
+                )
+            else:
+                print(f"Starting daemon for task '{task_label}'...")
 
-        try:
-            summary = supervisor.start(
-                plan=plan,
-                launcher=launcher,
-                max_parallel=args.max_parallel,
-                resume=args.resume,
-            )
-        except RuntimeError as exc:
-            print(f"Error: {exc}")
-            return
+        if serve:
+            # ── Combined worker + API path ───────────────────────────────────
+            # We bypass supervisor.start() because that method calls
+            # asyncio.run() internally — we need to run uvicorn alongside the
+            # worker in the same event loop via asyncio.gather().
+            supervisor._root.mkdir(parents=True, exist_ok=True)
+            try:
+                supervisor._write_pid()
+            except RuntimeError as exc:
+                print(f"Error: {exc}")
+                return
+            supervisor._setup_logging()
+
+            logger = logging.getLogger("baton.daemon")
+            summary = ""
+            try:
+                summary = asyncio.run(
+                    _run_daemon_with_api(
+                        plan=plan,
+                        launcher=launcher,
+                        supervisor=supervisor,
+                        max_parallel=args.max_parallel,
+                        resume=args.resume,
+                        host=host,
+                        port=port,
+                        token=token,
+                        team_context_root=supervisor._root,
+                    )
+                )
+            except KeyboardInterrupt:
+                summary = "Daemon interrupted by user."
+                logger.info("Daemon interrupted.")
+            except Exception as exc:
+                summary = f"Daemon failed: {exc}"
+                logger.exception("Daemon failed with exception.")
+            finally:
+                # Write status snapshot using a temporary ExecutionEngine so
+                # we can read the final persisted state without re-running.
+                from agent_baton.core.engine.executor import ExecutionEngine
+                _engine_for_status = ExecutionEngine(
+                    team_context_root=supervisor._root
+                )
+                supervisor._write_status(_engine_for_status, summary=summary)
+                supervisor._remove_pid()
+                logger.info("Daemon stopped.")
+        else:
+            # ── Worker-only path (original behaviour) ────────────────────────
+            try:
+                summary = supervisor.start(
+                    plan=plan,
+                    launcher=launcher,
+                    max_parallel=args.max_parallel,
+                    resume=args.resume,
+                )
+            except RuntimeError as exc:
+                print(f"Error: {exc}")
+                return
+            summary = summary  # already assigned
+
         # In foreground mode the process is still attached to the terminal and
         # can print the summary.  In daemon mode stdout has been redirected to
         # /dev/null so this is a no-op.
