@@ -1,0 +1,483 @@
+"""SQL DDL for Agent-Baton databases.
+
+PROJECT_SCHEMA_DDL — per-project baton.db
+PMO_SCHEMA_DDL — global pmo.db
+MIGRATIONS — sequential migration scripts keyed by version
+"""
+
+SCHEMA_VERSION = 1
+
+# Sequential migration scripts: {version: DDL_string}
+MIGRATIONS: dict[int, str] = {}
+
+# =====================================================================
+# Per-project database schema (baton.db)
+# =====================================================================
+
+PROJECT_SCHEMA_DDL = """
+-- Schema version tracking
+CREATE TABLE IF NOT EXISTS _schema_version (
+    version INTEGER NOT NULL
+);
+
+-- EXECUTIONS (replaces execution-state.json)
+CREATE TABLE IF NOT EXISTS executions (
+    task_id         TEXT PRIMARY KEY,
+    status          TEXT NOT NULL DEFAULT 'running',
+    current_phase   INTEGER NOT NULL DEFAULT 0,
+    current_step_index INTEGER NOT NULL DEFAULT 0,
+    started_at      TEXT NOT NULL,
+    completed_at    TEXT,
+    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_executions_status ON executions(status);
+CREATE INDEX IF NOT EXISTS idx_executions_started ON executions(started_at);
+
+-- PLANS (replaces plan.json)
+CREATE TABLE IF NOT EXISTS plans (
+    task_id           TEXT PRIMARY KEY,
+    task_summary      TEXT NOT NULL,
+    risk_level        TEXT NOT NULL DEFAULT 'LOW',
+    budget_tier       TEXT NOT NULL DEFAULT 'standard',
+    execution_mode    TEXT NOT NULL DEFAULT 'phased',
+    git_strategy      TEXT NOT NULL DEFAULT 'commit-per-agent',
+    shared_context    TEXT NOT NULL DEFAULT '',
+    pattern_source    TEXT,
+    plan_markdown     TEXT NOT NULL DEFAULT '',
+    created_at        TEXT NOT NULL,
+    FOREIGN KEY (task_id) REFERENCES executions(task_id) ON DELETE CASCADE
+);
+
+-- PLAN_PHASES
+CREATE TABLE IF NOT EXISTS plan_phases (
+    task_id              TEXT NOT NULL,
+    phase_id             INTEGER NOT NULL,
+    name                 TEXT NOT NULL,
+    approval_required    INTEGER NOT NULL DEFAULT 0,
+    approval_description TEXT NOT NULL DEFAULT '',
+    gate_type            TEXT,
+    gate_command         TEXT,
+    gate_description     TEXT,
+    gate_fail_on         TEXT,
+    PRIMARY KEY (task_id, phase_id),
+    FOREIGN KEY (task_id) REFERENCES plans(task_id) ON DELETE CASCADE
+);
+
+-- PLAN_STEPS
+CREATE TABLE IF NOT EXISTS plan_steps (
+    task_id           TEXT NOT NULL,
+    step_id           TEXT NOT NULL,
+    phase_id          INTEGER NOT NULL,
+    agent_name        TEXT NOT NULL,
+    task_description  TEXT NOT NULL DEFAULT '',
+    model             TEXT NOT NULL DEFAULT 'sonnet',
+    depends_on        TEXT NOT NULL DEFAULT '[]',
+    deliverables      TEXT NOT NULL DEFAULT '[]',
+    allowed_paths     TEXT NOT NULL DEFAULT '[]',
+    blocked_paths     TEXT NOT NULL DEFAULT '[]',
+    context_files     TEXT NOT NULL DEFAULT '[]',
+    PRIMARY KEY (task_id, step_id),
+    FOREIGN KEY (task_id, phase_id) REFERENCES plan_phases(task_id, phase_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_plan_steps_agent ON plan_steps(agent_name);
+CREATE INDEX IF NOT EXISTS idx_plan_steps_phase ON plan_steps(task_id, phase_id);
+
+-- TEAM_MEMBERS
+CREATE TABLE IF NOT EXISTS team_members (
+    task_id        TEXT NOT NULL,
+    step_id        TEXT NOT NULL,
+    member_id      TEXT NOT NULL,
+    agent_name     TEXT NOT NULL,
+    role           TEXT NOT NULL DEFAULT 'implementer',
+    task_description TEXT NOT NULL DEFAULT '',
+    model          TEXT NOT NULL DEFAULT 'sonnet',
+    depends_on     TEXT NOT NULL DEFAULT '[]',
+    deliverables   TEXT NOT NULL DEFAULT '[]',
+    PRIMARY KEY (task_id, step_id, member_id),
+    FOREIGN KEY (task_id, step_id) REFERENCES plan_steps(task_id, step_id) ON DELETE CASCADE
+);
+
+-- STEP_RESULTS
+CREATE TABLE IF NOT EXISTS step_results (
+    task_id           TEXT NOT NULL,
+    step_id           TEXT NOT NULL,
+    agent_name        TEXT NOT NULL,
+    status            TEXT NOT NULL DEFAULT 'complete',
+    outcome           TEXT NOT NULL DEFAULT '',
+    files_changed     TEXT NOT NULL DEFAULT '[]',
+    commit_hash       TEXT NOT NULL DEFAULT '',
+    estimated_tokens  INTEGER NOT NULL DEFAULT 0,
+    duration_seconds  REAL NOT NULL DEFAULT 0.0,
+    retries           INTEGER NOT NULL DEFAULT 0,
+    error             TEXT NOT NULL DEFAULT '',
+    completed_at      TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (task_id, step_id),
+    FOREIGN KEY (task_id) REFERENCES executions(task_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_step_results_status ON step_results(status);
+CREATE INDEX IF NOT EXISTS idx_step_results_agent ON step_results(agent_name);
+
+-- TEAM_STEP_RESULTS
+CREATE TABLE IF NOT EXISTS team_step_results (
+    task_id        TEXT NOT NULL,
+    step_id        TEXT NOT NULL,
+    member_id      TEXT NOT NULL,
+    agent_name     TEXT NOT NULL,
+    status         TEXT NOT NULL DEFAULT 'complete',
+    outcome        TEXT NOT NULL DEFAULT '',
+    files_changed  TEXT NOT NULL DEFAULT '[]',
+    PRIMARY KEY (task_id, step_id, member_id),
+    FOREIGN KEY (task_id, step_id) REFERENCES step_results(task_id, step_id) ON DELETE CASCADE
+);
+
+-- GATE_RESULTS
+CREATE TABLE IF NOT EXISTS gate_results (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id     TEXT NOT NULL,
+    phase_id    INTEGER NOT NULL,
+    gate_type   TEXT NOT NULL,
+    passed      INTEGER NOT NULL,
+    output      TEXT NOT NULL DEFAULT '',
+    checked_at  TEXT NOT NULL DEFAULT '',
+    FOREIGN KEY (task_id) REFERENCES executions(task_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_gate_results_task ON gate_results(task_id);
+
+-- APPROVAL_RESULTS
+CREATE TABLE IF NOT EXISTS approval_results (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id     TEXT NOT NULL,
+    phase_id    INTEGER NOT NULL,
+    result      TEXT NOT NULL,
+    feedback    TEXT NOT NULL DEFAULT '',
+    decided_at  TEXT NOT NULL DEFAULT '',
+    FOREIGN KEY (task_id) REFERENCES executions(task_id) ON DELETE CASCADE
+);
+
+-- AMENDMENTS
+CREATE TABLE IF NOT EXISTS amendments (
+    task_id           TEXT NOT NULL,
+    amendment_id      TEXT NOT NULL,
+    trigger           TEXT NOT NULL,
+    trigger_phase_id  INTEGER NOT NULL,
+    description       TEXT NOT NULL DEFAULT '',
+    phases_added      TEXT NOT NULL DEFAULT '[]',
+    steps_added       TEXT NOT NULL DEFAULT '[]',
+    feedback          TEXT NOT NULL DEFAULT '',
+    created_at        TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (task_id, amendment_id),
+    FOREIGN KEY (task_id) REFERENCES executions(task_id) ON DELETE CASCADE
+);
+
+-- EVENTS
+CREATE TABLE IF NOT EXISTS events (
+    event_id    TEXT NOT NULL,
+    task_id     TEXT NOT NULL,
+    timestamp   TEXT NOT NULL,
+    topic       TEXT NOT NULL,
+    sequence    INTEGER NOT NULL DEFAULT 0,
+    payload     TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY (event_id)
+);
+CREATE INDEX IF NOT EXISTS idx_events_task ON events(task_id);
+CREATE INDEX IF NOT EXISTS idx_events_topic ON events(topic);
+CREATE INDEX IF NOT EXISTS idx_events_task_seq ON events(task_id, sequence);
+
+-- USAGE_RECORDS
+CREATE TABLE IF NOT EXISTS usage_records (
+    task_id           TEXT PRIMARY KEY,
+    timestamp         TEXT NOT NULL,
+    total_agents      INTEGER NOT NULL DEFAULT 0,
+    risk_level        TEXT NOT NULL DEFAULT 'LOW',
+    sequencing_mode   TEXT NOT NULL DEFAULT 'phased_delivery',
+    gates_passed      INTEGER NOT NULL DEFAULT 0,
+    gates_failed      INTEGER NOT NULL DEFAULT 0,
+    outcome           TEXT NOT NULL DEFAULT '',
+    notes             TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_usage_timestamp ON usage_records(timestamp);
+
+-- AGENT_USAGE
+CREATE TABLE IF NOT EXISTS agent_usage (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id            TEXT NOT NULL,
+    agent_name         TEXT NOT NULL,
+    model              TEXT NOT NULL DEFAULT 'sonnet',
+    steps              INTEGER NOT NULL DEFAULT 1,
+    retries            INTEGER NOT NULL DEFAULT 0,
+    gate_results       TEXT NOT NULL DEFAULT '[]',
+    estimated_tokens   INTEGER NOT NULL DEFAULT 0,
+    duration_seconds   REAL NOT NULL DEFAULT 0.0,
+    FOREIGN KEY (task_id) REFERENCES usage_records(task_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_agent_usage_task ON agent_usage(task_id);
+CREATE INDEX IF NOT EXISTS idx_agent_usage_agent ON agent_usage(agent_name);
+
+-- TELEMETRY
+CREATE TABLE IF NOT EXISTS telemetry (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp    TEXT NOT NULL,
+    agent_name   TEXT NOT NULL,
+    event_type   TEXT NOT NULL,
+    tool_name    TEXT NOT NULL DEFAULT '',
+    file_path    TEXT NOT NULL DEFAULT '',
+    duration_ms  INTEGER NOT NULL DEFAULT 0,
+    details      TEXT NOT NULL DEFAULT '',
+    task_id      TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_telemetry_agent ON telemetry(agent_name);
+CREATE INDEX IF NOT EXISTS idx_telemetry_type ON telemetry(event_type);
+CREATE INDEX IF NOT EXISTS idx_telemetry_timestamp ON telemetry(timestamp);
+
+-- RETROSPECTIVES
+CREATE TABLE IF NOT EXISTS retrospectives (
+    task_id            TEXT PRIMARY KEY,
+    task_name          TEXT NOT NULL,
+    timestamp          TEXT NOT NULL,
+    agent_count        INTEGER NOT NULL DEFAULT 0,
+    retry_count        INTEGER NOT NULL DEFAULT 0,
+    gates_passed       INTEGER NOT NULL DEFAULT 0,
+    gates_failed       INTEGER NOT NULL DEFAULT 0,
+    risk_level         TEXT NOT NULL DEFAULT 'LOW',
+    duration_estimate  TEXT NOT NULL DEFAULT '',
+    estimated_tokens   INTEGER NOT NULL DEFAULT 0,
+    markdown           TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_retro_timestamp ON retrospectives(timestamp);
+
+-- RETROSPECTIVE_OUTCOMES
+CREATE TABLE IF NOT EXISTS retrospective_outcomes (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id      TEXT NOT NULL,
+    category     TEXT NOT NULL,
+    agent_name   TEXT NOT NULL,
+    worked_well  TEXT NOT NULL DEFAULT '',
+    issues       TEXT NOT NULL DEFAULT '',
+    root_cause   TEXT NOT NULL DEFAULT '',
+    FOREIGN KEY (task_id) REFERENCES retrospectives(task_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_retro_outcomes_task ON retrospective_outcomes(task_id);
+
+-- KNOWLEDGE_GAPS
+CREATE TABLE IF NOT EXISTS knowledge_gaps (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id         TEXT NOT NULL,
+    description     TEXT NOT NULL,
+    affected_agent  TEXT NOT NULL DEFAULT '',
+    suggested_fix   TEXT NOT NULL DEFAULT '',
+    FOREIGN KEY (task_id) REFERENCES retrospectives(task_id) ON DELETE CASCADE
+);
+
+-- ROSTER_RECOMMENDATIONS
+CREATE TABLE IF NOT EXISTS roster_recommendations (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id  TEXT NOT NULL,
+    action   TEXT NOT NULL,
+    target   TEXT NOT NULL,
+    reason   TEXT NOT NULL DEFAULT '',
+    FOREIGN KEY (task_id) REFERENCES retrospectives(task_id) ON DELETE CASCADE
+);
+
+-- SEQUENCING_NOTES
+CREATE TABLE IF NOT EXISTS sequencing_notes (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id      TEXT NOT NULL,
+    phase        TEXT NOT NULL,
+    observation  TEXT NOT NULL,
+    keep         INTEGER NOT NULL DEFAULT 1,
+    FOREIGN KEY (task_id) REFERENCES retrospectives(task_id) ON DELETE CASCADE
+);
+
+-- TRACES
+CREATE TABLE IF NOT EXISTS traces (
+    task_id        TEXT PRIMARY KEY,
+    plan_snapshot  TEXT NOT NULL DEFAULT '{}',
+    started_at     TEXT NOT NULL DEFAULT '',
+    completed_at   TEXT,
+    outcome        TEXT
+);
+
+-- TRACE_EVENTS
+CREATE TABLE IF NOT EXISTS trace_events (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id          TEXT NOT NULL,
+    timestamp        TEXT NOT NULL,
+    event_type       TEXT NOT NULL,
+    agent_name       TEXT,
+    phase            INTEGER NOT NULL DEFAULT 0,
+    step             INTEGER NOT NULL DEFAULT 0,
+    details          TEXT NOT NULL DEFAULT '{}',
+    duration_seconds REAL,
+    FOREIGN KEY (task_id) REFERENCES traces(task_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_trace_events_task ON trace_events(task_id);
+
+-- LEARNED_PATTERNS
+CREATE TABLE IF NOT EXISTS learned_patterns (
+    pattern_id           TEXT PRIMARY KEY,
+    task_type            TEXT NOT NULL,
+    stack                TEXT,
+    recommended_template TEXT NOT NULL DEFAULT '',
+    recommended_agents   TEXT NOT NULL DEFAULT '[]',
+    confidence           REAL NOT NULL DEFAULT 0.0,
+    sample_size          INTEGER NOT NULL DEFAULT 0,
+    success_rate         REAL NOT NULL DEFAULT 0.0,
+    avg_token_cost       INTEGER NOT NULL DEFAULT 0,
+    evidence             TEXT NOT NULL DEFAULT '[]',
+    created_at           TEXT NOT NULL DEFAULT '',
+    updated_at           TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_patterns_type ON learned_patterns(task_type);
+
+-- BUDGET_RECOMMENDATIONS
+CREATE TABLE IF NOT EXISTS budget_recommendations (
+    task_type          TEXT PRIMARY KEY,
+    current_tier       TEXT NOT NULL,
+    recommended_tier   TEXT NOT NULL,
+    reason             TEXT NOT NULL DEFAULT '',
+    avg_tokens_used    INTEGER NOT NULL DEFAULT 0,
+    median_tokens_used INTEGER NOT NULL DEFAULT 0,
+    p95_tokens_used    INTEGER NOT NULL DEFAULT 0,
+    sample_size        INTEGER NOT NULL DEFAULT 0,
+    confidence         REAL NOT NULL DEFAULT 0.0,
+    potential_savings  INTEGER NOT NULL DEFAULT 0
+);
+
+-- MISSION_LOG_ENTRIES
+CREATE TABLE IF NOT EXISTS mission_log_entries (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id       TEXT NOT NULL,
+    agent_name    TEXT NOT NULL,
+    status        TEXT NOT NULL,
+    assignment    TEXT NOT NULL DEFAULT '',
+    result        TEXT NOT NULL DEFAULT '',
+    files         TEXT NOT NULL DEFAULT '[]',
+    decisions     TEXT NOT NULL DEFAULT '[]',
+    issues        TEXT NOT NULL DEFAULT '[]',
+    handoff       TEXT NOT NULL DEFAULT '',
+    commit_hash   TEXT NOT NULL DEFAULT '',
+    failure_class TEXT,
+    timestamp     TEXT NOT NULL,
+    FOREIGN KEY (task_id) REFERENCES executions(task_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_mission_log_task ON mission_log_entries(task_id);
+
+-- SHARED_CONTEXT
+CREATE TABLE IF NOT EXISTS shared_context (
+    task_id        TEXT PRIMARY KEY,
+    content        TEXT NOT NULL DEFAULT '',
+    task_title     TEXT NOT NULL DEFAULT '',
+    stack          TEXT NOT NULL DEFAULT '',
+    architecture   TEXT NOT NULL DEFAULT '',
+    conventions    TEXT NOT NULL DEFAULT '',
+    guardrails     TEXT NOT NULL DEFAULT '',
+    agent_assignments TEXT NOT NULL DEFAULT '',
+    domain_context TEXT NOT NULL DEFAULT '',
+    updated_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    FOREIGN KEY (task_id) REFERENCES executions(task_id) ON DELETE CASCADE
+);
+
+-- CODEBASE_PROFILE (singleton)
+CREATE TABLE IF NOT EXISTS codebase_profile (
+    id         INTEGER PRIMARY KEY CHECK (id = 1),
+    content    TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+-- ACTIVE_TASK (singleton)
+CREATE TABLE IF NOT EXISTS active_task (
+    id       INTEGER PRIMARY KEY CHECK (id = 1),
+    task_id  TEXT NOT NULL
+);
+"""
+
+# =====================================================================
+# Global PMO database schema (pmo.db)
+# =====================================================================
+
+PMO_SCHEMA_DDL = """
+CREATE TABLE IF NOT EXISTS _schema_version (
+    version INTEGER NOT NULL
+);
+
+-- PROJECTS
+CREATE TABLE IF NOT EXISTS projects (
+    project_id     TEXT PRIMARY KEY,
+    name           TEXT NOT NULL,
+    path           TEXT NOT NULL,
+    program        TEXT NOT NULL,
+    color          TEXT NOT NULL DEFAULT '',
+    description    TEXT NOT NULL DEFAULT '',
+    registered_at  TEXT NOT NULL DEFAULT '',
+    ado_project    TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_projects_program ON projects(program);
+
+-- PROGRAMS
+CREATE TABLE IF NOT EXISTS programs (
+    name TEXT PRIMARY KEY
+);
+
+-- SIGNALS
+CREATE TABLE IF NOT EXISTS signals (
+    signal_id         TEXT PRIMARY KEY,
+    signal_type       TEXT NOT NULL,
+    title             TEXT NOT NULL,
+    description       TEXT NOT NULL DEFAULT '',
+    source_project_id TEXT NOT NULL DEFAULT '',
+    severity          TEXT NOT NULL DEFAULT 'medium',
+    status            TEXT NOT NULL DEFAULT 'open',
+    created_at        TEXT NOT NULL DEFAULT '',
+    resolved_at       TEXT NOT NULL DEFAULT '',
+    forge_task_id     TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_signals_status ON signals(status);
+CREATE INDEX IF NOT EXISTS idx_signals_severity ON signals(severity);
+
+-- ARCHIVED_CARDS
+CREATE TABLE IF NOT EXISTS archived_cards (
+    card_id          TEXT PRIMARY KEY,
+    project_id       TEXT NOT NULL,
+    program          TEXT NOT NULL,
+    title            TEXT NOT NULL,
+    column_name      TEXT NOT NULL,
+    risk_level       TEXT NOT NULL DEFAULT 'LOW',
+    priority         INTEGER NOT NULL DEFAULT 0,
+    agents           TEXT NOT NULL DEFAULT '[]',
+    steps_completed  INTEGER NOT NULL DEFAULT 0,
+    steps_total      INTEGER NOT NULL DEFAULT 0,
+    gates_passed     INTEGER NOT NULL DEFAULT 0,
+    current_phase    TEXT NOT NULL DEFAULT '',
+    error            TEXT NOT NULL DEFAULT '',
+    created_at       TEXT NOT NULL DEFAULT '',
+    updated_at       TEXT NOT NULL DEFAULT '',
+    external_id      TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_archive_project ON archived_cards(project_id);
+CREATE INDEX IF NOT EXISTS idx_archive_program ON archived_cards(program);
+
+-- FORGE_SESSIONS
+CREATE TABLE IF NOT EXISTS forge_sessions (
+    session_id    TEXT PRIMARY KEY,
+    project_id    TEXT NOT NULL DEFAULT '',
+    title         TEXT NOT NULL DEFAULT '',
+    status        TEXT NOT NULL DEFAULT 'active',
+    created_at    TEXT NOT NULL DEFAULT '',
+    completed_at  TEXT,
+    task_id       TEXT,
+    notes         TEXT NOT NULL DEFAULT ''
+);
+
+-- PMO_METRICS
+CREATE TABLE IF NOT EXISTS pmo_metrics (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp       TEXT NOT NULL,
+    program         TEXT NOT NULL DEFAULT '',
+    metric_name     TEXT NOT NULL,
+    metric_value    REAL NOT NULL DEFAULT 0.0,
+    details         TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_pmo_metrics_ts ON pmo_metrics(timestamp);
+CREATE INDEX IF NOT EXISTS idx_pmo_metrics_name ON pmo_metrics(metric_name);
+"""
