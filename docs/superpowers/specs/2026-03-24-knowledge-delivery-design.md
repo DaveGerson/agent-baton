@@ -161,18 +161,44 @@ class ResolvedDecision:
     timestamp: str
 ```
 
+### Relationship to existing `KnowledgeGap` model
+
+`agent_baton/models/retrospective.py` already defines a `KnowledgeGap` dataclass with
+`description`, `affected_agent`, and `suggested_fix`. The new `KnowledgeGapRecord` extends
+this concept with resolution tracking, gap typing, and task context needed for the feedback
+loop. During implementation, `KnowledgeGap` is **replaced** by `KnowledgeGapRecord` — the
+existing model is a subset. The `Retrospective` model's `knowledge_gaps` field type changes
+from `list[KnowledgeGap]` to `list[KnowledgeGapRecord]`. The `to_dict()`/`from_dict()` on
+`Retrospective` must be updated accordingly. Old retrospective JSON files with the prior
+schema are handled by `from_dict()` defaulting the new fields.
+
 ### Extensions to existing models
 
 ```python
 # PlanStep — new field:
 knowledge: list[KnowledgeAttachment] = field(default_factory=list)
+# NOTE: PlanStep.to_dict() and from_dict() are hand-written — they must be
+# updated to serialize/deserialize knowledge attachments. KnowledgeAttachment
+# needs its own to_dict()/from_dict() pair. This is load-bearing: plan.json
+# is the user-editable artifact for plan review.
 
 # AgentDefinition — new field:
 knowledge_packs: list[str] = field(default_factory=list)
+# Parsed from frontmatter in registry.py alongside existing fields.
 
 # MachinePlan — new fields:
-explicit_knowledge: list[str] = field(default_factory=list)  # from --knowledge CLI arg
-intervention_level: str = "low"  # low | medium | high
+task_type: str | None = None               # inferred task type (currently a local in create_plan, promoted to model)
+explicit_knowledge_packs: list[str] = field(default_factory=list)  # from --knowledge-pack CLI arg
+explicit_knowledge_docs: list[str] = field(default_factory=list)   # from --knowledge CLI arg (file paths)
+intervention_level: str = "low"            # low | medium | high
+# NOTE: MachinePlan.to_dict()/from_dict() are hand-written — all new fields
+# must be added to both methods.
+
+# StepStatus enum — new member:
+INTERRUPTED = "interrupted"
+# The executor's computed properties (dispatched_step_ids, completed_step_ids,
+# failed_step_ids) on ExecutionState need a corresponding interrupted_step_ids
+# property for state-machine progress tracking.
 
 # ExecutionState — new fields:
 pending_gaps: list[KnowledgeGapSignal] = field(default_factory=list)
@@ -183,7 +209,10 @@ resolved_decisions: list[ResolvedDecision] = field(default_factory=list)
 
 **Location:** `agent_baton/core/orchestration/knowledge_registry.py`
 
-Mirrors AgentRegistry — stateless directory loader, in-memory index, lookup/query API.
+Parallel to AgentRegistry — stateless directory loader, in-memory index, lookup/query API.
+Uses `get_pack()`/`get_document()` rather than AgentRegistry's `get()` because knowledge
+has two-level addressing (pack + doc) vs. agents' flat namespace. This is a conscious
+divergence from the agent pattern.
 
 ### Loading
 
@@ -273,7 +302,9 @@ Documents are processed in priority order (high → normal → low) within each 
 remaining_budget = 32_000
 
 for doc in sorted_documents:
-    if doc.token_estimate > 8_000:
+    if doc.token_estimate <= 0:
+        doc.delivery = "reference"       # unestimated — don't inline unknown sizes
+    elif doc.token_estimate > 8_000:
         doc.delivery = "reference"       # over per-doc cap
     elif doc.token_estimate <= remaining_budget:
         doc.delivery = "inline"          # fits budget
@@ -331,7 +362,14 @@ One new method on `PromptDispatcher`:
 def _build_knowledge_section(self, attachments: list[KnowledgeAttachment]) -> str
 ```
 
-Called from `build_delegation_prompt()` and `build_team_delegation_prompt()`. Loads inline doc content lazily. Returns empty string if no attachments.
+Called from `build_delegation_prompt()` and `build_team_delegation_prompt()`. Loads inline
+doc content lazily. Returns empty string if no attachments.
+
+**Team step knowledge:** For team steps, knowledge is resolved at the step level (shared
+across all team members in the step). Each `TeamMember` receives the same knowledge
+attachments. This is correct because team steps group members working on the same phase
+goal — they share context. If a team member has a distinct knowledge need, it should be
+a separate step, not a team member within a shared step.
 
 ### Agent metacognition block
 
@@ -355,27 +393,42 @@ Resolved decisions (provided above) are final — do not revisit them.
 
 ### Pipeline insertion
 
-After step 7 (agent routing), before step 8 (data classification) — new step 7.5:
+After step 7 (agent routing), before step 8 (data classification) — new step 7.5.
+
+**Registry injection:** `KnowledgeRegistry` is passed to `IntelligentPlanner.__init__()` as
+a new optional parameter (parallel to how `classifier` and `policy_engine` are already
+injected). If `None`, knowledge resolution is skipped entirely — graceful no-op.
+
+**RAG detection:** `_detect_rag()` checks `settings.json` for MCP server entries matching
+a well-known naming convention (e.g., server name containing `rag`). Returns `bool`.
+Exact detection logic is an implementation detail — the spec only requires that the
+resolver receives a boolean.
 
 ```python
 # Step 7.5: Resolve knowledge attachments
-resolver = KnowledgeResolver(
-    knowledge_registry,
-    rag_available=self._detect_rag(),
-    step_token_budget=32_000,
-    doc_token_cap=8_000,
-)
+if self.knowledge_registry is not None:
+    resolver = KnowledgeResolver(
+        self.knowledge_registry,
+        rag_available=self._detect_rag(),
+        step_token_budget=32_000,
+        doc_token_cap=8_000,
+    )
 
-for phase in plan.phases:
-    for step in phase.steps:
-        step.knowledge = resolver.resolve(
-            agent_name=step.agent_name,
-            task_description=step.task_description,
-            task_type=plan.task_type,
-            risk_level=plan.risk_level,
-            explicit_packs=plan.explicit_knowledge,
-        )
+    for phase in plan.phases:
+        for step in phase.steps:
+            step.knowledge = resolver.resolve(
+                agent_name=step.agent_name,
+                task_description=step.task_description,
+                task_type=inferred_type,  # local variable from step 3
+                risk_level=plan.risk_level,
+                explicit_packs=plan.explicit_knowledge_packs,
+                explicit_docs=plan.explicit_knowledge_docs,
+            )
 ```
+
+Note: `inferred_type` is currently a local variable in `create_plan()`. This step also
+writes it to `plan.task_type` so it persists on the plan object for downstream use
+(gap-suggested resolution, retrospective indexing).
 
 ### plan.md rendering
 
@@ -394,17 +447,45 @@ This is the plan review gate (discovery layer 5) — the user can add or remove 
 
 ### Gap-suggested attachments
 
-After knowledge resolution, the planner queries the pattern learner for prior gap records matching the agent + task type:
+After knowledge resolution, the planner queries the pattern learner for prior gap records
+matching the agent + task type. This requires a **new method** on `PatternLearner`:
 
 ```python
-prior_gaps = pattern_learner.knowledge_gaps_for(agent_name, task_type)
-for gap in prior_gaps:
-    matches = resolver.resolve(
-        agent_name=agent_name,
-        task_description=gap.description,
-    )
-    for match in matches:
-        match.source = "gap-suggested"
+# New method on PatternLearner (core/learn/pattern_learner.py):
+def knowledge_gaps_for(
+    self, agent_name: str, task_type: str | None = None
+) -> list[KnowledgeGapRecord]:
+    """Return prior knowledge gap records matching agent + task type.
+
+    Reads from retrospective JSON files in .claude/team-context/retros/.
+    Each retro contains a knowledge_gaps list (KnowledgeGapRecord entries).
+    Filters by agent_name match, and optionally task_type match.
+    Returns deduplicated gaps (by description) sorted by frequency.
+    """
+```
+
+**Storage path:** `KnowledgeGapRecord` entries are written as part of the `Retrospective`
+model (replacing the existing `KnowledgeGap` — see Data Models section). They persist in
+the same retrospective JSON files that `RetrospectiveEngine` already writes to
+`.claude/team-context/retros/`. The pattern learner reads these files to build its
+gap index — no new storage mechanism needed.
+
+```python
+# In planner, after step 7.5:
+if self.pattern_learner is not None:
+    for phase in plan.phases:
+        for step in phase.steps:
+            prior_gaps = self.pattern_learner.knowledge_gaps_for(
+                step.agent_name, plan.task_type
+            )
+            for gap in prior_gaps:
+                matches = resolver.resolve(
+                    agent_name=step.agent_name,
+                    task_description=gap.description,
+                )
+                for match in matches:
+                    match.source = "gap-suggested"
+                    step.knowledge.append(match)
 ```
 
 These appear in plan.md with a distinct tag so the user knows they're recommendations from prior executions.
@@ -425,7 +506,12 @@ TYPE: contextual
 
 ### Executor handling
 
-When `baton execute record` receives an outcome containing `KNOWLEDGE_GAP:`, the executor:
+**Parsing location:** The `KNOWLEDGE_GAP` signal is parsed in `ExecutionDriver.record_step()`
+(`core/engine/executor.py`), not in the CLI command layer. The CLI passes the raw outcome
+string; the executor inspects it before recording the step result. This keeps the protocol
+logic in the engine, not the CLI.
+
+When `record_step()` receives an outcome containing `KNOWLEDGE_GAP:`, the executor:
 
 1. Parses the signal into a `KnowledgeGapSignal`
 2. Consults the escalation matrix:
@@ -482,8 +568,8 @@ baton plan "task description" \
     --intervention low
 ```
 
-- **`--knowledge`** (repeatable) — explicit document file paths. Attached globally to the plan; resolver distributes to relevant steps.
-- **`--knowledge-pack`** (repeatable) — explicit pack names. Resolver distributes based on `target_agents`; if no target restriction, goes to all steps.
+- **`--knowledge`** (repeatable) — explicit document file paths. Stored in `MachinePlan.explicit_knowledge_docs`. Attached globally; resolver distributes to all steps (user decided it matters).
+- **`--knowledge-pack`** (repeatable) — explicit pack names. Stored in `MachinePlan.explicit_knowledge_packs`. Resolver distributes based on `target_agents`; if no target restriction, goes to all steps.
 - **`--intervention`** — `low` (default), `medium`, `high`. Stored on `MachinePlan.intervention_level`.
 
 ### No new command families
@@ -551,7 +637,8 @@ For reference — the hierarchy used throughout this document:
 ```
 MachinePlan (the whole job)
 ├── task_summary, risk_level, budget_tier, intervention_level
-├── explicit_knowledge: [...]        ← --knowledge-pack goes here
+├── explicit_knowledge_packs: [...]   ← --knowledge-pack goes here
+├── explicit_knowledge_docs: [...]    ← --knowledge goes here
 │
 ├── Phase 1: "Backend implementation"
 │   ├── Step 1.1: agent — "task"
@@ -568,7 +655,7 @@ MachinePlan (the whole job)
 
 | Term | What it is | Knowledge scope |
 |------|-----------|----------------|
-| **Plan** | The whole job. One per `baton plan` invocation. | `explicit_knowledge` — user's global inputs |
+| **Plan** | The whole job. One per `baton plan` invocation. | `explicit_knowledge_packs` + `explicit_knowledge_docs` — user's global inputs |
 | **Phase** | A sequential stage. Phases run in order. | Groups steps + a gate |
 | **Step** | One agent dispatch. The atomic unit of work. | `knowledge` attachments — resolved per-agent |
 | **Gate** | A checkpoint between phases. Tests, approvals, human review. | Where pending knowledge gaps surface |
