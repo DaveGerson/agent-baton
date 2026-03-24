@@ -219,3 +219,52 @@ class PmoConfig:
             ],
             version=data.get("version", "1"),
         )
+
+
+# ---------------------------------------------------------------------------
+# Interview (Forge refinement)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class InterviewQuestion:
+    """A structured question generated during Forge plan refinement."""
+    id: str
+    question: str
+    context: str
+    answer_type: str                        # "choice" or "text"
+    choices: list[str] | None = None
+
+    def to_dict(self) -> dict:
+        d = {
+            "id": self.id,
+            "question": self.question,
+            "context": self.context,
+            "answer_type": self.answer_type,
+        }
+        if self.choices is not None:
+            d["choices"] = self.choices
+        return d
+
+    @classmethod
+    def from_dict(cls, data: dict) -> InterviewQuestion:
+        return cls(
+            id=data["id"],
+            question=data["question"],
+            context=data.get("context", ""),
+            answer_type=data.get("answer_type", "text"),
+            choices=data.get("choices"),
+        )
+
+
+@dataclass
+class InterviewAnswer:
+    """User's answer to an interview question."""
+    question_id: str
+    answer: str
+
+    def to_dict(self) -> dict:
+        return {"question_id": self.question_id, "answer": self.answer}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> InterviewAnswer:
+        return cls(question_id=data["question_id"], answer=data["answer"])
