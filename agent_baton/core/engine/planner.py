@@ -839,17 +839,10 @@ class IntelligentPlanner:
         phase_lower = phase_name.lower()
         expertise = self._agent_expertise_level(agent_name)
 
-        # Expert agents: just the outcome phrase (first sentence of template or verb+task)
+        # Expert agents: minimal task-only description — their definition carries
+        # the methodology.  Use verb + task rather than the full template to avoid
+        # period-truncation issues when the task summary contains dots.
         if expertise == "expert":
-            agent_templates = _STEP_TEMPLATES.get(base_agent, {})
-            template = agent_templates.get(phase_lower)
-            if template:
-                # Use only up to the first period/sentence
-                outcome = template.format(task=task_summary)
-                first_sentence_end = outcome.find(".")
-                if first_sentence_end != -1:
-                    return outcome[: first_sentence_end + 1]
-                return outcome
             verb = _PHASE_VERBS.get(phase_lower, phase_name)
             return f"{verb}: {task_summary}."
 

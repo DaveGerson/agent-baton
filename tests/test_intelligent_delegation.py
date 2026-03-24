@@ -13,8 +13,6 @@ Covers all four tiers:
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
-
 import pytest
 
 from agent_baton.core.engine.dispatcher import PromptDispatcher, _SUCCESS_CRITERIA
@@ -28,7 +26,6 @@ from agent_baton.core.orchestration.registry import AgentRegistry
 from agent_baton.core.orchestration.router import AgentRouter
 from agent_baton.models.execution import (
     MachinePlan,
-    PlanGate,
     PlanPhase,
     PlanStep,
     StepResult,
