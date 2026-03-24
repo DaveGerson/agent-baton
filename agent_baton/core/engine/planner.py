@@ -118,160 +118,126 @@ _PHASE_VERBS: dict[str, str] = {
 _STEP_TEMPLATES: dict[str, dict[str, str]] = {
     "architect": {
         "design": (
-            "Design the architecture for: {task}. "
-            "Define module boundaries, interfaces, and data flow. "
-            "Document key design decisions and identify affected components."
+            "Produce a design for: {task} that the implementation team can build from without further clarification."
         ),
         "research": (
-            "Research existing patterns and constraints for: {task}. "
-            "Identify risks, dependencies, and technical trade-offs."
+            "Assess feasibility and constraints for: {task}. Surface anything that would change the implementation approach."
         ),
         "review": (
-            "Review the implementation of: {task} for architectural consistency. "
-            "Verify design adherence, module boundaries, and maintainability."
+            "Review: {task} for architectural fitness. Approve or flag structural issues."
         ),
     },
     "backend-engineer": {
         "implement": (
-            "Implement the server-side components for: {task}. "
-            "Write clean, tested code following project conventions. "
-            "Focus on API endpoints, business logic, and data access."
+            "Implement: {task}. Deliver working, tested code."
         ),
         "fix": (
-            "Diagnose and fix: {task}. "
-            "Identify root cause, apply a targeted fix, and add a regression test."
+            "Fix: {task}. Include a regression test."
         ),
         "design": (
-            "Design the backend approach for: {task}. "
-            "Define endpoints, data models, and business logic flow."
+            "Design the backend approach for: {task}."
         ),
         "investigate": (
-            "Investigate: {task}. "
-            "Trace the issue through the codebase, identify root cause, "
-            "and document findings with reproduction steps."
+            "Investigate: {task}. Document root cause and reproduction steps."
         ),
     },
     "frontend-engineer": {
         "implement": (
-            "Implement the UI for: {task}. "
-            "Create components, wire up state management, and handle user interactions. "
-            "Ensure accessibility and responsive behavior."
+            "Implement the UI for: {task}. Deliver working, accessible components."
         ),
         "design": (
-            "Design the frontend approach for: {task}. "
-            "Plan component hierarchy, state management, and user flow."
+            "Design the frontend approach for: {task}."
         ),
     },
     "test-engineer": {
         "test": (
-            "Write comprehensive tests for: {task}. "
-            "Cover happy paths, edge cases, error scenarios, and boundary conditions. "
-            "Include both unit and integration tests where appropriate."
+            "Verify: {task}. Deliver tests that would catch regressions."
         ),
         "implement": (
-            "Build test infrastructure for: {task}. "
-            "Create fixtures, helpers, and test utilities as needed."
+            "Build test infrastructure for: {task}."
         ),
         "review": (
-            "Review test coverage for: {task}. "
-            "Identify untested code paths and missing edge cases."
+            "Review test coverage for: {task}. Flag gaps."
         ),
     },
     "code-reviewer": {
         "review": (
-            "Review the implementation of: {task}. "
-            "Check code quality, error handling, naming consistency, "
-            "and adherence to project conventions. Flag security concerns."
+            "Review: {task}. Approve or flag issues blocking merge."
         ),
     },
     "security-reviewer": {
         "review": (
-            "Security audit: {task}. "
-            "Check for OWASP top 10 vulnerabilities, auth gaps, "
-            "input validation issues, and secrets exposure."
+            "Security audit: {task}. Flag vulnerabilities and required fixes."
         ),
     },
     "devops-engineer": {
         "implement": (
-            "Set up infrastructure for: {task}. "
-            "Configure deployment, CI/CD pipelines, Docker, and environment as needed."
+            "Set up infrastructure for: {task}."
         ),
         "review": (
-            "Review infrastructure changes for: {task}. "
-            "Verify security, reliability, and operational readiness."
+            "Review infrastructure for: {task}. Flag operational risks."
         ),
     },
     "data-engineer": {
         "design": (
-            "Design the data architecture for: {task}. "
-            "Define schemas, migrations, indexes, and data flow."
+            "Design the data layer for: {task}."
         ),
         "implement": (
-            "Implement the data layer for: {task}. "
-            "Create schemas, write migrations, optimize queries, and build ETL as needed."
+            "Implement the data layer for: {task}."
         ),
     },
     "data-analyst": {
         "design": (
-            "Plan the analysis approach for: {task}. "
-            "Define metrics, data sources, and query strategy."
+            "Plan the analysis for: {task}."
         ),
         "implement": (
-            "Execute the analysis for: {task}. "
-            "Write queries, compute metrics, and prepare findings for stakeholders."
+            "Execute the analysis for: {task}. Deliver findings."
         ),
     },
     "data-scientist": {
         "design": (
-            "Design the modeling approach for: {task}. "
-            "Define features, model selection criteria, and evaluation methodology."
+            "Design the modeling approach for: {task}."
         ),
         "implement": (
-            "Build and evaluate models for: {task}. "
-            "Implement feature engineering, model training, and evaluation pipeline."
+            "Build and evaluate models for: {task}."
         ),
     },
     "auditor": {
         "review": (
-            "Audit the implementation of: {task}. "
-            "Verify compliance, safety, and governance requirements. "
-            "Flag risks and provide pass/fail determination."
+            "Audit: {task}. Provide pass/fail with findings."
         ),
     },
     "visualization-expert": {
         "implement": (
-            "Create visualizations for: {task}. "
-            "Design clear, accurate charts or dashboards that communicate insights effectively."
+            "Create visualizations for: {task}."
         ),
     },
     "subject-matter-expert": {
         "research": (
-            "Provide domain expertise for: {task}. "
-            "Document applicable business rules, regulatory requirements, "
-            "and industry standards."
+            "Provide domain context for: {task}."
         ),
         "review": (
-            "Validate domain correctness of: {task}. "
-            "Verify business logic, terminology, and compliance with industry standards."
+            "Validate domain correctness of: {task}."
         ),
     },
 }
 
 # Default deliverables by agent base name — used when step has no explicit deliverables
+# and the agent definition does not already specify output format.
 _AGENT_DELIVERABLES: dict[str, list[str]] = {
-    "architect": ["Design document with module boundaries and interfaces"],
-    "backend-engineer": ["Implementation source files", "Tests for changed code"],
-    "frontend-engineer": ["UI component files", "Tests for changed code"],
-    "test-engineer": ["Test files with comprehensive coverage"],
-    "code-reviewer": ["Review summary with findings and approval status"],
-    "security-reviewer": ["Security audit report with findings and risk ratings"],
-    "devops-engineer": ["Infrastructure and deployment configuration files"],
-    "data-engineer": ["Schema definitions and migration files"],
-    "data-analyst": ["Analysis results and supporting queries"],
-    "data-scientist": ["Model artifacts and evaluation results"],
-    "auditor": ["Audit report with compliance findings"],
-    "visualization-expert": ["Visualization files or dashboard components"],
-    "subject-matter-expert": ["Domain requirements document"],
+    "architect": ["Design document"],
+    "backend-engineer": ["Working implementation with tests"],
+    "frontend-engineer": ["Working UI components with tests"],
+    "test-engineer": ["Test suite"],
+    "code-reviewer": ["Review verdict with findings"],
+    "security-reviewer": ["Security audit report"],
+    "devops-engineer": ["Infrastructure configuration"],
+    "data-engineer": ["Schema and migrations"],
+    "data-analyst": ["Analysis results"],
+    "data-scientist": ["Model with evaluation results"],
+    "auditor": ["Audit verdict"],
+    "visualization-expert": ["Visualizations"],
+    "subject-matter-expert": ["Domain context document"],
 }
 
 # Keyword sets for task type inference (checked in order — first match wins).
