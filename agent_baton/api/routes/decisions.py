@@ -100,15 +100,7 @@ async def get_decision(
             pass
 
     if context_contents:
-        # model_dump() + reconstruct so we can attach context_file_contents
-        # without altering the DecisionResponse schema.  We add it as an
-        # ad-hoc extra via model_dump and return as a dict when there is
-        # enrichment to include.
-        response_data = response.model_dump()
-        response_data["context_file_contents"] = context_contents
-        # FastAPI will serialise the raw dict fine; the response_model
-        # declaration handles the base fields — extra keys pass through.
-        return response_data  # type: ignore[return-value]
+        response.context_file_contents = context_contents
 
     return response
 
@@ -164,4 +156,6 @@ async def resolve_decision(
             detail=f"Decision '{request_id}' could not be resolved (concurrent modification).",
         )
 
-    return ResolveResponse(resolved=True, execution_resumed=True)
+    # execution_resumed is optimistic — the bus event was published but we
+    # don't verify a worker is listening.  Callers should poll /executions.
+    return ResolveResponse(resolved=True, execution_resumed=False)

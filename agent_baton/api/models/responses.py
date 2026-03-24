@@ -201,7 +201,7 @@ class ExecutionResponse(BaseModel):
             current_phase=obj.current_phase,  # type: ignore[attr-defined]
             current_step_index=obj.current_step_index,  # type: ignore[attr-defined]
             steps_completed=len(completed_ids),
-            steps_remaining=total_steps - len(completed_ids) - len(failed_ids),
+            steps_remaining=max(0, total_steps - len(completed_ids) - len(failed_ids)),
             steps_failed=len(failed_ids),
             gates_passed=gates_passed,
             pending_decisions=pending_decisions,
@@ -271,6 +271,10 @@ class DecisionResponse(BaseModel):
     )
     created_at: str = Field(default="", description="ISO 8601 creation timestamp.")
     status: str = Field(default="pending", description="Current status: pending, resolved, expired.")
+    context_file_contents: Optional[dict[str, str]] = Field(
+        default=None,
+        description="Inline contents of context files (populated by the detail endpoint).",
+    )
 
     @classmethod
     def from_dataclass(cls, obj: object) -> DecisionResponse:

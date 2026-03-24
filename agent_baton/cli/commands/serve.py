@@ -79,7 +79,8 @@ def handler(args: argparse.Namespace) -> None:
         "token": token,
     }
     if args.team_context is not None:
-        create_kwargs["team_context"] = args.team_context
+        from pathlib import Path
+        create_kwargs["team_context_root"] = Path(args.team_context).resolve()
 
     app = create_app(**create_kwargs)
 

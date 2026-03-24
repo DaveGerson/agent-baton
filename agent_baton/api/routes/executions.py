@@ -262,16 +262,19 @@ def _assert_active_task(engine: ExecutionEngine, task_id: str) -> None:
 
 def _collect_next_actions(engine: ExecutionEngine) -> list[ActionResponse]:
     """Return the next batch of dispatchable actions (parallel where possible)."""
+    import logging
+    _log = logging.getLogger(__name__)
     try:
         parallel = engine.next_actions()
         if parallel:
             return [ActionResponse.from_dataclass(a) for a in parallel]
     except Exception:
-        pass
+        _log.warning("next_actions() failed, falling back to next_action()", exc_info=True)
     try:
         single = engine.next_action()
         return [ActionResponse.from_dataclass(single)]
     except Exception:
+        _log.warning("next_action() failed, returning empty actions", exc_info=True)
         return []
 
 
