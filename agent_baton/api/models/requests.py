@@ -130,3 +130,118 @@ class RegisterWebhookRequest(BaseModel):
         default=None,
         description="Shared secret for HMAC signature verification of payloads.",
     )
+
+
+# ---------------------------------------------------------------------------
+# PMO requests
+# ---------------------------------------------------------------------------
+
+
+class RegisterProjectRequest(BaseModel):
+    """Request body for POST /pmo/projects — register a project with the PMO."""
+
+    project_id: str = Field(
+        ...,
+        min_length=1,
+        description="Unique project slug (e.g. 'nds').",
+    )
+    name: str = Field(
+        ...,
+        min_length=1,
+        description="Human-readable project name.",
+    )
+    path: str = Field(
+        ...,
+        min_length=1,
+        description="Absolute filesystem path to the project root.",
+    )
+    program: str = Field(
+        ...,
+        min_length=1,
+        description="Program code this project belongs to (e.g. 'NDS', 'ATL').",
+    )
+    color: str = Field(
+        default="",
+        description="Display color for the PMO board (e.g. '#4A90E2').",
+    )
+    description: str = Field(
+        default="",
+        description="Optional free-text description of the project.",
+    )
+
+
+class CreateForgeRequest(BaseModel):
+    """Request body for POST /pmo/forge/plan — create a plan via IntelligentPlanner."""
+
+    description: str = Field(
+        ...,
+        min_length=1,
+        description="Natural-language task description (the PRD).",
+    )
+    program: str = Field(
+        ...,
+        min_length=1,
+        description="Program code for context (e.g. 'NDS').",
+    )
+    project_id: str = Field(
+        ...,
+        min_length=1,
+        description="ID of the registered project to scope the plan to.",
+    )
+    task_type: str | None = Field(
+        default=None,
+        description="Optional task type hint (e.g. 'new-feature', 'bug-fix', 'refactor').",
+    )
+    priority: int = Field(
+        default=0,
+        ge=0,
+        le=2,
+        description="Plan priority: 0=normal, 1=high, 2=critical.",
+    )
+
+
+class ApproveForgeRequest(BaseModel):
+    """Request body for POST /pmo/forge/approve — save an approved plan to a project."""
+
+    plan: dict = Field(
+        ...,
+        description="Plan dict (same shape as MachinePlan.to_dict()).",
+    )
+    project_id: str = Field(
+        ...,
+        min_length=1,
+        description="ID of the registered project that will receive the plan.",
+    )
+
+
+class CreateSignalRequest(BaseModel):
+    """Request body for POST /pmo/signals — create a signal in the Signals Bar."""
+
+    signal_id: str = Field(
+        ...,
+        min_length=1,
+        description="Unique signal identifier.",
+    )
+    signal_type: str = Field(
+        ...,
+        pattern="^(bug|escalation|blocker)$",
+        description="Signal category: bug, escalation, or blocker.",
+    )
+    title: str = Field(
+        ...,
+        min_length=1,
+        description="Short, human-readable signal title.",
+    )
+    description: str = Field(
+        default="",
+        description="Additional context or reproduction steps.",
+    )
+    source_project_id: str = Field(
+        default="",
+        description="Project ID that generated this signal, if known.",
+    )
+    severity: str = Field(
+        default="medium",
+        pattern="^(low|medium|high|critical)$",
+        description="Signal severity: low, medium, high, or critical.",
+    )

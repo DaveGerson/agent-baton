@@ -37,6 +37,9 @@ from agent_baton.core.observe.dashboard import DashboardGenerator
 from agent_baton.core.observe.trace import TraceRecorder
 from agent_baton.core.observe.usage import UsageLogger
 from agent_baton.core.orchestration.registry import AgentRegistry
+from agent_baton.core.pmo.forge import ForgeSession
+from agent_baton.core.pmo.scanner import PmoScanner
+from agent_baton.core.pmo.store import PmoStore
 from agent_baton.core.runtime.decisions import DecisionManager
 
 # ---------------------------------------------------------------------------
@@ -54,6 +57,9 @@ _dashboard: DashboardGenerator | None = None
 _usage_logger: UsageLogger | None = None
 _trace_recorder: TraceRecorder | None = None
 _webhook_registry: WebhookRegistry | None = None
+_pmo_store: PmoStore | None = None
+_pmo_scanner: PmoScanner | None = None
+_forge_session: ForgeSession | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -86,6 +92,9 @@ def init_dependencies(
     global _usage_logger
     global _trace_recorder
     global _webhook_registry
+    global _pmo_store
+    global _pmo_scanner
+    global _forge_session
 
     _team_context_root = team_context_root
 
@@ -122,6 +131,11 @@ def init_dependencies(
     _webhook_registry = WebhookRegistry(
         webhooks_file=team_context_root / "webhooks.json",
     )
+
+    # PMO singletons — PmoStore reads/writes ~/.baton/pmo-config.json.
+    _pmo_store = PmoStore()
+    _pmo_scanner = PmoScanner(store=_pmo_store)
+    _forge_session = ForgeSession(planner=_planner, store=_pmo_store)
 
 
 # ---------------------------------------------------------------------------
@@ -243,3 +257,42 @@ def get_webhook_registry() -> WebhookRegistry:
             "WebhookRegistry not initialised. Call init_dependencies() before serving requests."
         )
     return _webhook_registry
+
+
+def get_pmo_store() -> PmoStore:
+    """Return the shared :class:`~agent_baton.core.pmo.store.PmoStore`.
+
+    Raises:
+        RuntimeError: If :func:`init_dependencies` has not been called.
+    """
+    if _pmo_store is None:
+        raise RuntimeError(
+            "PmoStore not initialised. Call init_dependencies() before serving requests."
+        )
+    return _pmo_store
+
+
+def get_pmo_scanner() -> PmoScanner:
+    """Return the shared :class:`~agent_baton.core.pmo.scanner.PmoScanner`.
+
+    Raises:
+        RuntimeError: If :func:`init_dependencies` has not been called.
+    """
+    if _pmo_scanner is None:
+        raise RuntimeError(
+            "PmoScanner not initialised. Call init_dependencies() before serving requests."
+        )
+    return _pmo_scanner
+
+
+def get_forge_session() -> ForgeSession:
+    """Return the shared :class:`~agent_baton.core.pmo.forge.ForgeSession`.
+
+    Raises:
+        RuntimeError: If :func:`init_dependencies` has not been called.
+    """
+    if _forge_session is None:
+        raise RuntimeError(
+            "ForgeSession not initialised. Call init_dependencies() before serving requests."
+        )
+    return _forge_session

@@ -544,3 +544,79 @@ class ErrorResponse(BaseModel):
         default=None,
         description="Additional context about the error.",
     )
+
+
+# ---------------------------------------------------------------------------
+# PMO responses
+# ---------------------------------------------------------------------------
+
+
+class PmoProjectResponse(BaseModel):
+    """A project registered with the PMO."""
+
+    project_id: str = Field(..., description="Unique project slug.")
+    name: str = Field(..., description="Human-readable project name.")
+    path: str = Field(..., description="Absolute filesystem path to the project root.")
+    program: str = Field(..., description="Program code (e.g. 'NDS', 'ATL').")
+    color: str = Field(default="", description="Display color for the PMO board.")
+    description: str = Field(default="", description="Optional project description.")
+    registered_at: str = Field(default="", description="ISO 8601 registration timestamp.")
+
+
+class PmoCardResponse(BaseModel):
+    """A Kanban card representing a plan's lifecycle state."""
+
+    card_id: str = Field(..., description="Task ID from the underlying MachinePlan.")
+    project_id: str = Field(..., description="Owning project ID.")
+    program: str = Field(..., description="Program code.")
+    title: str = Field(..., description="Plan task summary used as the card title.")
+    column: str = Field(..., description="Kanban column (queued, planning, executing, etc.).")
+    risk_level: str = Field(default="LOW", description="Risk classification (LOW, MEDIUM, HIGH, CRITICAL).")
+    priority: int = Field(default=0, description="Priority: 0=normal, 1=high, 2=critical.")
+    agents: list[str] = Field(default_factory=list, description="Agent names used in the plan.")
+    steps_completed: int = Field(default=0, description="Number of steps completed.")
+    steps_total: int = Field(default=0, description="Total steps in the plan.")
+    gates_passed: int = Field(default=0, description="Number of QA gates passed.")
+    current_phase: str = Field(default="", description="Name of the currently active phase.")
+    error: str = Field(default="", description="Last failure error message, if any.")
+    created_at: str = Field(default="", description="ISO 8601 plan creation timestamp.")
+    updated_at: str = Field(default="", description="ISO 8601 last-updated timestamp.")
+
+
+class PmoSignalResponse(BaseModel):
+    """A signal (bug, escalation, blocker) from the Signals Bar."""
+
+    signal_id: str = Field(..., description="Unique signal identifier.")
+    signal_type: str = Field(..., description="Signal category: bug, escalation, or blocker.")
+    title: str = Field(..., description="Short signal title.")
+    description: str = Field(default="", description="Additional signal context.")
+    source_project_id: str = Field(default="", description="Project that generated this signal.")
+    severity: str = Field(default="medium", description="Severity: low, medium, high, or critical.")
+    status: str = Field(default="open", description="Signal status: open, triaged, or resolved.")
+    created_at: str = Field(default="", description="ISO 8601 creation timestamp.")
+    forge_task_id: str = Field(default="", description="Plan task ID if this signal was triaged by Forge.")
+
+
+class ProgramHealthResponse(BaseModel):
+    """Aggregate health metrics for a program."""
+
+    program: str = Field(..., description="Program code.")
+    total_plans: int = Field(default=0, description="Total number of tracked plans.")
+    active: int = Field(default=0, description="Plans currently in progress.")
+    completed: int = Field(default=0, description="Plans in the deployed column.")
+    blocked: int = Field(default=0, description="Plans awaiting human input.")
+    failed: int = Field(default=0, description="Plans with a failure error set.")
+    completion_pct: float = Field(default=0.0, description="Percentage of plans completed.")
+
+
+class PmoBoardResponse(BaseModel):
+    """Full Kanban board state: all cards plus per-program health."""
+
+    cards: list[PmoCardResponse] = Field(
+        default_factory=list,
+        description="All Kanban cards across all registered projects.",
+    )
+    health: dict[str, ProgramHealthResponse] = Field(
+        default_factory=dict,
+        description="Per-program health metrics keyed by program code.",
+    )

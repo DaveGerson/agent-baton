@@ -1,0 +1,101 @@
+import type { ProgramHealth } from '../api/types';
+import { T } from '../styles/tokens';
+
+interface HealthBarProps {
+  health: Record<string, ProgramHealth>;
+}
+
+function clamp(n: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, n));
+}
+
+export function HealthBar({ health }: HealthBarProps) {
+  const programs = Object.values(health);
+
+  if (programs.length === 0) {
+    return (
+      <div style={{
+        padding: '8px 14px',
+        borderBottom: `1px solid ${T.border}`,
+        background: T.bg1,
+        fontSize: 8,
+        color: T.text3,
+        fontStyle: 'italic',
+      }}>
+        No programs tracked yet.
+      </div>
+    );
+  }
+
+  return (
+    <div style={{
+      display: 'flex',
+      gap: 8,
+      padding: '8px 14px',
+      borderBottom: `1px solid ${T.border}`,
+      background: T.bg1,
+      flexShrink: 0,
+      overflowX: 'auto',
+    }}>
+      {programs.map((pg) => {
+        const pct = clamp(Math.round(pg.completion_pct), 0, 100);
+        // Pick a consistent color by hashing the program name
+        const barColor = programColor(pg.program);
+
+        return (
+          <div
+            key={pg.program}
+            style={{
+              flex: '1 1 140px',
+              minWidth: 120,
+              padding: '6px 10px',
+              background: T.bg2,
+              borderRadius: 5,
+              borderLeft: `3px solid ${barColor}`,
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 3 }}>
+              <span style={{ fontSize: 10, fontWeight: 700, color: T.text0 }}>{pg.program}</span>
+              <span style={{ fontSize: 9, fontWeight: 600, color: barColor, fontFamily: 'monospace' }}>
+                {pct}%
+              </span>
+            </div>
+            <div style={{ width: '100%', height: 3, borderRadius: 2, background: T.bg3, overflow: 'hidden' }}>
+              <div style={{
+                width: `${pct}%`,
+                height: '100%',
+                background: barColor,
+                borderRadius: 2,
+                transition: 'width 0.5s',
+              }} />
+            </div>
+            <div style={{ fontSize: 7, color: T.text3, marginTop: 2 }}>
+              {pg.total_plans} plans
+              {pg.active > 0 && ` · ${pg.active} active`}
+              {pg.completed > 0 && ` · ${pg.completed} done`}
+              {pg.blocked > 0 && (
+                <span style={{ color: T.orange }}>{` · ${pg.blocked} blocked`}</span>
+              )}
+              {pg.failed > 0 && (
+                <span style={{ color: T.red }}>{` · ${pg.failed} failed`}</span>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+const PROGRAM_PALETTE = [
+  '#1e40af', '#7c3aed', '#059669', '#dc2626',
+  '#0284c7', '#c2410c', '#0d9488', '#7e22ce',
+];
+
+function programColor(program: string): string {
+  let hash = 0;
+  for (let i = 0; i < program.length; i++) {
+    hash = (hash * 31 + program.charCodeAt(i)) >>> 0;
+  }
+  return PROGRAM_PALETTE[hash % PROGRAM_PALETTE.length];
+}

@@ -7,11 +7,12 @@ system for Claude Code.
 
 ```
 agent_baton/       ← Python package (orchestration engine)
-  models/          ← Data models (16 modules)
-  core/            ← Business logic (9 sub-packages, no shim files)
+  models/          ← Data models (17 modules, incl. pmo.py)
+  core/            ← Business logic (10 sub-packages, no shim files)
     engine/        ← Execution core: planner, executor, dispatcher, gates,
     │                persistence, protocols (ExecutionDriver)
     orchestration/ ← Agent discovery: registry, router, context manager
+    pmo/           ← PMO subsystem: store, scanner, forge
     govern/        ← Policy enforcement, compliance, validation
     observe/       ← Tracing, usage, dashboard, retrospective, telemetry
     improve/       ← Scoring, evolution, VCS
@@ -21,7 +22,7 @@ agent_baton/       ← Python package (orchestration engine)
     events/        ← Event bus, domain events, persistence, projections
     runtime/       ← Async worker, supervisor, launcher, decisions,
                      ExecutionContext factory
-  cli/             ← CLI interface (37 commands via `baton`)
+  cli/             ← CLI interface (38 commands via `baton`)
     commands/
       execution/   ← execute, plan, status, daemon, async, decide
       observe/     ← dashboard, trace, usage, telemetry, context_profile, retro
@@ -29,12 +30,14 @@ agent_baton/       ← Python package (orchestration engine)
       improve/     ← scores, evolve, patterns, budget, changelog
       distribute/  ← package, publish, pull, verify_package, install, transfer
       agents/      ← agents, route, events, incident
+      pmo_cmd      ← pmo serve, pmo status, pmo add, pmo health
 docs/              ← Architecture documentation (architecture.md, design-decisions.md, invariants.md)
 agents/            ← Distributable agent definitions (19 .md files)
 references/        ← Distributable reference docs (13 .md files)
 templates/         ← CLAUDE.md + settings.json installed to target projects
 scripts/           ← Install scripts (Linux + Windows)
-tests/             ← Test suite (1732 tests, pytest)
+tests/             ← Test suite (2173 tests, pytest)
+pmo-ui/            ← React/Vite PMO frontend (served at /pmo/)
 .claude/           ← Project-specific orchestration setup:
   agents/          ← Tailored agents for developing agent-baton (11)
   references/      ← Symlink → ../references/ (canonical source)

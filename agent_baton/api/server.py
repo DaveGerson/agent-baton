@@ -58,6 +58,7 @@ _ROUTE_MODULES: list[tuple[str, str, str, list[str]]] = [
     ("agent_baton.api.routes.decisions", "router", "/api/v1", ["decisions"]),
     ("agent_baton.api.routes.events", "router", "/api/v1", ["events"]),
     ("agent_baton.api.routes.webhooks", "router", "/api/v1", ["webhooks"]),
+    ("agent_baton.api.routes.pmo", "router", "/api/v1", ["pmo"]),
 ]
 
 
@@ -141,6 +142,12 @@ def create_app(
     # --- Routes --------------------------------------------------------------
 
     _register_routes(app)
+
+    # Serve PMO UI static files if built assets exist
+    _pmo_dist = Path(__file__).resolve().parent.parent.parent / "pmo-ui" / "dist"
+    if _pmo_dist.is_dir():
+        from fastapi.staticfiles import StaticFiles
+        app.mount("/pmo", StaticFiles(directory=str(_pmo_dist), html=True), name="pmo-ui")
 
     return app
 
