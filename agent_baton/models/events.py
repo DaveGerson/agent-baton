@@ -1,0 +1,64 @@
+"""Event models for the event-driven async runtime."""
+from __future__ import annotations
+
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+
+
+@dataclass
+class Event:
+    """A single event in the execution event stream.
+
+    Events are the atomic unit of the event bus.  Each event has a topic
+    (e.g. ``step.completed``, ``gate.required``) that subscribers use for
+    routing, and a payload dict carrying event-specific data.
+
+    Events are append-only: once published they are never mutated.
+    """
+
+    event_id: str
+    timestamp: str
+    topic: str
+    task_id: str
+    sequence: int = 0
+    payload: dict = field(default_factory=dict)
+
+    @classmethod
+    def create(
+        cls,
+        topic: str,
+        task_id: str,
+        payload: dict | None = None,
+        sequence: int = 0,
+    ) -> Event:
+        """Factory that auto-generates event_id and timestamp."""
+        return cls(
+            event_id=uuid.uuid4().hex[:12],
+            timestamp=datetime.now(tz=timezone.utc).isoformat(timespec="seconds"),
+            topic=topic,
+            task_id=task_id,
+            sequence=sequence,
+            payload=payload or {},
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "event_id": self.event_id,
+            "timestamp": self.timestamp,
+            "topic": self.topic,
+            "task_id": self.task_id,
+            "sequence": self.sequence,
+            "payload": self.payload,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> Event:
+        return cls(
+            event_id=data.get("event_id", ""),
+            timestamp=data.get("timestamp", ""),
+            topic=data.get("topic", ""),
+            task_id=data.get("task_id", ""),
+            sequence=data.get("sequence", 0),
+            payload=data.get("payload", {}),
+        )

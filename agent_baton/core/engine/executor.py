@@ -19,8 +19,12 @@ from agent_baton.models.execution import (
     PlanStep,
     StepResult,
 )
+from agent_baton.models.events import Event
 from agent_baton.models.usage import AgentUsageRecord, TaskUsageRecord
 from agent_baton.core.engine.dispatcher import PromptDispatcher
+from agent_baton.core.events.bus import EventBus
+from agent_baton.core.events import events as evt
+from agent_baton.core.events.persistence import EventPersistence
 from agent_baton.core.observe.trace import TraceRecorder
 from agent_baton.core.observe.usage import UsageLogger
 from agent_baton.core.observe.retrospective import RetrospectiveEngine
@@ -82,8 +86,21 @@ class ExecutionEngine:
     _STATE_FILENAME = "execution-state.json"
     _DEFAULT_CONTEXT_ROOT = Path(".claude/team-context")
 
-    def __init__(self, team_context_root: Path | None = None) -> None:
+    def __init__(
+        self,
+        team_context_root: Path | None = None,
+        bus: EventBus | None = None,
+    ) -> None:
         self._root = team_context_root or self._DEFAULT_CONTEXT_ROOT
+        self._bus = bus
+        # If bus provided, auto-wire persistence as a subscriber.
+        if self._bus is not None:
+            self._event_persistence = EventPersistence(
+                events_dir=self._root / "events"
+            )
+            self._bus.subscribe("*", self._event_persistence.append)
+        else:
+            self._event_persistence = None
         self._tracer = TraceRecorder(team_context_root=self._root)
         self._usage_logger = UsageLogger(
             log_path=self._root / "usage-log.jsonl"
@@ -118,6 +135,21 @@ class ExecutionEngine:
             task_id=plan.task_id,
             plan_snapshot=plan.to_dict(),
         )
+
+        self._publish(evt.task_started(
+            task_id=plan.task_id,
+            task_summary=plan.task_summary,
+            risk_level=plan.risk_level,
+            total_steps=plan.total_steps,
+        ))
+        if plan.phases:
+            first_phase = plan.phases[0]
+            self._publish(evt.phase_started(
+                task_id=plan.task_id,
+                phase_id=first_phase.phase_id,
+                phase_name=first_phase.name,
+                step_count=len(first_phase.steps),
+            ))
 
         self._save_state(state)
         return self._determine_action(state)
@@ -260,6 +292,37 @@ class ExecutionEngine:
                 duration_seconds=duration_seconds if duration_seconds else None,
             )
 
+        # Publish EventBus event for the step transition.
+        task_id = state.task_id
+        if status == "complete":
+            self._publish(evt.step_completed(
+                task_id=task_id,
+                step_id=step_id,
+                agent_name=agent_name,
+                outcome=outcome,
+                files_changed=files_changed or [],
+                commit_hash=commit_hash,
+                duration_seconds=duration_seconds,
+                estimated_tokens=estimated_tokens,
+            ))
+        elif status == "failed":
+            self._publish(evt.step_failed(
+                task_id=task_id,
+                step_id=step_id,
+                agent_name=agent_name,
+                error=error,
+                duration_seconds=duration_seconds,
+            ))
+        elif status == "dispatched":
+            # Determine model from the plan step for the dispatched event.
+            step_model = _model_for_step(state.plan, step_id)
+            self._publish(evt.step_dispatched(
+                task_id=task_id,
+                step_id=step_id,
+                agent_name=agent_name,
+                model=step_model,
+            ))
+
         self._save_state(state)
 
     def mark_dispatched(self, step_id: str, agent_name: str) -> None:
@@ -323,8 +386,20 @@ class ExecutionEngine:
             )
 
         if not passed:
+            self._publish(evt.gate_failed(
+                task_id=state.task_id,
+                phase_id=phase_id,
+                gate_type=gate_type,
+                output=output,
+            ))
             state.status = "failed"
         else:
+            self._publish(evt.gate_passed(
+                task_id=state.task_id,
+                phase_id=phase_id,
+                gate_type=gate_type,
+                output=output,
+            ))
             # Advance to next phase.  current_phase is a 0-based index into
             # plan.phases, whereas phase_id is a 1-based identifier — so we
             # must increment the index, not derive it from phase_id.
@@ -373,6 +448,14 @@ class ExecutionEngine:
         steps_done = len(state.completed_step_ids)
         gates_passed = sum(1 for g in state.gate_results if g.passed)
         elapsed = _elapsed_seconds(state.started_at)
+
+        self._publish(evt.task_completed(
+            task_id=state.task_id,
+            steps_completed=steps_done,
+            gates_passed=gates_passed,
+            elapsed_seconds=elapsed,
+        ))
+
         summary_lines = [
             f"Task {state.task_id} completed.",
             f"Steps: {steps_done}/{state.plan.total_steps}",
@@ -438,7 +521,36 @@ class ExecutionEngine:
 
         return self._determine_action(state)
 
+    def recover_dispatched_steps(self) -> int:
+        """Clear stale dispatched-step markers for crash recovery.
+
+        After a daemon crash, steps in ``dispatched`` status have no running
+        agent process.  This method removes their ``StepResult`` entries so
+        the engine will re-dispatch them on the next ``next_action()`` call.
+
+        Returns the number of recovered (re-dispatchable) steps.
+        """
+        state = self._load_state()
+        if state is None:
+            return 0
+
+        original_count = len(state.step_results)
+        state.step_results = [
+            r for r in state.step_results if r.status != "dispatched"
+        ]
+        recovered = original_count - len(state.step_results)
+
+        if recovered > 0:
+            self._save_state(state)
+
+        return recovered
+
     # ── Internal helpers ────────────────────────────────────────────────────
+
+    def _publish(self, event: Event) -> None:
+        """Publish an event if a bus is configured."""
+        if self._bus is not None:
+            self._bus.publish(event)
 
     def _save_state(self, state: ExecutionState) -> Path:
         """Write *state* to ``.claude/team-context/execution-state.json``."""
@@ -587,8 +699,21 @@ class ExecutionEngine:
                     phase_id=phase_obj.phase_id,
                 )
             # Advance past empty phase with no gate (or gate already done).
+            self._publish(evt.phase_completed(
+                task_id=state.task_id,
+                phase_id=phase_obj.phase_id,
+                phase_name=phase_obj.name,
+            ))
             state.current_phase += 1
             state.current_step_index = 0
+            if state.current_phase < len(state.plan.phases):
+                next_phase = state.plan.phases[state.current_phase]
+                self._publish(evt.phase_started(
+                    task_id=state.task_id,
+                    phase_id=next_phase.phase_id,
+                    phase_name=next_phase.name,
+                    step_count=len(next_phase.steps),
+                ))
             return self._determine_action(state)
 
         # Check for any failed steps in this phase.
@@ -646,9 +771,22 @@ class ExecutionEngine:
             )
 
         # Gate passed (or no gate) — move to next phase.
+        self._publish(evt.phase_completed(
+            task_id=state.task_id,
+            phase_id=phase_obj.phase_id,
+            phase_name=phase_obj.name,
+        ))
         state.current_phase += 1
         state.current_step_index = 0
         state.status = "running"
+        if state.current_phase < len(state.plan.phases):
+            next_phase = state.plan.phases[state.current_phase]
+            self._publish(evt.phase_started(
+                task_id=state.task_id,
+                phase_id=next_phase.phase_id,
+                phase_name=next_phase.name,
+                step_count=len(next_phase.steps),
+            ))
         return self._determine_action(state)
 
     def _dispatch_action(self, step: PlanStep, state: ExecutionState) -> ExecutionAction:

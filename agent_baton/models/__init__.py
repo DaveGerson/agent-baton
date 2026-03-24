@@ -31,6 +31,8 @@ from agent_baton.models.pattern import LearnedPattern
 from agent_baton.models.budget import BudgetRecommendation
 from agent_baton.models.context_profile import AgentContextProfile, TaskContextProfile
 from agent_baton.models.registry import RegistryEntry, RegistryIndex
+from agent_baton.models.events import Event
+from agent_baton.models.decision import DecisionRequest, DecisionResolution
 from agent_baton.models.execution import (
     MachinePlan,
     PlanPhase,
@@ -88,4 +90,7 @@ __all__ = [
     "ActionType",
     "StepStatus",
     "PhaseStatus",
+    "Event",
+    "DecisionRequest",
+    "DecisionResolution",
 ]

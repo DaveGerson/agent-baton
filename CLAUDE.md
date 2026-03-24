@@ -7,25 +7,27 @@ system for Claude Code.
 
 ```
 agent_baton/       ← Python package (orchestration engine)
-  models/          ← Data models (14 modules: agent, plan, execution, usage, ...)
-  core/            ← Business logic (6 sub-packages)
+  models/          ← Data models (16 modules: agent, plan, execution, events, decision, ...)
+  core/            ← Business logic (9 sub-packages)
     engine/        ← Execution engine (planner, executor, dispatcher, gates)
     orchestration/ ← Context, plan, registry, router
     govern/        ← Classifier, compliance, escalation, policy, validation
-    observe/       ← Trace, usage, dashboard, retrospective, telemetry
+    observe/       ← Trace, usage, dashboard, retrospective, telemetry, context profiler
     improve/       ← Evolution, scoring, VCS
     learn/         ← Pattern learner, budget tuner
-    distribute/    ← Async dispatch, packaging, sharing, transfer
-  cli/             ← CLI interface (31 commands via `baton`)
+    distribute/    ← Async dispatch, packaging, sharing, transfer, incident
+    events/        ← Event bus, domain events, persistence, projections
+    runtime/       ← Async worker, scheduler, launcher, decisions, supervisor
+  cli/             ← CLI interface (35 commands via `baton`)
 agents/            ← Distributable agent definitions (19 .md files)
-references/        ← Distributable reference docs (12 .md files)
+references/        ← Distributable reference docs (13 .md files)
 templates/         ← CLAUDE.md + settings.json installed to target projects
 scripts/           ← Install scripts (Linux + Windows)
-tests/             ← Test suite (1730 tests, pytest)
+tests/             ← Test suite (1977 tests, pytest)
 .claude/           ← Project-specific orchestration setup:
-  agents/          ← Tailored agents for developing agent-baton
+  agents/          ← Tailored agents for developing agent-baton (11)
   references/      ← Symlink → ../references/ (canonical source)
-  knowledge/       ← Knowledge packs about agent-baton itself
+  knowledge/       ← Knowledge packs (3 packs, 10 docs)
   settings.json    ← Hooks for this project
 ```
 
@@ -62,7 +64,7 @@ tests/             ← Test suite (1730 tests, pytest)
 
 ```bash
 pip install -e ".[dev]"    # Install in editable mode
-pytest                     # Run tests (1730 tests)
+pytest                     # Run tests (1977 tests)
 scripts/install.sh         # Re-install globally after editing agents/references
 ```
 
