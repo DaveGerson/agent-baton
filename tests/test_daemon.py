@@ -52,12 +52,9 @@ def _plan(task_id: str = "t1", phases=None) -> MachinePlan:
 # ===========================================================================
 
 class TestSupervisorPaths:
-    def test_default_paths(self) -> None:
-        s = WorkerSupervisor()
-        assert s.pid_path.name == "daemon.pid"
-        assert s.log_path.name == "daemon.log"
-        assert s.status_path.name == "daemon-status.json"
-
+    # DECISION: removed trivial test_default_paths (hard-coded filename assertions
+    # against "daemon.pid" etc.). The names are constants; this adds no behavioural
+    # coverage. test_custom_root exercises the meaningful path composition logic.
     def test_custom_root(self, tmp_path: Path) -> None:
         s = WorkerSupervisor(team_context_root=tmp_path)
         assert s.pid_path.parent == tmp_path
@@ -117,6 +114,8 @@ class TestSupervisorStart:
 # ===========================================================================
 
 class TestSupervisorStatus:
+    # DECISION: removed test_no_pid_means_not_running — exact duplicate of
+    # test_no_execution_returns_not_running (same object, same assertion, same code path).
     def test_no_execution_returns_not_running(self, tmp_path: Path) -> None:
         s = WorkerSupervisor(team_context_root=tmp_path)
         status = s.status()
@@ -128,10 +127,6 @@ class TestSupervisorStatus:
         status = s.status()
         assert status.get("task_id") == "t1"
         assert "last_update" in status
-
-    def test_no_pid_means_not_running(self, tmp_path: Path) -> None:
-        s = WorkerSupervisor(team_context_root=tmp_path)
-        assert s.status()["running"] is False
 
 
 # ===========================================================================
@@ -211,9 +206,12 @@ class TestSupervisorPIDLocking:
 # ===========================================================================
 
 class TestSupervisorLogRotation:
-    def test_uses_rotating_handler(self, tmp_path: Path) -> None:
-        """After _setup_logging(), the baton.daemon logger has a
-        RotatingFileHandler attached."""
+    # DECISION: merged test_uses_rotating_handler + test_rotating_handler_max_bytes
+    # into one comprehensive test. Both call _setup_logging() and inspect the same
+    # RotatingFileHandler object; splitting adds no independent coverage.
+    def test_rotating_handler_attached_with_correct_max_bytes(self, tmp_path: Path) -> None:
+        """After _setup_logging(), the baton.daemon logger has a RotatingFileHandler
+        with maxBytes == 10 MiB."""
         s = WorkerSupervisor(team_context_root=tmp_path)
         s._setup_logging()
         logger = logging.getLogger("baton.daemon")
@@ -221,23 +219,13 @@ class TestSupervisorLogRotation:
             h for h in logger.handlers if isinstance(h, RotatingFileHandler)
         ]
         assert len(rotating_handlers) >= 1
+        assert rotating_handlers[-1].maxBytes == 10 * 1024 * 1024
 
     def test_log_file_created(self, tmp_path: Path) -> None:
         """daemon.log exists on disk after start() completes."""
         s = WorkerSupervisor(team_context_root=tmp_path)
         s.start(plan=_plan(), launcher=DryRunLauncher())
         assert s.log_path.exists()
-
-    def test_rotating_handler_max_bytes(self, tmp_path: Path) -> None:
-        """RotatingFileHandler is configured with the expected maxBytes."""
-        s = WorkerSupervisor(team_context_root=tmp_path)
-        s._setup_logging()
-        logger = logging.getLogger("baton.daemon")
-        rotating_handlers = [
-            h for h in logger.handlers if isinstance(h, RotatingFileHandler)
-        ]
-        assert rotating_handlers
-        assert rotating_handlers[-1].maxBytes == 10 * 1024 * 1024
 
 
 # ===========================================================================
@@ -361,15 +349,17 @@ class TestRecoverDispatchedSteps:
         count = engine.recover_dispatched_steps()
         assert count == 2
 
-    def test_recover_no_state_returns_zero(self, tmp_path: Path) -> None:
-        """recover_dispatched_steps() returns 0 when there is no state file."""
+    # DECISION: parameterized test_recover_no_state_returns_zero +
+    # test_recover_no_dispatched_steps_returns_zero into one test. Both assert
+    # recover_dispatched_steps() == 0 and differ only in whether a state file
+    # exists. The same boundary (return 0) is exercised in both.
+    @pytest.mark.parametrize("create_state", [False, True], ids=["no_state_file", "state_but_nothing_dispatched"])
+    def test_recover_returns_zero_when_nothing_to_recover(
+        self, tmp_path: Path, create_state: bool
+    ) -> None:
         engine = ExecutionEngine(team_context_root=tmp_path)
-        assert engine.recover_dispatched_steps() == 0
-
-    def test_recover_no_dispatched_steps_returns_zero(self, tmp_path: Path) -> None:
-        """Returns 0 when state exists but nothing is dispatched."""
-        engine = ExecutionEngine(team_context_root=tmp_path)
-        engine.start(_plan())
+        if create_state:
+            engine.start(_plan())  # creates state file with no dispatched steps
         assert engine.recover_dispatched_steps() == 0
 
 
@@ -572,15 +562,10 @@ class TestWorkerShutdownEvent:
 
         asyncio.run(_run())
 
-    def test_worker_without_shutdown_event_runs_normally(self, tmp_path: Path) -> None:
-        """Absence of a shutdown_event does not prevent normal completion."""
-        async def _run():
-            engine = ExecutionEngine(team_context_root=tmp_path)
-            engine.start(_plan())
-            worker = TaskWorker(engine=engine, launcher=DryRunLauncher())  # no shutdown_event
-            summary = await worker.run()
-            assert "completed" in summary.lower() or "complete" in summary.lower()
-        asyncio.run(_run())
+    # DECISION: removed test_worker_without_shutdown_event_runs_normally — it only
+    # asserts the absence of a shutdown_event does not crash. This is already
+    # exercised by test_single_step_completes and every other test that constructs
+    # a TaskWorker without the shutdown_event argument.
 
 
 # ===========================================================================
@@ -595,48 +580,44 @@ class TestDaemonizeFunction:
         with pytest.raises(RuntimeError, match="POSIX"):
             daemon.daemonize()
 
-    def test_calls_fork_twice(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """daemonize() calls os.fork() exactly twice (the double-fork)."""
-        import os
+    # DECISION: merged test_calls_fork_twice + test_calls_setsid + (implicitly)
+    # test_calls_dup2 into one comprehensive test that checks all three OS-level
+    # syscalls with a single monkeypatched daemonize() invocation. Each was
+    # patching the same functions and running the same setup; splitting them
+    # produced three identical mock setups with one different assertion each.
+    def test_daemonize_calls_fork_twice_setsid_once_and_dup2(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """daemonize() calls os.fork() exactly twice, os.setsid() once, and
+        os.dup2() to redirect stdio to /dev/null."""
         import agent_baton.core.runtime.daemon as daemon_mod
 
-        fork_calls = []
+        fork_calls: list[int] = []
+        setsid_calls: list[int] = []
+        dup2_calls: list[tuple] = []
 
         def fake_fork() -> int:
             fork_calls.append(1)
-            # Return 0 so we always act as the child — this avoids os._exit().
-            return 0
+            return 0  # always child to avoid os._exit()
 
         monkeypatch.setattr(daemon_mod.sys, "platform", "linux")
         monkeypatch.setattr(daemon_mod.os, "fork", fake_fork)
-        monkeypatch.setattr(daemon_mod.os, "setsid", lambda: None)
-        # Redirect the devnull open/dup2 calls so we don't clobber real FDs.
-        monkeypatch.setattr(daemon_mod.os, "open", lambda *a, **kw: 0)
-        monkeypatch.setattr(daemon_mod.os, "dup2", lambda *a: None)
-        monkeypatch.setattr(daemon_mod.os, "close", lambda *a: None)
-        monkeypatch.setattr(daemon_mod.sys.stdout, "flush", lambda: None)
-        monkeypatch.setattr(daemon_mod.sys.stderr, "flush", lambda: None)
-
-        daemon_mod.daemonize()
-        assert len(fork_calls) == 2, f"Expected 2 fork calls, got {len(fork_calls)}"
-
-    def test_calls_setsid(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """daemonize() calls os.setsid() exactly once (between the two forks)."""
-        import agent_baton.core.runtime.daemon as daemon_mod
-
-        setsid_calls = []
-
-        monkeypatch.setattr(daemon_mod.sys, "platform", "linux")
-        monkeypatch.setattr(daemon_mod.os, "fork", lambda: 0)
         monkeypatch.setattr(daemon_mod.os, "setsid", lambda: setsid_calls.append(1))
         monkeypatch.setattr(daemon_mod.os, "open", lambda *a, **kw: 0)
-        monkeypatch.setattr(daemon_mod.os, "dup2", lambda *a: None)
+        monkeypatch.setattr(daemon_mod.os, "dup2", lambda fd, target: dup2_calls.append((fd, target)))
         monkeypatch.setattr(daemon_mod.os, "close", lambda *a: None)
         monkeypatch.setattr(daemon_mod.sys.stdout, "flush", lambda: None)
         monkeypatch.setattr(daemon_mod.sys.stderr, "flush", lambda: None)
 
         daemon_mod.daemonize()
+
+        assert len(fork_calls) == 2, f"Expected 2 fork calls, got {len(fork_calls)}"
         assert len(setsid_calls) == 1, f"Expected 1 setsid call, got {len(setsid_calls)}"
+        # dup2 must have been called to redirect at least stdout (fd 1) and stderr (fd 2)
+        redirected_fds = {target for _, target in dup2_calls}
+        assert {1, 2}.issubset(redirected_fds), (
+            f"dup2 must redirect fd 1 and fd 2; got targets: {redirected_fds}"
+        )
 
     def test_first_fork_failure_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """If the first os.fork() raises OSError, daemonize() re-raises as RuntimeError."""

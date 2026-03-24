@@ -14,17 +14,14 @@ from agent_baton.core.runtime.signals import SignalHandler
 # ===========================================================================
 
 class TestSignalHandlerInitialState:
-    def test_initial_state_not_shutdown(self) -> None:
-        """shutdown_requested is False before any signal fires."""
+    # DECISION: merged test_initial_state_not_shutdown + test_not_installed_by_default
+    # into one test — both assert properties of a freshly-constructed handler and
+    # there is no benefit to splitting a two-assertion factory check.
+    def test_fresh_handler_not_shutdown_and_not_installed(self) -> None:
+        """A freshly-constructed handler has shutdown_requested=False and _installed=False."""
         async def _run():
             handler = SignalHandler()
             assert handler.shutdown_requested is False
-        asyncio.run(_run())
-
-    def test_not_installed_by_default(self) -> None:
-        """Handler is not installed until install() is called."""
-        async def _run():
-            handler = SignalHandler()
             assert handler._installed is False
         asyncio.run(_run())
 
@@ -105,26 +102,27 @@ class TestSignalHandlerInstallUninstall:
             assert handler._installed is False
         asyncio.run(_run())
 
-    def test_install_is_idempotent(self) -> None:
-        """Calling install() twice does not raise and installs only once."""
+    # DECISION: parameterized install_is_idempotent + uninstall_is_idempotent into
+    # one test. Both follow the exact same pattern (call twice, assert final state).
+    @pytest.mark.parametrize("action,expected_state", [
+        ("install", True),
+        ("uninstall", False),
+    ])
+    def test_double_call_is_idempotent(self, action: str, expected_state: bool) -> None:
+        """Calling install() or uninstall() twice does not raise and leaves a consistent state."""
         async def _run():
             handler = SignalHandler()
             handler.install()
-            handler.install()  # second call should be a no-op
-            try:
-                assert handler._installed is True
-            finally:
+            if action == "install":
+                handler.install()  # second call: no-op
+                try:
+                    assert handler._installed is expected_state
+                finally:
+                    handler.uninstall()
+            else:
                 handler.uninstall()
-        asyncio.run(_run())
-
-    def test_uninstall_is_idempotent(self) -> None:
-        """Calling uninstall() twice does not raise."""
-        async def _run():
-            handler = SignalHandler()
-            handler.install()
-            handler.uninstall()
-            handler.uninstall()  # second call should be a no-op
-            assert handler._installed is False
+                handler.uninstall()  # second call: no-op
+                assert handler._installed is expected_state
         asyncio.run(_run())
 
     def test_install_restores_original_handlers_on_uninstall(self) -> None:

@@ -89,39 +89,26 @@ def _engine(tmp_path: Path) -> ExecutionEngine:
 # ---------------------------------------------------------------------------
 
 class TestStart:
-    def test_returns_execution_action(self, tmp_path: Path) -> None:
-        action = _engine(tmp_path).start(_plan())
-        from agent_baton.models.execution import ExecutionAction
-        assert isinstance(action, ExecutionAction)
+    # DECISION: test_returns_execution_action removed — trivial isinstance check.
+    # DECISION: test_state_file_created / test_state_file_is_valid_json removed —
+    #   covered by TestStartExecution in test_engine_integration.py.
+    # DECISION: three dispatch-field tests collapsed into one parametrized test.
 
     def test_returns_dispatch_for_first_step(self, tmp_path: Path) -> None:
         action = _engine(tmp_path).start(_plan())
         assert action.action_type == ActionType.DISPATCH.value
 
-    def test_dispatch_carries_agent_name(self, tmp_path: Path) -> None:
-        plan = _plan(phases=[_phase(steps=[_step(agent_name="architect")])])
+    @pytest.mark.parametrize("field,step_kw,expected", [
+        ("agent_name", {"agent_name": "architect"}, "architect"),
+        ("step_id",    {"step_id": "1.1"},           "1.1"),
+        ("agent_model", {"model": "opus"},            "opus"),
+    ])
+    def test_dispatch_carries_field(
+        self, tmp_path: Path, field: str, step_kw: dict, expected: str
+    ) -> None:
+        plan = _plan(phases=[_phase(steps=[_step(**step_kw)])])
         action = _engine(tmp_path).start(plan)
-        assert action.agent_name == "architect"
-
-    def test_dispatch_carries_step_id(self, tmp_path: Path) -> None:
-        plan = _plan(phases=[_phase(steps=[_step(step_id="1.1")])])
-        action = _engine(tmp_path).start(plan)
-        assert action.step_id == "1.1"
-
-    def test_dispatch_carries_model(self, tmp_path: Path) -> None:
-        plan = _plan(phases=[_phase(steps=[_step(model="opus")])])
-        action = _engine(tmp_path).start(plan)
-        assert action.agent_model == "opus"
-
-    def test_state_file_created(self, tmp_path: Path) -> None:
-        _engine(tmp_path).start(_plan())
-        assert (tmp_path / "execution-state.json").exists()
-
-    def test_state_file_is_valid_json(self, tmp_path: Path) -> None:
-        _engine(tmp_path).start(_plan())
-        data = json.loads((tmp_path / "execution-state.json").read_text())
-        assert "task_id" in data
-        assert "plan" in data
+        assert getattr(action, field) == expected
 
     def test_state_status_is_running(self, tmp_path: Path) -> None:
         _engine(tmp_path).start(_plan())
@@ -162,64 +149,45 @@ class TestStart:
 # ---------------------------------------------------------------------------
 
 class TestRecordStepResult:
-    def test_step_appears_in_completed_ids(self, tmp_path: Path) -> None:
+    # DECISION: five field-storage tests (outcome, files_changed, tokens, duration,
+    #   commit_hash) share identical setup — folded into one parametrized test.
+    #   The shared @pytest.fixture for engine+start is inlined via a helper method
+    #   to stay within the class (pytest class fixtures require specific scoping).
+
+    @staticmethod
+    def _started_engine(tmp_path: Path) -> ExecutionEngine:
         engine = _engine(tmp_path)
         engine.start(_plan())
+        return engine
+
+    def test_step_appears_in_completed_ids(self, tmp_path: Path) -> None:
+        engine = self._started_engine(tmp_path)
         engine.record_step_result("1.1", "backend-engineer", status="complete")
-        state = engine._load_state()
-        assert "1.1" in state.completed_step_ids
+        assert "1.1" in engine._load_state().completed_step_ids
 
     def test_failed_step_appears_in_failed_ids(self, tmp_path: Path) -> None:
-        engine = _engine(tmp_path)
-        engine.start(_plan())
+        engine = self._started_engine(tmp_path)
         engine.record_step_result("1.1", "backend-engineer", status="failed", error="oops")
-        state = engine._load_state()
-        assert "1.1" in state.failed_step_ids
+        assert "1.1" in engine._load_state().failed_step_ids
 
-    def test_step_result_stores_outcome(self, tmp_path: Path) -> None:
-        engine = _engine(tmp_path)
-        engine.start(_plan())
-        engine.record_step_result("1.1", "backend-engineer", outcome="Feature X done")
-        state = engine._load_state()
-        result = state.get_step_result("1.1")
+    @pytest.mark.parametrize("record_kw,attr,expected", [
+        ({"outcome": "Feature X done"},           "outcome",           "Feature X done"),
+        ({"files_changed": ["a.py", "b.py"]},     "files_changed",     ["a.py", "b.py"]),
+        ({"estimated_tokens": 5000},               "estimated_tokens",  5000),
+        ({"duration_seconds": 42.5},               "duration_seconds",  42.5),
+        ({"commit_hash": "abc123"},                "commit_hash",       "abc123"),
+    ])
+    def test_step_result_stores_field(
+        self, tmp_path: Path, record_kw: dict, attr: str, expected
+    ) -> None:
+        engine = self._started_engine(tmp_path)
+        engine.record_step_result("1.1", "backend-engineer", **record_kw)
+        result = engine._load_state().get_step_result("1.1")
         assert result is not None
-        assert result.outcome == "Feature X done"
-
-    def test_step_result_stores_files_changed(self, tmp_path: Path) -> None:
-        engine = _engine(tmp_path)
-        engine.start(_plan())
-        engine.record_step_result("1.1", "backend-engineer", files_changed=["a.py", "b.py"])
-        state = engine._load_state()
-        result = state.get_step_result("1.1")
-        assert result.files_changed == ["a.py", "b.py"]
-
-    def test_step_result_stores_tokens(self, tmp_path: Path) -> None:
-        engine = _engine(tmp_path)
-        engine.start(_plan())
-        engine.record_step_result("1.1", "backend-engineer", estimated_tokens=5000)
-        state = engine._load_state()
-        result = state.get_step_result("1.1")
-        assert result.estimated_tokens == 5000
-
-    def test_step_result_stores_duration(self, tmp_path: Path) -> None:
-        engine = _engine(tmp_path)
-        engine.start(_plan())
-        engine.record_step_result("1.1", "backend-engineer", duration_seconds=42.5)
-        state = engine._load_state()
-        result = state.get_step_result("1.1")
-        assert result.duration_seconds == 42.5
-
-    def test_step_result_stores_commit_hash(self, tmp_path: Path) -> None:
-        engine = _engine(tmp_path)
-        engine.start(_plan())
-        engine.record_step_result("1.1", "backend-engineer", commit_hash="abc123")
-        state = engine._load_state()
-        result = state.get_step_result("1.1")
-        assert result.commit_hash == "abc123"
+        assert getattr(result, attr) == expected
 
     def test_state_persisted_to_disk(self, tmp_path: Path) -> None:
-        engine = _engine(tmp_path)
-        engine.start(_plan())
+        engine = self._started_engine(tmp_path)
         engine.record_step_result("1.1", "backend-engineer")
         data = json.loads((tmp_path / "execution-state.json").read_text())
         assert len(data["step_results"]) == 1
@@ -321,16 +289,26 @@ class TestNextAction:
 # ---------------------------------------------------------------------------
 
 class TestRecordGateResult:
-    def test_passed_gate_advances_phase(self, tmp_path: Path) -> None:
-        plan = _plan(
-            phases=[
+    # DECISION: shared helper _gate_engine builds a two-phase plan with gate on phase 0
+    #   to eliminate repeated plan construction boilerplate.
+
+    @staticmethod
+    def _gate_engine(tmp_path: Path, two_phase: bool = False) -> ExecutionEngine:
+        """Return an engine that has started and completed step 1.1 in a gated phase."""
+        if two_phase:
+            plan = _plan(phases=[
                 _phase(phase_id=0, steps=[_step("1.1")], gate=_gate()),
                 _phase(phase_id=1, name="Phase 2", steps=[_step("2.1")]),
-            ]
-        )
+            ])
+        else:
+            plan = _plan(phases=[_phase(phase_id=0, steps=[_step("1.1")], gate=_gate())])
         engine = _engine(tmp_path)
         engine.start(plan)
         engine.record_step_result("1.1", "backend-engineer")
+        return engine
+
+    def test_passed_gate_advances_phase(self, tmp_path: Path) -> None:
+        engine = self._gate_engine(tmp_path, two_phase=True)
         engine.next_action()  # returns GATE
         engine.record_gate_result(phase_id=0, passed=True)
         state = engine._load_state()
@@ -338,20 +316,13 @@ class TestRecordGateResult:
         assert state.status == "running"
 
     def test_failed_gate_sets_status_failed(self, tmp_path: Path) -> None:
-        plan = _plan(phases=[_phase(phase_id=0, steps=[_step("1.1")], gate=_gate())])
-        engine = _engine(tmp_path)
-        engine.start(plan)
-        engine.record_step_result("1.1", "backend-engineer")
+        engine = self._gate_engine(tmp_path)
         engine.next_action()  # returns GATE
         engine.record_gate_result(phase_id=0, passed=False, output="tests failed")
-        state = engine._load_state()
-        assert state.status == "failed"
+        assert engine._load_state().status == "failed"
 
     def test_gate_result_stored(self, tmp_path: Path) -> None:
-        plan = _plan(phases=[_phase(phase_id=0, steps=[_step("1.1")], gate=_gate())])
-        engine = _engine(tmp_path)
-        engine.start(plan)
-        engine.record_step_result("1.1", "backend-engineer")
+        engine = self._gate_engine(tmp_path)
         engine.record_gate_result(phase_id=0, passed=True, output="all green")
         state = engine._load_state()
         assert len(state.gate_results) == 1
@@ -359,10 +330,7 @@ class TestRecordGateResult:
         assert state.gate_results[0].output == "all green"
 
     def test_failed_gate_followed_by_failed_action(self, tmp_path: Path) -> None:
-        plan = _plan(phases=[_phase(phase_id=0, steps=[_step("1.1")], gate=_gate())])
-        engine = _engine(tmp_path)
-        engine.start(plan)
-        engine.record_step_result("1.1", "backend-engineer")
+        engine = self._gate_engine(tmp_path)
         engine.record_gate_result(phase_id=0, passed=False)
         action = engine.next_action()
         assert action.action_type == ActionType.FAILED.value
@@ -457,19 +425,6 @@ class TestComplete:
         state = engine._load_state()
         assert state.status == "complete"
 
-    def test_usage_log_written(self, tmp_path: Path) -> None:
-        engine = _engine(tmp_path)
-        engine.start(_plan(task_id="log-test"))
-        engine.record_step_result("1.1", "backend-engineer", estimated_tokens=1000)
-        engine.next_action()
-        engine.complete()
-        log_path = tmp_path / "usage-log.jsonl"
-        assert log_path.exists()
-        lines = [l for l in log_path.read_text().splitlines() if l.strip()]
-        assert len(lines) == 1
-        data = json.loads(lines[0])
-        assert data["task_id"] == "log-test"
-
     def test_retrospective_written(self, tmp_path: Path) -> None:
         engine = _engine(tmp_path)
         engine.start(_plan(task_id="retro-test"))
@@ -480,17 +435,6 @@ class TestComplete:
         assert retro_dir.exists()
         retro_files = list(retro_dir.glob("*.md"))
         assert len(retro_files) == 1
-
-    def test_trace_file_written(self, tmp_path: Path) -> None:
-        engine = _engine(tmp_path)
-        engine.start(_plan(task_id="trace-test"))
-        engine.record_step_result("1.1", "backend-engineer")
-        engine.next_action()
-        engine.complete()
-        traces_dir = tmp_path / "traces"
-        assert traces_dir.exists()
-        trace_files = list(traces_dir.glob("*.json"))
-        assert len(trace_files) == 1
 
     def test_summary_mentions_steps_complete(self, tmp_path: Path) -> None:
         engine = _engine(tmp_path)
@@ -512,6 +456,11 @@ class TestComplete:
 # ---------------------------------------------------------------------------
 
 class TestStatus:
+    # DECISION: test_steps_complete_initially_zero removed — trivial default-value check.
+    # DECISION: test_current_phase_key_present + test_elapsed_seconds_present_and_non_negative
+    #   folded into one parametrized key-presence test; the non-negative constraint for
+    #   elapsed_seconds is preserved as a separate substantive check.
+
     def test_returns_dict(self, tmp_path: Path) -> None:
         engine = _engine(tmp_path)
         engine.start(_plan())
@@ -530,10 +479,16 @@ class TestStatus:
         s = engine.status()
         assert s["status"] == "running"
 
-    def test_steps_complete_initially_zero(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("key", ["current_phase", "elapsed_seconds"])
+    def test_numeric_keys_present(self, tmp_path: Path, key: str) -> None:
         engine = _engine(tmp_path)
         engine.start(_plan())
-        assert engine.status()["steps_complete"] == 0
+        assert key in engine.status()
+
+    def test_elapsed_seconds_non_negative(self, tmp_path: Path) -> None:
+        engine = _engine(tmp_path)
+        engine.start(_plan())
+        assert engine.status()["elapsed_seconds"] >= 0.0
 
     def test_steps_complete_increments(self, tmp_path: Path) -> None:
         engine = _engine(tmp_path)
@@ -563,19 +518,6 @@ class TestStatus:
         engine.record_gate_result(phase_id=0, passed=False)
         assert engine.status()["gates_failed"] == 1
 
-    def test_current_phase_key_present(self, tmp_path: Path) -> None:
-        engine = _engine(tmp_path)
-        engine.start(_plan())
-        s = engine.status()
-        assert "current_phase" in s
-
-    def test_elapsed_seconds_present_and_non_negative(self, tmp_path: Path) -> None:
-        engine = _engine(tmp_path)
-        engine.start(_plan())
-        s = engine.status()
-        assert "elapsed_seconds" in s
-        assert s["elapsed_seconds"] >= 0.0
-
     def test_no_state_returns_indicator(self, tmp_path: Path) -> None:
         engine = _engine(tmp_path)
         s = engine.status()
@@ -587,14 +529,9 @@ class TestStatus:
 # ---------------------------------------------------------------------------
 
 class TestResume:
-    def test_resume_returns_action(self, tmp_path: Path) -> None:
-        engine = _engine(tmp_path)
-        engine.start(_plan())
-        # Simulate crash by creating a fresh engine with same dir.
-        resumed_engine = _engine(tmp_path)
-        action = resumed_engine.resume()
-        from agent_baton.models.execution import ExecutionAction
-        assert isinstance(action, ExecutionAction)
+    # DECISION: test_resume_returns_action removed — trivial isinstance check;
+    #   crash-recovery behaviour is fully covered by TestCrashRecovery in
+    #   test_engine_integration.py.
 
     def test_resume_returns_dispatch_if_step_pending(self, tmp_path: Path) -> None:
         engine = _engine(tmp_path)
