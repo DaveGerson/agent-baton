@@ -5,6 +5,14 @@ high-level cross-project analytics views plus a generic read-only
 query method.  All write paths go through SyncEngine; this class
 will raise ValueError if a mutating SQL statement is attempted
 through the ``query`` method.
+
+PMO migration
+-------------
+``_maybe_migrate_pmo()`` is called automatically by ``get_pmo_central_store``
+on the first access after central.db exists.  It copies every row from the
+legacy ``~/.baton/pmo.db`` PMO tables into the equivalent tables in
+``central.db``.  A marker file ``~/.baton/.pmo-migrated`` is written on
+success so the migration only runs once (idempotent).
 """
 from __future__ import annotations
 
@@ -18,6 +26,45 @@ from agent_baton.core.storage.schema import CENTRAL_SCHEMA_DDL, SCHEMA_VERSION
 _log = logging.getLogger(__name__)
 
 _CENTRAL_DB_DEFAULT = Path.home() / ".baton" / "central.db"
+_PMO_DB_DEFAULT = Path.home() / ".baton" / "pmo.db"
+_MIGRATION_MARKER = Path.home() / ".baton" / ".pmo-migrated"
+
+# Tables to copy from pmo.db → central.db PMO tables.
+# Each entry: (table_name, column_list)
+_PMO_TABLES: list[tuple[str, list[str]]] = [
+    (
+        "projects",
+        [
+            "project_id", "name", "path", "program", "color",
+            "description", "registered_at", "ado_project",
+        ],
+    ),
+    ("programs", ["name"]),
+    (
+        "signals",
+        [
+            "signal_id", "signal_type", "title", "description",
+            "source_project_id", "severity", "status",
+            "created_at", "resolved_at", "forge_task_id",
+        ],
+    ),
+    (
+        "archived_cards",
+        [
+            "card_id", "project_id", "program", "title", "column_name",
+            "risk_level", "priority", "agents", "steps_completed",
+            "steps_total", "gates_passed", "current_phase", "error",
+            "created_at", "updated_at", "external_id",
+        ],
+    ),
+    (
+        "forge_sessions",
+        [
+            "session_id", "project_id", "title", "status",
+            "created_at", "completed_at", "task_id", "notes",
+        ],
+    ),
+]
 
 # SQL keywords that indicate a write operation — used by the read-only guard.
 _WRITE_KEYWORDS = frozenset(
@@ -33,6 +80,107 @@ _WRITE_KEYWORDS = frozenset(
         "DETACH",
     ]
 )
+
+
+def _maybe_migrate_pmo(
+    central_db_path: Path | None = None,
+    pmo_db_path: Path | None = None,
+    marker_path: Path | None = None,
+) -> bool:
+    """One-time migration from ~/.baton/pmo.db to central.db PMO tables.
+
+    Copies every row from each PMO table in the source ``pmo.db`` into the
+    corresponding table in ``central.db`` using ``INSERT OR REPLACE`` so the
+    operation is safe to re-run (idempotent at the row level).
+
+    A marker file is written after a successful migration.  Subsequent calls
+    return immediately without touching either database.
+
+    Args:
+        central_db_path: Path to central.db.  Defaults to ``~/.baton/central.db``.
+        pmo_db_path: Path to the legacy pmo.db.  Defaults to ``~/.baton/pmo.db``.
+        marker_path: Path to the migration marker file.
+            Defaults to ``~/.baton/.pmo-migrated``.
+
+    Returns:
+        ``True`` if rows were actually migrated, ``False`` if migration was
+        skipped (marker present or pmo.db does not exist).
+    """
+    resolved_central = central_db_path or _CENTRAL_DB_DEFAULT
+    resolved_pmo = pmo_db_path or _PMO_DB_DEFAULT
+    resolved_marker = marker_path or _MIGRATION_MARKER
+
+    # Already migrated?
+    if resolved_marker.exists():
+        _log.debug("_maybe_migrate_pmo: marker %s present — skipping", resolved_marker)
+        return False
+
+    # Nothing to migrate.
+    if not resolved_pmo.exists():
+        _log.debug("_maybe_migrate_pmo: pmo.db not found at %s — skipping", resolved_pmo)
+        resolved_marker.parent.mkdir(parents=True, exist_ok=True)
+        resolved_marker.write_text("no-source\n", encoding="utf-8")
+        return False
+
+    _log.info(
+        "_maybe_migrate_pmo: migrating %s → %s",
+        resolved_pmo,
+        resolved_central,
+    )
+
+    # Open the source pmo.db read-only.
+    src = sqlite3.connect(f"file:{resolved_pmo}?mode=ro", uri=True)
+    src.row_factory = sqlite3.Row
+
+    # Open (or create) the destination central.db via CentralStore so that the
+    # schema is guaranteed to be initialised first.
+    store = CentralStore(resolved_central)
+    dst = store._conn()
+
+    total_rows = 0
+    try:
+        for table, columns in _PMO_TABLES:
+            # Check if the table exists in the source db.
+            tbl_exists = src.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+            if not tbl_exists:
+                _log.debug(
+                    "_maybe_migrate_pmo: table %s not in source — skipping", table
+                )
+                continue
+
+            cols_str = ", ".join(columns)
+            placeholders = ", ".join("?" for _ in columns)
+            insert_sql = (
+                f"INSERT OR REPLACE INTO {table} ({cols_str}) "
+                f"VALUES ({placeholders})"
+            )
+
+            rows = src.execute(
+                f"SELECT {cols_str} FROM {table}"
+            ).fetchall()
+
+            for row in rows:
+                dst.execute(insert_sql, tuple(row))
+            total_rows += len(rows)
+            _log.debug(
+                "_maybe_migrate_pmo: copied %d rows from %s", len(rows), table
+            )
+
+        dst.commit()
+    finally:
+        src.close()
+        store.close()
+
+    # Write marker.
+    resolved_marker.parent.mkdir(parents=True, exist_ok=True)
+    resolved_marker.write_text(
+        f"migrated {total_rows} rows\n", encoding="utf-8"
+    )
+    _log.info("_maybe_migrate_pmo: done — %d rows migrated", total_rows)
+    return True
 
 
 class CentralStore:
@@ -160,6 +308,55 @@ class CentralStore:
             )
         rows = self._conn().execute(sql, params).fetchall()
         return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Write interface for external-source management
+    # ------------------------------------------------------------------
+
+    # Tables that external-source management is permitted to write directly.
+    # Synced project tables must always go through SyncEngine.
+    _WRITABLE_TABLES = frozenset(
+        [
+            "external_sources",
+            "external_items",
+            "external_mappings",
+        ]
+    )
+
+    def execute(self, sql: str, params: tuple = ()) -> None:
+        """Execute a write statement against one of the allowed external-source tables.
+
+        Only INSERT, UPDATE, DELETE, and REPLACE against ``external_sources``,
+        ``external_items``, or ``external_mappings`` are permitted.  All other
+        write paths must go through SyncEngine.
+
+        Args:
+            sql: A DML statement targeting an external-source table.
+            params: Positional bind parameters.
+
+        Raises:
+            ValueError: If *sql* targets a table outside the allowed set, or
+                uses a statement type other than INSERT/UPDATE/DELETE/REPLACE.
+        """
+        stripped = sql.strip()
+        first_token = stripped.split()[0].upper() if stripped else ""
+        _ALLOWED_WRITE_KEYWORDS = frozenset(["INSERT", "UPDATE", "DELETE", "REPLACE"])
+        if first_token not in _ALLOWED_WRITE_KEYWORDS:
+            raise ValueError(
+                f"CentralStore.execute only accepts DML statements; "
+                f"got '{first_token}'.  Use query() for SELECT statements."
+            )
+        sql_upper = sql.upper()
+        target_allowed = any(t.upper() in sql_upper for t in self._WRITABLE_TABLES)
+        if not target_allowed:
+            allowed = ", ".join(sorted(self._WRITABLE_TABLES))
+            raise ValueError(
+                f"CentralStore.execute may only write to external-source tables "
+                f"({allowed}).  Use SyncEngine for project data."
+            )
+        conn = self._conn()
+        conn.execute(sql, params)
+        conn.commit()
 
     # ------------------------------------------------------------------
     # Internal helpers

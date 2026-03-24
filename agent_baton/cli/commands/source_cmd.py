@@ -181,7 +181,7 @@ def _add(args: argparse.Namespace) -> None:
 
     store = CentralStore()
     try:
-        store.query(
+        store.execute(
             "INSERT OR REPLACE INTO external_sources "
             "(source_id, source_type, display_name, config, enabled) "
             "VALUES (?, ?, ?, ?, 1)",
@@ -278,20 +278,112 @@ def _sync(args: argparse.Namespace) -> None:
             print("Run 'baton source list' to see registered sources.")
         sys.exit(1)
 
-    # Attempt to resolve adapters — currently deferred
+    # Load adapters — import triggers self-registration side effects.
     try:
-        from agent_baton.core.storage.adapters import AdapterRegistry  # type: ignore[import]
-        available = AdapterRegistry.available()
+        from agent_baton.core.storage.adapters import AdapterRegistry
+        import agent_baton.core.storage.adapters.ado  # noqa: F401  triggers registration
     except ImportError:
+        pass
+
+    try:
+        available = AdapterRegistry.available()
+    except Exception:
         available = []
 
+    store2 = CentralStore()
     for row in sources:
-        if row["source_type"] not in available:
-            print(f"  {row['source_id']}: Adapter not available for source type '{row['source_type']}'.")
-            print(f"    External adapters are not yet implemented. Check back in a future release.")
-        else:
-            # Future: instantiate adapter and call fetch_items()
-            print(f"  {row['source_id']}: Adapter found but sync not yet wired. Check back soon.")
+        source_id = row["source_id"]
+        source_type = row["source_type"]
+        if source_type not in available:
+            print(f"  {source_id}: No adapter available for source type '{source_type}'.")
+            continue
+
+        adapter_cls = AdapterRegistry.get(source_type)
+        if adapter_cls is None:
+            print(f"  {source_id}: Adapter class missing for '{source_type}'.")
+            continue
+
+        # Load config from central.db
+        config_rows = store2.query(
+            "SELECT config FROM external_sources WHERE source_id = ?",
+            (source_id,),
+        )
+        if not config_rows:
+            print(f"  {source_id}: Source not found.")
+            continue
+
+        import json as _json
+        raw_config = _json.loads(config_rows[0]["config"])
+        # Normalise config keys to match adapter expectations
+        config = {
+            "organization": raw_config.get("org", ""),
+            "project": raw_config.get("project", ""),
+            "pat_env_var": raw_config.get("pat_env", "ADO_PAT"),
+            "url": raw_config.get("url", ""),
+        }
+
+        adapter = adapter_cls()
+        try:
+            adapter.connect(config)
+        except ValueError as exc:
+            print(f"  {source_id}: Connection failed — {exc}")
+            continue
+        except Exception as exc:
+            print(f"  {source_id}: Unexpected connection error — {exc}")
+            continue
+
+        try:
+            items = adapter.fetch_items()
+        except Exception as exc:
+            print(f"  {source_id}: Fetch failed — {exc}")
+            continue
+
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        import json as _json2
+
+        persisted = 0
+        for item in items:
+            try:
+                store2.execute(
+                    "INSERT OR REPLACE INTO external_items "
+                    "(source_id, external_id, item_type, title, description, "
+                    "state, assigned_to, priority, parent_id, tags, url, "
+                    "raw_data, fetched_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        item.source_id,
+                        item.external_id,
+                        item.item_type,
+                        item.title,
+                        item.description,
+                        item.state,
+                        item.assigned_to,
+                        str(item.priority),
+                        item.parent_id,
+                        _json2.dumps(item.tags or []),
+                        item.url,
+                        _json2.dumps(item.raw_data or {}),
+                        now,
+                        item.updated_at,
+                    ),
+                )
+                persisted += 1
+            except Exception:
+                pass  # Don't abort the whole sync for one bad row
+
+        # Update last_synced timestamp
+        try:
+            store2.execute(
+                "UPDATE external_sources SET last_synced = ? WHERE source_id = ?",
+                (now, source_id),
+            )
+        except Exception:
+            pass
+
+        print(f"  {source_id}: Synced {persisted} item(s).")
+
+    store2.close()
 
 
 def _remove(args: argparse.Namespace) -> None:
@@ -312,7 +404,7 @@ def _remove(args: argparse.Namespace) -> None:
             print(f"error: source '{args.source_id}' not found.")
             store.close()
             sys.exit(1)
-        store.query(
+        store.execute(
             "DELETE FROM external_sources WHERE source_id = ?",
             (args.source_id,),
         )
@@ -351,7 +443,7 @@ def _map(args: argparse.Namespace) -> None:
             store.close()
             sys.exit(1)
 
-        store.query(
+        store.execute(
             "INSERT OR REPLACE INTO external_mappings "
             "(source_id, external_id, project_id, task_id, mapping_type, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?)",

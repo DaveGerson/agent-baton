@@ -44,6 +44,7 @@ from agent_baton.core.storage import get_project_storage
 from agent_baton.core.pmo.forge import ForgeSession
 from agent_baton.core.pmo.scanner import PmoScanner
 from agent_baton.core.pmo.store import PmoStore
+from agent_baton.core.storage.pmo_sqlite import PmoSqliteStore
 from agent_baton.core.runtime.decisions import DecisionManager
 
 # ---------------------------------------------------------------------------
@@ -61,7 +62,7 @@ _dashboard: DashboardGenerator | None = None
 _usage_logger: UsageLogger | None = None
 _trace_recorder: TraceRecorder | None = None
 _webhook_registry: WebhookRegistry | None = None
-_pmo_store: PmoStore | None = None
+_pmo_store: PmoStore | PmoSqliteStore | None = None
 _pmo_scanner: PmoScanner | None = None
 _forge_session: ForgeSession | None = None
 _classifier: DataClassifier | None = None
@@ -157,8 +158,9 @@ def init_dependencies(
         webhooks_file=team_context_root / "webhooks.json",
     )
 
-    # PMO singletons — PmoStore reads/writes ~/.baton/pmo-config.json.
-    _pmo_store = PmoStore()
+    # PMO singletons — backed by central.db (auto-migrates from pmo.db on first use).
+    from agent_baton.core.storage import get_pmo_central_store
+    _pmo_store = get_pmo_central_store()
     _pmo_scanner = PmoScanner(store=_pmo_store)
     _forge_session = ForgeSession(planner=_planner, store=_pmo_store)
 
@@ -284,15 +286,19 @@ def get_webhook_registry() -> WebhookRegistry:
     return _webhook_registry
 
 
-def get_pmo_store() -> PmoStore:
-    """Return the shared :class:`~agent_baton.core.pmo.store.PmoStore`.
+def get_pmo_store() -> PmoStore | PmoSqliteStore:
+    """Return the shared PMO store (backed by central.db).
+
+    Returns a :class:`~agent_baton.core.storage.pmo_sqlite.PmoSqliteStore`
+    pointing at ``~/.baton/central.db``.  It exposes the same interface as
+    the legacy :class:`~agent_baton.core.pmo.store.PmoStore`.
 
     Raises:
         RuntimeError: If :func:`init_dependencies` has not been called.
     """
     if _pmo_store is None:
         raise RuntimeError(
-            "PmoStore not initialised. Call init_dependencies() before serving requests."
+            "PMO store not initialised. Call init_dependencies() before serving requests."
         )
     return _pmo_store
 

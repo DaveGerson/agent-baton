@@ -146,10 +146,10 @@ def _serve(args: argparse.Namespace) -> None:
 
 def _status(args: argparse.Namespace) -> None:  # noqa: ARG001
     """Print a terminal Kanban board summary."""
-    from agent_baton.core.pmo.store import PmoStore
     from agent_baton.core.pmo.scanner import PmoScanner
+    from agent_baton.core.storage import get_pmo_central_store
 
-    store = PmoStore()
+    store = get_pmo_central_store()
     scanner = PmoScanner(store)
     config = store.load_config()
 
@@ -238,7 +238,7 @@ def _print_card_row(card) -> None:  # type: ignore[no-untyped-def]
 
 def _add(args: argparse.Namespace) -> None:
     """Register a project with the PMO."""
-    from agent_baton.core.pmo.store import PmoStore
+    from agent_baton.core.storage import get_pmo_central_store
     from agent_baton.models.pmo import PmoProject
 
     project_path = Path(args.path).resolve()
@@ -261,7 +261,7 @@ def _add(args: argparse.Namespace) -> None:
         color=args.color,
     )
 
-    store = PmoStore()
+    store = get_pmo_central_store()
     store.register_project(project)
 
     print(f"Registered project: {project.project_id} ({project.name})")
@@ -274,10 +274,10 @@ def _add(args: argparse.Namespace) -> None:
 
 def _health(args: argparse.Namespace) -> None:  # noqa: ARG001
     """Print program health bar summary."""
-    from agent_baton.core.pmo.store import PmoStore
     from agent_baton.core.pmo.scanner import PmoScanner
+    from agent_baton.core.storage import get_pmo_central_store
 
-    store = PmoStore()
+    store = get_pmo_central_store()
     scanner = PmoScanner(store)
     health_map = scanner.program_health()
 
