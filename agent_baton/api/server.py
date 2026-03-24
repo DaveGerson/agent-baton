@@ -32,7 +32,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 
-from agent_baton.api.deps import init_dependencies
+from agent_baton.api.deps import init_dependencies, get_bus, get_webhook_registry
 from agent_baton.api.middleware.auth import TokenAuthMiddleware
 from agent_baton.api.middleware.cors import configure_cors
 from agent_baton.core.events.bus import EventBus
@@ -57,6 +57,7 @@ _ROUTE_MODULES: list[tuple[str, str, str, list[str]]] = [
     ("agent_baton.api.routes.observe", "router", "/api/v1", ["observe"]),
     ("agent_baton.api.routes.decisions", "router", "/api/v1", ["decisions"]),
     ("agent_baton.api.routes.events", "router", "/api/v1", ["events"]),
+    ("agent_baton.api.routes.webhooks", "router", "/api/v1", ["webhooks"]),
 ]
 
 
@@ -100,6 +101,18 @@ def create_app(
 
     # Initialise dependency singletons before any route is registered.
     init_dependencies(team_context_root=root, bus=bus)
+
+    # Wire the WebhookDispatcher to the shared EventBus so outbound
+    # deliveries start as soon as the app is ready.
+    from agent_baton.api.webhooks.dispatcher import WebhookDispatcher
+
+    _shared_bus = get_bus()
+    _webhook_reg = get_webhook_registry()
+    _webhook_dispatcher = WebhookDispatcher(  # noqa: F841 — held alive by the bus subscription
+        registry=_webhook_reg,
+        bus=_shared_bus,
+        failures_path=root / "webhook-failures.jsonl",
+    )
 
     # Build the FastAPI app.
     app = FastAPI(

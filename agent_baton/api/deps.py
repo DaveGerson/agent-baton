@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from agent_baton.api.webhooks.registry import WebhookRegistry
 from agent_baton.core.engine.executor import ExecutionEngine
 from agent_baton.core.engine.planner import IntelligentPlanner
 from agent_baton.core.events.bus import EventBus
@@ -52,6 +53,7 @@ _decision_manager: DecisionManager | None = None
 _dashboard: DashboardGenerator | None = None
 _usage_logger: UsageLogger | None = None
 _trace_recorder: TraceRecorder | None = None
+_webhook_registry: WebhookRegistry | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +85,7 @@ def init_dependencies(
     global _dashboard
     global _usage_logger
     global _trace_recorder
+    global _webhook_registry
 
     _team_context_root = team_context_root
 
@@ -114,6 +117,11 @@ def init_dependencies(
 
     # Dashboard — wraps the usage logger we already created.
     _dashboard = DashboardGenerator(usage_logger=_usage_logger)
+
+    # Webhook registry — persists subscriptions to webhooks.json.
+    _webhook_registry = WebhookRegistry(
+        webhooks_file=team_context_root / "webhooks.json",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -222,3 +230,16 @@ def get_trace_recorder() -> TraceRecorder:
             "TraceRecorder not initialised. Call init_dependencies() before serving requests."
         )
     return _trace_recorder
+
+
+def get_webhook_registry() -> WebhookRegistry:
+    """Return the shared :class:`~agent_baton.api.webhooks.registry.WebhookRegistry`.
+
+    Raises:
+        RuntimeError: If :func:`init_dependencies` has not been called.
+    """
+    if _webhook_registry is None:
+        raise RuntimeError(
+            "WebhookRegistry not initialised. Call init_dependencies() before serving requests."
+        )
+    return _webhook_registry
