@@ -33,7 +33,10 @@ from agent_baton.api.webhooks.registry import WebhookRegistry
 from agent_baton.core.engine.executor import ExecutionEngine
 from agent_baton.core.engine.planner import IntelligentPlanner
 from agent_baton.core.events.bus import EventBus
+from agent_baton.core.govern.classifier import DataClassifier
+from agent_baton.core.govern.policy import PolicyEngine
 from agent_baton.core.observe.dashboard import DashboardGenerator
+from agent_baton.core.observe.retrospective import RetrospectiveEngine
 from agent_baton.core.observe.trace import TraceRecorder
 from agent_baton.core.observe.usage import UsageLogger
 from agent_baton.core.orchestration.registry import AgentRegistry
@@ -60,6 +63,8 @@ _webhook_registry: WebhookRegistry | None = None
 _pmo_store: PmoStore | None = None
 _pmo_scanner: PmoScanner | None = None
 _forge_session: ForgeSession | None = None
+_classifier: DataClassifier | None = None
+_policy_engine: PolicyEngine | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +100,8 @@ def init_dependencies(
     global _pmo_store
     global _pmo_scanner
     global _forge_session
+    global _classifier
+    global _policy_engine
 
     _team_context_root = team_context_root
 
@@ -111,8 +118,22 @@ def init_dependencies(
         bus=_bus,
     )
 
+    # Governance — DataClassifier and PolicyEngine are stateless; create once.
+    _classifier = DataClassifier()
+    _policy_engine = PolicyEngine()
+
     # Planner — reads agents from disk; scoped to the team-context root.
-    _planner = IntelligentPlanner(team_context_root=team_context_root)
+    # Wire the retro engine so create_plan() consults recent retrospectives.
+    # Wire classifier and policy_engine so governance runs automatically.
+    _retro_engine = RetrospectiveEngine(
+        retrospectives_dir=team_context_root / "retrospectives"
+    )
+    _planner = IntelligentPlanner(
+        team_context_root=team_context_root,
+        retro_engine=_retro_engine,
+        classifier=_classifier,
+        policy_engine=_policy_engine,
+    )
 
     # Registry — load agents eagerly so the first /agents request is fast.
     _registry = AgentRegistry()
@@ -296,3 +317,29 @@ def get_forge_session() -> ForgeSession:
             "ForgeSession not initialised. Call init_dependencies() before serving requests."
         )
     return _forge_session
+
+
+def get_classifier() -> DataClassifier:
+    """Return the shared :class:`~agent_baton.core.govern.classifier.DataClassifier`.
+
+    Raises:
+        RuntimeError: If :func:`init_dependencies` has not been called.
+    """
+    if _classifier is None:
+        raise RuntimeError(
+            "DataClassifier not initialised. Call init_dependencies() before serving requests."
+        )
+    return _classifier
+
+
+def get_policy_engine() -> PolicyEngine:
+    """Return the shared :class:`~agent_baton.core.govern.policy.PolicyEngine`.
+
+    Raises:
+        RuntimeError: If :func:`init_dependencies` has not been called.
+    """
+    if _policy_engine is None:
+        raise RuntimeError(
+            "PolicyEngine not initialised. Call init_dependencies() before serving requests."
+        )
+    return _policy_engine
