@@ -31,3 +31,10 @@ credentials.json
 secrets/
 /.superpowers/
 .worktrees/
+
+# Session state files (not for main branch)
+PMO_UI_NEXTSTEP.md
+RESUME_*.md
+
+# PMO UI local config
+pmo-ui/.claude/

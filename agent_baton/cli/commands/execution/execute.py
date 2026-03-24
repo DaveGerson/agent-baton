@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -196,9 +197,11 @@ def handler(args: argparse.Namespace) -> None:
         _handle_switch(args.switch_task_id)
         return
 
-    # Resolve task_id: explicit flag → active marker → None (legacy flat file)
+    # Resolve task_id: explicit flag → BATON_TASK_ID env var → active marker → None (legacy flat file)
     task_id = getattr(args, "task_id", None)
     context_root = Path(".claude/team-context").resolve()
+    if task_id is None:
+        task_id = os.environ.get("BATON_TASK_ID")
     if task_id is None and args.subcommand != "start":
         task_id = StatePersistence.get_active_task_id(
             Path(".claude/team-context")
@@ -229,6 +232,7 @@ def handler(args: argparse.Namespace) -> None:
             if engine._persistence is not None:
                 engine._persistence.set_active()
         _print_action(action.to_dict())
+        print(f"\nSession binding: export BATON_TASK_ID={task_id}")
 
     elif args.subcommand == "next":
         if args.all_actions:
@@ -335,6 +339,14 @@ def handler(args: argparse.Namespace) -> None:
             print("No active execution.")
             return
         print(f"Task:    {st.get('task_id', '?')}")
+        # Determine binding source
+        if getattr(args, "task_id", None):
+            bound_via = "--task-id"
+        elif os.environ.get("BATON_TASK_ID"):
+            bound_via = "BATON_TASK_ID"
+        else:
+            bound_via = "active-task-id.txt"
+        print(f"Bound:   {bound_via}")
         print(f"Status:  {st.get('status', '?')}")
         print(f"Phase:   {st.get('current_phase', '?')}")
         print(f"Steps:   {st.get('steps_complete', 0)}/{st.get('steps_total', 0)}")
