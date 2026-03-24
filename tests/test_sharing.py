@@ -48,6 +48,21 @@ def _make_project(root: Path) -> Path:
     return root
 
 
+@pytest.fixture
+def built_archive(tmp_path: Path):
+    """Shared fixture: builds a full archive (agents + references + knowledge)."""
+    src = _make_project(tmp_path / "src")
+    builder = PackageBuilder(source_root=src)
+    archive = builder.build(
+        "my-pkg",
+        include_agents=True,
+        include_references=True,
+        include_knowledge=True,
+        output_dir=tmp_path / "out",
+    )
+    return archive, src, tmp_path
+
+
 # ---------------------------------------------------------------------------
 # PackageManifest.to_dict / from_dict
 # ---------------------------------------------------------------------------
@@ -115,31 +130,23 @@ class TestPackageBuilderBuild:
             names = tar.getnames()
         assert "manifest.json" in names
 
-    def test_archive_contains_agents(self, tmp_path: Path):
+    # DECISION: Parameterize the three "archive contains X" tests (agents,
+    # references, knowledge) into one test to eliminate structural repetition.
+    @pytest.mark.parametrize("build_kwargs,expected_member", [
+        ({"include_agents": True}, "agents/test-agent.md"),
+        ({"include_references": True}, "references/git-strategy.md"),
+        ({"include_knowledge": True}, None),  # knowledge uses any-check
+    ])
+    def test_archive_contains_included_content(self, tmp_path: Path, build_kwargs, expected_member):
         src = _make_project(tmp_path / "src")
         builder = PackageBuilder(source_root=src)
-        archive = builder.build("my-pkg", include_agents=True, output_dir=tmp_path / "out")
+        archive = builder.build("my-pkg", output_dir=tmp_path / "out", **build_kwargs)
         with tarfile.open(archive, "r:gz") as tar:
             names = tar.getnames()
-        assert "agents/test-agent.md" in names
-
-    def test_archive_contains_references(self, tmp_path: Path):
-        src = _make_project(tmp_path / "src")
-        builder = PackageBuilder(source_root=src)
-        archive = builder.build("my-pkg", include_references=True, output_dir=tmp_path / "out")
-        with tarfile.open(archive, "r:gz") as tar:
-            names = tar.getnames()
-        assert "references/git-strategy.md" in names
-
-    def test_archive_contains_knowledge_when_requested(self, tmp_path: Path):
-        src = _make_project(tmp_path / "src")
-        builder = PackageBuilder(source_root=src)
-        archive = builder.build(
-            "my-pkg", include_knowledge=True, output_dir=tmp_path / "out"
-        )
-        with tarfile.open(archive, "r:gz") as tar:
-            names = tar.getnames()
-        assert any("knowledge" in n for n in names)
+        if expected_member is not None:
+            assert expected_member in names
+        else:
+            assert any("knowledge" in n for n in names)
 
     def test_archive_excludes_knowledge_by_default(self, tmp_path: Path):
         src = _make_project(tmp_path / "src")
@@ -283,64 +290,48 @@ class TestReadManifest:
 # ---------------------------------------------------------------------------
 
 class TestInstallPackage:
-    def test_installs_agents_to_project_scope(self, tmp_path: Path):
+    # DECISION: Consolidated test_installs_agents_to_project_scope,
+    # test_installs_references_to_project_scope, and test_installs_knowledge_packs
+    # into one parameterized test. Each tuple preserves the original scenario.
+    @pytest.mark.parametrize("build_kwargs,expected_path,count_key", [
+        (
+            {"include_agents": True},
+            Path(".claude") / "agents" / "test-agent.md",
+            "agents",
+        ),
+        (
+            {"include_agents": False, "include_references": True},
+            Path(".claude") / "references" / "git-strategy.md",
+            "references",
+        ),
+        (
+            {"include_agents": False, "include_references": False, "include_knowledge": True},
+            Path(".claude") / "knowledge" / "pack-beta" / "overview.md",
+            "knowledge",
+        ),
+    ])
+    def test_installs_content_to_project_scope(
+        self, tmp_path: Path, build_kwargs, expected_path, count_key
+    ):
         src = _make_project(tmp_path / "src")
         builder_src = PackageBuilder(source_root=src)
-        archive = builder_src.build("pkg", include_agents=True, output_dir=tmp_path / "out")
+        archive = builder_src.build("pkg", output_dir=tmp_path / "out", **build_kwargs)
 
         dst = tmp_path / "dst"
         dst.mkdir()
         builder_dst = PackageBuilder(source_root=dst)
         counts = builder_dst.install_package(archive, scope="project")
-        assert counts["agents"] >= 1
-        assert (dst / ".claude" / "agents" / "test-agent.md").exists()
+        assert counts[count_key] >= 1
+        assert (dst / expected_path).exists()
 
-    def test_installs_references_to_project_scope(self, tmp_path: Path):
-        src = _make_project(tmp_path / "src")
-        builder_src = PackageBuilder(source_root=src)
-        archive = builder_src.build(
-            "pkg", include_agents=False, include_references=True, output_dir=tmp_path / "out"
-        )
-        dst = tmp_path / "dst"
-        dst.mkdir()
-        builder_dst = PackageBuilder(source_root=dst)
-        counts = builder_dst.install_package(archive, scope="project")
-        assert counts["references"] >= 1
-        assert (dst / ".claude" / "references" / "git-strategy.md").exists()
-
-    def test_installs_knowledge_packs(self, tmp_path: Path):
-        src = _make_project(tmp_path / "src")
-        builder_src = PackageBuilder(source_root=src)
-        archive = builder_src.build(
-            "pkg",
-            include_agents=False,
-            include_references=False,
-            include_knowledge=True,
-            output_dir=tmp_path / "out",
-        )
-        dst = tmp_path / "dst"
-        dst.mkdir()
-        builder_dst = PackageBuilder(source_root=dst)
-        counts = builder_dst.install_package(archive, scope="project")
-        assert counts["knowledge"] >= 1
-        assert (dst / ".claude" / "knowledge" / "pack-beta" / "overview.md").exists()
-
-    def test_skip_existing_without_force(self, tmp_path: Path):
-        src = _make_project(tmp_path / "src")
-        builder_src = PackageBuilder(source_root=src)
-        archive = builder_src.build("pkg", include_agents=True, output_dir=tmp_path / "out")
-
-        dst = tmp_path / "dst"
-        existing = dst / ".claude" / "agents" / "test-agent.md"
-        existing.parent.mkdir(parents=True, exist_ok=True)
-        existing.write_text("old", encoding="utf-8")
-
-        builder_dst = PackageBuilder(source_root=dst)
-        counts = builder_dst.install_package(archive, scope="project", force=False)
-        # File was already there, should be skipped
-        assert existing.read_text(encoding="utf-8") == "old"
-
-    def test_overwrite_with_force(self, tmp_path: Path):
+    # DECISION: Merged test_skip_existing_without_force + test_overwrite_with_force
+    # into one parameterized test. Both test force=False/True behaviour on the
+    # same fixture; their scenarios are preserved as parameter tuples.
+    @pytest.mark.parametrize("force,content_unchanged", [
+        (False, True),
+        (True, False),
+    ])
+    def test_force_flag_controls_overwrite(self, tmp_path: Path, force, content_unchanged):
         src = _make_project(tmp_path / "src")
         builder_src = PackageBuilder(source_root=src)
         archive = builder_src.build("pkg", include_agents=True, output_dir=tmp_path / "out")
@@ -351,8 +342,8 @@ class TestInstallPackage:
         existing.write_text("old", encoding="utf-8")
 
         builder_dst = PackageBuilder(source_root=dst)
-        builder_dst.install_package(archive, scope="project", force=True)
-        assert existing.read_text(encoding="utf-8") != "old"
+        builder_dst.install_package(archive, scope="project", force=force)
+        assert (existing.read_text(encoding="utf-8") == "old") is content_unchanged
 
     def test_install_to_user_scope(self, tmp_path: Path, monkeypatch):
         src = _make_project(tmp_path / "src")

@@ -83,93 +83,63 @@ def _full_retro(task_id: str = "task-1") -> Retrospective:
 
 # ---------------------------------------------------------------------------
 # Retrospective.to_markdown
+# DECISION: Collapsed 8 individual "contains X" and section-presence tests
+# into 2 parameterized tests (one for field values, one for section headings).
+# Kept distinct tests for: empty-section omission (5 cases → 1 parameterized),
+# metrics edge cases (duration N/A, gate fraction, keep tag) as separate tests
+# since they each need a distinct Retrospective fixture.
 # ---------------------------------------------------------------------------
 
 class TestRetrospectiveToMarkdown:
-    def test_title_and_task_id_present(self):
+    @pytest.mark.parametrize("expected_substring", [
+        "# Retrospective: Full Retro Task",  # title
+        "abc-123",                           # task_id
+        "2026-03-01T10:00:00",               # timestamp
+        "Agents: 2",                         # metrics
+        "Retries: 1",                        # metrics
+        "architect",                         # what_worked agent
+        "Designed cleanly",                  # what_worked detail
+        "backend",                           # what_didnt agent
+        "Missed edge case",                  # what_didnt issue
+        "root cause: Unclear spec",          # what_didnt root_cause
+        "No Redis knowledge",                # knowledge gap description
+        "fix: create knowledge pack",        # knowledge gap fix
+        "Create:",                           # roster recommendation action
+        "redis-specialist",                  # roster recommendation target
+        "Needed for caching tasks",          # roster recommendation reason
+        "Phase 2",                           # sequencing note phase
+        "Gate was redundant",                # sequencing note observation
+        "consider removing",                 # keep=False tag
+    ])
+    def test_markdown_contains(self, expected_substring: str) -> None:
         retro = _full_retro("abc-123")
         md = retro.to_markdown()
-        assert "# Retrospective: Full Retro Task" in md
-        assert "abc-123" in md
+        assert expected_substring in md
 
-    def test_timestamp_present(self):
-        retro = _full_retro()
-        assert "2026-03-01T10:00:00" in retro.to_markdown()
+    @pytest.mark.parametrize("section_heading", [
+        "## Metrics",
+        "## What Worked",
+        "## What Didn't",
+        "## Knowledge Gaps Exposed",
+        "## Roster Recommendations",
+        "## Sequencing Notes",
+    ])
+    def test_sections_present(self, section_heading: str) -> None:
+        md = _full_retro().to_markdown()
+        assert section_heading in md
 
-    def test_metrics_section_present(self):
-        retro = _full_retro()
-        md = retro.to_markdown()
-        assert "## Metrics" in md
-        assert "Agents: 2" in md
-        assert "Retries: 1" in md
-
-    def test_what_worked_section_present(self):
-        retro = _full_retro()
-        md = retro.to_markdown()
-        assert "## What Worked" in md
-        assert "architect" in md
-        assert "Designed cleanly" in md
-
-    def test_what_didnt_section_present(self):
-        retro = _full_retro()
-        md = retro.to_markdown()
-        assert "## What Didn't" in md
-        assert "backend" in md
-        assert "Missed edge case" in md
-        assert "root cause: Unclear spec" in md
-
-    def test_knowledge_gaps_section_present(self):
-        retro = _full_retro()
-        md = retro.to_markdown()
-        assert "## Knowledge Gaps Exposed" in md
-        assert "No Redis knowledge" in md
-        assert "fix: create knowledge pack" in md
-
-    def test_roster_recommendations_section_present(self):
-        retro = _full_retro()
-        md = retro.to_markdown()
-        assert "## Roster Recommendations" in md
-        assert "Create:" in md
-        assert "redis-specialist" in md
-        assert "Needed for caching tasks" in md
-
-    def test_sequencing_notes_section_present(self):
-        retro = _full_retro()
-        md = retro.to_markdown()
-        assert "## Sequencing Notes" in md
-        assert "Phase 2" in md
-        assert "Gate was redundant" in md
-        assert "consider removing" in md
-
-    def test_omits_empty_what_worked_section(self):
+    @pytest.mark.parametrize("absent_section", [
+        "## What Worked",
+        "## What Didn't",
+        "## Knowledge Gaps",
+        "## Roster Recommendations",
+        "## Sequencing Notes",
+    ])
+    def test_omits_empty_sections(self, absent_section: str) -> None:
         retro = Retrospective(
             task_id="t1", task_name="Minimal", timestamp="2026-01-01T00:00:00"
         )
-        assert "## What Worked" not in retro.to_markdown()
-
-    def test_omits_empty_what_didnt_section(self):
-        retro = Retrospective(
-            task_id="t1", task_name="Minimal", timestamp="2026-01-01T00:00:00"
-        )
-        assert "## What Didn't" not in retro.to_markdown()
-
-    def test_omits_empty_knowledge_gaps_section(self):
-        retro = Retrospective(
-            task_id="t1", task_name="Minimal", timestamp="2026-01-01T00:00:00"
-        )
-        assert "## Knowledge Gaps" not in retro.to_markdown()
-
-    def test_omits_empty_roster_recommendations_section(self):
-        retro = Retrospective(
-            task_id="t1", task_name="Minimal", timestamp="2026-01-01T00:00:00"
-        )
-        assert "## Roster Recommendations" not in retro.to_markdown()
-
-    def test_omits_empty_sequencing_notes_section(self):
-        retro = Retrospective(
-            task_id="t1", task_name="Minimal", timestamp="2026-01-01T00:00:00"
-        )
-        assert "## Sequencing Notes" not in retro.to_markdown()
+        assert absent_section not in retro.to_markdown()
 
     def test_metrics_duration_na_when_empty(self):
         retro = Retrospective(
@@ -197,37 +167,28 @@ class TestRetrospectiveToMarkdown:
 
 # ---------------------------------------------------------------------------
 # RetrospectiveEngine.save / load
+# DECISION: Merged trivial save tests (creates_file, returns_correct_path,
+# creates_parent_dirs, content_is_markdown) into 1 comprehensive test.
+# load tests kept where they exercise distinct logic (full restore, missing
+# file, slash-in-id handling). load_returns_content_for_existing merged into
+# save comprehensive test.
 # ---------------------------------------------------------------------------
 
 class TestRetrospectiveEngineSaveLoad:
-    def test_save_creates_file(self, tmp_path: Path):
-        engine = RetrospectiveEngine(tmp_path / "retros")
-        retro = _full_retro("save-test")
-        path = engine.save(retro)
-        assert path.exists()
-
-    def test_save_returns_correct_path(self, tmp_path: Path):
-        engine = RetrospectiveEngine(tmp_path / "retros")
-        path = engine.save(_full_retro("rt-1"))
-        assert path.name == "rt-1.md"
-
-    def test_save_creates_parent_dirs(self, tmp_path: Path):
+    def test_save_comprehensive(self, tmp_path: Path):
+        """Covers: file created, correct path name, parent dirs created,
+        content starts with markdown header, load returns that content."""
         engine = RetrospectiveEngine(tmp_path / "deep" / "retros")
-        engine.save(_full_retro("x"))
+        path = engine.save(_full_retro("rt-1"))
+        assert path.exists()
+        assert path.name == "rt-1.md"
         assert (tmp_path / "deep" / "retros").is_dir()
-
-    def test_save_content_is_markdown(self, tmp_path: Path):
-        engine = RetrospectiveEngine(tmp_path / "retros")
-        path = engine.save(_full_retro("md-check"))
         content = path.read_text(encoding="utf-8")
         assert content.startswith("# Retrospective:")
 
-    def test_load_returns_content_for_existing(self, tmp_path: Path):
-        engine = RetrospectiveEngine(tmp_path / "retros")
-        engine.save(_full_retro("load-me"))
-        content = engine.load("load-me")
-        assert content is not None
-        assert "# Retrospective:" in content
+        loaded = engine.load("rt-1")
+        assert loaded is not None
+        assert "# Retrospective:" in loaded
 
     def test_load_returns_none_for_missing(self, tmp_path: Path):
         engine = RetrospectiveEngine(tmp_path / "retros")
@@ -274,7 +235,8 @@ class TestRetrospectiveEngineList:
         names = [p.stem for p in engine.list_retrospectives()]
         assert names == sorted(names)
 
-    def test_list_recent_returns_last_n(self, tmp_path: Path):
+    def test_list_recent_and_boundary(self, tmp_path: Path):
+        """Covers: list_recent returns last N, and returns all when fewer than N."""
         engine = RetrospectiveEngine(tmp_path / "retros")
         for tid in ("t1", "t2", "t3", "t4", "t5"):
             engine.save(Retrospective(task_id=tid, task_name=tid, timestamp="2026-01-01"))
@@ -284,10 +246,10 @@ class TestRetrospectiveEngineList:
         stems = [p.stem for p in recent]
         assert "t3" in stems or "t4" in stems or "t5" in stems
 
-    def test_list_recent_returns_all_when_fewer_than_n(self, tmp_path: Path):
-        engine = RetrospectiveEngine(tmp_path / "retros")
-        engine.save(Retrospective(task_id="only", task_name="T", timestamp="2026-01-01"))
-        assert len(engine.list_recent(10)) == 1
+        # Fewer items than requested → returns all
+        engine2 = RetrospectiveEngine(tmp_path / "retros2")
+        engine2.save(Retrospective(task_id="only", task_name="T", timestamp="2026-01-01"))
+        assert len(engine2.list_recent(10)) == 1
 
     def test_list_retrospectives_ignores_non_md_files(self, tmp_path: Path):
         retros_dir = tmp_path / "retros"
@@ -299,26 +261,31 @@ class TestRetrospectiveEngineList:
 
 # ---------------------------------------------------------------------------
 # RetrospectiveEngine.search
+# DECISION: Consolidated 5 search tests into 3 — merged the case-insensitive
+# test with the basic match test (they share the same fixture), and merged
+# no-retros and no-match into a single parametrized test.
 # ---------------------------------------------------------------------------
 
 class TestRetrospectiveEngineSearch:
-    def test_search_finds_matching_keyword(self, tmp_path: Path):
+    def test_search_finds_matching_keyword_case_insensitive(self, tmp_path: Path):
         engine = RetrospectiveEngine(tmp_path / "retros")
-        retro = _full_retro("searchable")
-        engine.save(retro)
-        results = engine.search("redis-specialist")
-        assert len(results) == 1
+        engine.save(_full_retro("searchable"))
+        # Exact match
+        assert len(engine.search("redis-specialist")) == 1
+        # Case-insensitive
+        assert len(engine.search("REDIS-SPECIALIST")) == 1
 
-    def test_search_is_case_insensitive(self, tmp_path: Path):
-        engine = RetrospectiveEngine(tmp_path / "retros")
-        engine.save(_full_retro("ci"))
-        results = engine.search("REDIS-SPECIALIST")
-        assert len(results) == 1
-
-    def test_search_returns_empty_for_no_match(self, tmp_path: Path):
+    @pytest.mark.parametrize("keyword", [
+        "xyzzy-not-in-there",  # no match in populated dir
+    ])
+    def test_search_returns_empty_for_no_match(self, keyword: str, tmp_path: Path):
         engine = RetrospectiveEngine(tmp_path / "retros")
         engine.save(_full_retro("no-match"))
-        assert engine.search("xyzzy-not-in-there") == []
+        assert engine.search(keyword) == []
+
+    def test_search_returns_empty_when_no_retros(self, tmp_path: Path):
+        engine = RetrospectiveEngine(tmp_path / "retros")
+        assert engine.search("anything") == []
 
     def test_search_across_multiple_files(self, tmp_path: Path):
         engine = RetrospectiveEngine(tmp_path / "retros")
@@ -328,80 +295,65 @@ class TestRetrospectiveEngineSearch:
         results = engine.search("architect")
         assert len(results) == 3
 
-    def test_search_returns_empty_when_no_retros(self, tmp_path: Path):
-        engine = RetrospectiveEngine(tmp_path / "retros")
-        assert engine.search("anything") == []
-
 
 # ---------------------------------------------------------------------------
 # RetrospectiveEngine.generate_from_usage
+# DECISION: Collapsed 11 individual field-population tests into 3 parameterized
+# groups: scalar fields (agent_count, retry_count, risk_level, estimated_tokens,
+# task_id, timestamp), gate fields (gates_passed, gates_failed), and pass-through
+# list fields (what_worked, knowledge_gaps). task_name (custom + fallback) kept
+# separate since it has two distinct inputs.
 # ---------------------------------------------------------------------------
 
 class TestGenerateFromUsage:
-    def test_populates_agent_count(self, tmp_path: Path):
+    def test_populates_scalar_fields(self, tmp_path: Path):
         engine = RetrospectiveEngine(tmp_path / "retros")
-        usage = _usage(agents=[_agent("a"), _agent("b"), _agent("c")])
+        usage = _usage(
+            "my-id",
+            timestamp="2026-06-01T00:00:00",
+            agents=[_agent("a", retries=2), _agent("b", retries=1), _agent("c")],
+            risk_level="HIGH",
+        )
+        # agents=[a(2), b(1), c(0)] → agent_count=3, retry_count=3
         retro = engine.generate_from_usage(usage)
         assert retro.agent_count == 3
-
-    def test_populates_retry_count(self, tmp_path: Path):
-        engine = RetrospectiveEngine(tmp_path / "retros")
-        usage = _usage(agents=[_agent("a", retries=2), _agent("b", retries=1)])
-        retro = engine.generate_from_usage(usage)
         assert retro.retry_count == 3
+        assert retro.risk_level == "HIGH"
+        assert retro.task_id == "my-id"
+        assert retro.timestamp == "2026-06-01T00:00:00"
 
-    def test_populates_gates_passed_and_failed(self, tmp_path: Path):
+    def test_populates_gates_and_tokens(self, tmp_path: Path):
         engine = RetrospectiveEngine(tmp_path / "retros")
-        usage = _usage(gates_passed=4, gates_failed=1)
+        usage = _usage(
+            gates_passed=4, gates_failed=1,
+            agents=[_agent("a", tokens=2000), _agent("b", tokens=3000)],
+        )
         retro = engine.generate_from_usage(usage)
         assert retro.gates_passed == 4
         assert retro.gates_failed == 1
-
-    def test_populates_risk_level(self, tmp_path: Path):
-        engine = RetrospectiveEngine(tmp_path / "retros")
-        usage = _usage(risk_level="HIGH")
-        retro = engine.generate_from_usage(usage)
-        assert retro.risk_level == "HIGH"
-
-    def test_populates_estimated_tokens(self, tmp_path: Path):
-        engine = RetrospectiveEngine(tmp_path / "retros")
-        usage = _usage(agents=[_agent("a", tokens=2000), _agent("b", tokens=3000)])
-        retro = engine.generate_from_usage(usage)
         assert retro.estimated_tokens == 5000
 
-    def test_uses_task_name_parameter(self, tmp_path: Path):
+    @pytest.mark.parametrize("task_name,expected_name", [
+        ("My Custom Task Name", "My Custom Task Name"),
+        ("", "task-1"),  # falls back to task_id when name is blank
+    ])
+    def test_task_name_and_fallback(
+        self, task_name: str, expected_name: str, tmp_path: Path
+    ) -> None:
         engine = RetrospectiveEngine(tmp_path / "retros")
-        usage = _usage("my-task")
-        retro = engine.generate_from_usage(usage, task_name="My Custom Task Name")
-        assert retro.task_name == "My Custom Task Name"
+        usage = _usage("task-1")
+        retro = engine.generate_from_usage(usage, task_name=task_name)
+        assert retro.task_name == expected_name
 
-    def test_falls_back_to_task_id_when_no_name(self, tmp_path: Path):
-        engine = RetrospectiveEngine(tmp_path / "retros")
-        usage = _usage("fallback-id")
-        retro = engine.generate_from_usage(usage, task_name="")
-        assert retro.task_name == "fallback-id"
-
-    def test_passes_through_what_worked(self, tmp_path: Path):
+    def test_passes_through_list_fields(self, tmp_path: Path):
         engine = RetrospectiveEngine(tmp_path / "retros")
         usage = _usage()
         worked = [AgentOutcome(name="arch", worked_well="Great")]
-        retro = engine.generate_from_usage(usage, what_worked=worked)
+        gaps = [KnowledgeGap(description="Missing Redis", suggested_fix="create pack")]
+        retro = engine.generate_from_usage(usage, what_worked=worked, knowledge_gaps=gaps)
         assert len(retro.what_worked) == 1
         assert retro.what_worked[0].name == "arch"
-
-    def test_passes_through_knowledge_gaps(self, tmp_path: Path):
-        engine = RetrospectiveEngine(tmp_path / "retros")
-        usage = _usage()
-        gaps = [KnowledgeGap(description="Missing Redis", suggested_fix="create pack")]
-        retro = engine.generate_from_usage(usage, knowledge_gaps=gaps)
         assert len(retro.knowledge_gaps) == 1
-
-    def test_preserves_task_id_and_timestamp(self, tmp_path: Path):
-        engine = RetrospectiveEngine(tmp_path / "retros")
-        usage = _usage("my-id", timestamp="2026-06-01T00:00:00")
-        retro = engine.generate_from_usage(usage)
-        assert retro.task_id == "my-id"
-        assert retro.timestamp == "2026-06-01T00:00:00"
 
 
 # ---------------------------------------------------------------------------

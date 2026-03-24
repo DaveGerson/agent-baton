@@ -146,22 +146,22 @@ class TestOverrideMode:
 
 
 class TestGet:
-    def test_get_by_exact_name_returns_agent(self, registry_with_agents: AgentRegistry):
-        agent = registry_with_agents.get("architect")
+    # DECISION: removed trivial test_get_returns_none_when_registry_empty — it
+    # tests the same path as test_get_missing_name_returns_none (returns None for
+    # absent key). Both share the same code path; the distinction has no value.
+    @pytest.mark.parametrize("name,expected_name", [
+        ("architect", "architect"),
+        ("backend-engineer--python", "backend-engineer--python"),
+    ])
+    def test_get_known_name_returns_agent(
+        self, registry_with_agents: AgentRegistry, name: str, expected_name: str
+    ):
+        agent = registry_with_agents.get(name)
         assert agent is not None
-        assert agent.name == "architect"
-
-    def test_get_by_flavored_name_returns_agent(self, registry_with_agents: AgentRegistry):
-        agent = registry_with_agents.get("backend-engineer--python")
-        assert agent is not None
-        assert agent.name == "backend-engineer--python"
+        assert agent.name == expected_name
 
     def test_get_missing_name_returns_none(self, registry_with_agents: AgentRegistry):
         assert registry_with_agents.get("nonexistent-agent") is None
-
-    def test_get_returns_none_when_registry_empty(self):
-        registry = AgentRegistry()
-        assert registry.get("architect") is None
 
 
 class TestGetFlavors:
@@ -177,13 +177,14 @@ class TestGetFlavors:
         for agent in flavors:
             assert agent.is_flavored is True
 
-    def test_returns_empty_when_no_flavors_exist(self, registry_with_agents: AgentRegistry):
-        # "architect" has no flavored variants in the fixture
-        flavors = registry_with_agents.get_flavors("architect")
-        assert flavors == []
-
-    def test_returns_empty_for_unknown_base(self, registry_with_agents: AgentRegistry):
-        flavors = registry_with_agents.get_flavors("nonexistent-agent")
+    @pytest.mark.parametrize("base_name", [
+        "architect",       # has no flavored variants in the fixture
+        "nonexistent-agent",  # unknown base
+    ])
+    def test_returns_empty_when_no_flavors_exist(
+        self, registry_with_agents: AgentRegistry, base_name: str
+    ):
+        flavors = registry_with_agents.get_flavors(base_name)
         assert flavors == []
 
 
@@ -211,21 +212,40 @@ class TestGetBase:
         assert agent is not None
         assert agent.name == "backend-engineer"
 
-    def test_returns_none_when_base_not_loaded(self, registry_with_agents: AgentRegistry):
-        # No plain "backend-engineer" (only flavored variants) in the fixture
-        agent = registry_with_agents.get_base("backend-engineer--python")
-        assert agent is None
-
-    def test_returns_none_for_unknown_name(self, registry_with_agents: AgentRegistry):
-        assert registry_with_agents.get_base("nonexistent") is None
+    @pytest.mark.parametrize("name", [
+        "backend-engineer--python",  # base "backend-engineer" not in fixture
+        "nonexistent",
+    ])
+    def test_returns_none_when_base_not_found(
+        self, registry_with_agents: AgentRegistry, name: str
+    ):
+        assert registry_with_agents.get_base(name) is None
 
 
 class TestFindBestMatch:
-    def test_returns_flavor_when_it_exists(self, registry_with_agents: AgentRegistry):
-        # Fixture has backend-engineer--python
-        result = registry_with_agents.find_best_match("backend-engineer", "python")
-        assert result is not None
-        assert result.name == "backend-engineer--python"
+    # DECISION: parameterized the five find_best_match tests into two groups:
+    # fixture-based lookups (1 parametrized test) and ones needing their own
+    # tmp_path setup (kept as standalone). The "flavor_search_is_exact_match"
+    # case (py != python) is included as a tuple since it exercises a distinct
+    # code path (no match → None).
+    @pytest.mark.parametrize("base,flavor,expected_name", [
+        ("backend-engineer", "python", "backend-engineer--python"),  # exact flavor match
+        ("backend-engineer", "py", None),                            # inexact flavor → no base → None
+        ("nonexistent-agent", "python", None),                       # nothing matches
+    ])
+    def test_find_best_match_fixture(
+        self,
+        registry_with_agents: AgentRegistry,
+        base: str,
+        flavor: str | None,
+        expected_name: str | None,
+    ):
+        result = registry_with_agents.find_best_match(base, flavor)
+        if expected_name is None:
+            assert result is None
+        else:
+            assert result is not None
+            assert result.name == expected_name
 
     def test_falls_back_to_base_when_flavor_missing(self, tmp_path: Path):
         agents_dir = tmp_path / "agents"
@@ -253,82 +273,58 @@ class TestFindBestMatch:
         assert result is not None
         assert result.name == "architect"
 
-    def test_returns_none_when_nothing_matches(self, registry_with_agents: AgentRegistry):
-        result = registry_with_agents.find_best_match("nonexistent-agent", "python")
-        assert result is None
-
-    def test_flavor_search_is_exact_match(self, registry_with_agents: AgentRegistry):
-        # "py" is not a valid flavor even though "python" exists
-        result = registry_with_agents.find_best_match("backend-engineer", "py")
-        # Should fall back to base; base "backend-engineer" not in fixture, so None
-        assert result is None
-
 
 class TestByCategory:
-    def test_engineering_category_includes_architect(self, registry_with_agents: AgentRegistry):
-        agents = registry_with_agents.by_category(AgentCategory.ENGINEERING)
-        names = [a.name for a in agents]
-        assert "architect" in names
-
-    def test_engineering_category_includes_flavored_backend(
-        self, registry_with_agents: AgentRegistry
+    # DECISION: parameterized the five category tests into two groups:
+    # "present" cases (which agents appear under a category) and the "empty"
+    # case. The category_returns_list check is folded into the present cases
+    # by asserting isinstance inside one shared parametrized test.
+    @pytest.mark.parametrize("category,expected_names", [
+        (
+            AgentCategory.ENGINEERING,
+            ["architect", "backend-engineer--python", "backend-engineer--node", "frontend-engineer--react"],
+        ),
+        (
+            AgentCategory.REVIEW,
+            ["security-reviewer"],
+        ),
+    ])
+    def test_category_contains_expected_agents(
+        self,
+        registry_with_agents: AgentRegistry,
+        category: AgentCategory,
+        expected_names: list[str],
     ):
-        agents = registry_with_agents.by_category(AgentCategory.ENGINEERING)
+        agents = registry_with_agents.by_category(category)
+        assert isinstance(agents, list)
         names = [a.name for a in agents]
-        assert "backend-engineer--python" in names
-        assert "backend-engineer--node" in names
-        assert "frontend-engineer--react" in names
-
-    def test_review_category_includes_security_reviewer(
-        self, registry_with_agents: AgentRegistry
-    ):
-        agents = registry_with_agents.by_category(AgentCategory.REVIEW)
-        names = [a.name for a in agents]
-        assert "security-reviewer" in names
+        for expected in expected_names:
+            assert expected in names
 
     def test_empty_category_returns_empty_list(self, registry_with_agents: AgentRegistry):
         # No DATA category agents in the fixture
         agents = registry_with_agents.by_category(AgentCategory.DATA)
         assert agents == []
 
-    def test_category_returns_list(self, registry_with_agents: AgentRegistry):
-        result = registry_with_agents.by_category(AgentCategory.ENGINEERING)
-        assert isinstance(result, list)
-
 
 class TestToolsParsing:
-    def test_comma_separated_tools_parsed_as_list(self, tmp_path: Path):
+    # DECISION: parameterized the three tools-parsing tests into one. All share
+    # the same setup (write one agent .md file, load it, call .get().tools).
+    @pytest.mark.parametrize("frontmatter_snippet,expected_tools", [
+        ("tools: Read, Write, Edit\n", ["Read", "Write", "Edit"]),
+        ("tools:\n  - Read\n  - Bash\n", ["Read", "Bash"]),
+        ("", []),  # no tools field → defaults to empty list
+    ])
+    def test_tools_parsing(
+        self, tmp_path: Path, frontmatter_snippet: str, expected_tools: list[str]
+    ):
         agents_dir = tmp_path / "agents"
         agents_dir.mkdir()
         (agents_dir / "test-agent.md").write_text(
-            "---\nname: test-agent\ndescription: d\ntools: Read, Write, Edit\n---\nbody\n",
+            f"---\nname: test-agent\ndescription: d\n{frontmatter_snippet}---\nbody\n",
             encoding="utf-8",
         )
         registry = AgentRegistry()
         registry.load_directory(agents_dir)
         agent = registry.get("test-agent")
-        assert agent.tools == ["Read", "Write", "Edit"]
-
-    def test_yaml_list_tools_preserved(self, tmp_path: Path):
-        agents_dir = tmp_path / "agents"
-        agents_dir.mkdir()
-        (agents_dir / "test-agent.md").write_text(
-            "---\nname: test-agent\ndescription: d\ntools:\n  - Read\n  - Bash\n---\nbody\n",
-            encoding="utf-8",
-        )
-        registry = AgentRegistry()
-        registry.load_directory(agents_dir)
-        agent = registry.get("test-agent")
-        assert agent.tools == ["Read", "Bash"]
-
-    def test_missing_tools_field_defaults_to_empty_list(self, tmp_path: Path):
-        agents_dir = tmp_path / "agents"
-        agents_dir.mkdir()
-        (agents_dir / "test-agent.md").write_text(
-            "---\nname: test-agent\ndescription: d\n---\nbody\n",
-            encoding="utf-8",
-        )
-        registry = AgentRegistry()
-        registry.load_directory(agents_dir)
-        agent = registry.get("test-agent")
-        assert agent.tools == []
+        assert agent.tools == expected_tools

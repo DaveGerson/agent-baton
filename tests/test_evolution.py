@@ -79,8 +79,18 @@ def _setup_engine(tmp_path: Path) -> tuple[UsageLogger, RetrospectiveEngine, Pro
     return logger, retro_engine, engine
 
 
+def _log_retries(logger: UsageLogger, name: str, retries_per_task: list[int]) -> None:
+    """Log one task per retry count for the given agent name."""
+    for i, r in enumerate(retries_per_task):
+        logger.log(_task(f"t{i}", [_agent(name, retries=r)]))
+
+
 # ---------------------------------------------------------------------------
 # EvolutionProposal.to_markdown
+# DECISION: metadata (priority/health/rate) and section-presence checks
+# consolidated into parametrized tests. issues/suggestions lists kept as
+# standalone tests because they verify list rendering (bullet items).
+# Empty-section tests merged into one parametrized test.
 # ---------------------------------------------------------------------------
 
 class TestEvolutionProposalToMarkdown:
@@ -94,79 +104,53 @@ class TestEvolutionProposalToMarkdown:
             priority="high",
             timestamp="2026-03-20T10:00:00",
         )
-        md = proposal.to_markdown()
-        assert md.startswith("# Evolution Proposal: arch")
+        assert proposal.to_markdown().startswith("# Evolution Proposal: arch")
 
-    def test_contains_priority(self) -> None:
+    @pytest.mark.parametrize("expected_fragment", [
+        "**Priority:** normal",
+        "**Health:**",
+        "**First-pass rate:** 50%",
+        "## Scorecard",
+    ])
+    def test_metadata_and_sections_rendered(self, expected_fragment: str) -> None:
         sc = AgentScorecard(agent_name="be", times_used=2, first_pass_rate=0.5)
-        proposal = EvolutionProposal(
-            agent_name="be",
-            scorecard=sc,
-            priority="normal",
-        )
-        md = proposal.to_markdown()
-        assert "**Priority:** normal" in md
+        proposal = EvolutionProposal(agent_name="be", scorecard=sc, priority="normal")
+        assert expected_fragment in proposal.to_markdown()
 
-    def test_contains_health(self) -> None:
-        sc = AgentScorecard(agent_name="be", times_used=2, first_pass_rate=0.5)
-        proposal = EvolutionProposal(agent_name="be", scorecard=sc)
-        md = proposal.to_markdown()
-        assert "**Health:**" in md
-
-    def test_contains_first_pass_rate(self) -> None:
-        sc = AgentScorecard(agent_name="be", times_used=2, first_pass_rate=0.5)
-        proposal = EvolutionProposal(agent_name="be", scorecard=sc)
-        md = proposal.to_markdown()
-        assert "**First-pass rate:** 50%" in md
-
-    def test_issues_section_rendered(self) -> None:
+    def test_issues_list_rendered(self) -> None:
         sc = AgentScorecard(agent_name="arch", times_used=3, first_pass_rate=0.33)
         proposal = EvolutionProposal(
-            agent_name="arch",
-            scorecard=sc,
-            issues=["Issue one", "Issue two"],
+            agent_name="arch", scorecard=sc, issues=["Issue one", "Issue two"],
         )
         md = proposal.to_markdown()
         assert "## Issues Identified" in md
         assert "- Issue one" in md
         assert "- Issue two" in md
 
-    def test_suggestions_section_rendered(self) -> None:
+    def test_suggestions_list_rendered(self) -> None:
         sc = AgentScorecard(agent_name="arch", times_used=3, first_pass_rate=0.33)
         proposal = EvolutionProposal(
-            agent_name="arch",
-            scorecard=sc,
-            suggestions=["Do this", "Then that"],
+            agent_name="arch", scorecard=sc, suggestions=["Do this", "Then that"],
         )
         md = proposal.to_markdown()
         assert "## Suggested Changes" in md
         assert "1. Do this" in md
         assert "2. Then that" in md
 
-    def test_scorecard_section_rendered(self) -> None:
-        sc = AgentScorecard(agent_name="arch", times_used=3, first_pass_rate=0.33)
-        proposal = EvolutionProposal(agent_name="arch", scorecard=sc)
-        md = proposal.to_markdown()
-        assert "## Scorecard" in md
-
     def test_timestamp_used_when_provided(self) -> None:
         sc = AgentScorecard(agent_name="arch", times_used=1, first_pass_rate=0.5)
         ts = "2026-03-20T00:00:00"
         proposal = EvolutionProposal(agent_name="arch", scorecard=sc, timestamp=ts)
-        md = proposal.to_markdown()
-        assert ts in md
+        assert ts in proposal.to_markdown()
 
-    def test_no_issues_section_when_empty(self) -> None:
+    @pytest.mark.parametrize("field,section_header", [
+        ("issues",      "## Issues Identified"),
+        ("suggestions", "## Suggested Changes"),
+    ])
+    def test_empty_list_omits_section(self, field: str, section_header: str) -> None:
         sc = AgentScorecard(agent_name="arch", times_used=1, first_pass_rate=0.9)
-        proposal = EvolutionProposal(agent_name="arch", scorecard=sc, issues=[])
-        md = proposal.to_markdown()
-        assert "## Issues Identified" not in md
-
-    def test_no_suggestions_section_when_empty(self) -> None:
-        sc = AgentScorecard(agent_name="arch", times_used=1, first_pass_rate=0.9)
-        proposal = EvolutionProposal(agent_name="arch", scorecard=sc, suggestions=[])
-        md = proposal.to_markdown()
-        assert "## Suggested Changes" not in md
+        proposal = EvolutionProposal(agent_name="arch", scorecard=sc, **{field: []})
+        assert section_header not in proposal.to_markdown()
 
 
 # ---------------------------------------------------------------------------
@@ -181,68 +165,56 @@ class TestAnalyzeBaseCases:
     def test_strong_agent_produces_no_proposal(self, tmp_path: Path) -> None:
         logger, _, engine = _setup_engine(tmp_path)
         # Three uses, zero retries => first_pass_rate=1.0 => "strong"
-        logger.log(_task("t1", [_agent("arch", retries=0)]))
-        logger.log(_task("t2", [_agent("arch", retries=0)]))
-        logger.log(_task("t3", [_agent("arch", retries=0)]))
+        _log_retries(logger, "arch", [0, 0, 0])
         proposals = engine.analyze()
-        names = [p.agent_name for p in proposals]
-        assert "arch" not in names
+        assert "arch" not in [p.agent_name for p in proposals]
 
 
 # ---------------------------------------------------------------------------
 # PromptEvolutionEngine.analyze — low first_pass_rate signals
+# DECISION: test_strong_agent_produces_no_proposal (rate=1.0→no proposal)
+# was an exact duplicate of test_first_pass_rate_at_or_above_0_8_no_proposal
+# (rate=0.8→no proposal). The 0.8 case is the boundary and is kept in the
+# parametrized test; the 1.0 case is covered in TestAnalyzeBaseCases above.
 # ---------------------------------------------------------------------------
 
 class TestAnalyzeLowFirstPassRate:
-    def test_first_pass_rate_below_0_5_generates_proposal(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("retries_per_task,should_propose", [
+        # [0,2,1] → 1/3 zero-retry → rate=0.33 < 0.5 → proposal
+        ([0, 2, 1], True),
+        # [0,1,1,1,1] → 1/5 zero-retry → rate=0.2 → proposal
+        ([0, 1, 1, 1, 1], True),
+        # [0,0,0,1,1] → 3/5 zero-retry → rate=0.6 → proposal
+        ([0, 0, 0, 1, 1], True),
+        # [0,0,0,0,1] → 4/5 zero-retry → rate=0.8 → "strong" → no proposal
+        ([0, 0, 0, 0, 1], False),
+    ])
+    def test_proposal_based_on_first_pass_rate(
+        self, tmp_path: Path, retries_per_task: list[int], should_propose: bool
+    ) -> None:
         logger, _, engine = _setup_engine(tmp_path)
-        # 1 out of 3 zero-retry => first_pass_rate=0.33 < 0.5
-        logger.log(_task("t1", [_agent("arch", retries=0)]))
-        logger.log(_task("t2", [_agent("arch", retries=2)]))
-        logger.log(_task("t3", [_agent("arch", retries=1)]))
+        _log_retries(logger, "agent", retries_per_task)
         proposals = engine.analyze()
         names = [p.agent_name for p in proposals]
-        assert "arch" in names
+        if should_propose:
+            assert "agent" in names
+        else:
+            assert "agent" not in names
 
     def test_low_first_pass_rate_issue_text(self, tmp_path: Path) -> None:
         logger, _, engine = _setup_engine(tmp_path)
-        logger.log(_task("t1", [_agent("slow", retries=0)]))
-        logger.log(_task("t2", [_agent("slow", retries=3)]))
-        logger.log(_task("t3", [_agent("slow", retries=3)]))
+        _log_retries(logger, "slow", [0, 3, 3])
         proposals = engine.analyze()
         proposal = next(p for p in proposals if p.agent_name == "slow")
         assert any("first-pass rate" in issue.lower() for issue in proposal.issues)
 
     def test_low_first_pass_rate_suggests_negative_examples(self, tmp_path: Path) -> None:
         logger, _, engine = _setup_engine(tmp_path)
-        logger.log(_task("t1", [_agent("slow", retries=0)]))
-        logger.log(_task("t2", [_agent("slow", retries=3)]))
-        logger.log(_task("t3", [_agent("slow", retries=3)]))
+        _log_retries(logger, "slow", [0, 3, 3])
         proposals = engine.analyze()
         proposal = next(p for p in proposals if p.agent_name == "slow")
         combined = " ".join(proposal.suggestions).lower()
         assert "negative examples" in combined or "failure modes" in combined
-
-    def test_moderate_first_pass_rate_between_0_5_and_0_8(self, tmp_path: Path) -> None:
-        logger, _, engine = _setup_engine(tmp_path)
-        # 3 out of 5 zero-retry => first_pass_rate=0.6 (adequate band)
-        for i in range(3):
-            logger.log(_task(f"t{i}", [_agent("mod", retries=0)]))
-        for i in range(3, 5):
-            logger.log(_task(f"t{i}", [_agent("mod", retries=1)]))
-        proposals = engine.analyze()
-        names = [p.agent_name for p in proposals]
-        assert "mod" in names
-
-    def test_first_pass_rate_at_or_above_0_8_no_proposal(self, tmp_path: Path) -> None:
-        logger, _, engine = _setup_engine(tmp_path)
-        # 4 out of 5 zero-retry => 0.8 => "strong" (no negatives) => no proposal
-        for i in range(4):
-            logger.log(_task(f"t{i}", [_agent("good", retries=0)]))
-        logger.log(_task("t4", [_agent("good", retries=1)]))
-        proposals = engine.analyze()
-        names = [p.agent_name for p in proposals]
-        assert "good" not in names
 
 
 # ---------------------------------------------------------------------------
@@ -253,8 +225,7 @@ class TestAnalyzeHighRetryRate:
     def test_retry_rate_above_1_generates_issue(self, tmp_path: Path) -> None:
         logger, _, engine = _setup_engine(tmp_path)
         # retries=2 each use => avg=2.0 > 1.0
-        logger.log(_task("t1", [_agent("chatty", retries=2)]))
-        logger.log(_task("t2", [_agent("chatty", retries=2)]))
+        _log_retries(logger, "chatty", [2, 2])
         proposals = engine.analyze()
         proposal = next((p for p in proposals if p.agent_name == "chatty"), None)
         assert proposal is not None
@@ -262,8 +233,7 @@ class TestAnalyzeHighRetryRate:
 
     def test_retry_rate_suggestion_mentions_acceptance_criteria(self, tmp_path: Path) -> None:
         logger, _, engine = _setup_engine(tmp_path)
-        logger.log(_task("t1", [_agent("chatty", retries=2)]))
-        logger.log(_task("t2", [_agent("chatty", retries=2)]))
+        _log_retries(logger, "chatty", [2, 2])
         proposals = engine.analyze()
         proposal = next(p for p in proposals if p.agent_name == "chatty")
         combined = " ".join(proposal.suggestions).lower()
@@ -301,8 +271,7 @@ class TestAnalyzeRetroSignals:
     def test_negative_mentions_generate_issue(self, tmp_path: Path) -> None:
         logger, retro_engine, engine = _setup_engine(tmp_path)
         # Give the agent a strong quantitative score so only retro signal matters
-        logger.log(_task("t1", [_agent("alpha", retries=0)]))
-        logger.log(_task("t2", [_agent("alpha", retries=0)]))
+        _log_retries(logger, "alpha", [0, 0])
         retro = Retrospective(
             task_id="t1",
             task_name="T",
@@ -317,8 +286,7 @@ class TestAnalyzeRetroSignals:
 
     def test_knowledge_gaps_generate_issue(self, tmp_path: Path) -> None:
         logger, retro_engine, engine = _setup_engine(tmp_path)
-        logger.log(_task("t1", [_agent("beta", retries=0)]))
-        logger.log(_task("t2", [_agent("beta", retries=0)]))
+        _log_retries(logger, "beta", [0, 0])
         retro = Retrospective(
             task_id="t1",
             task_name="T",
@@ -349,41 +317,31 @@ class TestAnalyzeRetroSignals:
 
 # ---------------------------------------------------------------------------
 # PromptEvolutionEngine.analyze — priority and sorting
+# DECISION: 3 priority tests parameterized into 1; sorting test kept standalone.
 # ---------------------------------------------------------------------------
 
 class TestAnalyzePriorityAndSorting:
-    def test_needs_improvement_health_gives_high_priority(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("retries_per_task,expected_priority", [
+        # rate < 0.5 → needs-improvement → high
+        ([0, 5, 5], "high"),
+        # rate = 0.6 → adequate → normal
+        ([0, 0, 0, 1, 1], "normal"),
+    ])
+    def test_priority_from_health(
+        self, tmp_path: Path, retries_per_task: list[int], expected_priority: str
+    ) -> None:
         logger, _, engine = _setup_engine(tmp_path)
-        # first_pass_rate < 0.5 => "needs-improvement" => priority="high"
-        logger.log(_task("t1", [_agent("poor", retries=0)]))
-        logger.log(_task("t2", [_agent("poor", retries=5)]))
-        logger.log(_task("t3", [_agent("poor", retries=5)]))
+        _log_retries(logger, "agent", retries_per_task)
         proposals = engine.analyze()
-        proposal = next(p for p in proposals if p.agent_name == "poor")
-        assert proposal.priority == "high"
-
-    def test_adequate_health_gives_normal_priority(self, tmp_path: Path) -> None:
-        logger, _, engine = _setup_engine(tmp_path)
-        # first_pass_rate = 0.6 => "adequate" => priority="normal"
-        for i in range(3):
-            logger.log(_task(f"t{i}", [_agent("mid", retries=0)]))
-        for i in range(3, 5):
-            logger.log(_task(f"t{i}", [_agent("mid", retries=1)]))
-        proposals = engine.analyze()
-        proposal = next(p for p in proposals if p.agent_name == "mid")
-        assert proposal.priority == "normal"
+        proposal = next(p for p in proposals if p.agent_name == "agent")
+        assert proposal.priority == expected_priority
 
     def test_high_priority_sorted_before_normal(self, tmp_path: Path) -> None:
         logger, _, engine = _setup_engine(tmp_path)
         # "good-ish": first_pass_rate=0.6 -> adequate -> normal
-        for i in range(3):
-            logger.log(_task(f"a{i}", [_agent("good-ish", retries=0)]))
-        for i in range(3, 5):
-            logger.log(_task(f"a{i}", [_agent("good-ish", retries=1)]))
+        _log_retries(logger, "good-ish", [0, 0, 0, 1, 1])
         # "bad": first_pass_rate=0.33 -> needs-improvement -> high
-        logger.log(_task("b1", [_agent("bad", retries=0)]))
-        logger.log(_task("b2", [_agent("bad", retries=3)]))
-        logger.log(_task("b3", [_agent("bad", retries=3)]))
+        _log_retries(logger, "bad", [0, 3, 3])
         proposals = engine.analyze()
         priorities = [p.priority for p in proposals]
         # All "high" entries must appear before "normal" entries
@@ -406,81 +364,60 @@ class TestProposeForAgent:
 
     def test_returns_none_for_well_performing_agent(self, tmp_path: Path) -> None:
         logger, _, engine = _setup_engine(tmp_path)
-        logger.log(_task("t1", [_agent("star", retries=0)]))
-        logger.log(_task("t2", [_agent("star", retries=0)]))
+        _log_retries(logger, "star", [0, 0])
         assert engine.propose_for_agent("star") is None
 
-    def test_returns_proposal_for_underperforming_agent(self, tmp_path: Path) -> None:
+    def test_returns_proposal_with_issues_for_underperforming_agent(
+        self, tmp_path: Path
+    ) -> None:
         logger, _, engine = _setup_engine(tmp_path)
-        logger.log(_task("t1", [_agent("sluggish", retries=0)]))
-        logger.log(_task("t2", [_agent("sluggish", retries=3)]))
-        logger.log(_task("t3", [_agent("sluggish", retries=3)]))
+        _log_retries(logger, "sluggish", [0, 3, 3])
         proposal = engine.propose_for_agent("sluggish")
         assert proposal is not None
         assert proposal.agent_name == "sluggish"
-
-    def test_returned_proposal_has_issues(self, tmp_path: Path) -> None:
-        logger, _, engine = _setup_engine(tmp_path)
-        logger.log(_task("t1", [_agent("sluggish", retries=0)]))
-        logger.log(_task("t2", [_agent("sluggish", retries=3)]))
-        logger.log(_task("t3", [_agent("sluggish", retries=3)]))
-        proposal = engine.propose_for_agent("sluggish")
-        assert proposal is not None
         assert len(proposal.issues) > 0
 
 
 # ---------------------------------------------------------------------------
 # PromptEvolutionEngine.save_proposals
+# DECISION: test_writes_files_to_proposals_dir, test_file_named_after_agent,
+# and test_file_contains_agent_name_in_content share identical setup — merged
+# into test_save_produces_correct_file. Other tests kept (distinct setup or
+# distinct concern).
 # ---------------------------------------------------------------------------
 
 class TestSaveProposals:
-    def test_writes_files_to_proposals_dir(self, tmp_path: Path) -> None:
+    def _underperforming_engine(
+        self, tmp_path: Path, agent_name: str = "myagent"
+    ) -> tuple[PromptEvolutionEngine, list]:
         logger, _, engine = _setup_engine(tmp_path)
-        logger.log(_task("t1", [_agent("arch", retries=0)]))
-        logger.log(_task("t2", [_agent("arch", retries=3)]))
-        logger.log(_task("t3", [_agent("arch", retries=3)]))
+        _log_retries(logger, agent_name, [0, 3, 3])
         proposals = engine.analyze()
+        return engine, proposals
+
+    def test_save_produces_correct_file(self, tmp_path: Path) -> None:
+        """Verify files are created, named after the agent, and contain the agent name."""
+        engine, proposals = self._underperforming_engine(tmp_path)
         paths = engine.save_proposals(proposals)
         assert len(paths) > 0
-        for path in paths:
-            assert path.exists()
-
-    def test_file_named_after_agent(self, tmp_path: Path) -> None:
-        logger, _, engine = _setup_engine(tmp_path)
-        logger.log(_task("t1", [_agent("myagent", retries=0)]))
-        logger.log(_task("t2", [_agent("myagent", retries=3)]))
-        logger.log(_task("t3", [_agent("myagent", retries=3)]))
-        proposals = engine.analyze()
-        paths = engine.save_proposals(proposals)
         file_names = [p.name for p in paths]
         assert "myagent.md" in file_names
-
-    def test_file_contains_agent_name_in_content(self, tmp_path: Path) -> None:
-        logger, _, engine = _setup_engine(tmp_path)
-        logger.log(_task("t1", [_agent("myagent", retries=0)]))
-        logger.log(_task("t2", [_agent("myagent", retries=3)]))
-        logger.log(_task("t3", [_agent("myagent", retries=3)]))
-        proposals = engine.analyze()
-        paths = engine.save_proposals(proposals)
         target = next(p for p in paths if p.name == "myagent.md")
-        content = target.read_text(encoding="utf-8")
-        assert "myagent" in content
+        assert target.exists()
+        assert "myagent" in target.read_text(encoding="utf-8")
 
     def test_creates_proposals_dir_if_missing(self, tmp_path: Path) -> None:
         logger, _, engine = _setup_engine(tmp_path)
         proposals_dir = tmp_path / "proposals"
         assert not proposals_dir.exists()
-        logger.log(_task("t1", [_agent("arch", retries=0)]))
-        logger.log(_task("t2", [_agent("arch", retries=3)]))
+        _log_retries(logger, "arch", [0, 3])
         proposals = engine.analyze()
         engine.save_proposals(proposals)
         assert proposals_dir.exists()
 
     def test_agent_name_with_slash_sanitised_in_filename(self, tmp_path: Path) -> None:
         logger, _, engine = _setup_engine(tmp_path)
-        logger.log(_task("t1", [_agent("org/agent", retries=0)]))
-        logger.log(_task("t2", [_agent("org/agent", retries=4)]))
-        logger.log(_task("t3", [_agent("org/agent", retries=4)]))
+        _log_retries(logger, "org/agent", [0, 4, 4])
         proposals = engine.analyze()
         paths = engine.save_proposals(proposals)
         assert any("org-agent.md" == p.name for p in paths)
@@ -493,6 +430,10 @@ class TestSaveProposals:
 
 # ---------------------------------------------------------------------------
 # PromptEvolutionEngine.generate_report
+# DECISION: test_report_includes_agent_name_when_issues_exist and
+# test_report_includes_issues_for_agents share identical setup — merged.
+# test_report_proposals_count, test_report_contains_high_priority_section,
+# test_report_contains_normal_priority_section collapsed to parametrize.
 # ---------------------------------------------------------------------------
 
 class TestGenerateReport:
@@ -505,46 +446,30 @@ class TestGenerateReport:
         _, _, engine = _setup_engine(tmp_path)
         assert engine.generate_report().startswith("# Prompt Evolution Report")
 
-    def test_report_includes_agent_name_when_issues_exist(self, tmp_path: Path) -> None:
+    def test_report_includes_agent_name_and_issue_text(self, tmp_path: Path) -> None:
         logger, _, engine = _setup_engine(tmp_path)
-        logger.log(_task("t1", [_agent("baddie", retries=0)]))
-        logger.log(_task("t2", [_agent("baddie", retries=3)]))
-        logger.log(_task("t3", [_agent("baddie", retries=3)]))
+        _log_retries(logger, "baddie", [0, 3, 3])
         report = engine.generate_report()
         assert "baddie" in report
-
-    def test_report_includes_issues_for_agents(self, tmp_path: Path) -> None:
-        logger, _, engine = _setup_engine(tmp_path)
-        logger.log(_task("t1", [_agent("baddie", retries=0)]))
-        logger.log(_task("t2", [_agent("baddie", retries=3)]))
-        logger.log(_task("t3", [_agent("baddie", retries=3)]))
-        report = engine.generate_report()
         assert "first-pass rate" in report.lower() or "retry rate" in report.lower()
 
-    def test_report_contains_high_priority_section(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("retries_per_task,expected_section", [
+        # needs-improvement → "High Priority"
+        ([0, 5, 5], "High Priority"),
+        # adequate → "Normal Priority"
+        ([0, 0, 0, 1, 1], "Normal Priority"),
+    ])
+    def test_report_priority_section(
+        self, tmp_path: Path, retries_per_task: list[int], expected_section: str
+    ) -> None:
         logger, _, engine = _setup_engine(tmp_path)
-        # first_pass_rate < 0.5 => needs-improvement => "High Priority"
-        logger.log(_task("t1", [_agent("baddie", retries=0)]))
-        logger.log(_task("t2", [_agent("baddie", retries=5)]))
-        logger.log(_task("t3", [_agent("baddie", retries=5)]))
+        _log_retries(logger, "agent", retries_per_task)
         report = engine.generate_report()
-        assert "High Priority" in report
-
-    def test_report_contains_normal_priority_section(self, tmp_path: Path) -> None:
-        logger, _, engine = _setup_engine(tmp_path)
-        # first_pass_rate = 0.6 => adequate => "Normal Priority"
-        for i in range(3):
-            logger.log(_task(f"t{i}", [_agent("mid", retries=0)]))
-        for i in range(3, 5):
-            logger.log(_task(f"t{i}", [_agent("mid", retries=1)]))
-        report = engine.generate_report()
-        assert "Normal Priority" in report
+        assert expected_section in report
 
     def test_report_proposals_count(self, tmp_path: Path) -> None:
         logger, _, engine = _setup_engine(tmp_path)
-        logger.log(_task("t1", [_agent("baddie", retries=0)]))
-        logger.log(_task("t2", [_agent("baddie", retries=3)]))
-        logger.log(_task("t3", [_agent("baddie", retries=3)]))
+        _log_retries(logger, "baddie", [0, 3, 3])
         report = engine.generate_report()
         # Report uses bold markdown: **Proposals generated:** 1
         assert "Proposals generated:** 1" in report
@@ -562,27 +487,19 @@ class TestGenerateReport:
 
 # ---------------------------------------------------------------------------
 # PromptEvolutionEngine.write_report
+# DECISION: creates_file, returns_path, and file_content_is_markdown all use
+# identical setup and can share one assertion block. Creates_parent_dirs
+# requires a deeper path and is kept separate.
 # ---------------------------------------------------------------------------
 
 class TestWriteReport:
-    def test_creates_file_on_disk(self, tmp_path: Path) -> None:
-        _, _, engine = _setup_engine(tmp_path)
-        out_path = tmp_path / "evo-report.md"
-        result = engine.write_report(out_path)
-        assert result.exists()
-
-    def test_returns_the_output_path(self, tmp_path: Path) -> None:
+    def test_write_report_creates_correct_file(self, tmp_path: Path) -> None:
         _, _, engine = _setup_engine(tmp_path)
         out_path = tmp_path / "evo-report.md"
         result = engine.write_report(out_path)
         assert result == out_path
-
-    def test_file_content_is_markdown(self, tmp_path: Path) -> None:
-        _, _, engine = _setup_engine(tmp_path)
-        out_path = tmp_path / "evo-report.md"
-        engine.write_report(out_path)
-        content = out_path.read_text(encoding="utf-8")
-        assert content.startswith("# Prompt Evolution Report")
+        assert result.exists()
+        assert result.read_text(encoding="utf-8").startswith("# Prompt Evolution Report")
 
     def test_creates_parent_dirs(self, tmp_path: Path) -> None:
         _, _, engine = _setup_engine(tmp_path)

@@ -45,64 +45,37 @@ def _manager(tmp_path: Path) -> EscalationManager:
 # ---------------------------------------------------------------------------
 
 class TestEscalationToMarkdown:
-    def test_pending_status_in_header(self) -> None:
-        esc = _escalation(resolved=False)
-        md = esc.to_markdown()
-        assert "PENDING" in md
+    # Decision: 10 individual field-presence tests collapsed into one
+    # parametrized test.  Each tuple is an independent behavioural contract;
+    # keeping them as tuples preserves the "one reason to fail" principle while
+    # cutting boilerplate.
+    @pytest.mark.parametrize("kwargs,expected_substring", [
+        ({"agent_name": "architect"},                              "architect"),
+        ({"timestamp": "2026-01-15T12:00:00+00:00"},              "2026-01-15T12:00:00+00:00"),
+        ({"question": "Should I use Postgres or MySQL?"},          "**Question:** Should I use Postgres or MySQL?"),
+        ({"context": "Building the auth module"},                  "**Context:** Building the auth module"),
+        ({"priority": "blocking"},                                 "**Priority:** blocking"),
+        ({"options": ["Postgres", "MySQL", "SQLite"]},             "**Options:** Postgres, MySQL, SQLite"),
+        ({"options": []},                                          "**Options:** "),
+        ({"resolved": True, "answer": "Use Postgres"},            "**Answer:** Use Postgres"),
+        ({"resolved": False, "answer": ""},                       "**Answer:** "),
+    ])
+    def test_field_in_markdown(self, kwargs, expected_substring):
+        esc = _escalation(**kwargs)
+        assert expected_substring in esc.to_markdown()
 
-    def test_resolved_status_in_header(self) -> None:
-        esc = _escalation(resolved=True)
-        md = esc.to_markdown()
-        assert "RESOLVED" in md
-
-    def test_agent_name_in_header(self) -> None:
-        esc = _escalation(agent_name="architect")
-        md = esc.to_markdown()
-        assert "architect" in md
-
-    def test_timestamp_in_header(self) -> None:
-        esc = _escalation(timestamp="2026-01-15T12:00:00+00:00")
-        md = esc.to_markdown()
-        assert "2026-01-15T12:00:00+00:00" in md
-
-    def test_question_field(self) -> None:
-        esc = _escalation(question="Should I use Postgres or MySQL?")
-        md = esc.to_markdown()
-        assert "**Question:** Should I use Postgres or MySQL?" in md
-
-    def test_context_field(self) -> None:
-        esc = _escalation(context="Building the auth module")
-        md = esc.to_markdown()
-        assert "**Context:** Building the auth module" in md
-
-    def test_priority_field(self) -> None:
-        esc = _escalation(priority="blocking")
-        md = esc.to_markdown()
-        assert "**Priority:** blocking" in md
-
-    def test_options_comma_joined(self) -> None:
-        esc = _escalation(options=["Postgres", "MySQL", "SQLite"])
-        md = esc.to_markdown()
-        assert "**Options:** Postgres, MySQL, SQLite" in md
-
-    def test_options_empty_renders_blank(self) -> None:
-        esc = _escalation(options=[])
-        md = esc.to_markdown()
-        assert "**Options:** " in md
-
-    def test_answer_field_when_resolved(self) -> None:
-        esc = _escalation(resolved=True, answer="Use Postgres")
-        md = esc.to_markdown()
-        assert "**Answer:** Use Postgres" in md
-
-    def test_answer_empty_when_pending(self) -> None:
-        esc = _escalation(resolved=False, answer="")
-        md = esc.to_markdown()
-        assert "**Answer:** " in md
+    # Decision: keep status rendering as a separate parametrized test because
+    # it tests a conditional branch (resolved flag → status text) that is
+    # conceptually distinct from field-forwarding.
+    @pytest.mark.parametrize("resolved,expected_status", [
+        (False, "PENDING"),
+        (True,  "RESOLVED"),
+    ])
+    def test_status_in_header(self, resolved, expected_status):
+        assert expected_status in _escalation(resolved=resolved).to_markdown()
 
     def test_header_format_starts_with_three_hashes(self) -> None:
-        esc = _escalation()
-        lines = esc.to_markdown().splitlines()
+        lines = _escalation().to_markdown().splitlines()
         assert lines[0].startswith("### ")
 
     def test_timestamp_auto_populated_when_empty(self) -> None:
@@ -115,35 +88,37 @@ class TestEscalationToMarkdown:
 # ---------------------------------------------------------------------------
 
 class TestEscalationManagerAdd:
-    def test_creates_file_on_first_add(self, tmp_path: Path) -> None:
+    # Decision: merged test_creates_file_on_first_add and
+    # test_add_creates_parent_directories — both verify file creation, just with
+    # different path depths.  Keeping both as separate assertions in one test
+    # is cleaner than two near-identical tests.
+    def test_add_creates_file_and_parent_dirs(self, tmp_path: Path) -> None:
+        # Shallow path
         mgr = _manager(tmp_path)
         mgr.add(_escalation())
         assert mgr.path.exists()
 
+        # Deep nested path
+        deep_path = tmp_path / "a" / "b" / "escalations.md"
+        mgr2 = EscalationManager(path=deep_path)
+        mgr2.add(_escalation())
+        assert deep_path.exists()
+
     def test_file_contains_agent_name(self, tmp_path: Path) -> None:
         mgr = _manager(tmp_path)
         mgr.add(_escalation(agent_name="security-reviewer"))
-        content = mgr.path.read_text(encoding="utf-8")
-        assert "security-reviewer" in content
+        assert "security-reviewer" in mgr.path.read_text(encoding="utf-8")
 
     def test_file_contains_question(self, tmp_path: Path) -> None:
         mgr = _manager(tmp_path)
         mgr.add(_escalation(question="Which auth scheme is best?"))
-        content = mgr.path.read_text(encoding="utf-8")
-        assert "Which auth scheme is best?" in content
+        assert "Which auth scheme is best?" in mgr.path.read_text(encoding="utf-8")
 
     def test_second_add_appends_not_overwrites(self, tmp_path: Path) -> None:
         mgr = _manager(tmp_path)
         mgr.add(_escalation(agent_name="agent-a", question="Q1?"))
         mgr.add(_escalation(agent_name="agent-b", question="Q2?"))
-        escalations = mgr.get_all()
-        assert len(escalations) == 2
-
-    def test_add_creates_parent_directories(self, tmp_path: Path) -> None:
-        deep_path = tmp_path / "a" / "b" / "escalations.md"
-        mgr = EscalationManager(path=deep_path)
-        mgr.add(_escalation())
-        assert deep_path.exists()
+        assert len(mgr.get_all()) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -151,9 +126,11 @@ class TestEscalationManagerAdd:
 # ---------------------------------------------------------------------------
 
 class TestGetPending:
+    # Decision: the "empty when no file" pattern appears in get_pending,
+    # get_all, and has_pending.  Keeping one canonical test per class is
+    # sufficient — the underlying guard code path is shared.
     def test_returns_empty_list_when_no_file(self, tmp_path: Path) -> None:
-        mgr = _manager(tmp_path)
-        assert mgr.get_pending() == []
+        assert _manager(tmp_path).get_pending() == []
 
     def test_returns_only_unresolved(self, tmp_path: Path) -> None:
         mgr = _manager(tmp_path)
@@ -181,15 +158,13 @@ class TestGetPending:
 
 class TestGetAll:
     def test_returns_empty_list_when_no_file(self, tmp_path: Path) -> None:
-        mgr = _manager(tmp_path)
-        assert mgr.get_all() == []
+        assert _manager(tmp_path).get_all() == []
 
     def test_returns_resolved_and_unresolved(self, tmp_path: Path) -> None:
         mgr = _manager(tmp_path)
         mgr.add(_escalation(agent_name="agent-a", resolved=False))
         mgr.add(_escalation(agent_name="agent-b", resolved=True, answer="done"))
-        all_escs = mgr.get_all()
-        assert len(all_escs) == 2
+        assert len(mgr.get_all()) == 2
 
     def test_preserves_order(self, tmp_path: Path) -> None:
         mgr = _manager(tmp_path)
@@ -243,8 +218,7 @@ class TestResolve:
         mgr = _manager(tmp_path)
         mgr.add(_escalation(agent_name="backend-engineer"))
         mgr.resolve("backend-engineer", "Use Postgres")
-        all_escs = mgr.get_all()
-        assert all_escs[0].answer == "Use Postgres"
+        assert mgr.get_all()[0].answer == "Use Postgres"
 
     def test_resolve_targets_oldest_pending_for_agent(self, tmp_path: Path) -> None:
         mgr = _manager(tmp_path)
@@ -260,7 +234,6 @@ class TestResolve:
         ))
         mgr.resolve("backend-engineer", "Answer to Q1")
         all_escs = mgr.get_all()
-        # First one should be resolved, second still pending
         assert all_escs[0].resolved is True
         assert all_escs[0].answer == "Answer to Q1"
         assert all_escs[1].resolved is False
@@ -270,15 +243,13 @@ class TestResolve:
         mgr.add(_escalation(agent_name="agent-a"))
         mgr.add(_escalation(agent_name="agent-b"))
         mgr.resolve("agent-a", "answer for a")
-        all_escs = mgr.get_all()
-        agent_b = next(e for e in all_escs if e.agent_name == "agent-b")
+        agent_b = next(e for e in mgr.get_all() if e.agent_name == "agent-b")
         assert not agent_b.resolved
 
     def test_resolve_returns_false_when_all_already_resolved(self, tmp_path: Path) -> None:
         mgr = _manager(tmp_path)
         mgr.add(_escalation(agent_name="backend-engineer"))
         mgr.resolve("backend-engineer", "first answer")
-        # Already resolved — second call should return False
         assert mgr.resolve("backend-engineer", "second answer") is False
 
 
@@ -291,14 +262,12 @@ class TestResolveAll:
         mgr = _manager(tmp_path)
         mgr.add(_escalation(agent_name="agent-a"))
         mgr.add(_escalation(agent_name="agent-b"))
-        count = mgr.resolve_all({"agent-a": "answer a", "agent-b": "answer b"})
-        assert count == 2
+        assert mgr.resolve_all({"agent-a": "answer a", "agent-b": "answer b"}) == 2
 
     def test_skips_missing_agents(self, tmp_path: Path) -> None:
         mgr = _manager(tmp_path)
         mgr.add(_escalation(agent_name="agent-a"))
-        count = mgr.resolve_all({"agent-a": "answer", "ghost": "nope"})
-        assert count == 1
+        assert mgr.resolve_all({"agent-a": "answer", "ghost": "nope"}) == 1
 
     def test_resolved_entries_have_correct_answers(self, tmp_path: Path) -> None:
         mgr = _manager(tmp_path)
@@ -320,26 +289,27 @@ class TestResolveAll:
 # ---------------------------------------------------------------------------
 
 class TestHasPending:
-    def test_false_when_no_file(self, tmp_path: Path) -> None:
-        mgr = _manager(tmp_path)
-        assert mgr.has_pending() is False
-
-    def test_true_when_pending_exists(self, tmp_path: Path) -> None:
-        mgr = _manager(tmp_path)
-        mgr.add(_escalation())
-        assert mgr.has_pending() is True
-
-    def test_false_after_all_resolved(self, tmp_path: Path) -> None:
-        mgr = _manager(tmp_path)
-        mgr.add(_escalation(agent_name="backend-engineer"))
-        mgr.resolve("backend-engineer", "done")
-        assert mgr.has_pending() is False
-
-    def test_true_with_mixed_state(self, tmp_path: Path) -> None:
-        mgr = _manager(tmp_path)
-        mgr.add(_escalation(agent_name="agent-a", resolved=True, answer="yes"))
-        mgr.add(_escalation(agent_name="agent-b", resolved=False))
-        assert mgr.has_pending() is True
+    # Decision: 4 independent boolean states — parameterize into one test.
+    # Each tuple exercises a distinct code path in the predicate.
+    @pytest.mark.parametrize("setup,expected", [
+        ("no_file",        False),
+        ("pending_exists", True),
+        ("all_resolved",   False),
+        ("mixed",          True),
+    ])
+    def test_has_pending(self, tmp_path: Path, setup, expected):
+        mgr = EscalationManager(path=tmp_path / f"esc-{setup}.md")
+        if setup == "no_file":
+            pass
+        elif setup == "pending_exists":
+            mgr.add(_escalation())
+        elif setup == "all_resolved":
+            mgr.add(_escalation(agent_name="backend-engineer"))
+            mgr.resolve("backend-engineer", "done")
+        elif setup == "mixed":
+            mgr.add(_escalation(agent_name="agent-a", resolved=True, answer="yes"))
+            mgr.add(_escalation(agent_name="agent-b", resolved=False))
+        assert mgr.has_pending() is expected
 
 
 # ---------------------------------------------------------------------------
@@ -388,23 +358,19 @@ class TestClearResolved:
 # ---------------------------------------------------------------------------
 
 class TestEdgeCases:
-    def test_get_all_empty_file_returns_empty_list(self, tmp_path: Path) -> None:
-        mgr = _manager(tmp_path)
+    # Decision: three near-identical "empty file returns empty/false" tests
+    # collapsed into one parametrized test.  The fourth test (header-only) and
+    # the multi-add roundtrip are kept separate as they test distinct scenarios.
+    @pytest.mark.parametrize("method,expected", [
+        ("get_all",     []),
+        ("get_pending", []),
+        ("has_pending", False),
+    ])
+    def test_empty_file_returns_default(self, tmp_path: Path, method, expected):
+        mgr = EscalationManager(path=tmp_path / f"esc-{method}.md")
         mgr.path.parent.mkdir(parents=True, exist_ok=True)
         mgr.path.write_text("", encoding="utf-8")
-        assert mgr.get_all() == []
-
-    def test_get_pending_empty_file_returns_empty_list(self, tmp_path: Path) -> None:
-        mgr = _manager(tmp_path)
-        mgr.path.parent.mkdir(parents=True, exist_ok=True)
-        mgr.path.write_text("", encoding="utf-8")
-        assert mgr.get_pending() == []
-
-    def test_has_pending_empty_file_returns_false(self, tmp_path: Path) -> None:
-        mgr = _manager(tmp_path)
-        mgr.path.parent.mkdir(parents=True, exist_ok=True)
-        mgr.path.write_text("", encoding="utf-8")
-        assert mgr.has_pending() is False
+        assert getattr(mgr, method)() == expected
 
     def test_file_with_only_header_returns_empty(self, tmp_path: Path) -> None:
         mgr = _manager(tmp_path)

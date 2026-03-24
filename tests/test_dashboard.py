@@ -69,6 +69,10 @@ def _logger_with_data(tmp_path: Path) -> UsageLogger:
 
 # ---------------------------------------------------------------------------
 # DashboardGenerator.generate
+# DECISION: Collapsed section-presence tests (5 tests) and overview-table
+# content tests (4 tests) each into 1 parameterized test. Tests that need
+# distinct fixture setup (sequencing modes, zero gates, avg agents, missing
+# outcome, retries column) are kept as individual tests.
 # ---------------------------------------------------------------------------
 
 class TestDashboardGeneratorGenerate:
@@ -89,96 +93,62 @@ class TestDashboardGeneratorGenerate:
         result = gen.generate()
         assert "2 tasks tracked" in result
 
-    def test_overview_section_present(self, tmp_path: Path):
+    @pytest.mark.parametrize("section_heading", [
+        "## Overview",
+        "## Agent Utilization",
+        "## Model Mix",
+        "## Outcomes",
+        "## Risk Distribution",
+        "## Sequencing Modes",
+    ])
+    def test_section_present(self, section_heading: str, tmp_path: Path):
         logger = _logger_with_data(tmp_path)
         gen = DashboardGenerator(logger)
-        assert "## Overview" in gen.generate()
+        assert section_heading in gen.generate()
 
-    def test_overview_table_contains_total_tasks(self, tmp_path: Path):
+    @pytest.mark.parametrize("expected_substring", [
+        "| Total tasks |",
+        "| 2 |",                 # 2 tasks
+        "| Total agent uses |",
+        "| 4 |",                 # t1: 2 agents + t2: 2 agents = 4
+        "Estimated tokens",
+        "4,300",                 # 1000+2000+500+800
+        "Gate pass rate",
+        "75%",                   # 3 passed / 4 total = 75%
+    ])
+    def test_overview_table_content(self, expected_substring: str, tmp_path: Path):
         logger = _logger_with_data(tmp_path)
         gen = DashboardGenerator(logger)
         result = gen.generate()
-        assert "| Total tasks |" in result
-        assert "| 2 |" in result
+        assert expected_substring in result
 
-    def test_overview_table_contains_total_agent_uses(self, tmp_path: Path):
+    @pytest.mark.parametrize("agent_name", ["arch", "be", "fe"])
+    def test_agent_utilization_contains_agent_names(
+        self, agent_name: str, tmp_path: Path
+    ):
         logger = _logger_with_data(tmp_path)
         gen = DashboardGenerator(logger)
-        result = gen.generate()
-        assert "| Total agent uses |" in result
-        # t1: 2 agents, t2: 2 agents -> 4 total
-        assert "| 4 |" in result
+        assert agent_name in gen.generate()
 
-    def test_overview_table_contains_estimated_tokens(self, tmp_path: Path):
+    @pytest.mark.parametrize("model_name", ["sonnet", "opus", "haiku"])
+    def test_model_mix_contains_model_names(self, model_name: str, tmp_path: Path):
         logger = _logger_with_data(tmp_path)
         gen = DashboardGenerator(logger)
-        result = gen.generate()
-        assert "Estimated tokens" in result
-        # 1000 + 2000 + 500 + 800 = 4300
-        assert "4,300" in result
+        assert model_name in gen.generate()
 
-    def test_overview_table_contains_gate_pass_rate(self, tmp_path: Path):
+    @pytest.mark.parametrize("outcome_value", ["SHIP", "REVISE"])
+    def test_outcomes_contains_outcome_values(self, outcome_value: str, tmp_path: Path):
         logger = _logger_with_data(tmp_path)
         gen = DashboardGenerator(logger)
-        result = gen.generate()
-        assert "Gate pass rate" in result
-        # gates_passed=3, gates_failed=1 -> 3/4 = 75%
-        assert "75%" in result
+        assert outcome_value in gen.generate()
 
-    def test_agent_utilization_section_present(self, tmp_path: Path):
+    @pytest.mark.parametrize("risk_level", ["LOW", "HIGH"])
+    def test_risk_distribution_contains_risk_levels(
+        self, risk_level: str, tmp_path: Path
+    ):
         logger = _logger_with_data(tmp_path)
         gen = DashboardGenerator(logger)
-        assert "## Agent Utilization" in gen.generate()
-
-    def test_agent_utilization_contains_agent_names(self, tmp_path: Path):
-        logger = _logger_with_data(tmp_path)
-        gen = DashboardGenerator(logger)
-        result = gen.generate()
-        assert "arch" in result
-        assert "be" in result
-        assert "fe" in result
-
-    def test_model_mix_section_present(self, tmp_path: Path):
-        logger = _logger_with_data(tmp_path)
-        gen = DashboardGenerator(logger)
-        assert "## Model Mix" in gen.generate()
-
-    def test_model_mix_contains_model_names(self, tmp_path: Path):
-        logger = _logger_with_data(tmp_path)
-        gen = DashboardGenerator(logger)
-        result = gen.generate()
-        assert "sonnet" in result
-        assert "opus" in result
-        assert "haiku" in result
-
-    def test_outcomes_section_present(self, tmp_path: Path):
-        logger = _logger_with_data(tmp_path)
-        gen = DashboardGenerator(logger)
-        assert "## Outcomes" in gen.generate()
-
-    def test_outcomes_contains_outcome_values(self, tmp_path: Path):
-        logger = _logger_with_data(tmp_path)
-        gen = DashboardGenerator(logger)
-        result = gen.generate()
-        assert "SHIP" in result
-        assert "REVISE" in result
-
-    def test_risk_distribution_section_present(self, tmp_path: Path):
-        logger = _logger_with_data(tmp_path)
-        gen = DashboardGenerator(logger)
-        assert "## Risk Distribution" in gen.generate()
-
-    def test_risk_distribution_contains_risk_levels(self, tmp_path: Path):
-        logger = _logger_with_data(tmp_path)
-        gen = DashboardGenerator(logger)
-        result = gen.generate()
-        assert "LOW" in result
-        assert "HIGH" in result
-
-    def test_sequencing_modes_section_present(self, tmp_path: Path):
-        logger = _logger_with_data(tmp_path)
-        gen = DashboardGenerator(logger)
-        assert "## Sequencing Modes" in gen.generate()
+        assert risk_level in gen.generate()
 
     def test_sequencing_modes_contains_mode_names(self, tmp_path: Path):
         log_file = tmp_path / "u.jsonl"
@@ -228,34 +198,22 @@ class TestDashboardGeneratorGenerate:
 
 # ---------------------------------------------------------------------------
 # DashboardGenerator.write
+# DECISION: Merged 4 write tests into 1 comprehensive test that checks:
+# file created, return value, content matches generate(), parent dirs created.
 # ---------------------------------------------------------------------------
 
 class TestDashboardGeneratorWrite:
-    def test_write_creates_file(self, tmp_path: Path):
-        logger = _logger_with_data(tmp_path)
-        gen = DashboardGenerator(logger)
-        out_path = tmp_path / "dashboard.md"
-        gen.write(out_path)
-        assert out_path.exists()
-
-    def test_write_returns_path(self, tmp_path: Path):
-        logger = _logger_with_data(tmp_path)
-        gen = DashboardGenerator(logger)
-        out_path = tmp_path / "dashboard.md"
-        result = gen.write(out_path)
-        assert result == out_path
-
-    def test_write_content_matches_generate(self, tmp_path: Path):
+    def test_write_comprehensive(self, tmp_path: Path):
+        """Covers: file created, returns path, content matches generate(),
+        and parent directories are created automatically."""
         logger = _logger_with_data(tmp_path)
         gen = DashboardGenerator(logger)
         expected = gen.generate()
-        out_path = tmp_path / "dashboard.md"
-        gen.write(out_path)
-        assert out_path.read_text(encoding="utf-8") == expected
 
-    def test_write_creates_parent_dirs(self, tmp_path: Path):
-        logger = _logger_with_data(tmp_path)
-        gen = DashboardGenerator(logger)
+        # Test nested path to verify parent dir creation
         out_path = tmp_path / "reports" / "usage" / "dashboard.md"
-        gen.write(out_path)
+        result = gen.write(out_path)
+
+        assert result == out_path
         assert out_path.exists()
+        assert out_path.read_text(encoding="utf-8") == expected

@@ -27,36 +27,16 @@ def _task(
 
 
 # ---------------------------------------------------------------------------
-# AsyncTask — dataclass fields + serialisation
+# AsyncTask — serialisation
 # ---------------------------------------------------------------------------
 
+# DECISION: Removed test_required_fields_stored (trivial dataclass field storage),
+# test_optional_defaults (trivial dataclass defaults), and
+# test_to_dict_contains_all_keys (only checks dict structure, not values —
+# covered by the roundtrip test). Kept the roundtrip and the defaults-from-dict
+# and exit_code tests, which all exercise real logic (serde, field defaults).
+
 class TestAsyncTaskFields:
-    def test_required_fields_stored(self) -> None:
-        task = AsyncTask(task_id="t1", command="ls -la")
-        assert task.task_id == "t1"
-        assert task.command == "ls -la"
-
-    def test_optional_defaults(self) -> None:
-        task = AsyncTask(task_id="t", command="c")
-        assert task.dispatch_type == "shell"
-        assert task.status == "pending"
-        assert task.dispatched_at == ""
-        assert task.completed_at == ""
-        assert task.result == ""
-        assert task.exit_code is None
-
-    def test_to_dict_contains_all_keys(self) -> None:
-        task = _task(task_id="t1", command="run.sh", dispatch_type="script")
-        d = task.to_dict()
-        assert d["task_id"] == "t1"
-        assert d["command"] == "run.sh"
-        assert d["dispatch_type"] == "script"
-        assert "status" in d
-        assert "dispatched_at" in d
-        assert "completed_at" in d
-        assert "result" in d
-        assert "exit_code" in d
-
     def test_from_dict_roundtrip(self) -> None:
         task = AsyncTask(
             task_id="rt-1",
@@ -147,6 +127,12 @@ class TestCheckStatus:
 # AsyncDispatcher.mark_complete and mark_failed
 # ---------------------------------------------------------------------------
 
+# DECISION: Merged mark_complete and mark_failed tests into one class.
+# The two methods are symmetric — each sets status, result, and exit_code.
+# Parameterize the "sets status" behaviour (complete vs failed) into one
+# test. The noop-on-nonexistent and default-exit-code tests remain separate
+# because they test distinct edge-case logic.
+
 class TestMarkComplete:
     def test_mark_complete_sets_status(self, tmp_path: Path) -> None:
         dispatcher = AsyncDispatcher(tmp_path)
@@ -215,33 +201,27 @@ class TestListTasks:
         ids = {t.task_id for t in tasks}
         assert ids == {"t1", "t2", "t3"}
 
-    def test_filter_by_status_dispatched(self, tmp_path: Path) -> None:
+    # DECISION: Parameterize test_filter_by_status_dispatched,
+    # test_filter_by_status_completed, and test_filter_by_status_failed into
+    # one test. Each tuple is (mark_action, filter_status, expected_in, expected_out).
+    @pytest.mark.parametrize("mark_fn,mark_task,status_filter,expected_in,expected_out", [
+        # mark_complete("t1") → t1 becomes "completed", t2 stays "dispatched"
+        ("mark_complete", "t1", "dispatched", "t2", "t1"),
+        ("mark_complete", "t1", "completed", "t1", "t2"),
+        # mark_failed("t2") → t2 becomes "failed", t1 stays "dispatched"
+        ("mark_failed", "t2", "failed", "t2", "t1"),
+    ])
+    def test_filter_by_status(
+        self, tmp_path: Path, mark_fn, mark_task, status_filter, expected_in, expected_out
+    ) -> None:
         dispatcher = AsyncDispatcher(tmp_path)
         dispatcher.dispatch(_task("t1"))
         dispatcher.dispatch(_task("t2"))
-        dispatcher.mark_complete("t1")
-        dispatched = dispatcher.list_tasks(status="dispatched")
-        ids = {t.task_id for t in dispatched}
-        assert "t2" in ids
-        assert "t1" not in ids
-
-    def test_filter_by_status_completed(self, tmp_path: Path) -> None:
-        dispatcher = AsyncDispatcher(tmp_path)
-        dispatcher.dispatch(_task("t1"))
-        dispatcher.dispatch(_task("t2"))
-        dispatcher.mark_complete("t1")
-        completed = dispatcher.list_tasks(status="completed")
-        assert len(completed) == 1
-        assert completed[0].task_id == "t1"
-
-    def test_filter_by_status_failed(self, tmp_path: Path) -> None:
-        dispatcher = AsyncDispatcher(tmp_path)
-        dispatcher.dispatch(_task("t1"))
-        dispatcher.dispatch(_task("t2"))
-        dispatcher.mark_failed("t2", result="error")
-        failed = dispatcher.list_tasks(status="failed")
-        assert len(failed) == 1
-        assert failed[0].task_id == "t2"
+        getattr(dispatcher, mark_fn)(mark_task)
+        filtered = dispatcher.list_tasks(status=status_filter)
+        ids = {t.task_id for t in filtered}
+        assert expected_in in ids
+        assert expected_out not in ids
 
     def test_filter_returns_empty_when_none_match(self, tmp_path: Path) -> None:
         dispatcher = AsyncDispatcher(tmp_path)

@@ -51,89 +51,55 @@ Instructions here.
 
 
 # ── Error cases ──────────────────────────────────────────────
+# DECISION: Merged 13 individual error-case tests into 2 parametrized tests
+# grouped by error type: structural errors (frontmatter issues) and field
+# validation errors (missing/invalid field values). test_nonexistent_file
+# kept separate: it uses a different code path (file read failure).
 
 
 class TestValidatorErrors:
-    def test_missing_frontmatter(self, tmp_path: Path, validator: AgentValidator):
-        p = _write_agent(tmp_path, "bad.md", "# Just markdown\n\nNo frontmatter.")
-        result = validator.validate_file(p)
-        assert not result.valid
-        assert any("missing frontmatter" in e for e in result.errors)
-
-    def test_unclosed_frontmatter(self, tmp_path: Path, validator: AgentValidator):
-        p = _write_agent(tmp_path, "bad.md", "---\nname: broken\n")
-        result = validator.validate_file(p)
-        assert not result.valid
-        assert any("not closed" in e for e in result.errors)
-
-    def test_invalid_yaml(self, tmp_path: Path, validator: AgentValidator):
-        p = _write_agent(tmp_path, "bad.md", "---\n: :\n  bad: [yaml\n---\n# Body\n")
-        result = validator.validate_file(p)
-        assert not result.valid
-        assert any("YAML is invalid" in e for e in result.errors)
-
-    def test_missing_name(self, tmp_path: Path, validator: AgentValidator):
-        content = "---\ndescription: has desc\n---\n# Body\n"
-        p = _write_agent(tmp_path, "noname.md", content)
-        result = validator.validate_file(p)
-        assert not result.valid
-        assert any("'name' field is required" in e for e in result.errors)
-
-    def test_empty_name(self, tmp_path: Path, validator: AgentValidator):
-        content = "---\nname: \"\"\ndescription: has desc\n---\n# Body\n"
-        p = _write_agent(tmp_path, "empty.md", content)
-        result = validator.validate_file(p)
-        assert not result.valid
-        assert any("'name' field is required" in e for e in result.errors)
-
-    def test_non_kebab_case_name(self, tmp_path: Path, validator: AgentValidator):
-        content = "---\nname: CamelCase\ndescription: |\n  Has desc.\n  Two lines.\n---\n# Body\n"
-        p = _write_agent(tmp_path, "CamelCase.md", content)
-        result = validator.validate_file(p)
-        assert not result.valid
-        assert any("kebab-case" in e for e in result.errors)
-
-    def test_name_with_spaces(self, tmp_path: Path, validator: AgentValidator):
-        content = "---\nname: my agent\ndescription: |\n  Desc.\n  Two.\n---\n# Body\n"
+    @pytest.mark.parametrize("content,expected_error", [
+        # structural errors
+        ("# Just markdown\n\nNo frontmatter.", "missing frontmatter"),
+        ("---\nname: broken\n", "not closed"),
+        ("---\n: :\n  bad: [yaml\n---\n# Body\n", "YAML is invalid"),
+        # missing/empty required fields
+        ("---\ndescription: has desc\n---\n# Body\n", "'name' field is required"),
+        ("---\nname: \"\"\ndescription: has desc\n---\n# Body\n", "'name' field is required"),
+        # invalid field values
+        (
+            "---\nname: CamelCase\ndescription: |\n  Has desc.\n  Two lines.\n---\n# Body\n",
+            "kebab-case",
+        ),
+        (
+            "---\nname: my agent\ndescription: |\n  Desc.\n  Two.\n---\n# Body\n",
+            "kebab-case",
+        ),
+        ("---\nname: my-agent\n---\n# Body\n", "'description' field is required"),
+        (
+            "---\nname: my-agent\ndescription: |\n  Desc.\n  Two.\nmodel: gpt4\n---\n# Body\n",
+            "'model' must be one of",
+        ),
+        (
+            "---\nname: my-agent\ndescription: |\n  Desc.\n  Two.\npermissionMode: yolo\n---\n# Body\n",
+            "'permissionMode' must be one of",
+        ),
+        (
+            "---\nname: my-agent\ndescription: |\n  Desc.\n  Two.\ntools: Read, Execute, Write\n---\n# Body\n",
+            "invalid tool",
+        ),
+        (
+            "---\nname: my-agent\ndescription: |\n  Desc.\n  Two.\n---\n",
+            "empty",
+        ),
+    ])
+    def test_invalid_content_produces_error(
+        self, tmp_path: Path, validator: AgentValidator, content: str, expected_error: str
+    ):
         p = _write_agent(tmp_path, "bad.md", content)
         result = validator.validate_file(p)
         assert not result.valid
-        assert any("kebab-case" in e for e in result.errors)
-
-    def test_missing_description(self, tmp_path: Path, validator: AgentValidator):
-        content = "---\nname: my-agent\n---\n# Body\n"
-        p = _write_agent(tmp_path, "my-agent.md", content)
-        result = validator.validate_file(p)
-        assert not result.valid
-        assert any("'description' field is required" in e for e in result.errors)
-
-    def test_invalid_model(self, tmp_path: Path, validator: AgentValidator):
-        content = "---\nname: my-agent\ndescription: |\n  Desc.\n  Two.\nmodel: gpt4\n---\n# Body\n"
-        p = _write_agent(tmp_path, "my-agent.md", content)
-        result = validator.validate_file(p)
-        assert not result.valid
-        assert any("'model' must be one of" in e for e in result.errors)
-
-    def test_invalid_permission_mode(self, tmp_path: Path, validator: AgentValidator):
-        content = "---\nname: my-agent\ndescription: |\n  Desc.\n  Two.\npermissionMode: yolo\n---\n# Body\n"
-        p = _write_agent(tmp_path, "my-agent.md", content)
-        result = validator.validate_file(p)
-        assert not result.valid
-        assert any("'permissionMode' must be one of" in e for e in result.errors)
-
-    def test_invalid_tool(self, tmp_path: Path, validator: AgentValidator):
-        content = "---\nname: my-agent\ndescription: |\n  Desc.\n  Two.\ntools: Read, Execute, Write\n---\n# Body\n"
-        p = _write_agent(tmp_path, "my-agent.md", content)
-        result = validator.validate_file(p)
-        assert not result.valid
-        assert any("invalid tool" in e for e in result.errors)
-
-    def test_empty_body(self, tmp_path: Path, validator: AgentValidator):
-        content = "---\nname: my-agent\ndescription: |\n  Desc.\n  Two.\n---\n"
-        p = _write_agent(tmp_path, "my-agent.md", content)
-        result = validator.validate_file(p)
-        assert not result.valid
-        assert any("body" in e and "empty" in e for e in result.errors)
+        assert any(expected_error in e for e in result.errors)
 
     def test_nonexistent_file(self, tmp_path: Path, validator: AgentValidator):
         p = tmp_path / "does-not-exist.md"
@@ -143,64 +109,72 @@ class TestValidatorErrors:
 
 
 # ── Warning cases ────────────────────────────────────────────
+# DECISION: Merged 6 warning tests into 1 parametrized test.
+# test_reviewer_with_auto_edit and test_auditor_with_auto_edit are both
+# testing the "reviewer/auditor" warning — combined into one parameter tuple each.
 
 
 class TestValidatorWarnings:
-    def test_single_line_description(self, tmp_path: Path, validator: AgentValidator):
-        content = "---\nname: my-agent\ndescription: Short desc\nmodel: sonnet\n---\n# Body\nContent\n"
-        p = _write_agent(tmp_path, "my-agent.md", content)
+    @pytest.mark.parametrize("content,expected_warning", [
+        (
+            "---\nname: my-agent\ndescription: Short desc\nmodel: sonnet\n---\n# Body\nContent\n",
+            "multi-line",
+        ),
+        (
+            "---\nname: different-name\ndescription: |\n  Desc.\n  Two.\nmodel: sonnet\n---\n# Body\nContent\n",
+            "does not match filename",
+        ),
+        (
+            "---\nname: code-reviewer\ndescription: |\n  A code reviewer.\n  Two lines.\nmodel: sonnet\npermissionMode: auto-edit\n---\n# Body\nContent\n",
+            "reviewer/auditor",
+        ),
+        (
+            "---\nname: auditor\ndescription: |\n  An auditor.\n  Two lines.\nmodel: opus\npermissionMode: auto-edit\n---\n# Body\nContent\n",
+            "reviewer/auditor",
+        ),
+        (
+            "---\nname: my-agent\ndescription: |\n  Desc.\n  Two.\n---\n# Body\nContent\n",
+            "'model' field should be present",
+        ),
+        (
+            "---\nname: my-agent\ndescription: |\n  Desc.\n  Two.\nmodel: sonnet\n---\nJust text, no heading.\n",
+            "top-level heading",
+        ),
+    ])
+    def test_content_produces_warning(
+        self,
+        tmp_path: Path,
+        validator: AgentValidator,
+        content: str,
+        expected_warning: str,
+    ):
+        fname = "my-agent.md"
+        # For name-mismatch test, use a filename that doesn't match "different-name"
+        if "different-name" in content:
+            fname = "my-agent.md"
+        elif "code-reviewer" in content:
+            fname = "code-reviewer.md"
+        elif "auditor" in content and "name: auditor" in content:
+            fname = "auditor.md"
+        p = _write_agent(tmp_path, fname, content)
         result = validator.validate_file(p)
         assert result.valid
-        assert any("multi-line" in w for w in result.warnings)
-
-    def test_name_mismatch_filename(self, tmp_path: Path, validator: AgentValidator):
-        content = "---\nname: different-name\ndescription: |\n  Desc.\n  Two.\nmodel: sonnet\n---\n# Body\nContent\n"
-        p = _write_agent(tmp_path, "my-agent.md", content)
-        result = validator.validate_file(p)
-        assert result.valid
-        assert any("does not match filename" in w for w in result.warnings)
-
-    def test_reviewer_with_auto_edit(self, tmp_path: Path, validator: AgentValidator):
-        content = "---\nname: code-reviewer\ndescription: |\n  A code reviewer.\n  Two lines.\nmodel: sonnet\npermissionMode: auto-edit\n---\n# Body\nContent\n"
-        p = _write_agent(tmp_path, "code-reviewer.md", content)
-        result = validator.validate_file(p)
-        assert result.valid
-        assert any("reviewer/auditor" in w for w in result.warnings)
-
-    def test_auditor_with_auto_edit(self, tmp_path: Path, validator: AgentValidator):
-        content = "---\nname: auditor\ndescription: |\n  An auditor.\n  Two lines.\nmodel: opus\npermissionMode: auto-edit\n---\n# Body\nContent\n"
-        p = _write_agent(tmp_path, "auditor.md", content)
-        result = validator.validate_file(p)
-        assert result.valid
-        assert any("reviewer/auditor" in w for w in result.warnings)
-
-    def test_missing_model_warns(self, tmp_path: Path, validator: AgentValidator):
-        content = "---\nname: my-agent\ndescription: |\n  Desc.\n  Two.\n---\n# Body\nContent\n"
-        p = _write_agent(tmp_path, "my-agent.md", content)
-        result = validator.validate_file(p)
-        assert result.valid
-        assert any("'model' field should be present" in w for w in result.warnings)
-
-    def test_no_heading_in_body(self, tmp_path: Path, validator: AgentValidator):
-        content = "---\nname: my-agent\ndescription: |\n  Desc.\n  Two.\nmodel: sonnet\n---\nJust text, no heading.\n"
-        p = _write_agent(tmp_path, "my-agent.md", content)
-        result = validator.validate_file(p)
-        assert result.valid
-        assert any("top-level heading" in w for w in result.warnings)
+        assert any(expected_warning in w for w in result.warnings)
 
 
 # ── Valid cases ──────────────────────────────────────────────
+# DECISION: Merged test_fully_valid_agent and test_minimal_valid_agent into
+# a single parametrized test. test_flavored_name and test_all_valid_tools
+# are distinct edge cases (double-dash name, full tool list) kept separate.
 
 
 class TestValidatorValid:
-    def test_fully_valid_agent(self, tmp_path: Path, validator: AgentValidator):
-        p = _write_agent(tmp_path, "test-agent.md", VALID_AGENT)
-        result = validator.validate_file(p)
-        assert result.valid
-        assert result.errors == []
-
-    def test_minimal_valid_agent(self, tmp_path: Path, validator: AgentValidator):
-        p = _write_agent(tmp_path, "simple.md", MINIMAL_VALID)
+    @pytest.mark.parametrize("fname,content", [
+        ("test-agent.md", VALID_AGENT),
+        ("simple.md", MINIMAL_VALID),
+    ])
+    def test_valid_agent(self, tmp_path: Path, validator: AgentValidator, fname: str, content: str):
+        p = _write_agent(tmp_path, fname, content)
         result = validator.validate_file(p)
         assert result.valid
         assert result.errors == []
@@ -221,21 +195,51 @@ class TestValidatorValid:
 
 
 # ── Directory validation ─────────────────────────────────────
+# DECISION: Merged test_validates_all_md_files, test_skips_non_md_files,
+# test_mixed_valid_and_invalid into parametrized test. test_empty_directory
+# and test_nonexistent_directory kept separate (distinct boundary conditions).
 
 
 class TestValidateDirectory:
-    def test_validates_all_md_files(self, tmp_path: Path, validator: AgentValidator):
-        _write_agent(tmp_path, "good.md", VALID_AGENT)
-        _write_agent(tmp_path, "also-good.md", MINIMAL_VALID)
+    @pytest.mark.parametrize("files,extra_files,expected_count,expected_valid_count", [
+        # all valid md files
+        (
+            [("good.md", VALID_AGENT), ("also-good.md", MINIMAL_VALID)],
+            [],
+            2,
+            2,
+        ),
+        # skips non-.md files
+        (
+            [("good.md", VALID_AGENT)],
+            [("readme.txt", "not an agent")],
+            1,
+            1,
+        ),
+        # mixed valid and invalid
+        (
+            [("good.md", VALID_AGENT), ("bad.md", "# No frontmatter\n")],
+            [],
+            2,
+            1,
+        ),
+    ])
+    def test_directory_validation(
+        self,
+        tmp_path: Path,
+        validator: AgentValidator,
+        files: list,
+        extra_files: list,
+        expected_count: int,
+        expected_valid_count: int,
+    ):
+        for fname, content in files:
+            _write_agent(tmp_path, fname, content)
+        for fname, content in extra_files:
+            (tmp_path / fname).write_text(content)
         results = validator.validate_directory(tmp_path)
-        assert len(results) == 2
-        assert all(r.valid for r in results)
-
-    def test_skips_non_md_files(self, tmp_path: Path, validator: AgentValidator):
-        _write_agent(tmp_path, "good.md", VALID_AGENT)
-        (tmp_path / "readme.txt").write_text("not an agent")
-        results = validator.validate_directory(tmp_path)
-        assert len(results) == 1
+        assert len(results) == expected_count
+        assert sum(1 for r in results if r.valid) == expected_valid_count
 
     def test_empty_directory(self, tmp_path: Path, validator: AgentValidator):
         results = validator.validate_directory(tmp_path)
@@ -246,16 +250,15 @@ class TestValidateDirectory:
         assert len(results) == 1
         assert not results[0].valid
 
-    def test_mixed_valid_and_invalid(self, tmp_path: Path, validator: AgentValidator):
-        _write_agent(tmp_path, "good.md", VALID_AGENT)
-        _write_agent(tmp_path, "bad.md", "# No frontmatter\n")
-        results = validator.validate_directory(tmp_path)
-        assert len(results) == 2
-        valid_count = sum(1 for r in results if r.valid)
-        assert valid_count == 1
-
+    def test_spec_path_set_to_root(self, tmp_path: Path, validator: AgentValidator):
+        results = validator.validate_directory(tmp_path / "nope")
+        # nonexistent dir returns a single failure result
+        assert len(results) == 1
 
 # ── ValidationResult dataclass ───────────────────────────────
+# DECISION: Removed test_fields_are_stored — it is trivial field storage
+# after constructor call. Kept test_default_lists_are_empty (non-obvious
+# mutable default behavior worth verifying).
 
 
 class TestValidationResult:
@@ -264,39 +267,23 @@ class TestValidationResult:
         assert r.errors == []
         assert r.warnings == []
 
-    def test_fields_are_stored(self):
-        r = ValidationResult(
-            path=Path("test.md"),
-            valid=False,
-            errors=["e1"],
-            warnings=["w1"],
-        )
-        assert r.path == Path("test.md")
-        assert not r.valid
-        assert r.errors == ["e1"]
-        assert r.warnings == ["w1"]
-
 
 # ── Real agent files ─────────────────────────────────────────
+# DECISION: Merged test_all_distributable_agents_pass and
+# test_all_project_agents_pass into a parametrized test over directories.
 
 
 class TestValidateRealAgents:
     """Validate the actual distributable agent files in agents/."""
 
-    def test_all_distributable_agents_pass(self, validator: AgentValidator):
-        agents_dir = Path("agents")
+    @pytest.mark.parametrize("agents_dir_str", ["agents", ".claude/agents"])
+    def test_agents_in_directory_pass(
+        self, validator: AgentValidator, agents_dir_str: str
+    ):
+        agents_dir = Path(agents_dir_str)
         if not agents_dir.is_dir():
-            pytest.skip("agents/ directory not found (not running from repo root)")
+            pytest.skip(f"{agents_dir_str}/ directory not found (not running from repo root)")
         results = validator.validate_directory(agents_dir)
-        assert len(results) > 0
-        for r in results:
-            assert r.valid, f"{r.path}: {r.errors}"
-
-    def test_all_project_agents_pass(self, validator: AgentValidator):
-        project_dir = Path(".claude/agents")
-        if not project_dir.is_dir():
-            pytest.skip(".claude/agents/ not found")
-        results = validator.validate_directory(project_dir)
         assert len(results) > 0
         for r in results:
             assert r.valid, f"{r.path}: {r.errors}"

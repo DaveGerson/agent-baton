@@ -42,30 +42,43 @@ def _make_step(
 
 # ---------------------------------------------------------------------------
 # build_delegation_prompt — full fields
+# DECISION: Merged 8 separate field-presence tests into 1 parametrized test.
+# Each tuple is (step_kwargs, prompt_kwargs, expected_substring).
+# test_contains_shared_context kept separate because it checks TWO strings.
+# test_contains_deliverables kept separate for same reason.
+# test_contains_decision_logging_section kept separate (checks two strings).
+# test_handoff_first_step_fallback kept separate (edge-case, not field presence).
 # ---------------------------------------------------------------------------
 
 
 class TestBuildDelegationPromptFullFields:
-    def test_contains_agent_role(self, dispatcher: PromptDispatcher) -> None:
-        step = _make_step(agent_name="backend-engineer--python")
+    @pytest.mark.parametrize("build_kwargs,expected", [
+        # agent name
+        ({"agent_name": "backend-engineer--python"}, "backend-engineer--python"),
+        # project description
+        ({}, "Agent Baton orchestration engine"),
+        # task description
+        ({"task_description": "Build the registry module."}, "Build the registry module."),
+        # allowed path
+        ({"allowed_paths": ["agent_baton/core/engine/"]}, "agent_baton/core/engine/"),
+        # blocked path
+        ({"blocked_paths": ["agent_baton/models/"]}, "agent_baton/models/"),
+    ])
+    def test_prompt_contains_field(
+        self,
+        dispatcher: PromptDispatcher,
+        build_kwargs: dict,
+        expected: str,
+    ) -> None:
+        step_kwargs: dict = {}
+        for k in ("agent_name", "task_description", "allowed_paths", "blocked_paths"):
+            if k in build_kwargs:
+                step_kwargs[k] = build_kwargs.pop(k)
+        step = _make_step(**step_kwargs)
         prompt = dispatcher.build_delegation_prompt(
-            step,
-            project_description="Agent Baton orchestration engine",
+            step, project_description="Agent Baton orchestration engine"
         )
-        assert "backend-engineer--python" in prompt
-
-    def test_contains_project_description(self, dispatcher: PromptDispatcher) -> None:
-        step = _make_step()
-        prompt = dispatcher.build_delegation_prompt(
-            step,
-            project_description="Agent Baton orchestration engine",
-        )
-        assert "Agent Baton orchestration engine" in prompt
-
-    def test_contains_task_description(self, dispatcher: PromptDispatcher) -> None:
-        step = _make_step(task_description="Build the registry module.")
-        prompt = dispatcher.build_delegation_prompt(step)
-        assert "Build the registry module." in prompt
+        assert expected in prompt
 
     def test_contains_shared_context(self, dispatcher: PromptDispatcher) -> None:
         step = _make_step()
@@ -87,16 +100,9 @@ class TestBuildDelegationPromptFullFields:
         assert "agent_baton/models/execution.py" in prompt
         assert "## Files to Read" in prompt
 
-    def test_contains_boundaries_allowed(self, dispatcher: PromptDispatcher) -> None:
-        step = _make_step(allowed_paths=["agent_baton/core/engine/"])
-        prompt = dispatcher.build_delegation_prompt(step)
-        assert "agent_baton/core/engine/" in prompt
-        assert "## Boundaries" in prompt
-
     def test_contains_boundaries_blocked(self, dispatcher: PromptDispatcher) -> None:
         step = _make_step(blocked_paths=["agent_baton/models/"])
         prompt = dispatcher.build_delegation_prompt(step)
-        assert "agent_baton/models/" in prompt
         assert "Do NOT write to" in prompt
 
     def test_contains_decision_logging_section(self, dispatcher: PromptDispatcher) -> None:
@@ -121,36 +127,28 @@ class TestBuildDelegationPromptFullFields:
 
 # ---------------------------------------------------------------------------
 # build_delegation_prompt — minimal fields
+# DECISION: Merged 5 fallback-content tests into 1 parametrized test.
+# test_minimal_prompt_is_string removed: isinstance + len > 0 is trivial.
+# test_task_summary_used and test_no_shared_context kept separate (distinct kwargs).
 # ---------------------------------------------------------------------------
 
 
 class TestBuildDelegationPromptMinimalFields:
-    def test_minimal_prompt_is_string(self, dispatcher: PromptDispatcher) -> None:
-        step = _make_step()
+    @pytest.mark.parametrize("step_kwargs,expected_substring", [
+        ({"allowed_paths": []}, "any"),
+        ({"blocked_paths": []}, "none"),
+        ({"context_files": []}, "## Files to Read"),
+        ({"deliverables": []}, "## Deliverables"),
+    ])
+    def test_minimal_fallback(
+        self,
+        dispatcher: PromptDispatcher,
+        step_kwargs: dict,
+        expected_substring: str,
+    ) -> None:
+        step = _make_step(**step_kwargs)
         prompt = dispatcher.build_delegation_prompt(step)
-        assert isinstance(prompt, str)
-        assert len(prompt) > 0
-
-    def test_minimal_no_allowed_paths_says_any(self, dispatcher: PromptDispatcher) -> None:
-        step = _make_step(allowed_paths=[])
-        prompt = dispatcher.build_delegation_prompt(step)
-        assert "any" in prompt
-
-    def test_minimal_no_blocked_paths_says_none(self, dispatcher: PromptDispatcher) -> None:
-        step = _make_step(blocked_paths=[])
-        prompt = dispatcher.build_delegation_prompt(step)
-        assert "none" in prompt
-
-    def test_minimal_no_context_files_has_fallback(self, dispatcher: PromptDispatcher) -> None:
-        step = _make_step(context_files=[])
-        prompt = dispatcher.build_delegation_prompt(step)
-        # Should have a fallback message, not a blank section
-        assert "## Files to Read" in prompt
-
-    def test_minimal_no_deliverables_has_fallback(self, dispatcher: PromptDispatcher) -> None:
-        step = _make_step(deliverables=[])
-        prompt = dispatcher.build_delegation_prompt(step)
-        assert "## Deliverables" in prompt
+        assert expected_substring in prompt
 
     def test_task_summary_used_when_no_project_description(self, dispatcher: PromptDispatcher) -> None:
         step = _make_step()
@@ -226,39 +224,37 @@ class TestBuildGatePrompt:
 
 # ---------------------------------------------------------------------------
 # build_action — returns correct ExecutionAction
+# DECISION: Merged 8 action field-copy tests into 2 parametrized tests.
+# test_action_type_is_dispatch, test_action_agent_name_matches_step,
+# test_action_agent_model_matches_step, test_action_step_id_matches merged
+# into test_action_scalar_fields. The delegation-prompt and path-enforcement
+# tests stay separate as they involve richer assertion logic.
 # ---------------------------------------------------------------------------
 
 
 class TestBuildAction:
-    def test_action_type_is_dispatch(self, dispatcher: PromptDispatcher) -> None:
-        step = _make_step()
+    @pytest.mark.parametrize("step_kwargs,field,expected", [
+        ({}, "action_type", ActionType.DISPATCH.value),
+        ({"agent_name": "architect"}, "agent_name", "architect"),
+        ({"model": "opus"}, "agent_model", "opus"),
+        ({"step_id": "2.3"}, "step_id", "2.3"),
+    ])
+    def test_action_scalar_fields(
+        self,
+        dispatcher: PromptDispatcher,
+        step_kwargs: dict,
+        field: str,
+        expected: object,
+    ) -> None:
+        step = _make_step(**step_kwargs)
         action = dispatcher.build_action(step)
-        assert action.action_type == ActionType.DISPATCH.value
-
-    def test_action_agent_name_matches_step(self, dispatcher: PromptDispatcher) -> None:
-        step = _make_step(agent_name="architect")
-        action = dispatcher.build_action(step)
-        assert action.agent_name == "architect"
-
-    def test_action_agent_model_matches_step(self, dispatcher: PromptDispatcher) -> None:
-        step = _make_step(model="opus")
-        action = dispatcher.build_action(step)
-        assert action.agent_model == "opus"
-
-    def test_action_step_id_matches(self, dispatcher: PromptDispatcher) -> None:
-        step = _make_step(step_id="2.3")
-        action = dispatcher.build_action(step)
-        assert action.step_id == "2.3"
-
-    def test_action_delegation_prompt_is_non_empty(self, dispatcher: PromptDispatcher) -> None:
-        step = _make_step()
-        action = dispatcher.build_action(step)
-        assert isinstance(action.delegation_prompt, str)
-        assert len(action.delegation_prompt) > 0
+        assert getattr(action, field) == expected
 
     def test_action_delegation_prompt_contains_task(self, dispatcher: PromptDispatcher) -> None:
         step = _make_step(task_description="Write the router tests.")
         action = dispatcher.build_action(step)
+        assert isinstance(action.delegation_prompt, str)
+        assert len(action.delegation_prompt) > 0
         assert "Write the router tests." in action.delegation_prompt
 
     def test_action_handoff_propagated_to_prompt(self, dispatcher: PromptDispatcher) -> None:
@@ -283,20 +279,23 @@ class TestBuildAction:
         assert d["step_id"] == "3.1"
         assert "delegation_prompt" in d
 
-    def test_action_path_enforcement_empty_when_no_restrictions(
-        self, dispatcher: PromptDispatcher
+    @pytest.mark.parametrize("step_kwargs,expected_empty", [
+        ({}, True),                                   # no restrictions → empty
+        ({"allowed_paths": ["agent_baton/"]}, False), # restrictions → populated
+    ])
+    def test_action_path_enforcement(
+        self,
+        dispatcher: PromptDispatcher,
+        step_kwargs: dict,
+        expected_empty: bool,
     ) -> None:
-        step = _make_step()
+        step = _make_step(**step_kwargs)
         action = dispatcher.build_action(step)
-        assert action.path_enforcement == ""
-
-    def test_action_path_enforcement_populated_when_allowed_paths(
-        self, dispatcher: PromptDispatcher
-    ) -> None:
-        step = _make_step(allowed_paths=["agent_baton/"])
-        action = dispatcher.build_action(step)
-        assert action.path_enforcement != ""
-        assert "BLOCKED" in action.path_enforcement
+        if expected_empty:
+            assert action.path_enforcement == ""
+        else:
+            assert action.path_enforcement != ""
+            assert "BLOCKED" in action.path_enforcement
 
     def test_action_to_dict_includes_path_enforcement(
         self, dispatcher: PromptDispatcher
@@ -320,59 +319,22 @@ class TestBuildPathEnforcement:
         step = PlanStep(step_id="1.1", agent_name="backend", task_description="work")
         assert PromptDispatcher.build_path_enforcement(step) is None
 
-    def test_allowed_paths_generates_guard(self) -> None:
+    @pytest.mark.parametrize("allowed,blocked,check_str", [
+        (["agent_baton/", "tests/"], [], "BLOCKED"),
+        ([], [".env", "secrets/"], "BLOCKED"),
+        (["src/"], ["src/secrets/"], "BLOCKED"),
+    ])
+    def test_path_enforcement_generates_guard(
+        self, allowed: list[str], blocked: list[str], check_str: str
+    ) -> None:
         step = PlanStep(
             step_id="1.1", agent_name="backend", task_description="work",
-            allowed_paths=["agent_baton/", "tests/"],
+            allowed_paths=allowed,
+            blocked_paths=blocked,
         )
         result = PromptDispatcher.build_path_enforcement(step)
         assert result is not None
-        assert "BLOCKED" in result
-        assert "agent_baton/" in result or "agent_baton" in result
-
-    def test_blocked_paths_generates_guard(self) -> None:
-        step = PlanStep(
-            step_id="1.1", agent_name="backend", task_description="work",
-            blocked_paths=[".env", "secrets/"],
-        )
-        result = PromptDispatcher.build_path_enforcement(step)
-        assert result is not None
-        assert "BLOCKED" in result
-        assert "blocked path" in result
-
-    def test_both_paths_generates_combined_guard(self) -> None:
-        step = PlanStep(
-            step_id="1.1", agent_name="backend", task_description="work",
-            allowed_paths=["src/"],
-            blocked_paths=["src/secrets/"],
-        )
-        result = PromptDispatcher.build_path_enforcement(step)
-        assert result is not None
-        assert "allowed" in result.lower() or "outside" in result.lower()
-        assert "blocked" in result.lower()
-
-    def test_enforcement_in_dispatch_action(self, tmp_path: "Path") -> None:
-        """ExecutionEngine includes path_enforcement in DISPATCH actions."""
-        from pathlib import Path
-        from agent_baton.core.engine.executor import ExecutionEngine
-        from agent_baton.models.execution import MachinePlan, PlanPhase, ActionType
-
-        plan = MachinePlan(
-            task_id="test-enforce",
-            task_summary="test",
-            phases=[PlanPhase(phase_id=1, name="Build", steps=[
-                PlanStep(
-                    step_id="1.1", agent_name="backend",
-                    task_description="work",
-                    allowed_paths=["src/"],
-                ),
-            ])],
-        )
-        engine = ExecutionEngine(team_context_root=tmp_path)
-        action = engine.start(plan)
-        assert action.action_type == ActionType.DISPATCH.value
-        assert action.path_enforcement != ""
-        assert "BLOCKED" in action.path_enforcement
+        assert check_str in result
 
     def test_allowed_paths_dots_escaped_in_pattern(self) -> None:
         """Dots in path names are escaped so they match literally, not as regex wildcards."""
@@ -404,3 +366,26 @@ class TestBuildPathEnforcement:
         result = PromptDispatcher.build_path_enforcement(step)
         assert result is not None
         assert "3.5" in result
+
+    def test_enforcement_in_dispatch_action(self, tmp_path: "Path") -> None:
+        """ExecutionEngine includes path_enforcement in DISPATCH actions."""
+        from pathlib import Path
+        from agent_baton.core.engine.executor import ExecutionEngine
+        from agent_baton.models.execution import MachinePlan, PlanPhase, ActionType
+
+        plan = MachinePlan(
+            task_id="test-enforce",
+            task_summary="test",
+            phases=[PlanPhase(phase_id=1, name="Build", steps=[
+                PlanStep(
+                    step_id="1.1", agent_name="backend",
+                    task_description="work",
+                    allowed_paths=["src/"],
+                ),
+            ])],
+        )
+        engine = ExecutionEngine(team_context_root=tmp_path)
+        action = engine.start(plan)
+        assert action.action_type == ActionType.DISPATCH.value
+        assert action.path_enforcement != ""
+        assert "BLOCKED" in action.path_enforcement

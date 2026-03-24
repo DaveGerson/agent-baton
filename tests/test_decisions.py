@@ -34,15 +34,14 @@ def _req(
 
 # ===========================================================================
 # DecisionRequest model
+# DECISION: Removed test_required_fields (trivial field storage) and
+# test_deadline_optional (trivial None-default check).
+# Kept: roundtrip, from_dict_defaults (missing-key edge case), factory tests
+# (factory_method and factory_unique_ids test non-trivial ID generation),
+# and created_at auto-populate (non-obvious side-effect on construction).
 # ===========================================================================
 
 class TestDecisionRequest:
-    def test_required_fields(self) -> None:
-        r = _req()
-        assert r.request_id == "req-001"
-        assert r.task_id == "t1"
-        assert r.status == "pending"
-
     def test_created_at_auto_populates(self) -> None:
         r = _req()
         assert r.created_at  # non-empty
@@ -76,21 +75,15 @@ class TestDecisionRequest:
         r = DecisionRequest.create("t1", "plan_review", "s", options=["go", "stop", "modify"])
         assert r.options == ["go", "stop", "modify"]
 
-    def test_deadline_optional(self) -> None:
-        r = _req()
-        assert r.deadline is None
-
 
 # ===========================================================================
 # DecisionResolution model
+# DECISION: Removed test_required_fields (trivial field storage).
+# Kept: roundtrip, from_dict_defaults (missing-key edge case), and
+# resolved_at auto-populate (non-obvious side-effect).
 # ===========================================================================
 
 class TestDecisionResolution:
-    def test_required_fields(self) -> None:
-        r = DecisionResolution(request_id="req-001", chosen_option="approve")
-        assert r.chosen_option == "approve"
-        assert r.resolved_by == "human"
-
     def test_resolved_at_auto_populates(self) -> None:
         r = DecisionResolution(request_id="r", chosen_option="ok")
         assert r.resolved_at  # non-empty
@@ -170,6 +163,9 @@ class TestDecisionManagerGet:
 
 # ===========================================================================
 # DecisionManager — pending() and list_all()
+# DECISION: Merged test_empty_dir_returns_empty and test_missing_dir_returns_empty
+# into a single parametrized test. Listing behaviour tests kept separate
+# because they require state setup (request + resolve).
 # ===========================================================================
 
 class TestDecisionManagerListing:
@@ -191,18 +187,21 @@ class TestDecisionManagerListing:
         ids = {r.request_id for r in all_reqs}
         assert ids == {"r1", "r2"}
 
-    def test_empty_dir_returns_empty(self, tmp_path: Path) -> None:
-        mgr = DecisionManager(decisions_dir=tmp_path)
+    @pytest.mark.parametrize("use_nonexistent", [False, True])
+    def test_empty_listing(self, tmp_path: Path, use_nonexistent: bool) -> None:
+        decisions_dir = tmp_path / "nonexistent" if use_nonexistent else tmp_path
+        mgr = DecisionManager(decisions_dir=decisions_dir)
         assert mgr.pending() == []
-        assert mgr.list_all() == []
-
-    def test_missing_dir_returns_empty(self, tmp_path: Path) -> None:
-        mgr = DecisionManager(decisions_dir=tmp_path / "nonexistent")
         assert mgr.list_all() == []
 
 
 # ===========================================================================
 # DecisionManager — resolve()
+# DECISION: Merged test_resolve_updates_status and test_resolve_with_rationale
+# (both test that get() returns a resolved request, just with different extra
+# fields checked — unified into test_resolve_updates_status which now also
+# verifies the status). test_resolve_missing_returns_false and
+# test_resolve_already_resolved_returns_false merged into parametrized test.
 # ===========================================================================
 
 class TestDecisionManagerResolve:
@@ -235,23 +234,20 @@ class TestDecisionManagerResolve:
         assert len(received) == 1
         assert received[0].payload["chosen_option"] == "approve"
 
-    def test_resolve_missing_returns_false(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("setup,resolve_id,expected", [
+        # missing request
+        (False, "nonexistent", False),
+        # already resolved
+        (True, "r1", False),
+    ])
+    def test_resolve_returns_false_on_failure(
+        self, tmp_path: Path, setup: bool, resolve_id: str, expected: bool
+    ) -> None:
         mgr = DecisionManager(decisions_dir=tmp_path)
-        assert mgr.resolve("nonexistent", "approve") is False
-
-    def test_resolve_already_resolved_returns_false(self, tmp_path: Path) -> None:
-        mgr = DecisionManager(decisions_dir=tmp_path)
-        mgr.request(_req(request_id="r1"))
-        mgr.resolve("r1", "approve")
-        assert mgr.resolve("r1", "reject") is False
-
-    def test_resolve_with_rationale(self, tmp_path: Path) -> None:
-        mgr = DecisionManager(decisions_dir=tmp_path)
-        mgr.request(_req(request_id="r1"))
-        mgr.resolve("r1", "reject", rationale="needs rework")
-        r = mgr.get("r1")
-        assert r is not None
-        assert r.status == "resolved"
+        if setup:
+            mgr.request(_req(request_id="r1"))
+            mgr.resolve("r1", "approve")
+        assert mgr.resolve(resolve_id, "reject") is expected
 
 
 # ===========================================================================

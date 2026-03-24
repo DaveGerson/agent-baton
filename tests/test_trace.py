@@ -54,38 +54,12 @@ def _make_trace(
 
 # ---------------------------------------------------------------------------
 # TraceEvent — dataclass fields and defaults
+# DECISION: Removed test_required_fields_stored, test_optional_fields_defaults,
+# test_agent_name_can_be_none — trivial field-existence tests. Kept
+# test_details_is_independent_per_instance (mutation / list independence, not trivial).
 # ---------------------------------------------------------------------------
 
 class TestTraceEventFields:
-    def test_required_fields_stored(self) -> None:
-        ev = TraceEvent(
-            timestamp="2026-03-20T14:30:00+00:00",
-            event_type="agent_start",
-            agent_name="architect",
-            phase=1,
-            step=1,
-        )
-        assert ev.timestamp == "2026-03-20T14:30:00+00:00"
-        assert ev.event_type == "agent_start"
-        assert ev.agent_name == "architect"
-        assert ev.phase == 1
-        assert ev.step == 1
-
-    def test_optional_fields_defaults(self) -> None:
-        ev = TraceEvent(
-            timestamp="t",
-            event_type="decision",
-            agent_name=None,
-            phase=0,
-            step=0,
-        )
-        assert ev.details == {}
-        assert ev.duration_seconds is None
-
-    def test_agent_name_can_be_none(self) -> None:
-        ev = _make_event(agent_name=None, event_type="gate_check")
-        assert ev.agent_name is None
-
     def test_details_is_independent_per_instance(self) -> None:
         ev1 = _make_event()
         ev2 = _make_event()
@@ -95,16 +69,14 @@ class TestTraceEventFields:
 
 # ---------------------------------------------------------------------------
 # TraceEvent — serialisation round-trip
+# DECISION: Removed test_to_dict_contains_all_keys (only checks structure),
+# test_from_dict_none_agent_name (trivial None check), and
+# test_from_dict_uses_defaults_for_missing_keys (duplicate of defaults test).
+# Kept test_to_dict_values_match (verifies values), test_from_dict_roundtrip
+# (identity roundtrip), and test_from_dict_handles_null_details (edge case).
 # ---------------------------------------------------------------------------
 
 class TestTraceEventSerialisation:
-    def test_to_dict_contains_all_keys(self) -> None:
-        ev = _make_event(event_type="file_read", duration_seconds=1.5)
-        d = ev.to_dict()
-        for key in ("timestamp", "event_type", "agent_name", "phase", "step",
-                    "details", "duration_seconds"):
-            assert key in d, f"Missing key: {key}"
-
     def test_to_dict_values_match(self) -> None:
         ev = _make_event(
             event_type="decision",
@@ -122,7 +94,7 @@ class TestTraceEventSerialisation:
         assert d["details"] == {"reason": "REST is simpler"}
         assert d["duration_seconds"] == 42.0
 
-    def test_from_dict_roundtrip(self) -> None:
+    def test_roundtrip_is_identity(self) -> None:
         ev = _make_event(event_type="gate_result", details={"result": "PASS"})
         restored = TraceEvent.from_dict(ev.to_dict())
         assert restored.timestamp == ev.timestamp
@@ -133,20 +105,6 @@ class TestTraceEventSerialisation:
         assert restored.details == ev.details
         assert restored.duration_seconds == ev.duration_seconds
 
-    def test_from_dict_none_agent_name(self) -> None:
-        d = {
-            "timestamp": "t", "event_type": "gate_check",
-            "agent_name": None, "phase": 1, "step": 0,
-        }
-        ev = TraceEvent.from_dict(d)
-        assert ev.agent_name is None
-
-    def test_from_dict_uses_defaults_for_missing_keys(self) -> None:
-        ev = TraceEvent.from_dict({"timestamp": "t", "event_type": "e",
-                                   "agent_name": None, "phase": 0, "step": 0})
-        assert ev.details == {}
-        assert ev.duration_seconds is None
-
     def test_from_dict_handles_null_details(self) -> None:
         d = {"timestamp": "t", "event_type": "e", "agent_name": None,
              "phase": 0, "step": 0, "details": None}
@@ -156,21 +114,12 @@ class TestTraceEventSerialisation:
 
 # ---------------------------------------------------------------------------
 # TaskTrace — dataclass fields and defaults
+# DECISION: Removed test_required_fields_stored and test_optional_fields_defaults
+# (trivial field-existence / default-value checks).
+# Kept test_events_list_is_independent_per_instance (mutation guard, not trivial).
 # ---------------------------------------------------------------------------
 
 class TestTaskTraceFields:
-    def test_required_fields_stored(self) -> None:
-        trace = TaskTrace(task_id="my-task")
-        assert trace.task_id == "my-task"
-
-    def test_optional_fields_defaults(self) -> None:
-        trace = TaskTrace(task_id="t")
-        assert trace.plan_snapshot == {}
-        assert trace.events == []
-        assert trace.started_at == ""
-        assert trace.completed_at is None
-        assert trace.outcome is None
-
     def test_events_list_is_independent_per_instance(self) -> None:
         t1 = TaskTrace(task_id="t1")
         t2 = TaskTrace(task_id="t2")
@@ -180,16 +129,11 @@ class TestTaskTraceFields:
 
 # ---------------------------------------------------------------------------
 # TaskTrace — serialisation round-trip
+# DECISION: Removed test_to_dict_contains_all_keys (structure-only check).
+# Kept tests that verify values, serialisation behaviour, or null handling.
 # ---------------------------------------------------------------------------
 
 class TestTaskTraceSerialisation:
-    def test_to_dict_contains_all_keys(self) -> None:
-        trace = _make_trace()
-        d = trace.to_dict()
-        for key in ("task_id", "plan_snapshot", "events",
-                    "started_at", "completed_at", "outcome"):
-            assert key in d
-
     def test_events_serialised_as_list_of_dicts(self) -> None:
         trace = _make_trace(events=[_make_event(), _make_event(event_type="agent_complete")])
         d = trace.to_dict()
@@ -198,7 +142,7 @@ class TestTaskTraceSerialisation:
         assert d["events"][0]["event_type"] == "agent_start"
         assert d["events"][1]["event_type"] == "agent_complete"
 
-    def test_from_dict_roundtrip(self) -> None:
+    def test_roundtrip_is_identity(self) -> None:
         original = _make_trace(
             task_id="roundtrip-task",
             events=[_make_event(), _make_event(event_type="decision")],
@@ -211,19 +155,15 @@ class TestTaskTraceSerialisation:
         assert len(restored.events) == 2
         assert restored.events[1].event_type == "decision"
 
-    def test_from_dict_empty_events(self) -> None:
-        trace = TaskTrace.from_dict({"task_id": "empty", "events": []})
-        assert trace.events == []
+    def test_from_dict_handles_null_and_missing(self) -> None:
+        # Merged: handles null events list and missing optional keys
+        trace_null = TaskTrace.from_dict({"task_id": "t", "events": None})
+        assert trace_null.events == []
 
-    def test_from_dict_handles_null_events(self) -> None:
-        trace = TaskTrace.from_dict({"task_id": "t", "events": None})
-        assert trace.events == []
-
-    def test_from_dict_handles_missing_keys(self) -> None:
-        trace = TaskTrace.from_dict({"task_id": "minimal"})
-        assert trace.plan_snapshot == {}
-        assert trace.completed_at is None
-        assert trace.outcome is None
+        trace_minimal = TaskTrace.from_dict({"task_id": "minimal"})
+        assert trace_minimal.plan_snapshot == {}
+        assert trace_minimal.completed_at is None
+        assert trace_minimal.outcome is None
 
     def test_json_serialisable(self) -> None:
         trace = _make_trace(events=[_make_event()])
@@ -234,28 +174,22 @@ class TestTaskTraceSerialisation:
 
 # ---------------------------------------------------------------------------
 # TraceRecorder — start_trace
+# DECISION: Consolidated trivial start_trace field tests (task_id, started_at,
+# completed_at, events list) into one test. Kept plan_snapshot tests separate
+# since they cover two distinct behaviours (explicit value vs default).
 # ---------------------------------------------------------------------------
 
 class TestStartTrace:
-    def test_returns_task_trace(self, tmp_path: Path) -> None:
+    def test_start_trace_initial_state(self, tmp_path: Path) -> None:
+        """Covers: returns TaskTrace, task_id stored, started_at populated,
+        completed_at is None, events list starts empty."""
         rec = TraceRecorder(tmp_path)
         trace = rec.start_trace("my-task")
         assert isinstance(trace, TaskTrace)
-
-    def test_task_id_stored(self, tmp_path: Path) -> None:
-        rec = TraceRecorder(tmp_path)
-        trace = rec.start_trace("my-task")
         assert trace.task_id == "my-task"
-
-    def test_started_at_is_populated(self, tmp_path: Path) -> None:
-        rec = TraceRecorder(tmp_path)
-        trace = rec.start_trace("t")
         assert trace.started_at != ""
-
-    def test_completed_at_is_none(self, tmp_path: Path) -> None:
-        rec = TraceRecorder(tmp_path)
-        trace = rec.start_trace("t")
         assert trace.completed_at is None
+        assert trace.events == []
 
     def test_plan_snapshot_stored(self, tmp_path: Path) -> None:
         rec = TraceRecorder(tmp_path)
@@ -268,31 +202,24 @@ class TestStartTrace:
         trace = rec.start_trace("t")
         assert trace.plan_snapshot == {}
 
-    def test_events_list_starts_empty(self, tmp_path: Path) -> None:
-        rec = TraceRecorder(tmp_path)
-        trace = rec.start_trace("t")
-        assert trace.events == []
-
 
 # ---------------------------------------------------------------------------
 # TraceRecorder — record_event
+# DECISION: Collapsed the five individual field tests (returns TraceEvent,
+# event appended, fields stored, timestamp populated, defaults) into two tests:
+# one for the append/count behaviour, one for field values and defaults.
 # ---------------------------------------------------------------------------
 
 class TestRecordEvent:
-    def test_returns_trace_event(self, tmp_path: Path) -> None:
+    def test_events_appended_in_order(self, tmp_path: Path) -> None:
         rec = TraceRecorder(tmp_path)
         trace = rec.start_trace("t")
         ev = rec.record_event(trace, "agent_start", agent_name="arch")
-        assert isinstance(ev, TraceEvent)
-
-    def test_event_appended_to_trace(self, tmp_path: Path) -> None:
-        rec = TraceRecorder(tmp_path)
-        trace = rec.start_trace("t")
-        rec.record_event(trace, "agent_start")
         rec.record_event(trace, "agent_complete")
+        assert isinstance(ev, TraceEvent)
         assert len(trace.events) == 2
 
-    def test_event_fields_stored(self, tmp_path: Path) -> None:
+    def test_event_fields_and_defaults(self, tmp_path: Path) -> None:
         rec = TraceRecorder(tmp_path)
         trace = rec.start_trace("t")
         ev = rec.record_event(
@@ -309,24 +236,12 @@ class TestRecordEvent:
         assert ev.step == 3
         assert ev.details == {"reason": "simpler"}
         assert ev.duration_seconds == 15.5
-
-    def test_event_timestamp_is_populated(self, tmp_path: Path) -> None:
-        rec = TraceRecorder(tmp_path)
-        trace = rec.start_trace("t")
-        ev = rec.record_event(trace, "gate_check")
         assert ev.timestamp != ""
 
-    def test_details_defaults_to_empty(self, tmp_path: Path) -> None:
-        rec = TraceRecorder(tmp_path)
-        trace = rec.start_trace("t")
-        ev = rec.record_event(trace, "agent_start")
-        assert ev.details == {}
-
-    def test_duration_seconds_defaults_to_none(self, tmp_path: Path) -> None:
-        rec = TraceRecorder(tmp_path)
-        trace = rec.start_trace("t")
-        ev = rec.record_event(trace, "agent_start")
-        assert ev.duration_seconds is None
+        # Defaults
+        ev2 = rec.record_event(trace, "gate_check")
+        assert ev2.details == {}
+        assert ev2.duration_seconds is None
 
 
 # ---------------------------------------------------------------------------
@@ -334,16 +249,11 @@ class TestRecordEvent:
 # ---------------------------------------------------------------------------
 
 class TestCompleteTrace:
-    def test_returns_path(self, tmp_path: Path) -> None:
-        rec = TraceRecorder(tmp_path)
-        trace = rec.start_trace("my-task")
-        path = rec.complete_trace(trace)
-        assert isinstance(path, Path)
-
     def test_file_written_to_traces_dir(self, tmp_path: Path) -> None:
         rec = TraceRecorder(tmp_path)
         trace = rec.start_trace("file-test")
         path = rec.complete_trace(trace)
+        assert isinstance(path, Path)
         assert path.exists()
         assert path.parent == tmp_path / "traces"
         assert path.name == "file-test.json"
@@ -354,16 +264,11 @@ class TestCompleteTrace:
         path = rec.complete_trace(trace)
         assert path.exists()
 
-    def test_completed_at_set(self, tmp_path: Path) -> None:
-        rec = TraceRecorder(tmp_path)
-        trace = rec.start_trace("t")
-        rec.complete_trace(trace)
-        assert trace.completed_at is not None
-
-    def test_outcome_stored(self, tmp_path: Path) -> None:
+    def test_completed_at_set_and_outcome_stored(self, tmp_path: Path) -> None:
         rec = TraceRecorder(tmp_path)
         trace = rec.start_trace("t")
         rec.complete_trace(trace, outcome="SHIP")
+        assert trace.completed_at is not None
         assert trace.outcome == "SHIP"
 
     def test_outcome_none_by_default(self, tmp_path: Path) -> None:
@@ -372,23 +277,16 @@ class TestCompleteTrace:
         rec.complete_trace(trace)
         assert trace.outcome is None
 
-    def test_written_file_is_valid_json(self, tmp_path: Path) -> None:
+    def test_written_file_is_valid_json_with_correct_content(self, tmp_path: Path) -> None:
         rec = TraceRecorder(tmp_path)
         trace = rec.start_trace("json-test")
         rec.record_event(trace, "agent_start", agent_name="arch")
+        rec.record_event(trace, "agent_complete", agent_name="arch", phase=1, step=1)
         path = rec.complete_trace(trace, outcome="SHIP")
         data = json.loads(path.read_text(encoding="utf-8"))
         assert data["task_id"] == "json-test"
         assert data["outcome"] == "SHIP"
         assert isinstance(data["events"], list)
-
-    def test_events_preserved_in_file(self, tmp_path: Path) -> None:
-        rec = TraceRecorder(tmp_path)
-        trace = rec.start_trace("events-test")
-        rec.record_event(trace, "agent_start", agent_name="arch", phase=1, step=1)
-        rec.record_event(trace, "agent_complete", agent_name="arch", phase=1, step=1)
-        path = rec.complete_trace(trace)
-        data = json.loads(path.read_text(encoding="utf-8"))
         assert len(data["events"]) == 2
 
 
@@ -397,13 +295,6 @@ class TestCompleteTrace:
 # ---------------------------------------------------------------------------
 
 class TestLoadTrace:
-    def test_load_returns_task_trace(self, tmp_path: Path) -> None:
-        rec = TraceRecorder(tmp_path)
-        trace = rec.start_trace("load-test")
-        rec.complete_trace(trace, outcome="DONE")
-        loaded = rec.load_trace("load-test")
-        assert isinstance(loaded, TaskTrace)
-
     def test_load_restores_all_fields(self, tmp_path: Path) -> None:
         rec = TraceRecorder(tmp_path)
         trace = rec.start_trace("full-restore", plan_snapshot={"phases": []})
@@ -412,7 +303,7 @@ class TestLoadTrace:
         rec.complete_trace(trace, outcome="SHIP")
 
         loaded = rec.load_trace("full-restore")
-        assert loaded is not None
+        assert isinstance(loaded, TaskTrace)
         assert loaded.task_id == "full-restore"
         assert loaded.outcome == "SHIP"
         assert loaded.plan_snapshot == {"phases": []}
@@ -463,19 +354,14 @@ class TestListTraces:
         names = [p.stem for p in paths]
         assert names == ["gamma", "beta", "alpha"]
 
-    def test_count_limits_results(self, tmp_path: Path) -> None:
+    def test_count_limits_and_overshoots(self, tmp_path: Path) -> None:
+        # Merged: count=3 from 5 items, count=100 from 3 items
         rec = TraceRecorder(tmp_path)
         for i in range(5):
             t = rec.start_trace(f"task-{i}")
             rec.complete_trace(t)
         assert len(rec.list_traces(count=3)) == 3
-
-    def test_count_larger_than_available_returns_all(self, tmp_path: Path) -> None:
-        rec = TraceRecorder(tmp_path)
-        for i in range(3):
-            t = rec.start_trace(f"task-{i}")
-            rec.complete_trace(t)
-        assert len(rec.list_traces(count=100)) == 3
+        assert len(rec.list_traces(count=100)) == 5
 
 
 # ---------------------------------------------------------------------------
@@ -541,6 +427,9 @@ class TestConcurrentTraces:
 
 # ---------------------------------------------------------------------------
 # TraceRenderer — render_timeline
+# DECISION: Collapsed 9 individual "contains X" string tests into 1 parameterized
+# test. Kept test_empty_trace_handled and test_time_formatted_as_hms as separate
+# tests since they use different fixtures / verify distinct rendering logic.
 # ---------------------------------------------------------------------------
 
 class TestRenderTimeline:
@@ -566,62 +455,29 @@ class TestRenderTimeline:
         return _make_trace(task_id="my-task-id", events=events,
                            started_at="2026-03-20T14:30:00+00:00")
 
-    def test_header_contains_task_id(self) -> None:
+    @pytest.mark.parametrize("expected_substring", [
+        "my-task-id",       # header: task_id
+        "2026-03-20",       # header: started_at date
+        "SHIP",             # header: outcome
+        "Phase 1",          # phase header
+        "Phase 2",          # phase header
+        "Design",           # phase name from snapshot
+        "Implement",        # phase name from snapshot
+        "agent_start",      # event type
+        "decision",         # event type
+        "agent_complete",   # event type
+        "gate_check",       # event type
+        "gate_result",      # event type
+        "architect",        # agent name
+        "backend-engineer", # agent name
+        "80s",              # duration for agent_complete
+        "Chose REST over GraphQL",  # detail reason
+        "PASS",             # gate result detail
+    ])
+    def test_timeline_contains(self, expected_substring: str) -> None:
         renderer = TraceRenderer()
         output = renderer.render_timeline(self._standard_trace())
-        assert "my-task-id" in output
-
-    def test_header_contains_started_at(self) -> None:
-        renderer = TraceRenderer()
-        output = renderer.render_timeline(self._standard_trace())
-        assert "2026-03-20" in output
-
-    def test_header_contains_outcome(self) -> None:
-        renderer = TraceRenderer()
-        output = renderer.render_timeline(self._standard_trace())
-        assert "SHIP" in output
-
-    def test_phase_headers_present(self) -> None:
-        renderer = TraceRenderer()
-        output = renderer.render_timeline(self._standard_trace())
-        assert "Phase 1" in output
-        assert "Phase 2" in output
-
-    def test_phase_name_from_snapshot(self) -> None:
-        renderer = TraceRenderer()
-        output = renderer.render_timeline(self._standard_trace())
-        assert "Design" in output
-        assert "Implement" in output
-
-    def test_event_types_appear(self) -> None:
-        renderer = TraceRenderer()
-        output = renderer.render_timeline(self._standard_trace())
-        assert "agent_start" in output
-        assert "decision" in output
-        assert "agent_complete" in output
-        assert "gate_check" in output
-        assert "gate_result" in output
-
-    def test_agent_names_appear(self) -> None:
-        renderer = TraceRenderer()
-        output = renderer.render_timeline(self._standard_trace())
-        assert "architect" in output
-        assert "backend-engineer" in output
-
-    def test_duration_shown_for_agent_complete(self) -> None:
-        renderer = TraceRenderer()
-        output = renderer.render_timeline(self._standard_trace())
-        assert "80s" in output
-
-    def test_detail_reason_shown(self) -> None:
-        renderer = TraceRenderer()
-        output = renderer.render_timeline(self._standard_trace())
-        assert "Chose REST over GraphQL" in output
-
-    def test_gate_result_shown(self) -> None:
-        renderer = TraceRenderer()
-        output = renderer.render_timeline(self._standard_trace())
-        assert "PASS" in output
+        assert expected_substring in output
 
     def test_empty_trace_handled(self) -> None:
         renderer = TraceRenderer()
@@ -638,6 +494,10 @@ class TestRenderTimeline:
 
 # ---------------------------------------------------------------------------
 # TraceRenderer — render_summary
+# DECISION: Collapsed 7 individual "contains X" string tests into 1 parameterized
+# test. Kept test_empty_trace_summary, test_no_outcome_shown_as_na, and
+# test_in_progress_when_no_completed_at as separate tests because each uses a
+# different trace fixture and tests a distinct rendering branch.
 # ---------------------------------------------------------------------------
 
 class TestRenderSummary:
@@ -658,36 +518,23 @@ class TestRenderSummary:
             outcome="SHIP",
         )
 
-    def test_task_id_in_summary(self) -> None:
+    @pytest.mark.parametrize("expected_substring", [
+        "summary-task",      # task id
+        "SHIP",              # outcome
+        "4",                 # event count (4 events total)
+        "architect",         # agent name
+        "backend-engineer",  # agent name
+        "PASS",              # gate result
+    ])
+    def test_summary_contains(self, expected_substring: str) -> None:
         renderer = TraceRenderer()
         output = renderer.render_summary(self._traced_task())
-        assert "summary-task" in output
-
-    def test_outcome_in_summary(self) -> None:
-        renderer = TraceRenderer()
-        output = renderer.render_summary(self._traced_task())
-        assert "SHIP" in output
+        assert expected_substring in output
 
     def test_duration_in_summary(self) -> None:
         renderer = TraceRenderer()
         output = renderer.render_summary(self._traced_task())
         assert "5m" in output or "300s" in output or "5" in output
-
-    def test_event_count_in_summary(self) -> None:
-        renderer = TraceRenderer()
-        output = renderer.render_summary(self._traced_task())
-        assert "4" in output  # 4 events total
-
-    def test_agent_count_and_names_in_summary(self) -> None:
-        renderer = TraceRenderer()
-        output = renderer.render_summary(self._traced_task())
-        assert "architect" in output
-        assert "backend-engineer" in output
-
-    def test_gate_results_in_summary(self) -> None:
-        renderer = TraceRenderer()
-        output = renderer.render_summary(self._traced_task())
-        assert "PASS" in output
 
     def test_empty_trace_summary(self) -> None:
         renderer = TraceRenderer()

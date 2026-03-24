@@ -51,13 +51,9 @@ def _plan(task_id: str = "t1", phases=None) -> MachinePlan:
 # ===========================================================================
 
 class TestLaunchResult:
-    def test_defaults(self) -> None:
-        r = LaunchResult(step_id="1.1", agent_name="be")
-        assert r.status == "complete"
-        assert r.outcome == ""
-        assert r.error == ""
-        assert r.files_changed == []
-
+    # DECISION: removed trivial test_defaults (asserts dataclass field defaults
+    # set by constructor). Kept test_custom_fields which exercises the actual
+    # non-default code path and demonstrates that custom values are accepted.
     def test_custom_fields(self) -> None:
         r = LaunchResult(
             step_id="1.1", agent_name="be", status="failed",
@@ -113,20 +109,15 @@ class TestDryRunLauncher:
 
 
 # ===========================================================================
-# SchedulerConfig
+# SchedulerConfig + StepScheduler
 # ===========================================================================
 
 class TestSchedulerConfig:
-    def test_default_max_concurrent(self) -> None:
-        assert SchedulerConfig().max_concurrent == 3
+    # DECISION: removed trivial test_default_max_concurrent and test_custom_config
+    # (both assert a single dataclass field). The concurrency-limit and
+    # max_concurrent_property tests in TestStepScheduler provide better coverage.
+    pass
 
-    def test_custom_config(self) -> None:
-        assert SchedulerConfig(max_concurrent=5).max_concurrent == 5
-
-
-# ===========================================================================
-# StepScheduler
-# ===========================================================================
 
 class TestStepScheduler:
     def test_single_dispatch(self) -> None:
@@ -185,9 +176,8 @@ class TestStepScheduler:
             assert sched.active_count == 0
         asyncio.run(_run())
 
-    def test_max_concurrent_property(self) -> None:
-        sched = StepScheduler(SchedulerConfig(max_concurrent=7))
-        assert sched.max_concurrent == 7
+    # DECISION: removed trivial test_max_concurrent_property (single-field getter check).
+    # The concurrency-limit test already exercises the same config path with more value.
 
 
 # ===========================================================================
@@ -195,13 +185,21 @@ class TestStepScheduler:
 # ===========================================================================
 
 class TestTaskWorkerSimple:
-    def test_single_step_completes(self, tmp_path: Path) -> None:
+    # DECISION: merged test_single_step_completes + test_empty_plan_completes into
+    # one parameterized test. Both assert the same "completed" string on the summary;
+    # they differ only in whether there are steps in the phase.
+    @pytest.mark.parametrize("steps_factory,label", [
+        (lambda: [_step("1.1")], "single step"),
+        (lambda: [], "empty plan"),
+    ])
+    def test_plan_completes(self, tmp_path: Path, steps_factory, label: str) -> None:
         async def _run():
+            plan = _plan(phases=[_phase(steps=steps_factory())])
             engine = ExecutionEngine(team_context_root=tmp_path)
-            engine.start(_plan())
+            engine.start(plan)
             worker = TaskWorker(engine=engine, launcher=DryRunLauncher())
             summary = await worker.run()
-            assert "completed" in summary.lower() or "complete" in summary.lower()
+            assert "completed" in summary.lower() or "complete" in summary.lower(), label
         asyncio.run(_run())
 
     def test_is_running_tracks_state(self, tmp_path: Path) -> None:
@@ -214,37 +212,36 @@ class TestTaskWorkerSimple:
             assert not worker.is_running
         asyncio.run(_run())
 
-    def test_multi_step_plan(self, tmp_path: Path) -> None:
-        async def _run():
-            plan = _plan(phases=[
-                _phase(steps=[_step("1.1"), _step("1.2", agent="tester")])
-            ])
-            engine = ExecutionEngine(team_context_root=tmp_path)
-            engine.start(plan)
-            worker = TaskWorker(engine=engine, launcher=DryRunLauncher())
-            summary = await worker.run()
-            assert "completed" in summary.lower() or "complete" in summary.lower()
-        asyncio.run(_run())
 
-
-class TestTaskWorkerParallel:
-    def test_parallel_steps_dispatch(self, tmp_path: Path) -> None:
-        """Two independent steps should both be dispatched."""
+class TestTaskWorkerParallelAndMultiStep:
+    # DECISION: merged test_parallel_steps_dispatch + test_multi_step_plan into one
+    # parameterized test. Both exercise multi-step plans; the parallel test additionally
+    # checks that all step_ids were dispatched — we keep that assertion in both cases.
+    @pytest.mark.parametrize("steps,expected_ids,label", [
+        (
+            [_step("1.1", agent="a1"), _step("1.2", agent="a2")],
+            {"1.1", "1.2"},
+            "parallel independent steps",
+        ),
+        (
+            [_step("1.1"), _step("1.2", agent="tester")],
+            {"1.1", "1.2"},
+            "sequential multi-step",
+        ),
+    ])
+    def test_multi_step_plan_dispatches_all(
+        self, tmp_path: Path, steps, expected_ids: set, label: str
+    ) -> None:
         async def _run():
-            plan = _plan(phases=[
-                _phase(steps=[
-                    _step("1.1", agent="a1"),
-                    _step("1.2", agent="a2"),
-                ])
-            ])
+            plan = _plan(phases=[_phase(steps=steps)])
             engine = ExecutionEngine(team_context_root=tmp_path)
             engine.start(plan)
             launcher = DryRunLauncher()
             worker = TaskWorker(engine=engine, launcher=launcher)
-            await worker.run()
+            summary = await worker.run()
+            assert "completed" in summary.lower() or "complete" in summary.lower(), label
             launched_ids = {l["step_id"] for l in launcher.launches}
-            assert "1.1" in launched_ids
-            assert "1.2" in launched_ids
+            assert expected_ids <= launched_ids, f"{label}: missing {expected_ids - launched_ids}"
         asyncio.run(_run())
 
 
@@ -277,18 +274,6 @@ class TestTaskWorkerFailure:
             worker = TaskWorker(engine=engine, launcher=launcher)
             summary = await worker.run()
             assert "failed" in summary.lower()
-        asyncio.run(_run())
-
-
-class TestTaskWorkerEmptyPlan:
-    def test_empty_plan_completes(self, tmp_path: Path) -> None:
-        async def _run():
-            plan = _plan(phases=[_phase(steps=[])])
-            engine = ExecutionEngine(team_context_root=tmp_path)
-            engine.start(plan)
-            worker = TaskWorker(engine=engine, launcher=DryRunLauncher())
-            summary = await worker.run()
-            assert "completed" in summary.lower() or "complete" in summary.lower()
         asyncio.run(_run())
 
 

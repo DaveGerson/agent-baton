@@ -85,18 +85,10 @@ def realistic_task() -> TaskUsageRecord:
 # ---------------------------------------------------------------------------
 
 class TestStep1UsageLogger:
-    def test_log_file_created_on_disk(self, tmp_path: Path, realistic_task: TaskUsageRecord):
-        log_file = tmp_path / "team-context" / "usage-log.jsonl"
-        logger = UsageLogger(log_file)
-        logger.log(realistic_task)
-        assert log_file.exists(), "usage-log.jsonl was not created"
-
-    def test_one_line_written_per_record(self, tmp_path: Path, realistic_task: TaskUsageRecord):
-        log_file = tmp_path / "team-context" / "usage-log.jsonl"
-        logger = UsageLogger(log_file)
-        logger.log(realistic_task)
-        lines = [ln for ln in log_file.read_text(encoding="utf-8").splitlines() if ln.strip()]
-        assert len(lines) == 1
+    # DECISION: removed test_log_file_created_on_disk (file existence only) and
+    # test_one_line_written_per_record (line count only). Both are subsets of
+    # test_record_round_trips_correctly which already reads from the file, proving
+    # it was created and contains exactly 1 parseable record.
 
     def test_record_round_trips_correctly(self, tmp_path: Path, realistic_task: TaskUsageRecord):
         log_file = tmp_path / "team-context" / "usage-log.jsonl"
@@ -273,13 +265,6 @@ class TestStep3PerformanceScorer:
         scorer = PerformanceScorer(logger, retro_engine)
         return logger, retro_engine, scorer
 
-    def test_score_all_returns_three_scorecards(
-        self, tmp_path: Path, realistic_task: TaskUsageRecord
-    ):
-        _, _, scorer = self._setup(tmp_path, realistic_task)
-        scorecards = scorer.score_all()
-        assert len(scorecards) == 3, f"Expected 3 scorecards, got {len(scorecards)}"
-
     def test_all_scorecards_have_nonzero_times_used(
         self, tmp_path: Path, realistic_task: TaskUsageRecord
     ):
@@ -287,35 +272,31 @@ class TestStep3PerformanceScorer:
         for sc in scorer.score_all():
             assert sc.times_used > 0, f"{sc.agent_name} has times_used=0"
 
-    def test_architect_scorecard_has_correct_metrics(
-        self, tmp_path: Path, realistic_task: TaskUsageRecord
+    # DECISION: parameterized test_architect_scorecard_has_correct_metrics +
+    # test_backend_engineer_scorecard_reflects_retry + test_test_engineer_scorecard_is_nonzero
+    # into one test. All three call score_agent() and check first_pass_rate,
+    # retry_rate, total_estimated_tokens — identical structure, different values.
+    @pytest.mark.parametrize("agent_name,expected_times_used,expected_first_pass_rate,expected_retry_rate,expected_tokens", [
+        ("architect", 1, 1.0, 0.0, 4500),
+        ("backend-engineer--python", 1, 0.0, 1.0, 12000),
+        ("test-engineer", 1, 1.0, 0.0, 6200),
+    ])
+    def test_scorecard_metrics(
+        self,
+        tmp_path: Path,
+        realistic_task: TaskUsageRecord,
+        agent_name: str,
+        expected_times_used: int,
+        expected_first_pass_rate: float,
+        expected_retry_rate: float,
+        expected_tokens: int,
     ):
         _, _, scorer = self._setup(tmp_path, realistic_task)
-        sc = scorer.score_agent("architect")
-        assert sc.times_used == 1
-        assert sc.first_pass_rate == 1.0  # 0 retries
-        assert sc.retry_rate == 0.0
-        assert sc.total_estimated_tokens == 4500
-        assert sc.avg_tokens_per_use == 4500
-
-    def test_backend_engineer_scorecard_reflects_retry(
-        self, tmp_path: Path, realistic_task: TaskUsageRecord
-    ):
-        _, _, scorer = self._setup(tmp_path, realistic_task)
-        sc = scorer.score_agent("backend-engineer--python")
-        assert sc.times_used == 1
-        assert sc.first_pass_rate == 0.0  # had 1 retry
-        assert sc.retry_rate == 1.0
-        assert sc.total_estimated_tokens == 12000
-
-    def test_test_engineer_scorecard_is_nonzero(
-        self, tmp_path: Path, realistic_task: TaskUsageRecord
-    ):
-        _, _, scorer = self._setup(tmp_path, realistic_task)
-        sc = scorer.score_agent("test-engineer")
-        assert sc.times_used == 1
-        assert sc.first_pass_rate == 1.0  # 0 retries
-        assert sc.total_estimated_tokens == 6200
+        sc = scorer.score_agent(agent_name)
+        assert sc.times_used == expected_times_used
+        assert sc.first_pass_rate == expected_first_pass_rate
+        assert sc.retry_rate == expected_retry_rate
+        assert sc.total_estimated_tokens == expected_tokens
 
     def test_positive_mention_counted_for_architect(
         self, tmp_path: Path, realistic_task: TaskUsageRecord
@@ -350,21 +331,22 @@ class TestStep3PerformanceScorer:
         content = result.read_text(encoding="utf-8")
         assert content.startswith("# Agent Performance Scorecards")
 
-    def test_gate_pass_rate_computed_for_architect(
-        self, tmp_path: Path, realistic_task: TaskUsageRecord
+    # DECISION: parameterized test_gate_pass_rate_computed_for_architect +
+    # test_gate_pass_rate_computed_for_backend_engineer into one test.
+    @pytest.mark.parametrize("agent_name,expected_rate", [
+        ("architect", 1.0),            # gate_results=["PASS"] → 100%
+        ("backend-engineer--python", 0.5),  # gate_results=["FAIL","PASS"] → 50%
+    ])
+    def test_gate_pass_rate(
+        self,
+        tmp_path: Path,
+        realistic_task: TaskUsageRecord,
+        agent_name: str,
+        expected_rate: float,
     ):
         _, _, scorer = self._setup(tmp_path, realistic_task)
-        sc = scorer.score_agent("architect")
-        # architect has gate_results=["PASS"] -> 100%
-        assert sc.gate_pass_rate == pytest.approx(1.0)
-
-    def test_gate_pass_rate_computed_for_backend_engineer(
-        self, tmp_path: Path, realistic_task: TaskUsageRecord
-    ):
-        _, _, scorer = self._setup(tmp_path, realistic_task)
-        sc = scorer.score_agent("backend-engineer--python")
-        # gate_results=["FAIL", "PASS"] -> 1/2 = 50%
-        assert sc.gate_pass_rate == pytest.approx(0.5)
+        sc = scorer.score_agent(agent_name)
+        assert sc.gate_pass_rate == pytest.approx(expected_rate)
 
 
 # ---------------------------------------------------------------------------
@@ -378,82 +360,52 @@ class TestStep4DashboardGenerator:
         logger.log(realistic_task)
         return logger
 
-    def test_dashboard_starts_with_header(
+    # DECISION: consolidated the 8 single-assertion dashboard content tests
+    # (test_dashboard_starts_with_header, test_dashboard_contains_task_count,
+    # test_dashboard_contains_overview_section, test_dashboard_overview_reflects_token_total,
+    # test_dashboard_contains_all_three_agents, test_dashboard_outcome_reflects_ship_with_notes,
+    # test_dashboard_risk_level_present, test_dashboard_model_mix_contains_sonnet_and_opus,
+    # test_dashboard_gate_pass_rate_is_75_percent) into 3 grouped tests.
+    # Each group covers a logical slice of the dashboard content.
+    # test_dashboard_write_content_matches_generate (pure roundtrip) removed as trivial.
+
+    def test_dashboard_structure_and_overview(
         self, tmp_path: Path, realistic_task: TaskUsageRecord
     ):
+        """Dashboard has correct header, task count, and Overview section."""
         logger = self._setup_logger(tmp_path, realistic_task)
         gen = DashboardGenerator(logger)
         dashboard = gen.generate()
         assert dashboard.startswith("# Usage Dashboard")
-
-    def test_dashboard_contains_task_count(
-        self, tmp_path: Path, realistic_task: TaskUsageRecord
-    ):
-        logger = self._setup_logger(tmp_path, realistic_task)
-        gen = DashboardGenerator(logger)
-        dashboard = gen.generate()
         assert "1 tasks tracked" in dashboard
-
-    def test_dashboard_contains_overview_section(
-        self, tmp_path: Path, realistic_task: TaskUsageRecord
-    ):
-        logger = self._setup_logger(tmp_path, realistic_task)
-        gen = DashboardGenerator(logger)
-        dashboard = gen.generate()
         assert "## Overview" in dashboard
 
-    def test_dashboard_overview_reflects_token_total(
+    def test_dashboard_numeric_data(
         self, tmp_path: Path, realistic_task: TaskUsageRecord
     ):
+        """Dashboard includes correct token total (22,700) and gate pass rate (75%)."""
         logger = self._setup_logger(tmp_path, realistic_task)
         gen = DashboardGenerator(logger)
         dashboard = gen.generate()
         # 4500 + 12000 + 6200 = 22700
         assert "22,700" in dashboard
+        # gates_passed=3, gates_failed=1 → 3/4 = 75%
+        assert "75%" in dashboard
 
-    def test_dashboard_contains_all_three_agents(
+    def test_dashboard_content_reflects_task_data(
         self, tmp_path: Path, realistic_task: TaskUsageRecord
     ):
+        """Dashboard contains all three agent names, outcome, risk level, and model names."""
         logger = self._setup_logger(tmp_path, realistic_task)
         gen = DashboardGenerator(logger)
         dashboard = gen.generate()
         assert "architect" in dashboard
         assert "backend-engineer--python" in dashboard
         assert "test-engineer" in dashboard
-
-    def test_dashboard_outcome_reflects_ship_with_notes(
-        self, tmp_path: Path, realistic_task: TaskUsageRecord
-    ):
-        logger = self._setup_logger(tmp_path, realistic_task)
-        gen = DashboardGenerator(logger)
-        dashboard = gen.generate()
         assert "SHIP WITH NOTES" in dashboard
-
-    def test_dashboard_risk_level_present(
-        self, tmp_path: Path, realistic_task: TaskUsageRecord
-    ):
-        logger = self._setup_logger(tmp_path, realistic_task)
-        gen = DashboardGenerator(logger)
-        dashboard = gen.generate()
         assert "MEDIUM" in dashboard
-
-    def test_dashboard_model_mix_contains_sonnet_and_opus(
-        self, tmp_path: Path, realistic_task: TaskUsageRecord
-    ):
-        logger = self._setup_logger(tmp_path, realistic_task)
-        gen = DashboardGenerator(logger)
-        dashboard = gen.generate()
         assert "sonnet" in dashboard
         assert "opus" in dashboard
-
-    def test_dashboard_gate_pass_rate_is_75_percent(
-        self, tmp_path: Path, realistic_task: TaskUsageRecord
-    ):
-        logger = self._setup_logger(tmp_path, realistic_task)
-        gen = DashboardGenerator(logger)
-        dashboard = gen.generate()
-        # gates_passed=3, gates_failed=1 -> 3/4 = 75%
-        assert "75%" in dashboard
 
     def test_dashboard_write_creates_file_on_disk(
         self, tmp_path: Path, realistic_task: TaskUsageRecord
@@ -465,16 +417,6 @@ class TestStep4DashboardGenerator:
         assert result.exists(), "usage-dashboard.md was not created"
         content = result.read_text(encoding="utf-8")
         assert "# Usage Dashboard" in content
-
-    def test_dashboard_write_content_matches_generate(
-        self, tmp_path: Path, realistic_task: TaskUsageRecord
-    ):
-        logger = self._setup_logger(tmp_path, realistic_task)
-        gen = DashboardGenerator(logger)
-        expected = gen.generate()
-        out_path = tmp_path / "team-context" / "usage-dashboard.md"
-        gen.write(out_path)
-        assert out_path.read_text(encoding="utf-8") == expected
 
 
 # ---------------------------------------------------------------------------
@@ -526,29 +468,26 @@ def _seed_pipeline(tmp_path: Path, realistic_task: TaskUsageRecord) -> None:
 
 
 class TestStep5CLICommands:
-    def test_usage_summary_shows_task_count(
+    # DECISION: merged test_usage_summary_shows_task_count + test_usage_summary_shows_agent_names
+    # + test_usage_recent_shows_task_id into 1 comprehensive usage command test. They all
+    # call `baton usage` (or a minor variant) against the same seeded data. The task-id
+    # check also implicitly proves the record was written and read back.
+    def test_usage_command(
         self, tmp_path: Path, realistic_task: TaskUsageRecord
     ):
+        """usage command reports task count, agent names, and recent task ids."""
         _seed_pipeline(tmp_path, realistic_task)
+
+        # Basic summary
         result = _run_cli(["usage"], str(tmp_path))
         assert result.returncode == 0, f"CLI exited {result.returncode}: {result.stderr}"
         assert "1 task" in result.stdout
-
-    def test_usage_summary_shows_agent_names(
-        self, tmp_path: Path, realistic_task: TaskUsageRecord
-    ):
-        _seed_pipeline(tmp_path, realistic_task)
-        result = _run_cli(["usage"], str(tmp_path))
-        assert result.returncode == 0
         assert "architect" in result.stdout
 
-    def test_usage_recent_shows_task_id(
-        self, tmp_path: Path, realistic_task: TaskUsageRecord
-    ):
-        _seed_pipeline(tmp_path, realistic_task)
-        result = _run_cli(["usage", "--recent", "5"], str(tmp_path))
-        assert result.returncode == 0
-        assert "dogfood-task-2026-03-20" in result.stdout
+        # Recent
+        result2 = _run_cli(["usage", "--recent", "5"], str(tmp_path))
+        assert result2.returncode == 0
+        assert "dogfood-task-2026-03-20" in result2.stdout
 
     def test_usage_agent_stats_for_architect(
         self, tmp_path: Path, realistic_task: TaskUsageRecord

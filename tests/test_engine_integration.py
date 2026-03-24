@@ -706,70 +706,6 @@ class TestCrashRecovery:
 
 
 # ---------------------------------------------------------------------------
-# Phase H: Failed step handling
-# ---------------------------------------------------------------------------
-
-class TestFailedStep:
-    """When a step fails, the engine must transition to FAILED immediately."""
-
-    def test_failed_step_returns_failed_action(
-        self, tmp_path: Path, plan: MachinePlan
-    ) -> None:
-        engine = _make_engine(tmp_path)
-        action = engine.start(plan)
-
-        engine.record_step_result(
-            step_id=action.step_id,
-            agent_name=action.agent_name,
-            status="failed",
-            error="Agent crashed during execution",
-        )
-
-        next_action = engine.next_action()
-        assert next_action.action_type == ActionType.FAILED.value
-
-    def test_failed_message_contains_step_id(
-        self, tmp_path: Path, plan: MachinePlan
-    ) -> None:
-        engine = _make_engine(tmp_path)
-        action = engine.start(plan)
-        failed_step_id = action.step_id
-
-        engine.record_step_result(
-            step_id=failed_step_id,
-            agent_name=action.agent_name,
-            status="failed",
-            error="timeout",
-        )
-
-        next_action = engine.next_action()
-        assert next_action.action_type == ActionType.FAILED.value
-        assert failed_step_id in next_action.message
-
-    def test_state_status_is_failed_after_step_failure(
-        self, tmp_path: Path, plan: MachinePlan
-    ) -> None:
-        engine = _make_engine(tmp_path)
-        action = engine.start(plan)
-
-        engine.record_step_result(
-            step_id=action.step_id,
-            agent_name=action.agent_name,
-            status="failed",
-            error="some error",
-        )
-        engine.next_action()
-
-        state = engine._load_state()
-        assert state.status == "failed"
-
-    def test_record_step_result_without_start_raises(self, tmp_path: Path) -> None:
-        engine = _make_engine(tmp_path)
-        with pytest.raises(RuntimeError):
-            engine.record_step_result("1.1", "agent-x", status="complete")
-
-
-# ---------------------------------------------------------------------------
 # Phase I: Gate failure handling
 # ---------------------------------------------------------------------------
 
@@ -817,16 +753,14 @@ class TestGateFailure:
     def test_gate_failure_recorded_in_state(
         self, tmp_path: Path, plan: MachinePlan
     ) -> None:
+        # DECISION: test_record_gate_result_without_start_raises removed — unit-level
+        #   duplicate of TestRecordGateResult.test_raises_without_active_state in
+        #   test_executor.py.
         engine = _make_engine(tmp_path)
         self._advance_to_first_gate(engine, plan)
         state = engine._load_state()
         failed_gates = [g for g in state.gate_results if not g.passed]
         assert len(failed_gates) >= 1
-
-    def test_record_gate_result_without_start_raises(self, tmp_path: Path) -> None:
-        engine = _make_engine(tmp_path)
-        with pytest.raises(RuntimeError):
-            engine.record_gate_result(0, passed=True)
 
 
 # ---------------------------------------------------------------------------

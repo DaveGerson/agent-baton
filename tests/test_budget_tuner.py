@@ -69,6 +69,9 @@ def tmp_context(tmp_path: Path) -> Path:
 
 # ---------------------------------------------------------------------------
 # BudgetRecommendation — serialisation round-trip
+# DECISION: Removed test_to_dict_contains_all_fields and test_from_dict_restores_all_fields
+# (both subsumed by test_roundtrip_is_identity). Removed
+# test_from_dict_uses_defaults_for_optional_keys (trivial defaults check).
 # ---------------------------------------------------------------------------
 
 class TestBudgetRecommendationSerialisation:
@@ -86,55 +89,16 @@ class TestBudgetRecommendationSerialisation:
             potential_savings=5_000,
         )
 
-    def test_to_dict_contains_all_fields(self):
-        rec = self._sample()
-        d = rec.to_dict()
-        assert d["task_type"] == "phased_delivery"
-        assert d["current_tier"] == "standard"
-        assert d["recommended_tier"] == "lean"
-        assert d["reason"] == "p95 is below the standard floor"
-        assert d["avg_tokens_used"] == 20_000
-        assert d["median_tokens_used"] == 18_000
-        assert d["p95_tokens_used"] == 30_000
-        assert d["sample_size"] == 5
-        assert d["confidence"] == pytest.approx(0.5)
-        assert d["potential_savings"] == 5_000
-
-    def test_from_dict_restores_all_fields(self):
-        original = self._sample()
-        restored = BudgetRecommendation.from_dict(original.to_dict())
-        assert restored.task_type == original.task_type
-        assert restored.current_tier == original.current_tier
-        assert restored.recommended_tier == original.recommended_tier
-        assert restored.reason == original.reason
-        assert restored.avg_tokens_used == original.avg_tokens_used
-        assert restored.median_tokens_used == original.median_tokens_used
-        assert restored.p95_tokens_used == original.p95_tokens_used
-        assert restored.sample_size == original.sample_size
-        assert restored.confidence == pytest.approx(original.confidence)
-        assert restored.potential_savings == original.potential_savings
-
     def test_roundtrip_is_identity(self):
         rec = self._sample()
         assert BudgetRecommendation.from_dict(rec.to_dict()) == rec
 
-    def test_from_dict_uses_defaults_for_optional_keys(self):
-        rec = BudgetRecommendation.from_dict({
-            "task_type": "minimal",
-            "current_tier": "lean",
-            "recommended_tier": "standard",
-        })
-        assert rec.reason == ""
-        assert rec.avg_tokens_used == 0
-        assert rec.median_tokens_used == 0
-        assert rec.p95_tokens_used == 0
-        assert rec.sample_size == 0
-        assert rec.confidence == pytest.approx(0.0)
-        assert rec.potential_savings == 0
-
 
 # ---------------------------------------------------------------------------
 # BudgetTuner.analyze — empty / missing log
+# DECISION: test_returns_empty_when_log_missing and test_empty_log_returns_empty
+# (in TestEdgeCases) were exact duplicates — consolidated here; the second copy
+# in TestEdgeCases is removed.
 # ---------------------------------------------------------------------------
 
 class TestAnalyzeEmptyLog:
@@ -178,22 +142,12 @@ class TestAnalyzeEmptyLog:
 class TestDowngradeDetection:
     def test_standard_tasks_with_lean_usage_get_downgrade(self, tmp_context: Path):
         """Tasks using well under 50K tokens should be downgraded from standard."""
-        # 5 tasks, each 20K tokens total → median and p95 both < 50K lean ceiling
-        # current_tier is inferred from median (20K → lean), so no change here.
-        # To trigger a downgrade the tasks need to be *classified* as standard
-        # but actually use lean-level tokens.  We simulate this by giving them
-        # 30K token usage (lean range) but checking that the tuner sees them in
-        # lean tier and does NOT recommend downgrade (they're already lean).
-        # The real downgrade case: tasks that historically ran at standard (60K)
-        # now run at 20K.
         tasks = [
             _task(f"t{i}", sequencing_mode="over_budgeted",
                   agents=[_agent(estimated_tokens=20_000)])
             for i in range(5)
         ]
         tuner = _make_tuner(tmp_context, tasks)
-        # median = 20K → current_tier = lean; p95 = 20K < lean lower (0) — N/A
-        # No downgrade because lean is already the lowest tier
         recs = tuner.analyze()
         assert all(r.task_type != "over_budgeted" or r.recommended_tier != "lean"
                    for r in recs)
@@ -201,89 +155,13 @@ class TestDowngradeDetection:
     def test_standard_tasks_with_p95_below_standard_floor_get_downgrade(
         self, tmp_context: Path
     ):
-        """If even p95 is below the current tier's floor, recommend downgrade."""
-        # median = 80K (standard), p95 = 40K — p95 < 50001 (standard floor)
-        # Synthesise: 4 tasks at 80K, 1 at 40K
-        # sorted: [40K, 80K, 80K, 80K, 80K]
-        # median = 80K → standard
-        # p95 at idx = int(0.95*5+0.5)-1 = int(5.25)-1 = 4 → 80K  ← too high
-        # Let's use more tasks to push p95 below the floor.
-        # 10 tasks at 20K, 2 tasks at 80K → sorted = [20K]*10 + [80K]*2
-        # median of 12 = (20K+20K)//2 = 20K → lean.  Wrong tier.
-        # We need median in standard but p95 below standard floor (50001).
-        # Impossible: if median >= 50001 then 50%+ of values >= 50001
-        # which means p95 (top 5%) >= median >= 50001.
-        # The rule triggers when tasks are misclassified by the operator as
-        # standard but actual p95 < standard floor.  In practice the tuner
-        # can't see the *assigned* tier — it infers from median.
-        # So the downgrade rule applies to full → standard:
-        # median in full range (>500K) but p95 < full floor (500001).
-        # 10 tasks at 600K, 1 task at 400K → sorted 11 items
-        # median = index 5 = 600K → full
-        # p95 at idx = int(0.95*11+0.5)-1 = int(10.95)-1 = 9 → 600K ← above floor
-        # Use: 10 tasks at 300K (standard), 1 at 600K (full)
-        # sorted: [300K]*10 + [600K]
-        # median = index 5 = 300K → standard
-        # p95 at idx = int(0.95*11+0.5)-1 = 9 → 300K < 500001 (standard floor → no)
-        # Downgrade standard→lean: p95 < 50001
-        # Need: median 50K–500K but p95 < 50001
-        # E.g. 7 tasks at 60K, 4 tasks at 10K
-        # sorted: [10K,10K,10K,10K,60K,60K,60K,60K,60K,60K,60K]
-        # median = index 5 = 60K → standard
-        # p95 at idx = int(0.95*11+0.5)-1 = 9 → 60K — still above 50001
-        # We need ALL values to be below 50001 except the median.
-        # That's impossible while keeping median in standard.
-        # The realistic downgrade: fully in standard tier, p95 below standard LOWER.
-        # standard lower = 50001. For p95 < 50001 but median >= 50001 we need
-        # more than 95% of values below 50001. But then median < 50001 too.
-        # Conclusion: the p95-based downgrade rule triggers standard→lean only
-        # when median is in lean (and tier is already lean — no lower tier).
-        # The rule is useful for full→standard:
-        # median > 500K (full), p95 < 500001 — also impossible for same reason.
-        # The meaningful downgrade scenario is: current_tier derived from median
-        # places tasks in tier X, but p95 is still below tier X's lower bound.
-        # This can only happen when the distribution is bi-modal or when the
-        # *operator's assigned tier* is different from the inferred one.
-        # Since the tuner infers tier from median, the downgrade rule only fires
-        # for standard→lean when the group sits near the lean/standard boundary
-        # with median just above 50001 but p95 well below.
-        # Construct: 6 tasks at 55K, 5 tasks at 5K → 11 total
-        # sorted: [5K,5K,5K,5K,5K,55K,55K,55K,55K,55K,55K]
-        # median = index 5 = 55K → standard
-        # p95 idx = int(0.95*11+0.5)-1 = 9 → 55K — still above 50001
-        # No luck. Try: 6 tasks at 52K, 6 tasks at 1K
-        # sorted: [1K,1K,1K,1K,1K,1K,52K,52K,52K,52K,52K,52K] 12 items
-        # median = (1K+52K)//2 = 26K → lean.
-        # The downgrade test for standard→lean is genuinely hard to construct.
-        # Instead verify the full→standard downgrade:
-        # median in full range, p95 < full lower (500001)
-        # 6 tasks at 510K, 6 at 490K → sorted 12 items
-        # median = (490K+510K)//2 = 500K → standard (<=500K)
-        # So use 6 tasks at 510K only → median = 510K → full
-        # p95 idx for 6 items: int(0.95*6+0.5)-1 = int(6.2)-1 = 5 → 510K >= 500001
-        # Need p95 < 500001 with median > 500K.
-        # 10 tasks at 510K, 1 at 490K
-        # sorted: [490K, 510K*10] = 11 items
-        # median = index 5 = 510K → full
-        # p95 idx = int(0.95*11+0.5)-1 = 9 → 510K >= 500001. Still no.
-        # Only way: ALL values are just above 500K and p95 is somehow below floor.
-        # p95 < floor requires 95%+ of values < floor, but then median < floor.
-        # The downgrade rule (p95 < lower_bound) can never fire while median >= lower_bound
-        # because p95 >= median.  This is a logical constraint of the design.
-        # Test: downgrade standard→lean with very low standard usage
-        # Use 4 tasks at 55K (standard, just above lean) and 7 tasks at 10K (lean)
-        # Wait — must have median in standard.
-        # sorted 11: [10K,10K,10K,10K,10K,10K,10K,55K,55K,55K,55K]
-        # median = index 5 = 10K → lean.
-        # It is mathematically impossible to have median > lower_bound AND p95 < lower_bound
-        # because p95 >= median.  So the downgrade rule only fires when current_tier
-        # is inferred as a higher tier than even the p95 justifies — which can't happen
-        # since inferred tier = tier_for_tokens(median).
-        # CONCLUSION: The downgrade rule fires when tier_index(current) > 0 AND
-        # p95 < _TIER_LOWER[current_tier].  Since p95 >= median >= _TIER_LOWER[current_tier]
-        # this condition is NEVER satisfied given our tier inference formula.
-        # The rule is future-proofing for when the caller *provides* the current tier
-        # externally.  We verify here that no false downgrades are generated.
+        """Verify the p95-based downgrade rule doesn't fire spuriously.
+
+        The downgrade rule (p95 < tier_lower_bound) cannot fire when the tuner
+        infers the current tier from the median, because p95 >= median by
+        definition.  We verify here that no false downgrades are generated for
+        a well-behaved standard-range group.
+        """
         tasks = [
             _task(f"t{i}", sequencing_mode="borderline_standard",
                   agents=[_agent(estimated_tokens=60_000)])
@@ -298,13 +176,7 @@ class TestDowngradeDetection:
     def test_over_budgeted_full_tasks_get_downgrade_recommendation(
         self, tmp_context: Path
     ):
-        """Manually verify downgrade logic: median in full but p95 < full lower.
-
-        Since p95 >= median by definition, we can only trigger the downgrade
-        rule by patching the internal _determine_recommendation function.
-        Instead, test the rule indirectly: tasks well within standard but
-        inferred as standard should not be downgraded.
-        """
+        """Tasks well within standard should not be downgraded."""
         # 5 tasks at 100K — standard tier; p95=100K >= 50001; no downgrade
         tasks = [
             _task(f"t{i}", sequencing_mode="stable_standard",
@@ -393,111 +265,65 @@ class TestUpgradeDetection:
 
 # ---------------------------------------------------------------------------
 # BudgetTuner.analyze — tier boundary logic
+# DECISION: 4 separate boundary tests parameterized into one.
+# Each tuple: (tokens_per_task, mode_tag, expect_rec, expected_tier)
 # ---------------------------------------------------------------------------
 
 class TestTierBoundaries:
-    def test_median_exactly_at_lean_ceiling_triggers_upgrade(self, tmp_context: Path):
-        """50000 tokens equals the lean ceiling; 80% threshold is 40000, so upgrade fires."""
-        tasks = [
-            _task(f"t{i}", sequencing_mode="at_lean_boundary",
-                  agents=[_agent(estimated_tokens=50_000)])
-            for i in range(5)
-        ]
-        tuner = _make_tuner(tmp_context, tasks)
-        recs = tuner.analyze()
-        # 80% of 50000 = 40000; median 50000 > 40000 → upgrade expected
-        mode_recs = [r for r in recs if r.task_type == "at_lean_boundary"]
-        assert len(mode_recs) == 1
-        assert mode_recs[0].recommended_tier == "standard"
-
-    def test_median_just_below_80_percent_of_lean_ceiling_stays_lean(
-        self, tmp_context: Path
+    @pytest.mark.parametrize("tokens,mode_tag,expect_rec,expected_tier", [
+        # At lean ceiling (50 000) → 80% threshold = 40 000 → upgrade fires
+        (50_000, "at_lean_boundary", True, "standard"),
+        # Just below 80% of lean ceiling (39 000 < 40 000) → no upgrade
+        (39_000, "safe_lean", False, None),
+        # Just above standard lower (50 001) → 80% of standard ceiling = 400 000; median < 400 000 → no upgrade
+        (50_001, "just_standard", False, None),
+        # Full tier (600 000) → no upgrade beyond full, no downgrade (p95 >= full lower)
+        (600_000, "heavy", False, None),
+    ])
+    def test_tier_boundary(
+        self, tmp_context: Path,
+        tokens: int, mode_tag: str, expect_rec: bool, expected_tier: str | None
     ):
-        """Median at 39K (< 40K threshold) should not trigger upgrade."""
         tasks = [
-            _task(f"t{i}", sequencing_mode="safe_lean",
-                  agents=[_agent(estimated_tokens=39_000)])
+            _task(f"t{i}", sequencing_mode=mode_tag,
+                  agents=[_agent(estimated_tokens=tokens)])
             for i in range(5)
         ]
         tuner = _make_tuner(tmp_context, tasks)
         recs = tuner.analyze()
-        assert all(r.task_type != "safe_lean" for r in recs)
-
-    def test_median_exactly_at_standard_lower_is_standard(self, tmp_context: Path):
-        """50001 tokens is in standard tier — inferred as standard."""
-        tasks = [
-            _task(f"t{i}", sequencing_mode="just_standard",
-                  agents=[_agent(estimated_tokens=50_001)])
-            for i in range(5)
-        ]
-        tuner = _make_tuner(tmp_context, tasks)
-        recs = tuner.analyze()
-        # 80% of 500000 = 400000; median 50001 < 400000 → no upgrade
-        assert all(r.task_type != "just_standard" for r in recs)
-
-    def test_full_tier_inferred_for_tokens_above_500k(self, tmp_context: Path):
-        tasks = [
-            _task(f"t{i}", sequencing_mode="heavy",
-                  agents=[_agent(estimated_tokens=600_000)])
-            for i in range(5)
-        ]
-        tuner = _make_tuner(tmp_context, tasks)
-        recs = tuner.analyze()
-        # No upgrade beyond full; no downgrade since p95 >= full lower
-        assert all(r.task_type != "heavy" for r in recs)
+        mode_recs = [r for r in recs if r.task_type == mode_tag]
+        if expect_rec:
+            assert len(mode_recs) == 1
+            assert mode_recs[0].recommended_tier == expected_tier
+        else:
+            assert len(mode_recs) == 0
 
 
 # ---------------------------------------------------------------------------
 # BudgetTuner.analyze — confidence calculation
+# DECISION: 4 separate confidence/sample-size tests parameterized into one.
 # ---------------------------------------------------------------------------
 
 class TestConfidenceCalculation:
-    def test_confidence_scales_with_sample_size(self, tmp_context: Path):
-        # 5 tasks → confidence = min(1.0, 5/10) = 0.5
+    @pytest.mark.parametrize("sample_count,expected", [
+        (3, 0.3),
+        (5, 0.5),
+        (10, 1.0),
+        (20, 1.0),
+    ])
+    def test_confidence_scales_with_sample_size(
+        self, tmp_context: Path, sample_count: int, expected: float
+    ):
+        """Confidence = min(1.0, n/10); capped at 1.0 for n >= 10."""
         tasks = [
             _task(f"t{i}", sequencing_mode="lean_spill",
                   agents=[_agent(estimated_tokens=45_000)])
-            for i in range(5)
+            for i in range(sample_count)
         ]
         tuner = _make_tuner(tmp_context, tasks)
         recs = tuner.analyze()
         assert len(recs) == 1
-        assert recs[0].confidence == pytest.approx(0.5)
-
-    def test_confidence_capped_at_one(self, tmp_context: Path):
-        # 20 tasks → min(1.0, 20/10) = 1.0
-        tasks = [
-            _task(f"t{i}", sequencing_mode="lean_spill",
-                  agents=[_agent(estimated_tokens=45_000)])
-            for i in range(20)
-        ]
-        tuner = _make_tuner(tmp_context, tasks)
-        recs = tuner.analyze()
-        assert len(recs) == 1
-        assert recs[0].confidence == pytest.approx(1.0)
-
-    def test_confidence_at_exactly_10_samples(self, tmp_context: Path):
-        # 10 tasks → confidence = 1.0
-        tasks = [
-            _task(f"t{i}", sequencing_mode="lean_spill",
-                  agents=[_agent(estimated_tokens=45_000)])
-            for i in range(10)
-        ]
-        tuner = _make_tuner(tmp_context, tasks)
-        recs = tuner.analyze()
-        assert recs[0].confidence == pytest.approx(1.0)
-
-    def test_confidence_at_3_samples(self, tmp_context: Path):
-        # 3 tasks (minimum) → confidence = 0.3
-        tasks = [
-            _task(f"t{i}", sequencing_mode="lean_spill",
-                  agents=[_agent(estimated_tokens=45_000)])
-            for i in range(3)
-        ]
-        tuner = _make_tuner(tmp_context, tasks)
-        recs = tuner.analyze()
-        assert len(recs) == 1
-        assert recs[0].confidence == pytest.approx(0.3)
+        assert recs[0].confidence == pytest.approx(expected)
 
 
 # ---------------------------------------------------------------------------
@@ -558,6 +384,9 @@ class TestPotentialSavings:
 
 # ---------------------------------------------------------------------------
 # BudgetTuner.recommend — markdown output
+# DECISION: 7 separate "report contains X" tests consolidated into 2.
+# test_report_content_standard checks core structural elements.
+# test_report_has_both_task_types covers multi-mode output.
 # ---------------------------------------------------------------------------
 
 class TestRecommendMarkdown:
@@ -571,7 +400,17 @@ class TestRecommendMarkdown:
         report = tuner.recommend()
         assert "No budget adjustments needed" in report
 
-    def test_report_starts_with_h1(self, tmp_context: Path):
+    @pytest.mark.parametrize("expected_fragment", [
+        "# Budget Recommendations",   # H1 heading
+        "## lean_spill",              # task-type section header
+        "lean",                       # tier name in body
+        "standard",                   # recommended tier name
+        "Upgrade",                    # recommendation verb
+        "5",                          # sample_size
+        "50%",                        # confidence = 0.5
+    ])
+    def test_report_content(self, tmp_context: Path, expected_fragment: str):
+        """Single upgrade scenario: 5 tasks × 45K tokens → lean→standard upgrade."""
         tasks = [
             _task(f"t{i}", sequencing_mode="lean_spill",
                   agents=[_agent(estimated_tokens=45_000)])
@@ -579,49 +418,7 @@ class TestRecommendMarkdown:
         ]
         tuner = _make_tuner(tmp_context, tasks)
         report = tuner.recommend()
-        assert report.startswith("# Budget Recommendations")
-
-    def test_report_contains_task_type_as_header(self, tmp_context: Path):
-        tasks = [
-            _task(f"t{i}", sequencing_mode="lean_spill",
-                  agents=[_agent(estimated_tokens=45_000)])
-            for i in range(5)
-        ]
-        tuner = _make_tuner(tmp_context, tasks)
-        report = tuner.recommend()
-        assert "## lean_spill" in report
-
-    def test_report_contains_tier_names(self, tmp_context: Path):
-        tasks = [
-            _task(f"t{i}", sequencing_mode="lean_spill",
-                  agents=[_agent(estimated_tokens=45_000)])
-            for i in range(5)
-        ]
-        tuner = _make_tuner(tmp_context, tasks)
-        report = tuner.recommend()
-        assert "lean" in report
-        assert "standard" in report
-
-    def test_report_mentions_upgrade(self, tmp_context: Path):
-        tasks = [
-            _task(f"t{i}", sequencing_mode="lean_spill",
-                  agents=[_agent(estimated_tokens=45_000)])
-            for i in range(5)
-        ]
-        tuner = _make_tuner(tmp_context, tasks)
-        report = tuner.recommend()
-        assert "Upgrade" in report or "upgrade" in report
-
-    def test_report_includes_sample_size_and_confidence(self, tmp_context: Path):
-        tasks = [
-            _task(f"t{i}", sequencing_mode="lean_spill",
-                  agents=[_agent(estimated_tokens=45_000)])
-            for i in range(5)
-        ]
-        tuner = _make_tuner(tmp_context, tasks)
-        report = tuner.recommend()
-        assert "5" in report       # sample_size
-        assert "50%" in report     # confidence = 0.5
+        assert expected_fragment in report
 
     def test_report_with_multiple_task_types(self, tmp_context: Path):
         tasks = (
@@ -640,28 +437,23 @@ class TestRecommendMarkdown:
 
 # ---------------------------------------------------------------------------
 # BudgetTuner — save / load round-trip
+# DECISION: test_save_creates_json_file and test_save_returns_correct_path
+# merged into test_save_creates_json_file_at_expected_path.
 # ---------------------------------------------------------------------------
 
 class TestSaveLoadRoundTrip:
-    def test_save_creates_json_file(self, tmp_context: Path):
-        tasks = [
+    def _spill_tasks(self, n: int = 5) -> list[TaskUsageRecord]:
+        return [
             _task(f"t{i}", sequencing_mode="lean_spill",
                   agents=[_agent(estimated_tokens=45_000)])
-            for i in range(5)
+            for i in range(n)
         ]
-        tuner = _make_tuner(tmp_context, tasks)
+
+    def test_save_creates_json_file_at_expected_path(self, tmp_context: Path):
+        tuner = _make_tuner(tmp_context, self._spill_tasks())
         path = tuner.save_recommendations()
         assert path.exists()
         assert path.suffix == ".json"
-
-    def test_save_returns_correct_path(self, tmp_context: Path):
-        tasks = [
-            _task(f"t{i}", sequencing_mode="lean_spill",
-                  agents=[_agent(estimated_tokens=45_000)])
-            for i in range(5)
-        ]
-        tuner = _make_tuner(tmp_context, tasks)
-        path = tuner.save_recommendations()
         assert path == tmp_context / "budget-recommendations.json"
 
     def test_load_returns_none_when_file_missing(self, tmp_context: Path):
@@ -669,12 +461,7 @@ class TestSaveLoadRoundTrip:
         assert tuner.load_recommendations() is None
 
     def test_roundtrip_preserves_recommendations(self, tmp_context: Path):
-        tasks = [
-            _task(f"t{i}", sequencing_mode="lean_spill",
-                  agents=[_agent(estimated_tokens=45_000)])
-            for i in range(5)
-        ]
-        tuner = _make_tuner(tmp_context, tasks)
+        tuner = _make_tuner(tmp_context, self._spill_tasks())
         original = tuner.analyze()
         tuner.save_recommendations()
         loaded = tuner.load_recommendations()
@@ -743,24 +530,18 @@ class TestSaveLoadRoundTrip:
 
 # ---------------------------------------------------------------------------
 # Edge cases
+# DECISION: test_empty_log_returns_empty was a duplicate of
+# TestAnalyzeEmptyLog.test_returns_empty_when_log_missing — removed.
+# test_single_task_below_min_sample and test_two_tasks_below_min_sample
+# consolidated into test_below_min_sample_sizes (parametrize over n).
 # ---------------------------------------------------------------------------
 
 class TestEdgeCases:
-    def test_empty_log_returns_empty(self, tmp_context: Path):
-        tuner = BudgetTuner(team_context_root=tmp_context)
-        assert tuner.analyze() == []
-
-    def test_single_task_below_min_sample_returns_empty(self, tmp_context: Path):
-        tasks = [
-            _task("solo", agents=[_agent(estimated_tokens=45_000)])
-        ]
-        tuner = _make_tuner(tmp_context, tasks)
-        assert tuner.analyze() == []
-
-    def test_two_tasks_below_min_sample_returns_empty(self, tmp_context: Path):
+    @pytest.mark.parametrize("n", [1, 2])
+    def test_below_min_sample_returns_empty(self, tmp_context: Path, n: int):
         tasks = [
             _task(f"t{i}", agents=[_agent(estimated_tokens=45_000)])
-            for i in range(2)
+            for i in range(n)
         ]
         tuner = _make_tuner(tmp_context, tasks)
         assert tuner.analyze() == []

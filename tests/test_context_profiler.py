@@ -88,31 +88,13 @@ def _write_trace_to_disk(
 
 # ---------------------------------------------------------------------------
 # AgentContextProfile — model fields and serialisation
+# DECISION: Removed test_required_field_stored, test_optional_fields_default,
+# test_to_dict_contains_all_keys (all trivial field-existence / default checks).
+# Kept test_to_dict_values_match (verifies actual values), roundtrip (identity),
+# null-list handling (edge case), and list-copy guard (mutation safety).
 # ---------------------------------------------------------------------------
 
 class TestAgentContextProfileModel:
-    def test_required_field_stored(self) -> None:
-        ap = AgentContextProfile(agent_name="backend-engineer")
-        assert ap.agent_name == "backend-engineer"
-
-    def test_optional_fields_default(self) -> None:
-        ap = AgentContextProfile(agent_name="architect")
-        assert ap.files_read == []
-        assert ap.files_written == []
-        assert ap.files_referenced == []
-        assert ap.context_tokens_estimate == 0
-        assert ap.output_tokens_estimate == 0
-        assert ap.efficiency_score == 0.0
-
-    def test_to_dict_contains_all_keys(self) -> None:
-        ap = AgentContextProfile(agent_name="backend-engineer")
-        d = ap.to_dict()
-        for key in (
-            "agent_name", "files_read", "files_written", "files_referenced",
-            "context_tokens_estimate", "output_tokens_estimate", "efficiency_score",
-        ):
-            assert key in d, f"Missing key: {key}"
-
     def test_to_dict_values_match(self) -> None:
         ap = AgentContextProfile(
             agent_name="test-agent",
@@ -132,7 +114,7 @@ class TestAgentContextProfileModel:
         assert d["output_tokens_estimate"] == 200
         assert d["efficiency_score"] == 0.5
 
-    def test_from_dict_roundtrip(self) -> None:
+    def test_roundtrip_is_identity(self) -> None:
         ap = AgentContextProfile(
             agent_name="arch",
             files_read=["x.py"],
@@ -145,17 +127,18 @@ class TestAgentContextProfileModel:
         assert restored.files_written == ap.files_written
         assert restored.efficiency_score == ap.efficiency_score
 
-    def test_from_dict_handles_missing_optional_keys(self) -> None:
-        ap = AgentContextProfile.from_dict({"agent_name": "x"})
-        assert ap.files_read == []
-        assert ap.efficiency_score == 0.0
+    def test_from_dict_handles_missing_and_null(self) -> None:
+        # Missing optional keys
+        ap_missing = AgentContextProfile.from_dict({"agent_name": "x"})
+        assert ap_missing.files_read == []
+        assert ap_missing.efficiency_score == 0.0
 
-    def test_from_dict_handles_null_list_fields(self) -> None:
-        ap = AgentContextProfile.from_dict(
+        # Null list fields
+        ap_null = AgentContextProfile.from_dict(
             {"agent_name": "x", "files_read": None, "files_written": None}
         )
-        assert ap.files_read == []
-        assert ap.files_written == []
+        assert ap_null.files_read == []
+        assert ap_null.files_written == []
 
     def test_to_dict_lists_are_copies(self) -> None:
         """Mutating the returned dict should not affect the dataclass."""
@@ -167,31 +150,13 @@ class TestAgentContextProfileModel:
 
 # ---------------------------------------------------------------------------
 # TaskContextProfile — model fields and serialisation
+# DECISION: Removed test_required_field_stored, test_optional_fields_default,
+# test_to_dict_contains_all_keys (trivial). Kept tests that verify values,
+# nested serialisation, roundtrip identity, null/missing handling, and JSON
+# serialisability.
 # ---------------------------------------------------------------------------
 
 class TestTaskContextProfileModel:
-    def test_required_field_stored(self) -> None:
-        tp = TaskContextProfile(task_id="my-task")
-        assert tp.task_id == "my-task"
-
-    def test_optional_fields_default(self) -> None:
-        tp = TaskContextProfile(task_id="t")
-        assert tp.agent_profiles == []
-        assert tp.total_files_read == 0
-        assert tp.unique_files_read == 0
-        assert tp.redundant_reads == 0
-        assert tp.redundancy_rate == 0.0
-        assert tp.created_at == ""
-
-    def test_to_dict_contains_all_keys(self) -> None:
-        tp = TaskContextProfile(task_id="t")
-        d = tp.to_dict()
-        for key in (
-            "task_id", "agent_profiles", "total_files_read",
-            "unique_files_read", "redundant_reads", "redundancy_rate", "created_at",
-        ):
-            assert key in d, f"Missing key: {key}"
-
     def test_agent_profiles_serialised_as_list_of_dicts(self) -> None:
         tp = TaskContextProfile(
             task_id="t",
@@ -205,7 +170,7 @@ class TestTaskContextProfileModel:
         assert len(d["agent_profiles"]) == 2
         assert d["agent_profiles"][0]["agent_name"] == "arch"
 
-    def test_from_dict_roundtrip(self) -> None:
+    def test_roundtrip_is_identity(self) -> None:
         tp = TaskContextProfile(
             task_id="roundtrip",
             agent_profiles=[AgentContextProfile(agent_name="arch", efficiency_score=0.5)],
@@ -225,14 +190,15 @@ class TestTaskContextProfileModel:
         assert len(restored.agent_profiles) == 1
         assert restored.agent_profiles[0].agent_name == "arch"
 
-    def test_from_dict_handles_missing_keys(self) -> None:
-        tp = TaskContextProfile.from_dict({"task_id": "minimal"})
-        assert tp.agent_profiles == []
-        assert tp.total_files_read == 0
+    def test_from_dict_handles_missing_and_null(self) -> None:
+        # Missing optional keys
+        tp_missing = TaskContextProfile.from_dict({"task_id": "minimal"})
+        assert tp_missing.agent_profiles == []
+        assert tp_missing.total_files_read == 0
 
-    def test_from_dict_handles_null_agent_profiles(self) -> None:
-        tp = TaskContextProfile.from_dict({"task_id": "t", "agent_profiles": None})
-        assert tp.agent_profiles == []
+        # Null agent_profiles
+        tp_null = TaskContextProfile.from_dict({"task_id": "t", "agent_profiles": None})
+        assert tp_null.agent_profiles == []
 
     def test_json_serialisable(self) -> None:
         tp = TaskContextProfile(
@@ -246,6 +212,10 @@ class TestTaskContextProfileModel:
 
 # ---------------------------------------------------------------------------
 # ContextProfiler — profile_task
+# DECISION: Kept all profiling behaviour tests intact since they each test
+# distinct computation (read collection, write collection, multi-agent,
+# efficiency score, redundancy stats, referenced files intersection, event
+# filtering). Parameterized efficiency_score variants (3 tests → 1).
 # ---------------------------------------------------------------------------
 
 class TestProfileTask:
@@ -254,31 +224,15 @@ class TestProfileTask:
         result = profiler.profile_task("nonexistent-task")
         assert result is None
 
-    def test_returns_task_context_profile(self, tmp_path: Path) -> None:
-        _write_trace_to_disk(tmp_path, "basic-task", [
+    def test_returns_task_context_profile_with_correct_id(self, tmp_path: Path) -> None:
+        _write_trace_to_disk(tmp_path, "my-task-id", [
             _file_read_event("arch", "design.md"),
             _file_write_event("arch", "plan.md"),
         ])
         profiler = ContextProfiler(tmp_path)
-        profile = profiler.profile_task("basic-task")
-        assert isinstance(profile, TaskContextProfile)
-
-    def test_task_id_preserved(self, tmp_path: Path) -> None:
-        _write_trace_to_disk(tmp_path, "my-task-id", [
-            _file_read_event("arch", "design.md"),
-        ])
-        profiler = ContextProfiler(tmp_path)
         profile = profiler.profile_task("my-task-id")
-        assert profile is not None
+        assert isinstance(profile, TaskContextProfile)
         assert profile.task_id == "my-task-id"
-
-    def test_created_at_is_populated(self, tmp_path: Path) -> None:
-        _write_trace_to_disk(tmp_path, "ts-task", [
-            _file_read_event("arch", "f.md"),
-        ])
-        profiler = ContextProfiler(tmp_path)
-        profile = profiler.profile_task("ts-task")
-        assert profile is not None
         assert profile.created_at != ""
 
     def test_collects_files_read_per_agent(self, tmp_path: Path) -> None:
@@ -322,42 +276,26 @@ class TestProfileTask:
         assert "architect" in agent_names
         assert "backend-engineer" in agent_names
 
-    def test_efficiency_score_computed_correctly(self, tmp_path: Path) -> None:
-        # 2 reads, 1 write → efficiency = 1/2 = 0.5
-        _write_trace_to_disk(tmp_path, "eff-task", [
-            _file_read_event("arch", "a.md"),
-            _file_read_event("arch", "b.md"),
-            _file_write_event("arch", "c.md"),
-        ])
+    @pytest.mark.parametrize("reads,writes,task_suffix,expected_score", [
+        (2, 1, "two-reads-one-write", 0.5),   # 1 write / 2 reads = 0.5
+        (0, 1, "no-reads",           1.0),    # 0 reads, 1 write → 1.0
+        (3, 0, "no-writes",          0.0),    # 3 reads, 0 writes → 0.0
+    ])
+    def test_efficiency_score_computed(
+        self, reads: int, writes: int, task_suffix: str,
+        expected_score: float, tmp_path: Path
+    ) -> None:
+        events = (
+            [_file_read_event("arch", f"r{i}.md") for i in range(reads)]
+            + [_file_write_event("arch", f"w{i}.md") for i in range(writes)]
+        )
+        task_id = f"eff-{task_suffix}"
+        _write_trace_to_disk(tmp_path, task_id, events)
         profiler = ContextProfiler(tmp_path)
-        profile = profiler.profile_task("eff-task")
+        profile = profiler.profile_task(task_id)
         assert profile is not None
         ap = profile.agent_profiles[0]
-        assert abs(ap.efficiency_score - 0.5) < 0.0001
-
-    def test_efficiency_score_with_zero_reads(self, tmp_path: Path) -> None:
-        # 0 reads, 1 write → efficiency = 1/max(0,1) = 1.0
-        _write_trace_to_disk(tmp_path, "no-reads-task", [
-            _file_write_event("arch", "output.md"),
-        ])
-        profiler = ContextProfiler(tmp_path)
-        profile = profiler.profile_task("no-reads-task")
-        assert profile is not None
-        ap = profile.agent_profiles[0]
-        assert ap.efficiency_score == 1.0
-
-    def test_efficiency_score_with_zero_writes(self, tmp_path: Path) -> None:
-        # 3 reads, 0 writes → efficiency = 0/3 = 0.0
-        _write_trace_to_disk(tmp_path, "no-writes-task", [
-            _file_read_event("arch", "a.md"),
-            _file_read_event("arch", "b.md"),
-            _file_read_event("arch", "c.md"),
-        ])
-        profiler = ContextProfiler(tmp_path)
-        profile = profiler.profile_task("no-writes-task")
-        assert profile is not None
-        ap = profile.agent_profiles[0]
-        assert ap.efficiency_score == 0.0
+        assert abs(ap.efficiency_score - expected_score) < 0.0001
 
     def test_total_files_read_counts_all_events(self, tmp_path: Path) -> None:
         # Both agents each read the same file → total = 2, unique = 1
@@ -381,37 +319,33 @@ class TestProfileTask:
         assert profile is not None
         assert profile.unique_files_read == 2  # shared.md + other.md
 
-    def test_redundant_reads_computed(self, tmp_path: Path) -> None:
-        _write_trace_to_disk(tmp_path, "redundant-task", [
-            _file_read_event("arch", "shared.md"),
-            _file_read_event("backend-engineer", "shared.md"),
-        ])
+    @pytest.mark.parametrize("task_id,setup_events,exp_redundant,exp_rate", [
+        # 2 total reads, 1 unique → redundant=1, rate=0.5
+        ("redundant-task", [
+            ("arch", "shared.md", "read"),
+            ("backend-engineer", "shared.md", "read"),
+        ], 1, 0.5),
+        # 2 reads, 2 unique → no redundancy
+        ("no-redundancy-task", [
+            ("arch", "a.md", "read"),
+            ("backend-engineer", "b.md", "read"),
+        ], 0, 0.0),
+    ])
+    def test_redundancy_stats(
+        self, task_id: str, setup_events: list, exp_redundant: int,
+        exp_rate: float, tmp_path: Path
+    ) -> None:
+        events = [
+            _file_read_event(agent, path) if kind == "read"
+            else _file_write_event(agent, path)
+            for agent, path, kind in setup_events
+        ]
+        _write_trace_to_disk(tmp_path, task_id, events)
         profiler = ContextProfiler(tmp_path)
-        profile = profiler.profile_task("redundant-task")
+        profile = profiler.profile_task(task_id)
         assert profile is not None
-        assert profile.redundant_reads == 1  # total(2) - unique(1)
-
-    def test_redundancy_rate_computed(self, tmp_path: Path) -> None:
-        # 2 total reads, 1 unique → rate = 0.5
-        _write_trace_to_disk(tmp_path, "rate-task", [
-            _file_read_event("arch", "shared.md"),
-            _file_read_event("backend-engineer", "shared.md"),
-        ])
-        profiler = ContextProfiler(tmp_path)
-        profile = profiler.profile_task("rate-task")
-        assert profile is not None
-        assert abs(profile.redundancy_rate - 0.5) < 0.0001
-
-    def test_no_redundancy_when_all_reads_unique(self, tmp_path: Path) -> None:
-        _write_trace_to_disk(tmp_path, "no-redundancy-task", [
-            _file_read_event("arch", "a.md"),
-            _file_read_event("backend-engineer", "b.md"),
-        ])
-        profiler = ContextProfiler(tmp_path)
-        profile = profiler.profile_task("no-redundancy-task")
-        assert profile is not None
-        assert profile.redundant_reads == 0
-        assert profile.redundancy_rate == 0.0
+        assert profile.redundant_reads == exp_redundant
+        assert abs(profile.redundancy_rate - exp_rate) < 0.0001
 
     def test_files_referenced_is_read_write_intersection(self, tmp_path: Path) -> None:
         # arch reads a.md and b.md, writes a.md → referenced = {a.md}
@@ -531,26 +465,20 @@ class TestSingleAgent:
 
 # ---------------------------------------------------------------------------
 # ContextProfiler — save_profile / load_profile
+# DECISION: Merged trivial path/existence tests (save_returns_path,
+# save_writes_json_file, save_path_is_under_profiles_dir) into one test.
+# Kept full-restore, error cases, overwrite, and end-to-end roundtrip separate.
 # ---------------------------------------------------------------------------
 
 class TestSaveLoadProfile:
-    def test_save_returns_path(self, tmp_path: Path) -> None:
+    def test_save_creates_file_in_correct_location(self, tmp_path: Path) -> None:
+        """Covers: returns Path, file exists, correct dir, correct suffix."""
         profiler = ContextProfiler(tmp_path)
         tp = TaskContextProfile(task_id="save-test", created_at="2026-03-20T00:00:00+00:00")
         path = profiler.save_profile(tp)
         assert isinstance(path, Path)
-
-    def test_save_writes_json_file(self, tmp_path: Path) -> None:
-        profiler = ContextProfiler(tmp_path)
-        tp = TaskContextProfile(task_id="write-test")
-        path = profiler.save_profile(tp)
         assert path.exists()
         assert path.suffix == ".json"
-
-    def test_save_path_is_under_profiles_dir(self, tmp_path: Path) -> None:
-        profiler = ContextProfiler(tmp_path)
-        tp = TaskContextProfile(task_id="dir-test")
-        path = profiler.save_profile(tp)
         assert path.parent == tmp_path / "context-profiles"
 
     def test_save_creates_profiles_dir_automatically(self, tmp_path: Path) -> None:
@@ -558,13 +486,6 @@ class TestSaveLoadProfile:
         tp = TaskContextProfile(task_id="mkdir-test")
         path = profiler.save_profile(tp)
         assert path.exists()
-
-    def test_load_returns_task_context_profile(self, tmp_path: Path) -> None:
-        profiler = ContextProfiler(tmp_path)
-        tp = TaskContextProfile(task_id="load-me", total_files_read=5)
-        profiler.save_profile(tp)
-        loaded = profiler.load_profile("load-me")
-        assert isinstance(loaded, TaskContextProfile)
 
     def test_load_restores_all_fields(self, tmp_path: Path) -> None:
         profiler = ContextProfiler(tmp_path)
@@ -586,7 +507,7 @@ class TestSaveLoadProfile:
         )
         profiler.save_profile(tp)
         loaded = profiler.load_profile("full-restore")
-        assert loaded is not None
+        assert isinstance(loaded, TaskContextProfile)
         assert loaded.task_id == "full-restore"
         assert loaded.total_files_read == 3
         assert loaded.unique_files_read == 2
@@ -640,6 +561,7 @@ class TestSaveLoadProfile:
 
 # ---------------------------------------------------------------------------
 # ContextProfiler — list_profiles
+# DECISION: Merged count=3/count=100 boundary tests into one test.
 # ---------------------------------------------------------------------------
 
 class TestListProfiles:
@@ -654,17 +576,12 @@ class TestListProfiles:
         assert len(paths) == 1
         assert paths[0].suffix == ".json"
 
-    def test_count_limits_results(self, tmp_path: Path) -> None:
+    def test_count_limits_and_overshoots(self, tmp_path: Path) -> None:
         profiler = ContextProfiler(tmp_path)
         for i in range(5):
             profiler.save_profile(TaskContextProfile(task_id=f"task-{i}"))
         assert len(profiler.list_profiles(count=3)) == 3
-
-    def test_count_larger_than_available_returns_all(self, tmp_path: Path) -> None:
-        profiler = ContextProfiler(tmp_path)
-        for i in range(3):
-            profiler.save_profile(TaskContextProfile(task_id=f"task-{i}"))
-        assert len(profiler.list_profiles(count=100)) == 3
+        assert len(profiler.list_profiles(count=100)) == 5
 
 
 # ---------------------------------------------------------------------------
@@ -778,6 +695,10 @@ class TestAgentSummary:
 
 # ---------------------------------------------------------------------------
 # ContextProfiler — generate_report
+# DECISION: Collapsed 7 individual "is X in report" tests into 1 parameterized
+# test for the common case (task_id, redundancy %, overall stats). Kept tests
+# for distinct report states (no profiles, flagged agents, no-flagged-message,
+# multiple tasks) as separate tests since each needs its own fixture setup.
 # ---------------------------------------------------------------------------
 
 class TestGenerateReport:
@@ -786,29 +707,25 @@ class TestGenerateReport:
         report = profiler.generate_report()
         assert "No profiles found" in report
 
-    def test_report_is_markdown(self, tmp_path: Path) -> None:
-        profiler = ContextProfiler(tmp_path)
-        profiler.save_profile(TaskContextProfile(task_id="my-task"))
-        report = profiler.generate_report()
-        assert report.startswith("#")
-
-    def test_report_contains_task_id(self, tmp_path: Path) -> None:
-        profiler = ContextProfiler(tmp_path)
-        profiler.save_profile(TaskContextProfile(task_id="special-task-id"))
-        report = profiler.generate_report()
-        assert "special-task-id" in report
-
-    def test_report_contains_redundancy_info(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("expected_substring", [
+        "special-task-id",          # task id appears in report
+        "20.0%",                    # redundancy rate
+        "Overall",                  # overall statistics header
+    ])
+    def test_report_content(self, expected_substring: str, tmp_path: Path) -> None:
         profiler = ContextProfiler(tmp_path)
         profiler.save_profile(TaskContextProfile(
-            task_id="t1",
+            task_id="special-task-id",
+            agent_profiles=[AgentContextProfile(agent_name="arch", efficiency_score=0.6)],
             total_files_read=10,
             unique_files_read=8,
             redundant_reads=2,
             redundancy_rate=0.2,
         ))
         report = profiler.generate_report()
-        assert "20.0%" in report or "20%" in report
+        assert expected_substring in report or (
+            expected_substring == "Overall" and "statistics" in report.lower()
+        )
 
     def test_report_flags_low_efficiency_agents(self, tmp_path: Path) -> None:
         profiler = ContextProfiler(tmp_path)
@@ -837,15 +754,6 @@ class TestGenerateReport:
         ))
         report = profiler.generate_report()
         assert "No agents flagged" in report
-
-    def test_report_contains_overall_statistics(self, tmp_path: Path) -> None:
-        profiler = ContextProfiler(tmp_path)
-        profiler.save_profile(TaskContextProfile(
-            task_id="stats-task",
-            agent_profiles=[AgentContextProfile(agent_name="arch", efficiency_score=0.6)],
-        ))
-        report = profiler.generate_report()
-        assert "Overall" in report or "statistics" in report.lower()
 
     def test_report_handles_multiple_tasks(self, tmp_path: Path) -> None:
         profiler = ContextProfiler(tmp_path)

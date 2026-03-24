@@ -56,14 +56,14 @@ def _topics(bus: EventBus, task_id: str = "t1") -> list[str]:
 # ---------------------------------------------------------------------------
 
 class TestBusNoneBackwardCompat:
-    def test_start_without_bus(self, tmp_path: Path) -> None:
+    # DECISION: two tests merged into one — the full lifecycle test also exercises
+    #   the start() return value, making the standalone start test redundant.
+
+    def test_full_lifecycle_without_bus(self, tmp_path: Path) -> None:
+        """bus=None must not raise; start() must return a DISPATCH action."""
         engine = ExecutionEngine(team_context_root=tmp_path)
         action = engine.start(_plan())
         assert action.action_type == ActionType.DISPATCH.value
-
-    def test_full_lifecycle_without_bus(self, tmp_path: Path) -> None:
-        engine = ExecutionEngine(team_context_root=tmp_path)
-        engine.start(_plan())
         engine.record_step_result("1.1", "backend")
         engine.complete()
 

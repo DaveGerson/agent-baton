@@ -76,71 +76,29 @@ def _setup_scorer(tmp_path: Path) -> tuple[UsageLogger, RetrospectiveEngine, Per
 # ---------------------------------------------------------------------------
 
 class TestAgentScorecardHealth:
-    def test_unused_for_zero_uses(self):
-        sc = AgentScorecard(agent_name="ghost", times_used=0)
-        assert sc.health == "unused"
-
-    def test_strong_for_high_first_pass_and_no_negatives(self):
+    # Decision: 8 individual tests collapsed into one parameterized test.
+    # Each tuple is an independent boundary/threshold case for the health
+    # classifier.  The "unused" case is included as a tuple so it won't be
+    # lost, while the boundary-straddling values (0.8 exactly, 0.5 exactly)
+    # are preserved as separate tuples.
+    @pytest.mark.parametrize("times_used,first_pass_rate,neg_mentions,expected_health", [
+        (0,  0.0, 0, "unused"),
+        (5,  0.9, 0, "strong"),           # well above 0.8 threshold
+        (5,  0.8, 0, "strong"),           # exactly at 0.8 threshold
+        (5,  0.6, 0, "adequate"),         # below 0.8, above 0.5
+        (5,  0.9, 1, "adequate"),         # high pass but has negative mention
+        (2,  0.5, 0, "adequate"),         # exactly at 0.5 threshold
+        (5,  0.3, 0, "needs-improvement"),
+        (10, 0.4, 0, "needs-improvement"),# just below 0.5
+    ])
+    def test_health(self, times_used, first_pass_rate, neg_mentions, expected_health):
         sc = AgentScorecard(
             agent_name="arch",
-            times_used=5,
-            first_pass_rate=0.9,
-            negative_mentions=0,
+            times_used=times_used,
+            first_pass_rate=first_pass_rate,
+            negative_mentions=neg_mentions,
         )
-        assert sc.health == "strong"
-
-    def test_strong_threshold_is_0_8(self):
-        sc = AgentScorecard(
-            agent_name="arch",
-            times_used=5,
-            first_pass_rate=0.8,
-            negative_mentions=0,
-        )
-        assert sc.health == "strong"
-
-    def test_adequate_when_first_pass_below_0_8(self):
-        sc = AgentScorecard(
-            agent_name="arch",
-            times_used=5,
-            first_pass_rate=0.6,
-            negative_mentions=0,
-        )
-        assert sc.health == "adequate"
-
-    def test_adequate_when_high_pass_but_has_negative_mentions(self):
-        sc = AgentScorecard(
-            agent_name="arch",
-            times_used=5,
-            first_pass_rate=0.9,
-            negative_mentions=1,
-        )
-        # Not "strong" because of negative mention, but first_pass >= 0.5
-        assert sc.health == "adequate"
-
-    def test_needs_improvement_for_low_first_pass(self):
-        sc = AgentScorecard(
-            agent_name="arch",
-            times_used=5,
-            first_pass_rate=0.3,
-            negative_mentions=0,
-        )
-        assert sc.health == "needs-improvement"
-
-    def test_needs_improvement_threshold_is_below_0_5(self):
-        sc = AgentScorecard(
-            agent_name="arch",
-            times_used=10,
-            first_pass_rate=0.4,
-        )
-        assert sc.health == "needs-improvement"
-
-    def test_adequate_at_exactly_0_5_first_pass(self):
-        sc = AgentScorecard(
-            agent_name="arch",
-            times_used=2,
-            first_pass_rate=0.5,
-        )
-        assert sc.health == "adequate"
+        assert sc.health == expected_health
 
 
 # ---------------------------------------------------------------------------
@@ -160,56 +118,47 @@ class TestScoreAgent:
         logger, _, scorer = _setup_scorer(tmp_path)
         logger.log(_task("t1", [_agent("arch")]))
         logger.log(_task("t2", [_agent("arch"), _agent("be")]))
-        sc = scorer.score_agent("arch")
-        assert sc.times_used == 2
+        assert scorer.score_agent("arch").times_used == 2
 
-    def test_first_pass_rate_all_zero_retries(self, tmp_path: Path):
-        logger, _, scorer = _setup_scorer(tmp_path)
-        logger.log(_task("t1", [_agent("arch", retries=0)]))
-        logger.log(_task("t2", [_agent("arch", retries=0)]))
+    # Decision: 5 metric tests consolidated — they all call score_agent on a
+    # controlled dataset and assert a single computed field.  Keeping them
+    # as parametrize tuples means each metric can fail independently.
+    @pytest.mark.parametrize("setup,metric,expected", [
+        ("all_zero_retries",  "first_pass_rate", 1.0),
+        ("mixed_retries",     "first_pass_rate", 2 / 3),
+        ("retries_3_and_1",   "retry_rate",      2.0),
+        ("tokens_1k_2k",      "total_estimated_tokens", 3000),
+        ("tokens_1k_3k",      "avg_tokens_per_use",     2000),
+    ])
+    def test_numeric_metrics(self, tmp_path: Path, setup, metric, expected):
+        logger, _, scorer = _setup_scorer(tmp_path / setup)
+        if setup == "all_zero_retries":
+            logger.log(_task("t1", [_agent("arch", retries=0)]))
+            logger.log(_task("t2", [_agent("arch", retries=0)]))
+        elif setup == "mixed_retries":
+            logger.log(_task("t1", [_agent("arch", retries=0)]))
+            logger.log(_task("t2", [_agent("arch", retries=1)]))
+            logger.log(_task("t3", [_agent("arch", retries=0)]))
+        elif setup == "retries_3_and_1":
+            logger.log(_task("t1", [_agent("arch", retries=3)]))
+            logger.log(_task("t2", [_agent("arch", retries=1)]))
+        elif setup == "tokens_1k_2k":
+            logger.log(_task("t1", [_agent("arch", tokens=1000)]))
+            logger.log(_task("t2", [_agent("arch", tokens=2000)]))
+        elif setup == "tokens_1k_3k":
+            logger.log(_task("t1", [_agent("arch", tokens=1000)]))
+            logger.log(_task("t2", [_agent("arch", tokens=3000)]))
         sc = scorer.score_agent("arch")
-        assert sc.first_pass_rate == 1.0
+        assert getattr(sc, metric) == pytest.approx(expected)
 
-    def test_first_pass_rate_mixed_retries(self, tmp_path: Path):
-        logger, _, scorer = _setup_scorer(tmp_path)
-        logger.log(_task("t1", [_agent("arch", retries=0)]))
-        logger.log(_task("t2", [_agent("arch", retries=1)]))
-        logger.log(_task("t3", [_agent("arch", retries=0)]))
-        sc = scorer.score_agent("arch")
-        assert sc.first_pass_rate == pytest.approx(2 / 3)
-
-    def test_retry_rate(self, tmp_path: Path):
-        logger, _, scorer = _setup_scorer(tmp_path)
-        logger.log(_task("t1", [_agent("arch", retries=3)]))
-        logger.log(_task("t2", [_agent("arch", retries=1)]))
-        sc = scorer.score_agent("arch")
-        assert sc.retry_rate == 2.0
-
-    def test_gate_pass_rate(self, tmp_path: Path):
-        logger, _, scorer = _setup_scorer(tmp_path)
-        logger.log(_task("t1", [_agent("arch", gate_results=["PASS", "PASS", "FAIL"])]))
-        sc = scorer.score_agent("arch")
-        assert sc.gate_pass_rate == pytest.approx(2 / 3)
-
-    def test_gate_pass_rate_none_when_no_gates(self, tmp_path: Path):
-        logger, _, scorer = _setup_scorer(tmp_path)
-        logger.log(_task("t1", [_agent("arch", gate_results=[])]))
-        sc = scorer.score_agent("arch")
-        assert sc.gate_pass_rate is None
-
-    def test_total_estimated_tokens(self, tmp_path: Path):
-        logger, _, scorer = _setup_scorer(tmp_path)
-        logger.log(_task("t1", [_agent("arch", tokens=1000)]))
-        logger.log(_task("t2", [_agent("arch", tokens=2000)]))
-        sc = scorer.score_agent("arch")
-        assert sc.total_estimated_tokens == 3000
-
-    def test_avg_tokens_per_use(self, tmp_path: Path):
-        logger, _, scorer = _setup_scorer(tmp_path)
-        logger.log(_task("t1", [_agent("arch", tokens=1000)]))
-        logger.log(_task("t2", [_agent("arch", tokens=3000)]))
-        sc = scorer.score_agent("arch")
-        assert sc.avg_tokens_per_use == 2000
+    @pytest.mark.parametrize("gate_results,expected_rate", [
+        (["PASS", "PASS", "FAIL"], pytest.approx(2 / 3)),
+        ([],                       None),
+    ])
+    def test_gate_pass_rate(self, tmp_path: Path, gate_results, expected_rate):
+        logger, _, scorer = _setup_scorer(tmp_path / str(len(gate_results)))
+        logger.log(_task("t1", [_agent("arch", gate_results=gate_results)]))
+        assert scorer.score_agent("arch").gate_pass_rate == expected_rate
 
     def test_models_used(self, tmp_path: Path):
         logger, _, scorer = _setup_scorer(tmp_path)
@@ -234,8 +183,7 @@ class TestScoreAgentRetroSignals:
             what_worked=[AgentOutcome(name="arch", worked_well="Did great")],
         )
         retro_engine.save(retro)
-        sc = scorer.score_agent("arch")
-        assert sc.positive_mentions >= 1
+        assert scorer.score_agent("arch").positive_mentions >= 1
 
     def test_negative_mentions_from_what_didnt(self, tmp_path: Path):
         logger, retro_engine, scorer = _setup_scorer(tmp_path)
@@ -245,8 +193,7 @@ class TestScoreAgentRetroSignals:
             what_didnt=[AgentOutcome(name="arch", issues="Missed edge case")],
         )
         retro_engine.save(retro)
-        sc = scorer.score_agent("arch")
-        assert sc.negative_mentions >= 1
+        assert scorer.score_agent("arch").negative_mentions >= 1
 
     def test_knowledge_gaps_cited(self, tmp_path: Path):
         logger, retro_engine, scorer = _setup_scorer(tmp_path)
@@ -257,8 +204,7 @@ class TestScoreAgentRetroSignals:
                                           affected_agent="arch")],
         )
         retro_engine.save(retro)
-        sc = scorer.score_agent("arch")
-        assert sc.knowledge_gaps_cited >= 1
+        assert scorer.score_agent("arch").knowledge_gaps_cited >= 1
 
 
 # ---------------------------------------------------------------------------
@@ -269,8 +215,7 @@ class TestScoreAll:
     def test_returns_scorecards_for_all_agents(self, tmp_path: Path):
         logger, _, scorer = _setup_scorer(tmp_path)
         logger.log(_task("t1", [_agent("arch"), _agent("be")]))
-        scorecards = scorer.score_all()
-        names = {sc.agent_name for sc in scorecards}
+        names = {sc.agent_name for sc in scorer.score_all()}
         assert "arch" in names
         assert "be" in names
 
@@ -281,8 +226,7 @@ class TestScoreAll:
     def test_excludes_agents_with_zero_uses(self, tmp_path: Path):
         logger, _, scorer = _setup_scorer(tmp_path)
         logger.log(_task("t1", [_agent("arch")]))
-        scorecards = scorer.score_all()
-        assert all(sc.times_used > 0 for sc in scorecards)
+        assert all(sc.times_used > 0 for sc in scorer.score_all())
 
     def test_sorted_by_agent_name(self, tmp_path: Path):
         logger, _, scorer = _setup_scorer(tmp_path)
@@ -298,32 +242,19 @@ class TestScoreAll:
 class TestGenerateReport:
     def test_no_data_message_when_empty(self, tmp_path: Path):
         _, _, scorer = _setup_scorer(tmp_path)
-        report = scorer.generate_report()
-        assert "No usage data available" in report
+        assert "No usage data available" in scorer.generate_report()
 
-    def test_starts_with_h1(self, tmp_path: Path):
-        logger, _, scorer = _setup_scorer(tmp_path)
-        logger.log(_task("t1", [_agent("arch")]))
-        assert scorer.generate_report().startswith("# Agent Performance Scorecards")
-
-    def test_includes_agent_section(self, tmp_path: Path):
+    # Decision: 4 report-content checks collapsed — all use the same setup and
+    # assert distinct substrings.  Fails independently because each substring
+    # is checked separately.
+    def test_report_content(self, tmp_path: Path):
         logger, _, scorer = _setup_scorer(tmp_path)
         logger.log(_task("t1", [_agent("arch", retries=0)]))
+        logger.log(_task("t2", [_agent("arch"), _agent("be")]))
         report = scorer.generate_report()
+        assert report.startswith("# Agent Performance Scorecards")
         assert "arch" in report
-
-    def test_groups_by_health_status(self, tmp_path: Path):
-        logger, _, scorer = _setup_scorer(tmp_path)
-        # arch: all zero retries -> first_pass_rate=1.0 -> "strong"
-        logger.log(_task("t1", [_agent("arch", retries=0)]))
-        report = scorer.generate_report()
-        assert "Strong" in report
-
-    def test_total_uses_count_in_report(self, tmp_path: Path):
-        logger, _, scorer = _setup_scorer(tmp_path)
-        logger.log(_task("t1", [_agent("arch"), _agent("be")]))
-        logger.log(_task("t2", [_agent("arch")]))
-        report = scorer.generate_report()
+        assert "Strong" in report          # health group heading
         assert "3 total agent uses" in report
 
 
@@ -332,29 +263,20 @@ class TestGenerateReport:
 # ---------------------------------------------------------------------------
 
 class TestWriteReport:
-    def test_creates_file_on_disk(self, tmp_path: Path):
-        logger, _, scorer = _setup_scorer(tmp_path)
-        logger.log(_task("t1", [_agent("arch")]))
-        out_path = tmp_path / "scorecards.md"
-        result = scorer.write_report(out_path)
-        assert result.exists()
-
-    def test_returns_the_output_path(self, tmp_path: Path):
+    # Decision: 4 write_report tests merged into 2.  File existence, return
+    # value, and content correctness are all checked in one test because they
+    # are consequences of the same single call.  Parent-dir creation is kept
+    # separate because it exercises a distinct code path.
+    def test_write_report_creates_file_with_correct_content(self, tmp_path: Path):
         logger, _, scorer = _setup_scorer(tmp_path)
         logger.log(_task("t1", [_agent("arch")]))
         out_path = tmp_path / "scorecards.md"
         result = scorer.write_report(out_path)
         assert result == out_path
+        assert result.exists()
+        assert result.read_text(encoding="utf-8").startswith("# Agent Performance Scorecards")
 
-    def test_file_content_is_markdown(self, tmp_path: Path):
-        logger, _, scorer = _setup_scorer(tmp_path)
-        logger.log(_task("t1", [_agent("arch")]))
-        out_path = tmp_path / "scorecards.md"
-        scorer.write_report(out_path)
-        content = out_path.read_text(encoding="utf-8")
-        assert content.startswith("# Agent Performance Scorecards")
-
-    def test_creates_parent_dirs(self, tmp_path: Path):
+    def test_write_report_creates_parent_dirs(self, tmp_path: Path):
         logger, _, scorer = _setup_scorer(tmp_path)
         logger.log(_task("t1", [_agent("arch")]))
         out_path = tmp_path / "reports" / "scorecards.md"
