@@ -199,7 +199,7 @@ def handler(args: argparse.Namespace) -> None:
         # Use namespaced execution directory for the new plan
         task_id = plan.task_id
         engine = ExecutionEngine(bus=bus, task_id=task_id)
-        ContextManager().init_mission_log(plan.task_summary, risk_level=plan.risk_level)
+        ContextManager(task_id=task_id).init_mission_log(plan.task_summary, risk_level=plan.risk_level)
         action = engine.start(plan)
         # Mark this as the active execution
         engine._persistence.set_active()
@@ -246,7 +246,7 @@ def handler(args: argparse.Namespace) -> None:
             commit_hash=args.commit,
             issues=[args.error] if args.error else [],
         )
-        ContextManager().append_to_mission_log(entry)
+        ContextManager(task_id=task_id).append_to_mission_log(entry)
         print(f"Recorded: step {args.step_id} ({args.agent}) — {args.status}")
 
     elif args.subcommand == "gate":

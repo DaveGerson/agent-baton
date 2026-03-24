@@ -76,23 +76,16 @@ class ForgeSession:
 
         Returns the path to the written plan.json.
         """
+        from agent_baton.core.orchestration.context import ContextManager
         context_root = Path(project.path) / ".claude" / "team-context"
-        context_root.mkdir(parents=True, exist_ok=True)
-
-        # Write plan.json
-        plan_path = context_root / "plan.json"
-        tmp_path = plan_path.with_suffix(".json.tmp")
-        tmp_path.write_text(
-            json.dumps(plan.to_dict(), indent=2, ensure_ascii=False),
-            encoding="utf-8",
+        # Write into task-scoped directory
+        ctx = ContextManager(
+            team_context_dir=context_root,
+            task_id=plan.task_id,
         )
-        tmp_path.rename(plan_path)
+        ctx.write_plan(plan)
 
-        # Write plan.md (human-readable)
-        md_path = context_root / "plan.md"
-        md_path.write_text(plan.to_markdown(), encoding="utf-8")
-
-        return plan_path
+        return ctx.plan_json_path
 
     def signal_to_plan(
         self,

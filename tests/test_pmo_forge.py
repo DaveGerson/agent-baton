@@ -196,7 +196,8 @@ class TestSavePlan:
         plan = _plan(task_id="saved-task")
         returned_path = forge.save_plan(plan, project)
 
-        expected = Path(project.path) / ".claude" / "team-context" / "plan.json"
+        # Plans are now written to executions/<task_id>/plan.json
+        expected = Path(project.path) / ".claude" / "team-context" / "executions" / "saved-task" / "plan.json"
         assert returned_path == expected
         assert expected.exists()
 
@@ -222,7 +223,7 @@ class TestSavePlan:
         plan = _plan(task_summary="Human readable plan")
         forge.save_plan(plan, project)
 
-        md_path = Path(project.path) / ".claude" / "team-context" / "plan.md"
+        md_path = Path(project.path) / ".claude" / "team-context" / "executions" / plan.task_id / "plan.md"
         assert md_path.exists()
 
     def test_plan_md_contains_task_summary(self, tmp_path: Path):
@@ -234,7 +235,7 @@ class TestSavePlan:
         plan = _plan(task_summary="Refactor login service")
         forge.save_plan(plan, project)
 
-        md_path = Path(project.path) / ".claude" / "team-context" / "plan.md"
+        md_path = Path(project.path) / ".claude" / "team-context" / "executions" / plan.task_id / "plan.md"
         content = md_path.read_text(encoding="utf-8")
         assert "Refactor login service" in content
 
@@ -257,8 +258,10 @@ class TestSavePlan:
         planner = _mock_planner()
         forge = _forge(planner, store)
 
-        forge.save_plan(_plan(), project)
-        tmp_file = Path(project.path) / ".claude" / "team-context" / "plan.json.tmp"
+        plan = _plan()
+        forge.save_plan(plan, project)
+        task_dir = Path(project.path) / ".claude" / "team-context" / "executions" / plan.task_id
+        tmp_file = task_dir / "plan.json.tmp"
         assert not tmp_file.exists()
 
     def test_save_plan_returns_path_to_plan_json(self, tmp_path: Path):

@@ -1,4 +1,24 @@
-"""Context manager — shared context, mission log, and codebase profile."""
+"""Context manager — shared context, mission log, and codebase profile.
+
+Supports task-scoped directories for parallel plan execution::
+
+    .claude/team-context/
+      executions/<task-id>/       ← task-scoped files
+        plan.json
+        plan.md
+        context.md
+        mission-log.md
+      shared/                     ← cross-task shared data
+        codebase-profile.md
+      active-task-id.txt          ← pointer to default task
+
+When ``task_id`` is provided, per-task files (plan, context, mission log)
+are written inside the task's execution directory.  Shared files (codebase
+profile) remain at the root or ``shared/`` level.
+
+When ``task_id`` is ``None``, the legacy flat layout is used for backward
+compatibility.
+"""
 from __future__ import annotations
 
 from datetime import datetime
@@ -7,38 +27,77 @@ from pathlib import Path
 from agent_baton.models.execution import MachinePlan
 from agent_baton.models.plan import MissionLogEntry
 
+_EXECUTIONS_DIR = "executions"
+_SHARED_DIR = "shared"
+
 
 class ContextManager:
     """Manage the .claude/team-context/ directory and its files.
 
     Handles reading/writing:
-    - plan.md — execution plan
-    - context.md — shared project context for agents
-    - mission-log.md — timestamped record of agent completions
-    - codebase-profile.md — cached codebase research
+    - plan.md / plan.json — execution plan (task-scoped when task_id set)
+    - context.md — shared project context for agents (task-scoped)
+    - mission-log.md — timestamped record of agent completions (task-scoped)
+    - codebase-profile.md — cached codebase research (shared across tasks)
+
+    Args:
+        team_context_dir: Root of the team-context directory.
+        task_id: When set, per-task files are written to
+            ``executions/<task_id>/`` instead of the root.
     """
 
-    def __init__(self, team_context_dir: Path | None = None) -> None:
-        self._dir = (team_context_dir or Path(".claude/team-context")).resolve()
+    def __init__(
+        self,
+        team_context_dir: Path | None = None,
+        task_id: str | None = None,
+    ) -> None:
+        self._root = (team_context_dir or Path(".claude/team-context")).resolve()
+        self._task_id = task_id
+        if task_id:
+            self._task_dir = self._root / _EXECUTIONS_DIR / task_id
+        else:
+            self._task_dir = self._root  # legacy flat layout
 
     @property
     def dir(self) -> Path:
-        return self._dir
+        """Root team-context directory."""
+        return self._root
+
+    @property
+    def task_dir(self) -> Path:
+        """Task-scoped directory (same as root if no task_id)."""
+        return self._task_dir
+
+    @property
+    def task_id(self) -> str | None:
+        return self._task_id
 
     def ensure_dir(self) -> None:
-        """Create the team-context directory if it doesn't exist."""
-        self._dir.mkdir(parents=True, exist_ok=True)
+        """Create the task directory if it doesn't exist."""
+        self._task_dir.mkdir(parents=True, exist_ok=True)
 
     # ── Plan ───────────────────────────────────────────────
 
     @property
     def plan_path(self) -> Path:
-        return self._dir / "plan.md"
+        return self._task_dir / "plan.md"
+
+    @property
+    def plan_json_path(self) -> Path:
+        return self._task_dir / "plan.json"
 
     def write_plan(self, plan: MachinePlan) -> Path:
-        """Write an execution plan to disk."""
+        """Write an execution plan to disk (both .md and .json)."""
+        import json
         self.ensure_dir()
         self.plan_path.write_text(plan.to_markdown(), encoding="utf-8")
+        # Also write JSON for machine consumption
+        tmp = self.plan_json_path.with_suffix(".json.tmp")
+        tmp.write_text(
+            json.dumps(plan.to_dict(), indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        tmp.rename(self.plan_json_path)
         return self.plan_path
 
     def read_plan(self) -> str | None:
@@ -51,7 +110,7 @@ class ContextManager:
 
     @property
     def context_path(self) -> Path:
-        return self._dir / "context.md"
+        return self._task_dir / "context.md"
 
     def write_context(
         self,
@@ -104,7 +163,7 @@ class ContextManager:
 
     @property
     def mission_log_path(self) -> Path:
-        return self._dir / "mission-log.md"
+        return self._task_dir / "mission-log.md"
 
     def init_mission_log(self, task: str, risk_level: str = "LOW") -> Path:
         """Initialize a new mission log."""
@@ -130,7 +189,6 @@ class ContextManager:
             with self.mission_log_path.open("a", encoding="utf-8") as f:
                 f.write(text)
         else:
-            # Auto-initialize if the log doesn't exist
             self.init_mission_log("Untitled")
             with self.mission_log_path.open("a", encoding="utf-8") as f:
                 f.write(text)
@@ -141,15 +199,16 @@ class ContextManager:
             return self.mission_log_path.read_text(encoding="utf-8")
         return None
 
-    # ── Codebase Profile ───────────────────────────────────
+    # ── Codebase Profile (shared across tasks) ─────────────
 
     @property
     def profile_path(self) -> Path:
-        return self._dir / "codebase-profile.md"
+        # Profile is project-level, not task-level — lives at root
+        return self._root / "codebase-profile.md"
 
     def write_profile(self, content: str) -> Path:
         """Write the codebase profile cache."""
-        self.ensure_dir()
+        self._root.mkdir(parents=True, exist_ok=True)
         self.profile_path.write_text(content, encoding="utf-8")
         return self.profile_path
 
@@ -172,3 +231,17 @@ class ContextManager:
             "mission_log": self.mission_log_path.exists(),
             "profile": self.profile_path.exists(),
         }
+
+    # ── Discovery ──────────────────────────────────────────
+
+    @staticmethod
+    def list_task_ids(context_root: Path) -> list[str]:
+        """List all task IDs that have execution directories."""
+        exec_dir = context_root / _EXECUTIONS_DIR
+        if not exec_dir.is_dir():
+            return []
+        return sorted(
+            child.name
+            for child in exec_dir.iterdir()
+            if child.is_dir()
+        )
