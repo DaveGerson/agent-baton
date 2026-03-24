@@ -120,13 +120,6 @@ class TestAgentDefinitionCategory:
         assert agent.category == AgentCategory.ENGINEERING
 
 
-# DECISION: Removed test_default_model_is_sonnet, test_default_permission_mode_is_default,
-# test_default_color_is_none, test_default_tools_is_empty_list — these are trivial
-# dataclass default assertions. The class is kept as a marker but the trivial tests
-# are removed per the cleanup rules.
-class TestAgentDefinitionDefaults:
-    pass
-
 
 # ---------------------------------------------------------------------------
 # ExecutionPlan

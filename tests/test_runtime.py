@@ -8,11 +8,10 @@ import pytest
 
 from agent_baton.core.engine.executor import ExecutionEngine
 from agent_baton.core.events.bus import EventBus
-from agent_baton.core.runtime.launcher import AgentLauncher, DryRunLauncher, LaunchResult
+from agent_baton.core.runtime.launcher import DryRunLauncher, LaunchResult
 from agent_baton.core.runtime.scheduler import SchedulerConfig, StepScheduler
 from agent_baton.core.runtime.worker import TaskWorker
 from agent_baton.models.execution import (
-    ActionType,
     MachinePlan,
     PlanGate,
     PlanPhase,
@@ -111,12 +110,6 @@ class TestDryRunLauncher:
 # ===========================================================================
 # SchedulerConfig + StepScheduler
 # ===========================================================================
-
-class TestSchedulerConfig:
-    # DECISION: removed trivial test_default_max_concurrent and test_custom_config
-    # (both assert a single dataclass field). The concurrency-limit and
-    # max_concurrent_property tests in TestStepScheduler provide better coverage.
-    pass
 
 
 class TestStepScheduler:
