@@ -520,6 +520,27 @@ class IntelligentPlanner:
                 if not step.context_files:
                     step.context_files = ["CLAUDE.md"]
 
+        # 13b. Model inheritance — inherit model preference from agent definition.
+        # If the agent definition specifies a model, use it; otherwise keep the
+        # PlanStep default ("sonnet").
+        for phase in plan_phases:
+            for step in phase.steps:
+                agent_def = self._registry.get(step.agent_name)
+                if agent_def and agent_def.model:
+                    step.model = agent_def.model
+
+        # 13c. Context richness — extract file paths from task summary and append
+        # to every step's context_files (deduplicated).
+        extracted_paths = self._extract_file_paths(task_summary)
+        if extracted_paths:
+            for phase in plan_phases:
+                for step in phase.steps:
+                    existing = set(step.context_files)
+                    for path in extracted_paths:
+                        if path not in existing:
+                            step.context_files.append(path)
+                            existing.add(path)
+
         # 14. Shared context
         tmp_plan = MachinePlan(
             task_id=task_id,
@@ -659,6 +680,31 @@ class IntelligentPlanner:
     # Private helpers — task ID and type inference
     # ------------------------------------------------------------------
 
+    def _extract_file_paths(self, text: str) -> list[str]:
+        """Extract file path candidates from task summary text.
+
+        Scans for tokens that look like file paths — must contain a ``/``
+        or end with a known code/config extension to reduce false positives.
+
+        Returns:
+            Deduplicated list of path-like strings found in *text*.
+        """
+        _CODE_EXTENSIONS = {
+            ".py", ".ts", ".md", ".json", ".yaml", ".yml", ".toml",
+            ".cfg", ".txt", ".html", ".css", ".js", ".jsx", ".tsx",
+        }
+        pattern = r'(?:^|[\s(])([a-zA-Z0-9_./-]+(?:\.[a-zA-Z0-9]+|/))'
+        candidates = re.findall(pattern, text)
+        seen: set[str] = set()
+        result: list[str] = []
+        for c in candidates:
+            last_part = c.split("/")[-1]
+            ext_match = "." in last_part and f".{last_part.rsplit('.', 1)[-1]}" in _CODE_EXTENSIONS
+            if ("/" in c or ext_match) and c not in seen:
+                seen.add(c)
+                result.append(c)
+        return result
+
     def _generate_task_id(self, summary: str) -> str:
         """Create a collision-free task ID.
 
@@ -718,14 +764,47 @@ class IntelligentPlanner:
                             f" from phase {prev.phase_id} ({prev_agents})."
                         )
 
-                # Default deliverables
+                # Default deliverables — skip if agent definition already specifies
+                # output format (to avoid duplicating what the agent already knows).
                 if not step.deliverables:
                     base_agent = step.agent_name.split("--")[0]
                     defaults = _AGENT_DELIVERABLES.get(base_agent)
-                    if defaults:
+                    if defaults and not self._agent_has_output_spec(step.agent_name):
                         step.deliverables = list(defaults)
 
         return phases
+
+    def _agent_expertise_level(self, agent_name: str) -> str:
+        """Assess agent expertise from definition richness.
+
+        Consults the registry to determine how much guidance this agent needs
+        in its delegation prompt.
+
+        Returns:
+            "expert"   — rich definition (>200 words); agent knows its craft,
+                         use minimal task-only description.
+            "standard" — has a definition; use the full outcome template.
+            "minimal"  — no definition found; use template plus light hints.
+        """
+        agent_def = self._registry.get(agent_name)
+        if agent_def is None:
+            return "minimal"
+        word_count = len(agent_def.instructions.split())
+        return "expert" if word_count > 200 else "standard"
+
+    def _agent_has_output_spec(self, agent_name: str) -> bool:
+        """Return True if the agent definition already specifies its output format.
+
+        Checks for common section headers/keywords that indicate the agent
+        already knows what to produce.  When True, the planner skips adding
+        ``_AGENT_DELIVERABLES`` defaults to avoid duplication.
+        """
+        agent_def = self._registry.get(agent_name)
+        if agent_def is None:
+            return False
+        instructions_lower = agent_def.instructions.lower()
+        output_markers = ("output format", "when you finish", "return:", "deliverables")
+        return any(marker in instructions_lower for marker in output_markers)
 
     def _step_description(
         self, phase_name: str, agent_name: str, task_summary: str
@@ -734,15 +813,21 @@ class IntelligentPlanner:
 
         Uses ``_STEP_TEMPLATES`` for agent+phase combinations that have a
         dedicated template, falling back to ``_PHASE_VERBS`` for unknown
-        combinations.
+        combinations.  Prompt weight scales with agent expertise level:
+
+        - **expert** agents (rich definitions, >200 words) receive just the
+          outcome phrase — their definition already carries the methodology.
+        - **standard** agents receive the full outcome template.
+        - **minimal** agents (no definition) receive the template plus a brief
+          method hint so they have enough guidance to proceed.
 
         Examples::
 
             _step_description("implement", "backend-engineer--python", "Add OAuth2 login")
-            # -> "Implement the server-side components for: Add OAuth2 login. ..."
+            # -> "Implement: Add OAuth2 login. Deliver working, tested code."
 
             _step_description("design", "architect", "Add OAuth2 login")
-            # -> "Design the architecture for: Add OAuth2 login. ..."
+            # -> "Produce a design for: Add OAuth2 login ..."
 
         Falls back to ``"<phase> phase — <agent>"`` when ``task_summary`` is empty.
         """
@@ -751,17 +836,42 @@ class IntelligentPlanner:
 
         base_agent = agent_name.split("--")[0]
         phase_lower = phase_name.lower()
+        expertise = self._agent_expertise_level(agent_name)
 
-        # Try agent+phase specific template first
+        # Expert agents: just the outcome phrase (first sentence of template or verb+task)
+        if expertise == "expert":
+            agent_templates = _STEP_TEMPLATES.get(base_agent, {})
+            template = agent_templates.get(phase_lower)
+            if template:
+                # Use only up to the first period/sentence
+                outcome = template.format(task=task_summary)
+                first_sentence_end = outcome.find(".")
+                if first_sentence_end != -1:
+                    return outcome[: first_sentence_end + 1]
+                return outcome
+            verb = _PHASE_VERBS.get(phase_lower, phase_name)
+            return f"{verb}: {task_summary}."
+
+        # Standard agents: full outcome template
         agent_templates = _STEP_TEMPLATES.get(base_agent, {})
         template = agent_templates.get(phase_lower)
-
         if template:
-            return template.format(task=task_summary)
+            description = template.format(task=task_summary)
+            if expertise == "minimal":
+                # Append a light method hint so agents without definitions have guidance
+                verb = _PHASE_VERBS.get(phase_lower, phase_name.lower())
+                description += (
+                    f" Apply sound {verb.lower().split(':')[0].strip()} practices"
+                    f" and document your approach."
+                )
+            return description
 
         # Fallback to generic verb + task
         verb = _PHASE_VERBS.get(phase_lower, phase_name)
-        return f"{verb}: {task_summary} (as {agent_name})"
+        base_desc = f"{verb}: {task_summary} (as {agent_name})"
+        if expertise == "minimal":
+            base_desc += " Document your approach and decisions."
+        return base_desc
 
     def _default_phases(self, task_type: str, agents: list[str], task_summary: str = "") -> list[PlanPhase]:
         """Build the default PlanPhase list for a task type.
