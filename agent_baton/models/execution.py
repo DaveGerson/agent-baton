@@ -377,7 +377,7 @@ class ExecutionState:
 @dataclass
 class ExecutionAction:
     """Instruction from the engine to the driving session."""
-    action_type: str                    # ActionType value
+    action_type: ActionType             # strongly-typed; serialises to str via to_dict()
     message: str = ""                   # human-readable description
 
     # For DISPATCH actions:
@@ -400,8 +400,10 @@ class ExecutionAction:
     parallel_actions: list[ExecutionAction] = field(default_factory=list)
 
     def to_dict(self) -> dict:
-        d = {"action_type": self.action_type, "message": self.message}
-        if self.action_type == ActionType.DISPATCH.value:
+        # action_type is serialised as a plain string so CLI / Claude output
+        # is unaffected by the internal enum representation.
+        d = {"action_type": self.action_type.value, "message": self.message}
+        if self.action_type == ActionType.DISPATCH:
             d.update({
                 "agent_name": self.agent_name,
                 "agent_model": self.agent_model,
@@ -409,13 +411,13 @@ class ExecutionAction:
                 "step_id": self.step_id,
                 "path_enforcement": self.path_enforcement,
             })
-        elif self.action_type == ActionType.GATE.value:
+        elif self.action_type == ActionType.GATE:
             d.update({
                 "gate_type": self.gate_type,
                 "gate_command": self.gate_command,
                 "phase_id": self.phase_id,
             })
-        elif self.action_type in (ActionType.COMPLETE.value, ActionType.FAILED.value):
+        elif self.action_type in (ActionType.COMPLETE, ActionType.FAILED):
             d["summary"] = self.summary
         if self.parallel_actions:
             d["parallel_actions"] = [a.to_dict() for a in self.parallel_actions]

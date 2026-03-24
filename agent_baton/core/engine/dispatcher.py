@@ -224,7 +224,7 @@ class PromptDispatcher:
         enforcement = self.build_path_enforcement(step)
 
         return ExecutionAction(
-            action_type=ActionType.DISPATCH.value,
+            action_type=ActionType.DISPATCH,
             message=f"Dispatch {step.agent_name} for step {step.step_id}",
             agent_name=step.agent_name,
             agent_model=step.model,

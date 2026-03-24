@@ -95,24 +95,24 @@ class TaskWorker:
 
             action = self._engine.next_action()
 
-            if action.action_type == ActionType.COMPLETE.value:
+            if action.action_type == ActionType.COMPLETE:
                 summary = self._engine.complete()
                 return summary
 
-            if action.action_type == ActionType.FAILED.value:
+            if action.action_type == ActionType.FAILED:
                 return action.message
 
-            if action.action_type == ActionType.WAIT.value:
+            if action.action_type == ActionType.WAIT:
                 # Parallel steps are still in-flight (from a previous
                 # iteration).  Sleep briefly and re-check.
                 await asyncio.sleep(0.5)
                 continue
 
-            if action.action_type == ActionType.GATE.value:
+            if action.action_type == ActionType.GATE:
                 await self._handle_gate(action)
                 continue
 
-            if action.action_type == ActionType.DISPATCH.value:
+            if action.action_type == ActionType.DISPATCH:
                 # Collect ALL currently dispatchable steps so we can launch
                 # them in parallel.
                 actions = self._engine.next_actions()

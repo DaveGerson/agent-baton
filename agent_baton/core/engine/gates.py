@@ -99,7 +99,7 @@ class GateRunner:
         message = f"Gate '{gate.gate_type}' for phase {phase_id}: {description}"
 
         return ExecutionAction(
-            action_type=ActionType.GATE.value,
+            action_type=ActionType.GATE,
             message=message,
             gate_type=gate.gate_type,
             gate_command=command,

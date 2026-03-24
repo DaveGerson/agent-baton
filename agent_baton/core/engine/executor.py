@@ -176,7 +176,7 @@ class ExecutionEngine:
         state = self._persistence.load()
         if state is None:
             return ExecutionAction(
-                action_type=ActionType.FAILED.value,
+                action_type=ActionType.FAILED,
                 message="No active execution state found. Call start() first.",
                 summary="No execution state on disk.",
             )
@@ -471,7 +471,7 @@ class ExecutionEngine:
         state = self._persistence.load()
         if state is None:
             return ExecutionAction(
-                action_type=ActionType.FAILED.value,
+                action_type=ActionType.FAILED,
                 message="No execution state found on disk. Cannot resume.",
                 summary="No execution state on disk.",
             )
@@ -606,7 +606,7 @@ class ExecutionEngine:
         # Terminal states — report immediately.
         if state.status == "complete":
             return ExecutionAction(
-                action_type=ActionType.COMPLETE.value,
+                action_type=ActionType.COMPLETE,
                 message=f"Task {state.task_id} is already complete.",
                 summary=f"Task {state.task_id} completed.",
             )
@@ -614,7 +614,7 @@ class ExecutionEngine:
             failed_ids = list(state.failed_step_ids)
             msg = f"Execution failed. Failed step(s): {', '.join(failed_ids) or 'gate'}"
             return ExecutionAction(
-                action_type=ActionType.FAILED.value,
+                action_type=ActionType.FAILED,
                 message=msg,
                 summary=msg,
             )
@@ -624,7 +624,7 @@ class ExecutionEngine:
             phase_obj = state.current_phase_obj
             if phase_obj and phase_obj.gate:
                 return ExecutionAction(
-                    action_type=ActionType.GATE.value,
+                    action_type=ActionType.GATE,
                     message=f"Run gate '{phase_obj.gate.gate_type}' for phase {phase_obj.phase_id}.",
                     gate_type=phase_obj.gate.gate_type,
                     gate_command=phase_obj.gate.command,
@@ -634,7 +634,7 @@ class ExecutionEngine:
         # No more phases — all done.
         if state.current_phase >= len(state.plan.phases):
             return ExecutionAction(
-                action_type=ActionType.COMPLETE.value,
+                action_type=ActionType.COMPLETE,
                 message=f"All phases of task {state.task_id} are complete.",
                 summary=f"Task {state.task_id} completed successfully.",
             )
@@ -642,7 +642,7 @@ class ExecutionEngine:
         phase_obj = state.current_phase_obj
         if phase_obj is None:
             return ExecutionAction(
-                action_type=ActionType.COMPLETE.value,
+                action_type=ActionType.COMPLETE,
                 message="No more phases.",
                 summary=f"Task {state.task_id} completed.",
             )
@@ -654,7 +654,7 @@ class ExecutionEngine:
             if phase_obj.gate and not self._gate_passed_for_phase(state, phase_obj.phase_id):
                 state.status = "gate_pending"
                 return ExecutionAction(
-                    action_type=ActionType.GATE.value,
+                    action_type=ActionType.GATE,
                     message=f"Run gate '{phase_obj.gate.gate_type}' for phase {phase_obj.phase_id}.",
                     gate_type=phase_obj.gate.gate_type,
                     gate_command=phase_obj.gate.command,
@@ -684,7 +684,7 @@ class ExecutionEngine:
                 state.status = "failed"
                 msg = f"Step {step.step_id} failed."
                 return ExecutionAction(
-                    action_type=ActionType.FAILED.value,
+                    action_type=ActionType.FAILED,
                     message=msg,
                     summary=msg,
                 )
@@ -716,7 +716,7 @@ class ExecutionEngine:
         pending = {s.step_id for s in steps} - completed - state.failed_step_ids
         if pending:
             return ExecutionAction(
-                action_type=ActionType.WAIT.value,
+                action_type=ActionType.WAIT,
                 message="Waiting for in-flight steps to complete before proceeding.",
                 summary=f"Steps in flight or blocked: {', '.join(sorted(pending))}",
             )
@@ -725,7 +725,7 @@ class ExecutionEngine:
         if phase_obj.gate and not self._gate_passed_for_phase(state, phase_obj.phase_id):
             state.status = "gate_pending"
             return ExecutionAction(
-                action_type=ActionType.GATE.value,
+                action_type=ActionType.GATE,
                 message=f"Run gate '{phase_obj.gate.gate_type}' for phase {phase_obj.phase_id}.",
                 gate_type=phase_obj.gate.gate_type,
                 gate_command=phase_obj.gate.command,
@@ -756,7 +756,7 @@ class ExecutionEngine:
         prompt = _build_delegation_prompt(step, state.plan)
         enforcement = PromptDispatcher.build_path_enforcement(step)
         return ExecutionAction(
-            action_type=ActionType.DISPATCH.value,
+            action_type=ActionType.DISPATCH,
             message=f"Dispatch agent '{step.agent_name}' for step {step.step_id}.",
             agent_name=step.agent_name,
             agent_model=step.model,
