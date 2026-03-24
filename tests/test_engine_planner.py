@@ -124,17 +124,21 @@ class TestGenerateTaskId:
         assert "'" not in tid
         assert "!" not in tid
 
-    def test_empty_summary_returns_date_only(self, planner: IntelligentPlanner):
+    def test_empty_summary_returns_date_with_uuid(self, planner: IntelligentPlanner):
         tid = planner._generate_task_id("")
         import re
-        assert re.match(r"^\d{4}-\d{2}-\d{2}$", tid)
+        # Format: YYYY-MM-DD-<8-char-uuid>
+        assert re.match(r"^\d{4}-\d{2}-\d{2}-[a-f0-9]{8}$", tid)
 
     def test_long_summary_truncated(self, planner: IntelligentPlanner):
         long_summary = "word " * 30  # 150 chars
         tid = planner._generate_task_id(long_summary)
-        # slug portion should be <= 50 chars
-        slug = tid[len("YYYY-MM-DD-"):]  # approximate
-        assert len(tid) <= 65  # date(10) + dash(1) + slug(50) + trailing hyphen removal
+        # date(10) + dash(1) + slug(<=50) + dash(1) + uuid(8) = max 70
+        assert len(tid) <= 70
+
+    def test_task_ids_are_unique(self, planner: IntelligentPlanner):
+        ids = {planner._generate_task_id("same task") for _ in range(20)}
+        assert len(ids) == 20, "UUID suffix should prevent collisions"
 
 
 # ---------------------------------------------------------------------------
