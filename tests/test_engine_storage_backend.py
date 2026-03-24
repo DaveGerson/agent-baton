@@ -198,13 +198,16 @@ class TestSqliteStorageMode:
         assert st["task_id"] == "sqlite-status-001"
         assert st["status"] == "running"
 
-    def test_no_legacy_files_written(self, tmp_path: Path) -> None:
-        """In SQLite mode the legacy JSON files must NOT be created."""
+    def test_dual_write_creates_file_alongside_sqlite(self, tmp_path: Path) -> None:
+        """In SQLite mode, dual-write keeps file persistence current."""
         engine, _ = _engine_with_sqlite(tmp_path)
-        engine.start(_plan("sqlite-no-files-001"))
-        assert not (tmp_path / "execution-state.json").exists()
-        assert not (tmp_path / "usage-log.jsonl").exists()
-        assert not (tmp_path / "telemetry.jsonl").exists()
+        engine.start(_plan("sqlite-dual-write-001"))
+        # Dual-write should create execution-state files for backward compat
+        has_state = (
+            (tmp_path / "execution-state.json").exists()
+            or any((tmp_path / "executions").rglob("execution-state.json"))
+        )
+        assert has_state
 
     def test_complete_does_not_raise(self, tmp_path: Path) -> None:
         engine, _ = _engine_with_sqlite(tmp_path)

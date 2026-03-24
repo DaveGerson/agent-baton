@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from pathlib import Path
 
@@ -11,9 +12,12 @@ from agent_baton.core.engine.persistence import StatePersistence
 from agent_baton.core.events.bus import EventBus
 from agent_baton.core.orchestration.context import ContextManager
 from agent_baton.core.runtime.supervisor import WorkerSupervisor
+from agent_baton.core.storage import detect_backend, get_project_storage
 from agent_baton.models.execution import MachinePlan, ActionType, PlanPhase, PlanStep
 from agent_baton.models.parallel import ExecutionRecord
 from agent_baton.models.plan import MissionLogEntry
+
+_log = logging.getLogger(__name__)
 
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
@@ -321,13 +325,40 @@ def handler(args: argparse.Namespace) -> None:
 def _handle_list() -> None:
     """Print a table of all known executions with status and worker info."""
     context_root = Path(".claude/team-context")
-    task_ids = StatePersistence.list_executions(context_root)
+
+    # Collect task IDs from file backend (namespaced dirs)
+    file_task_ids = StatePersistence.list_executions(context_root)
 
     # Also include a legacy flat-file execution if present
     legacy_sp = StatePersistence(context_root)
     legacy_state = legacy_sp.load()
 
     active_task_id = StatePersistence.get_active_task_id(context_root)
+
+    # Collect task IDs from SQLite backend (union with file IDs)
+    sqlite_task_ids: list[str] = []
+    _sqlite_storage = None
+    backend = detect_backend(context_root)
+    if backend == "sqlite":
+        _log.debug("execute list: using SQLite backend at %s", context_root / "baton.db")
+        try:
+            _sqlite_storage = get_project_storage(context_root, backend="sqlite")
+            sqlite_task_ids = _sqlite_storage.list_executions()
+            # Also check for active task in SQLite if not found on disk
+            if active_task_id is None:
+                active_task_id = _sqlite_storage.get_active_task()
+        except Exception:
+            _log.debug("execute list: SQLite load failed, using file backend only", exc_info=True)
+    else:
+        _log.debug("execute list: using file backend at %s", context_root)
+
+    # Merge: union of file and SQLite task IDs, preserving file order first
+    all_task_ids_seen: set[str] = set(file_task_ids)
+    merged_task_ids: list[str] = list(file_task_ids)
+    for tid in sqlite_task_ids:
+        if tid not in all_task_ids_seen:
+            merged_task_ids.append(tid)
+            all_task_ids_seen.add(tid)
 
     # Build worker liveness index: task_id -> pid
     workers_by_task: dict[str, int] = {}
@@ -337,9 +368,16 @@ def _handle_list() -> None:
 
     records: list[ExecutionRecord] = []
 
-    for tid in task_ids:
+    for tid in merged_task_ids:
+        # Try file backend first, then SQLite
+        state = None
         sp = StatePersistence(context_root, task_id=tid)
         state = sp.load()
+        if state is None and _sqlite_storage is not None:
+            try:
+                state = _sqlite_storage.load_execution(tid)
+            except Exception:
+                _log.debug("execute list: failed to load %s from SQLite", tid, exc_info=True)
         if state is None:
             continue
         steps_complete = sum(
@@ -398,11 +436,34 @@ def _handle_switch(task_id: str) -> None:
     """Switch the active execution to the given task ID."""
     context_root = Path(".claude/team-context")
     sp = StatePersistence(context_root, task_id=task_id)
-    if not sp.exists():
+
+    # Check whether the execution exists in either backend
+    exists_in_files = sp.exists()
+    exists_in_sqlite = False
+    _sqlite_storage = None
+    backend = detect_backend(context_root)
+    if backend == "sqlite":
+        _log.debug("execute switch: checking SQLite backend for task %s", task_id)
+        try:
+            _sqlite_storage = get_project_storage(context_root, backend="sqlite")
+            exists_in_sqlite = _sqlite_storage.load_execution(task_id) is not None
+        except Exception:
+            _log.debug("execute switch: SQLite check failed", exc_info=True)
+
+    if not exists_in_files and not exists_in_sqlite:
         print(f"error: no execution found with task ID '{task_id}'")
         print("Run 'baton execute list' to see available executions.")
         sys.exit(1)
+
+    # Update active task in both backends that are available
     sp.set_active()
+    if _sqlite_storage is not None:
+        _log.debug("execute switch: setting active task in SQLite to %s", task_id)
+        try:
+            _sqlite_storage.set_active_task(task_id)
+        except Exception:
+            _log.debug("execute switch: SQLite set_active_task failed", exc_info=True)
+
     print(f"Active execution switched to: {task_id}")
 
 
