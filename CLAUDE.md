@@ -7,23 +7,34 @@ system for Claude Code.
 
 ```
 agent_baton/       ← Python package (orchestration engine)
-  models/          ← Data models (16 modules: agent, plan, execution, events, decision, ...)
-  core/            ← Business logic (9 sub-packages)
-    engine/        ← Execution engine (planner, executor, dispatcher, gates)
-    orchestration/ ← Context, plan, registry, router
-    govern/        ← Classifier, compliance, escalation, policy, validation
-    observe/       ← Trace, usage, dashboard, retrospective, telemetry, context profiler
-    improve/       ← Evolution, scoring, VCS
+  models/          ← Data models (16 modules)
+  core/            ← Business logic (9 sub-packages, no shim files)
+    engine/        ← Execution core: planner, executor, dispatcher, gates,
+    │                persistence, protocols (ExecutionDriver)
+    orchestration/ ← Agent discovery: registry, router, context manager
+    govern/        ← Policy enforcement, compliance, validation
+    observe/       ← Tracing, usage, dashboard, retrospective, telemetry
+    improve/       ← Scoring, evolution, VCS
     learn/         ← Pattern learner, budget tuner
-    distribute/    ← Async dispatch, packaging, sharing, transfer, incident
+    distribute/    ← Packaging, sharing, registry client
+    │  experimental/ ← Incident, async dispatch, transfer (not production)
     events/        ← Event bus, domain events, persistence, projections
-    runtime/       ← Async worker, scheduler, launcher, decisions, supervisor
-  cli/             ← CLI interface (35 commands via `baton`)
+    runtime/       ← Async worker, supervisor, launcher, decisions,
+                     ExecutionContext factory
+  cli/             ← CLI interface (34 commands via `baton`)
+    commands/
+      execution/   ← execute, plan, status, daemon, async, decide
+      observe/     ← dashboard, trace, usage, telemetry, context_profile, retro
+      govern/      ← classify, compliance, policy, escalations, validate, spec_check, detect
+      improve/     ← scores, evolve, patterns, budget, changelog
+      distribute/  ← package, publish, pull, verify_package, install, transfer
+      agents/      ← agents, route, events, incident
+docs/              ← Architecture documentation (architecture.md, design-decisions.md, invariants.md)
 agents/            ← Distributable agent definitions (19 .md files)
 references/        ← Distributable reference docs (13 .md files)
 templates/         ← CLAUDE.md + settings.json installed to target projects
 scripts/           ← Install scripts (Linux + Windows)
-tests/             ← Test suite (1977 tests, pytest)
+tests/             ← Test suite (1732 tests, pytest)
 .claude/           ← Project-specific orchestration setup:
   agents/          ← Tailored agents for developing agent-baton (11)
   references/      ← Symlink → ../references/ (canonical source)
@@ -42,7 +53,12 @@ tests/             ← Test suite (1977 tests, pytest)
 - The `agent_baton` Python package reads agent definitions at runtime.
 - `core/engine/` is the execution engine — changes here affect the runtime
   behavior of all orchestrated tasks.
-- Backward-compatible shims exist at `core/*.py` for Epic 1 module paths.
+- All imports use canonical sub-package paths (e.g.,
+  `from agent_baton.core.govern.classifier import DataClassifier`).
+  There are no backward-compatibility shims.
+- `cli/commands/execute.py` contains `_print_action()` — the output format
+  Claude reads to drive orchestration. Treat it as a public API. See
+  `docs/invariants.md` for the full contract.
 
 ## Agent Roster (for this project)
 
@@ -64,7 +80,7 @@ tests/             ← Test suite (1977 tests, pytest)
 
 ```bash
 pip install -e ".[dev]"    # Install in editable mode
-pytest                     # Run tests (1977 tests)
+pytest                     # Run tests (1732 tests)
 scripts/install.sh         # Re-install globally after editing agents/references
 ```
 
@@ -78,3 +94,21 @@ and should involve the auditor when substantial.
 
 Changes to `core/engine/` affect the execution runtime and should have
 corresponding test coverage.
+
+## Documentation Maintenance
+
+When completing work that changes the architecture, public API, CLI
+commands, or data models, update the relevant documentation:
+
+- **`docs/architecture.md`** — Package layout, dependency graph, key
+  contracts. Update when adding/removing/moving modules or changing
+  the interaction chain.
+- **`docs/design-decisions.md`** — ADR log. Add an entry when making a
+  non-obvious architectural decision.
+- **`docs/invariants.md`** — Critical interface boundaries. Update when
+  changing CLI command names, `_print_action()` output format, or
+  `execution-state.json` schema.
+- **`README.md`** — User-facing overview. Update when adding agents,
+  references, or CLI commands.
+- **This file (`CLAUDE.md`)** — Developer guide. Update when the repo
+  structure, test count, or development workflow changes.
