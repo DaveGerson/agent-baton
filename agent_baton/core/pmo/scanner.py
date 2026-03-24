@@ -23,72 +23,78 @@ class PmoScanner:
     def __init__(self, store: PmoStore) -> None:
         self._store = store
 
+    def _state_to_card(
+        self, state: "ExecutionState", project: PmoProject
+    ) -> PmoCard:
+        """Convert an ExecutionState to a PmoCard."""
+        plan = state.plan
+        completed = len([
+            r for r in state.step_results if r.status == "complete"
+        ])
+        failed = [
+            r for r in state.step_results if r.status == "failed"
+        ]
+        gates_passed = len([
+            g for g in state.gate_results if g.passed
+        ])
+
+        current_phase_name = ""
+        if state.current_phase < len(plan.phases):
+            current_phase_name = plan.phases[state.current_phase].name
+
+        return PmoCard(
+            card_id=plan.task_id,
+            project_id=project.project_id,
+            program=project.program,
+            title=plan.task_summary,
+            column=status_to_column(state.status),
+            risk_level=plan.risk_level,
+            agents=list(plan.all_agents),
+            steps_completed=completed,
+            steps_total=plan.total_steps,
+            gates_passed=gates_passed,
+            current_phase=current_phase_name,
+            error=failed[-1].error if failed else "",
+            created_at=plan.created_at,
+            updated_at=state.completed_at or state.started_at,
+        )
+
     def scan_project(self, project: PmoProject) -> list[PmoCard]:
-        """Scan a single project for execution state and return cards."""
+        """Scan a single project for execution states and return cards.
+
+        Supports both namespaced executions (multiple plans per project)
+        and legacy flat execution-state.json files.
+        """
         context_root = Path(project.path) / ".claude" / "team-context"
-        persistence = StatePersistence(context_root)
-
-        # Also check for a saved plan (plan.json) even without execution state
-        plan_path = context_root / "plan.json"
-
-        state = persistence.load()
-        if state is None and not plan_path.exists():
-            return []
-
         cards: list[PmoCard] = []
 
-        if state is not None:
-            plan = state.plan
-            completed = len([
-                r for r in state.step_results if r.status == "complete"
-            ])
-            failed = [
-                r for r in state.step_results if r.status == "failed"
-            ]
-            gates_passed = len([
-                g for g in state.gate_results if g.passed
-            ])
+        # Load all execution states (namespaced + legacy flat file)
+        states = StatePersistence.load_all(context_root)
+        for state in states:
+            cards.append(self._state_to_card(state, project))
 
-            current_phase_name = ""
-            if state.current_phase < len(plan.phases):
-                current_phase_name = plan.phases[state.current_phase].name
-
-            card = PmoCard(
-                card_id=plan.task_id,
-                project_id=project.project_id,
-                program=project.program,
-                title=plan.task_summary,
-                column=status_to_column(state.status),
-                risk_level=plan.risk_level,
-                agents=list(plan.all_agents),
-                steps_completed=completed,
-                steps_total=plan.total_steps,
-                gates_passed=gates_passed,
-                current_phase=current_phase_name,
-                error=failed[-1].error if failed else "",
-                created_at=plan.created_at,
-                updated_at=state.completed_at or state.started_at,
-            )
-            cards.append(card)
-        elif plan_path.exists():
-            # Plan exists but execution hasn't started → queued
+        # Also check for a saved plan (plan.json) without execution state → queued
+        seen_task_ids = {c.card_id for c in cards}
+        plan_path = context_root / "plan.json"
+        if plan_path.exists():
             import json
             try:
                 data = json.loads(plan_path.read_text(encoding="utf-8"))
                 from agent_baton.models.execution import MachinePlan
                 plan = MachinePlan.from_dict(data)
-                card = PmoCard(
-                    card_id=plan.task_id,
-                    project_id=project.project_id,
-                    program=project.program,
-                    title=plan.task_summary,
-                    column="queued",
-                    risk_level=plan.risk_level,
-                    agents=list(plan.all_agents),
-                    steps_total=plan.total_steps,
-                    created_at=plan.created_at,
-                )
-                cards.append(card)
+                if plan.task_id not in seen_task_ids:
+                    card = PmoCard(
+                        card_id=plan.task_id,
+                        project_id=project.project_id,
+                        program=project.program,
+                        title=plan.task_summary,
+                        column="queued",
+                        risk_level=plan.risk_level,
+                        agents=list(plan.all_agents),
+                        steps_total=plan.total_steps,
+                        created_at=plan.created_at,
+                    )
+                    cards.append(card)
             except (json.JSONDecodeError, KeyError, TypeError):
                 pass
 

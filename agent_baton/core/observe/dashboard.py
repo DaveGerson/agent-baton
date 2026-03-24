@@ -4,18 +4,26 @@ from __future__ import annotations
 from collections import Counter
 from pathlib import Path
 
+from agent_baton.core.observe.telemetry import AgentTelemetry
 from agent_baton.core.observe.usage import UsageLogger
 
 
 class DashboardGenerator:
-    """Generate a markdown dashboard from usage log data.
+    """Generate a markdown usage dashboard from JSONL logs.
 
     Produces .claude/team-context/usage-dashboard.md with cost trends,
-    agent utilization, retry rates, and model mix.
+    agent utilization, retry rates, and model mix.  When *telemetry* is
+    supplied (or the default telemetry.jsonl exists), a telemetry summary
+    section is appended.
     """
 
-    def __init__(self, usage_logger: UsageLogger | None = None) -> None:
+    def __init__(
+        self,
+        usage_logger: UsageLogger | None = None,
+        telemetry: AgentTelemetry | None = None,
+    ) -> None:
         self._usage = usage_logger or UsageLogger()
+        self._telemetry = telemetry or AgentTelemetry()
 
     def generate(self) -> str:
         """Generate the full dashboard markdown."""
@@ -143,6 +151,51 @@ class DashboardGenerator:
             lines.append(f"| {mode} | {count} |")
 
         lines.append("")
+
+        # ── Telemetry summary ─────────────────────────────────────────────
+        try:
+            tel_summary = self._telemetry.summary()
+        except Exception:
+            tel_summary = None
+
+        if tel_summary and tel_summary.get("total_events", 0) > 0:
+            lines.extend([
+                "## Telemetry",
+                "",
+                "| Metric | Value |",
+                "|--------|-------|",
+                f"| Total events | {tel_summary['total_events']} |",
+                f"| Files read | {len(tel_summary['files_read'])} |",
+                f"| Files written | {len(tel_summary['files_written'])} |",
+                "",
+                "### Events by Agent",
+                "",
+                "| Agent | Events |",
+                "|-------|--------|",
+            ])
+            for agent, count in sorted(
+                tel_summary["events_by_agent"].items(),
+                key=lambda kv: kv[1],
+                reverse=True,
+            ):
+                lines.append(f"| {agent} | {count} |")
+
+            lines.extend([
+                "",
+                "### Events by Type",
+                "",
+                "| Type | Count |",
+                "|------|-------|",
+            ])
+            for etype, count in sorted(
+                tel_summary["events_by_type"].items(),
+                key=lambda kv: kv[1],
+                reverse=True,
+            ):
+                lines.append(f"| {etype} | {count} |")
+
+            lines.append("")
+
         return "\n".join(lines)
 
     def write(self, path: Path | None = None) -> Path:

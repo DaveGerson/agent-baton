@@ -23,6 +23,7 @@ from agent_baton.models.retrospective import (
 from agent_baton.models.trace import TraceEvent, TaskTrace
 from agent_baton.models.pattern import LearnedPattern
 from agent_baton.models.budget import BudgetRecommendation
+from agent_baton.models.feedback import RetrospectiveFeedback
 from agent_baton.models.context_profile import AgentContextProfile, TaskContextProfile
 from agent_baton.models.registry import RegistryEntry, RegistryIndex
 from agent_baton.models.execution import (
@@ -63,6 +64,7 @@ __all__ = [
     "TaskTrace",
     "LearnedPattern",
     "BudgetRecommendation",
+    "RetrospectiveFeedback",
     "AgentContextProfile",
     "TaskContextProfile",
     "RegistryEntry",

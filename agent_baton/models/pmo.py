@@ -45,7 +45,7 @@ class PmoProject:
     project_id: str                             # slug, e.g. "nds"
     name: str
     path: str                                   # absolute filesystem path
-    program: str                                # "NDS", "ATL", etc.
+    program: str                                # e.g. "RW", "PROJ2"
     color: str = ""
     description: str = ""
     registered_at: str = ""                     # ISO 8601

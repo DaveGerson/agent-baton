@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from agent_baton.core.engine.planner import IntelligentPlanner
+from agent_baton.core.observe.retrospective import RetrospectiveEngine
 
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
@@ -53,7 +54,8 @@ def handler(args: argparse.Namespace) -> None:
     project_root = Path(args.project) if args.project else Path.cwd()
     agents = [a.strip() for a in args.agents.split(",") if a.strip()] if args.agents else None
 
-    planner = IntelligentPlanner()
+    retro_engine = RetrospectiveEngine()
+    planner = IntelligentPlanner(retro_engine=retro_engine)
     plan = planner.create_plan(
         args.summary,
         task_type=args.task_type,

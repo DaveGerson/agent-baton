@@ -11,6 +11,8 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
+from agent_baton.core.govern.classifier import ClassificationResult, DataClassifier
+from agent_baton.core.govern.policy import PolicyEngine, PolicySet, PolicyViolation
 from agent_baton.core.improve.scoring import AgentScorecard, PerformanceScorer
 from agent_baton.core.learn.budget_tuner import BudgetTuner
 from agent_baton.core.learn.pattern_learner import PatternLearner
@@ -18,6 +20,7 @@ from agent_baton.core.orchestration.registry import AgentRegistry
 from agent_baton.core.orchestration.router import AgentRouter
 from agent_baton.models.enums import GitStrategy, RiskLevel
 from agent_baton.models.execution import MachinePlan, PlanGate, PlanPhase, PlanStep, TeamMember
+from agent_baton.models.feedback import RetrospectiveFeedback
 from agent_baton.models.pattern import LearnedPattern
 
 
@@ -304,7 +307,13 @@ class IntelligentPlanner:
         print(planner.explain_plan(plan))
     """
 
-    def __init__(self, team_context_root: Path | None = None) -> None:
+    def __init__(
+        self,
+        team_context_root: Path | None = None,
+        classifier: DataClassifier | None = None,
+        policy_engine: PolicyEngine | None = None,
+        retro_engine: object | None = None,
+    ) -> None:
         self._team_context_root = team_context_root
         self._pattern_learner = PatternLearner(team_context_root)
         self._scorer = PerformanceScorer()
@@ -314,10 +323,21 @@ class IntelligentPlanner:
         self._registry = registry
         self._router = AgentRouter(registry)
 
+        # Optional governance subsystem — both are safe to leave as None
+        self._classifier = classifier
+        self._policy_engine = policy_engine
+
+        # Optional retrospective engine — provides closed-loop learning feedback.
+        # Typed as object to avoid a circular import; duck-typed at call site.
+        self._retro_engine = retro_engine
+
         # Populated during create_plan for use in explain_plan
         self._last_pattern_used: LearnedPattern | None = None
         self._last_score_warnings: list[str] = []
         self._last_routing_notes: list[str] = []
+        self._last_retro_feedback: RetrospectiveFeedback | None = None
+        self._last_classification: ClassificationResult | None = None
+        self._last_policy_violations: list[PolicyViolation] = []
 
     # ------------------------------------------------------------------
     # Public API
@@ -341,13 +361,15 @@ class IntelligentPlanner:
         4. Look for a high-confidence pattern that matches the task_type.
         5. Determine agents list — from explicit override, pattern, or defaults.
         6. Route base agent names to flavored variants.
-        7. Assess risk via _assess_risk (keywords + structural signals from agents).
-        8. Derive git strategy from risk level.
-        9. Build phase list — from override, pattern, or defaults.
-        10. Check PerformanceScorer; warn about low-scoring agents.
-        11. Apply budget tier recommendation if one exists.
-        12. Add QA gates between phases.
-        13. Build shared_context string and return MachinePlan.
+        7. Classify task sensitivity (DataClassifier if available).
+        8. Assess risk — combines classifier output with keyword/structural signals.
+        9. Derive git strategy from risk level.
+        10. Build phase list — from override, pattern, or defaults.
+        11. Check PerformanceScorer; warn about low-scoring agents.
+        12. Apply budget tier recommendation if one exists.
+        13. Validate agent assignments against policy (PolicyEngine if available).
+        14. Add QA gates between phases.
+        15. Build shared_context string and return MachinePlan.
 
         Args:
             task_summary: One-line human description of the task.
@@ -365,6 +387,9 @@ class IntelligentPlanner:
         self._last_pattern_used = None
         self._last_score_warnings = []
         self._last_routing_notes = []
+        self._last_classification = None
+        self._last_policy_violations = []
+        self._last_retro_feedback = None
 
         # 1. Task ID
         task_id = self._generate_task_id(task_summary)
@@ -409,14 +434,50 @@ class IntelligentPlanner:
         else:
             resolved_agents = list(agents)
 
+        # 5b. Retrospective feedback — filter dropped agents and record gaps.
+        # This is consulted before routing so the feedback applies to base names.
+        # Violations are soft: dropped agents are removed but the plan is not
+        # blocked; knowledge gaps are noted in shared_context only.
+        retro_feedback: RetrospectiveFeedback | None = None
+        if self._retro_engine is not None:
+            try:
+                retro_feedback = self._retro_engine.load_recent_feedback()
+                self._last_retro_feedback = retro_feedback
+            except Exception:
+                pass
+
+        if retro_feedback is not None and retro_feedback.has_feedback():
+            resolved_agents = self._apply_retro_feedback(resolved_agents, retro_feedback)
+
         # 6. Route agents
         resolved_agents = self._route_agents(resolved_agents, project_root)
 
-        # 7. Risk — assessed after routing so structural signals use final agents
-        risk_level = self._assess_risk(task_summary, resolved_agents)
+        # 7. Classify task sensitivity (DataClassifier if available)
+        classification: ClassificationResult | None = None
+        if self._classifier is not None:
+            try:
+                classification = self._classifier.classify(task_summary)
+                self._last_classification = classification
+            except Exception:
+                pass
+
+        # 8. Risk — combines DataClassifier output with keyword/structural signals.
+        # The classifier's risk level is the floor; keyword/structural signals can
+        # raise it further but cannot lower it below what the classifier detected.
+        keyword_risk_level = self._assess_risk(task_summary, resolved_agents)
+        if classification is not None:
+            # Take the higher of the two assessments
+            classifier_ordinal = _RISK_ORDINAL[classification.risk_level]
+            keyword_ordinal = _RISK_ORDINAL[RiskLevel(keyword_risk_level)]
+            if classifier_ordinal > keyword_ordinal:
+                risk_level = classification.risk_level.value
+            else:
+                risk_level = keyword_risk_level
+        else:
+            risk_level = keyword_risk_level
         risk_level_enum = RiskLevel(risk_level)
 
-        # 8. Git strategy — derived from risk
+        # 8b. Git strategy — derived from risk
         git_strategy = _select_git_strategy(risk_level_enum).value
 
         # 9. Build phases
@@ -437,6 +498,22 @@ class IntelligentPlanner:
 
         # 11. Budget tier
         budget_tier = self._select_budget_tier(inferred_type, len(resolved_agents))
+
+        # 11b. Policy validation — check agent assignments against active policy set.
+        # Violations are recorded as warnings; they never hard-block plan creation.
+        if self._policy_engine is not None:
+            try:
+                preset_name = self._classify_to_preset_key(classification)
+                policy_set = self._policy_engine.load_preset(preset_name)
+                if policy_set is not None:
+                    self._last_policy_violations = self._validate_agents_against_policy(
+                        resolved_agents, policy_set, plan_phases
+                    )
+                    # Enforce structural require_agent rules by injecting missing
+                    # required agents into the plan's shared context as warnings.
+                    # (We cannot silently add phases here — the user decides.)
+            except Exception:
+                pass
 
         # 12. Add QA gates
         for phase in plan_phases:
@@ -553,6 +630,40 @@ class IntelligentPlanner:
             for note in self._last_routing_notes:
                 lines.append(f"- {note}")
             lines.append("")
+
+        # Governance — classification
+        if self._last_classification is not None:
+            c = self._last_classification
+            lines += ["## Data Classification", ""]
+            lines.append(f"**Guardrail Preset:** {c.guardrail_preset}")
+            lines.append(f"**Confidence:** {c.confidence}")
+            if c.signals_found:
+                lines.append(f"**Signals:** {', '.join(c.signals_found)}")
+            if c.explanation:
+                lines.append(f"**Explanation:** {c.explanation}")
+            lines.append("")
+        else:
+            lines += [
+                "## Data Classification",
+                "",
+                "No classifier configured. Risk assessed via keyword signals only.",
+                "",
+            ]
+
+        # Governance — policy violations
+        if self._last_policy_violations:
+            lines += ["## Policy Notes", ""]
+            for v in self._last_policy_violations:
+                severity_tag = "WARN" if v.rule.severity == "warn" else "POLICY"
+                lines.append(f"- [{severity_tag}] **{v.rule.name}**: {v.details}")
+            lines.append("")
+        else:
+            lines += [
+                "## Policy Notes",
+                "",
+                "No policy violations detected.",
+                "",
+            ]
 
         # Phase summary
         lines += ["## Phase Summary", ""]
@@ -982,6 +1093,57 @@ class IntelligentPlanner:
                     f"{card.negative_mentions} negative mention(s))."
                 )
 
+    def _apply_retro_feedback(
+        self,
+        agents: list[str],
+        feedback: RetrospectiveFeedback,
+    ) -> list[str]:
+        """Apply retrospective recommendations to the candidate agent list.
+
+        Rules (soft — never hard-block the plan):
+        - Agents whose base name appears in ``feedback.agents_to_drop()`` are
+          removed from the list.  If removal would empty the list, the original
+          list is returned unchanged to ensure the plan remains executable.
+        - Agents recommended via ``feedback.agents_to_prefer()`` are not added
+          automatically (the planner does not invent agents), but routing notes
+          are recorded so ``explain_plan`` can surface them.
+
+        Args:
+            agents: The candidate agent list before routing.
+            feedback: Aggregated retrospective feedback.
+
+        Returns:
+            Filtered agent list (same order, routing notes updated).
+        """
+        to_drop = feedback.agents_to_drop()
+        to_prefer = feedback.agents_to_prefer()
+
+        if to_drop:
+            filtered = [
+                a for a in agents
+                if a.split("--")[0] not in to_drop and a not in to_drop
+            ]
+            if filtered:
+                for dropped in to_drop:
+                    if any(
+                        a.split("--")[0] == dropped or a == dropped
+                        for a in agents
+                    ):
+                        self._last_routing_notes.append(
+                            f"{dropped} removed (retrospective recommendation)"
+                        )
+                agents = filtered
+            # else: would empty the list — silently keep the original
+
+        if to_prefer:
+            for preferred in sorted(to_prefer):
+                self._last_routing_notes.append(
+                    f"Retrospective recommends: {preferred} "
+                    f"(not auto-added — add manually if desired)"
+                )
+
+        return agents
+
     # ------------------------------------------------------------------
     # Private helpers — budget
     # ------------------------------------------------------------------
@@ -1085,6 +1247,91 @@ class IntelligentPlanner:
         return _LEVELS[score]
 
     # ------------------------------------------------------------------
+    # Private helpers — governance
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _classify_to_preset_key(classification: ClassificationResult | None) -> str:
+        """Map a ClassificationResult's guardrail_preset string to a PolicyEngine key.
+
+        The DataClassifier uses human-readable preset names; the PolicyEngine
+        stores presets under short keys.  This function translates between them.
+
+        Falls back to "standard_dev" when classification is absent.
+        """
+        if classification is None:
+            return "standard_dev"
+        name = classification.guardrail_preset
+        mapping = {
+            "Standard Development": "standard_dev",
+            "Data Analysis": "data_analysis",
+            "Infrastructure Changes": "infrastructure",
+            "Regulated Data": "regulated",
+            "Security-Sensitive": "security",
+        }
+        return mapping.get(name, "standard_dev")
+
+    def _validate_agents_against_policy(
+        self,
+        agents: list[str],
+        policy_set: PolicySet,
+        plan_phases: list[PlanPhase],
+    ) -> list[PolicyViolation]:
+        """Check each agent's assignment against the active policy set.
+
+        Evaluates path_block and tool_restrict rules for every agent/phase step.
+        For require_agent rules, checks whether the required agent name is
+        present anywhere in the resolved agent list.
+
+        Returns a deduplicated list of PolicyViolation objects.  Violations are
+        informational warnings — callers must not treat them as hard failures.
+        """
+        violations: list[PolicyViolation] = []
+        seen: set[str] = set()  # deduplicate identical (agent, rule) pairs
+
+        for phase in plan_phases:
+            for step in phase.steps:
+                agent = step.agent_name
+                # Use context_files as a proxy for paths this step touches
+                paths = list(step.context_files or [])
+                tools: list[str] = []  # tools not tracked at plan time
+
+                step_violations = self._policy_engine.evaluate(  # type: ignore[union-attr]
+                    policy_set, agent, paths, tools
+                )
+                for v in step_violations:
+                    key = f"{v.agent_name}:{v.rule.name}"
+                    if key not in seen:
+                        seen.add(key)
+                        violations.append(v)
+
+        # Additionally check require_agent rules at the plan level.
+        # These rules fire once regardless of which phase/step is involved.
+        for rule in policy_set.rules:
+            if rule.rule_type == "require_agent":
+                required = rule.pattern
+                # Check if any agent in the roster matches (base name match)
+                if not any(
+                    a == required or a.split("--")[0] == required
+                    for a in agents
+                ):
+                    key = f"plan:{rule.name}"
+                    if key not in seen:
+                        seen.add(key)
+                        violations.append(
+                            PolicyViolation(
+                                agent_name="plan",
+                                rule=rule,
+                                details=(
+                                    f"Required agent '{required}' is not in the plan roster. "
+                                    "Consider adding it to satisfy this policy rule."
+                                ),
+                            )
+                        )
+
+        return violations
+
+    # ------------------------------------------------------------------
     # Private helpers — shared context
     # ------------------------------------------------------------------
 
@@ -1093,6 +1340,10 @@ class IntelligentPlanner:
 
         This is the boilerplate every delegated agent should receive so it
         understands the overall mission and its role in the plan.
+
+        When governance subsystems are active, classification results and
+        policy warnings are appended so every agent is aware of applicable
+        guardrails.
         """
         agent_list = ", ".join(dict.fromkeys(plan.all_agents))  # deduplicated, ordered
         lines: list[str] = [
@@ -1107,4 +1358,37 @@ class IntelligentPlanner:
             lines.append(f"Team: {agent_list}")
         if plan.pattern_source:
             lines.append(f"Pattern: {plan.pattern_source}")
+
+        # Governance — classification
+        if self._last_classification is not None:
+            lines.append(
+                f"Guardrail Preset: {self._last_classification.guardrail_preset}"
+            )
+            if self._last_classification.signals_found:
+                lines.append(
+                    f"Sensitivity Signals: {', '.join(self._last_classification.signals_found)}"
+                )
+
+        # Governance — policy violations (warnings only, user decides)
+        if self._last_policy_violations:
+            warn_lines = []
+            for v in self._last_policy_violations:
+                severity_tag = "[WARN]" if v.rule.severity == "warn" else "[POLICY]"
+                warn_lines.append(f"  {severity_tag} {v.details}")
+            lines.append("Policy Notes:\n" + "\n".join(warn_lines))
+
+        # Retrospective feedback — surface knowledge gaps so agents are aware
+        if (
+            self._last_retro_feedback is not None
+            and self._last_retro_feedback.knowledge_gaps
+        ):
+            gap_lines = [
+                f"  - {g.description}"
+                + (f" (fix: {g.suggested_fix})" if g.suggested_fix else "")
+                for g in self._last_retro_feedback.knowledge_gaps
+            ]
+            lines.append(
+                "Knowledge Gaps (from recent retrospectives):\n" + "\n".join(gap_lines)
+            )
+
         return "\n".join(lines)

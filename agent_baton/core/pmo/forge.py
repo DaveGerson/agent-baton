@@ -41,7 +41,7 @@ class ForgeSession:
         description:
             Natural-language task description (the PRD).
         program:
-            Program code (e.g., "NDS").
+            Program code (e.g., "RW").
         project_id:
             ID of the registered project to scope the plan to.
         task_type:

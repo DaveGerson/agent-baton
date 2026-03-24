@@ -2,6 +2,15 @@
 
 Handles reading and writing ExecutionState to disk, supporting crash
 recovery via atomic writes (write to tmp, then rename).
+
+Supports namespaced execution directories for concurrent plans::
+
+    .claude/team-context/
+      executions/
+        <task-id-1>/execution-state.json
+        <task-id-2>/execution-state.json
+      active-task-id.txt          ← points to default task
+      execution-state.json        ← legacy flat file (backward compat)
 """
 from __future__ import annotations
 
@@ -11,18 +20,40 @@ from pathlib import Path
 from agent_baton.models.execution import ExecutionState
 
 _STATE_FILENAME = "execution-state.json"
+_EXECUTIONS_DIR = "executions"
+_ACTIVE_TASK_FILE = "active-task-id.txt"
 
 
 class StatePersistence:
-    """Manages ExecutionState serialization to disk."""
+    """Manages ExecutionState serialization to disk.
 
-    def __init__(self, context_root: Path) -> None:
+    When *task_id* is provided, state is stored under
+    ``<context_root>/executions/<task_id>/execution-state.json``.
+    Otherwise, falls back to the legacy flat path
+    ``<context_root>/execution-state.json``.
+    """
+
+    def __init__(
+        self,
+        context_root: Path,
+        task_id: str | None = None,
+    ) -> None:
         self._root = context_root
-        self._state_path = context_root / _STATE_FILENAME
+        self._task_id = task_id
+        if task_id:
+            self._state_path = (
+                context_root / _EXECUTIONS_DIR / task_id / _STATE_FILENAME
+            )
+        else:
+            self._state_path = context_root / _STATE_FILENAME
+
+    @property
+    def task_id(self) -> str | None:
+        return self._task_id
 
     def save(self, state: ExecutionState) -> None:
         """Atomically write state to disk (tmp + rename)."""
-        self._root.mkdir(parents=True, exist_ok=True)
+        self._state_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = self._state_path.with_suffix(".json.tmp")
         tmp_path.write_text(
             json.dumps(state.to_dict(), indent=2, ensure_ascii=False),
@@ -51,3 +82,58 @@ class StatePersistence:
     @property
     def path(self) -> Path:
         return self._state_path
+
+    # ── Active task management ─────────────────────────────────────────────
+
+    def set_active(self) -> None:
+        """Mark this task as the active (default) execution."""
+        if not self._task_id:
+            return
+        active_path = self._root / _ACTIVE_TASK_FILE
+        active_path.parent.mkdir(parents=True, exist_ok=True)
+        active_path.write_text(self._task_id, encoding="utf-8")
+
+    @staticmethod
+    def get_active_task_id(context_root: Path) -> str | None:
+        """Read the active task ID from disk. Returns None if not set."""
+        active_path = context_root / _ACTIVE_TASK_FILE
+        if not active_path.exists():
+            return None
+        task_id = active_path.read_text(encoding="utf-8").strip()
+        return task_id if task_id else None
+
+    # ── Discovery ──────────────────────────────────────────────────────────
+
+    @staticmethod
+    def list_executions(context_root: Path) -> list[str]:
+        """List all namespaced task IDs that have execution state."""
+        exec_dir = context_root / _EXECUTIONS_DIR
+        if not exec_dir.is_dir():
+            return []
+        task_ids = []
+        for child in sorted(exec_dir.iterdir()):
+            if child.is_dir() and (child / _STATE_FILENAME).exists():
+                task_ids.append(child.name)
+        return task_ids
+
+    @staticmethod
+    def load_all(context_root: Path) -> list[ExecutionState]:
+        """Load all execution states (namespaced + legacy flat file)."""
+        states: list[ExecutionState] = []
+
+        # Namespaced executions
+        for task_id in StatePersistence.list_executions(context_root):
+            sp = StatePersistence(context_root, task_id=task_id)
+            state = sp.load()
+            if state is not None:
+                states.append(state)
+
+        # Legacy flat file (only if no namespaced version of same task exists)
+        legacy = StatePersistence(context_root)
+        legacy_state = legacy.load()
+        if legacy_state is not None:
+            existing_ids = {s.task_id for s in states}
+            if legacy_state.task_id not in existing_ids:
+                states.append(legacy_state)
+
+        return states

@@ -7,6 +7,8 @@ import sys
 from pathlib import Path
 
 from agent_baton.core.engine.executor import ExecutionEngine
+from agent_baton.core.engine.persistence import StatePersistence
+from agent_baton.core.events.bus import EventBus
 from agent_baton.core.orchestration.context import ContextManager
 from agent_baton.models.execution import MachinePlan, ActionType, PlanPhase, PlanStep
 from agent_baton.models.plan import MissionLogEntry
@@ -16,6 +18,11 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     p = subparsers.add_parser(
         "execute",
         help="Drive an orchestrated task through the execution engine",
+    )
+    p.add_argument(
+        "--task-id",
+        default=None,
+        help="Target a specific execution by task ID (default: active execution)",
     )
     sub = p.add_subparsers(dest="subcommand")
 
@@ -154,7 +161,15 @@ def handler(args: argparse.Namespace) -> None:
         print("error: supply a subcommand: start, next, record, dispatched, gate, complete, status, resume")
         sys.exit(1)
 
-    engine = ExecutionEngine()
+    # Resolve task_id: explicit flag → active marker → None (legacy flat file)
+    task_id = getattr(args, "task_id", None)
+    if task_id is None and args.subcommand != "start":
+        task_id = StatePersistence.get_active_task_id(
+            Path(".claude/team-context")
+        )
+
+    bus = EventBus()
+    engine = ExecutionEngine(bus=bus, task_id=task_id)
 
     if args.subcommand == "start":
         plan_path = Path(args.plan)
@@ -164,8 +179,13 @@ def handler(args: argparse.Namespace) -> None:
             sys.exit(1)
         data = json.loads(plan_path.read_text(encoding="utf-8"))
         plan = MachinePlan.from_dict(data)
+        # Use namespaced execution directory for the new plan
+        task_id = plan.task_id
+        engine = ExecutionEngine(bus=bus, task_id=task_id)
         ContextManager().init_mission_log(plan.task_summary, risk_level=plan.risk_level)
         action = engine.start(plan)
+        # Mark this as the active execution
+        engine._persistence.set_active()
         _print_action(action.to_dict())
 
     elif args.subcommand == "next":

@@ -30,6 +30,7 @@ from agent_baton.core.engine.persistence import StatePersistence
 from agent_baton.core.events.bus import EventBus
 from agent_baton.core.events import events as evt
 from agent_baton.core.events.persistence import EventPersistence
+from agent_baton.core.observe.telemetry import AgentTelemetry, TelemetryEvent
 from agent_baton.core.observe.trace import TraceRecorder
 from agent_baton.core.observe.usage import UsageLogger
 from agent_baton.core.observe.retrospective import RetrospectiveEngine
@@ -110,9 +111,16 @@ class ExecutionEngine:
         self._usage_logger = UsageLogger(
             log_path=self._root / "usage-log.jsonl"
         )
+        self._telemetry = AgentTelemetry(
+            log_path=self._root / "telemetry.jsonl"
+        )
         self._retro_engine = RetrospectiveEngine(
             retrospectives_dir=self._root / "retrospectives"
         )
+        # Wire telemetry as a catch-all EventBus subscriber so every domain
+        # event is captured in the telemetry log.
+        if self._bus is not None:
+            self._bus.subscribe("*", self._on_event_for_telemetry)
         # In-memory trace object, populated during start() / resume().
         self._trace = None
 
@@ -140,6 +148,16 @@ class ExecutionEngine:
             task_id=plan.task_id,
             plan_snapshot=plan.to_dict(),
         )
+
+        try:
+            self._telemetry.log_event(TelemetryEvent(
+                timestamp=_utcnow(),
+                agent_name="engine",
+                event_type="execution_started",
+                details=f"task_id={plan.task_id} risk={plan.risk_level}",
+            ))
+        except Exception:
+            pass
 
         self._publish(evt.task_started(
             task_id=plan.task_id,
@@ -297,6 +315,26 @@ class ExecutionEngine:
                 duration_seconds=duration_seconds if duration_seconds else None,
             )
 
+        # Log telemetry event for this step.
+        try:
+            tel_event_type = (
+                "step_completed" if status == "complete" else "step_failed"
+            )
+            duration_ms = int(duration_seconds * 1000)
+            file_path = files_changed[0] if files_changed else ""
+            self._telemetry.log_event(TelemetryEvent(
+                timestamp=_utcnow(),
+                agent_name=agent_name,
+                event_type=tel_event_type,
+                duration_ms=duration_ms,
+                file_path=file_path,
+                details=f"step_id={step_id} outcome={outcome}" + (
+                    f" error={error}" if error else ""
+                ),
+            ))
+        except Exception:
+            pass
+
         self._persistence.save(state)
 
     def mark_dispatched(self, step_id: str, agent_name: str) -> None:
@@ -358,6 +396,17 @@ class ExecutionEngine:
                     "output": output,
                 },
             )
+
+        # Log telemetry event for this gate.
+        try:
+            self._telemetry.log_event(TelemetryEvent(
+                timestamp=_utcnow(),
+                agent_name="engine",
+                event_type="gate_passed" if passed else "gate_failed",
+                details=f"phase_id={phase_id} gate_type={gate_type}",
+            ))
+        except Exception:
+            pass
 
         if not passed:
             self._publish(evt.gate_failed(
@@ -429,6 +478,20 @@ class ExecutionEngine:
             gates_passed=gates_passed,
             elapsed_seconds=elapsed,
         ))
+
+        try:
+            self._telemetry.log_event(TelemetryEvent(
+                timestamp=_utcnow(),
+                agent_name="engine",
+                event_type="execution_completed",
+                duration_ms=int(elapsed * 1000),
+                details=(
+                    f"task_id={state.task_id} steps={steps_done}"
+                    f" gates_passed={gates_passed}"
+                ),
+            ))
+        except Exception:
+            pass
 
         summary_lines = [
             f"Task {state.task_id} completed.",
@@ -744,6 +807,23 @@ class ExecutionEngine:
     # Event ownership: Engine publishes task-level and phase-level events.
     # Step-level events (step.dispatched, step.completed, step.failed) are
     # published by the runtime layer (TaskWorker) to avoid duplication.
+
+    def _on_event_for_telemetry(self, event: Event) -> None:
+        """EventBus subscriber that mirrors every domain event to telemetry.
+
+        Called synchronously by the bus during publish().  Wrapped in
+        try/except so a logging failure never crashes execution.
+        """
+        try:
+            agent_name = event.payload.get("agent_name") or "engine"
+            self._telemetry.log_event(TelemetryEvent(
+                timestamp=event.timestamp,
+                agent_name=agent_name,
+                event_type=event.topic,
+                details=f"task_id={event.task_id} seq={event.sequence}",
+            ))
+        except Exception:
+            pass
 
     def _publish(self, event: Event) -> None:
         """Publish an event if a bus is configured."""

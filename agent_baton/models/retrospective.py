@@ -12,6 +12,23 @@ class AgentOutcome:
     issues: str = ""
     root_cause: str = ""
 
+    def to_dict(self) -> dict:
+        return {
+            "name": self.name,
+            "worked_well": self.worked_well,
+            "issues": self.issues,
+            "root_cause": self.root_cause,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> AgentOutcome:
+        return cls(
+            name=data["name"],
+            worked_well=data.get("worked_well", ""),
+            issues=data.get("issues", ""),
+            root_cause=data.get("root_cause", ""),
+        )
+
 
 @dataclass
 class KnowledgeGap:
@@ -19,6 +36,21 @@ class KnowledgeGap:
     description: str
     affected_agent: str = ""
     suggested_fix: str = ""  # "create knowledge pack", "update agent prompt", etc.
+
+    def to_dict(self) -> dict:
+        return {
+            "description": self.description,
+            "affected_agent": self.affected_agent,
+            "suggested_fix": self.suggested_fix,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> KnowledgeGap:
+        return cls(
+            description=data["description"],
+            affected_agent=data.get("affected_agent", ""),
+            suggested_fix=data.get("suggested_fix", ""),
+        )
 
 
 @dataclass
@@ -28,6 +60,21 @@ class RosterRecommendation:
     target: str  # agent name or knowledge pack
     reason: str = ""
 
+    def to_dict(self) -> dict:
+        return {
+            "action": self.action,
+            "target": self.target,
+            "reason": self.reason,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> RosterRecommendation:
+        return cls(
+            action=data["action"],
+            target=data["target"],
+            reason=data.get("reason", ""),
+        )
+
 
 @dataclass
 class SequencingNote:
@@ -35,6 +82,21 @@ class SequencingNote:
     phase: str
     observation: str  # e.g., "gate caught issue X", "gate was unnecessary"
     keep: bool = True
+
+    def to_dict(self) -> dict:
+        return {
+            "phase": self.phase,
+            "observation": self.observation,
+            "keep": self.keep,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> SequencingNote:
+        return cls(
+            phase=data["phase"],
+            observation=data["observation"],
+            keep=bool(data.get("keep", True)),
+        )
 
 
 @dataclass
@@ -59,6 +121,52 @@ class Retrospective:
     knowledge_gaps: list[KnowledgeGap] = field(default_factory=list)
     roster_recommendations: list[RosterRecommendation] = field(default_factory=list)
     sequencing_notes: list[SequencingNote] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        """Serialise to a plain dict suitable for JSON persistence."""
+        return {
+            "task_id": self.task_id,
+            "task_name": self.task_name,
+            "timestamp": self.timestamp,
+            "agent_count": self.agent_count,
+            "retry_count": self.retry_count,
+            "gates_passed": self.gates_passed,
+            "gates_failed": self.gates_failed,
+            "risk_level": self.risk_level,
+            "duration_estimate": self.duration_estimate,
+            "estimated_tokens": self.estimated_tokens,
+            "what_worked": [o.to_dict() for o in self.what_worked],
+            "what_didnt": [o.to_dict() for o in self.what_didnt],
+            "knowledge_gaps": [g.to_dict() for g in self.knowledge_gaps],
+            "roster_recommendations": [r.to_dict() for r in self.roster_recommendations],
+            "sequencing_notes": [n.to_dict() for n in self.sequencing_notes],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> Retrospective:
+        """Deserialise from a plain dict (e.g. loaded from JSON)."""
+        return cls(
+            task_id=data["task_id"],
+            task_name=data.get("task_name", data["task_id"]),
+            timestamp=data.get("timestamp", ""),
+            agent_count=int(data.get("agent_count", 0)),
+            retry_count=int(data.get("retry_count", 0)),
+            gates_passed=int(data.get("gates_passed", 0)),
+            gates_failed=int(data.get("gates_failed", 0)),
+            risk_level=data.get("risk_level", "LOW"),
+            duration_estimate=data.get("duration_estimate", ""),
+            estimated_tokens=int(data.get("estimated_tokens", 0)),
+            what_worked=[AgentOutcome.from_dict(o) for o in data.get("what_worked", [])],
+            what_didnt=[AgentOutcome.from_dict(o) for o in data.get("what_didnt", [])],
+            knowledge_gaps=[KnowledgeGap.from_dict(g) for g in data.get("knowledge_gaps", [])],
+            roster_recommendations=[
+                RosterRecommendation.from_dict(r)
+                for r in data.get("roster_recommendations", [])
+            ],
+            sequencing_notes=[
+                SequencingNote.from_dict(n) for n in data.get("sequencing_notes", [])
+            ],
+        )
 
     def to_markdown(self) -> str:
         """Render the retrospective as markdown."""

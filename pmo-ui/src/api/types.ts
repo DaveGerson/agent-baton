@@ -90,5 +90,5 @@ export interface ForgePlanBody {
   program: string;
   project_id: string;
   task_type?: string;
-  priority?: string;
+  priority?: number;
 }

@@ -1,9 +1,11 @@
 """Retrospective engine — generates and manages task retrospectives."""
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from pathlib import Path
 
+from agent_baton.models.feedback import RetrospectiveFeedback
 from agent_baton.models.retrospective import (
     AgentOutcome,
     KnowledgeGap,
@@ -66,15 +68,26 @@ class RetrospectiveEngine:
         )
 
     def save(self, retro: Retrospective) -> Path:
-        """Write a retrospective to disk as markdown.
+        """Write a retrospective to disk as markdown with a JSON sidecar.
 
-        Returns the path to the written file.
+        Both files share the same stem so structured data can be reloaded
+        without markdown parsing.
+
+        Returns the path to the written markdown file.
         """
         self._dir.mkdir(parents=True, exist_ok=True)
         # Sanitize task_id for filename
         safe_id = retro.task_id.replace("/", "-").replace(" ", "-")
         path = self._dir / f"{safe_id}.md"
         path.write_text(retro.to_markdown(), encoding="utf-8")
+
+        # JSON sidecar — structured data for programmatic consumption
+        json_path = self._dir / f"{safe_id}.json"
+        json_path.write_text(
+            json.dumps(retro.to_dict(), indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+
         return path
 
     def load(self, task_id: str) -> str | None:
@@ -108,6 +121,69 @@ class RetrospectiveEngine:
             except OSError:
                 continue
         return results
+
+    def list_json_files(self) -> list[Path]:
+        """List all retrospective JSON sidecar files, sorted by name."""
+        if not self._dir.is_dir():
+            return []
+        return sorted(self._dir.glob("*.json"))
+
+    def load_recent_feedback(self, limit: int = 5) -> RetrospectiveFeedback:
+        """Load structured feedback from the most recent retrospective JSON files.
+
+        Reads the last *limit* JSON sidecars (written alongside each markdown
+        file by :meth:`save`).  Falls back gracefully to markdown parsing via
+        :meth:`extract_recommendations` when no JSON sidecars exist yet.
+
+        Args:
+            limit: Maximum number of retrospective files to read.
+
+        Returns:
+            A :class:`~agent_baton.models.feedback.RetrospectiveFeedback`
+            aggregating roster recommendations, knowledge gaps, and sequencing
+            notes across the selected retrospectives.
+        """
+        json_files = self.list_json_files()[-limit:]
+
+        if json_files:
+            return self._feedback_from_json(json_files)
+
+        # Legacy fallback: no JSON sidecars — parse markdown for recommendations only.
+        recs = self.extract_recommendations()
+        return RetrospectiveFeedback(
+            roster_recommendations=recs,
+            source_count=len(self.list_recent(limit)),
+        )
+
+    def _feedback_from_json(self, json_files: list[Path]) -> RetrospectiveFeedback:
+        """Deserialise feedback from JSON sidecar files."""
+        roster: list[RosterRecommendation] = []
+        gaps: list[KnowledgeGap] = []
+        notes: list[SequencingNote] = []
+        loaded = 0
+
+        for path in json_files:
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+
+            try:
+                retro = Retrospective.from_dict(raw)
+            except (KeyError, TypeError, ValueError):
+                continue
+
+            roster.extend(retro.roster_recommendations)
+            gaps.extend(retro.knowledge_gaps)
+            notes.extend(retro.sequencing_notes)
+            loaded += 1
+
+        return RetrospectiveFeedback(
+            roster_recommendations=roster,
+            knowledge_gaps=gaps,
+            sequencing_notes=notes,
+            source_count=loaded,
+        )
 
     def extract_recommendations(self) -> list[RosterRecommendation]:
         """Extract all roster recommendations across all retrospectives.

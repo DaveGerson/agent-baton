@@ -21,10 +21,9 @@ const TASK_TYPES = [
 ];
 
 const PRIORITIES = [
-  { value: 'P0', label: 'P0 — Critical' },
-  { value: 'P1', label: 'P1 — High' },
-  { value: 'P2', label: 'P2 — Normal' },
-  { value: 'P3', label: 'P3 — Low' },
+  { value: 2, label: 'P0 — Critical' },
+  { value: 1, label: 'P1 — High' },
+  { value: 0, label: 'P2 — Normal' },
 ];
 
 export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
@@ -39,7 +38,7 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
   );
   const [projectId, setProjectId] = useState('');
   const [taskType, setTaskType] = useState('');
-  const [priority, setPriority] = useState('P1');
+  const [priority, setPriority] = useState<number>(1);
 
   const [plan, setPlan] = useState<PlanResponse | null>(null);
   const [generateError, setGenerateError] = useState<string | null>(null);
@@ -205,7 +204,7 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
               <FormField label="Priority" style={{ flex: 1 }}>
                 <select
                   value={priority}
-                  onChange={e => setPriority(e.target.value)}
+                  onChange={e => setPriority(Number(e.target.value))}
                   style={selectStyle}
                 >
                   {PRIORITIES.map(p => (
