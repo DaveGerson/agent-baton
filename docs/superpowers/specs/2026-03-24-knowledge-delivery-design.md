@@ -29,7 +29,7 @@ MCP RAG Server (broad org knowledge) ─┘     (match + budget)      (prompt as
 
 - **KnowledgeRegistry** lives in `core/orchestration/` — parallel to AgentRegistry
 - **KnowledgeResolver** lives in `core/engine/` — interacts with planner state, risk, budgets
-- **Runtime acquisition protocol** lives in `core/engine/protocols/` — defines gap signals and executor handling
+- **Runtime acquisition protocol** lives in `core/engine/knowledge_gap.py` — defines gap signals and executor handling
 - **Feedback loop** flows through existing `core/observe/` and `core/learn/` subsystems
 
 ## Decisions
@@ -199,6 +199,8 @@ INTERRUPTED = "interrupted"
 # The executor's computed properties (dispatched_step_ids, completed_step_ids,
 # failed_step_ids) on ExecutionState need a corresponding interrupted_step_ids
 # property for state-machine progress tracking.
+# IMPORTANT: ExecutionEngine._VALID_STEP_STATUSES whitelist in record_step_result()
+# must be updated to include "interrupted" or it will raise ValueError.
 
 # ExecutionState — new fields:
 pending_gaps: list[KnowledgeGapSignal] = field(default_factory=list)
@@ -443,7 +445,11 @@ Each step shows its knowledge attachments with source tags:
 - audit-checklist.md (compliance) — reference (gap-suggested)
 ```
 
-This is the plan review gate (discovery layer 5) — the user can add or remove attachments in plan.json before execution.
+This is the plan review gate (discovery layer 5) — the user can add or remove attachments
+in plan.json before execution.
+
+**Implementation note:** `MachinePlan.to_markdown()` in `models/execution.py` generates
+plan.md. Update it to render `step.knowledge` attachments after existing step metadata.
 
 ### Gap-suggested attachments
 
@@ -457,7 +463,7 @@ def knowledge_gaps_for(
 ) -> list[KnowledgeGapRecord]:
     """Return prior knowledge gap records matching agent + task type.
 
-    Reads from retrospective JSON files in .claude/team-context/retros/.
+    Reads from retrospective JSON files in .claude/team-context/retrospectives/.
     Each retro contains a knowledge_gaps list (KnowledgeGapRecord entries).
     Filters by agent_name match, and optionally task_type match.
     Returns deduplicated gaps (by description) sorted by frequency.
@@ -467,7 +473,7 @@ def knowledge_gaps_for(
 **Storage path:** `KnowledgeGapRecord` entries are written as part of the `Retrospective`
 model (replacing the existing `KnowledgeGap` — see Data Models section). They persist in
 the same retrospective JSON files that `RetrospectiveEngine` already writes to
-`.claude/team-context/retros/`. The pattern learner reads these files to build its
+`.claude/team-context/retrospectives/`. The pattern learner reads these files to build its
 gap index — no new storage mechanism needed.
 
 ```python
@@ -492,7 +498,11 @@ These appear in plan.md with a distinct tag so the user knows they're recommenda
 
 ## Runtime Knowledge Acquisition Protocol
 
-**Location:** `agent_baton/core/engine/protocols/knowledge_gap.py` (new)
+**Location:** `agent_baton/core/engine/knowledge_gap.py` (new)
+
+Note: `core/engine/protocols.py` is a single file (not a package), so placing this in a
+`protocols/` subdirectory would shadow the existing module. Using a standalone file avoids
+the conflict.
 
 ### Signal format
 
@@ -506,10 +516,12 @@ TYPE: contextual
 
 ### Executor handling
 
-**Parsing location:** The `KNOWLEDGE_GAP` signal is parsed in `ExecutionDriver.record_step()`
+**Parsing location:** The `KNOWLEDGE_GAP` signal is parsed in `ExecutionEngine.record_step_result()`
 (`core/engine/executor.py`), not in the CLI command layer. The CLI passes the raw outcome
 string; the executor inspects it before recording the step result. This keeps the protocol
-logic in the engine, not the CLI.
+logic in the engine, not the CLI. Note: `ExecutionDriver` in `core/engine/protocols.py` is
+the Protocol interface — its signature must also be updated if `record_step_result` gains
+new return types for gap handling.
 
 When `record_step()` receives an outcome containing `KNOWLEDGE_GAP:`, the executor:
 
