@@ -70,8 +70,16 @@ def handler(args: argparse.Namespace) -> None:
     )
 
     if args.save:
+        from agent_baton.core.orchestration.context import ContextManager
+
         ctx_dir = Path(".claude/team-context").resolve()
         ctx_dir.mkdir(parents=True, exist_ok=True)
+
+        # Write to task-scoped directory (executions/<task_id>/)
+        ctx = ContextManager(team_context_dir=ctx_dir, task_id=plan.task_id)
+        ctx.write_plan(plan)
+
+        # Also write to root for backward compat (most-recent plan shortcut)
         json_path = ctx_dir / "plan.json"
         md_path = ctx_dir / "plan.md"
         json_path.write_text(
@@ -79,7 +87,8 @@ def handler(args: argparse.Namespace) -> None:
             encoding="utf-8",
         )
         md_path.write_text(plan.to_markdown(), encoding="utf-8")
-        print(f"Plan saved: {json_path} and {md_path}")
+        print(f"Plan saved: {ctx.plan_json_path} and {ctx.plan_path}")
+        print(f"  (also copied to {json_path} for backward compat)")
 
     if args.explain:
         print(planner.explain_plan(plan))

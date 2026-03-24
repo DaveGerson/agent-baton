@@ -138,10 +138,10 @@ class TestStart:
         action = _engine(tmp_path).start(plan)
         assert "src/main.py" in action.delegation_prompt
 
-    def test_delegation_prompt_mentions_team_context(self, tmp_path: Path) -> None:
+    def test_delegation_prompt_mentions_claude_md(self, tmp_path: Path) -> None:
         plan = _plan(phases=[_phase(steps=[_step()])])
         action = _engine(tmp_path).start(plan)
-        assert "team-context/context.md" in action.delegation_prompt
+        assert "CLAUDE.md" in action.delegation_prompt
 
 
 # ---------------------------------------------------------------------------

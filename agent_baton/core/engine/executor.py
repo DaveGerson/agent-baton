@@ -1454,7 +1454,7 @@ def _build_delegation_prompt(step: PlanStep, plan: MachinePlan) -> str:
         lines += [f"**Blocked paths**: {', '.join(step.blocked_paths)}"]
     lines += [
         "",
-        "Read `.claude/team-context/context.md` for shared project context.",
+        "Read `CLAUDE.md` for project conventions. Shared context is provided above.",
     ]
     return "\n".join(lines)
 

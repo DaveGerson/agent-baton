@@ -72,7 +72,6 @@ class PromptDispatcher:
             shared_context_block,
             "",
             "Read `CLAUDE.md` for project conventions.",
-            "Read `.claude/team-context/context.md` for shared project context.",
             "",
             f"## Your Task (Step {step.step_id})",
             step.task_description.strip(),

@@ -149,11 +149,11 @@ class TestPlanCreation:
     def test_shared_context_contains_task_summary(self, plan: MachinePlan) -> None:
         assert plan.task_summary in plan.shared_context
 
-    def test_delegation_prompt_references_context_md(self, plan: MachinePlan, tmp_path: Path) -> None:
-        """context.md instruction is now in the delegation prompt, not shared_context."""
+    def test_delegation_prompt_references_claude_md(self, plan: MachinePlan, tmp_path: Path) -> None:
+        """Delegation prompt tells agent to read CLAUDE.md for conventions."""
         engine = _make_engine(tmp_path)
         action = engine.start(plan)
-        assert "context.md" in action.delegation_prompt
+        assert "CLAUDE.md" in action.delegation_prompt
 
     def test_risk_level_is_set(self, plan: MachinePlan) -> None:
         assert plan.risk_level in ("LOW", "MEDIUM", "HIGH")
@@ -250,11 +250,11 @@ class TestDelegationPrompt:
         # shared_context contains the task summary
         assert plan.task_summary in action.delegation_prompt
 
-    def test_prompt_references_context_md(
+    def test_prompt_references_claude_md(
         self, tmp_path: Path, plan: MachinePlan
     ) -> None:
         action = _make_engine(tmp_path).start(plan)
-        assert "context.md" in action.delegation_prompt
+        assert "CLAUDE.md" in action.delegation_prompt
 
     def test_prompt_contains_step_id_header(
         self, tmp_path: Path, plan: MachinePlan
@@ -274,7 +274,7 @@ class TestDelegationPrompt:
         assert "## Shared Context" in prompt
         assert "## Your Task" in prompt
         assert "## Deliverables" in prompt
-        assert "context.md" in prompt
+        assert "CLAUDE.md" in prompt
 
 
 # ---------------------------------------------------------------------------
