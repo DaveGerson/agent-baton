@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from agent_baton.models.knowledge import KnowledgeGapRecord
 from agent_baton.models.retrospective import (
     KnowledgeGap,
     RosterRecommendation,
@@ -33,7 +34,7 @@ class RetrospectiveFeedback:
     """
 
     roster_recommendations: list[RosterRecommendation] = field(default_factory=list)
-    knowledge_gaps: list[KnowledgeGap] = field(default_factory=list)
+    knowledge_gaps: list[KnowledgeGapRecord] = field(default_factory=list)
     sequencing_notes: list[SequencingNote] = field(default_factory=list)
     source_count: int = 0
 

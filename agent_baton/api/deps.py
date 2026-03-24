@@ -40,6 +40,7 @@ from agent_baton.core.observe.retrospective import RetrospectiveEngine
 from agent_baton.core.observe.trace import TraceRecorder
 from agent_baton.core.observe.usage import UsageLogger
 from agent_baton.core.orchestration.registry import AgentRegistry
+from agent_baton.core.storage import get_project_storage
 from agent_baton.core.pmo.forge import ForgeSession
 from agent_baton.core.pmo.scanner import PmoScanner
 from agent_baton.core.pmo.store import PmoStore
@@ -113,9 +114,12 @@ def init_dependencies(
     _trace_recorder = TraceRecorder(team_context_root=team_context_root)
 
     # Engine — wires the shared bus so it emits task/phase events.
+    # Auto-detect storage backend (SQLite if baton.db exists, else file).
+    _storage = get_project_storage(team_context_root)
     _engine = ExecutionEngine(
         team_context_root=team_context_root,
         bus=_bus,
+        storage=_storage,
     )
 
     # Governance — DataClassifier and PolicyEngine are stateless; create once.

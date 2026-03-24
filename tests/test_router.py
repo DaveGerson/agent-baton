@@ -91,6 +91,39 @@ def test_empty_directory_profile(tmp_path: Path, attribute: str, expected) -> No
     assert getattr(profile, attribute) == expected
 
 
+def test_mixed_stack_root_python_subdir_node(tmp_path: Path) -> None:
+    """Root pyproject.toml should win over subdirectory package.json."""
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='app'\n", encoding="utf-8")
+    frontend = tmp_path / "pmo-ui"
+    frontend.mkdir()
+    (frontend / "package.json").write_text('{"name":"pmo-ui"}\n', encoding="utf-8")
+    (frontend / "tsconfig.json").write_text("{}\n", encoding="utf-8")
+    profile = AgentRouter(AgentRegistry()).detect_stack(tmp_path)
+    assert profile.language == "python", (
+        f"Root pyproject.toml should take priority; got {profile.language}"
+    )
+
+
+def test_mixed_stack_routes_to_python_flavor(tmp_path: Path) -> None:
+    """In a mixed Python+JS project, backend-engineer should route to python."""
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='app'\n", encoding="utf-8")
+    frontend = tmp_path / "frontend"
+    frontend.mkdir()
+    (frontend / "package.json").write_text('{"name":"ui"}\n', encoding="utf-8")
+    registry = _make_registry_with("backend-engineer", "backend-engineer--python", "backend-engineer--node")
+    router = AgentRouter(registry)
+    assert router.route("backend-engineer", project_root=tmp_path) == "backend-engineer--python"
+
+
+def test_subdir_only_node_still_routes_to_node(tmp_path: Path) -> None:
+    """When there's no root signal, subdirectory signals should still work."""
+    subdir = tmp_path / "app"
+    subdir.mkdir()
+    (subdir / "package.json").write_text('{"name":"app"}\n', encoding="utf-8")
+    profile = AgentRouter(AgentRegistry()).detect_stack(tmp_path)
+    assert profile.language == "javascript"
+
+
 # ---------------------------------------------------------------------------
 # route()
 # ---------------------------------------------------------------------------

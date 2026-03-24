@@ -9,6 +9,7 @@ from pathlib import Path
 from agent_baton.core.engine.executor import ExecutionEngine
 from agent_baton.core.engine.persistence import StatePersistence
 from agent_baton.core.events.bus import EventBus
+from agent_baton.core.storage import get_project_storage
 from agent_baton.core.orchestration.context import ContextManager
 from agent_baton.core.runtime.supervisor import WorkerSupervisor
 from agent_baton.models.execution import MachinePlan, ActionType, PlanPhase, PlanStep
@@ -180,13 +181,15 @@ def handler(args: argparse.Namespace) -> None:
 
     # Resolve task_id: explicit flag → active marker → None (legacy flat file)
     task_id = getattr(args, "task_id", None)
+    context_root = Path(".claude/team-context").resolve()
     if task_id is None and args.subcommand != "start":
         task_id = StatePersistence.get_active_task_id(
             Path(".claude/team-context")
         )
 
     bus = EventBus()
-    engine = ExecutionEngine(bus=bus, task_id=task_id)
+    storage = get_project_storage(context_root)
+    engine = ExecutionEngine(bus=bus, task_id=task_id, storage=storage)
 
     if args.subcommand == "start":
         plan_path = Path(args.plan)
@@ -198,11 +201,16 @@ def handler(args: argparse.Namespace) -> None:
         plan = MachinePlan.from_dict(data)
         # Use namespaced execution directory for the new plan
         task_id = plan.task_id
-        engine = ExecutionEngine(bus=bus, task_id=task_id)
+        engine = ExecutionEngine(bus=bus, task_id=task_id, storage=storage)
         ContextManager(task_id=task_id).init_mission_log(plan.task_summary, risk_level=plan.risk_level)
         action = engine.start(plan)
         # Mark this as the active execution
-        engine._persistence.set_active()
+        try:
+            storage.set_active_task(task_id)
+        except Exception:
+            # Fallback to legacy persistence marker when storage is unavailable.
+            if engine._persistence is not None:
+                engine._persistence.set_active()
         _print_action(action.to_dict())
 
     elif args.subcommand == "next":

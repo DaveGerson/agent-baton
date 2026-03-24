@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 
 from agent_baton.models.feedback import RetrospectiveFeedback
+from agent_baton.models.knowledge import KnowledgeGapRecord
 from agent_baton.models.retrospective import (
     AgentOutcome,
     KnowledgeGap,
@@ -14,6 +16,18 @@ from agent_baton.models.retrospective import (
     SequencingNote,
 )
 from agent_baton.models.usage import TaskUsageRecord
+
+# Phrases that indicate an implicit knowledge gap in retrospective narrative text.
+# Each entry is a compiled regex pattern for fast scanning.
+_IMPLICIT_GAP_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"lacked context", re.IGNORECASE),
+    re.compile(r"didn['\u2019]t know about", re.IGNORECASE),
+    re.compile(r"assumed incorrectly", re.IGNORECASE),
+    re.compile(r"no knowledge of", re.IGNORECASE),
+    re.compile(r"unaware of", re.IGNORECASE),
+    re.compile(r"missing context", re.IGNORECASE),
+    re.compile(r"lack(?:ed|ing) information", re.IGNORECASE),
+)
 
 
 class RetrospectiveEngine:
@@ -37,18 +51,54 @@ class RetrospectiveEngine:
         task_name: str = "",
         what_worked: list[AgentOutcome] | None = None,
         what_didnt: list[AgentOutcome] | None = None,
-        knowledge_gaps: list[KnowledgeGap] | None = None,
+        knowledge_gaps: list[KnowledgeGapRecord] | None = None,
         roster_recommendations: list[RosterRecommendation] | None = None,
         sequencing_notes: list[SequencingNote] | None = None,
+        task_type: str | None = None,
+        task_summary: str = "",
     ) -> Retrospective:
         """Generate a retrospective from a usage record plus qualitative input.
 
         The usage record provides metrics (agent count, retries, gates, tokens).
         The qualitative fields (what_worked, what_didnt, etc.) are provided by
         the orchestrator based on its observations during the task.
+
+        Explicit ``knowledge_gaps`` (from KNOWLEDGE_GAP signals during execution)
+        are merged with any implicit gaps detected by scanning the narrative text
+        in ``what_didnt``.  Duplicates (same description) are removed; explicit
+        gaps take precedence.
+
+        Args:
+            usage: Metrics from the completed task execution.
+            task_name: Human-readable task name (falls back to task_id).
+            what_worked: Agent outcomes that succeeded.
+            what_didnt: Agent outcomes that had issues — scanned for implicit gaps.
+            knowledge_gaps: Explicit :class:`~agent_baton.models.knowledge.KnowledgeGapRecord`
+                entries from KNOWLEDGE_GAP signals captured during execution.
+            roster_recommendations: Agent roster change suggestions.
+            sequencing_notes: Phase-level observations about gate effectiveness.
+            task_type: Inferred task type (e.g. "feature", "bugfix") for gap indexing.
+            task_summary: Short summary of the task for gap context.
         """
         total_tokens = sum(a.estimated_tokens for a in usage.agents_used)
         total_retries = sum(a.retries for a in usage.agents_used)
+
+        resolved_task_summary = task_summary or task_name or usage.task_id
+
+        explicit_gaps: list[KnowledgeGapRecord] = list(knowledge_gaps or [])
+        implicit_gaps = self._detect_implicit_gaps(
+            what_didnt or [],
+            task_type=task_type,
+            task_summary=resolved_task_summary,
+        )
+
+        # Merge: deduplicate by description, explicit entries win over implicit.
+        seen_descriptions: set[str] = {g.description for g in explicit_gaps}
+        merged_gaps: list[KnowledgeGapRecord] = list(explicit_gaps)
+        for gap in implicit_gaps:
+            if gap.description not in seen_descriptions:
+                seen_descriptions.add(gap.description)
+                merged_gaps.append(gap)
 
         return Retrospective(
             task_id=usage.task_id,
@@ -62,10 +112,63 @@ class RetrospectiveEngine:
             estimated_tokens=total_tokens,
             what_worked=what_worked or [],
             what_didnt=what_didnt or [],
-            knowledge_gaps=knowledge_gaps or [],
+            knowledge_gaps=merged_gaps,
             roster_recommendations=roster_recommendations or [],
             sequencing_notes=sequencing_notes or [],
         )
+
+    # ------------------------------------------------------------------
+    # Implicit gap detection
+    # ------------------------------------------------------------------
+
+    def _detect_implicit_gaps(
+        self,
+        outcomes: list[AgentOutcome],
+        *,
+        task_type: str | None = None,
+        task_summary: str = "",
+    ) -> list[KnowledgeGapRecord]:
+        """Scan narrative text in *outcomes* for knowledge-gap indicators.
+
+        Inspects the ``issues`` and ``root_cause`` fields of each
+        :class:`~agent_baton.models.retrospective.AgentOutcome`.  Any sentence
+        (line) containing a recognised phrase is emitted as a candidate
+        :class:`~agent_baton.models.knowledge.KnowledgeGapRecord` with
+        ``resolution="unresolved"``.
+
+        Deduplication by description is performed within this method; the caller
+        performs a second dedup pass against explicit gaps.
+
+        Returns:
+            List of detected gap records, possibly empty.
+        """
+        gaps: list[KnowledgeGapRecord] = []
+        seen: set[str] = set()
+
+        for outcome in outcomes:
+            agent = outcome.name
+            for text in (outcome.issues, outcome.root_cause):
+                if not text:
+                    continue
+                for line in text.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    if any(pat.search(line) for pat in _IMPLICIT_GAP_PATTERNS):
+                        if line not in seen:
+                            seen.add(line)
+                            gaps.append(
+                                KnowledgeGapRecord(
+                                    description=line,
+                                    gap_type="contextual",
+                                    resolution="unresolved",
+                                    resolution_detail="",
+                                    agent_name=agent,
+                                    task_summary=task_summary,
+                                    task_type=task_type,
+                                )
+                            )
+        return gaps
 
     def save(self, retro: Retrospective) -> Path:
         """Write a retrospective to disk as markdown with a JSON sidecar.
@@ -158,7 +261,7 @@ class RetrospectiveEngine:
     def _feedback_from_json(self, json_files: list[Path]) -> RetrospectiveFeedback:
         """Deserialise feedback from JSON sidecar files."""
         roster: list[RosterRecommendation] = []
-        gaps: list[KnowledgeGap] = []
+        gaps: list[KnowledgeGapRecord] = []
         notes: list[SequencingNote] = []
         loaded = 0
 

@@ -111,20 +111,42 @@ class AgentRouter:
                     break
 
         # Check package manager signals.
-        # Allow "typescript" to override "javascript" when tsconfig.json is
-        # found alongside package.json.
+        # Root-level signals take priority: if the project root contains a
+        # package signal (e.g. pyproject.toml), that defines the primary
+        # language.  Subdirectory signals (e.g. pmo-ui/package.json) are
+        # secondary and won't override a root-level detection.
+        # Within the same priority tier, allow "typescript" to override
+        # "javascript" when tsconfig.json is found alongside package.json.
+        root_language: str | None = None
         for filename, (lang, _) in PACKAGE_SIGNALS.items():
-            for scan_dir in scan_dirs:
-                if (scan_dir / filename).exists():
-                    if (
-                        profile.language is None
-                        or (lang == "typescript" and profile.language == "javascript")
-                    ):
-                        profile.language = lang
-                    rel = str((scan_dir / filename).relative_to(root))
-                    if rel not in profile.detected_files:
-                        profile.detected_files.append(rel)
-                    break
+            if (root / filename).exists():
+                if (
+                    root_language is None
+                    or (lang == "typescript" and root_language == "javascript")
+                ):
+                    root_language = lang
+                rel = filename
+                if rel not in profile.detected_files:
+                    profile.detected_files.append(rel)
+
+        if root_language is not None:
+            # Root signal found — use it as the primary language.
+            if profile.language is None:
+                profile.language = root_language
+        else:
+            # No root signal — fall back to subdirectory scan.
+            for filename, (lang, _) in PACKAGE_SIGNALS.items():
+                for scan_dir in scan_dirs:
+                    if (scan_dir / filename).exists():
+                        if (
+                            profile.language is None
+                            or (lang == "typescript" and profile.language == "javascript")
+                        ):
+                            profile.language = lang
+                        rel = str((scan_dir / filename).relative_to(root))
+                        if rel not in profile.detected_files:
+                            profile.detected_files.append(rel)
+                        break
 
         # Scan for .csproj / .sln (glob patterns across all scan_dirs)
         for scan_dir in scan_dirs:

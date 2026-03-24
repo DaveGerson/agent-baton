@@ -132,6 +132,14 @@ class AgentRegistry:
         else:
             tools = []
 
+        kp_raw = metadata.get("knowledge_packs", [])
+        if isinstance(kp_raw, str):
+            knowledge_packs = [k.strip() for k in kp_raw.split(",") if k.strip()]
+        elif isinstance(kp_raw, list):
+            knowledge_packs = [str(k).strip() for k in kp_raw if k]
+        else:
+            knowledge_packs = []
+
         return AgentDefinition(
             name=name,
             description=description,
@@ -141,4 +149,5 @@ class AgentRegistry:
             tools=tools,
             instructions=body,
             source_path=path,
+            knowledge_packs=knowledge_packs,
         )

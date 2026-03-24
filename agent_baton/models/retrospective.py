@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from agent_baton.models.knowledge import KnowledgeGapRecord
+
 
 @dataclass
 class AgentOutcome:
@@ -99,6 +101,27 @@ class SequencingNote:
         )
 
 
+def _knowledge_gap_from_dict(data: dict) -> KnowledgeGapRecord:
+    """Deserialise a knowledge gap entry with backward-compat for the old KnowledgeGap schema.
+
+    Old schema had: description, affected_agent, suggested_fix
+    New schema has: description, gap_type, resolution, resolution_detail,
+                    agent_name, task_summary, task_type
+    """
+    # Old schema detection: presence of 'affected_agent' or 'suggested_fix'
+    if "affected_agent" in data or "suggested_fix" in data:
+        return KnowledgeGapRecord(
+            description=data["description"],
+            gap_type="factual",             # reasonable default for old records
+            resolution="unresolved",
+            resolution_detail=data.get("suggested_fix", ""),
+            agent_name=data.get("affected_agent", ""),
+            task_summary="",
+            task_type=None,
+        )
+    return KnowledgeGapRecord.from_dict(data)
+
+
 @dataclass
 class Retrospective:
     """Structured retrospective for an orchestrated task."""
@@ -118,7 +141,7 @@ class Retrospective:
     # Qualitative
     what_worked: list[AgentOutcome] = field(default_factory=list)
     what_didnt: list[AgentOutcome] = field(default_factory=list)
-    knowledge_gaps: list[KnowledgeGap] = field(default_factory=list)
+    knowledge_gaps: list[KnowledgeGapRecord] = field(default_factory=list)
     roster_recommendations: list[RosterRecommendation] = field(default_factory=list)
     sequencing_notes: list[SequencingNote] = field(default_factory=list)
 
@@ -158,7 +181,9 @@ class Retrospective:
             estimated_tokens=int(data.get("estimated_tokens", 0)),
             what_worked=[AgentOutcome.from_dict(o) for o in data.get("what_worked", [])],
             what_didnt=[AgentOutcome.from_dict(o) for o in data.get("what_didnt", [])],
-            knowledge_gaps=[KnowledgeGap.from_dict(g) for g in data.get("knowledge_gaps", [])],
+            knowledge_gaps=[
+                _knowledge_gap_from_dict(g) for g in data.get("knowledge_gaps", [])
+            ],
             roster_recommendations=[
                 RosterRecommendation.from_dict(r)
                 for r in data.get("roster_recommendations", [])
@@ -203,7 +228,14 @@ class Retrospective:
             lines.append("## Knowledge Gaps Exposed")
             for gap in self.knowledge_gaps:
                 line = f"- {gap.description}"
-                if gap.suggested_fix:
+                # Support both KnowledgeGapRecord (new) and KnowledgeGap (old schema)
+                if hasattr(gap, "agent_name") and gap.agent_name:
+                    line += f" (agent: {gap.agent_name})"
+                if hasattr(gap, "resolution"):
+                    line += f" — *{gap.resolution}*"
+                    if gap.resolution_detail:
+                        line += f": {gap.resolution_detail}"
+                elif hasattr(gap, "suggested_fix") and gap.suggested_fix:
                     line += f" — *fix: {gap.suggested_fix}*"
                 lines.append(line)
             lines.append("")

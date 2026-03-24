@@ -267,6 +267,18 @@ class ExecutionEngine:
             ))
 
         self._save_execution(state)
+        # Track the new task_id so _load_execution() can find it by ID.
+        self._task_id = state.task_id
+        # In storage mode, also mark this as the active task so any engine
+        # instance without an explicit task_id (e.g. from init_dependencies)
+        # can still load the state via get_active_task().
+        if self._storage is not None:
+            try:
+                self._storage.set_active_task(state.task_id)
+            except Exception:
+                pass
+        elif self._persistence is not None:
+            self._persistence.set_active()
         return self._determine_action(state)
 
     def next_action(self) -> ExecutionAction:
@@ -395,7 +407,7 @@ class ExecutionEngine:
         - Emits trace events (``agent_complete`` or ``agent_failed``).
         - Saves state to disk.
         """
-        _VALID_STEP_STATUSES = {"complete", "failed", "dispatched"}
+        _VALID_STEP_STATUSES = {"complete", "failed", "dispatched", "interrupted"}
         if status not in _VALID_STEP_STATUSES:
             raise ValueError(
                 f"Invalid step status '{status}'. Must be one of: {_VALID_STEP_STATUSES}"
@@ -584,11 +596,13 @@ class ExecutionEngine:
 
         # Build and save retrospective with rich qualitative data.
         retro_data = self._build_retrospective_data(state)
-        # generate_from_usage produces data only; does not persist.
-        retro_engine_for_gen = RetrospectiveEngine(
+        # generate_from_usage produces the model object but does not persist.
+        # Reuse self._retro_engine in file mode; create a transient one for
+        # storage mode (persist is handled by _save_retro).
+        _gen_engine = self._retro_engine or RetrospectiveEngine(
             retrospectives_dir=self._root / "retrospectives"
         )
-        retro = retro_engine_for_gen.generate_from_usage(
+        retro = _gen_engine.generate_from_usage(
             usage=usage_record,
             task_name=retro_data.get("task_name", state.plan.task_summary),
             what_worked=retro_data.get("what_worked"),
@@ -957,14 +971,16 @@ class ExecutionEngine:
             self._bus.publish(event)
 
     # Backward-compatible shims — tests may call these directly.
-    def _save_state(self, state: ExecutionState) -> Path:
-        """Delegate to :class:`StatePersistence`."""
-        self._persistence.save(state)
-        return self._persistence.path
+    def _save_state(self, state: ExecutionState) -> "Path | None":
+        """Persist state; routes to storage backend or legacy file."""
+        self._save_execution(state)
+        if self._persistence is not None:
+            return self._persistence.path
+        return None
 
     def _load_state(self) -> ExecutionState | None:
-        """Delegate to :class:`StatePersistence`."""
-        return self._persistence.load()
+        """Load state; routes to storage backend or legacy file."""
+        return self._load_execution()
 
     def _build_usage_record(self, state: ExecutionState) -> TaskUsageRecord:
         """Convert *state* into a :class:`TaskUsageRecord` for the usage logger."""

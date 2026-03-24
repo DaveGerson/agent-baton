@@ -1,6 +1,8 @@
 """Prompt dispatcher — generates delegation prompts for agent subagents."""
 from __future__ import annotations
 
+from pathlib import Path
+
 from agent_baton.models.execution import (
     ActionType,
     ExecutionAction,
@@ -8,6 +10,18 @@ from agent_baton.models.execution import (
     PlanStep,
     TeamMember,
 )
+from agent_baton.models.knowledge import KnowledgeAttachment
+
+_KNOWLEDGE_GAPS_BLOCK = """\
+## Knowledge Gaps
+
+If you lack sufficient context to complete this task correctly:
+- Output `KNOWLEDGE_GAP: <description>` with what you need
+- Include `CONFIDENCE: none | low | partial` and `TYPE: factual | contextual`
+- Stop and report your partial progress
+
+Do not guess through gaps on HIGH/CRITICAL risk tasks.
+Resolved decisions (provided above) are final — do not revisit them."""
 
 # Success criteria by task type — shown in the delegation prompt to make the
 # definition of done concrete.  Selected by the caller via the task_type arg.
@@ -29,6 +43,90 @@ class PromptDispatcher:
     following the comms-protocols template.  The class is stateless; every
     method operates purely on its arguments.
     """
+
+    # ------------------------------------------------------------------
+    # Knowledge section builder
+    # ------------------------------------------------------------------
+
+    def _build_knowledge_section(self, attachments: list[KnowledgeAttachment]) -> str:
+        """Render a knowledge section string from resolved attachments.
+
+        Inline attachments are rendered under '## Knowledge Context' with
+        their full document content loaded lazily from source_path.
+        Referenced attachments are listed under '## Knowledge References'
+        with a retrieval hint.
+
+        Returns an empty string when *attachments* is empty so there is zero
+        overhead for steps without knowledge.
+        """
+        if not attachments:
+            return ""
+
+        inline_parts: list[str] = []
+        reference_parts: list[str] = []
+
+        for attachment in attachments:
+            pack_label = attachment.pack_name or "standalone"
+
+            if attachment.delivery == "inline":
+                # Lazy-load content from source_path if content is not already cached
+                content = self._load_attachment_content(attachment)
+                grounding_line = f"\n{attachment.grounding}" if attachment.grounding else ""
+                inline_parts.append(
+                    f"### {attachment.document_name} ({pack_label})"
+                    + grounding_line
+                    + f"\n\n{content}"
+                )
+            else:
+                # Reference delivery: path + summary + retrieval hint
+                retrieval_hint = self._build_retrieval_hint(attachment)
+                reference_parts.append(
+                    f"- **{attachment.document_name}** ({pack_label}): {attachment.grounding or ''}"
+                    + f"\n  {retrieval_hint}"
+                )
+
+        sections: list[str] = []
+
+        if inline_parts:
+            sections.append("## Knowledge Context\n")
+            sections.append("\n\n".join(inline_parts))
+
+        if reference_parts:
+            sections.append("## Knowledge References\n")
+            sections.append("\n".join(reference_parts))
+
+        return "\n".join(sections)
+
+    @staticmethod
+    def _load_attachment_content(attachment: KnowledgeAttachment) -> str:
+        """Return the document content for an inline attachment.
+
+        Reads from source_path on disk if the attachment's content string is
+        empty (lazy loading).  Returns a placeholder when the path is absent or
+        unreadable so that prompt assembly never raises.
+        """
+        if attachment.path:
+            path = Path(attachment.path)
+            try:
+                return path.read_text(encoding="utf-8")
+            except OSError:
+                return f"_Content unavailable: {attachment.path}_"
+        return f"_Content unavailable: no path for {attachment.document_name}_"
+
+    @staticmethod
+    def _build_retrieval_hint(attachment: KnowledgeAttachment) -> str:
+        """Return the retrieval hint line for a reference attachment."""
+        if attachment.retrieval == "mcp-rag":
+            # RAG instructions only when MCP RAG server is available
+            return (
+                f'Retrieve via: query RAG server for '
+                f'"{attachment.document_name}: {attachment.grounding or attachment.document_name}"'
+            )
+        return f"Retrieve via: `Read {attachment.path}`"
+
+    # ------------------------------------------------------------------
+    # Delegation prompt builders
+    # ------------------------------------------------------------------
 
     def build_delegation_prompt(
         self,
@@ -81,6 +179,9 @@ class PromptDispatcher:
         # Shared context block
         shared_context_block = shared_context.strip() if shared_context.strip() else "_No shared context provided._"
 
+        # Knowledge section (empty string when no attachments)
+        knowledge_section = self._build_knowledge_section(step.knowledge)
+
         article = "an" if role[0:1] in "aeiouAEIOU" else "a"
         parts = [
             f"You are {article} {role} working on {project_line}.",
@@ -99,6 +200,11 @@ class PromptDispatcher:
                 task_summary.strip(),
                 "",
             ]
+
+        # Insert knowledge section between Shared Context and Your Task
+        if knowledge_section:
+            parts.append(knowledge_section)
+            parts.append("")
 
         parts += [
             f"## Your Task (Step {step.step_id})",
@@ -125,6 +231,8 @@ class PromptDispatcher:
             "## Boundaries",
             f"- Write to: {allowed}",
             f"- Do NOT write to: {blocked}",
+            "",
+            _KNOWLEDGE_GAPS_BLOCK,
             "",
             "## Previous Step Output",
             previous_output,
@@ -154,6 +262,10 @@ class PromptDispatcher:
 
         Includes the member's specific task, their role, the team
         composition, and any dependencies on other members' output.
+
+        Knowledge is resolved at the step level and shared across all team
+        members — every member in a team step receives the same knowledge
+        attachments because they are working toward the same phase goal.
         """
         role = member.agent_name
         project_line = task_summary or "this project"
@@ -175,6 +287,9 @@ class PromptDispatcher:
 
         shared_block = shared_context.strip() if shared_context.strip() else "_No shared context._"
 
+        # Knowledge section — resolved at step level, shared by all team members
+        knowledge_section = self._build_knowledge_section(step.knowledge)
+
         parts = [
             f"You are {article} {role} working on {project_line}.",
             f"You are part of a team: {team_overview}.",
@@ -185,15 +300,28 @@ class PromptDispatcher:
             "",
             "Read `CLAUDE.md` for project conventions.",
             "",
+        ]
+
+        # Insert knowledge section between Shared Context and Your Task
+        if knowledge_section:
+            parts.append(knowledge_section)
+            parts.append("")
+
+        parts.extend([
             f"## Your Task (Step {step.step_id}, Member {member.member_id})",
             (member.task_description or step.task_description).strip(),
             "",
             "## Deliverables",
             deliverables_text,
-        ]
+        ])
         if deps_text:
             parts.append(deps_text)
         parts.extend([
+            "",
+            "## Boundaries",
+            "- Coordinate with your team members on shared resources.",
+            "",
+            _KNOWLEDGE_GAPS_BLOCK,
             "",
             "## Decision Logging",
             "When you make a non-obvious decision, document it in your output",

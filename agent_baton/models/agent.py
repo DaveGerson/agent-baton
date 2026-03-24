@@ -16,6 +16,7 @@ class AgentDefinition:
     tools: list[str] = field(default_factory=list)
     instructions: str = ""  # The markdown body after frontmatter
     source_path: Path | None = None
+    knowledge_packs: list[str] = field(default_factory=list)  # baseline pack names
 
     @property
     def base_name(self) -> str:

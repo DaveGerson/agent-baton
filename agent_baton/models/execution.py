@@ -5,6 +5,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 
+from agent_baton.models.knowledge import (
+    KnowledgeAttachment,
+    KnowledgeGapSignal,
+    ResolvedDecision,
+)
+
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -16,6 +22,7 @@ class StepStatus(Enum):
     COMPLETE = "complete"
     FAILED = "failed"
     SKIPPED = "skipped"
+    INTERRUPTED = "interrupted"
 
 
 class PhaseStatus(Enum):
@@ -88,6 +95,7 @@ class PlanStep:
     blocked_paths: list[str] = field(default_factory=list)
     context_files: list[str] = field(default_factory=list)  # files agent should read
     team: list[TeamMember] = field(default_factory=list)    # non-empty = team step
+    knowledge: list[KnowledgeAttachment] = field(default_factory=list)  # resolved knowledge
 
     def to_dict(self) -> dict:
         d = {
@@ -103,6 +111,8 @@ class PlanStep:
         }
         if self.team:
             d["team"] = [m.to_dict() for m in self.team]
+        if self.knowledge:
+            d["knowledge"] = [k.to_dict() for k in self.knowledge]
         return d
 
     @classmethod
@@ -118,6 +128,7 @@ class PlanStep:
             blocked_paths=data.get("blocked_paths", []),
             context_files=data.get("context_files", []),
             team=[TeamMember.from_dict(m) for m in data.get("team", [])],
+            knowledge=[KnowledgeAttachment.from_dict(k) for k in data.get("knowledge", [])],
         )
 
 
@@ -196,7 +207,10 @@ class MachinePlan:
     shared_context: str = ""            # pre-built context for agents
     pattern_source: str | None = None   # pattern_id that influenced this plan
     created_at: str = ""
-    task_type: str = ""                 # inferred task type (bug-fix, new-feature, etc.)
+    task_type: str | None = None        # inferred task type (e.g. "feature", "bug-fix")
+    explicit_knowledge_packs: list[str] = field(default_factory=list)  # from --knowledge-pack
+    explicit_knowledge_docs: list[str] = field(default_factory=list)   # from --knowledge
+    intervention_level: str = "low"     # low | medium | high
 
     def __post_init__(self) -> None:
         if not self.created_at:
@@ -227,6 +241,9 @@ class MachinePlan:
             "pattern_source": self.pattern_source,
             "created_at": self.created_at,
             "task_type": self.task_type,
+            "explicit_knowledge_packs": self.explicit_knowledge_packs,
+            "explicit_knowledge_docs": self.explicit_knowledge_docs,
+            "intervention_level": self.intervention_level,
         }
 
     @classmethod
@@ -242,7 +259,10 @@ class MachinePlan:
             shared_context=data.get("shared_context", ""),
             pattern_source=data.get("pattern_source"),
             created_at=data.get("created_at", ""),
-            task_type=data.get("task_type", ""),
+            task_type=data.get("task_type"),
+            explicit_knowledge_packs=data.get("explicit_knowledge_packs", []),
+            explicit_knowledge_docs=data.get("explicit_knowledge_docs", []),
+            intervention_level=data.get("intervention_level", "low"),
         )
 
     def to_markdown(self) -> str:
@@ -260,6 +280,14 @@ class MachinePlan:
         ]
         if self.pattern_source:
             lines.append(f"**Pattern**: {self.pattern_source}")
+        if self.task_type:
+            lines.append(f"**Task Type**: {self.task_type}")
+        if self.intervention_level != "low":
+            lines.append(f"**Intervention Level**: {self.intervention_level}")
+        if self.explicit_knowledge_packs:
+            lines.append(f"**Explicit Knowledge Packs**: {', '.join(self.explicit_knowledge_packs)}")
+        if self.explicit_knowledge_docs:
+            lines.append(f"**Explicit Knowledge Docs**: {', '.join(self.explicit_knowledge_docs)}")
         lines.append("")
 
         for phase in self.phases:
@@ -290,6 +318,14 @@ class MachinePlan:
                     lines.append(f"- **Writes to**: {', '.join(step.allowed_paths)}")
                 if step.blocked_paths:
                     lines.append(f"- **Blocked from**: {', '.join(step.blocked_paths)}")
+                if step.knowledge:
+                    lines.append("- **Knowledge**:")
+                    for att in step.knowledge:
+                        pack_label = f" ({att.pack_name})" if att.pack_name else ""
+                        lines.append(
+                            f"  - {att.document_name}{pack_label}"
+                            f" — {att.delivery} ({att.source})"
+                        )
                 lines.append("")
 
             if phase.gate:
@@ -498,6 +534,8 @@ class ExecutionState:
     amendments: list[PlanAmendment] = field(default_factory=list)
     started_at: str = ""
     completed_at: str = ""
+    pending_gaps: list[KnowledgeGapSignal] = field(default_factory=list)
+    resolved_decisions: list[ResolvedDecision] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.started_at:
@@ -521,6 +559,10 @@ class ExecutionState:
     def dispatched_step_ids(self) -> set[str]:
         return {r.step_id for r in self.step_results if r.status == "dispatched"}
 
+    @property
+    def interrupted_step_ids(self) -> set[str]:
+        return {r.step_id for r in self.step_results if r.status == "interrupted"}
+
     def get_step_result(self, step_id: str) -> StepResult | None:
         for r in self.step_results:
             if r.step_id == step_id:
@@ -540,6 +582,8 @@ class ExecutionState:
             "amendments": [a.to_dict() for a in self.amendments],
             "started_at": self.started_at,
             "completed_at": self.completed_at,
+            "pending_gaps": [g.to_dict() for g in self.pending_gaps],
+            "resolved_decisions": [d.to_dict() for d in self.resolved_decisions],
         }
 
     @classmethod
@@ -556,6 +600,8 @@ class ExecutionState:
             amendments=[PlanAmendment.from_dict(a) for a in data.get("amendments", [])],
             started_at=data.get("started_at", ""),
             completed_at=data.get("completed_at", ""),
+            pending_gaps=[KnowledgeGapSignal.from_dict(g) for g in data.get("pending_gaps", [])],
+            resolved_decisions=[ResolvedDecision.from_dict(d) for d in data.get("resolved_decisions", [])],
         )
 
 

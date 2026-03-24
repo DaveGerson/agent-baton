@@ -10,8 +10,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from agent_baton.core.observe.usage import UsageLogger
-from agent_baton.models.usage import TaskUsageRecord
+from agent_baton.models.knowledge import KnowledgeGapRecord
 from agent_baton.models.pattern import LearnedPattern
+from agent_baton.models.usage import TaskUsageRecord
 
 _PATTERNS_FILE = "learned-patterns.json"
 _DEFAULT_TEAM_CONTEXT = Path(".claude/team-context")
@@ -274,6 +275,82 @@ class PatternLearner:
 
         best = patterns[0]  # already sorted by confidence desc
         return best.recommended_agents, best.confidence
+
+    def knowledge_gaps_for(
+        self,
+        agent_name: str,
+        task_type: str | None = None,
+    ) -> list[KnowledgeGapRecord]:
+        """Return prior knowledge gap records matching *agent_name* and optionally *task_type*.
+
+        Reads all retrospective JSON sidecar files from
+        ``<team_context_root>/retrospectives/``.  Each file contains a
+        ``knowledge_gaps`` list whose entries are deserialized as
+        :class:`~agent_baton.models.knowledge.KnowledgeGapRecord`.
+
+        Filtering rules:
+
+        - Only records whose ``agent_name`` matches *agent_name* are included.
+        - If *task_type* is provided, only records whose ``task_type`` matches
+          are included (records with ``task_type=None`` are excluded when a
+          filter is given).
+
+        Deduplication is performed on ``description`` — the first occurrence
+        wins (preserving the most recent file's record, since files are
+        iterated in sorted — i.e. oldest-first — order, so later duplicates
+        are dropped).  The returned list is sorted by frequency (most-seen
+        descriptions first), then alphabetically on description for stability.
+
+        Returns:
+            Deduplicated list of gap records, possibly empty.
+        """
+        retros_dir = self._root / "retrospectives"
+        if not retros_dir.is_dir():
+            return []
+
+        description_counts: Counter[str] = Counter()
+        # Map description → first-seen record (from most recent file, so
+        # we iterate newest-first and keep the first occurrence).
+        gap_by_description: dict[str, KnowledgeGapRecord] = {}
+
+        json_files = sorted(retros_dir.glob("*.json"), reverse=True)  # newest first
+        for path in json_files:
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+
+            raw_gaps = raw.get("knowledge_gaps", [])
+            if not isinstance(raw_gaps, list):
+                continue
+
+            for entry in raw_gaps:
+                if not isinstance(entry, dict):
+                    continue
+                try:
+                    record = KnowledgeGapRecord.from_dict(entry)
+                except (KeyError, TypeError, ValueError):
+                    continue
+
+                # Filter by agent_name
+                if record.agent_name != agent_name:
+                    continue
+
+                # Filter by task_type when requested
+                if task_type is not None and record.task_type != task_type:
+                    continue
+
+                description_counts[record.description] += 1
+                # Keep the first occurrence (newest file, since we iterate newest-first).
+                if record.description not in gap_by_description:
+                    gap_by_description[record.description] = record
+
+        # Sort by frequency descending, then description for determinism.
+        sorted_descriptions = sorted(
+            gap_by_description.keys(),
+            key=lambda d: (-description_counts[d], d),
+        )
+        return [gap_by_description[d] for d in sorted_descriptions]
 
     def generate_report(self) -> str:
         """Return a markdown report summarising all stored patterns."""
