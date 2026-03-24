@@ -41,6 +41,7 @@ class ExecutionContext:
         team_context_root: Path | None = None,
         bus: EventBus | None = None,
         persist_events: bool = True,
+        task_id: str | None = None,
     ) -> ExecutionContext:
         """Build a correctly-wired execution context.
 
@@ -55,12 +56,16 @@ class ExecutionContext:
             persist_events: When True, the bus is passed to the engine so it
                 auto-wires event persistence.  When False, the engine is
                 constructed without a bus and no events are persisted.
+            task_id: Optional task ID for namespaced execution state. When
+                provided, state files are stored under
+                ``<team_context_root>/executions/<task_id>/``.
         """
         bus = bus or EventBus()
         engine_bus = bus if persist_events else None
         engine = ExecutionEngine(
             team_context_root=team_context_root,
             bus=engine_bus,
+            task_id=task_id,
         )
         # Surface the engine's internal persistence reference so callers can
         # replay events without constructing a parallel reader.

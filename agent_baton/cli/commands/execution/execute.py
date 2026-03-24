@@ -10,7 +10,9 @@ from agent_baton.core.engine.executor import ExecutionEngine
 from agent_baton.core.engine.persistence import StatePersistence
 from agent_baton.core.events.bus import EventBus
 from agent_baton.core.orchestration.context import ContextManager
+from agent_baton.core.runtime.supervisor import WorkerSupervisor
 from agent_baton.models.execution import MachinePlan, ActionType, PlanPhase, PlanStep
+from agent_baton.models.parallel import ExecutionRecord
 from agent_baton.models.plan import MissionLogEntry
 
 
@@ -98,6 +100,13 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     # baton execute resume
     sub.add_parser("resume", help="Resume execution after a crash")
 
+    # baton execute list
+    sub.add_parser("list", help="List all executions (active and completed)")
+
+    # baton execute switch TASK_ID
+    p_switch = sub.add_parser("switch", help="Switch the active execution to a different task ID")
+    p_switch.add_argument("switch_task_id", metavar="TASK_ID", help="Task ID to switch to")
+
     return p
 
 
@@ -158,8 +167,16 @@ def _print_action(action: dict) -> None:
 
 def handler(args: argparse.Namespace) -> None:
     if args.subcommand is None:
-        print("error: supply a subcommand: start, next, record, dispatched, gate, complete, status, resume")
+        print("error: supply a subcommand: start, next, record, dispatched, gate, complete, status, resume, list, switch")
         sys.exit(1)
+
+    if args.subcommand == "list":
+        _handle_list()
+        return
+
+    if args.subcommand == "switch":
+        _handle_switch(args.switch_task_id)
+        return
 
     # Resolve task_id: explicit flag → active marker → None (legacy flat file)
     task_id = getattr(args, "task_id", None)
@@ -295,6 +312,98 @@ def handler(args: argparse.Namespace) -> None:
     elif args.subcommand == "resume":
         action = engine.resume()
         _print_action(action.to_dict())
+
+
+# ---------------------------------------------------------------------------
+# Helpers for list and switch subcommands
+# ---------------------------------------------------------------------------
+
+def _handle_list() -> None:
+    """Print a table of all known executions with status and worker info."""
+    context_root = Path(".claude/team-context")
+    task_ids = StatePersistence.list_executions(context_root)
+
+    # Also include a legacy flat-file execution if present
+    legacy_sp = StatePersistence(context_root)
+    legacy_state = legacy_sp.load()
+
+    active_task_id = StatePersistence.get_active_task_id(context_root)
+
+    # Build worker liveness index: task_id -> pid
+    workers_by_task: dict[str, int] = {}
+    for w in WorkerSupervisor.list_workers(context_root):
+        if w["alive"]:
+            workers_by_task[w["task_id"]] = w["pid"]
+
+    records: list[ExecutionRecord] = []
+
+    for tid in task_ids:
+        sp = StatePersistence(context_root, task_id=tid)
+        state = sp.load()
+        if state is None:
+            continue
+        steps_complete = sum(
+            1 for r in state.step_results if r.status == "complete"
+        )
+        records.append(ExecutionRecord(
+            execution_id=tid,
+            status=state.status,
+            plan_summary=state.plan.task_summary[:120],
+            worker_pid=workers_by_task.get(tid, 0),
+            started_at=state.started_at[:19] if state.started_at else "",
+            updated_at=state.completed_at[:19] if state.completed_at else "",
+            risk_level=state.plan.risk_level,
+            budget_tier=state.plan.budget_tier,
+            steps_total=state.plan.total_steps,
+            steps_complete=steps_complete,
+        ))
+
+    # Add legacy flat-file if not already covered
+    if legacy_state is not None and legacy_state.task_id not in {r.execution_id for r in records}:
+        steps_complete = sum(
+            1 for r in legacy_state.step_results if r.status == "complete"
+        )
+        records.append(ExecutionRecord(
+            execution_id=legacy_state.task_id,
+            status=legacy_state.status,
+            plan_summary=legacy_state.plan.task_summary[:120],
+            worker_pid=workers_by_task.get("(legacy)", 0),
+            started_at=legacy_state.started_at[:19] if legacy_state.started_at else "",
+            updated_at=legacy_state.completed_at[:19] if legacy_state.completed_at else "",
+            risk_level=legacy_state.plan.risk_level,
+            budget_tier=legacy_state.plan.budget_tier,
+            steps_total=legacy_state.plan.total_steps,
+            steps_complete=steps_complete,
+        ))
+
+    if not records:
+        print("No executions found.")
+        return
+
+    # Print header
+    print(f"  {'TASK ID':<38}  {'STATUS':<18}  {'STEPS':>7}  {'PID':>7}  SUMMARY")
+    print("-" * 90)
+    for rec in records:
+        active_marker = "*" if rec.execution_id == active_task_id else " "
+        steps_str = f"{rec.steps_complete}/{rec.steps_total}"
+        pid_str = str(rec.worker_pid) if rec.worker_pid else "-"
+        summary = rec.plan_summary[:40]
+        print(
+            f"{active_marker} {rec.execution_id:<38}  {rec.status:<18}  "
+            f"{steps_str:>7}  {pid_str:>7}  {summary}"
+        )
+
+
+def _handle_switch(task_id: str) -> None:
+    """Switch the active execution to the given task ID."""
+    context_root = Path(".claude/team-context")
+    sp = StatePersistence(context_root, task_id=task_id)
+    if not sp.exists():
+        print(f"error: no execution found with task ID '{task_id}'")
+        print("Run 'baton execute list' to see available executions.")
+        sys.exit(1)
+    sp.set_active()
+    print(f"Active execution switched to: {task_id}")
 
 
 # ---------------------------------------------------------------------------
