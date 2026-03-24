@@ -23,6 +23,7 @@ from agent_baton.core.engine.protocols import ExecutionDriver
 from agent_baton.core.events.bus import EventBus
 from agent_baton.core.events.persistence import EventPersistence
 from agent_baton.core.events.projections import project_task_view
+from agent_baton.core.runtime.context import ExecutionContext
 from agent_baton.core.runtime.launcher import AgentLauncher
 from agent_baton.core.runtime.signals import SignalHandler
 from agent_baton.core.runtime.worker import TaskWorker
@@ -88,8 +89,12 @@ class WorkerSupervisor:
 
         logger = logging.getLogger("baton.daemon")
 
-        bus = bus or EventBus()
-        engine = ExecutionEngine(team_context_root=self._root, bus=bus)
+        ctx = ExecutionContext.build(
+            launcher=launcher,
+            team_context_root=self._root,
+            bus=bus,
+        )
+        engine = ctx.engine
 
         if resume:
             logger.info("Daemon resuming: task=%s", plan.task_id)
@@ -101,7 +106,7 @@ class WorkerSupervisor:
         worker = TaskWorker(
             engine=engine,
             launcher=launcher,
-            bus=bus,
+            bus=ctx.bus,
             max_parallel=max_parallel,
         )
 

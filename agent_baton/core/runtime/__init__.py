@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from agent_baton.core.runtime.launcher import AgentLauncher, DryRunLauncher, LaunchResult
 from agent_baton.core.runtime.claude_launcher import ClaudeCodeLauncher, ClaudeCodeConfig
+from agent_baton.core.runtime.context import ExecutionContext
 from agent_baton.core.runtime.scheduler import StepScheduler, SchedulerConfig
 from agent_baton.core.runtime.signals import SignalHandler
 from agent_baton.core.runtime.worker import TaskWorker
@@ -15,6 +16,7 @@ __all__ = [
     "LaunchResult",
     "ClaudeCodeLauncher",
     "ClaudeCodeConfig",
+    "ExecutionContext",
     "StepScheduler",
     "SchedulerConfig",
     "SignalHandler",
