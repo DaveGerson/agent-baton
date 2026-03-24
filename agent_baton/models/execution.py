@@ -397,6 +397,7 @@ class StepResult:
     error: str = ""
     completed_at: str = ""
     member_results: list[TeamStepResult] = field(default_factory=list)  # team step results
+    deviations: list[str] = field(default_factory=list)  # plan deviations reported by agent
 
     def to_dict(self) -> dict:
         d = {
@@ -411,6 +412,7 @@ class StepResult:
             "retries": self.retries,
             "error": self.error,
             "completed_at": self.completed_at,
+            "deviations": self.deviations,
         }
         if self.member_results:
             d["member_results"] = [m.to_dict() for m in self.member_results]
@@ -421,8 +423,11 @@ class StepResult:
         member_results = [
             TeamStepResult.from_dict(m) for m in data.pop("member_results", [])
         ]
+        # Extract deviations before passing remaining fields to __init__
+        deviations = data.pop("deviations", [])
         obj = cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
         obj.member_results = member_results
+        obj.deviations = deviations
         return obj
 
 
