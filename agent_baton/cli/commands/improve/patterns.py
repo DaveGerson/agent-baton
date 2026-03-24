@@ -30,11 +30,35 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         default=0.0,
         help="Filter patterns by minimum confidence (0.0-1.0)",
     )
+    p.add_argument(
+        "--recommendations",
+        action="store_true",
+        help="Show sequencing recommendations for each task type",
+    )
     return p
 
 
 def handler(args: argparse.Namespace) -> None:
     learner = PatternLearner()
+
+    if args.recommendations:
+        patterns = learner.load_patterns()
+        if not patterns:
+            print("No patterns available for recommendations.")
+            print("Run 'baton patterns --refresh' first.")
+            return
+        task_types = sorted(set(p.task_type for p in patterns))
+        print("Sequencing Recommendations:")
+        print()
+        for tt in task_types:
+            result = learner.recommend_sequencing(tt)
+            if result is not None:
+                agents, confidence = result
+                print(f"  {tt}")
+                print(f"    Agents:     {', '.join(agents)}")
+                print(f"    Confidence: {confidence:.0%}")
+                print()
+        return
 
     if args.refresh:
         patterns = learner.refresh()

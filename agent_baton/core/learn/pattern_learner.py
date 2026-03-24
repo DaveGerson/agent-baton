@@ -256,6 +256,25 @@ class PatternLearner:
         matches.sort(key=lambda p: p.confidence, reverse=True)
         return matches
 
+    def recommend_sequencing(
+        self,
+        task_type: str,
+    ) -> tuple[list[str], float] | None:
+        """Return the optimal agent sequence and confidence for a task type.
+
+        Examines stored patterns matching *task_type* and returns the
+        recommended agent list from the highest-confidence pattern, along
+        with the pattern's confidence score.
+
+        Returns ``None`` if no matching pattern is found.
+        """
+        patterns = self.get_patterns_for_task(task_type)
+        if not patterns:
+            return None
+
+        best = patterns[0]  # already sorted by confidence desc
+        return best.recommended_agents, best.confidence
+
     def generate_report(self) -> str:
         """Return a markdown report summarising all stored patterns."""
         patterns = self.load_patterns()

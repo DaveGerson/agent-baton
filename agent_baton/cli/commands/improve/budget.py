@@ -21,11 +21,28 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         action="store_true",
         help="Save recommendations to budget-recommendations.json",
     )
+    p.add_argument(
+        "--auto-apply",
+        action="store_true",
+        dest="auto_apply",
+        help="Show only auto-applicable (downgrade) recommendations above 80%% confidence",
+    )
     return p
 
 
 def handler(args: argparse.Namespace) -> None:
     tuner = BudgetTuner()
+
+    if args.auto_apply:
+        eligible = tuner.auto_apply_recommendations()
+        if not eligible:
+            print("No auto-applicable budget recommendations (downgrades above 80% confidence).")
+            return
+        print(f"Auto-Applicable Budget Recommendations ({len(eligible)}):")
+        print("  (Only downgrades to cheaper tiers are auto-applicable)")
+        print()
+        _print_recommendations(eligible)
+        return
 
     if args.save:
         recs = tuner.analyze()

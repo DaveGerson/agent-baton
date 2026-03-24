@@ -167,6 +167,52 @@ class PerformanceScorer:
 
         return "\n".join(lines)
 
+    def detect_trends(self, agent_name: str, window: int = 10) -> str:
+        """Detect performance trend for an agent over the last *window* tasks.
+
+        Uses a simple linear regression slope on the agent's first-pass rate
+        (1 if zero retries, 0 otherwise) across the most recent *window*
+        tasks where the agent participated.
+
+        Returns:
+            "improving" if slope > 0.02,
+            "degrading" if slope < -0.02,
+            "stable" otherwise.
+        """
+        records = self._usage.read_all()
+        # Collect binary success values (1 = first pass, 0 = retry)
+        # in chronological order for the given agent.
+        successes: list[float] = []
+        for rec in records:
+            for agent in rec.agents_used:
+                if agent.name == agent_name:
+                    successes.append(1.0 if agent.retries == 0 else 0.0)
+
+        if len(successes) < 3:
+            return "stable"
+
+        # Take the last `window` values
+        recent = successes[-window:]
+
+        # Simple linear regression: slope = (n*sum(x*y) - sum(x)*sum(y)) / (n*sum(x^2) - sum(x)^2)
+        n = len(recent)
+        sum_x = sum(range(n))
+        sum_y = sum(recent)
+        sum_xy = sum(i * y for i, y in enumerate(recent))
+        sum_x2 = sum(i * i for i in range(n))
+
+        denom = n * sum_x2 - sum_x * sum_x
+        if denom == 0:
+            return "stable"
+
+        slope = (n * sum_xy - sum_x * sum_y) / denom
+
+        if slope > 0.02:
+            return "improving"
+        if slope < -0.02:
+            return "degrading"
+        return "stable"
+
     def write_report(self, path: Path | None = None) -> Path:
         """Write the scorecard report to disk."""
         out_path = (path or Path(".claude/team-context/agent-scorecards.md")).resolve()

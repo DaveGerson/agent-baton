@@ -255,6 +255,31 @@ class BudgetTuner:
         self._recs_path.write_text(payload + "\n", encoding="utf-8")
         return self._recs_path
 
+    def auto_apply_recommendations(self, threshold: float = 0.8) -> list[BudgetRecommendation]:
+        """Return budget recommendations eligible for automatic application.
+
+        Guardrail: only DOWNGRADE recommendations are returned.  Budget
+        upgrades (to more expensive tiers) are never auto-applied.
+
+        Args:
+            threshold: Minimum confidence to include a recommendation.
+
+        Returns:
+            List of downgrade-only recommendations above the confidence
+            threshold.
+        """
+        all_recs = self.analyze()
+        eligible: list[BudgetRecommendation] = []
+
+        for rec in all_recs:
+            # Only downgrades are auto-applicable
+            if _tier_index(rec.recommended_tier) >= _tier_index(rec.current_tier):
+                continue
+            if rec.confidence >= threshold:
+                eligible.append(rec)
+
+        return eligible
+
     def load_recommendations(self) -> list[BudgetRecommendation] | None:
         """Read previously saved recommendations from disk.
 

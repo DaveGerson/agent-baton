@@ -15,6 +15,9 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     group.add_argument(
         "--write", action="store_true", help="Write scorecard report to disk",
     )
+    group.add_argument(
+        "--trends", action="store_true", help="Show performance trends for all agents",
+    )
     return p
 
 
@@ -32,6 +35,19 @@ def handler(args: argparse.Namespace) -> None:
     if args.write:
         path = scorer.write_report()
         print(f"Scorecard report written to {path}")
+        return
+
+    if args.trends:
+        scorecards = scorer.score_all()
+        if not scorecards:
+            print("No usage data available for trend analysis.")
+            return
+        print("Agent Performance Trends:")
+        print()
+        for sc in scorecards:
+            trend = scorer.detect_trends(sc.agent_name)
+            trend_indicator = {"improving": "+", "degrading": "-", "stable": "="}.get(trend, "?")
+            print(f"  [{trend_indicator}] {sc.agent_name}: {trend} (health={sc.health})")
         return
 
     report = scorer.generate_report()
