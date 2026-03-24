@@ -620,3 +620,48 @@ class PmoBoardResponse(BaseModel):
         default_factory=dict,
         description="Per-program health metrics keyed by program code.",
     )
+
+
+# ---------------------------------------------------------------------------
+# Forge interview / ADO responses
+# ---------------------------------------------------------------------------
+
+
+class InterviewQuestionResponse(BaseModel):
+    """A single structured interview question."""
+
+    id: str = Field(..., description="Question identifier.")
+    question: str = Field(..., description="The question text.")
+    context: str = Field(default="", description="Why this question matters.")
+    answer_type: str = Field(..., description="'choice' or 'text'.")
+    choices: Optional[list[str]] = Field(default=None, description="Options for choice type.")
+
+
+class InterviewResponse(BaseModel):
+    """Response from POST /pmo/forge/interview."""
+
+    questions: list[InterviewQuestionResponse] = Field(
+        ...,
+        description="3-5 structured interview questions.",
+    )
+
+
+class AdoWorkItemResponse(BaseModel):
+    """An Azure DevOps work item (placeholder)."""
+
+    id: str = Field(..., description="Work item ID (e.g. 'F-4203').")
+    title: str = Field(..., description="Work item title.")
+    type: str = Field(..., description="Feature, Bug, or Story.")
+    program: str = Field(..., description="Program code.")
+    owner: str = Field(..., description="Assigned owner.")
+    priority: str = Field(..., description="Priority level.")
+    description: str = Field(default="", description="Work item description / PRD.")
+
+
+class AdoSearchResponse(BaseModel):
+    """Response from GET /pmo/ado/search."""
+
+    items: list[AdoWorkItemResponse] = Field(
+        default_factory=list,
+        description="Matching ADO work items.",
+    )

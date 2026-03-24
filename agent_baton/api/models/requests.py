@@ -245,3 +245,42 @@ class CreateSignalRequest(BaseModel):
         pattern="^(low|medium|high|critical)$",
         description="Signal severity: low, medium, high, or critical.",
     )
+
+
+# ---------------------------------------------------------------------------
+# Forge interview / regeneration requests
+# ---------------------------------------------------------------------------
+
+
+class InterviewRequest(BaseModel):
+    """Request body for POST /pmo/forge/interview."""
+
+    plan: dict = Field(
+        ...,
+        description="Current plan dict (MachinePlan.to_dict() shape).",
+    )
+    feedback: Optional[str] = Field(
+        default=None,
+        description="Optional user feedback on what to change.",
+    )
+
+
+class InterviewAnswerPayload(BaseModel):
+    """A single answered interview question."""
+
+    question_id: str = Field(..., description="ID of the question being answered.")
+    answer: str = Field(..., description="User's answer (selected choice or free text).")
+
+
+class RegenerateRequest(BaseModel):
+    """Request body for POST /pmo/forge/regenerate."""
+
+    project_id: str = Field(..., min_length=1, description="Target project ID.")
+    description: str = Field(..., min_length=1, description="Original task description.")
+    task_type: Optional[str] = Field(default=None, description="Task type hint.")
+    priority: int = Field(default=0, ge=0, le=2, description="Priority: 0-2.")
+    original_plan: dict = Field(..., description="Current plan to refine.")
+    answers: list[InterviewAnswerPayload] = Field(
+        ...,
+        description="Answered interview questions.",
+    )
