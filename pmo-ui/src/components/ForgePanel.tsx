@@ -1,15 +1,17 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { api } from '../api/client';
-import { PlanPreview } from './PlanPreview';
+import { PlanEditor } from './PlanEditor';
+import { InterviewPanel } from './InterviewPanel';
+import { AdoCombobox } from './AdoCombobox';
 import { T } from '../styles/tokens';
-import type { PmoProject, PmoSignal, ForgePlanResponse } from '../api/types';
+import type { PmoProject, PmoSignal, ForgePlanResponse, InterviewQuestion, InterviewAnswer } from '../api/types';
 
 interface ForgePanelProps {
   onBack: () => void;
   initialSignal?: PmoSignal | null;
 }
 
-type Phase = 'intake' | 'generating' | 'preview' | 'saved';
+type Phase = 'intake' | 'generating' | 'preview' | 'regenerating' | 'saved';
 
 const TASK_TYPES = [
   { value: '', label: 'Auto-detect' },
@@ -21,9 +23,9 @@ const TASK_TYPES = [
 ];
 
 const PRIORITIES = [
-  { value: 2, label: 'P0 — Critical' },
-  { value: 1, label: 'P1 — High' },
-  { value: 0, label: 'P2 — Normal' },
+  { value: 2, label: 'P0 \u2014 Critical' },
+  { value: 1, label: 'P1 \u2014 High' },
+  { value: 0, label: 'P2 \u2014 Normal' },
 ];
 
 export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
@@ -41,10 +43,13 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
   const [priority, setPriority] = useState<number>(1);
 
   const [plan, setPlan] = useState<ForgePlanResponse | null>(null);
+  const [interviewQuestions, setInterviewQuestions] = useState<InterviewQuestion[]>([]);
   const [generateError, setGenerateError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [savePath, setSavePath] = useState<string | null>(null);
+  const [regenLoading, setRegenLoading] = useState(false);
 
+  const abortRef = useRef<AbortController | null>(null);
   const selectedProject = projects.find(p => p.project_id === projectId);
 
   useEffect(() => {
@@ -53,12 +58,18 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
         setProjects(ps);
         if (ps.length > 0 && !projectId) setProjectId(ps[0].project_id);
       })
-      .catch(() => { /* non-fatal */ })
+      .catch(() => {})
       .finally(() => setProjectsLoading(false));
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  useEffect(() => {
+    return () => { abortRef.current?.abort(); };
+  }, []);
+
   async function handleGenerate() {
     if (!description.trim() || !projectId) return;
+    abortRef.current?.abort();
+    abortRef.current = new AbortController();
     setPhase('generating');
     setGenerateError(null);
     try {
@@ -72,8 +83,46 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
       setPlan(result);
       setPhase('preview');
     } catch (err) {
+      if ((err as Error).name === 'AbortError') return;
       setGenerateError(err instanceof Error ? err.message : 'Generation failed');
       setPhase('intake');
+    }
+  }
+
+  async function handleStartRegenerate() {
+    if (!plan) return;
+    setRegenLoading(true);
+    try {
+      const resp = await api.forgeInterview({ plan });
+      setInterviewQuestions(resp.questions);
+      setPhase('regenerating');
+    } catch (err) {
+      setGenerateError(err instanceof Error ? err.message : 'Failed to generate questions');
+    }
+    setRegenLoading(false);
+  }
+
+  async function handleRegenerate(answers: InterviewAnswer[]) {
+    if (!plan) return;
+    abortRef.current?.abort();
+    abortRef.current = new AbortController();
+    setPhase('generating');
+    setGenerateError(null);
+    try {
+      const result = await api.forgeRegenerate({
+        project_id: projectId,
+        description: description.trim(),
+        task_type: taskType || undefined,
+        priority,
+        original_plan: plan,
+        answers,
+      });
+      setPlan(result);
+      setPhase('preview');
+    } catch (err) {
+      if ((err as Error).name === 'AbortError') return;
+      setGenerateError(err instanceof Error ? err.message : 'Re-generation failed');
+      setPhase('preview');
     }
   }
 
@@ -89,81 +138,60 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
     }
   }
 
+  const phaseLabel: Record<Phase, string> = {
+    intake: 'Describe the work to generate a plan',
+    generating: 'Generating plan...',
+    preview: 'Review, edit, or regenerate',
+    regenerating: 'Answer refinement questions',
+    saved: 'Plan saved \u2014 ready to execute',
+  };
+
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
       {/* Header */}
       <div style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 8,
-        padding: '7px 14px',
-        borderBottom: `1px solid ${T.border}`,
-        background: T.bg1,
-        flexShrink: 0,
+        display: 'flex', alignItems: 'center', gap: 8,
+        padding: '7px 14px', borderBottom: `1px solid ${T.border}`,
+        background: T.bg1, flexShrink: 0,
       }}>
-        <button
-          onClick={onBack}
-          style={{
-            padding: '3px 8px',
-            borderRadius: 3,
-            border: `1px solid ${T.border}`,
-            background: 'transparent',
-            color: T.text2,
-            fontSize: 9,
-            cursor: 'pointer',
-          }}
-        >
-          {'\u2190'} Board
-        </button>
+        <button onClick={onBack} style={{
+          padding: '3px 8px', borderRadius: 3, border: `1px solid ${T.border}`,
+          background: 'transparent', color: T.text2, fontSize: 9, cursor: 'pointer',
+        }}>{'\u2190'} Board</button>
         <div style={{ width: 1, height: 14, background: T.border }} />
         <span style={{ fontSize: 11, fontWeight: 700, color: T.text0 }}>The Forge</span>
-        <span style={{ fontSize: 8, color: T.text3 }}>
-          {phase === 'intake' && 'Describe the work to generate a plan'}
-          {phase === 'generating' && 'Generating plan...'}
-          {phase === 'preview' && 'Review plan before approving'}
-          {phase === 'saved' && 'Plan saved — ready to execute'}
-        </span>
+        <span style={{ fontSize: 8, color: T.text3 }}>{phaseLabel[phase]}</span>
         {initialSignal && (
           <span style={{
-            padding: '1px 6px',
-            borderRadius: 3,
-            fontSize: 7,
-            fontWeight: 600,
-            color: T.red,
-            background: T.red + '14',
-            border: `1px solid ${T.red}22`,
-          }}>
-            from signal: {initialSignal.signal_id}
-          </span>
+            padding: '1px 6px', borderRadius: 3, fontSize: 7, fontWeight: 600,
+            color: T.red, background: T.red + '14', border: `1px solid ${T.red}22`,
+          }}>from signal: {initialSignal.signal_id}</span>
         )}
         <div style={{ flex: 1 }} />
         {phase === 'preview' && (
-          <button
-            onClick={() => setPhase('intake')}
-            style={{
-              padding: '3px 8px',
-              borderRadius: 3,
-              border: `1px solid ${T.border}`,
-              background: 'transparent',
-              color: T.text2,
-              fontSize: 9,
-              cursor: 'pointer',
-            }}
-          >
-            {'\u2190'} Edit
-          </button>
+          <button onClick={() => setPhase('intake')} style={{
+            padding: '3px 8px', borderRadius: 3, border: `1px solid ${T.border}`,
+            background: 'transparent', color: T.text2, fontSize: 9, cursor: 'pointer',
+          }}>{'\u2190'} Edit Intake</button>
         )}
       </div>
 
       {/* Body */}
       <div style={{ flex: 1, overflow: 'auto', padding: 16 }}>
 
-        {/* ── INTAKE ── */}
+        {/* INTAKE */}
         {(phase === 'intake' || phase === 'generating') && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10, maxWidth: 640 }}>
             <div style={{ fontSize: 9, fontWeight: 700, color: T.accent, textTransform: 'uppercase', letterSpacing: 0.5 }}>
               Define the Work
             </div>
+
+            {/* ADO Import */}
+            <FormField label="Import from ADO (placeholder)">
+              <AdoCombobox onSelect={item => {
+                setDescription(item.description || item.title);
+              }} />
+            </FormField>
 
             {/* Project selector */}
             <FormField label="Project *">
@@ -171,68 +199,41 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
                 <div style={{ fontSize: 8, color: T.text3, padding: 4 }}>Loading projects...</div>
               ) : projects.length === 0 ? (
                 <div style={{ fontSize: 8, color: T.yellow, padding: 4 }}>
-                  No projects registered. Use <code style={{ fontFamily: 'monospace' }}>POST /api/v1/pmo/projects</code> to add one.
+                  No projects registered. Use <code>baton pmo add</code> to register one.
                 </div>
               ) : (
-                <select
-                  value={projectId}
-                  onChange={e => setProjectId(e.target.value)}
-                  style={selectStyle}
-                >
+                <select value={projectId} onChange={e => setProjectId(e.target.value)} style={selectStyle}>
                   {projects.map(p => (
-                    <option key={p.project_id} value={p.project_id}>
-                      {p.name} ({p.program})
-                    </option>
+                    <option key={p.project_id} value={p.project_id}>{p.name} ({p.program})</option>
                   ))}
                 </select>
               )}
             </FormField>
 
-            {/* Row: task type + priority */}
             <div style={{ display: 'flex', gap: 8 }}>
               <FormField label="Task Type" style={{ flex: 1 }}>
-                <select
-                  value={taskType}
-                  onChange={e => setTaskType(e.target.value)}
-                  style={selectStyle}
-                >
-                  {TASK_TYPES.map(t => (
-                    <option key={t.value} value={t.value}>{t.label}</option>
-                  ))}
+                <select value={taskType} onChange={e => setTaskType(e.target.value)} style={selectStyle}>
+                  {TASK_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
                 </select>
               </FormField>
               <FormField label="Priority" style={{ flex: 1 }}>
-                <select
-                  value={priority}
-                  onChange={e => setPriority(Number(e.target.value))}
-                  style={selectStyle}
-                >
-                  {PRIORITIES.map(p => (
-                    <option key={p.value} value={p.value}>{p.label}</option>
-                  ))}
+                <select value={priority} onChange={e => setPriority(Number(e.target.value))} style={selectStyle}>
+                  {PRIORITIES.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
                 </select>
               </FormField>
             </div>
 
-            {/* Task description */}
             <FormField label="Task Description *">
               <textarea
                 value={description}
                 onChange={e => setDescription(e.target.value)}
-                placeholder="Describe the work: what needs to be built, fixed, or analyzed. The more detail you provide, the better the generated plan."
+                placeholder="Describe the work: what needs to be built, fixed, or analyzed."
                 rows={9}
                 style={{
-                  width: '100%',
-                  padding: '8px 10px',
-                  borderRadius: 4,
-                  border: `1px solid ${T.border}`,
-                  background: T.bg1,
-                  color: T.text0,
-                  fontSize: 10,
-                  lineHeight: 1.55,
-                  outline: 'none',
-                  resize: 'vertical',
-                  fontFamily: 'inherit',
+                  width: '100%', padding: '8px 10px', borderRadius: 4,
+                  border: `1px solid ${T.border}`, background: T.bg1,
+                  color: T.text0, fontSize: 10, lineHeight: 1.55,
+                  outline: 'none', resize: 'vertical', fontFamily: 'inherit',
                 }}
               />
             </FormField>
@@ -247,16 +248,10 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
               onClick={handleGenerate}
               disabled={phase === 'generating' || !description.trim() || !projectId}
               style={{
-                alignSelf: 'flex-start',
-                padding: '7px 20px',
-                borderRadius: 4,
+                alignSelf: 'flex-start', padding: '7px 20px', borderRadius: 4,
                 border: 'none',
-                background: phase === 'generating' || !description.trim() || !projectId
-                  ? T.bg3
-                  : `linear-gradient(135deg, ${T.accent}, #2563eb)`,
-                color: '#fff',
-                fontSize: 10,
-                fontWeight: 700,
+                background: phase === 'generating' || !description.trim() || !projectId ? T.bg3 : `linear-gradient(135deg, ${T.accent}, #2563eb)`,
+                color: '#fff', fontSize: 10, fontWeight: 700,
                 cursor: phase === 'generating' || !description.trim() || !projectId ? 'not-allowed' : 'pointer',
                 opacity: phase === 'generating' || !description.trim() || !projectId ? 0.6 : 1,
               }}
@@ -266,30 +261,24 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
           </div>
         )}
 
-        {/* ── PLAN PREVIEW ── */}
+        {/* PREVIEW */}
         {phase === 'preview' && plan && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            {/* Action bar */}
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <span style={{ fontSize: 12, fontWeight: 700, color: T.text0 }}>
-                Plan Ready
-              </span>
+              <span style={{ fontSize: 12, fontWeight: 700, color: T.text0 }}>Plan Ready</span>
               <div style={{ display: 'flex', gap: 6 }}>
-                <button
-                  onClick={handleApprove}
-                  style={{
-                    padding: '5px 16px',
-                    borderRadius: 4,
-                    border: 'none',
-                    background: `linear-gradient(135deg, ${T.green}, #059669)`,
-                    color: '#fff',
-                    fontSize: 9,
-                    fontWeight: 700,
-                    cursor: 'pointer',
-                  }}
-                >
-                  Approve & Save
-                </button>
+                <button onClick={handleApprove} style={{
+                  padding: '5px 16px', borderRadius: 4, border: 'none',
+                  background: `linear-gradient(135deg, ${T.green}, #059669)`,
+                  color: '#fff', fontSize: 9, fontWeight: 700, cursor: 'pointer',
+                }}>Approve & Queue</button>
+                <button onClick={handleStartRegenerate} disabled={regenLoading} style={{
+                  padding: '5px 14px', borderRadius: 4,
+                  border: `1px solid ${T.yellow}44`, background: 'transparent',
+                  color: T.yellow, fontSize: 9, fontWeight: 600,
+                  cursor: regenLoading ? 'not-allowed' : 'pointer',
+                  opacity: regenLoading ? 0.6 : 1,
+                }}>{regenLoading ? 'Loading...' : 'Regenerate'}</button>
               </div>
             </div>
 
@@ -299,65 +288,41 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
               </div>
             )}
 
-            <PlanPreview plan={plan} />
+            <PlanEditor plan={plan} onPlanChange={setPlan} />
           </div>
         )}
 
-        {/* ── SAVED ── */}
+        {/* REGENERATING */}
+        {phase === 'regenerating' && (
+          <InterviewPanel
+            questions={interviewQuestions}
+            onSubmit={handleRegenerate}
+            onCancel={() => setPhase('preview')}
+          />
+        )}
+
+        {/* SAVED */}
         {phase === 'saved' && (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12, paddingTop: 40 }}>
             <div style={{
-              width: 48,
-              height: 48,
-              borderRadius: '50%',
-              background: T.green + '20',
-              border: `2px solid ${T.green}`,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              fontSize: 22,
-              color: T.green,
-            }}>
-              {'\u2713'}
-            </div>
-            <div style={{ fontSize: 14, fontWeight: 700, color: T.green }}>
-              Plan Saved
-            </div>
+              width: 48, height: 48, borderRadius: '50%',
+              background: T.green + '20', border: `2px solid ${T.green}`,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              fontSize: 22, color: T.green,
+            }}>{'\u2713'}</div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: T.green }}>Plan Saved & Queued</div>
             {savePath && (
-              <div style={{ fontSize: 9, color: T.text3, fontFamily: 'monospace' }}>
-                {savePath}
-              </div>
+              <div style={{ fontSize: 9, color: T.text3, fontFamily: 'monospace' }}>{savePath}</div>
             )}
             <div style={{ display: 'flex', gap: 8 }}>
-              <button
-                onClick={() => { setPhase('intake'); setDescription(''); setPlan(null); }}
-                style={{
-                  padding: '5px 14px',
-                  borderRadius: 4,
-                  border: `1px solid ${T.border}`,
-                  background: 'transparent',
-                  color: T.text2,
-                  fontSize: 9,
-                  cursor: 'pointer',
-                }}
-              >
-                New Plan
-              </button>
-              <button
-                onClick={onBack}
-                style={{
-                  padding: '5px 14px',
-                  borderRadius: 4,
-                  border: 'none',
-                  background: T.accent,
-                  color: '#fff',
-                  fontSize: 9,
-                  fontWeight: 600,
-                  cursor: 'pointer',
-                }}
-              >
-                Back to Board
-              </button>
+              <button onClick={() => { setPhase('intake'); setDescription(''); setPlan(null); }} style={{
+                padding: '5px 14px', borderRadius: 4, border: `1px solid ${T.border}`,
+                background: 'transparent', color: T.text2, fontSize: 9, cursor: 'pointer',
+              }}>New Plan</button>
+              <button onClick={onBack} style={{
+                padding: '5px 14px', borderRadius: 4, border: 'none',
+                background: T.accent, color: '#fff', fontSize: 9, fontWeight: 600, cursor: 'pointer',
+              }}>Back to Board</button>
             </div>
           </div>
         )}
@@ -366,32 +331,17 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
   );
 }
 
-function FormField({
-  label,
-  children,
-  style,
-}: {
-  label: string;
-  children: React.ReactNode;
-  style?: React.CSSProperties;
-}) {
+function FormField({ label, children, style }: { label: string; children: React.ReactNode; style?: React.CSSProperties }) {
   return (
     <div style={style}>
-      <label style={{ fontSize: 8, color: T.text2, display: 'block', marginBottom: 4 }}>
-        {label}
-      </label>
+      <label style={{ fontSize: 8, color: T.text2, display: 'block', marginBottom: 4 }}>{label}</label>
       {children}
     </div>
   );
 }
 
 const selectStyle: React.CSSProperties = {
-  width: '100%',
-  padding: '6px 8px',
-  borderRadius: 4,
-  border: `1px solid ${T.border}`,
-  background: T.bg1,
-  color: T.text0,
-  fontSize: 10,
-  outline: 'none',
+  width: '100%', padding: '6px 8px', borderRadius: 4,
+  border: `1px solid ${T.border}`, background: T.bg1,
+  color: T.text0, fontSize: 10, outline: 'none',
 };
