@@ -196,6 +196,7 @@ class MachinePlan:
     shared_context: str = ""            # pre-built context for agents
     pattern_source: str | None = None   # pattern_id that influenced this plan
     created_at: str = ""
+    task_type: str = ""                 # inferred task type (bug-fix, new-feature, etc.)
 
     def __post_init__(self) -> None:
         if not self.created_at:
@@ -225,6 +226,7 @@ class MachinePlan:
             "shared_context": self.shared_context,
             "pattern_source": self.pattern_source,
             "created_at": self.created_at,
+            "task_type": self.task_type,
         }
 
     @classmethod
@@ -240,6 +242,7 @@ class MachinePlan:
             shared_context=data.get("shared_context", ""),
             pattern_source=data.get("pattern_source"),
             created_at=data.get("created_at", ""),
+            task_type=data.get("task_type", ""),
         )
 
     def to_markdown(self) -> str:

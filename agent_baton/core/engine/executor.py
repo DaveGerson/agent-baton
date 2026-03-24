@@ -1296,6 +1296,7 @@ class ExecutionEngine:
             shared_context=state.plan.shared_context,
             handoff_from=handoff,
             task_summary=state.plan.task_summary,
+            task_type=state.plan.task_type,
         )
         enforcement = PromptDispatcher.build_path_enforcement(step)
         return ExecutionAction(

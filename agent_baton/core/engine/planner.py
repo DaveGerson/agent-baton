@@ -550,6 +550,7 @@ class IntelligentPlanner:
             git_strategy=git_strategy,
             phases=plan_phases,
             pattern_source=pattern.pattern_id if pattern else None,
+            task_type=inferred_type,
         )
         shared_context = self._build_shared_context(tmp_plan)
         tmp_plan.shared_context = shared_context

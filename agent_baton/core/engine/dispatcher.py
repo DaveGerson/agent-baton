@@ -9,6 +9,18 @@ from agent_baton.models.execution import (
     TeamMember,
 )
 
+# Success criteria by task type — shown in the delegation prompt to make the
+# definition of done concrete.  Selected by the caller via the task_type arg.
+_SUCCESS_CRITERIA: dict[str, str] = {
+    "bug-fix": "The bug no longer reproduces and a regression test prevents recurrence.",
+    "new-feature": "The feature works as specified and has test coverage.",
+    "refactor": "Behavior is unchanged, code is cleaner, and tests still pass.",
+    "test": "Test coverage meaningfully improved with no false positives.",
+    "documentation": "Documentation is accurate, complete, and matches current code.",
+    "migration": "Data is migrated correctly with rollback capability verified.",
+    "data-analysis": "Analysis answers the stated question with supporting evidence.",
+}
+
 
 class PromptDispatcher:
     """Generates delegation prompts for agent subagents.
@@ -26,6 +38,7 @@ class PromptDispatcher:
         handoff_from: str = "",
         project_description: str = "",
         task_summary: str = "",
+        task_type: str = "",
     ) -> str:
         """Build a complete delegation prompt for an agent.
 
@@ -35,6 +48,10 @@ class PromptDispatcher:
             handoff_from: Free-text summary from the previous step's output.
             project_description: One-line description of the overall project.
             task_summary: High-level summary of the mission being executed.
+                Forwarded verbatim in the Intent section so the agent sees the
+                user's original words unmodified.
+            task_type: Task type key (e.g. "bug-fix", "new-feature") used to
+                select the Success Criteria text.  Defaults to "" (no criteria shown).
 
         Returns:
             A formatted markdown delegation prompt ready to pass to the Agent tool.
@@ -73,9 +90,32 @@ class PromptDispatcher:
             "",
             "Read `CLAUDE.md` for project conventions.",
             "",
+        ]
+
+        # Intent section — user's original words, unmodified, before the task
+        if task_summary.strip():
+            parts += [
+                "## Intent",
+                task_summary.strip(),
+                "",
+            ]
+
+        parts += [
             f"## Your Task (Step {step.step_id})",
             step.task_description.strip(),
             "",
+        ]
+
+        # Success Criteria section — derived from task type
+        success_criteria = _SUCCESS_CRITERIA.get(task_type, "")
+        if success_criteria:
+            parts += [
+                "## Success Criteria",
+                success_criteria,
+                "",
+            ]
+
+        parts += [
             "## Files to Read",
             context_files_text,
             "",
@@ -92,6 +132,11 @@ class PromptDispatcher:
             "## Decision Logging",
             "When you make a non-obvious decision, document it in your output",
             "under a 'Decisions' heading explaining why you chose this approach.",
+            "",
+            "## Deviations",
+            "If the plan's approach doesn't fit the actual situation, document what",
+            "you changed and why under a 'Deviations' heading. This feeds the",
+            "learning loop — deviations improve future plans.",
         ]
 
         return "\n".join(parts)
@@ -265,6 +310,7 @@ class PromptDispatcher:
         handoff_from: str = "",
         project_description: str = "",
         task_summary: str = "",
+        task_type: str = "",
     ) -> ExecutionAction:
         """Build a complete ExecutionAction with DISPATCH type.
 
@@ -277,6 +323,7 @@ class PromptDispatcher:
             handoff_from: Summary from the previous step's output.
             project_description: One-line project description.
             task_summary: High-level mission summary.
+            task_type: Task type key for Success Criteria selection.
 
         Returns:
             An ExecutionAction with action_type=DISPATCH and a fully-built
@@ -289,6 +336,7 @@ class PromptDispatcher:
             handoff_from=handoff_from,
             project_description=project_description,
             task_summary=task_summary,
+            task_type=task_type,
         )
         enforcement = self.build_path_enforcement(step)
 
