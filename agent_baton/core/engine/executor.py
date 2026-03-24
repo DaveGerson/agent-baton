@@ -753,7 +753,21 @@ class ExecutionEngine:
 
     def _dispatch_action(self, step: PlanStep, state: ExecutionState) -> ExecutionAction:
         """Build a DISPATCH action for *step*."""
-        prompt = _build_delegation_prompt(step, state.plan)
+        dispatcher = PromptDispatcher()
+
+        # Find the most recent completed step (different step_id) for handoff.
+        handoff = ""
+        for result in reversed(state.step_results):
+            if result.step_id != step.step_id and result.status == "complete" and result.outcome:
+                handoff = result.outcome
+                break
+
+        prompt = dispatcher.build_delegation_prompt(
+            step,
+            shared_context=state.plan.shared_context,
+            handoff_from=handoff,
+            task_summary=state.plan.task_summary,
+        )
         enforcement = PromptDispatcher.build_path_enforcement(step)
         return ExecutionAction(
             action_type=ActionType.DISPATCH,

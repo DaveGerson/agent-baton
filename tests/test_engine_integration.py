@@ -149,8 +149,11 @@ class TestPlanCreation:
     def test_shared_context_contains_task_summary(self, plan: MachinePlan) -> None:
         assert plan.task_summary in plan.shared_context
 
-    def test_shared_context_references_context_md(self, plan: MachinePlan) -> None:
-        assert "context.md" in plan.shared_context
+    def test_delegation_prompt_references_context_md(self, plan: MachinePlan, tmp_path: Path) -> None:
+        """context.md instruction is now in the delegation prompt, not shared_context."""
+        engine = _make_engine(tmp_path)
+        action = engine.start(plan)
+        assert "context.md" in action.delegation_prompt
 
     def test_risk_level_is_set(self, plan: MachinePlan) -> None:
         assert plan.risk_level in ("LOW", "MEDIUM", "HIGH")

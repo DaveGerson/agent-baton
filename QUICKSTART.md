@@ -37,7 +37,7 @@ powershell -ExecutionPolicy Bypass -File scripts\install.ps1
 Choose option 1 (user-level) for global install, or option 2 (project-level)
 for a single project.
 
-### Option D: Python package (for CLI tools)
+### Option D: Python package (required for engine-driven execution)
 
 ```bash
 cd /path/to/agent-baton
@@ -45,7 +45,8 @@ pip install -e ".[dev]"
 ```
 
 This installs the `baton` CLI with 31 commands for planning, execution,
-observability, governance, and distribution.
+observability, governance, and distribution. The orchestrator uses the
+`baton` CLI to drive tasks through the execution engine.
 
 ## Verify (30 seconds)
 
@@ -57,7 +58,7 @@ In Claude Code:
 You should see ~19 agents listed including `orchestrator`, `auditor`,
 `backend-engineer`, etc.
 
-If you installed the Python package:
+Verify the CLI:
 ```bash
 baton agents
 baton validate agents/
@@ -78,27 +79,28 @@ definitely routes to the right agent.
 
 ## What to Watch For
 
-The orchestrator should:
-1. Read the reference docs in `.claude/references/`
-2. Research your codebase and detect the project stack
-3. Create an execution plan with phases, agents, and QA gates
-4. Ask you to approve before dispatching agents
-5. Delegate to specialist agents (in parallel when independent)
-6. Run QA gates (build, test, lint) between phases
-7. Commit work and update the mission log as it goes
-8. Write a trace, usage log, and retrospective on completion
+The orchestrator drives tasks through the execution engine. For complex
+tasks (Level 3), the workflow is:
 
-If it skips steps 1-3 and jumps straight to coding, say:
-"Stop. Read all files in .claude/references/ first, then present an
-execution plan before doing any work."
+1. Plan via `baton plan "task description" --save --explain`
+2. Start execution via `baton execute start`
+3. Drive the loop: the engine returns DISPATCH, GATE, or COMPLETE actions
+4. For DISPATCH: spawn the specialist agent with the provided prompt
+5. Record results via `baton execute record`
+6. Run QA gates between phases via `baton execute gate`
+7. Finalize via `baton execute complete`
+8. The engine writes traces, usage logs, and retrospectives automatically
 
-## Engine-Driven Execution (Advanced)
+For simpler tasks (Level 1-2), the orchestrator dispatches agents directly
+without the engine — no ceremony needed for small changes.
 
-If you installed the Python package, the orchestrator can use the execution
-engine for persistent, crash-recoverable task execution:
+If the orchestrator jumps straight to coding without planning, say:
+"Stop. Run `baton plan` first, then present the plan before doing any work."
+
+## Engine CLI Reference
 
 ```bash
-# Create a plan
+# Create a plan (engine handles agent routing, risk, budget, sequencing)
 baton plan "Add input validation to the API" --save --explain
 
 # Start execution (returns first DISPATCH action)
@@ -134,10 +136,9 @@ feed the learning pipeline. Future plans improve based on past execution data.
 | Problem | Fix |
 |---------|-----|
 | Agents don't show up in `/agents` | Files aren't in `.claude/agents/` — check the path |
-| Orchestrator doesn't read references | Say "Read all files in .claude/references/ first" |
-| Orchestrator skips the plan | Say "Write an execution plan to .claude/team-context/plan.md before delegating" |
+| `baton` command not found | Run `pip install -e ".[dev]"` in the agent-baton directory |
+| Orchestrator skips the plan | Say "Run `baton plan` first, then present the plan before doing any work" |
 | Agent writes to wrong files | `git checkout -- [file]` to revert, re-delegate with stronger boundaries |
 | Permission prompts on every action | Check `permissionMode: auto-edit` is in the agent's frontmatter |
-| Rate limited mid-task | The mission log at `.claude/team-context/mission-log.md` has what completed. Start a new session and say "Resume the interrupted task — read .claude/team-context/" |
 | Session crash during execution | Run `baton execute resume` — the engine recovers from saved state |
-| `baton` command not found | Run `pip install -e ".[dev]"` in the agent-baton directory |
+| Rate limited mid-task | Start a new session, run `baton execute resume` to pick up where it left off |

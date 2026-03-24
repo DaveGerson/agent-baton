@@ -7,6 +7,11 @@ from dataclasses import dataclass, field
 from agent_baton.core.orchestration.registry import AgentRegistry
 
 
+# Directories to skip when scanning subdirectories for stack signals.
+_SKIP_DIRS: frozenset[str] = frozenset({
+    "node_modules", "__pycache__", "dist", "build", ".git",
+})
+
 # Stack detection signals: filename → (language, framework_hint)
 PACKAGE_SIGNALS: dict[str, tuple[str, str | None]] = {
     "package.json": ("javascript", None),
@@ -65,6 +70,10 @@ class AgentRouter:
     def detect_stack(self, project_root: Path | None = None) -> StackProfile:
         """Scan project files to determine language and framework.
 
+        Scans up to two levels of subdirectories (root + visible children +
+        visible grandchildren), skipping hidden directories and common
+        build/cache directories.
+
         Args:
             project_root: Directory to scan. Defaults to cwd.
 
@@ -74,24 +83,56 @@ class AgentRouter:
         root = project_root or Path.cwd()
         profile = StackProfile()
 
+        # Build the list of directories to scan: root, its visible children,
+        # and their visible children (i.e. up to two levels deep).
+        scan_dirs: list[Path] = [root]
+        for child in sorted(root.iterdir()) if root.is_dir() else []:
+            if not child.is_dir():
+                continue
+            if child.name.startswith(".") or child.name in _SKIP_DIRS:
+                continue
+            scan_dirs.append(child)
+            for grandchild in sorted(child.iterdir()):
+                if not grandchild.is_dir():
+                    continue
+                if grandchild.name.startswith(".") or grandchild.name in _SKIP_DIRS:
+                    continue
+                scan_dirs.append(grandchild)
+
         # Check framework signals first (more specific)
         for filename, (lang, framework) in FRAMEWORK_SIGNALS.items():
-            if (root / filename).exists():
-                profile.language = lang
-                profile.framework = framework
-                profile.detected_files.append(filename)
-
-        # Check package manager signals
-        for filename, (lang, _) in PACKAGE_SIGNALS.items():
-            if (root / filename).exists():
-                if profile.language is None:
+            for scan_dir in scan_dirs:
+                if (scan_dir / filename).exists():
                     profile.language = lang
-                profile.detected_files.append(filename)
+                    profile.framework = framework
+                    rel = str((scan_dir / filename).relative_to(root))
+                    if rel not in profile.detected_files:
+                        profile.detected_files.append(rel)
+                    break
 
-        # Scan for .csproj / .sln (glob patterns)
-        if any(root.glob("*.csproj")) or any(root.glob("*.sln")):
-            profile.language = "csharp"
-            profile.detected_files.append("*.csproj")
+        # Check package manager signals.
+        # Allow "typescript" to override "javascript" when tsconfig.json is
+        # found alongside package.json.
+        for filename, (lang, _) in PACKAGE_SIGNALS.items():
+            for scan_dir in scan_dirs:
+                if (scan_dir / filename).exists():
+                    if (
+                        profile.language is None
+                        or (lang == "typescript" and profile.language == "javascript")
+                    ):
+                        profile.language = lang
+                    rel = str((scan_dir / filename).relative_to(root))
+                    if rel not in profile.detected_files:
+                        profile.detected_files.append(rel)
+                    break
+
+        # Scan for .csproj / .sln (glob patterns across all scan_dirs)
+        for scan_dir in scan_dirs:
+            if any(scan_dir.glob("*.csproj")) or any(scan_dir.glob("*.sln")):
+                profile.language = "csharp"
+                if "*.csproj" not in profile.detected_files:
+                    profile.detected_files.append("*.csproj")
+                break
 
         return profile
 

@@ -24,7 +24,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash -c 'TIMESTAMP=$(date -Iseconds); AGENT=\"$CLAUDE_AGENT_NAME\"; echo \"### $TIMESTAMP — $AGENT — COMPLETE\" >> .claude/team-context/mission-log.md 2>/dev/null; echo \"✓ Mission log updated for agent completion\"'"
+            "command": "bash -c 'TIMESTAMP=$(date -Iseconds); AGENT=\"${CLAUDE_AGENT_NAME:-unknown-agent}\"; echo \"### $TIMESTAMP — $AGENT — COMPLETE\" >> .claude/team-context/mission-log.md 2>/dev/null; echo \"✓ Mission log updated for agent completion\"'"
           }
         ]
       }

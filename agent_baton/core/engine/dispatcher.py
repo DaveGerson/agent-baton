@@ -58,13 +58,17 @@ class PromptDispatcher:
         # Shared context block
         shared_context_block = shared_context.strip() if shared_context.strip() else "_No shared context provided._"
 
+        article = "an" if role[0:1] in "aeiouAEIOU" else "a"
         parts = [
-            f"You are a {role} working on {project_line}.",
+            f"You are {article} {role} working on {project_line}.",
             "",
             "## Shared Context",
             shared_context_block,
             "",
-            "## Your Task",
+            "Read `CLAUDE.md` for project conventions.",
+            "Read `.claude/team-context/context.md` for shared project context.",
+            "",
+            f"## Your Task (Step {step.step_id})",
             step.task_description.strip(),
             "",
             "## Files to Read",

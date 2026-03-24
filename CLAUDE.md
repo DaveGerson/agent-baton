@@ -86,8 +86,38 @@ scripts/install.sh         # Re-install globally after editing agents/references
 
 ## Orchestrator Usage
 
-For complex tasks involving 3+ files across different layers, use the
-orchestrator agent. For simple single-file changes, work directly.
+This project dogfoods the agent-baton execution engine for its own
+orchestration. For complex tasks involving 3+ files across different
+layers, use the engine path:
+
+```
+baton plan "task description" --save --explain
+# Review plan.md — present summary to user, adjust if needed
+baton execute start
+
+loop:
+  baton execute next
+  if DISPATCH:
+    baton execute dispatched --step ID --agent NAME
+    → spawn Agent tool with the delegation_prompt ←
+    baton execute record --step ID --agent NAME --status complete \
+      --outcome "summary" --files "changed.py"
+  if GATE:
+    run gate command
+    baton execute gate --phase-id N --result pass
+  if COMPLETE:
+    baton execute complete
+    break
+```
+
+**For DISPATCH actions — you MUST use the Agent tool** to spawn the
+specified subagent with the delegation prompt. Do NOT do the work inline.
+Valid `--status` values: `complete` or `failed`.
+
+See `references/baton-engine.md` for the full CLI reference and
+troubleshooting guide.
+
+For simple single-file changes, work directly without the engine.
 
 Changes to distributable files (`agents/`, `references/`) are MEDIUM risk
 and should involve the auditor when substantial.

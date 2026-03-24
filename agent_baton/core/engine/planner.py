@@ -75,7 +75,7 @@ _DEFAULT_AGENTS: dict[str, list[str]] = {
     "bug-fix": ["backend-engineer", "test-engineer"],
     "refactor": ["architect", "backend-engineer", "test-engineer", "code-reviewer"],
     "data-analysis": ["architect", "data-analyst"],
-    "documentation": [],
+    "documentation": ["architect"],
     "migration": ["architect", "backend-engineer", "test-engineer", "code-reviewer", "auditor"],
     "test": ["test-engineer"],
 }
@@ -96,15 +96,193 @@ _PHASE_NAMES: dict[str, list[str]] = {
 
 _DEFAULT_PHASE_NAMES: list[str] = ["Design", "Implement", "Test", "Review"]
 
-# Keyword sets for task type inference (checked in order)
+# Maps phase names (lower-cased) to human-readable action verbs for step descriptions
+_PHASE_VERBS: dict[str, str] = {
+    "research": "Explore and document",
+    "investigate": "Explore and document",
+    "design": "Design the approach for",
+    "implement": "Implement",
+    "fix": "Fix",
+    "draft": "Draft",
+    "test": "Write tests to verify",
+    "review": "Review the implementation of",
+}
+
+# Agent+phase-specific description templates. {task} is replaced with task_summary.
+# Only common combinations need entries; _PHASE_VERBS handles the rest.
+_STEP_TEMPLATES: dict[str, dict[str, str]] = {
+    "architect": {
+        "design": (
+            "Design the architecture for: {task}. "
+            "Define module boundaries, interfaces, and data flow. "
+            "Document key design decisions and identify affected components."
+        ),
+        "research": (
+            "Research existing patterns and constraints for: {task}. "
+            "Identify risks, dependencies, and technical trade-offs."
+        ),
+        "review": (
+            "Review the implementation of: {task} for architectural consistency. "
+            "Verify design adherence, module boundaries, and maintainability."
+        ),
+    },
+    "backend-engineer": {
+        "implement": (
+            "Implement the server-side components for: {task}. "
+            "Write clean, tested code following project conventions. "
+            "Focus on API endpoints, business logic, and data access."
+        ),
+        "fix": (
+            "Diagnose and fix: {task}. "
+            "Identify root cause, apply a targeted fix, and add a regression test."
+        ),
+        "design": (
+            "Design the backend approach for: {task}. "
+            "Define endpoints, data models, and business logic flow."
+        ),
+        "investigate": (
+            "Investigate: {task}. "
+            "Trace the issue through the codebase, identify root cause, "
+            "and document findings with reproduction steps."
+        ),
+    },
+    "frontend-engineer": {
+        "implement": (
+            "Implement the UI for: {task}. "
+            "Create components, wire up state management, and handle user interactions. "
+            "Ensure accessibility and responsive behavior."
+        ),
+        "design": (
+            "Design the frontend approach for: {task}. "
+            "Plan component hierarchy, state management, and user flow."
+        ),
+    },
+    "test-engineer": {
+        "test": (
+            "Write comprehensive tests for: {task}. "
+            "Cover happy paths, edge cases, error scenarios, and boundary conditions. "
+            "Include both unit and integration tests where appropriate."
+        ),
+        "implement": (
+            "Build test infrastructure for: {task}. "
+            "Create fixtures, helpers, and test utilities as needed."
+        ),
+        "review": (
+            "Review test coverage for: {task}. "
+            "Identify untested code paths and missing edge cases."
+        ),
+    },
+    "code-reviewer": {
+        "review": (
+            "Review the implementation of: {task}. "
+            "Check code quality, error handling, naming consistency, "
+            "and adherence to project conventions. Flag security concerns."
+        ),
+    },
+    "security-reviewer": {
+        "review": (
+            "Security audit: {task}. "
+            "Check for OWASP top 10 vulnerabilities, auth gaps, "
+            "input validation issues, and secrets exposure."
+        ),
+    },
+    "devops-engineer": {
+        "implement": (
+            "Set up infrastructure for: {task}. "
+            "Configure deployment, CI/CD pipelines, Docker, and environment as needed."
+        ),
+        "review": (
+            "Review infrastructure changes for: {task}. "
+            "Verify security, reliability, and operational readiness."
+        ),
+    },
+    "data-engineer": {
+        "design": (
+            "Design the data architecture for: {task}. "
+            "Define schemas, migrations, indexes, and data flow."
+        ),
+        "implement": (
+            "Implement the data layer for: {task}. "
+            "Create schemas, write migrations, optimize queries, and build ETL as needed."
+        ),
+    },
+    "data-analyst": {
+        "design": (
+            "Plan the analysis approach for: {task}. "
+            "Define metrics, data sources, and query strategy."
+        ),
+        "implement": (
+            "Execute the analysis for: {task}. "
+            "Write queries, compute metrics, and prepare findings for stakeholders."
+        ),
+    },
+    "data-scientist": {
+        "design": (
+            "Design the modeling approach for: {task}. "
+            "Define features, model selection criteria, and evaluation methodology."
+        ),
+        "implement": (
+            "Build and evaluate models for: {task}. "
+            "Implement feature engineering, model training, and evaluation pipeline."
+        ),
+    },
+    "auditor": {
+        "review": (
+            "Audit the implementation of: {task}. "
+            "Verify compliance, safety, and governance requirements. "
+            "Flag risks and provide pass/fail determination."
+        ),
+    },
+    "visualization-expert": {
+        "implement": (
+            "Create visualizations for: {task}. "
+            "Design clear, accurate charts or dashboards that communicate insights effectively."
+        ),
+    },
+    "subject-matter-expert": {
+        "research": (
+            "Provide domain expertise for: {task}. "
+            "Document applicable business rules, regulatory requirements, "
+            "and industry standards."
+        ),
+        "review": (
+            "Validate domain correctness of: {task}. "
+            "Verify business logic, terminology, and compliance with industry standards."
+        ),
+    },
+}
+
+# Default deliverables by agent base name — used when step has no explicit deliverables
+_AGENT_DELIVERABLES: dict[str, list[str]] = {
+    "architect": ["Design document with module boundaries and interfaces"],
+    "backend-engineer": ["Implementation source files", "Tests for changed code"],
+    "frontend-engineer": ["UI component files", "Tests for changed code"],
+    "test-engineer": ["Test files with comprehensive coverage"],
+    "code-reviewer": ["Review summary with findings and approval status"],
+    "security-reviewer": ["Security audit report with findings and risk ratings"],
+    "devops-engineer": ["Infrastructure and deployment configuration files"],
+    "data-engineer": ["Schema definitions and migration files"],
+    "data-analyst": ["Analysis results and supporting queries"],
+    "data-scientist": ["Model artifacts and evaluation results"],
+    "auditor": ["Audit report with compliance findings"],
+    "visualization-expert": ["Visualization files or dashboard components"],
+    "subject-matter-expert": ["Domain requirements document"],
+}
+
+# Keyword sets for task type inference (checked in order — first match wins).
+# Priority: specific intents (bug-fix, migration, refactor) first, then
+# domain-specific (data-analysis), then new-feature (action verbs like "build"),
+# then test and documentation last (to avoid false positives from incidental
+# keywords like "tests" or "documentation" in feature descriptions).
 _TASK_TYPE_KEYWORDS: list[tuple[str, list[str]]] = [
     ("bug-fix", ["fix", "bug", "broken", "error", "crash", "traceback", "exception", "patch"]),
     ("migration", ["migrate", "migration", "upgrade", "move"]),
     ("refactor", ["refactor", "clean", "reorganize", "restructure", "rename", "cleanup"]),
     ("data-analysis", ["analyze", "analyse", "report", "dashboard", "query", "insight", "metric"]),
-    ("documentation", ["doc", "docs", "readme", "spec", "adr", "document", "wiki"]),
-    ("test", ["test", "tests", "testing", "coverage", "e2e", "unit", "integration"]),
     ("new-feature", ["add", "build", "create", "implement", "new", "feature", "develop"]),
+    ("test", ["test", "tests", "testing", "coverage", "e2e", "unit", "integration"]),
+    ("documentation", ["doc", "docs", "readme", "spec", "adr", "document", "wiki",
+                        "review", "summarize", "explore", "architecture", "overview"]),
 ]
 
 
@@ -243,13 +421,16 @@ class IntelligentPlanner:
 
         # 9. Build phases
         if phases is not None:
-            plan_phases = self._phases_from_dicts(phases, resolved_agents)
+            plan_phases = self._phases_from_dicts(phases, resolved_agents, task_summary)
         elif pattern is not None:
-            plan_phases = self._apply_pattern(pattern, inferred_type)
+            plan_phases = self._apply_pattern(pattern, inferred_type, task_summary)
             # Apply routed agent names to pattern-derived phases
-            plan_phases = self._assign_agents_to_phases(plan_phases, resolved_agents)
+            plan_phases = self._assign_agents_to_phases(plan_phases, resolved_agents, task_summary)
         else:
-            plan_phases = self._default_phases(inferred_type, resolved_agents)
+            plan_phases = self._default_phases(inferred_type, resolved_agents, task_summary)
+
+        # 9b. Enrich steps with cross-phase context and default deliverables
+        plan_phases = self._enrich_phases(plan_phases)
 
         # 10. Score check — warn about low-health agents
         self._check_agent_scores(resolved_agents)
@@ -262,9 +443,13 @@ class IntelligentPlanner:
             if phase.gate is None:
                 phase.gate = self._default_gate(phase.name)
 
-        # 13. Shared context
-        # Build a temporary plan to generate the context string
-        # Build a temporary plan to generate the context string
+        # 13. Populate context_files — every agent should read CLAUDE.md
+        for phase in plan_phases:
+            for step in phase.steps:
+                if not step.context_files:
+                    step.context_files = ["CLAUDE.md"]
+
+        # 14. Shared context
         tmp_plan = MachinePlan(
             task_id=task_id,
             task_summary=task_summary,
@@ -395,18 +580,88 @@ class IntelligentPlanner:
     # Private helpers — phase building
     # ------------------------------------------------------------------
 
-    def _default_phases(self, task_type: str, agents: list[str]) -> list[PlanPhase]:
+    def _enrich_phases(self, phases: list[PlanPhase]) -> list[PlanPhase]:
+        """Post-process phases to add cross-phase context and default deliverables.
+
+        For each step:
+        - If the step is in phase 2+, appends a reference to the preceding
+          phase so the agent knows what to build on.
+        - If the step has no explicit deliverables, populates them from
+          ``_AGENT_DELIVERABLES`` based on the agent's base name.
+        """
+        for phase in phases:
+            for step in phase.steps:
+                # Cross-phase reference: tell agent what came before
+                if phase.phase_id > 1:
+                    prev = next(
+                        (p for p in phases if p.phase_id == phase.phase_id - 1),
+                        None,
+                    )
+                    if prev and prev.steps:
+                        prev_agents = ", ".join(
+                            s.agent_name for s in prev.steps
+                        )
+                        step.task_description += (
+                            f" Build on the {prev.name.lower()} output"
+                            f" from phase {prev.phase_id} ({prev_agents})."
+                        )
+
+                # Default deliverables
+                if not step.deliverables:
+                    base_agent = step.agent_name.split("--")[0]
+                    defaults = _AGENT_DELIVERABLES.get(base_agent)
+                    if defaults:
+                        step.deliverables = list(defaults)
+
+        return phases
+
+    def _step_description(
+        self, phase_name: str, agent_name: str, task_summary: str
+    ) -> str:
+        """Generate a role-specific step description for an agent within a phase.
+
+        Uses ``_STEP_TEMPLATES`` for agent+phase combinations that have a
+        dedicated template, falling back to ``_PHASE_VERBS`` for unknown
+        combinations.
+
+        Examples::
+
+            _step_description("implement", "backend-engineer--python", "Add OAuth2 login")
+            # -> "Implement the server-side components for: Add OAuth2 login. ..."
+
+            _step_description("design", "architect", "Add OAuth2 login")
+            # -> "Design the architecture for: Add OAuth2 login. ..."
+
+        Falls back to ``"<phase> phase — <agent>"`` when ``task_summary`` is empty.
+        """
+        if not task_summary:
+            return f"{phase_name} phase — {agent_name}"
+
+        base_agent = agent_name.split("--")[0]
+        phase_lower = phase_name.lower()
+
+        # Try agent+phase specific template first
+        agent_templates = _STEP_TEMPLATES.get(base_agent, {})
+        template = agent_templates.get(phase_lower)
+
+        if template:
+            return template.format(task=task_summary)
+
+        # Fallback to generic verb + task
+        verb = _PHASE_VERBS.get(phase_lower, phase_name)
+        return f"{verb}: {task_summary} (as {agent_name})"
+
+    def _default_phases(self, task_type: str, agents: list[str], task_summary: str = "") -> list[PlanPhase]:
         """Build the default PlanPhase list for a task type.
 
-        Phase names come from _PHASE_NAMES.  Agents are distributed round-robin
-        across phases, ensuring every phase has at least one step when agents
-        are available.  If the agent list is empty, one step with a generic
-        placeholder name is created per phase.
+        Phase names come from _PHASE_NAMES.  Agents are assigned to phases
+        using affinity matching (see ``_assign_agents_to_phases``), with
+        round-robin fallback for unmatched agents/phases.
         """
         phase_names = _PHASE_NAMES.get(task_type, _DEFAULT_PHASE_NAMES)
-        return self._build_phases_for_names(phase_names, agents)
+        return self._build_phases_for_names(phase_names, agents, task_summary)
 
-    def _apply_pattern(self, pattern: LearnedPattern, task_type: str) -> list[PlanPhase]:
+    def _apply_pattern(self, pattern: LearnedPattern, task_type: str, task_summary: str = "") -> list[PlanPhase]:
         """Convert a LearnedPattern into PlanPhases.
 
         The pattern provides a template description and recommended agents but
@@ -421,36 +676,113 @@ class IntelligentPlanner:
             phases.append(PlanPhase(phase_id=idx, name=name, steps=[]))
         return phases
 
+    # Preferred agent roles per phase name — used for affinity-based assignment.
+    # Each entry is a priority-ordered list: first match in the agent pool wins.
+    _PHASE_IDEAL_ROLES: dict[str, list[str]] = {
+        "design": ["architect", "data-engineer", "data-analyst", "backend-engineer"],
+        "research": ["architect", "subject-matter-expert", "data-analyst"],
+        "investigate": ["backend-engineer", "frontend-engineer", "data-analyst"],
+        "implement": ["backend-engineer", "frontend-engineer", "devops-engineer",
+                       "data-engineer", "data-scientist", "visualization-expert"],
+        "fix": ["backend-engineer", "frontend-engineer"],
+        "draft": ["architect", "subject-matter-expert"],
+        "test": ["test-engineer", "backend-engineer", "frontend-engineer"],
+        "review": ["code-reviewer", "security-reviewer", "auditor", "architect"],
+    }
+
     def _assign_agents_to_phases(
-        self, phases: list[PlanPhase], agents: list[str]
+        self, phases: list[PlanPhase], agents: list[str], task_summary: str = ""
     ) -> list[PlanPhase]:
-        """Distribute agents across phases that have no steps yet."""
+        """Distribute agents across phases using affinity-based assignment.
+
+        Assignment strategy:
+        1. Match agents to phases where they are the ideal role (e.g. architect → Design).
+        2. Assign remaining agents to remaining phases round-robin.
+        3. For phases with no remaining agents, reuse the best-fit agent from the pool.
+        4. Distribute any leftover agents to phases where they have affinity.
+        5. Guarantee every phase has at least one step.
+        """
         if not agents:
-            # Ensure every phase has at least one step even without real agents
-            for idx, phase in enumerate(phases):
+            for phase in phases:
                 if not phase.steps:
-                    step_id = f"{phase.phase_id}.1"
                     phase.steps.append(
                         PlanStep(
-                            step_id=step_id,
+                            step_id=f"{phase.phase_id}.1",
                             agent_name="backend-engineer",
-                            task_description=f"{phase.name} phase work",
+                            task_description=self._step_description(
+                                phase.name, "backend-engineer", task_summary
+                            ),
                         )
                     )
             return phases
 
-        # Distribute agents across phases (round-robin)
-        n_phases = len(phases)
-        for agent_idx, agent in enumerate(agents):
-            phase_idx = agent_idx % n_phases
-            phase = phases[phase_idx]
+        assigned: list[tuple[PlanPhase, str]] = []
+        remaining_agents = list(agents)
+        remaining_phases = list(phases)
+
+        # Pass 1: assign agents to their ideal phases (greedy, first-match)
+        for phase in list(remaining_phases):
+            ideal_roles = self._PHASE_IDEAL_ROLES.get(phase.name.lower(), [])
+            matched = False
+            for role in ideal_roles:
+                for agent in remaining_agents:
+                    if agent.split("--")[0] == role:
+                        assigned.append((phase, agent))
+                        remaining_agents.remove(agent)
+                        remaining_phases.remove(phase)
+                        matched = True
+                        break
+                if matched:
+                    break
+
+        # Pass 2: assign remaining agents to remaining phases round-robin
+        for phase in list(remaining_phases):
+            if remaining_agents:
+                agent = remaining_agents.pop(0)
+                assigned.append((phase, agent))
+                remaining_phases.remove(phase)
+
+        # Pass 3: phases still unassigned — reuse the best-fit agent from pool
+        for phase in remaining_phases:
+            ideal_roles = self._PHASE_IDEAL_ROLES.get(phase.name.lower(), [])
+            best = None
+            for role in ideal_roles:
+                for agent in agents:
+                    if agent.split("--")[0] == role:
+                        best = agent
+                        break
+                if best:
+                    break
+            if best is None:
+                best = agents[0]
+            assigned.append((phase, best))
+
+        # Pass 4: leftover agents — add to the phase where they fit best
+        for agent in remaining_agents:
+            base = agent.split("--")[0]
+            best_phase = None
+            for phase_name, roles in self._PHASE_IDEAL_ROLES.items():
+                if base in roles:
+                    best_phase = next(
+                        (p for p in phases if p.name.lower() == phase_name), None
+                    )
+                    if best_phase:
+                        break
+            if best_phase is None:
+                best_phase = phases[0]
+            assigned.append((best_phase, agent))
+
+        # Build PlanStep objects from assignments
+        for phase, agent in sorted(assigned, key=lambda x: x[0].phase_id):
             step_number = len(phase.steps) + 1
             step_id = f"{phase.phase_id}.{step_number}"
             phase.steps.append(
                 PlanStep(
                     step_id=step_id,
                     agent_name=agent,
-                    task_description=f"{phase.name} phase — {agent}",
+                    task_description=self._step_description(
+                        phase.name, agent, task_summary
+                    ),
                 )
             )
 
@@ -461,24 +793,26 @@ class IntelligentPlanner:
                     PlanStep(
                         step_id=f"{phase.phase_id}.1",
                         agent_name=agents[0],
-                        task_description=f"{phase.name} phase work",
+                        task_description=self._step_description(
+                            phase.name, agents[0], task_summary
+                        ),
                     )
                 )
 
         return phases
 
     def _build_phases_for_names(
-        self, phase_names: list[str], agents: list[str]
+        self, phase_names: list[str], agents: list[str], task_summary: str = ""
     ) -> list[PlanPhase]:
         """Build PlanPhase objects for a list of names, distributing agents."""
         phases: list[PlanPhase] = [
             PlanPhase(phase_id=idx, name=name, steps=[])
             for idx, name in enumerate(phase_names, start=1)
         ]
-        return self._assign_agents_to_phases(phases, agents)
+        return self._assign_agents_to_phases(phases, agents, task_summary)
 
     def _phases_from_dicts(
-        self, phase_dicts: list[dict], agents: list[str]
+        self, phase_dicts: list[dict], agents: list[str], task_summary: str = ""
     ) -> list[PlanPhase]:
         """Build PlanPhase objects from user-supplied dicts.
 
@@ -509,7 +843,9 @@ class IntelligentPlanner:
                     PlanStep(
                         step_id=f"{idx}.{step_idx}",
                         agent_name=agent,
-                        task_description=f"{name} phase — {agent}",
+                        task_description=self._step_description(
+                            name, agent, task_summary
+                        ),
                     )
                 )
             phases.append(PlanPhase(phase_id=idx, name=name, steps=steps, gate=gate))
@@ -517,7 +853,7 @@ class IntelligentPlanner:
         # If no phase-level agents were provided, distribute the resolved agents
         all_steps_empty = all(not p.steps for p in phases)
         if all_steps_empty and agents:
-            return self._assign_agents_to_phases(phases, agents)
+            return self._assign_agents_to_phases(phases, agents, task_summary)
 
         return phases
 
@@ -722,8 +1058,4 @@ class IntelligentPlanner:
             lines.append(f"Team: {agent_list}")
         if plan.pattern_source:
             lines.append(f"Pattern: {plan.pattern_source}")
-        lines.append("")
-        lines.append(
-            "Read `.claude/team-context/context.md` for shared project context."
-        )
         return "\n".join(lines)

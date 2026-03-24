@@ -173,6 +173,16 @@ class TestInferTaskType:
         result = planner._infer_task_type("fix and add new feature")
         assert result == "bug-fix"
 
+    def test_new_feature_beats_documentation_when_build_verb(self, planner: IntelligentPlanner):
+        """'Build X with documentation' should be new-feature, not documentation."""
+        result = planner._infer_task_type("Build a health check API with tests and documentation")
+        assert result == "new-feature"
+
+    def test_review_still_classifies_as_documentation(self, planner: IntelligentPlanner):
+        """'review the codebase' should still classify as documentation."""
+        result = planner._infer_task_type("review the codebase architecture")
+        assert result == "documentation"
+
 
 # ---------------------------------------------------------------------------
 # Default phases
@@ -675,12 +685,12 @@ class TestBudgetTier:
 
 class TestBuildSharedContext:
     def test_shared_context_content(self, planner: IntelligentPlanner):
-        """Shared context must include the task summary, context.md link,
-        task ID, and risk level so every dispatched agent has full context."""
+        """Shared context must include the task summary,
+        task ID, and risk level so every dispatched agent has full context.
+        Note: context.md instruction moved to PromptDispatcher delegation prompt."""
         plan = planner.create_plan("Build search feature")
         ctx = plan.shared_context
         assert "Build search feature" in ctx
-        assert "context.md" in ctx
         assert plan.task_id in ctx
         assert plan.risk_level in ctx
 
@@ -764,3 +774,197 @@ class TestRiskAssessmentStructural:
         """_assess_risk is callable directly; returns a string risk level."""
         result = planner._assess_risk("Add a helper function", ["backend-engineer"])
         assert result in ("LOW", "MEDIUM", "HIGH")
+
+
+# ---------------------------------------------------------------------------
+# Step description decomposition — agent+phase templates
+# ---------------------------------------------------------------------------
+
+class TestStepDescriptionDecomposition:
+    """Verify that _step_description produces role-specific descriptions."""
+
+    def test_architect_design_uses_template(self, planner: IntelligentPlanner):
+        desc = planner._step_description("Design", "architect", "Add OAuth2 login")
+        assert "architecture" in desc.lower()
+        assert "Add OAuth2 login" in desc
+        # Should NOT be the generic fallback format
+        assert "(as architect)" not in desc
+
+    def test_backend_implement_uses_template(self, planner: IntelligentPlanner):
+        desc = planner._step_description("Implement", "backend-engineer", "Add OAuth2 login")
+        assert "server-side" in desc.lower()
+        assert "Add OAuth2 login" in desc
+
+    def test_backend_python_flavor_matches_base(self, planner: IntelligentPlanner):
+        """Flavored agent name (--python) should match the base agent template."""
+        desc = planner._step_description("Implement", "backend-engineer--python", "Add OAuth2 login")
+        assert "server-side" in desc.lower()
+
+    def test_test_engineer_test_uses_template(self, planner: IntelligentPlanner):
+        desc = planner._step_description("Test", "test-engineer", "Add OAuth2 login")
+        assert "comprehensive tests" in desc.lower()
+
+    def test_code_reviewer_review_uses_template(self, planner: IntelligentPlanner):
+        desc = planner._step_description("Review", "code-reviewer", "Add OAuth2 login")
+        assert "code quality" in desc.lower()
+
+    def test_security_reviewer_uses_template(self, planner: IntelligentPlanner):
+        desc = planner._step_description("Review", "security-reviewer", "Add OAuth2 login")
+        assert "owasp" in desc.lower() or "security" in desc.lower()
+
+    def test_unknown_agent_falls_back_to_verb(self, planner: IntelligentPlanner):
+        desc = planner._step_description("Implement", "custom-agent", "Do something")
+        assert "Do something" in desc
+        assert "(as custom-agent)" in desc
+
+    def test_unknown_phase_falls_back_to_name(self, planner: IntelligentPlanner):
+        desc = planner._step_description("Validate", "architect", "Check stuff")
+        assert "Check stuff" in desc
+        # Falls to generic since "validate" is not in _PHASE_VERBS or templates
+        assert "(as architect)" in desc
+
+    def test_empty_task_summary_falls_back(self, planner: IntelligentPlanner):
+        desc = planner._step_description("Implement", "backend-engineer", "")
+        assert "phase" in desc.lower()
+        assert "backend-engineer" in desc
+
+    @pytest.mark.parametrize("agent,phase", [
+        ("architect", "design"),
+        ("architect", "research"),
+        ("architect", "review"),
+        ("backend-engineer", "implement"),
+        ("backend-engineer", "fix"),
+        ("backend-engineer", "investigate"),
+        ("frontend-engineer", "implement"),
+        ("test-engineer", "test"),
+        ("code-reviewer", "review"),
+        ("data-engineer", "implement"),
+        ("data-analyst", "implement"),
+        ("auditor", "review"),
+    ])
+    def test_all_template_entries_produce_output(
+        self, planner: IntelligentPlanner, agent: str, phase: str
+    ):
+        desc = planner._step_description(phase.capitalize(), agent, "Sample task")
+        assert len(desc) > 20
+        assert "Sample task" in desc
+        # Should use template, not fallback
+        assert f"(as {agent})" not in desc
+
+    def test_different_agents_get_different_descriptions(self, planner: IntelligentPlanner):
+        """Core quality check: architect and backend-engineer in the same phase
+        should get meaningfully different descriptions."""
+        task = "Add a health check API"
+        arch_desc = planner._step_description("Design", "architect", task)
+        be_desc = planner._step_description("Design", "backend-engineer", task)
+        assert arch_desc != be_desc
+        assert "architecture" in arch_desc.lower() or "module boundaries" in arch_desc.lower()
+        assert "endpoint" in be_desc.lower() or "backend" in be_desc.lower()
+
+
+# ---------------------------------------------------------------------------
+# Cross-phase enrichment
+# ---------------------------------------------------------------------------
+
+class TestEnrichPhases:
+    """Verify _enrich_phases adds cross-phase context and deliverables."""
+
+    def test_first_phase_has_no_cross_reference(self, planner: IntelligentPlanner):
+        plan = planner.create_plan("Add a health check API", task_type="new-feature")
+        first_step = plan.phases[0].steps[0]
+        assert "Build on the" not in first_step.task_description
+
+    def test_second_phase_references_first(self, planner: IntelligentPlanner):
+        plan = planner.create_plan("Add a health check API", task_type="new-feature")
+        if len(plan.phases) >= 2:
+            second_step = plan.phases[1].steps[0]
+            assert "phase 1" in second_step.task_description.lower()
+
+    def test_cross_reference_names_prior_agents(self, planner: IntelligentPlanner):
+        plan = planner.create_plan(
+            "Add a health check API",
+            task_type="new-feature",
+            agents=["architect", "backend-engineer", "test-engineer", "code-reviewer"],
+        )
+        if len(plan.phases) >= 2:
+            second_step = plan.phases[1].steps[0]
+            # Should mention the agent from phase 1
+            first_agents = [s.agent_name for s in plan.phases[0].steps]
+            assert any(a in second_step.task_description for a in first_agents)
+
+    def test_deliverables_populated_for_known_agents(self, planner: IntelligentPlanner):
+        plan = planner.create_plan(
+            "Add a health check API",
+            agents=["architect", "backend-engineer", "test-engineer"],
+        )
+        for phase in plan.phases:
+            for step in phase.steps:
+                base = step.agent_name.split("--")[0]
+                if base in ("architect", "backend-engineer", "test-engineer"):
+                    assert len(step.deliverables) > 0, (
+                        f"{step.agent_name} in {phase.name} has empty deliverables"
+                    )
+
+    def test_deliverables_not_overwritten_when_explicit(self, planner: IntelligentPlanner):
+        """If a step already has deliverables, _enrich_phases should not replace them."""
+        phases = [PlanPhase(
+            phase_id=1, name="Implement",
+            steps=[PlanStep(
+                step_id="1.1",
+                agent_name="backend-engineer",
+                task_description="Custom task",
+                deliverables=["my-explicit-file.py"],
+            )],
+        )]
+        enriched = planner._enrich_phases(phases)
+        assert enriched[0].steps[0].deliverables == ["my-explicit-file.py"]
+
+    def test_unknown_agent_gets_no_deliverables(self, planner: IntelligentPlanner):
+        phases = [PlanPhase(
+            phase_id=1, name="Implement",
+            steps=[PlanStep(
+                step_id="1.1",
+                agent_name="custom-unknown-agent",
+                task_description="Custom task",
+            )],
+        )]
+        enriched = planner._enrich_phases(phases)
+        assert enriched[0].steps[0].deliverables == []
+
+
+# ---------------------------------------------------------------------------
+# End-to-end plan quality — descriptions through create_plan
+# ---------------------------------------------------------------------------
+
+class TestPlanDescriptionQuality:
+    """Verify that full plans have rich, differentiated step descriptions."""
+
+    def test_new_feature_steps_are_differentiated(self, planner: IntelligentPlanner):
+        """Each step in a new-feature plan should have a unique description."""
+        plan = planner.create_plan("Build a REST API for user management")
+        descriptions = [
+            s.task_description for p in plan.phases for s in p.steps
+        ]
+        # All descriptions should be unique
+        assert len(descriptions) == len(set(descriptions))
+
+    def test_descriptions_are_substantial(self, planner: IntelligentPlanner):
+        """Descriptions should be sentences, not just 'Implement phase — agent'."""
+        plan = planner.create_plan("Add payment processing")
+        for phase in plan.phases:
+            for step in phase.steps:
+                # Should be a real sentence, not a stub
+                assert len(step.task_description) > 30, (
+                    f"Step {step.step_id} ({step.agent_name}) description too short: "
+                    f"{step.task_description!r}"
+                )
+                # Should not contain the old generic format
+                assert "phase —" not in step.task_description
+
+    def test_bug_fix_plan_has_investigation_language(self, planner: IntelligentPlanner):
+        plan = planner.create_plan("Fix the login timeout bug")
+        all_descs = " ".join(s.task_description for p in plan.phases for s in p.steps)
+        # Bug fix plans should reference investigation/diagnosis
+        assert any(w in all_descs.lower() for w in [
+            "diagnose", "investigate", "root cause", "trace", "fix"
+        ])
