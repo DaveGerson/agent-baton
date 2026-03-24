@@ -63,7 +63,7 @@ class TestBusNoneBackwardCompat:
         """bus=None must not raise; start() must return a DISPATCH action."""
         engine = ExecutionEngine(team_context_root=tmp_path)
         action = engine.start(_plan())
-        assert action.action_type == ActionType.DISPATCH.value
+        assert action.action_type == ActionType.DISPATCH
         engine.record_step_result("1.1", "backend")
         engine.complete()
 

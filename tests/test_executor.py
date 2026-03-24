@@ -96,7 +96,7 @@ class TestStart:
 
     def test_returns_dispatch_for_first_step(self, tmp_path: Path) -> None:
         action = _engine(tmp_path).start(_plan())
-        assert action.action_type == ActionType.DISPATCH.value
+        assert action.action_type == ActionType.DISPATCH
 
     @pytest.mark.parametrize("field,step_kw,expected", [
         ("agent_name", {"agent_name": "architect"}, "architect"),
@@ -118,7 +118,7 @@ class TestStart:
     def test_plan_with_no_phases_returns_complete(self, tmp_path: Path) -> None:
         plan = _plan(phases=[])
         action = _engine(tmp_path).start(plan)
-        assert action.action_type == ActionType.COMPLETE.value
+        assert action.action_type == ActionType.COMPLETE
 
     def test_delegation_prompt_contains_task(self, tmp_path: Path) -> None:
         plan = _plan(phases=[_phase(steps=[_step(task="Do something important")])])
@@ -207,14 +207,14 @@ class TestNextAction:
         engine = _engine(tmp_path)
         engine.start(_plan())
         action = engine.next_action()
-        assert action.action_type == ActionType.DISPATCH.value
+        assert action.action_type == ActionType.DISPATCH
 
     def test_returns_complete_after_last_step(self, tmp_path: Path) -> None:
         engine = _engine(tmp_path)
         engine.start(_plan())
         engine.record_step_result("1.1", "backend-engineer")
         action = engine.next_action()
-        assert action.action_type == ActionType.COMPLETE.value
+        assert action.action_type == ActionType.COMPLETE
 
     def test_returns_gate_after_all_steps_complete_in_phase(self, tmp_path: Path) -> None:
         plan = _plan(phases=[_phase(steps=[_step("1.1")], gate=_gate("test", "pytest"))])
@@ -222,7 +222,7 @@ class TestNextAction:
         engine.start(plan)
         engine.record_step_result("1.1", "backend-engineer")
         action = engine.next_action()
-        assert action.action_type == ActionType.GATE.value
+        assert action.action_type == ActionType.GATE
 
     def test_gate_action_carries_gate_type(self, tmp_path: Path) -> None:
         plan = _plan(phases=[_phase(steps=[_step("1.1")], gate=_gate("lint", "ruff"))])
@@ -256,7 +256,7 @@ class TestNextAction:
         engine.start(plan)
         engine.record_step_result("1.1", "backend-engineer")
         action = engine.next_action()
-        assert action.action_type == ActionType.DISPATCH.value
+        assert action.action_type == ActionType.DISPATCH
         assert action.step_id == "1.2"
 
     def test_returns_failed_when_step_failed(self, tmp_path: Path) -> None:
@@ -264,12 +264,12 @@ class TestNextAction:
         engine.start(_plan())
         engine.record_step_result("1.1", "backend-engineer", status="failed")
         action = engine.next_action()
-        assert action.action_type == ActionType.FAILED.value
+        assert action.action_type == ActionType.FAILED
 
     def test_returns_no_state_error_without_start(self, tmp_path: Path) -> None:
         engine = _engine(tmp_path)
         action = engine.next_action()
-        assert action.action_type == ActionType.FAILED.value
+        assert action.action_type == ActionType.FAILED
 
     def test_complete_action_when_already_complete(self, tmp_path: Path) -> None:
         engine = _engine(tmp_path)
@@ -281,7 +281,7 @@ class TestNextAction:
         state.status = "complete"
         engine._save_state(state)
         action = engine.next_action()
-        assert action.action_type == ActionType.COMPLETE.value
+        assert action.action_type == ActionType.COMPLETE
 
 
 # ---------------------------------------------------------------------------
@@ -333,7 +333,7 @@ class TestRecordGateResult:
         engine = self._gate_engine(tmp_path)
         engine.record_gate_result(phase_id=0, passed=False)
         action = engine.next_action()
-        assert action.action_type == ActionType.FAILED.value
+        assert action.action_type == ActionType.FAILED
 
     def test_raises_without_active_state(self, tmp_path: Path) -> None:
         engine = _engine(tmp_path)
@@ -363,7 +363,7 @@ class TestPhaseTransitions:
         engine.start(self._two_phase_plan())
         engine.record_step_result("1.1", "backend-engineer")
         action = engine.next_action()
-        assert action.action_type == ActionType.GATE.value
+        assert action.action_type == ActionType.GATE
 
     def test_dispatches_phase2_step_after_gate_passes(self, tmp_path: Path) -> None:
         engine = _engine(tmp_path)
@@ -372,7 +372,7 @@ class TestPhaseTransitions:
         engine.next_action()  # GATE
         engine.record_gate_result(phase_id=0, passed=True)
         action = engine.next_action()
-        assert action.action_type == ActionType.DISPATCH.value
+        assert action.action_type == ActionType.DISPATCH
         assert action.step_id == "2.1"
 
     def test_complete_after_phase2_step_done(self, tmp_path: Path) -> None:
@@ -384,7 +384,7 @@ class TestPhaseTransitions:
         engine.next_action()
         engine.record_step_result("2.1", "architect")
         action = engine.next_action()
-        assert action.action_type == ActionType.COMPLETE.value
+        assert action.action_type == ActionType.COMPLETE
 
     def test_phase_pointer_incremented_after_gate(self, tmp_path: Path) -> None:
         engine = _engine(tmp_path)
@@ -539,7 +539,7 @@ class TestResume:
         # Crash before recording step result.
         resumed = _engine(tmp_path)
         action = resumed.resume()
-        assert action.action_type == ActionType.DISPATCH.value
+        assert action.action_type == ActionType.DISPATCH
         assert action.step_id == "1.1"
 
     def test_resume_returns_correct_action_after_partial_progress(self, tmp_path: Path) -> None:
@@ -552,7 +552,7 @@ class TestResume:
         # Crash after step 1.1.
         resumed = _engine(tmp_path)
         action = resumed.resume()
-        assert action.action_type == ActionType.DISPATCH.value
+        assert action.action_type == ActionType.DISPATCH
         assert action.step_id == "1.2"
 
     def test_resume_returns_gate_if_pending(self, tmp_path: Path) -> None:
@@ -566,12 +566,12 @@ class TestResume:
         engine._save_state(state)
         resumed = _engine(tmp_path)
         action = resumed.resume()
-        assert action.action_type == ActionType.GATE.value
+        assert action.action_type == ActionType.GATE
 
     def test_resume_returns_failed_on_no_state(self, tmp_path: Path) -> None:
         engine = _engine(tmp_path)
         action = engine.resume()
-        assert action.action_type == ActionType.FAILED.value
+        assert action.action_type == ActionType.FAILED
 
     def test_resume_picks_up_completed_steps(self, tmp_path: Path) -> None:
         plan = _plan(phases=[_phase(steps=[_step("1.1"), _step("1.2")])])
@@ -602,26 +602,26 @@ class TestMultiPhaseEndToEnd:
 
         # Phase 0 — step 1.1
         action = engine.start(plan)
-        assert action.action_type == ActionType.DISPATCH.value
+        assert action.action_type == ActionType.DISPATCH
         assert action.step_id == "1.1"
 
         engine.record_step_result("1.1", "backend-engineer", estimated_tokens=2000)
 
         # Gate for phase 0
         action = engine.next_action()
-        assert action.action_type == ActionType.GATE.value
+        assert action.action_type == ActionType.GATE
         engine.record_gate_result(phase_id=0, passed=True)
 
         # Phase 1 — step 2.1
         action = engine.next_action()
-        assert action.action_type == ActionType.DISPATCH.value
+        assert action.action_type == ActionType.DISPATCH
         assert action.step_id == "2.1"
 
         engine.record_step_result("2.1", "backend-engineer", estimated_tokens=1500)
 
         # Complete
         action = engine.next_action()
-        assert action.action_type == ActionType.COMPLETE.value
+        assert action.action_type == ActionType.COMPLETE
 
         summary = engine.complete()
         assert "e2e-task" in summary
@@ -639,7 +639,7 @@ class TestMultiPhaseEndToEnd:
         for step_id in ("1.1", "2.1", "3.1"):
             engine.record_step_result(step_id, "backend-engineer")
         action = engine.next_action()
-        assert action.action_type == ActionType.COMPLETE.value
+        assert action.action_type == ActionType.COMPLETE
 
     def test_gate_failure_halts_execution(self, tmp_path: Path) -> None:
         plan = _plan(
@@ -654,7 +654,7 @@ class TestMultiPhaseEndToEnd:
         engine.next_action()  # GATE
         engine.record_gate_result(phase_id=0, passed=False)
         action = engine.next_action()
-        assert action.action_type == ActionType.FAILED.value
+        assert action.action_type == ActionType.FAILED
 
     def test_step_failure_in_phase2_halts_execution(self, tmp_path: Path) -> None:
         plan = _plan(
@@ -670,7 +670,7 @@ class TestMultiPhaseEndToEnd:
         engine.next_action()  # DISPATCH 2.1
         engine.record_step_result("2.1", "backend-engineer", status="failed")
         action = engine.next_action()
-        assert action.action_type == ActionType.FAILED.value
+        assert action.action_type == ActionType.FAILED
 
 
 # ---------------------------------------------------------------------------
@@ -683,7 +683,7 @@ class TestFailedStepHandling:
         engine.start(_plan())
         engine.record_step_result("1.1", "backend-engineer", status="failed", error="import error")
         action = engine.next_action()
-        assert action.action_type == ActionType.FAILED.value
+        assert action.action_type == ActionType.FAILED
 
     def test_failed_action_message_contains_step_id(self, tmp_path: Path) -> None:
         engine = _engine(tmp_path)
@@ -849,14 +849,14 @@ class TestPhaseAdvanceWithOneBasedIds:
 
         action = engine.start(plan)
         for _ in range(30):
-            if action.action_type == ActionType.COMPLETE.value:
+            if action.action_type == ActionType.COMPLETE:
                 break
-            if action.action_type == ActionType.FAILED.value:
+            if action.action_type == ActionType.FAILED:
                 break
-            if action.action_type == ActionType.DISPATCH.value:
+            if action.action_type == ActionType.DISPATCH:
                 dispatched.append(action.step_id)
                 engine.record_step_result(action.step_id, action.agent_name)
-            elif action.action_type == ActionType.GATE.value:
+            elif action.action_type == ActionType.GATE:
                 engine.record_gate_result(action.phase_id, passed=True)
             action = engine.next_action()
 
@@ -876,11 +876,11 @@ class TestPhaseAdvanceWithOneBasedIds:
         engine.start(plan)
         engine.record_step_result("1.1", "backend-engineer")
         action = engine.next_action()  # GATE
-        assert action.action_type == ActionType.GATE.value
+        assert action.action_type == ActionType.GATE
 
         engine.record_gate_result(action.phase_id, passed=True)
         action = engine.next_action()
-        assert action.action_type == ActionType.DISPATCH.value
+        assert action.action_type == ActionType.DISPATCH
         assert action.step_id == "2.1"
 
     def test_four_phases_all_gated_dispatches_all(self, tmp_path: Path) -> None:
@@ -899,12 +899,12 @@ class TestPhaseAdvanceWithOneBasedIds:
 
         action = engine.start(plan)
         for _ in range(40):
-            if action.action_type in (ActionType.COMPLETE.value, ActionType.FAILED.value):
+            if action.action_type in (ActionType.COMPLETE, ActionType.FAILED):
                 break
-            if action.action_type == ActionType.DISPATCH.value:
+            if action.action_type == ActionType.DISPATCH:
                 dispatched.append(action.step_id)
                 engine.record_step_result(action.step_id, action.agent_name)
-            elif action.action_type == ActionType.GATE.value:
+            elif action.action_type == ActionType.GATE:
                 gates_run.append(action.phase_id)
                 engine.record_gate_result(action.phase_id, passed=True)
             action = engine.next_action()
@@ -962,7 +962,7 @@ class TestParallelDispatch:
         engine.start(plan)
         engine.mark_dispatched("1.1", "a")
         action = engine.next_action()
-        assert action.action_type == ActionType.DISPATCH.value
+        assert action.action_type == ActionType.DISPATCH
         assert action.step_id == "1.2"
 
     def test_blocked_step_returns_wait(self, tmp_path: Path) -> None:
@@ -976,7 +976,7 @@ class TestParallelDispatch:
         engine.start(plan)
         engine.mark_dispatched("1.1", "a")
         action = engine.next_action()
-        assert action.action_type == ActionType.WAIT.value
+        assert action.action_type == ActionType.WAIT
 
     def test_dependency_satisfied_enables_dispatch(self, tmp_path: Path) -> None:
         """Once dependency completes, blocked step becomes dispatchable."""
@@ -989,7 +989,7 @@ class TestParallelDispatch:
         engine.start(plan)
         engine.record_step_result("1.1", "a")
         action = engine.next_action()
-        assert action.action_type == ActionType.DISPATCH.value
+        assert action.action_type == ActionType.DISPATCH
         assert action.step_id == "1.2"
 
     def test_next_actions_returns_all_runnable(self, tmp_path: Path) -> None:
@@ -1045,12 +1045,12 @@ class TestParallelDispatch:
         engine.mark_dispatched("1.2", "b")
         # Both in flight -- should WAIT
         action = engine.next_action()
-        assert action.action_type == ActionType.WAIT.value
+        assert action.action_type == ActionType.WAIT
         # Complete both
         engine.record_step_result("1.1", "a")
         engine.record_step_result("1.2", "b")
         action = engine.next_action()
-        assert action.action_type == ActionType.COMPLETE.value
+        assert action.action_type == ActionType.COMPLETE
 
     def test_mark_dispatched_is_valid_status(self, tmp_path: Path) -> None:
         """mark_dispatched uses 'dispatched' status which is accepted."""
@@ -1070,9 +1070,9 @@ class TestParallelDispatch:
         dispatched = []
         action = engine.start(plan)
         for _ in range(10):
-            if action.action_type == ActionType.COMPLETE.value:
+            if action.action_type == ActionType.COMPLETE:
                 break
-            if action.action_type == ActionType.DISPATCH.value:
+            if action.action_type == ActionType.DISPATCH:
                 dispatched.append(action.step_id)
                 engine.record_step_result(action.step_id, action.agent_name)
             action = engine.next_action()

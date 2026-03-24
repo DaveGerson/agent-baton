@@ -234,7 +234,7 @@ class TestBuildGatePrompt:
 
 class TestBuildAction:
     @pytest.mark.parametrize("step_kwargs,field,expected", [
-        ({}, "action_type", ActionType.DISPATCH.value),
+        ({}, "action_type", ActionType.DISPATCH),
         ({"agent_name": "architect"}, "agent_name", "architect"),
         ({"model": "opus"}, "agent_model", "opus"),
         ({"step_id": "2.3"}, "step_id", "2.3"),
@@ -386,6 +386,6 @@ class TestBuildPathEnforcement:
         )
         engine = ExecutionEngine(team_context_root=tmp_path)
         action = engine.start(plan)
-        assert action.action_type == ActionType.DISPATCH.value
+        assert action.action_type == ActionType.DISPATCH
         assert action.path_enforcement != ""
         assert "BLOCKED" in action.path_enforcement

@@ -87,7 +87,7 @@ def test_describe_gate(
 
 def test_build_gate_action_type_is_gate(runner: GateRunner) -> None:
     action = runner.build_gate_action(_make_gate(), phase_id=1)
-    assert action.action_type == ActionType.GATE.value
+    assert action.action_type == ActionType.GATE
 
 
 @pytest.mark.parametrize("phase_id,gate_type,command", [

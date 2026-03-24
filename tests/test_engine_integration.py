@@ -69,14 +69,14 @@ def _run_full_loop(
 
     iteration = 0
     while action.action_type not in (
-        ActionType.COMPLETE.value,
-        ActionType.FAILED.value,
+        ActionType.COMPLETE,
+        ActionType.FAILED,
     ):
         if iteration > 50:
             raise RuntimeError("Execution loop exceeded 50 iterations — likely stuck")
         iteration += 1
 
-        if action.action_type == ActionType.DISPATCH.value:
+        if action.action_type == ActionType.DISPATCH:
             engine.record_step_result(
                 step_id=action.step_id,
                 agent_name=action.agent_name,
@@ -86,7 +86,7 @@ def _run_full_loop(
                 duration_seconds=duration_per_step,
             )
             steps_dispatched += 1
-        elif action.action_type == ActionType.GATE.value:
+        elif action.action_type == ActionType.GATE:
             engine.record_gate_result(
                 phase_id=action.phase_id,
                 passed=True,
@@ -181,7 +181,7 @@ class TestStartExecution:
 
     def test_returns_dispatch_action(self, tmp_path: Path, plan: MachinePlan) -> None:
         action = _make_engine(tmp_path).start(plan)
-        assert action.action_type == ActionType.DISPATCH.value
+        assert action.action_type == ActionType.DISPATCH
 
     def test_dispatch_has_agent_name(self, tmp_path: Path, plan: MachinePlan) -> None:
         action = _make_engine(tmp_path).start(plan)
@@ -286,7 +286,7 @@ class TestExecuteLoop:
         _run_full_loop(engine, plan)
         # After the loop, call next_action and confirm we're complete
         final = engine.next_action()
-        assert final.action_type == ActionType.COMPLETE.value
+        assert final.action_type == ActionType.COMPLETE
 
     def test_at_least_one_dispatch_occurs(
         self, tmp_path: Path, plan: MachinePlan
@@ -342,18 +342,18 @@ class TestExecuteLoop:
         action = engine.start(plan)
         iteration = 0
         while action.action_type not in (
-            ActionType.COMPLETE.value,
-            ActionType.FAILED.value,
+            ActionType.COMPLETE,
+            ActionType.FAILED,
         ):
             if iteration > 50:
                 break
             iteration += 1
-            if action.action_type == ActionType.DISPATCH.value:
+            if action.action_type == ActionType.DISPATCH:
                 dispatched_ids.append(action.step_id)
                 engine.record_step_result(
                     action.step_id, action.agent_name, status="complete"
                 )
-            elif action.action_type == ActionType.GATE.value:
+            elif action.action_type == ActionType.GATE:
                 engine.record_gate_result(action.phase_id, passed=True)
             action = engine.next_action()
 
@@ -424,13 +424,13 @@ class TestStatusMidExecution:
         action = engine.start(plan)
 
         # Dispatch steps until we hit the first gate
-        while action.action_type == ActionType.DISPATCH.value:
+        while action.action_type == ActionType.DISPATCH:
             engine.record_step_result(
                 action.step_id, action.agent_name, status="complete"
             )
             action = engine.next_action()
 
-        if action.action_type == ActionType.GATE.value:
+        if action.action_type == ActionType.GATE:
             assert engine.status()["gates_passed"] == 0
             engine.record_gate_result(action.phase_id, passed=True)
             assert engine.status()["gates_passed"] == 1
@@ -634,9 +634,9 @@ class TestCrashRecovery:
         engine2 = _make_engine(tmp_path)
         resumed = engine2.resume()
         assert resumed.action_type in (
-            ActionType.DISPATCH.value,
-            ActionType.GATE.value,
-            ActionType.COMPLETE.value,
+            ActionType.DISPATCH,
+            ActionType.GATE,
+            ActionType.COMPLETE,
         )
 
     def test_resume_does_not_repeat_completed_step(
@@ -651,7 +651,7 @@ class TestCrashRecovery:
         engine2 = _make_engine(tmp_path)
         resumed = engine2.resume()
         # Should NOT dispatch the step we already completed
-        if resumed.action_type == ActionType.DISPATCH.value:
+        if resumed.action_type == ActionType.DISPATCH:
             assert resumed.step_id != first_step_id
 
     def test_resume_without_prior_execution_returns_failed(
@@ -659,7 +659,7 @@ class TestCrashRecovery:
     ) -> None:
         engine = _make_engine(tmp_path)
         action = engine.resume()
-        assert action.action_type == ActionType.FAILED.value
+        assert action.action_type == ActionType.FAILED
 
     def test_resumed_engine_can_complete_execution(
         self, tmp_path: Path, plan: MachinePlan
@@ -677,23 +677,23 @@ class TestCrashRecovery:
         # Drive to completion
         iteration = 0
         while resumed_action.action_type not in (
-            ActionType.COMPLETE.value,
-            ActionType.FAILED.value,
+            ActionType.COMPLETE,
+            ActionType.FAILED,
         ):
             if iteration > 50:
                 break
             iteration += 1
-            if resumed_action.action_type == ActionType.DISPATCH.value:
+            if resumed_action.action_type == ActionType.DISPATCH:
                 engine2.record_step_result(
                     resumed_action.step_id,
                     resumed_action.agent_name,
                     status="complete",
                 )
-            elif resumed_action.action_type == ActionType.GATE.value:
+            elif resumed_action.action_type == ActionType.GATE:
                 engine2.record_gate_result(resumed_action.phase_id, passed=True)
             resumed_action = engine2.next_action()
 
-        assert resumed_action.action_type == ActionType.COMPLETE.value
+        assert resumed_action.action_type == ActionType.COMPLETE
 
     def test_state_file_present_after_crash(
         self, tmp_path: Path, plan: MachinePlan
@@ -718,7 +718,7 @@ class TestGateFailure:
         """Drive the engine until the first GATE action, then stop."""
         action = engine.start(plan)
         iteration = 0
-        while action.action_type == ActionType.DISPATCH.value:
+        while action.action_type == ActionType.DISPATCH:
             if iteration > 50:
                 raise RuntimeError("No gate found after 50 steps")
             iteration += 1
@@ -727,7 +727,7 @@ class TestGateFailure:
             )
             action = engine.next_action()
         # action should now be GATE
-        if action.action_type != ActionType.GATE.value:
+        if action.action_type != ActionType.GATE:
             pytest.skip(
                 f"Plan has no gate reachable before COMPLETE; got {action.action_type}"
             )
@@ -739,7 +739,7 @@ class TestGateFailure:
         engine = _make_engine(tmp_path)
         self._advance_to_first_gate(engine, plan)
         action = engine.next_action()
-        assert action.action_type == ActionType.FAILED.value
+        assert action.action_type == ActionType.FAILED
 
     def test_state_status_is_failed_after_gate_failure(
         self, tmp_path: Path, plan: MachinePlan
@@ -833,7 +833,7 @@ class TestGateRunnerIntegration:
         runner = GateRunner()
         gate = PlanGate(gate_type="test", command="pytest --tb=short")
         action = runner.build_gate_action(gate, phase_id=1)
-        assert action.action_type == ActionType.GATE.value
+        assert action.action_type == ActionType.GATE
         assert action.gate_type == "test"
         assert action.phase_id == 1
 
@@ -916,7 +916,7 @@ class TestPromptDispatcherIntegration:
             shared_context=plan.shared_context,
             task_summary=plan.task_summary,
         )
-        assert action.action_type == ActionType.DISPATCH.value
+        assert action.action_type == ActionType.DISPATCH
 
     def test_build_action_carries_step_metadata(
         self, plan: MachinePlan
@@ -1033,7 +1033,7 @@ class TestMultiPhasePlan:
     def test_explicit_plan_dispatches_first_step(self, tmp_path: Path) -> None:
         plan = self._make_explicit_plan()
         action = _make_engine(tmp_path).start(plan)
-        assert action.action_type == ActionType.DISPATCH.value
+        assert action.action_type == ActionType.DISPATCH
         assert action.step_id == "1.1"
         assert action.agent_name == "architect"
 
@@ -1047,18 +1047,18 @@ class TestMultiPhasePlan:
         action = engine.start(plan)
         iteration = 0
         while action.action_type not in (
-            ActionType.COMPLETE.value,
-            ActionType.FAILED.value,
+            ActionType.COMPLETE,
+            ActionType.FAILED,
         ):
             if iteration > 20:
                 break
             iteration += 1
-            if action.action_type == ActionType.DISPATCH.value:
+            if action.action_type == ActionType.DISPATCH:
                 dispatched.append(action.step_id)
                 engine.record_step_result(
                     action.step_id, action.agent_name, status="complete"
                 )
-            elif action.action_type == ActionType.GATE.value:
+            elif action.action_type == ActionType.GATE:
                 engine.record_gate_result(action.phase_id, passed=True)
             action = engine.next_action()
 
@@ -1073,17 +1073,17 @@ class TestMultiPhasePlan:
         action = engine.start(plan)
         iteration = 0
         while action.action_type not in (
-            ActionType.COMPLETE.value,
-            ActionType.FAILED.value,
+            ActionType.COMPLETE,
+            ActionType.FAILED,
         ):
             if iteration > 20:
                 break
             iteration += 1
-            if action.action_type == ActionType.DISPATCH.value:
+            if action.action_type == ActionType.DISPATCH:
                 engine.record_step_result(
                     action.step_id, action.agent_name, status="complete"
                 )
-            elif action.action_type == ActionType.GATE.value:
+            elif action.action_type == ActionType.GATE:
                 gate_phase_ids.append(action.phase_id)
                 engine.record_gate_result(action.phase_id, passed=True)
             action = engine.next_action()
@@ -1095,7 +1095,7 @@ class TestMultiPhasePlan:
         engine = _make_engine(tmp_path)
         steps, gates = _run_full_loop(engine, plan)
         final = engine.next_action()
-        assert final.action_type == ActionType.COMPLETE.value
+        assert final.action_type == ActionType.COMPLETE
         # All 3 steps dispatched and 1 gate run
         assert steps == 3
         assert gates == 1
