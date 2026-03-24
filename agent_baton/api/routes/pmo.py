@@ -24,9 +24,15 @@ from agent_baton.api.models.requests import (
     ApproveForgeRequest,
     CreateForgeRequest,
     CreateSignalRequest,
+    InterviewRequest,
+    RegenerateRequest,
     RegisterProjectRequest,
 )
 from agent_baton.api.models.responses import (
+    AdoSearchResponse,
+    AdoWorkItemResponse,
+    InterviewQuestionResponse,
+    InterviewResponse,
     PmoBoardResponse,
     PmoCardResponse,
     PmoProjectResponse,
@@ -243,6 +249,84 @@ async def forge_approve(
         ) from exc
 
     return {"saved": True, "path": str(saved_path)}
+
+
+@router.post("/pmo/forge/interview", response_model=InterviewResponse)
+async def forge_interview(
+    req: InterviewRequest,
+    forge: ForgeSession = Depends(get_forge_session),
+) -> InterviewResponse:
+    """Generate structured interview questions for plan refinement."""
+    from agent_baton.models.execution import MachinePlan
+
+    try:
+        plan = MachinePlan.from_dict(req.plan)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid plan: {exc}") from exc
+
+    questions = forge.generate_interview(plan, feedback=req.feedback)
+    return InterviewResponse(
+        questions=[
+            InterviewQuestionResponse(
+                id=q.id,
+                question=q.question,
+                context=q.context,
+                answer_type=q.answer_type,
+                choices=q.choices,
+            )
+            for q in questions
+        ]
+    )
+
+
+@router.post("/pmo/forge/regenerate", response_model=dict, status_code=201)
+async def forge_regenerate(
+    req: RegenerateRequest,
+    forge: ForgeSession = Depends(get_forge_session),
+    store: PmoStore = Depends(get_pmo_store),
+) -> dict:
+    """Re-generate a plan incorporating interview answers."""
+    project = store.get_project(req.project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail=f"Project '{req.project_id}' not found.")
+
+    from agent_baton.models.pmo import InterviewAnswer
+
+    answers = [
+        InterviewAnswer(question_id=a.question_id, answer=a.answer)
+        for a in req.answers
+    ]
+
+    try:
+        plan = forge.regenerate_plan(
+            description=req.description,
+            project_id=req.project_id,
+            answers=answers,
+            task_type=req.task_type,
+            priority=req.priority,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Regeneration failed: {exc}") from exc
+
+    return plan.to_dict()
+
+
+@router.get("/pmo/ado/search", response_model=AdoSearchResponse)
+async def ado_search(q: str = "") -> AdoSearchResponse:
+    """Search Azure DevOps work items (placeholder with mock data)."""
+    mock_items = [
+        AdoWorkItemResponse(id="F-4202", title="Phase 3 Flight Ops Optimization", type="Feature", program="NDS", owner="Kyle", priority="P0", description="Optimize flight operations through constraint-based scheduling."),
+        AdoWorkItemResponse(id="F-4203", title="FTE Migration — NDS Components", type="Feature", program="NDS", owner="Dave C", priority="P1", description="Migrate NDS analytical components from contractor codebase."),
+        AdoWorkItemResponse(id="F-4212", title="Root Cause Systems — Leadership Dashboards", type="Feature", program="ATL", owner="Mandy", priority="P1", description="Root cause analysis tooling for KPI drill-down."),
+        AdoWorkItemResponse(id="F-4230", title="Revenue Mgmt — Cargo Capacity", type="Feature", program="COM", owner="Pooja", priority="P0", description="Revenue management for cargo capacity optimization."),
+        AdoWorkItemResponse(id="B-901", title="R2 blocks missing on Off day", type="Bug", program="NDS", owner="Unassigned", priority="P0", description="Crew scheduling R2 blocks not appearing for off-day assignments."),
+    ]
+    query_lower = q.lower()
+    if query_lower:
+        filtered = [item for item in mock_items if query_lower in item.title.lower() or query_lower in item.id.lower() or query_lower in item.program.lower()]
+    else:
+        filtered = mock_items
+    return AdoSearchResponse(items=filtered)
 
 
 # ---------------------------------------------------------------------------

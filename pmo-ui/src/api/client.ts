@@ -8,6 +8,10 @@ import type {
   ForgeApproveBody,
   ForgeApproveResponse,
   ForgePlanBody,
+  ForgePlanResponse,
+  InterviewResponse,
+  RegenerateBody,
+  AdoSearchResponse,
 } from './types';
 
 const BASE = '/api/v1/pmo';
@@ -47,7 +51,7 @@ export const api = {
   },
 
   // Forge
-  forgePlan(body: ForgePlanBody): Promise<PlanResponse> {
+  forgePlan(body: ForgePlanBody): Promise<ForgePlanResponse> {
     return request('/forge/plan', { method: 'POST', body: JSON.stringify(body) });
   },
   forgeApprove(body: ForgeApproveBody): Promise<ForgeApproveResponse> {
@@ -70,7 +74,20 @@ export const api = {
       body: JSON.stringify({ project_id: projectId }),
     });
   },
+
+  // Forge interview & regeneration
+  forgeInterview(body: { plan: ForgePlanResponse; feedback?: string }): Promise<InterviewResponse> {
+    return request('/forge/interview', { method: 'POST', body: JSON.stringify(body) });
+  },
+  forgeRegenerate(body: RegenerateBody): Promise<ForgePlanResponse> {
+    return request('/forge/regenerate', { method: 'POST', body: JSON.stringify(body) });
+  },
+
+  // ADO search (placeholder)
+  searchAdo(q: string): Promise<AdoSearchResponse> {
+    return request(`/ado/search?q=${encodeURIComponent(q)}`);
+  },
 };
 
 // Re-export types for convenience
-export type { PmoCard, PmoProject, ProgramHealth, PmoSignal, BoardResponse, PlanResponse, ForgePlanBody };
+export type { PmoCard, PmoProject, ProgramHealth, PmoSignal, BoardResponse, PlanResponse, ForgePlanBody, ForgePlanResponse, ForgeApproveBody, ForgeApproveResponse, InterviewResponse, RegenerateBody, AdoSearchResponse };

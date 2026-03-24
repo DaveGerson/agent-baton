@@ -76,7 +76,7 @@ export interface PlanResponse {
 }
 
 export interface ForgeApproveBody {
-  plan: PlanResponse;
+  plan: ForgePlanResponse;
   project_id: string;
 }
 
@@ -91,4 +91,95 @@ export interface ForgePlanBody {
   project_id: string;
   task_type?: string;
   priority?: number;
+}
+
+// ---------------------------------------------------------------------------
+// Forge-specific plan types (match raw MachinePlan.to_dict() output)
+// ---------------------------------------------------------------------------
+
+export interface ForgePlanStep {
+  step_id: string;
+  agent_name: string;
+  task_description: string;
+  model: string;
+  depends_on: string[];
+  deliverables: string[];
+  allowed_paths: string[];
+  blocked_paths: string[];
+  context_files: string[];
+}
+
+export interface ForgePlanGate {
+  gate_type: string;
+  command: string;
+  description: string;
+  fail_on: string[];
+}
+
+export interface ForgePlanPhase {
+  phase_id: number;
+  name: string;
+  steps: ForgePlanStep[];
+  gate?: ForgePlanGate;
+}
+
+export interface ForgePlanResponse {
+  task_id: string;
+  task_summary: string;
+  risk_level: string;
+  budget_tier: string;
+  execution_mode: string;
+  git_strategy: string;
+  phases: ForgePlanPhase[];
+  shared_context: string;
+  pattern_source: string | null;
+  created_at: string;
+}
+
+// ---------------------------------------------------------------------------
+// Interview types
+// ---------------------------------------------------------------------------
+
+export interface InterviewQuestion {
+  id: string;
+  question: string;
+  context: string;
+  answer_type: 'choice' | 'text';
+  choices?: string[];
+}
+
+export interface InterviewAnswer {
+  question_id: string;
+  answer: string;
+}
+
+export interface InterviewResponse {
+  questions: InterviewQuestion[];
+}
+
+export interface RegenerateBody {
+  project_id: string;
+  description: string;
+  task_type?: string;
+  priority?: number;
+  original_plan: ForgePlanResponse;
+  answers: InterviewAnswer[];
+}
+
+// ---------------------------------------------------------------------------
+// ADO placeholder
+// ---------------------------------------------------------------------------
+
+export interface AdoWorkItem {
+  id: string;
+  title: string;
+  type: string;
+  program: string;
+  owner: string;
+  priority: string;
+  description: string;
+}
+
+export interface AdoSearchResponse {
+  items: AdoWorkItem[];
 }
