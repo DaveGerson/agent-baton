@@ -179,6 +179,106 @@ classDiagram
 
 ---
 
+## 2b. Architectural Invariant: The Claude-Facing Interface
+
+### The Interaction Chain
+
+Agent-baton does not replace Claude Code — it serves it. The end user never
+interacts with the Python package directly. The interaction chain is:
+
+```
+Human User ←→ Claude Code (natural language) ←→ baton CLI (structured) ←→ Python engine
+             Layer A        Layer B                  Layer C                   Layer D
+```
+
+Claude reads the orchestrator agent definition (`.claude/agents/orchestrator.md`
+or `agents/orchestrator.md`) as part of its system prompt, follows the `baton`
+CLI commands documented there, and parses their stdout output to decide what
+action to take next. Claude does not import Python — it reads text.
+
+### Interface Boundary 1: CLI Command Surface (Claude → baton)
+
+These commands are the control protocol between Claude and the engine:
+
+| Command | Purpose |
+|---------|---------|
+| `baton plan "..." --save --explain` | Generate execution plan |
+| `baton execute start` | Begin execution |
+| `baton execute next` | Get next action |
+| `baton execute record --step-id ... --agent ... --status ...` | Record step result |
+| `baton execute gate --phase-id ... --result pass/fail` | Record gate result |
+| `baton execute complete` | Finalize execution |
+| `baton execute status` | Check current state |
+| `baton execute resume` | Recover from crash |
+
+**INVARIANT**: Every command string above must continue to work identically
+after the re-architecture. Subcommand names are determined by `register()`
+in each CLI module, not by file paths — so modules can move freely as long
+as their registered names are unchanged.
+
+### Interface Boundary 1b: CLI Output Format (baton → Claude)
+
+The `_print_action()` function in `cli/commands/execute.py` (lines 68-101)
+produces structured text that Claude parses to determine what to do:
+
+```
+ACTION: DISPATCH
+  Agent: backend-engineer--python
+  Model: sonnet
+  Step:  1.1
+  Message: ...
+--- Delegation Prompt ---
+...
+--- End Prompt ---
+```
+
+**INVARIANT**: This output format is the most load-bearing piece of text in
+the system. If `ACTION: DISPATCH` changes to `ACTION: dispatch`, or field
+labels change, Claude will not recognize the action type. The `_print_action()`
+function must be treated as a public API with a contract test.
+
+### Interface Boundary 2: Execution State on Disk
+
+The engine persists `execution-state.json` to `.claude/team-context/`. This
+file is what makes `baton execute resume` work after a session crash.
+
+**INVARIANT**: The path `.claude/team-context/execution-state.json`, its JSON
+schema (`ExecutionState.to_dict()`/`from_dict()`), and `plan.json` must remain
+stable. Any serialization format change means mid-session crashes cannot be
+recovered.
+
+### What This Means for the Re-Architecture
+
+All 10 proposals are internal to Layer D (the Python engine). None changes a
+CLI command name, output format, or disk schema. However, two proposals require
+extra care:
+
+- **P9 (Normalize Enums)**: Changes `ExecutionAction.action_type` from `str`
+  to `ActionType` enum. The `to_dict()` serialization MUST continue outputting
+  `.value` strings, or `_print_action()` breaks silently. A type guard
+  assertion should be added to `_print_action()`.
+
+- **P8 (Group CLI Commands)**: Changes the auto-discovery mechanism. If any
+  command module fails to register, Claude will see "unknown subcommand" with
+  no recovery path. A frozen set of expected subcommand names should be tested.
+
+### Safeguards Required
+
+1. **Before Phase 3**: Add a CLI output format regression test that asserts
+   `_print_action()` produces exactly the text Claude expects for each
+   `ActionType`.
+
+2. **Before Phase 4**: Add a subcommand registration test with a frozen set
+   of all 35 expected command names.
+
+3. **After every phase gate**: Verify each `baton` command listed in
+   `agents/orchestrator.md` runs without error (not covered by `pytest`).
+
+4. **Document Boundary 1b**: Add a docstring to `_print_action()` stating
+   this function is the control protocol between Claude and the engine.
+
+---
+
 ## 3. Problems and Motivations
 
 ### 3.1 Parallel Plan Hierarchies Confuse Contributors
