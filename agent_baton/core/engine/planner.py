@@ -11,6 +11,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Protocol
 
 from agent_baton.core.govern.classifier import ClassificationResult, DataClassifier
 from agent_baton.core.govern.policy import PolicyEngine, PolicySet, PolicyViolation
@@ -291,6 +292,16 @@ _TASK_TYPE_KEYWORDS: list[tuple[str, list[str]]] = [
 
 
 # ---------------------------------------------------------------------------
+# Protocol for retrospective engine (avoids coupling to concrete class)
+# ---------------------------------------------------------------------------
+
+class RetroEngine(Protocol):
+    """Structural type for any object that provides retrospective feedback."""
+
+    def load_recent_feedback(self, limit: int = ...) -> RetrospectiveFeedback: ...
+
+
+# ---------------------------------------------------------------------------
 # IntelligentPlanner
 # ---------------------------------------------------------------------------
 
@@ -313,7 +324,7 @@ class IntelligentPlanner:
         team_context_root: Path | None = None,
         classifier: DataClassifier | None = None,
         policy_engine: PolicyEngine | None = None,
-        retro_engine: object | None = None,
+        retro_engine: RetroEngine | None = None,
     ) -> None:
         self._team_context_root = team_context_root
         self._pattern_learner = PatternLearner(team_context_root)
@@ -329,7 +340,6 @@ class IntelligentPlanner:
         self._policy_engine = policy_engine
 
         # Optional retrospective engine — provides closed-loop learning feedback.
-        # Typed as object to avoid a circular import; duck-typed at call site.
         self._retro_engine = retro_engine
 
         # Populated during create_plan for use in explain_plan
