@@ -1289,6 +1289,8 @@ class IntelligentPlanner:
         violations: list[PolicyViolation] = []
         seen: set[str] = set()  # deduplicate identical (agent, rule) pairs
 
+        # Pass 1: per-step path_block and tool_restrict checks.
+        # require_agent / require_gate are plan-level concerns handled in pass 2.
         for phase in plan_phases:
             for step in phase.steps:
                 agent = step.agent_name
@@ -1300,17 +1302,22 @@ class IntelligentPlanner:
                     policy_set, agent, paths, tools
                 )
                 for v in step_violations:
+                    # Skip require_agent / require_gate from per-step results —
+                    # those are handled at the plan level in pass 2 below, which
+                    # can correctly determine whether the agent is in the roster.
+                    if v.rule.rule_type in ("require_agent", "require_gate"):
+                        continue
                     key = f"{v.agent_name}:{v.rule.name}"
                     if key not in seen:
                         seen.add(key)
                         violations.append(v)
 
-        # Additionally check require_agent rules at the plan level.
-        # These rules fire once regardless of which phase/step is involved.
+        # Pass 2: require_agent rules evaluated once at the plan level.
+        # Checks whether the required agent name is present in the full roster.
         for rule in policy_set.rules:
             if rule.rule_type == "require_agent":
                 required = rule.pattern
-                # Check if any agent in the roster matches (base name match)
+                # Match on full name OR base name (before "--" flavor separator)
                 if not any(
                     a == required or a.split("--")[0] == required
                     for a in agents

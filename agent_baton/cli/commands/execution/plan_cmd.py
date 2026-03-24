@@ -7,6 +7,8 @@ import sys
 from pathlib import Path
 
 from agent_baton.core.engine.planner import IntelligentPlanner
+from agent_baton.core.govern.classifier import DataClassifier
+from agent_baton.core.govern.policy import PolicyEngine
 from agent_baton.core.observe.retrospective import RetrospectiveEngine
 
 
@@ -55,7 +57,11 @@ def handler(args: argparse.Namespace) -> None:
     agents = [a.strip() for a in args.agents.split(",") if a.strip()] if args.agents else None
 
     retro_engine = RetrospectiveEngine()
-    planner = IntelligentPlanner(retro_engine=retro_engine)
+    planner = IntelligentPlanner(
+        retro_engine=retro_engine,
+        classifier=DataClassifier(),
+        policy_engine=PolicyEngine(),
+    )
     plan = planner.create_plan(
         args.summary,
         task_type=args.task_type,
