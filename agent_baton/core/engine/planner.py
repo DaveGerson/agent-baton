@@ -87,7 +87,7 @@ _DEFAULT_AGENTS: dict[str, list[str]] = {
     "bug-fix": ["backend-engineer", "test-engineer"],
     "refactor": ["architect", "backend-engineer", "test-engineer", "code-reviewer"],
     "data-analysis": ["architect", "data-analyst"],
-    "documentation": ["architect"],
+    "documentation": ["architect", "talent-builder", "code-reviewer"],
     "migration": ["architect", "backend-engineer", "test-engineer", "code-reviewer", "auditor"],
     "test": ["test-engineer"],
 }

@@ -980,3 +980,39 @@ class TestPlanDescriptionQuality:
         assert any(w in all_descs.lower() for w in [
             "diagnose", "investigate", "root cause", "trace", "fix"
         ])
+
+
+# ---------------------------------------------------------------------------
+# Fix 1: _DEFAULT_AGENTS["documentation"] must be non-empty
+# ---------------------------------------------------------------------------
+
+class TestDefaultAgentsDocumentation:
+    def test_documentation_agents_list_is_non_empty(self) -> None:
+        """_DEFAULT_AGENTS['documentation'] must not be an empty list."""
+        agents = _DEFAULT_AGENTS.get("documentation", [])
+        assert agents, (
+            "_DEFAULT_AGENTS['documentation'] is empty — "
+            "documentation tasks would produce a plan with no agents"
+        )
+
+    def test_documentation_agents_include_expected_roles(self) -> None:
+        """documentation agents should cover research/drafting/review roles."""
+        agents = _DEFAULT_AGENTS["documentation"]
+        # At least one agent should handle drafting/content creation
+        content_agents = {"talent-builder", "agent-definition-engineer", "backend-engineer"}
+        assert any(a in content_agents for a in agents), (
+            f"Expected at least one content-creating agent in {agents}"
+        )
+
+    def test_documentation_agents_include_reviewer(self) -> None:
+        """documentation plan should include a review role."""
+        agents = _DEFAULT_AGENTS["documentation"]
+        review_agents = {"code-reviewer", "auditor", "architect"}
+        assert any(a in review_agents for a in agents), (
+            f"Expected at least one review agent in {agents}"
+        )
+
+    def test_all_task_types_have_non_empty_agents(self) -> None:
+        """Every known task type should map to at least one agent."""
+        for task_type, agents in _DEFAULT_AGENTS.items():
+            assert agents, f"_DEFAULT_AGENTS['{task_type}'] is empty"

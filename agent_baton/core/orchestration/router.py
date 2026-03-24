@@ -156,6 +156,39 @@ class AgentRouter:
                     profile.detected_files.append("*.csproj")
                 break
 
+        # Vite + React: vite.config.ts/js alongside a package.json that
+        # lists "react" as a dependency.  Only override when the current
+        # profile has no framework set (framework signals take priority).
+        if profile.framework is None:
+            for scan_dir in scan_dirs:
+                vite_file: Path | None = None
+                for vite_name in ("vite.config.ts", "vite.config.js", "vite.config.mjs"):
+                    candidate = scan_dir / vite_name
+                    if candidate.exists():
+                        vite_file = candidate
+                        break
+                if vite_file is None:
+                    continue
+                # Check for a package.json that references "react"
+                pkg_json = scan_dir / "package.json"
+                if pkg_json.exists():
+                    try:
+                        import json
+                        pkg = json.loads(pkg_json.read_text(encoding="utf-8"))
+                        deps = {
+                            **pkg.get("dependencies", {}),
+                            **pkg.get("devDependencies", {}),
+                        }
+                        if "react" in deps:
+                            profile.language = "javascript"
+                            profile.framework = "react"
+                            rel = str(vite_file.relative_to(root))
+                            if rel not in profile.detected_files:
+                                profile.detected_files.append(rel)
+                            break
+                    except Exception:
+                        pass
+
         return profile
 
     def route(

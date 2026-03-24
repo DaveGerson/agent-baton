@@ -220,3 +220,127 @@ def test_route_team_accepts_prebuilt_stack_profile() -> None:
     registry = _make_registry_with("backend-engineer", "backend-engineer--python")
     result = AgentRouter(registry).route_team(["backend-engineer"], stack=stack)
     assert result["backend-engineer"] == "backend-engineer--python"
+
+
+# ---------------------------------------------------------------------------
+# Fix 3: Vite + React stack detection
+# ---------------------------------------------------------------------------
+
+
+def _write_package_json(path: Path, deps: dict[str, str], dev_deps: dict[str, str] | None = None) -> None:
+    import json
+    pkg = {"name": "my-app", "dependencies": deps}
+    if dev_deps:
+        pkg["devDependencies"] = dev_deps
+    (path / "package.json").write_text(json.dumps(pkg), encoding="utf-8")
+
+
+@pytest.mark.parametrize("vite_filename", [
+    "vite.config.ts",
+    "vite.config.js",
+    "vite.config.mjs",
+])
+def test_vite_react_detected_as_react_framework(tmp_path: Path, vite_filename: str) -> None:
+    """vite.config.* + package.json with react dep → (javascript, react)."""
+    (tmp_path / vite_filename).write_text("export default {}\n", encoding="utf-8")
+    _write_package_json(tmp_path, {"react": "^18.0.0", "react-dom": "^18.0.0"})
+    profile = AgentRouter(AgentRegistry()).detect_stack(tmp_path)
+    assert profile.language == "javascript"
+    assert profile.framework == "react"
+
+
+def test_vite_react_detected_files_includes_vite_config(tmp_path: Path) -> None:
+    """vite.config.ts path should appear in detected_files."""
+    (tmp_path / "vite.config.ts").write_text("export default {}\n", encoding="utf-8")
+    _write_package_json(tmp_path, {"react": "^18.0.0"})
+    profile = AgentRouter(AgentRegistry()).detect_stack(tmp_path)
+    assert any("vite.config.ts" in f for f in profile.detected_files)
+
+
+def test_vite_without_react_dep_not_detected_as_react(tmp_path: Path) -> None:
+    """vite.config.ts + package.json without 'react' → framework remains None."""
+    (tmp_path / "vite.config.ts").write_text("export default {}\n", encoding="utf-8")
+    _write_package_json(tmp_path, {"vue": "^3.0.0"})
+    profile = AgentRouter(AgentRegistry()).detect_stack(tmp_path)
+    assert profile.framework != "react"
+
+
+def test_vite_react_in_dev_deps_detected(tmp_path: Path) -> None:
+    """react in devDependencies (not dependencies) should still trigger detection."""
+    (tmp_path / "vite.config.ts").write_text("export default {}\n", encoding="utf-8")
+    _write_package_json(tmp_path, {}, dev_deps={"react": "^18.0.0", "@vitejs/plugin-react": "^4.0.0"})
+    profile = AgentRouter(AgentRegistry()).detect_stack(tmp_path)
+    assert profile.framework == "react"
+
+
+def test_vite_react_in_subdir_detected(tmp_path: Path) -> None:
+    """vite.config.ts + react in a subdirectory should be detected."""
+    frontend = tmp_path / "frontend"
+    frontend.mkdir()
+    (frontend / "vite.config.ts").write_text("export default {}\n", encoding="utf-8")
+    _write_package_json(frontend, {"react": "^18.0.0"})
+    profile = AgentRouter(AgentRegistry()).detect_stack(tmp_path)
+    assert profile.framework == "react"
+
+
+def test_next_config_takes_priority_over_vite(tmp_path: Path) -> None:
+    """next.config.js (an explicit framework signal) should win over vite detection."""
+    (tmp_path / "next.config.js").write_text("module.exports = {}\n", encoding="utf-8")
+    (tmp_path / "vite.config.ts").write_text("export default {}\n", encoding="utf-8")
+    _write_package_json(tmp_path, {"react": "^18.0.0", "next": "^14.0.0"})
+    profile = AgentRouter(AgentRegistry()).detect_stack(tmp_path)
+    # framework should still be react (from next.config.js), not overridden
+    assert profile.framework == "react"
+
+
+def test_vite_react_routes_to_react_flavor(tmp_path: Path) -> None:
+    """A Vite+React project should route frontend-engineer to frontend-engineer--react."""
+    (tmp_path / "vite.config.ts").write_text("export default {}\n", encoding="utf-8")
+    _write_package_json(tmp_path, {"react": "^18.0.0"})
+    registry = _make_registry_with("frontend-engineer", "frontend-engineer--react")
+    router = AgentRouter(registry)
+    assert router.route("frontend-engineer", project_root=tmp_path) == "frontend-engineer--react"
+
+
+# ---------------------------------------------------------------------------
+# Fix 2: references/baton-engine.md exists and is distributed by install.sh
+# ---------------------------------------------------------------------------
+
+
+def test_baton_engine_reference_exists() -> None:
+    """references/baton-engine.md must exist so install.sh can copy it."""
+    import os
+    # Find the repo root by walking up from this file
+    this_file = Path(__file__).resolve()
+    repo_root = this_file.parent.parent
+    ref_path = repo_root / "references" / "baton-engine.md"
+    assert ref_path.exists(), (
+        f"references/baton-engine.md not found at {ref_path}. "
+        "The file must exist so install.sh copies it to ~/.claude/references/."
+    )
+
+
+def test_baton_engine_reference_has_frontmatter() -> None:
+    """baton-engine.md must have YAML frontmatter with a name field."""
+    import os
+    this_file = Path(__file__).resolve()
+    repo_root = this_file.parent.parent
+    ref_path = repo_root / "references" / "baton-engine.md"
+    if not ref_path.exists():
+        pytest.skip("baton-engine.md not present — covered by existence test")
+    content = ref_path.read_text(encoding="utf-8")
+    assert content.startswith("---"), "baton-engine.md must start with YAML frontmatter (---)"
+    assert "name:" in content, "baton-engine.md frontmatter must include a 'name:' field"
+
+
+def test_install_sh_copies_all_md_references() -> None:
+    """install.sh must contain a loop that copies *.md from the references dir."""
+    this_file = Path(__file__).resolve()
+    repo_root = this_file.parent.parent
+    install_sh = repo_root / "scripts" / "install.sh"
+    assert install_sh.exists(), "scripts/install.sh must exist"
+    content = install_sh.read_text(encoding="utf-8")
+    # The script iterates over $REFS_DIR/*.md and copies them
+    assert "$REFS_DIR" in content, "install.sh must reference REFS_DIR"
+    assert "*.md" in content, "install.sh must glob *.md files from references dir"
+    assert "cp " in content, "install.sh must use cp to copy reference files"
