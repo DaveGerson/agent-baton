@@ -10,12 +10,9 @@ from __future__ import annotations
 
 import argparse
 import io
-import json
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 from agent_baton.cli.commands.execution.execute import handler
 
@@ -46,22 +43,6 @@ def _capture_handler(args: argparse.Namespace) -> str:
     return buf.getvalue()
 
 
-def _fake_engine(task_id_seen: list[str | None]) -> MagicMock:
-    """Return a mock ExecutionEngine that records the task_id it was given."""
-    engine = MagicMock()
-    engine.status.return_value = {
-        "task_id": task_id_seen[0] if task_id_seen else "?",
-        "status": "running",
-        "current_phase": 1,
-        "steps_complete": 0,
-        "steps_total": 2,
-        "gates_passed": 0,
-        "gates_failed": 0,
-        "elapsed_seconds": 0,
-    }
-    return engine
-
-
 # ---------------------------------------------------------------------------
 # Test 1: --task-id flag beats BATON_TASK_ID env var
 # ---------------------------------------------------------------------------
@@ -72,7 +53,7 @@ class TestFlagBeatsEnvVar:
     def test_engine_receives_flag_task_id_not_env_var(self) -> None:
         received: list[str | None] = []
 
-        def fake_engine_factory(bus, task_id, storage):
+        def fake_engine_factory(bus=None, task_id=None, storage=None):  # noqa: ARG001
             received.append(task_id)
             e = MagicMock()
             e.status.return_value = {
@@ -104,7 +85,7 @@ class TestFlagBeatsEnvVar:
     def test_engine_does_not_receive_env_var_value_when_flag_set(self) -> None:
         received: list[str | None] = []
 
-        def fake_engine_factory(bus, task_id, storage):
+        def fake_engine_factory(bus=None, task_id=None, storage=None):  # noqa: ARG001
             received.append(task_id)
             e = MagicMock()
             e.status.return_value = {
@@ -142,7 +123,7 @@ class TestEnvVarBeatsActiveMarker:
     def test_engine_receives_env_var_not_active_marker(self) -> None:
         received: list[str | None] = []
 
-        def fake_engine_factory(bus, task_id, storage):
+        def fake_engine_factory(bus=None, task_id=None, storage=None):  # noqa: ARG001
             received.append(task_id)
             e = MagicMock()
             e.status.return_value = {
@@ -212,7 +193,7 @@ class TestFallbackToActiveMarker:
     def test_engine_receives_active_marker_task_id(self) -> None:
         received: list[str | None] = []
 
-        def fake_engine_factory(bus, task_id, storage):
+        def fake_engine_factory(bus=None, task_id=None, storage=None):  # noqa: ARG001
             received.append(task_id)
             e = MagicMock()
             e.status.return_value = {

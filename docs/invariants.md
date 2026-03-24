@@ -35,6 +35,47 @@ command module via `register(subparsers)` — they are not derived from filename
 Moving command files to subdirectories does not change these strings, but
 renaming the registered subcommand does.
 
+### Task-ID Resolution Order
+
+Every `baton execute` subcommand (except `list` and `switch`) resolves a
+target task ID through a three-level priority chain:
+
+```
+--task-id flag  →  BATON_TASK_ID env var  →  active-task-id.txt  →  None
+```
+
+| Source | Scope | When to use |
+|--------|-------|-------------|
+| `--task-id FLAG` | Per-invocation | Inspect or drive a specific execution for a single command |
+| `BATON_TASK_ID` | Per shell session | Bind a terminal session to one execution when multiple are running concurrently |
+| `active-task-id.txt` | Per repository | Single-execution workflow fallback; updated by `baton execute switch` |
+| `None` | Legacy | Reads the flat `execution-state.json` without a task-scoped directory |
+
+**Rules that must not change**:
+
+1. `--task-id` always beats the env var. The env var always beats the file
+   marker. This order matches the CLI convention where the most explicit
+   signal wins.
+2. On `start`, the resolved `task_id` is immediately overwritten by
+   `plan.task_id`. The env var check is harmless on `start`.
+3. The `BATON_TASK_ID` check is a two-line insertion in `handler()`
+   (`execute.py`) between the `--task-id` guard and the `get_active_task_id`
+   call. Reordering these checks breaks the priority contract.
+
+### Export Hint on `baton execute start`
+
+After `_print_action()` returns (regardless of action type), `start` prints:
+
+```
+Session binding: export BATON_TASK_ID=<plan-task-id>
+```
+
+This line is printed **after** `--- End Prompt ---` and is **not** part of
+the `_print_action()` protocol (Invariant 2). Agentic callers that parse
+`_print_action()` output are not affected. The hint uses `plan.task_id`,
+not the value of `BATON_TASK_ID` in the environment — the env var may be
+stale from a previous session.
+
 **Safeguard**: A frozen-set contract test asserts that all expected subcommand
 names are registered by `cli/main.py`. The test fails if any command is
 accidentally dropped during auto-discovery changes.

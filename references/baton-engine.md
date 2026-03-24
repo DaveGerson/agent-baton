@@ -361,12 +361,21 @@ baton execute status
 
 ```
 Task:    abc123
+Bound:   BATON_TASK_ID
 Status:  running
 Phase:   1
 Steps:   2/4
 Gates:   1 passed, 0 failed
 Elapsed: 145s
 ```
+
+The `Bound:` field shows which resolution path supplied the task ID:
+
+| Value | Meaning |
+|-------|---------|
+| `--task-id` | Explicit `--task-id` flag on this invocation |
+| `BATON_TASK_ID` | `BATON_TASK_ID` environment variable |
+| `active-task-id.txt` | Repository-wide active marker file |
 
 **Output when no active execution:** `No active execution.`
 
@@ -832,6 +841,89 @@ already finalised.
 **Fix:** Verify the execution loop reached a COMPLETE action before
 calling `complete`.  If the state was already finalised, the run data is
 already in `usage-log.jsonl` and `retrospectives/`.
+
+---
+
+## Concurrent Execution
+
+Multiple `baton execute start` calls in the same repository run concurrently
+without interference because each execution uses its own task-scoped state
+directory (`executions/<task-id>/execution-state.json`).  The challenge is
+that each terminal session needs to know *which* execution it belongs to.
+
+### Session Binding with `BATON_TASK_ID`
+
+After `baton execute start`, the engine prints a copyable export line:
+
+```
+Session binding: export BATON_TASK_ID=<plan-task-id>
+```
+
+Run this command in the terminal to bind all subsequent `baton execute`
+calls in that shell to the new execution.  Each terminal session maintains
+its own binding independently.
+
+**Typical two-session workflow:**
+
+Terminal A:
+```bash
+baton plan "Add JWT auth" --save --explain
+baton execute start
+# Output includes: Session binding: export BATON_TASK_ID=task-auth-abc
+export BATON_TASK_ID=task-auth-abc
+baton execute next   # resolves to task-auth-abc via env var
+```
+
+Terminal B (concurrently):
+```bash
+baton plan "Fix dashboard bug" --save --explain
+baton execute start
+# Output includes: Session binding: export BATON_TASK_ID=task-fix-xyz
+export BATON_TASK_ID=task-fix-xyz
+baton execute next   # resolves to task-fix-xyz, not task-auth-abc
+```
+
+### Task-ID Resolution Order
+
+Every subcommand resolves the target execution through this priority chain:
+
+```
+--task-id flag  →  BATON_TASK_ID env var  →  active-task-id.txt  →  None
+```
+
+| Mechanism | Scope | Notes |
+|-----------|-------|-------|
+| `--task-id FLAG` | Single invocation | Highest priority; overrides both env var and marker |
+| `BATON_TASK_ID` | Shell session | Set once with `export`; persists for the session lifetime |
+| `active-task-id.txt` | Repository | Updated by `baton execute switch`; single-execution fallback |
+
+**Agentic callers** (Claude Code's orchestrator): env vars do not persist
+across independent `Bash` tool calls.  Pass `--task-id` explicitly on every
+CLI call when driving concurrent executions from an agent context.
+
+### Inspecting the active binding
+
+`baton execute status` shows which resolution path is in use:
+
+```
+Task:    task-auth-abc
+Bound:   BATON_TASK_ID
+Status:  running
+...
+```
+
+### Re-binding after starting a new plan
+
+When `BATON_TASK_ID` is set to a previous task and `baton execute start`
+creates a new plan, the export hint prints the **new** plan's task ID.
+Re-run the `export` command to rebind:
+
+```bash
+# BATON_TASK_ID is still set to the old task
+baton execute start
+# Session binding: export BATON_TASK_ID=brand-new-task-id
+export BATON_TASK_ID=brand-new-task-id   # update the binding
+```
 
 ---
 
