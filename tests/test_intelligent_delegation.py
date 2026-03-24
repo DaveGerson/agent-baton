@@ -1160,7 +1160,12 @@ class TestMachinePlanTaskType:
         assert restored.task_type == "bug-fix"
 
     def test_task_type_backward_compat_missing_key(self) -> None:
-        """Old plan dicts without 'task_type' should load with empty string."""
+        """Old plan dicts without 'task_type' should load as None (not empty string).
+
+        Phase 1 changed the field type from str to str | None to distinguish
+        'not inferred yet' from an empty string. Old plan.json files that
+        lack the key deserialize to None.
+        """
         data = {
             "task_id": "t-old",
             "task_summary": "Old plan",
@@ -1174,4 +1179,4 @@ class TestMachinePlanTaskType:
             # 'task_type' intentionally absent
         }
         plan = MachinePlan.from_dict(data)
-        assert plan.task_type == ""
+        assert plan.task_type is None

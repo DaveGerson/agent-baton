@@ -1,0 +1,5 @@
+name: agent-baton
+description: Architecture, conventions, and development workflow for the agent-baton project
+tags: [orchestration, architecture, development, conventions, workflow]
+target_agents: [backend-engineer--python, architect, ai-systems-architect]
+default_delivery: reference

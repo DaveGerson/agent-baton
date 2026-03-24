@@ -1,0 +1,5 @@
+name: case-studies
+description: Real-world failure modes, comparative framework analysis, and scaling patterns for multi-agent orchestration systems
+tags: [failure-modes, scaling, orchestration, case-study, architecture]
+target_agents: []
+default_delivery: reference

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from agent_baton.utils.frontmatter import parse_frontmatter
 from agent_baton.models.execution import (
     ActionType,
     ExecutionAction,
@@ -108,7 +109,9 @@ class PromptDispatcher:
         if attachment.path:
             path = Path(attachment.path)
             try:
-                return path.read_text(encoding="utf-8")
+                raw = path.read_text(encoding="utf-8")
+                _, body = parse_frontmatter(raw)
+                return body
             except OSError:
                 return f"_Content unavailable: {attachment.path}_"
         return f"_Content unavailable: no path for {attachment.document_name}_"

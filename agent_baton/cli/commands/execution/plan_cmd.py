@@ -10,6 +10,7 @@ from agent_baton.core.engine.planner import IntelligentPlanner
 from agent_baton.core.govern.classifier import DataClassifier
 from agent_baton.core.govern.policy import PolicyEngine
 from agent_baton.core.observe.retrospective import RetrospectiveEngine
+from agent_baton.core.orchestration.knowledge_registry import KnowledgeRegistry
 
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
@@ -49,6 +50,29 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         action="store_true",
         help="Show explanation of why this plan was chosen",
     )
+    p.add_argument(
+        "--knowledge",
+        dest="knowledge",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="Explicit document file path to attach globally to all steps (repeatable)",
+    )
+    p.add_argument(
+        "--knowledge-pack",
+        dest="knowledge_pack",
+        action="append",
+        default=[],
+        metavar="PACK",
+        help="Explicit knowledge pack name to attach globally to all steps (repeatable)",
+    )
+    p.add_argument(
+        "--intervention",
+        dest="intervention",
+        default="low",
+        choices=["low", "medium", "high"],
+        help="How aggressively agents escalate knowledge gaps (default: low)",
+    )
     return p
 
 
@@ -56,17 +80,24 @@ def handler(args: argparse.Namespace) -> None:
     project_root = Path(args.project) if args.project else Path.cwd()
     agents = [a.strip() for a in args.agents.split(",") if a.strip()] if args.agents else None
 
+    knowledge_registry = KnowledgeRegistry()
+    knowledge_registry.load_default_paths()
+
     retro_engine = RetrospectiveEngine()
     planner = IntelligentPlanner(
         retro_engine=retro_engine,
         classifier=DataClassifier(),
         policy_engine=PolicyEngine(),
+        knowledge_registry=knowledge_registry,
     )
     plan = planner.create_plan(
         args.summary,
         task_type=args.task_type,
         project_root=project_root,
         agents=agents,
+        explicit_knowledge_packs=args.knowledge_pack,
+        explicit_knowledge_docs=args.knowledge,
+        intervention_level=args.intervention,
     )
 
     if args.save:

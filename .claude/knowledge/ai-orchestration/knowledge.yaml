@@ -1,0 +1,5 @@
+name: ai-orchestration
+description: Multi-agent orchestration patterns, evaluation frameworks, and prompt engineering principles
+tags: [orchestration, multi-agent, coordination, context-window, prompt-engineering, evaluation]
+target_agents: [ai-systems-architect, architect, ai-product-strategist]
+default_delivery: reference

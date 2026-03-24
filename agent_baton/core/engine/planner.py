@@ -7,11 +7,13 @@ to default heuristics when no historical data is available.
 """
 from __future__ import annotations
 
+import json
+import logging
 import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from agent_baton.core.govern.classifier import ClassificationResult, DataClassifier
 from agent_baton.core.govern.policy import PolicyEngine, PolicySet, PolicyViolation
@@ -24,6 +26,11 @@ from agent_baton.models.enums import GitStrategy, RiskLevel
 from agent_baton.models.execution import MachinePlan, PlanGate, PlanPhase, PlanStep, TeamMember
 from agent_baton.models.feedback import RetrospectiveFeedback
 from agent_baton.models.pattern import LearnedPattern
+
+if TYPE_CHECKING:
+    from agent_baton.core.orchestration.knowledge_registry import KnowledgeRegistry
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -291,6 +298,7 @@ class IntelligentPlanner:
         classifier: DataClassifier | None = None,
         policy_engine: PolicyEngine | None = None,
         retro_engine: RetroEngine | None = None,
+        knowledge_registry: KnowledgeRegistry | None = None,
     ) -> None:
         self._team_context_root = team_context_root
         self._pattern_learner = PatternLearner(team_context_root)
@@ -307,6 +315,10 @@ class IntelligentPlanner:
 
         # Optional retrospective engine — provides closed-loop learning feedback.
         self._retro_engine = retro_engine
+
+        # Optional knowledge registry — enables per-step knowledge resolution.
+        # When None, the knowledge resolution step is skipped entirely.
+        self.knowledge_registry: KnowledgeRegistry | None = knowledge_registry
 
         # Populated during create_plan for use in explain_plan
         self._last_pattern_used: LearnedPattern | None = None
@@ -328,6 +340,9 @@ class IntelligentPlanner:
         project_root: Path | None = None,
         agents: list[str] | None = None,
         phases: list[dict] | None = None,
+        explicit_knowledge_packs: list[str] | None = None,
+        explicit_knowledge_docs: list[str] | None = None,
+        intervention_level: str = "low",
     ) -> MachinePlan:
         """Create a complete, data-driven execution plan.
 
@@ -356,6 +371,13 @@ class IntelligentPlanner:
             phases: Explicit phase definitions as dicts; if given, pattern/default
                     phase logic is skipped.  Each dict must have at minimum a
                     "name" key; optionally "agents" (list of str) and "gate" (dict).
+            explicit_knowledge_packs: Pack names supplied via --knowledge-pack.
+                    Stored on MachinePlan.explicit_knowledge_packs and used by the
+                    knowledge resolver to attach docs globally to all steps.
+            explicit_knowledge_docs: File paths supplied via --knowledge.
+                    Stored on MachinePlan.explicit_knowledge_docs.
+            intervention_level: How aggressively agents escalate knowledge gaps.
+                    ``low`` (default) | ``medium`` | ``high``.
 
         Returns:
             A fully constructed MachinePlan.
@@ -429,6 +451,23 @@ class IntelligentPlanner:
         # 6. Route agents
         resolved_agents = self._route_agents(resolved_agents, project_root)
 
+        # 6.5. Resolve knowledge attachments per step (KnowledgeRegistry if available).
+        # This runs after routing so step.agent_name reflects the routed variant.
+        # Phases and steps are not built yet at this point — knowledge resolution
+        # happens after phase building (step 9). We defer it to a post-phase hook
+        # at step 9.5 so it can iterate over actual PlanStep objects.
+        # (The resolver reference is stored here for use at step 9.5 below.)
+        _resolver = None
+        if self.knowledge_registry is not None:
+            from agent_baton.core.engine.knowledge_resolver import KnowledgeResolver
+            _resolver = KnowledgeResolver(
+                self.knowledge_registry,
+                agent_registry=self._registry,
+                rag_available=self._detect_rag(),
+                step_token_budget=32_000,
+                doc_token_cap=8_000,
+            )
+
         # 7. Classify task sensitivity (DataClassifier if available)
         classification: ClassificationResult | None = None
         if self._classifier is not None:
@@ -469,6 +508,58 @@ class IntelligentPlanner:
 
         # 9b. Enrich steps with cross-phase context and default deliverables
         plan_phases = self._enrich_phases(plan_phases)
+
+        # 9.5. Resolve knowledge attachments for each step.
+        # Runs after phase building so step.agent_name and task_description are final.
+        # explicit_knowledge_packs/docs come from create_plan args (CLI --knowledge flags).
+        if _resolver is not None:
+            for phase in plan_phases:
+                for step in phase.steps:
+                    try:
+                        step.knowledge = _resolver.resolve(
+                            agent_name=step.agent_name,
+                            task_description=step.task_description,
+                            task_type=inferred_type,
+                            risk_level=risk_level,
+                            explicit_packs=explicit_knowledge_packs or [],
+                            explicit_docs=explicit_knowledge_docs or [],
+                        )
+                    except Exception:
+                        logger.debug(
+                            "Knowledge resolution failed for step %s — skipping",
+                            step.step_id,
+                            exc_info=True,
+                        )
+
+        # 9.6. Gap-suggested attachments — query pattern learner for prior gaps
+        # matching each step's agent + task type. Only runs when both resolver
+        # and pattern learner are available.
+        if _resolver is not None and self._pattern_learner is not None:
+            for phase in plan_phases:
+                for step in phase.steps:
+                    try:
+                        prior_gaps = self._pattern_learner.knowledge_gaps_for(
+                            step.agent_name, inferred_type
+                        )
+                        for gap in prior_gaps:
+                            matches = _resolver.resolve(
+                                agent_name=step.agent_name,
+                                task_description=gap.description,
+                            )
+                            existing_paths = {a.path for a in step.knowledge if a.path}
+                            for match in matches:
+                                if match.path and match.path in existing_paths:
+                                    continue
+                                match.source = "gap-suggested"
+                                step.knowledge.append(match)
+                                if match.path:
+                                    existing_paths.add(match.path)
+                    except Exception:
+                        logger.debug(
+                            "Gap-suggested resolution failed for step %s — skipping",
+                            step.step_id,
+                            exc_info=True,
+                        )
 
         # 10. Score check — warn about low-health agents
         self._check_agent_scores(resolved_agents)
@@ -551,6 +642,9 @@ class IntelligentPlanner:
             phases=plan_phases,
             pattern_source=pattern.pattern_id if pattern else None,
             task_type=inferred_type,
+            explicit_knowledge_packs=list(explicit_knowledge_packs or []),
+            explicit_knowledge_docs=list(explicit_knowledge_docs or []),
+            intervention_level=intervention_level,
         )
         shared_context = self._build_shared_context(tmp_plan)
         tmp_plan.shared_context = shared_context
@@ -806,6 +900,33 @@ class IntelligentPlanner:
         instructions_lower = agent_def.instructions.lower()
         output_markers = ("output format", "when you finish", "return:", "deliverables")
         return any(marker in instructions_lower for marker in output_markers)
+
+    def _detect_rag(self) -> bool:
+        """Return True if an MCP RAG server is registered in settings.json.
+
+        Checks both the project-local ``.claude/settings.json`` and the global
+        ``~/.claude/settings.json`` for MCP server entries whose name contains
+        ``rag`` (case-insensitive). Returns False on any read or parse error.
+        """
+        settings_candidates = [
+            Path(".claude/settings.json"),
+            Path.home() / ".claude" / "settings.json",
+        ]
+        for settings_path in settings_candidates:
+            if not settings_path.exists():
+                continue
+            try:
+                data = json.loads(settings_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            # MCP servers may live under "mcpServers" (object keyed by name)
+            # or "mcp" -> "servers" depending on the Claude version.
+            mcp_servers = data.get("mcpServers", data.get("mcp", {}).get("servers", {}))
+            if isinstance(mcp_servers, dict):
+                for server_name in mcp_servers:
+                    if "rag" in str(server_name).lower():
+                        return True
+        return False
 
     def _step_description(
         self, phase_name: str, agent_name: str, task_summary: str

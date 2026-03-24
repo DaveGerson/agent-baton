@@ -11,6 +11,8 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
+
 from agent_baton.models.execution import (
     ActionType,
     ApprovalResult,
@@ -26,8 +28,10 @@ from agent_baton.models.execution import (
     TeamStepResult,
 )
 from agent_baton.models.events import Event
+from agent_baton.models.knowledge import KnowledgeGapSignal, ResolvedDecision
 from agent_baton.models.usage import AgentUsageRecord, TaskUsageRecord
 from agent_baton.core.engine.dispatcher import PromptDispatcher
+from agent_baton.core.engine.knowledge_gap import determine_escalation, parse_knowledge_gap
 from agent_baton.core.engine.persistence import StatePersistence
 from agent_baton.core.events.bus import EventBus
 from agent_baton.core.events import events as evt
@@ -493,6 +497,18 @@ class ExecutionEngine:
             deviations=self._extract_deviations(outcome),
         )
         state.step_results.append(result)
+
+        # ── Knowledge gap protocol ──────────────────────────────────────────
+        # Inspect the outcome for a KNOWLEDGE_GAP signal emitted by the agent.
+        # Only process when status is "complete" or "interrupted" — a "failed"
+        # step is handled by the failure path; "dispatched" has no outcome yet.
+        if status in ("complete", "interrupted") and outcome:
+            self._handle_knowledge_gap(
+                outcome=outcome,
+                step_id=step_id,
+                agent_name=agent_name,
+                state=state,
+            )
 
         # Determine phase + step index for trace context.
         phase_idx, step_idx = self._locate_step(state, step_id)
@@ -1104,14 +1120,14 @@ class ExecutionEngine:
         """
         from agent_baton.models.retrospective import (
             AgentOutcome,
-            KnowledgeGap,
             RosterRecommendation,
             SequencingNote,
         )
+        from agent_baton.models.knowledge import KnowledgeGapRecord
 
         what_worked: list[AgentOutcome] = []
         what_didnt: list[AgentOutcome] = []
-        knowledge_gaps: list[KnowledgeGap] = []
+        knowledge_gaps: list[KnowledgeGapRecord] = []
         sequencing_notes: list[SequencingNote] = []
         roster_recs: list[RosterRecommendation] = []
 
@@ -1147,16 +1163,17 @@ class ExecutionEngine:
                 ))
                 # Signal a knowledge gap if the agent failed with retries
                 if total_retries > 0 or len(failures) > 1:
-                    knowledge_gaps.append(KnowledgeGap(
+                    knowledge_gaps.append(KnowledgeGapRecord(
                         description=(
                             f"{agent_name} struggled: "
                             f"{len(failures)} failure(s), "
                             f"{total_retries} retry(ies)"
                         ),
-                        affected_agent=agent_name,
-                        suggested_fix=(
-                            "review agent prompt or add knowledge pack"
-                        ),
+                        gap_type="contextual",
+                        resolution="unresolved",
+                        resolution_detail="review agent prompt or add knowledge pack",
+                        agent_name=agent_name,
+                        task_summary=state.plan.task_summary,
                     ))
                 # Recommend improvement if retry rate is high
                 if total_retries >= 2:
@@ -1215,14 +1232,40 @@ class ExecutionEngine:
         if total_steps > 0 and total_tokens > 0:
             avg_per_step = total_tokens // total_steps
             if avg_per_step > 50000:
-                knowledge_gaps.append(KnowledgeGap(
+                knowledge_gaps.append(KnowledgeGapRecord(
                     description=(
                         f"High token usage: ~{avg_per_step:,} tokens/step "
                         f"({total_tokens:,} total). May indicate agents "
                         f"exploring too broadly."
                     ),
-                    suggested_fix="add context_files to reduce search scope",
+                    gap_type="contextual",
+                    resolution="unresolved",
+                    resolution_detail="add context_files to reduce search scope",
+                    agent_name="",
+                    task_summary=state.plan.task_summary,
                 ))
+
+        # ── Pending gaps (unresolved KnowledgeGapSignal entries) ─────────
+        for signal in state.pending_gaps:
+            knowledge_gaps.append(KnowledgeGapRecord(
+                description=signal.description,
+                gap_type=signal.gap_type,
+                resolution="unresolved",
+                resolution_detail=signal.partial_outcome or "",
+                agent_name=signal.agent_name,
+                task_summary=state.plan.task_summary,
+            ))
+
+        # ── Resolved decisions (human-answered gaps) ──────────────────────
+        for decision in state.resolved_decisions:
+            knowledge_gaps.append(KnowledgeGapRecord(
+                description=decision.gap_description,
+                gap_type="factual",
+                resolution="human-answered",
+                resolution_detail=decision.resolution,
+                agent_name="",
+                task_summary=state.plan.task_summary,
+            ))
 
         gates_passed = len([g for g in state.gate_results if g.passed])
         gates_failed = len([g for g in state.gate_results if not g.passed])
@@ -1423,6 +1466,10 @@ class ExecutionEngine:
                 handoff = result.outcome
                 break
 
+        # Append resolved decisions to the handoff so the agent does not re-litigate
+        # knowledge gaps that have already been answered.
+        handoff = _append_resolved_decisions(handoff, state.resolved_decisions)
+
         prompt = dispatcher.build_delegation_prompt(
             step,
             shared_context=state.plan.shared_context,
@@ -1479,7 +1526,11 @@ class ExecutionEngine:
     def _build_approval_context(
         state: ExecutionState, phase_obj: PlanPhase,
     ) -> str:
-        """Build a markdown summary of phase output for the human reviewer."""
+        """Build a markdown summary of phase output for the human reviewer.
+
+        Also surfaces any pending knowledge gaps so the reviewer can answer
+        them before execution continues.
+        """
         lines = [
             f"## Phase {phase_obj.phase_id}: {phase_obj.name} — Review Summary",
             "",
@@ -1494,6 +1545,23 @@ class ExecutionEngine:
                 if result.files_changed:
                     lines.append(f"**Files changed**: {', '.join(result.files_changed)}")
                 lines.append("")
+
+        # Surface pending knowledge gaps for human resolution.
+        if state.pending_gaps:
+            lines.append("## Pending Knowledge Gaps")
+            lines.append(
+                "The following gaps were flagged by agents and require your input "
+                "before execution can continue:"
+            )
+            lines.append("")
+            for gap in state.pending_gaps:
+                lines.append(
+                    f"- **Step {gap.step_id}** ({gap.agent_name}, "
+                    f"confidence={gap.confidence}, type={gap.gap_type}): "
+                    f"{gap.description}"
+                )
+            lines.append("")
+
         return "\n".join(lines)
 
     def _team_dispatch_action(
@@ -1635,10 +1703,139 @@ class ExecutionEngine:
                     return pi, si
         return -1, -1
 
+    def _handle_knowledge_gap(
+        self,
+        outcome: str,
+        step_id: str,
+        agent_name: str,
+        state: ExecutionState,
+    ) -> None:
+        """Inspect *outcome* for a KNOWLEDGE_GAP signal and take the appropriate action.
+
+        This is the core of the runtime knowledge acquisition protocol.
+        Called from :meth:`record_step_result` after the StepResult is
+        appended but before the state is saved.
+
+        Three outcomes are possible based on the escalation matrix:
+
+        * ``auto-resolve``: The resolver found matching knowledge.  A
+          ``ResolvedDecision`` is recorded so re-dispatches carry the answer.
+        * ``best-effort``: LOW risk + low intervention + no match.  Log and
+          continue — the caller proceeds with best-effort work.
+        * ``queue-for-gate``: The gap is appended to
+          ``state.pending_gaps`` so it surfaces at the next human review gate.
+
+        When a ``KnowledgeResolver`` is available on the engine (set by the
+        caller), it is used for auto-resolution.  Otherwise the auto-resolve
+        path logs a warning and falls back to ``queue-for-gate`` — the
+        engine should not fail silently if the resolver was expected.
+        """
+        signal = parse_knowledge_gap(outcome, step_id=step_id, agent_name=agent_name)
+        if signal is None:
+            return
+
+        logger.debug(
+            "KNOWLEDGE_GAP detected in step %s (%s): %r [confidence=%s, type=%s]",
+            step_id, agent_name, signal.description, signal.confidence, signal.gap_type,
+        )
+
+        # Attempt auto-resolution via resolver if available.
+        resolver = getattr(self, "_knowledge_resolver", None)
+        resolution_found = False
+        resolved_detail = ""
+
+        if resolver is not None:
+            try:
+                attachments = resolver.resolve(
+                    agent_name=agent_name,
+                    task_description=signal.description,
+                )
+                if attachments:
+                    resolution_found = True
+                    resolved_detail = "auto-resolved via " + ", ".join(
+                        f"{a.pack_name or 'unknown'}/{a.document_name}"
+                        for a in attachments
+                    )
+            except Exception:
+                logger.warning(
+                    "KnowledgeResolver.resolve() raised for gap in step %s — "
+                    "treating as no match",
+                    step_id, exc_info=True,
+                )
+
+        risk_level = state.plan.risk_level
+        intervention_level = getattr(state.plan, "intervention_level", "low")
+        action = determine_escalation(
+            signal,
+            risk_level=risk_level,
+            intervention_level=intervention_level,
+            resolution_found=resolution_found,
+        )
+
+        logger.info(
+            "Knowledge gap escalation for step %s: %s (risk=%s, intervention=%s, match=%s)",
+            step_id, action, risk_level, intervention_level, resolution_found,
+        )
+
+        if action == "auto-resolve":
+            # Record a ResolvedDecision so future re-dispatches carry the answer.
+            decision = ResolvedDecision(
+                gap_description=signal.description,
+                resolution=resolved_detail or "auto-resolved (no detail)",
+                step_id=step_id,
+                timestamp=_utcnow(),
+            )
+            state.resolved_decisions.append(decision)
+            logger.info(
+                "Auto-resolved knowledge gap for step %s: %r",
+                step_id, signal.description,
+            )
+
+        elif action == "best-effort":
+            # Log and continue — nothing added to state.
+            logger.info(
+                "Best-effort knowledge gap for step %s: %r (proceeding without resolution)",
+                step_id, signal.description,
+            )
+
+        else:  # queue-for-gate
+            # Surface at the next human review gate.
+            state.pending_gaps.append(signal)
+            logger.info(
+                "Queued knowledge gap for step %s for human review: %r",
+                step_id, signal.description,
+            )
+
 
 # ---------------------------------------------------------------------------
 # Private utilities (module-level to keep the class lean)
 # ---------------------------------------------------------------------------
+
+def _append_resolved_decisions(
+    handoff: str,
+    resolved_decisions: list[ResolvedDecision],
+) -> str:
+    """Append a 'Resolved Decisions' section to a handoff string.
+
+    When *resolved_decisions* is non-empty, the section is appended so the
+    re-dispatched agent sees final answers and does not re-litigate them.
+
+    Returns the original *handoff* unchanged if there are no decisions.
+    """
+    if not resolved_decisions:
+        return handoff
+
+    lines = []
+    if handoff:
+        lines.append(handoff)
+        lines.append("")
+
+    lines.append("## Resolved Decisions (final — do not revisit)")
+    for decision in resolved_decisions:
+        lines.append(f'- "{decision.gap_description}": {decision.resolution}')
+
+    return "\n".join(lines)
+
 
 def _build_delegation_prompt(step: PlanStep, plan: MachinePlan) -> str:
     """Build a minimal delegation prompt for a plan step."""

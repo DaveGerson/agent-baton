@@ -7,6 +7,7 @@ from agent_baton.core.engine.planner import IntelligentPlanner
 from agent_baton.core.engine.dispatcher import PromptDispatcher
 from agent_baton.core.engine.gates import GateRunner
 from agent_baton.core.engine.protocols import ExecutionDriver
+from agent_baton.core.engine.knowledge_resolver import KnowledgeResolver
 
 __all__ = [
     "ExecutionEngine",
@@ -15,4 +16,5 @@ __all__ = [
     "IntelligentPlanner",
     "PromptDispatcher",
     "GateRunner",
+    "KnowledgeResolver",
 ]
