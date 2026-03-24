@@ -8,6 +8,7 @@ to default heuristics when no historical data is available.
 from __future__ import annotations
 
 import re
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -683,12 +684,19 @@ class IntelligentPlanner:
     # ------------------------------------------------------------------
 
     def _generate_task_id(self, summary: str) -> str:
-        """Create a task ID like '2026-03-20-build-widget-api'."""
+        """Create a collision-free task ID.
+
+        Format: ``YYYY-MM-DD-<slug>-<8-char-uuid>``
+        The UUID suffix guarantees uniqueness even when two plans are
+        created on the same day with identical summaries.
+        """
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         slug = re.sub(r"[^a-z0-9]+", "-", summary.lower()).strip("-")
-        slug = slug[:50]  # keep IDs manageable
+        slug = slug[:50]
         slug = slug.rstrip("-")
-        return f"{date_str}-{slug}" if slug else date_str
+        uid = uuid.uuid4().hex[:8]
+        base = f"{date_str}-{slug}" if slug else date_str
+        return f"{base}-{uid}"
 
     def _infer_task_type(self, summary: str) -> str:
         """Infer task type from summary keywords.
