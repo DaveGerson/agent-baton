@@ -95,14 +95,21 @@ class ExecutionEngine:
         self,
         team_context_root: Path | None = None,
         bus: EventBus | None = None,
+        task_id: str | None = None,
     ) -> None:
         self._root = (team_context_root or self._DEFAULT_CONTEXT_ROOT).resolve()
-        self._persistence = StatePersistence(self._root)
+        self._task_id = task_id
+        self._persistence = StatePersistence(self._root, task_id=task_id)
         self._bus = bus
+        # Namespace events under the task directory when task_id is provided.
+        if task_id:
+            events_dir = self._root / "executions" / task_id / "events"
+        else:
+            events_dir = self._root / "events"
         # If bus provided, auto-wire persistence as a subscriber.
         if self._bus is not None:
             self._event_persistence = EventPersistence(
-                events_dir=self._root / "events"
+                events_dir=events_dir
             )
             self._bus.subscribe("*", self._event_persistence.append)
         else:

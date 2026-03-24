@@ -65,9 +65,28 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         "--token", metavar="TOKEN", default=None,
         help="Bearer token for API authentication (only used with --serve)",
     )
+    start.add_argument(
+        "--task-id", metavar="ID", default=None, dest="task_id",
+        help="Namespace this daemon under a specific task ID",
+    )
 
-    sub.add_parser("status", help="Show daemon status")
-    sub.add_parser("stop", help="Stop the running daemon")
+    status_p = sub.add_parser("status", help="Show daemon status")
+    status_p.add_argument(
+        "--task-id", metavar="ID", default=None, dest="task_id",
+        help="Show status for a specific task ID",
+    )
+
+    stop_p = sub.add_parser("stop", help="Stop the running daemon")
+    stop_p.add_argument(
+        "--task-id", metavar="ID", default=None, dest="task_id",
+        help="Stop the daemon for a specific task ID",
+    )
+
+    list_p = sub.add_parser("list", help="List all daemon workers")
+    list_p.add_argument(
+        "--project-dir", metavar="DIR", default=None,
+        help="Project directory to scan (default: cwd)",
+    )
 
     return p
 
@@ -87,6 +106,7 @@ async def _run_daemon_with_api(
     port: int,
     token: str | None,
     team_context_root: Path,
+    task_id: str | None = None,
 ) -> str:
     """Run the async worker and the HTTP API server concurrently.
 
@@ -127,6 +147,7 @@ async def _run_daemon_with_api(
         launcher=launcher,
         team_context_root=team_context_root,
         bus=bus,
+        task_id=task_id,
     )
     engine = ctx.engine
 
@@ -238,7 +259,8 @@ async def _run_daemon_with_api(
 # ---------------------------------------------------------------------------
 
 def handler(args: argparse.Namespace) -> None:
-    supervisor = WorkerSupervisor()
+    task_id: str | None = getattr(args, "task_id", None)
+    supervisor = WorkerSupervisor(task_id=task_id)
 
     if args.daemon_action == "start":
         if not args.resume and not args.plan:
@@ -350,6 +372,7 @@ def handler(args: argparse.Namespace) -> None:
                         port=port,
                         token=token,
                         team_context_root=supervisor._root,
+                        task_id=task_id,
                     )
                 )
             except KeyboardInterrupt:
@@ -363,7 +386,8 @@ def handler(args: argparse.Namespace) -> None:
                 # we can read the final persisted state without re-running.
                 from agent_baton.core.engine.executor import ExecutionEngine
                 _engine_for_status = ExecutionEngine(
-                    team_context_root=supervisor._root
+                    team_context_root=supervisor._root,
+                    task_id=task_id,
                 )
                 supervisor._write_status(_engine_for_status, summary=summary)
                 supervisor._remove_pid()
@@ -421,6 +445,23 @@ def handler(args: argparse.Namespace) -> None:
             print("No running daemon found.")
         return
 
+    if args.daemon_action == "list":
+        project_dir = getattr(args, "project_dir", None)
+        if project_dir is not None:
+            context_root = Path(project_dir).resolve() / ".claude" / "team-context"
+        else:
+            context_root = Path(".claude/team-context").resolve()
+        workers = WorkerSupervisor.list_workers(context_root)
+        if not workers:
+            print("No daemon workers found.")
+            return
+        print(f"{'TASK ID':<40}  {'PID':>7}  {'ALIVE'}")
+        print("-" * 55)
+        for w in workers:
+            alive_str = "yes" if w["alive"] else "no"
+            print(f"{w['task_id']:<40}  {w['pid']:>7}  {alive_str}")
+        return
+
     # No subcommand — show help.
-    print("Usage: baton daemon {start|status|stop}")
+    print("Usage: baton daemon {start|status|stop|list}")
     print("Run 'baton daemon start --help' for options.")

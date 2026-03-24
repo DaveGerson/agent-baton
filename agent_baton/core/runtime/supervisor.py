@@ -37,27 +37,51 @@ def _utcnow() -> str:
 class WorkerSupervisor:
     """Manage the lifecycle of a :class:`TaskWorker` in daemon mode.
 
-    Files managed:
+    Files managed (legacy, when *task_id* is ``None``):
 
-    - ``daemon.pid`` — PID of the running process (written on start,
-      removed on clean stop).
+    - ``daemon.pid`` — PID of the running process.
     - ``daemon.log`` — structured log output from the worker.
     - ``daemon-status.json`` — snapshot of last known execution status.
+
+    When *task_id* is provided, files are namespaced under
+    ``executions/<task_id>/``:
+
+    - ``executions/<task_id>/worker.pid``
+    - ``executions/<task_id>/worker.log``
+    - ``executions/<task_id>/worker-status.json``
     """
 
-    def __init__(self, team_context_root: Path | None = None) -> None:
+    def __init__(
+        self,
+        team_context_root: Path | None = None,
+        task_id: str | None = None,
+    ) -> None:
         self._root = (team_context_root or Path(".claude/team-context")).resolve()
+        self._task_id = task_id
+
+    @property
+    def _exec_dir(self) -> Path:
+        """Directory for this supervisor's files (namespaced or legacy)."""
+        if self._task_id:
+            return self._root / "executions" / self._task_id
+        return self._root
 
     @property
     def pid_path(self) -> Path:
+        if self._task_id:
+            return self._exec_dir / "worker.pid"
         return self._root / "daemon.pid"
 
     @property
     def log_path(self) -> Path:
+        if self._task_id:
+            return self._exec_dir / "worker.log"
         return self._root / "daemon.log"
 
     @property
     def status_path(self) -> Path:
+        if self._task_id:
+            return self._exec_dir / "worker-status.json"
         return self._root / "daemon-status.json"
 
     # ── Start ───────────────────────────────────────────────────────────────
@@ -93,6 +117,7 @@ class WorkerSupervisor:
             launcher=launcher,
             team_context_root=self._root,
             bus=bus,
+            task_id=self._task_id,
         )
         engine = ctx.engine
 
@@ -181,7 +206,9 @@ class WorkerSupervisor:
                 pass
 
         # Read engine status.
-        engine = ExecutionEngine(team_context_root=self._root)
+        engine = ExecutionEngine(
+            team_context_root=self._root, task_id=self._task_id
+        )
         engine_status = engine.status()
         result.update(engine_status)
 
@@ -230,10 +257,69 @@ class WorkerSupervisor:
         # Process still alive after timeout.
         return False
 
+    # ── Discovery ──────────────────────────────────────────────────────────
+
+    @staticmethod
+    def list_workers(team_context_root: Path) -> list[dict]:
+        """Scan all execution directories for running worker processes.
+
+        Returns a list of dicts with keys: ``task_id``, ``pid``,
+        ``alive`` (bool), ``pid_path``.  Checks liveness via
+        ``os.kill(pid, 0)``.
+        """
+        exec_dir = team_context_root / "executions"
+        results: list[dict] = []
+
+        if exec_dir.is_dir():
+            for child in sorted(exec_dir.iterdir()):
+                if not child.is_dir():
+                    continue
+                pid_file = child / "worker.pid"
+                if not pid_file.exists():
+                    continue
+                try:
+                    pid = int(pid_file.read_text().strip())
+                except (ValueError, OSError):
+                    continue
+                alive = False
+                try:
+                    os.kill(pid, 0)
+                    alive = True
+                except OSError:
+                    pass
+                results.append({
+                    "task_id": child.name,
+                    "pid": pid,
+                    "alive": alive,
+                    "pid_path": str(pid_file),
+                })
+
+        # Also check legacy daemon.pid
+        legacy_pid = team_context_root / "daemon.pid"
+        if legacy_pid.exists():
+            try:
+                pid = int(legacy_pid.read_text().strip())
+                alive = False
+                try:
+                    os.kill(pid, 0)
+                    alive = True
+                except OSError:
+                    pass
+                results.append({
+                    "task_id": "(legacy)",
+                    "pid": pid,
+                    "alive": alive,
+                    "pid_path": str(legacy_pid),
+                })
+            except (ValueError, OSError):
+                pass
+
+        return results
+
     # ── Internal helpers ────────────────────────────────────────────────────
 
     def _write_pid(self) -> None:
-        self._root.mkdir(parents=True, exist_ok=True)
+        self._exec_dir.mkdir(parents=True, exist_ok=True)
         # Open the PID file and acquire an exclusive lock BEFORE writing.
         # The OS releases the lock automatically when the process exits or the
         # FD is closed, which eliminates the stale-PID-file race condition.
@@ -265,7 +351,7 @@ class WorkerSupervisor:
 
     def _setup_logging(self) -> None:
         """Configure file-based logging for the daemon with rotation."""
-        self._root.mkdir(parents=True, exist_ok=True)
+        self._exec_dir.mkdir(parents=True, exist_ok=True)
         logger = logging.getLogger("baton.daemon")
         # Remove any existing handlers so we always log to the current path.
         for h in logger.handlers[:]:
