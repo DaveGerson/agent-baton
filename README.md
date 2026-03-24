@@ -214,6 +214,23 @@ baton install --scope user --verify    # Install with health check
 - **Say "use the orchestrator"** explicitly for your first few runs so
   Claude Code routes to the right agent.
 
+## Architecture
+
+The system has three layers with two critical interface boundaries:
+
+```
+Human User ←→ Claude Code (natural language) ←→ baton CLI ←→ Python engine
+```
+
+Claude reads the orchestrator agent definition as its prompt, calls `baton`
+CLI commands, and parses structured text output to drive execution. The Python
+engine provides planning, state management, crash recovery, and observability.
+
+For full details see:
+- [`docs/architecture.md`](docs/architecture.md) — Package layout, dependency graph, key contracts
+- [`docs/design-decisions.md`](docs/design-decisions.md) — Why the architecture looks the way it does
+- [`docs/invariants.md`](docs/invariants.md) — Interface boundaries that must not change
+
 ## Project Structure
 
 ```
@@ -221,8 +238,9 @@ agents/            ← 19 agent definitions (markdown + YAML frontmatter)
 references/        ← 12 reference procedures (shared knowledge)
 templates/         ← CLAUDE.md + settings.json for target projects
 scripts/           ← Install scripts (Linux + Windows)
+docs/              ← Architecture documentation
 agent_baton/       ← Optional Python package (CLI + execution engine)
-tests/             ← 1730 pytest tests
+tests/             ← 1732 pytest tests
 ```
 
 ## Contributing
