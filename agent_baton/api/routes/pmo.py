@@ -11,13 +11,18 @@ POST /pmo/forge/approve               — Save an approved plan to a project
 GET  /pmo/signals                     — List all open signals
 POST /pmo/signals                     — Create a signal
 POST /pmo/signals/{signal_id}/resolve — Resolve a signal
-POST /pmo/signals/{signal_id}/forge   — Triage signal into a plan
+POST /pmo/signals/{signal_id}/forge     — Triage signal into a plan
+POST /pmo/signals/batch/resolve         — Batch-resolve multiple signals
+GET  /pmo/cards/{card_id}               — Card detail with optional plan data
+GET  /pmo/forge/sessions                — List forge sessions
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 
 from agent_baton.api.deps import get_forge_session, get_pmo_scanner, get_pmo_store
 from agent_baton.api.models.requests import (
@@ -60,7 +65,7 @@ async def get_board(
 ) -> PmoBoardResponse:
     """Return the full Kanban board with all cards and per-program health."""
     cards = scanner.scan_all()
-    health_map = scanner.program_health()
+    health_map = scanner.program_health(cards=cards)
 
     card_responses = [_card_response(c) for c in cards]
     health_responses = {
@@ -78,7 +83,7 @@ async def get_board_by_program(
     cards = scanner.scan_all()
     program_upper = program.upper()
     filtered = [c for c in cards if c.program.upper() == program_upper]
-    health_map = scanner.program_health()
+    health_map = scanner.program_health(cards=cards)
 
     card_responses = [_card_response(c) for c in filtered]
     health_responses = {
@@ -87,6 +92,47 @@ async def get_board_by_program(
         if prog.upper() == program_upper
     }
     return PmoBoardResponse(cards=card_responses, health=health_responses)
+
+
+# ---------------------------------------------------------------------------
+# Card detail
+# ---------------------------------------------------------------------------
+
+
+@router.get("/pmo/cards/{card_id}", response_model=dict)
+async def get_card(
+    card_id: str,
+    scanner: PmoScanner = Depends(get_pmo_scanner),
+    store: PmoStore = Depends(get_pmo_store),
+) -> dict:
+    """Return a single card by its task ID, including full plan data if available."""
+    from pathlib import Path as _Path
+
+    cards = scanner.scan_all()
+    card = next((c for c in cards if c.card_id == card_id), None)
+    if card is None:
+        raise HTTPException(status_code=404, detail=f"Card '{card_id}' not found.")
+
+    card_dict = _card_response(card).model_dump()
+
+    project = store.get_project(card.project_id)
+    if project is not None:
+        context_root = _Path(project.path) / ".claude" / "team-context"
+        plan_data: dict | None = None
+        scoped_plan = context_root / "executions" / card_id / "plan.json"
+        root_plan = context_root / "plan.json"
+        for plan_path in (scoped_plan, root_plan):
+            if plan_path.exists():
+                try:
+                    raw = json.loads(plan_path.read_text(encoding="utf-8"))
+                    if raw.get("task_id") == card_id:
+                        plan_data = raw
+                        break
+                except (json.JSONDecodeError, OSError):
+                    pass
+        card_dict["plan"] = plan_data
+
+    return card_dict
 
 
 # ---------------------------------------------------------------------------
