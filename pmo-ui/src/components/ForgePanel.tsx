@@ -179,6 +179,44 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
       {/* Body */}
       <div style={{ flex: 1, overflow: 'auto', padding: 16 }}>
 
+        {/* Global error banner — visible in any phase */}
+        {generateError && (
+          <div style={{
+            fontSize: 9,
+            color: T.red,
+            padding: '5px 8px',
+            background: T.red + '12',
+            borderRadius: 4,
+            marginBottom: 10,
+            maxWidth: 640,
+          }}>
+            {generateError}
+          </div>
+        )}
+
+        {/* Cancel button during generation phases */}
+        {(phase === 'generating' || phase === 'regenerating') && (
+          <div style={{ marginBottom: 10, maxWidth: 640 }}>
+            <button
+              onClick={() => {
+                abortRef.current?.abort();
+                setPhase(phase === 'regenerating' ? 'preview' : 'intake');
+              }}
+              style={{
+                padding: '4px 12px',
+                borderRadius: 3,
+                border: `1px solid ${T.border}`,
+                background: 'transparent',
+                color: T.text2,
+                fontSize: 9,
+                cursor: 'pointer',
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        )}
+
         {/* INTAKE */}
         {(phase === 'intake' || phase === 'generating') && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10, maxWidth: 640 }}>
@@ -237,12 +275,6 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
                 }}
               />
             </FormField>
-
-            {generateError && (
-              <div style={{ fontSize: 9, color: T.red, padding: '5px 8px', background: T.red + '12', borderRadius: 4 }}>
-                {generateError}
-              </div>
-            )}
 
             <button
               onClick={handleGenerate}

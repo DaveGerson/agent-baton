@@ -5,6 +5,7 @@ import { T, PRIORITY_COLOR } from '../styles/tokens';
 interface KanbanCardProps {
   card: PmoCard;
   columnColor: string;
+  onForge?: (card: PmoCard) => void;
 }
 
 function Chip({ children, color = T.text2 }: { children: React.ReactNode; color?: string }) {
@@ -56,7 +57,7 @@ function ProgramDot({ program, size = 7 }: { program: string; size?: number }) {
   );
 }
 
-export function KanbanCard({ card, columnColor }: KanbanCardProps) {
+export function KanbanCard({ card, columnColor, onForge }: KanbanCardProps) {
   const [expanded, setExpanded] = useState(false);
   const isHuman = card.column === 'awaiting_human';
   const priorityColor = PRIORITY_COLOR[card.priority] ?? T.text2;
@@ -91,7 +92,7 @@ export function KanbanCard({ card, columnColor }: KanbanCardProps) {
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 4, marginBottom: 3 }}>
           <ProgramDot program={card.program} size={6} />
           <div style={{
-            fontSize: 9,
+            fontSize: 12,
             fontWeight: 600,
             color: T.text0,
             lineHeight: 1.25,
@@ -107,7 +108,7 @@ export function KanbanCard({ card, columnColor }: KanbanCardProps) {
 
         {/* Meta row */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 3, flexWrap: 'wrap', marginBottom: 3 }}>
-          <span style={{ fontSize: 7, color: T.text4, fontFamily: 'monospace' }}>{card.card_id}</span>
+          <span style={{ fontSize: 9, color: T.text4, fontFamily: 'monospace' }}>{card.card_id}</span>
           {card.priority <= 1 && (
             <Chip color={priorityColor}>P{card.priority}</Chip>
           )}
@@ -122,7 +123,7 @@ export function KanbanCard({ card, columnColor }: KanbanCardProps) {
         {card.steps_total > 0 && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 3 }}>
             <Pips done={card.steps_completed} total={card.steps_total} color={columnColor} />
-            <span style={{ fontSize: 7, color: T.text3 }}>
+            <span style={{ fontSize: 9, color: T.text3 }}>
               {card.steps_completed}/{card.steps_total}
             </span>
           </div>
@@ -131,7 +132,7 @@ export function KanbanCard({ card, columnColor }: KanbanCardProps) {
         {/* Current phase / error */}
         {card.current_phase && !card.error && (
           <div style={{
-            fontSize: 7,
+            fontSize: 9,
             color: isHuman ? T.orange : T.text2,
             lineHeight: 1.2,
             marginTop: 2,
@@ -147,7 +148,7 @@ export function KanbanCard({ card, columnColor }: KanbanCardProps) {
         )}
         {card.error && (
           <div style={{
-            fontSize: 7,
+            fontSize: 9,
             color: T.red,
             lineHeight: 1.2,
             marginTop: 2,
@@ -162,18 +163,18 @@ export function KanbanCard({ card, columnColor }: KanbanCardProps) {
 
         {/* Footer */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 5 }}>
-          <span style={{ fontSize: 7, color: T.text3 }}>{card.project_id}</span>
+          <span style={{ fontSize: 9, color: T.text3 }}>{card.project_id}</span>
           {card.agents.length > 0 && (
             <>
-              <span style={{ fontSize: 6, color: T.text4 }}>·</span>
-              <span style={{ fontSize: 7, color: T.text3 }}>
+              <span style={{ fontSize: 9, color: T.text4 }}>·</span>
+              <span style={{ fontSize: 9, color: T.text3 }}>
                 {card.agents.slice(0, 2).join(', ')}
                 {card.agents.length > 2 && ` +${card.agents.length - 2}`}
               </span>
             </>
           )}
           <div style={{ flex: 1 }} />
-          <span style={{ fontSize: 6, color: T.text4 }}>{fmtTime(card.updated_at)}</span>
+          <span style={{ fontSize: 9, color: T.text4 }}>{fmtTime(card.updated_at)}</span>
         </div>
       </div>
 
@@ -186,19 +187,57 @@ export function KanbanCard({ card, columnColor }: KanbanCardProps) {
         }}>
           <div style={{ display: 'flex', gap: 8, marginBottom: 4 }}>
             <div>
-              <span style={{ fontSize: 7, color: T.text3 }}>Program: </span>
-              <span style={{ fontSize: 7, color: T.text0, fontWeight: 600 }}>{card.program}</span>
+              <span style={{ fontSize: 9, color: T.text3 }}>Program: </span>
+              <span style={{ fontSize: 9, color: T.text0, fontWeight: 600 }}>{card.program}</span>
             </div>
             <div>
-              <span style={{ fontSize: 7, color: T.text3 }}>Gates passed: </span>
-              <span style={{ fontSize: 7, color: T.text0, fontWeight: 600 }}>{card.gates_passed}</span>
+              <span style={{ fontSize: 9, color: T.text3 }}>Gates passed: </span>
+              <span style={{ fontSize: 9, color: T.text0, fontWeight: 600 }}>{card.gates_passed}</span>
             </div>
           </div>
           {card.agents.length > 0 && (
-            <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap', marginBottom: 6 }}>
               {card.agents.map(a => (
                 <Chip key={a} color={T.cyan}>{a}</Chip>
               ))}
+            </div>
+          )}
+
+          {/* Forge navigation actions */}
+          {onForge && (
+            <div style={{ display: 'flex', gap: 4, marginTop: 4, paddingTop: 4, borderTop: `1px solid ${T.border}` }}>
+              <button
+                onClick={e => { e.stopPropagation(); onForge(card); }}
+                style={{
+                  padding: '3px 9px',
+                  borderRadius: 3,
+                  border: `1px solid ${T.accent}44`,
+                  background: T.accent + '12',
+                  color: T.accent,
+                  fontSize: 9,
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                }}
+                title="Open Forge with this card's context"
+              >
+                Re-forge
+              </button>
+              <button
+                onClick={e => { e.stopPropagation(); onForge(card); }}
+                style={{
+                  padding: '3px 9px',
+                  borderRadius: 3,
+                  border: `1px solid ${T.purple}44`,
+                  background: T.purple + '12',
+                  color: T.purple,
+                  fontSize: 9,
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                }}
+                title="Edit this plan in Forge"
+              >
+                Edit in Forge
+              </button>
             </div>
           )}
         </div>
