@@ -29,6 +29,7 @@ class TestHandleListEmpty:
         self, capsys: pytest.CaptureFixture
     ) -> None:
         with (
+            patch(f"{_MOD}.detect_backend", return_value="file"),
             patch(f"{_MOD}.StatePersistence.list_executions", return_value=[]),
             patch(f"{_MOD}.StatePersistence") as mock_sp_cls,
             patch(f"{_MOD}.WorkerSupervisor.list_workers", return_value=[]),
