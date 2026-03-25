@@ -561,6 +561,7 @@ def _project_response(p: object) -> PmoProjectResponse:
         color=p.color,  # type: ignore[attr-defined]
         description=p.description,  # type: ignore[attr-defined]
         registered_at=p.registered_at,  # type: ignore[attr-defined]
+        ado_project=getattr(p, "ado_project", ""),  # type: ignore[attr-defined]
     )
 
 
