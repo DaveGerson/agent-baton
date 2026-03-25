@@ -24,6 +24,40 @@ if (-not (Test-Path $AgentsDir)) {
     exit 1
 }
 
+# ---------------------------------------------------------------------------
+# Prerequisite checks
+# ---------------------------------------------------------------------------
+function Test-Prerequisites {
+    # Check Python
+    $py = Get-Command python3 -ErrorAction SilentlyContinue
+    if (-not $py) {
+        $py = Get-Command python -ErrorAction SilentlyContinue
+    }
+    if (-not $py) {
+        Write-Error "Python 3.10+ is required but not found in PATH."
+        Write-Error "Install from https://python.org"
+        exit 1
+    }
+    $pyVersion = & $py.Source --version 2>&1
+    if ($pyVersion -match "(\d+)\.(\d+)") {
+        $major = [int]$Matches[1]
+        $minor = [int]$Matches[2]
+        if ($major -lt 3 -or ($major -eq 3 -and $minor -lt 10)) {
+            Write-Error "Python 3.10+ required (found: $pyVersion)"
+            exit 1
+        }
+    }
+
+    # Check git
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+        Write-Error "git is required but not found in PATH."
+        Write-Error "Install from https://git-scm.com"
+        exit 1
+    }
+}
+
+Test-Prerequisites
+
 # ── Step 1: Scope ──────────────────────────────────────────
 if ($Scope -eq "") {
     Write-Host "  STEP 1: Install Location"

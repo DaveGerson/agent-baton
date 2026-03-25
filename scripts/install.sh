@@ -9,6 +9,32 @@ REFS_DIR="$ROOT_DIR/references"
 CLAUDE_MD="$ROOT_DIR/templates/CLAUDE.md"
 SETTINGS_JSON="$ROOT_DIR/templates/settings.json"
 
+# ---------------------------------------------------------------------------
+# Prerequisite checks
+# ---------------------------------------------------------------------------
+check_prereq() {
+    local cmd=$1
+    local install_hint=$2
+    if ! command -v "$cmd" &>/dev/null; then
+        echo "error: '$cmd' is required but not found in PATH"
+        echo "  $install_hint"
+        exit 1
+    fi
+}
+
+check_prereqs() {
+    check_prereq "python3" "Install Python 3.10+ from https://python.org"
+    check_prereq "git" "Install git from https://git-scm.com"
+
+    # Verify Python version >= 3.10
+    if ! python3 -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)" 2>/dev/null; then
+        echo "error: Python 3.10+ required (found: $(python3 --version 2>&1))"
+        exit 1
+    fi
+}
+
+check_prereqs
+
 if [ ! -d "$AGENTS_DIR" ]; then
     echo "Error: agents/ not found. Run from the skill folder."
     exit 1

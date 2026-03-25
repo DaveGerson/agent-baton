@@ -188,7 +188,13 @@ def _add(args: argparse.Namespace) -> None:
             (source_id, args.source_type, args.name, json.dumps(config)),
         )
     except Exception as exc:
-        print(f"error registering source: {exc}")
+        msg = str(exc)
+        if "UNIQUE constraint" in msg:
+            print(f"error: source '{source_id}' is already registered.")
+            print(f"  Update it by removing first: baton source remove {source_id}")
+        else:
+            print(f"error registering source: {exc}")
+            print("  Check that central.db is writable and not locked.")
         store.close()
         sys.exit(1)
     store.close()
@@ -223,7 +229,13 @@ def _list(args: argparse.Namespace) -> None:  # noqa: ARG001
             "FROM external_sources ORDER BY source_type, source_id"
         )
     except Exception as exc:
-        print(f"error reading external_sources: {exc}")
+        msg = str(exc)
+        if "no such table" in msg:
+            print("error: external_sources table not found in central.db.")
+            print("  This may indicate an older database version. Run: baton migrate-storage")
+        else:
+            print(f"error reading external_sources: {exc}")
+            print("  Check that central.db exists and is readable.")
         store.close()
         sys.exit(1)
     store.close()
@@ -265,7 +277,13 @@ def _sync(args: argparse.Namespace) -> None:
                 (args.source_id,),
             )
     except Exception as exc:
-        print(f"error reading external_sources: {exc}")
+        msg = str(exc)
+        if "no such table" in msg:
+            print("error: external_sources table not found in central.db.")
+            print("  Run: baton migrate-storage")
+        else:
+            print(f"error reading external_sources: {exc}")
+            print("  Check that central.db exists and is readable.")
         store.close()
         sys.exit(1)
     store.close()
@@ -409,7 +427,12 @@ def _remove(args: argparse.Namespace) -> None:
             (args.source_id,),
         )
     except Exception as exc:
-        print(f"error removing source: {exc}")
+        msg = str(exc)
+        if "no such table" in msg:
+            print("error: external_sources table not found. Run: baton migrate-storage")
+        else:
+            print(f"error removing source: {exc}")
+            print("  Check that central.db is writable and not locked.")
         store.close()
         sys.exit(1)
     store.close()
@@ -457,7 +480,15 @@ def _map(args: argparse.Namespace) -> None:
             ),
         )
     except Exception as exc:
-        print(f"error writing mapping: {exc}")
+        msg = str(exc)
+        if "UNIQUE constraint" in msg:
+            print(f"error: mapping already exists for {args.source_id}/{args.external_id}")
+            print("  The existing mapping has been replaced (INSERT OR REPLACE).")
+        elif "no such table" in msg:
+            print("error: external_mappings table not found. Run: baton migrate-storage")
+        else:
+            print(f"error writing mapping: {exc}")
+            print("  Check that central.db is writable and not locked.")
         store.close()
         sys.exit(1)
     store.close()

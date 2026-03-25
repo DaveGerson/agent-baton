@@ -1,8 +1,8 @@
 # TODO: Code Review & Audit Findings — Proposal 001
 
-**Date**: 2026-03-22
-**Source**: Code Reviewer (Phase C2) + Security Auditor (Phase C3)
-**Status of build**: 1977 tests passing. Shipped with fixes for top 3 issues.
+**Date**: 2026-03-22 (original), 2026-03-25 (DX audit additions)
+**Source**: Code Reviewer (Phase C2) + Security Auditor (Phase C3) + DX Audit (6 parallel agents)
+**Status of build**: 3727 tests passing. DX Phase 1 fixes shipped.
 
 ---
 
@@ -60,3 +60,61 @@
 - File: `tests/test_daemon.py:test_windows_raises_runtime_error`
 - Issue: Patches both `sys.platform` and `daemon.sys.platform` — the first is redundant since the daemon module uses its own reference.
 - Fix: Remove the `monkeypatch.setattr(sys, "platform", "win32")` line.
+
+---
+
+## DX Audit — Phase 1 Fixes (SHIPPED 2026-03-25)
+
+14 findings implemented across 7 files (187 insertions, 36 deletions):
+
+- [x] **F1** (HIGH): Prerequisite checks in install scripts — Python 3.10+, git
+- [x] **F2** (HIGH): JSON/schema parsing error handling in execute.py
+- [x] **F3** (HIGH): Silent sync `except: pass` → logged warning
+- [x] **F4** (CRITICAL): BATON_TASK_ID printed before first action
+- [x] **F5** (HIGH): next_action() RuntimeError caught with recovery hints
+- [x] **F7** (HIGH): Progress prints during `baton plan`
+- [x] **F8** (HIGH): First-run detection in `baton` (no args)
+- [x] **F9** (HIGH): "Next: baton execute start" hint after plan save
+- [x] **F10** (HIGH): Recovery hints on "No active execution"
+- [x] **F19** (MEDIUM): Context-specific SQLite error messages in source_cmd.py
+- [x] **F20** (MEDIUM): SQLite fallback promoted from debug to info log
+- [x] **F22** (MEDIUM): --add-phase/--add-step input validation
+- [x] **F23** (MEDIUM): step_id format validation (N.N pattern)
+- [x] **F33** (LOW): assert → ValueError in _print_action()
+
+## DX Audit — Phase 2 TODOs ("Guide the Developer")
+
+**TODO-DX-9: CLI help restructure (F6)**
+- File: `agent_baton/cli/main.py`
+- Issue: 53 commands listed flat in `baton --help`. Core workflow buried.
+- Fix: Group commands into sections (Core Workflow / Observability / Governance / Admin).
+
+**TODO-DX-10: Consolidate execution loop docs (F11)**
+- Files: `CLAUDE.md:104-128`, `references/baton-engine.md:524-625`
+- Issue: Two different execution loop descriptions with subtle divergences.
+- Fix: Pick canonical version in baton-engine.md, cross-reference from CLAUDE.md.
+
+**TODO-DX-11: End-to-end worked example (F12)**
+- File: New `docs/examples/first-run.md`
+- Issue: No copy-paste-and-learn path for new users.
+- Fix: Write complete worked example with real task, plan output, full execute loop.
+
+**TODO-DX-12: Troubleshooting index (F13)**
+- File: New `docs/troubleshooting.md`
+- Issue: Troubleshooting scattered across 3 files.
+- Fix: Create single-page decision tree linking to existing docs.
+
+**TODO-DX-13: Settings.json schema docs (F14)**
+- Issue: Users learn hook structure by trial/error.
+- Fix: Document schema, supported hooks, mcpServers, env, permissions.
+
+**TODO-DX-14: --step vs --step-id consistency (F16)**
+- File: `agent_baton/cli/commands/execution/execute.py`
+- Issue: Inconsistent aliases across execute subcommands.
+- Fix: Standardize on --step-id everywhere.
+
+## DX Audit — Phase 3 TODOs ("Polish the Experience")
+
+See full findings matrix in the DX Audit Report (conversation artifact, 2026-03-25).
+Items F18, F24-F32, F34-F38 cover centralized formatting, agent definition
+consistency, documentation polish, version flag, color support, and exit codes.

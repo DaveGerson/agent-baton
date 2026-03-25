@@ -5,6 +5,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -20,6 +21,8 @@ from agent_baton.models.parallel import ExecutionRecord
 from agent_baton.models.plan import MissionLogEntry
 
 _log = logging.getLogger(__name__)
+
+_STEP_ID_RE = re.compile(r'^\d+\.\d+$')
 
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
@@ -138,7 +141,8 @@ def _print_action(action: dict) -> None:
     parse engine responses. Treat this function as a public API.
     """
     atype = action.get("action_type", "")
-    assert isinstance(atype, str), f"action_type must be str from to_dict(), got {type(atype)}"
+    if not isinstance(atype, str):
+        raise ValueError(f"Internal error: action_type must be str, got {type(atype).__name__}. Report this issue with the full execution trace.")
     msg = action.get("message", "")
 
     if atype == ActionType.DISPATCH.value:
@@ -217,8 +221,18 @@ def handler(args: argparse.Namespace) -> None:
             print(f"error: plan file not found: {plan_path}")
             print("Run 'baton plan --save \"task description\"' first.")
             sys.exit(1)
-        data = json.loads(plan_path.read_text(encoding="utf-8"))
-        plan = MachinePlan.from_dict(data)
+        try:
+            data = json.loads(plan_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            print(f"error: plan.json is not valid JSON: {exc}", file=sys.stderr)
+            print("Re-create with: baton plan --save \"task description\"", file=sys.stderr)
+            sys.exit(1)
+        try:
+            plan = MachinePlan.from_dict(data)
+        except (KeyError, ValueError, TypeError) as exc:
+            print(f"error: plan.json has invalid structure: {exc}", file=sys.stderr)
+            print("Re-create with: baton plan --save \"task description\"", file=sys.stderr)
+            sys.exit(1)
         # Use namespaced execution directory for the new plan
         task_id = plan.task_id
         engine = ExecutionEngine(bus=bus, task_id=task_id, storage=storage)
@@ -231,28 +245,42 @@ def handler(args: argparse.Namespace) -> None:
             # Fallback to legacy persistence marker when storage is unavailable.
             if engine._persistence is not None:
                 engine._persistence.set_active()
+        print(f"Session binding: export BATON_TASK_ID={task_id}\n")
         _print_action(action.to_dict())
-        print(f"\nSession binding: export BATON_TASK_ID={task_id}")
 
     elif args.subcommand == "next":
-        if args.all_actions:
-            actions = engine.next_actions()
-            if actions:
-                result = [a.to_dict() for a in actions]
+        try:
+            if args.all_actions:
+                actions = engine.next_actions()
+                if actions:
+                    result = [a.to_dict() for a in actions]
+                else:
+                    # Fall back to single next_action for terminal states
+                    action = engine.next_action()
+                    result = [action.to_dict()]
+                print(json.dumps(result, indent=2))
             else:
-                # Fall back to single next_action for terminal states
                 action = engine.next_action()
-                result = [action.to_dict()]
-            print(json.dumps(result, indent=2))
-        else:
-            action = engine.next_action()
-            _print_action(action.to_dict())
+                _print_action(action.to_dict())
+        except RuntimeError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            print("Recovery options:", file=sys.stderr)
+            print("  baton execute resume    — resume from saved state", file=sys.stderr)
+            print("  baton execute status    — check current state", file=sys.stderr)
+            print("  baton execute list      — see all executions", file=sys.stderr)
+            sys.exit(1)
 
     elif args.subcommand == "dispatched":
+        if not _STEP_ID_RE.match(args.step_id):
+            print(f"error: invalid step ID '{args.step_id}' (expected format: N.N, e.g. '1.1')", file=sys.stderr)
+            sys.exit(1)
         engine.mark_dispatched(step_id=args.step_id, agent_name=args.agent)
         print(json.dumps({"status": "dispatched", "step_id": args.step_id}))
 
     elif args.subcommand == "record":
+        if not _STEP_ID_RE.match(args.step_id):
+            print(f"error: invalid step ID '{args.step_id}' (expected format: N.N, e.g. '1.1')", file=sys.stderr)
+            sys.exit(1)
         files = [f.strip() for f in args.files.split(",") if f.strip()] if args.files else []
         engine.record_step_result(
             step_id=args.step_id,
@@ -330,13 +358,17 @@ def handler(args: argparse.Namespace) -> None:
             sync_result = auto_sync_current_project()
             if sync_result and sync_result.rows_synced > 0:
                 print(f"Synced {sync_result.rows_synced} rows to central.db")
-        except Exception:
-            pass  # sync failure must never block execution completion
+        except Exception as exc:
+            _log.warning("Auto-sync to central.db failed (non-blocking): %s", exc)
 
     elif args.subcommand == "status":
         st = engine.status()
         if not st:
             print("No active execution.")
+            print()
+            print("  List executions:  baton execute list")
+            print("  Switch execution: export BATON_TASK_ID=<task-id>")
+            print("  Start new:        baton plan --save \"task description\"")
             return
         print(f"Task:    {st.get('task_id', '?')}")
         # Determine binding source
@@ -389,8 +421,8 @@ def _handle_list() -> None:
             # Also check for active task in SQLite if not found on disk
             if active_task_id is None:
                 active_task_id = _sqlite_storage.get_active_task()
-        except Exception:
-            _log.debug("execute list: SQLite load failed, using file backend only", exc_info=True)
+        except Exception as exc:
+            _log.info("execute list: SQLite backend unavailable, using file backend: %s", exc)
     else:
         _log.debug("execute list: using file backend at %s", context_root)
 
@@ -418,8 +450,8 @@ def _handle_list() -> None:
         if state is None and _sqlite_storage is not None:
             try:
                 state = _sqlite_storage.load_execution(tid)
-            except Exception:
-                _log.debug("execute list: failed to load %s from SQLite", tid, exc_info=True)
+            except Exception as exc:
+                _log.info("execute list: failed to load %s from SQLite: %s", tid, exc)
         if state is None:
             continue
         steps_complete = sum(
@@ -489,8 +521,8 @@ def _handle_switch(task_id: str) -> None:
         try:
             _sqlite_storage = get_project_storage(context_root, backend="sqlite")
             exists_in_sqlite = _sqlite_storage.load_execution(task_id) is not None
-        except Exception:
-            _log.debug("execute switch: SQLite check failed", exc_info=True)
+        except Exception as exc:
+            _log.info("execute switch: SQLite check failed: %s", exc)
 
     if not exists_in_files and not exists_in_sqlite:
         print(f"error: no execution found with task ID '{task_id}'")
@@ -503,8 +535,8 @@ def _handle_switch(task_id: str) -> None:
         _log.debug("execute switch: setting active task in SQLite to %s", task_id)
         try:
             _sqlite_storage.set_active_task(task_id)
-        except Exception:
-            _log.debug("execute switch: SQLite set_active_task failed", exc_info=True)
+        except Exception as exc:
+            _log.info("execute switch: SQLite set_active_task failed: %s", exc)
 
     print(f"Active execution switched to: {task_id}")
 
@@ -519,7 +551,13 @@ def _parse_add_phases(specs: list[str]) -> list[PlanPhase]:
     for i, spec in enumerate(specs, start=1):
         parts = spec.split(":", 1)
         name = parts[0].strip()
+        if not name:
+            print(f"error: --add-phase spec #{i} has empty name: '{spec}'", file=sys.stderr)
+            print("Expected format: NAME:AGENT (e.g. 'Design phase:architect')", file=sys.stderr)
+            sys.exit(1)
         agent = parts[1].strip() if len(parts) > 1 else "backend-engineer"
+        if len(parts) == 1:
+            print(f"warning: --add-phase '{spec}' has no agent specified, defaulting to 'backend-engineer'", file=sys.stderr)
         phases.append(PlanPhase(
             phase_id=0,  # placeholder — renumbered by amend_plan
             name=name,
@@ -545,8 +583,14 @@ def _parse_add_steps(specs: list[str]) -> tuple[int | None, list[PlanStep]]:
     for i, spec in enumerate(specs, start=1):
         parts = spec.split(":", 2)
         if len(parts) < 2:
-            continue
-        phase_id = int(parts[0].strip())
+            print(f"error: --add-step spec #{i} is malformed: '{spec}'", file=sys.stderr)
+            print("Expected format: PHASE_ID:AGENT:DESCRIPTION (e.g. '2:data-engineer:Run migration')", file=sys.stderr)
+            sys.exit(1)
+        try:
+            phase_id = int(parts[0].strip())
+        except ValueError:
+            print(f"error: --add-step spec #{i} has non-numeric phase ID: '{parts[0]}'", file=sys.stderr)
+            sys.exit(1)
         agent = parts[1].strip()
         desc = parts[2].strip() if len(parts) > 2 else f"Additional work in phase {phase_id}"
         if target_phase is None:

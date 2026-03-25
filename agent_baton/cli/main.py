@@ -59,6 +59,15 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     if args.command is None:
+        from pathlib import Path
+        if not Path(".claude/agents").exists():
+            print("Agent Baton is not installed in this project.\n")
+            print("Quick start:")
+            print("  baton install --scope project --source /path/to/agent-baton")
+            print()
+            print("Or run the install script from the agent-baton repo:")
+            print("  scripts/install.sh")
+            print()
         parser.print_help()
         return
 
