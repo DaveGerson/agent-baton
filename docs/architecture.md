@@ -12,6 +12,20 @@ execution bookkeeping lives in the Python engine.
 
 ---
 
+## Quick Navigation
+
+| Question | Section |
+|----------|---------|
+| How does Claude talk to the engine? | [2. Interaction Chain](#2-interaction-chain) |
+| What's in each package? | [3. Package Layout](#3-package-layout) |
+| What depends on what? | [4. Dependency Graph](#4-dependency-graph) |
+| Where is the execution state machine? | [5. Execution Engine](#5-execution-engine) |
+| What are the interface contracts? | [6. Key Contracts](#6-key-contracts) |
+| How does knowledge delivery work? | [9. Knowledge Delivery](#9-knowledge-delivery-subsystem) |
+| How does cross-project sync work? | [10. Federated Sync](#10-federated-sync-architecture) |
+
+---
+
 ## 2. Interaction Chain
 
 ```

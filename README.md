@@ -12,7 +12,7 @@ data engineering, security review, code review, and more. Stack-aware:
 ask for a backend engineer on a Node.js project, you get one that knows
 Express and Prisma. On a Python project, you get FastAPI and SQLAlchemy.
 
-**12 reference procedures** — the orchestrator reads these before every task.
+**15 reference procedures** — the orchestrator reads these before every task.
 They encode how to plan, what guardrails to apply, how agents communicate,
 when to commit, and how to handle failures. You never see them; they make
 the orchestrator smarter.
@@ -181,7 +181,10 @@ First time on a Go project? The `talent-builder` agent creates
 |----------|-------------|
 | `decision-framework.md` | When to use subagent vs skill vs reference doc |
 | `research-procedures.md` | 4 research modes the orchestrator runs inline |
+| `adaptive-execution.md` | Adaptive execution strategies and runtime adjustments |
 | `agent-routing.md` | Stack detection + agent flavor matching |
+| `baton-engine.md` | CLI reference for the execution engine |
+| `baton-patterns.md` | Design patterns catalog for orchestration |
 | `guardrail-presets.md` | Risk triage + standard guardrail configs |
 | `comms-protocols.md` | Delegation prompts, handoff briefs, logging |
 | `task-sequencing.md` | Phase ordering + parallel dispatch rules |

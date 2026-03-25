@@ -24,7 +24,7 @@ performant queries.
 - **Measure before optimizing.** Add indexes and denormalize only when you
   can justify it with query patterns.
 
-## When you finish
+## Output Format
 
 Return:
 1. **Files created/modified** (with paths)

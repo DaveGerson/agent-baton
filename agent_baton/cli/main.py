@@ -50,10 +50,17 @@ def discover_commands() -> dict[str, types.ModuleType]:
 
 
 def main(argv: list[str] | None = None) -> None:
+    from importlib.metadata import version, PackageNotFoundError
+    try:
+        _version = version("agent-baton")
+    except PackageNotFoundError:
+        _version = "dev"
+
     parser = argparse.ArgumentParser(
         prog="baton",
         description="Agent Baton — multi-agent orchestration tools",
     )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {_version}")
     sub = parser.add_subparsers(dest="command")
 
     # Discover and register all command modules.

@@ -28,7 +28,7 @@ server-side code.
   an algorithm, adding an index), leave a brief comment or note in your
   summary explaining why.
 
-## When you finish
+## Output Format
 
 Return a structured summary:
 1. **Files created/modified** (with paths)

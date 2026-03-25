@@ -48,7 +48,7 @@ React applications following modern patterns.
 - `any` in TypeScript — always type your props and state
 - Barrel files (`index.ts` re-exports) in large codebases — they hurt tree-shaking
 
-## When you finish
+## Output Format
 
 Return:
 1. **Files created/modified** (with paths)
