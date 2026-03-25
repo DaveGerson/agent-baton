@@ -212,6 +212,12 @@ baton execute start                    # Drive the plan through phases
 baton execute next --all               # Get all parallel-dispatchable steps
 baton execute resume                   # Resume after crash/interruption
 
+# Concurrent execution (multiple plans in parallel)
+export BATON_TASK_ID=<task-id>         # Bind this terminal to a specific execution
+baton execute status                   # Shows which execution + binding source
+baton execute list                     # List all running executions
+baton execute switch <task-id>         # Switch the active execution marker
+
 # Operational visibility
 baton usage                            # Usage statistics
 baton scores                           # Agent performance scorecards
@@ -245,6 +251,11 @@ baton source sync <id>                 # Pull latest items from external source
   outweighs benefits.
 - **Say "use the orchestrator"** explicitly for your first few runs so
   Claude Code routes to the right agent.
+- **Run plans in parallel.** Each `baton execute start` prints an
+  `export BATON_TASK_ID=...` line. Run that in each terminal to bind it
+  to its execution. Without it, whichever terminal starts last wins the
+  default active marker. Resolution order:
+  `--task-id` flag > `BATON_TASK_ID` env var > `active-task-id.txt`.
 
 ## Architecture
 
