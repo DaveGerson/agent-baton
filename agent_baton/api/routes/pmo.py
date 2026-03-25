@@ -24,6 +24,7 @@ from agent_baton.api.models.requests import (
     ApproveForgeRequest,
     CreateForgeRequest,
     CreateSignalRequest,
+    ForgeSignalRequest,
     InterviewRequest,
     RegenerateRequest,
     RegisterProjectRequest,
@@ -38,6 +39,7 @@ from agent_baton.api.models.responses import (
     PmoProjectResponse,
     PmoSignalResponse,
     ProgramHealthResponse,
+    ResolveSignalResponse,
 )
 from agent_baton.core.pmo.forge import ForgeSession
 from agent_baton.core.pmo.scanner import PmoScanner
@@ -376,28 +378,52 @@ async def create_signal(
     return _signal_response(saved)
 
 
-@router.post("/pmo/signals/{signal_id}/resolve", response_model=dict)
+@router.post("/pmo/signals/{signal_id}/resolve", response_model=ResolveSignalResponse)
 async def resolve_signal(
     signal_id: str,
     store: PmoStore = Depends(get_pmo_store),
-) -> dict:
-    """Mark a signal as resolved.
+) -> ResolveSignalResponse:
+    """Mark a signal as resolved and return the updated signal.
 
-    Returns 404 if the signal does not exist.
+    Sets the signal's status to ``"resolved"`` and returns the full updated
+    signal so callers can synchronise their local state without a separate
+    fetch.  Returns 404 if the signal does not exist.
     """
-    resolved = store.resolve_signal(signal_id)
-    if not resolved:
+    found = store.resolve_signal(signal_id)
+    if not found:
         raise HTTPException(
             status_code=404,
             detail=f"Signal '{signal_id}' not found.",
         )
-    return {"resolved": True, "signal_id": signal_id}
+
+    # Read the signal back from the store to get the authoritative, updated state.
+    config = store.load_config()
+    updated = next((s for s in config.signals if s.signal_id == signal_id), None)
+    if updated is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Signal was resolved but could not be read back.",
+        )
+
+    sig = _signal_response(updated)
+    return ResolveSignalResponse(
+        resolved=True,
+        signal_id=sig.signal_id,
+        signal_type=sig.signal_type,
+        title=sig.title,
+        description=sig.description,
+        source_project_id=sig.source_project_id,
+        severity=sig.severity,
+        status=sig.status,
+        created_at=sig.created_at,
+        forge_task_id=sig.forge_task_id,
+    )
 
 
 @router.post("/pmo/signals/{signal_id}/forge", response_model=dict, status_code=201)
 async def forge_signal(
     signal_id: str,
-    req: ApproveForgeRequest,
+    req: ForgeSignalRequest,
     forge: ForgeSession = Depends(get_forge_session),
     store: PmoStore = Depends(get_pmo_store),
 ) -> dict:
@@ -408,8 +434,8 @@ async def forge_signal(
     signal status is updated to ``triaged``.
 
     The ``project_id`` in the request body determines which project receives
-    the plan.  The ``plan`` field is ignored for this endpoint — the Forge
-    derives the description from the signal itself.
+    the plan.  The Forge derives the plan description from the signal itself
+    — no ``plan`` payload is required.
 
     Returns the generated plan dict plus the saved path.
     """

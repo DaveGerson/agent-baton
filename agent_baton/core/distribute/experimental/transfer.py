@@ -1,4 +1,25 @@
-"""Cross-project knowledge transfer — copy agents, knowledge, and references between projects."""
+"""Cross-project knowledge transfer -- copy agents, knowledge packs, and
+references between projects.
+
+Enables organizations to share proven agent configurations across projects
+without going through the full package/publish/pull cycle. Operates
+directly on ``.claude/`` directory structures.
+
+The transfer workflow:
+
+1. **Discover** what is available in the source project with
+   ``discover_transferable()``. Optionally filter agents by their
+   performance score (``min_score``).
+2. **Build a manifest** selecting which agents, knowledge packs, and
+   references to transfer.
+3. **Export** from source to target with ``export_to()``, or
+   **import** from another project with ``import_from()``.
+
+Existing files in the target are never overwritten unless ``force=True``.
+
+**Status: Experimental** -- built and tested but not yet validated with
+real usage data.
+"""
 from __future__ import annotations
 
 import shutil

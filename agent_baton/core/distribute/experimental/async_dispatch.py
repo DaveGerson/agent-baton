@@ -1,9 +1,27 @@
-"""Async Task Dispatch — dispatch and track long-running tasks."""
+"""Async task dispatch -- dispatch and track long-running tasks.
+
+Provides on-disk tracking for tasks that run outside the main orchestration
+loop (e.g. long-running CI pipelines, external builds, manual approvals).
+Each task is stored as a JSON file under
+``.claude/team-context/async-tasks/`` so its status can be polled by any
+agent session.
+
+Task lifecycle::
+
+    pending --> dispatched --> completed | failed
+
+The ``AsyncDispatcher`` records task intent on disk but does NOT launch
+subprocesses itself. The caller is responsible for actually executing the
+task and calling ``mark_complete()`` or ``mark_failed()`` when done.
+
+**Status: Experimental** -- built and tested but not yet validated with
+real usage data.
+"""
 from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 

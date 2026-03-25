@@ -55,7 +55,7 @@ class EventBus:
 
         self._history.append(event)
 
-        for sub_id, (pattern, handler) in list(self._subscriptions.items()):
+        for _sub_id, (pattern, handler) in list(self._subscriptions.items()):
             if fnmatch(event.topic, pattern):
                 handler(event)
 

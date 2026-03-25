@@ -12,7 +12,6 @@ from __future__ import annotations
 import argparse
 
 from agent_baton.core.improve.triggers import TriggerEvaluator
-from agent_baton.models.improvement import TriggerConfig
 
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
