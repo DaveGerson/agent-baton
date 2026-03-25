@@ -2,6 +2,16 @@ import { useState } from 'react';
 import { T } from '../styles/tokens';
 import type { ForgePlanResponse, ForgePlanPhase, ForgePlanStep } from '../api/types';
 
+const AGENT_LIST = [
+  'backend-engineer',
+  'frontend-engineer',
+  'test-engineer',
+  'architect',
+  'security-reviewer',
+  'devops-engineer',
+  'data-engineer',
+] as const;
+
 interface PlanEditorProps {
   plan: ForgePlanResponse;
   onPlanChange: (plan: ForgePlanResponse) => void;
@@ -186,14 +196,41 @@ export function PlanEditor({ plan, onPlanChange }: PlanEditorProps) {
                       )}
                     </div>
 
-                    {/* Agent tag */}
-                    <span style={{
-                      fontSize: 7, color: T.cyan, background: T.cyan + '14',
-                      border: `1px solid ${T.cyan}22`, padding: '1px 5px',
-                      borderRadius: 3, whiteSpace: 'nowrap', flexShrink: 0,
-                    }}>
-                      {step.agent_name}
-                    </span>
+                    {/* Agent chip — dropdown when editing, badge when not */}
+                    {editingStep === step.step_id ? (
+                      <select
+                        value={step.agent_name}
+                        onChange={e => updateStep(pi, si, s => ({ ...s, agent_name: e.target.value }))}
+                        onClick={e => e.stopPropagation()}
+                        style={{
+                          fontSize: 9,
+                          color: T.cyan,
+                          background: T.bg3,
+                          border: `1px solid ${T.cyan}44`,
+                          borderRadius: 3,
+                          padding: '1px 4px',
+                          outline: 'none',
+                          flexShrink: 0,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {AGENT_LIST.map(a => (
+                          <option key={a} value={a}>{a}</option>
+                        ))}
+                        {/* Preserve current value if it's not in the standard list */}
+                        {!AGENT_LIST.includes(step.agent_name as typeof AGENT_LIST[number]) && (
+                          <option value={step.agent_name}>{step.agent_name}</option>
+                        )}
+                      </select>
+                    ) : (
+                      <span style={{
+                        fontSize: 9, color: T.cyan, background: T.cyan + '14',
+                        border: `1px solid ${T.cyan}22`, padding: '1px 5px',
+                        borderRadius: 3, whiteSpace: 'nowrap', flexShrink: 0,
+                      }}>
+                        {step.agent_name}
+                      </span>
+                    )}
 
                     {/* Remove step */}
                     <button

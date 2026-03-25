@@ -47,3 +47,11 @@ export const PRIORITY_COLOR: Record<number, string> = {
   2: T.yellow,
   3: T.text2,
 };
+
+export const FONT_SIZES = {
+  xs: '9px',    // minimum — only for tertiary metadata
+  sm: '11px',   // scannable content floor
+  md: '12px',   // card titles, form labels
+  lg: '14px',   // section headers
+  xl: '16px',   // page titles
+} as const;

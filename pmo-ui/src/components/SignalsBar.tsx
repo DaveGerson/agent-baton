@@ -1,17 +1,20 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { api } from '../api/client';
 import { T, SEVERITY_COLOR } from '../styles/tokens';
 import type { PmoSignal } from '../api/types';
 
+const SIGNALS_POLL_MS = 15000;
+
 interface SignalsBarProps {
   onForge: (signal: PmoSignal) => void;
+  onOpenCountChange?: (count: number) => void;
 }
 
 function severityColor(sev: string): string {
   return SEVERITY_COLOR[sev.toLowerCase()] ?? T.text2;
 }
 
-export function SignalsBar({ onForge }: SignalsBarProps) {
+export function SignalsBar({ onForge, onOpenCountChange }: SignalsBarProps) {
   const [signals, setSignals] = useState<PmoSignal[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -19,18 +22,49 @@ export function SignalsBar({ onForge }: SignalsBarProps) {
   const [newTitle, setNewTitle] = useState('');
   const [newSeverity, setNewSeverity] = useState('medium');
   const [submitting, setSubmitting] = useState(false);
+  const mountedRef = useRef(true);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  function applySignals(data: PmoSignal[]) {
+    if (!mountedRef.current) return;
+    setSignals(data);
+    const openCount = data.filter(s => s.status !== 'resolved').length;
+    onOpenCountChange?.(openCount);
+  }
 
   useEffect(() => {
-    api.getSignals()
-      .then(setSignals)
-      .catch(e => setError(e instanceof Error ? e.message : 'Failed to load signals'))
-      .finally(() => setLoading(false));
-  }, []);
+    mountedRef.current = true;
+
+    async function fetchSignals() {
+      try {
+        const data = await api.getSignals();
+        applySignals(data);
+        setError(null);
+      } catch (e) {
+        if (mountedRef.current) setError(e instanceof Error ? e.message : 'Failed to load signals');
+      } finally {
+        if (mountedRef.current) setLoading(false);
+      }
+    }
+
+    fetchSignals();
+    intervalRef.current = setInterval(fetchSignals, SIGNALS_POLL_MS);
+
+    return () => {
+      mountedRef.current = false;
+      if (intervalRef.current) clearInterval(intervalRef.current);
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function handleResolve(id: string) {
     try {
       const updated = await api.resolveSignal(id);
-      setSignals(prev => prev.map(s => s.signal_id === id ? updated : s));
+      setSignals(prev => {
+        const next = prev.map(s => s.signal_id === id ? updated : s);
+        const openCount = next.filter(s => s.status !== 'resolved').length;
+        onOpenCountChange?.(openCount);
+        return next;
+      });
     } catch {
       // silent — not critical
     }
@@ -47,7 +81,12 @@ export function SignalsBar({ onForge }: SignalsBarProps) {
         severity: newSeverity,
         status: 'open',
       });
-      setSignals(prev => [sig, ...prev]);
+      setSignals(prev => {
+        const next = [sig, ...prev];
+        const openCount = next.filter(s => s.status !== 'resolved').length;
+        onOpenCountChange?.(openCount);
+        return next;
+      });
       setNewTitle('');
       setShowAdd(false);
     } catch {

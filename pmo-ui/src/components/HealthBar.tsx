@@ -69,7 +69,7 @@ export function HealthBar({ health }: HealthBarProps) {
                 transition: 'width 0.5s',
               }} />
             </div>
-            <div style={{ fontSize: 7, color: T.text3, marginTop: 2 }}>
+            <div style={{ fontSize: 9, color: T.text3, marginTop: 2 }}>
               {pg.total_plans} plans
               {pg.active > 0 && ` · ${pg.active} active`}
               {pg.completed > 0 && ` · ${pg.completed} done`}
