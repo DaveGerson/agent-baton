@@ -43,7 +43,7 @@ agents/            ← Distributable agent definitions (19 .md files)
 references/        ← Distributable reference docs (13 .md files)
 templates/         ← CLAUDE.md + settings.json installed to target projects
 scripts/           ← Install scripts (Linux + Windows)
-tests/             ← Test suite (~3745 tests, pytest)
+tests/             ← Test suite (~3907 tests, pytest)
 pmo-ui/            ← React/Vite PMO frontend (served at /pmo/)
 .claude/           ← Project-specific orchestration setup:
   agents/          ← 19 packaged agents (mirrored from agents/) +
