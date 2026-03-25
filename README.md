@@ -12,7 +12,7 @@ data engineering, security review, code review, and more. Stack-aware:
 ask for a backend engineer on a Node.js project, you get one that knows
 Express and Prisma. On a Python project, you get FastAPI and SQLAlchemy.
 
-**12 reference procedures** — the orchestrator reads these before every task.
+**15 reference procedures** — the orchestrator reads these before every task.
 They encode how to plan, what guardrails to apply, how agents communicate,
 when to commit, and how to handle failures. You never see them; they make
 the orchestrator smarter.
@@ -191,6 +191,9 @@ First time on a Go project? The `talent-builder` agent creates
 | `hooks-enforcement.md` | Mechanical guardrails via Claude Code hooks |
 | `doc-generation.md` | Document generation pipeline |
 | `knowledge-architecture.md` | Knowledge pack structure and conventions |
+| `adaptive-execution.md` | Engagement level classification (Level 1/2/3) |
+| `baton-engine.md` | Full CLI reference for the execution engine |
+| `baton-patterns.md` | Execution plan design patterns catalog |
 
 ## Optional: Python CLI (`baton`)
 
@@ -283,7 +286,7 @@ templates/         ← CLAUDE.md + settings.json for target projects
 scripts/           ← Install scripts (Linux + Windows)
 docs/              ← Architecture documentation
 agent_baton/       ← Optional Python package (CLI + execution engine)
-tests/             ← ~3675 pytest tests
+tests/             ← ~3745 pytest tests
 ```
 
 ## Contributing

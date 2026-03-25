@@ -43,10 +43,12 @@ agents/            ← Distributable agent definitions (19 .md files)
 references/        ← Distributable reference docs (13 .md files)
 templates/         ← CLAUDE.md + settings.json installed to target projects
 scripts/           ← Install scripts (Linux + Windows)
-tests/             ← Test suite (~3675 tests, pytest)
+tests/             ← Test suite (~3745 tests, pytest)
 pmo-ui/            ← React/Vite PMO frontend (served at /pmo/)
 .claude/           ← Project-specific orchestration setup:
-  agents/          ← Tailored agents for developing agent-baton (11)
+  agents/          ← 19 packaged agents (mirrored from agents/) +
+  |                  5 meta agents for baton development +
+  |                  18 GSD framework agents
   references/      ← Symlink → ../references/ (canonical source)
   knowledge/       ← Knowledge packs (3 packs, 10 docs)
   settings.json    ← Hooks for this project
@@ -56,8 +58,10 @@ pmo-ui/            ← React/Vite PMO frontend (served at /pmo/)
 
 - `agents/` and `references/` are the **distributable** source of truth.
   Changes here affect all users who install agent-baton.
-- `.claude/agents/` contains **project-specific** agents tailored for
-  developing agent-baton. These are NOT distributed.
+- `.claude/agents/` contains three tiers: (1) **packaged agents** mirrored
+  from `agents/` so this project can dogfood them, (2) **meta agents** for
+  developing agent-baton itself (these are NOT distributed), and (3) **GSD
+  framework agents** for project management workflows.
 - `.claude/references/` is a symlink to `references/` — edits to canonical
   references are immediately available to the project's orchestrator.
 - The `agent_baton` Python package reads agent definitions at runtime.
@@ -72,16 +76,29 @@ pmo-ui/            ← React/Vite PMO frontend (served at /pmo/)
 
 ## Agent Roster (for this project)
 
+**Packaged agents** (19 — mirrored from `agents/`, also shipped to users):
+
 | Agent | Role |
 |-------|------|
 | `orchestrator` | Coordinate multi-step development tasks |
-| `backend-engineer--python` | Python implementation in agent_baton/ |
+| `backend-engineer` / `--python` / `--node` | Server-side implementation |
+| `frontend-engineer` / `--react` / `--dotnet` | Client-side UI |
 | `architect` | Design decisions, module boundaries |
-| `ai-systems-architect` | Multi-agent orchestration design |
 | `test-engineer` | Write and organize pytest tests |
 | `code-reviewer` | Quality review before commits |
 | `auditor` | Safety review for guardrail/hook changes |
 | `talent-builder` | Create new distributable agent definitions |
+| `security-reviewer` | Security audit (OWASP, auth, secrets) |
+| `devops-engineer` | Infrastructure, CI/CD, Docker |
+| `data-engineer` / `data-analyst` / `data-scientist` | Data stack |
+| `visualization-expert` | Charts, dashboards |
+| `subject-matter-expert` | Domain-specific business operations |
+
+**Meta agents** (5 — project-specific, for developing agent-baton):
+
+| Agent | Role |
+|-------|------|
+| `ai-systems-architect` | Multi-agent orchestration design |
 | `agent-definition-engineer` | Edit agent .md files, references, knowledge packs |
 | `prompt-engineer` | Agent prompt optimization |
 | `ai-product-strategist` | Product decisions, value/cost analysis |
@@ -91,7 +108,7 @@ pmo-ui/            ← React/Vite PMO frontend (served at /pmo/)
 
 ```bash
 pip install -e ".[dev]"    # Install in editable mode
-pytest                     # Run tests (~3675 tests)
+pytest                     # Run tests (~3745 tests)
 scripts/install.sh         # Re-install globally after editing agents/references
 ```
 
