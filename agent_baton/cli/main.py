@@ -8,6 +8,19 @@ import types
 
 from agent_baton.cli import commands as commands_pkg
 
+# Command groups for organized --help output
+_COMMAND_GROUPS: dict[str, list[str]] = {
+    "Core Workflow": ["plan", "execute", "status"],
+    "Agents & Routing": ["agents", "route", "events", "incident"],
+    "Observability": ["dashboard", "trace", "usage", "telemetry", "context-profile", "retro", "query"],
+    "Governance": ["classify", "compliance", "policy", "escalations", "validate", "spec-check", "detect"],
+    "Improvement": ["scores", "evolve", "patterns", "budget", "changelog", "experiment", "anomalies", "improve"],
+    "Distribution": ["install", "package", "publish", "pull", "transfer", "verify-package"],
+    "Storage & Sync": ["sync", "source", "cquery", "migrate-storage", "cleanup"],
+    "Execution (Advanced)": ["daemon", "async", "decide"],
+    "Portfolio": ["pmo", "serve"],
+}
+
 
 def discover_commands() -> dict[str, types.ModuleType]:
     """Auto-discover all command modules in cli/commands/ and subdirectories.
@@ -55,6 +68,31 @@ def main(argv: list[str] | None = None) -> None:
         # sp.prog is "baton <subcommand>"; extract just the subcommand part.
         subcommand = sp.prog.split(None, 1)[1] if " " in sp.prog else sp.prog
         dispatch[subcommand] = mod
+
+    # Build grouped help epilog
+    lines = ["\nCommand groups:"]
+    for group_name, cmd_names in _COMMAND_GROUPS.items():
+        # Only include commands that actually exist
+        available = [c for c in cmd_names if c in dispatch]
+        if available:
+            lines.append(f"\n  {group_name}:")
+            lines.append(f"    {', '.join(available)}")
+
+    # Any commands not in a group
+    grouped = {c for cmds in _COMMAND_GROUPS.values() for c in cmds}
+    ungrouped = sorted(set(dispatch.keys()) - grouped)
+    if ungrouped:
+        lines.append(f"\n  Other:")
+        lines.append(f"    {', '.join(ungrouped)}")
+
+    lines.append(f"\nQuick start:")
+    lines.append(f"  baton plan \"task description\" --save --explain")
+    lines.append(f"  baton execute start")
+    lines.append(f"  baton execute next")
+    lines.append(f"")
+
+    parser.epilog = "\n".join(lines)
+    parser.formatter_class = argparse.RawDescriptionHelpFormatter
 
     args = parser.parse_args(argv)
 

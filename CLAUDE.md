@@ -69,6 +69,9 @@ pmo-ui/            ← React/Vite PMO frontend (served at /pmo/)
 - `cli/commands/execute.py` contains `_print_action()` — the output format
   Claude reads to drive orchestration. Treat it as a public API. See
   `docs/invariants.md` for the full contract.
+- Before changing CLI command names, `_print_action()` output format, or
+  execution state schema, read `docs/invariants.md` — these are the protocol
+  contract between Claude and the engine.
 
 ## Agent Roster (for this project)
 

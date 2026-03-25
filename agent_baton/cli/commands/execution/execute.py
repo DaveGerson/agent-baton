@@ -103,7 +103,7 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     # baton execute team-record --step-id S --member-id M --agent NAME [--status S] [--outcome O] [--files F]
     p_team = sub.add_parser("team-record", parents=[_task_id_parent],
                             help="Record a team member completion")
-    p_team.add_argument("--step-id", required=True, dest="step_id", help="Parent team step ID")
+    p_team.add_argument("--step-id", "--step", required=True, dest="step_id", help="Parent team step ID")
     p_team.add_argument("--member-id", required=True, dest="member_id", help="Team member ID")
     p_team.add_argument("--agent", required=True, help="Agent name")
     p_team.add_argument("--status", default="complete", choices=["complete", "failed"])
