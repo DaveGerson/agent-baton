@@ -464,4 +464,16 @@ def handler(args: argparse.Namespace) -> None:
 
     # No subcommand — show help.
     print("Usage: baton daemon {start|status|stop|list}")
-    print("Run 'baton daemon start --help' for options.")
+    print()
+    print("Run execution in the background with optional REST API.")
+    print()
+    print("  start   — launch a background worker for a plan")
+    print("  status  — show daemon state and progress")
+    print("  stop    — stop a running daemon")
+    print("  list    — list all daemon workers")
+    print()
+    print("Use 'baton daemon start --plan plan.json' for fire-and-forget execution.")
+    print("Use 'baton daemon start --serve' to also start a REST API for monitoring.")
+    print("For synchronous execution, use 'baton execute start' instead.")
+    print()
+    print("Run 'baton daemon start --help' for all options.")

@@ -190,7 +190,7 @@ def _print_action(action: dict) -> None:
 
 def handler(args: argparse.Namespace) -> None:
     if args.subcommand is None:
-        print("error: supply a subcommand: start, next, record, dispatched, gate, complete, status, resume, list, switch")
+        print("error: supply a subcommand: start, next, record, dispatched, gate, approve, amend, team-record, complete, status, resume, list, switch")
         sys.exit(1)
 
     if args.subcommand == "list":
@@ -237,7 +237,11 @@ def handler(args: argparse.Namespace) -> None:
         task_id = plan.task_id
         engine = ExecutionEngine(bus=bus, task_id=task_id, storage=storage)
         ContextManager(task_id=task_id).init_mission_log(plan.task_summary, risk_level=plan.risk_level)
-        action = engine.start(plan)
+        try:
+            action = engine.start(plan)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            sys.exit(1)
         # Mark this as the active execution
         try:
             storage.set_active_task(task_id)
@@ -282,17 +286,21 @@ def handler(args: argparse.Namespace) -> None:
             print(f"error: invalid step ID '{args.step_id}' (expected format: N.N, e.g. '1.1')", file=sys.stderr)
             sys.exit(1)
         files = [f.strip() for f in args.files.split(",") if f.strip()] if args.files else []
-        engine.record_step_result(
-            step_id=args.step_id,
-            agent_name=args.agent,
-            status=args.status,
-            outcome=args.outcome,
-            files_changed=files,
-            commit_hash=args.commit,
-            estimated_tokens=args.tokens,
-            duration_seconds=args.duration,
-            error=args.error,
-        )
+        try:
+            engine.record_step_result(
+                step_id=args.step_id,
+                agent_name=args.agent,
+                status=args.status,
+                outcome=args.outcome,
+                files_changed=files,
+                commit_hash=args.commit,
+                estimated_tokens=args.tokens,
+                duration_seconds=args.duration,
+                error=args.error,
+            )
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            sys.exit(1)
         log_status = "COMPLETE" if args.status == "complete" else "FAILED"
         entry = MissionLogEntry(
             agent_name=args.agent,
@@ -363,7 +371,7 @@ def handler(args: argparse.Namespace) -> None:
 
     elif args.subcommand == "status":
         st = engine.status()
-        if not st:
+        if not st or st.get("status") == "no_active_execution":
             print("No active execution.")
             print()
             print("  List executions:  baton execute list")
@@ -375,17 +383,59 @@ def handler(args: argparse.Namespace) -> None:
         if getattr(args, "task_id", None):
             bound_via = "--task-id"
         elif os.environ.get("BATON_TASK_ID"):
-            bound_via = "BATON_TASK_ID"
+            bound_via = "BATON_TASK_ID (from env)"
         else:
             bound_via = "active-task-id.txt"
         print(f"Bound:   {bound_via}")
         print(f"Status:  {st.get('status', '?')}")
-        print(f"Phase:   {st.get('current_phase', '?')}")
-        print(f"Steps:   {st.get('steps_complete', 0)}/{st.get('steps_total', 0)}")
-        print(f"Gates:   {st.get('gates_passed', 0)} passed, {st.get('gates_failed', 0)} failed")
+        total_phases = st.get("total_phases", "?")
+        print(f"Phase:   {st.get('current_phase', '?')} / {total_phases}")
+        print(f"Steps:   {st.get('steps_complete', 0)}/{st.get('steps_total', 0)} complete")
         elapsed = st.get("elapsed_seconds", 0)
         if elapsed:
             print(f"Elapsed: {elapsed:.0f}s")
+
+        # Step detail
+        step_results = st.get("step_results", [])
+        step_plan = st.get("step_plan", [])
+        if step_results or step_plan:
+            print()
+            print("Steps:")
+            shown_ids: set[str] = set()
+            for r in step_results:
+                sid = r.get("step_id", "?")
+                shown_ids.add(sid)
+                agent = r.get("agent_name", "?")
+                status_val = r.get("status", "?")
+                outcome = r.get("outcome", "")
+                if status_val == "complete":
+                    marker = "done"
+                elif status_val == "dispatched":
+                    marker = "  >>"
+                elif status_val == "failed":
+                    marker = "FAIL"
+                else:
+                    marker = "  .."
+                outcome_short = f" ({outcome[:50]})" if outcome else ""
+                print(f"  {marker}  {sid:<5}  {agent:<24} — {status_val}{outcome_short}")
+            for sp in step_plan:
+                sid = sp.get("step_id", "?")
+                if sid not in shown_ids:
+                    agent = sp.get("agent_name", "?")
+                    print(f"  ...   {sid:<5}  {agent:<24} — pending")
+
+        # Gate detail
+        gate_results = st.get("gate_results", [])
+        if gate_results:
+            print()
+            print("Gates:")
+            for g in gate_results:
+                phase_id = g.get("phase_id", "?")
+                passed = g.get("passed", False)
+                gate_type = g.get("gate_type", "")
+                marker = "pass" if passed else "FAIL"
+                type_label = f" ({gate_type})" if gate_type else ""
+                print(f"  {marker}  Phase {phase_id}{type_label}")
 
     elif args.subcommand == "resume":
         action = engine.resume()

@@ -5,6 +5,26 @@ orchestrator plans it, delegates to the right agents, runs QA checks between
 phases, and delivers tested, reviewed code — all inside your normal Claude
 Code session.
 
+## Quick Start
+
+```bash
+# Install
+scripts/install.sh    # Linux/macOS
+# or
+scripts/install.ps1   # Windows (no admin required)
+
+# Plan a task
+baton plan "Add request logging middleware" --save --explain
+
+# Execute it
+baton execute start
+baton execute next     # get next action
+# ... dispatch agents, record results ...
+baton execute complete
+```
+
+See [docs/examples/first-run.md](docs/examples/first-run.md) for a complete walkthrough.
+
 ## What You Get
 
 **19 specialist agents** — backend, frontend, architect, devops, testing,

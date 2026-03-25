@@ -72,6 +72,21 @@ TEAM_CTX="$BASE/team-context"
 KNOWLEDGE_DIR="$BASE/knowledge"
 SKILLS_DIR="$BASE/skills"
 
+# Pre-flight: verify write permissions
+if ! mkdir -p "$BASE" 2>/dev/null; then
+    echo "error: cannot create directory '$BASE' — check permissions"
+    if [ "$SCOPE" = "user" ]; then
+        echo "  Try project-level install instead (option 2)"
+    fi
+    exit 1
+fi
+if ! touch "$BASE/.write-test" 2>/dev/null; then
+    echo "error: cannot write to '$BASE' — check permissions"
+    rm -f "$BASE/.write-test"
+    exit 1
+fi
+rm -f "$BASE/.write-test"
+
 # ── Step 2: Install Core Files ─────────────────────────────
 echo ""
 echo "  STEP 2: Installing Core Files"

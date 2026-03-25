@@ -159,6 +159,31 @@ A docstring on `_print_action()` reads:
 > section delimiters, or ACTION type strings without updating the
 > orchestrator agent definition and the contract test.
 
+### Output Format Contract
+
+Each `baton execute` subcommand has a defined output format. Some outputs
+are human-readable (designed for Claude to parse as prose); others are
+machine-readable JSON (designed for programmatic consumption).
+
+| Subcommand | Format | Notes |
+|------------|--------|-------|
+| `start` | Session binding line + `_print_action()` | Human-readable |
+| `next` | `_print_action()` | Human-readable |
+| `next --all` | JSON array of action dicts | Machine-readable; may contain mixed action types |
+| `dispatched` | JSON `{"status": "dispatched", "step_id": "..."}` | Machine-readable |
+| `record` | Plain text confirmation | Human-readable |
+| `gate` | Plain text confirmation | Human-readable |
+| `approve` | Plain text confirmation | Human-readable |
+| `amend` | Plain text confirmation | Human-readable |
+| `team-record` | Plain text confirmation | Human-readable |
+| `complete` | Engine summary text | Human-readable |
+| `status` | Structured plain text | Human-readable |
+| `list` | Formatted table | Human-readable |
+
+**With `--all`**: Returns only actions that can be dispatched in parallel.
+When no parallel actions exist, falls back to a single-element array
+containing the next sequential action (GATE, APPROVAL, or COMPLETE).
+
 ---
 
 ## Invariant 3: Execution State Disk Schema

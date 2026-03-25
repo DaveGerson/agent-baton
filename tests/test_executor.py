@@ -115,10 +115,10 @@ class TestStart:
         data = json.loads((tmp_path / "execution-state.json").read_text())
         assert data["status"] == "running"
 
-    def test_plan_with_no_phases_returns_complete(self, tmp_path: Path) -> None:
+    def test_plan_with_no_phases_raises_value_error(self, tmp_path: Path) -> None:
         plan = _plan(phases=[])
-        action = _engine(tmp_path).start(plan)
-        assert action.action_type == ActionType.COMPLETE
+        with pytest.raises(ValueError, match="Plan has no phases"):
+            _engine(tmp_path).start(plan)
 
     def test_delegation_prompt_contains_task(self, tmp_path: Path) -> None:
         plan = _plan(phases=[_phase(steps=[_step(task="Do something important")])])

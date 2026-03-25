@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 
 from agent_baton.models.enums import FailureClass
 
@@ -19,11 +19,11 @@ class MissionLogEntry:
     handoff: str = ""
     commit_hash: str = ""
     failure_class: FailureClass | None = None
-    timestamp: datetime = field(default_factory=datetime.now)
+    timestamp: str = field(default_factory=lambda: datetime.now(tz=timezone.utc).isoformat(timespec="seconds"))
 
     def to_markdown(self) -> str:
         lines = [
-            f"### {self.timestamp.isoformat()} — {self.agent_name} — {self.status}",
+            f"### {self.timestamp} — {self.agent_name} — {self.status}",
             f"Assignment: {self.assignment}",
         ]
         if self.result:
