@@ -359,6 +359,17 @@ async def forge_regenerate(
     return plan.to_dict()
 
 
+@router.get("/pmo/forge/sessions", response_model=list[dict])
+async def list_forge_sessions(
+    status: str | None = None,
+    store: PmoStore = Depends(get_pmo_store),
+) -> list[dict]:
+    """List forge sessions, optionally filtered by status ('active' or 'completed')."""
+    if hasattr(store, "list_forge_sessions"):
+        return store.list_forge_sessions(status=status)  # type: ignore[union-attr]
+    return []
+
+
 @router.get("/pmo/ado/search", response_model=AdoSearchResponse)
 async def ado_search(q: str = "") -> AdoSearchResponse:
     """Search Azure DevOps work items (placeholder with mock data)."""
@@ -422,6 +433,27 @@ async def create_signal(
             detail="Signal was written but could not be read back.",
         )
     return _signal_response(saved)
+
+
+class BatchResolveRequest(BaseModel):
+    """Request body for POST /pmo/signals/batch/resolve."""
+    signal_ids: list[str]
+
+
+@router.post("/pmo/signals/batch/resolve", response_model=dict)
+async def batch_resolve_signals(
+    req: BatchResolveRequest,
+    store: PmoStore = Depends(get_pmo_store),
+) -> dict:
+    """Resolve multiple signals in a single request."""
+    resolved: list[str] = []
+    not_found: list[str] = []
+    for sid in req.signal_ids:
+        if store.resolve_signal(sid):
+            resolved.append(sid)
+        else:
+            not_found.append(sid)
+    return {"resolved": resolved, "not_found": not_found}
 
 
 @router.post("/pmo/signals/{signal_id}/resolve", response_model=ResolveSignalResponse)
