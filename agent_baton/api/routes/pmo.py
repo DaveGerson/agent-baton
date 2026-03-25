@@ -15,15 +15,17 @@ POST /pmo/signals/{signal_id}/forge   — Triage signal into a plan
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import json
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 
 from agent_baton.api.deps import get_forge_session, get_pmo_scanner, get_pmo_store
 from agent_baton.api.models.requests import (
     ApproveForgeRequest,
     CreateForgeRequest,
     CreateSignalRequest,
+    ForgeSignalRequest,
     InterviewRequest,
     RegenerateRequest,
     RegisterProjectRequest,
@@ -594,13 +596,19 @@ async def resolve_signal(
             status_code=404,
             detail=f"Signal '{signal_id}' not found.",
         )
+    # Return the full signal so the frontend can update its state correctly.
+    # Fixes F-AF-2: frontend expected PmoSignal shape, got partial dict.
+    if hasattr(store, "get_signal"):
+        signal = store.get_signal(signal_id)
+        if signal is not None:
+            return _signal_response(signal).model_dump()
     return {"resolved": True, "signal_id": signal_id}
 
 
 @router.post("/pmo/signals/{signal_id}/forge", response_model=dict, status_code=201)
 async def forge_signal(
     signal_id: str,
-    req: ApproveForgeRequest,
+    req: ForgeSignalRequest,
     forge: ForgeSession = Depends(get_forge_session),
     store: PmoStore = Depends(get_pmo_store),
 ) -> dict:
@@ -611,11 +619,6 @@ async def forge_signal(
     Generates a bug-fix plan from the signal description, links the
     signal to the plan, and saves the plan to the project's
     team-context.  The signal status is updated to ``triaged``.
-
-    The ``project_id`` in the request body determines which project
-    receives the plan.  The ``plan`` field in the request body is
-    ignored for this endpoint -- the Forge derives the description
-    from the signal itself.
 
     Args:
         signal_id: The signal to triage (URL path parameter).

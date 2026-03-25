@@ -797,7 +797,7 @@ class StorageMigrator:
         for result in state.step_results:
             conn.execute(
                 """
-                INSERT OR IGNORE INTO step_results
+                INSERT OR REPLACE INTO step_results
                     (task_id, step_id, agent_name, status, outcome,
                      files_changed, commit_hash, estimated_tokens,
                      duration_seconds, retries, error, completed_at)

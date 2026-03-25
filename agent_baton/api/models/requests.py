@@ -273,6 +273,20 @@ class ApproveForgeRequest(BaseModel):
     )
 
 
+class ForgeSignalRequest(BaseModel):
+    """Request body for ``POST /api/v1/pmo/signals/{signal_id}/forge``.
+
+    Dedicated model for signal-to-forge triage — only requires project_id.
+    Fixes F-AF-1 (Pydantic 422 when reusing ApproveForgeRequest).
+    """
+
+    project_id: str = Field(
+        ...,
+        min_length=1,
+        description="ID of the registered project to forge a plan for.",
+    )
+
+
 class CreateSignalRequest(BaseModel):
     """Request body for ``POST /api/v1/pmo/signals``.
 
