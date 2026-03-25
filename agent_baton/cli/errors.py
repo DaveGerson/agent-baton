@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+from typing import NoReturn
 
 # Semantic exit codes
 EXIT_SUCCESS = 0
@@ -15,7 +16,7 @@ def user_error(
     hint: str = "",
     docs: str = "",
     exit_code: int = EXIT_RUNTIME,
-) -> None:
+) -> NoReturn:
     """Print a standardized error message and exit.
 
     Args:
@@ -32,6 +33,6 @@ def user_error(
     sys.exit(exit_code)
 
 
-def validation_error(msg: str, *, hint: str = "", docs: str = "") -> None:
+def validation_error(msg: str, *, hint: str = "", docs: str = "") -> NoReturn:
     """Shortcut for user_error with EXIT_VALIDATION."""
     user_error(msg, hint=hint, docs=docs, exit_code=EXIT_VALIDATION)

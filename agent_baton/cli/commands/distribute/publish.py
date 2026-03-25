@@ -1,4 +1,11 @@
-"""baton publish — publish a package archive to a local registry directory."""
+"""``baton publish`` -- publish a package archive to a local registry directory.
+
+Copies a .tar.gz package into a local registry directory structure
+and updates the registry index.
+
+Delegates to:
+    agent_baton.core.distribute.registry_client.RegistryClient
+"""
 from __future__ import annotations
 
 import argparse

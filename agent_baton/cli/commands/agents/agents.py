@@ -1,4 +1,11 @@
-"""baton agents — list available agents."""
+"""``baton agents`` -- list available agents.
+
+Loads agent definitions from default paths and displays them grouped
+by category with model tags and flavor indicators.
+
+Delegates to:
+    agent_baton.core.orchestration.registry.AgentRegistry
+"""
 from __future__ import annotations
 
 import argparse

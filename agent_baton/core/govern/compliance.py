@@ -100,7 +100,17 @@ class ComplianceReport:
 
 
 class ComplianceReportGenerator:
-    """Generate and manage compliance reports."""
+    """Generate, persist, and retrieve compliance reports.
+
+    The generator assembles ``ComplianceReport`` objects from task execution
+    data and writes them as markdown files to a reports directory. Reports
+    can be listed, loaded by task ID, and filtered to recent entries.
+
+    The default storage location is
+    ``.claude/team-context/compliance-reports/``, which is created on first
+    write. Each report is named ``<task_id>.md`` with path-unsafe characters
+    replaced by hyphens.
+    """
 
     def __init__(self, reports_dir: Path | None = None) -> None:
         self._dir = (reports_dir or Path(".claude/team-context/compliance-reports")).resolve()

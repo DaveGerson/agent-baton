@@ -1,4 +1,12 @@
-"""baton patterns — display and refresh learned orchestration patterns."""
+"""``baton patterns`` -- display and refresh learned orchestration patterns.
+
+Patterns capture recurring agent sequencing strategies that correlate
+with successful outcomes. The pattern learner analyses the usage log
+and identifies high-confidence templates for the planner to reuse.
+
+Delegates to:
+    agent_baton.core.learn.pattern_learner.PatternLearner
+"""
 from __future__ import annotations
 
 import argparse

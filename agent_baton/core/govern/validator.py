@@ -1,4 +1,30 @@
-"""Validate agent definition markdown files for format correctness."""
+"""Validate agent definition markdown files for format correctness.
+
+Agent definitions follow a strict format: YAML frontmatter (delimited by
+``---``) followed by a markdown body. The frontmatter must include
+``name`` and ``description`` fields and may include ``model``,
+``permissionMode``, and ``tools``.
+
+Validation checks are split into two categories:
+
+**Errors** (blocking -- the definition is invalid):
+    - Missing or invalid YAML frontmatter.
+    - ``name`` missing, empty, or not in kebab-case format.
+    - ``description`` missing or empty.
+    - ``model`` not in the allowed set (opus, sonnet, haiku).
+    - ``permissionMode`` not in the allowed set (auto-edit, default).
+    - Unknown tool names (must be in the standard set or match the MCP
+      naming convention ``mcp__<server>__<tool>``).
+    - Empty markdown body.
+
+**Warnings** (non-blocking -- the definition works but could be improved):
+    - Single-line description (multi-line recommended for trigger matching).
+    - Agent name does not match the filename stem.
+    - Reviewer/auditor agents with ``permissionMode: auto-edit``
+      (should use ``default``).
+    - Missing ``model`` field.
+    - No top-level heading in the markdown body.
+"""
 from __future__ import annotations
 
 import re
@@ -40,7 +66,14 @@ class ValidationResult:
 
 
 class AgentValidator:
-    """Validate agent definition .md files for format correctness."""
+    """Validate agent definition ``.md`` files for structural correctness.
+
+    Checks frontmatter YAML (required fields, allowed values, naming
+    conventions) and markdown body (non-empty, has heading). Does not
+    evaluate the semantic quality of the agent prompt itself.
+
+    The validator is stateless and safe to reuse across multiple calls.
+    """
 
     def validate_file(self, path: Path) -> ValidationResult:
         """Validate a single agent markdown file.

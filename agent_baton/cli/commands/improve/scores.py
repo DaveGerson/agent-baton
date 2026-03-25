@@ -1,4 +1,11 @@
-"""baton scores — show agent performance scorecards."""
+"""``baton scores`` -- show agent performance scorecards.
+
+Scorecards aggregate agent performance metrics (success rate, retry
+rate, gate pass rate, token efficiency) into a health indicator.
+
+Delegates to:
+    agent_baton.core.improve.scoring.PerformanceScorer
+"""
 from __future__ import annotations
 
 import argparse

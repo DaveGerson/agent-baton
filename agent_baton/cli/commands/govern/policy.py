@@ -1,4 +1,12 @@
-"""baton policy — list, show, or check guardrail policy presets."""
+"""``baton policy`` -- list, show, or evaluate guardrail policy presets.
+
+Policy presets define rules that constrain agent behaviour. This command
+lists available presets, shows their rules, and evaluates an agent against
+a preset to check for violations.
+
+Delegates to:
+    agent_baton.core.govern.policy.PolicyEngine
+"""
 from __future__ import annotations
 
 import argparse

@@ -1,4 +1,20 @@
-"""baton execute — drive the execution engine through an orchestrated task."""
+"""``baton execute`` -- drive the execution engine through an orchestrated task.
+
+This module implements the core execution loop CLI that an orchestrator
+agent (typically Claude Code) uses to advance a plan step-by-step.
+It exposes subcommands for starting, advancing, recording, gating,
+approving, amending, and completing orchestrated executions.
+
+The module also contains :func:`_print_action`, which formats engine
+actions into the text protocol that Claude Code parses to drive
+orchestration.  This function is treated as a **public API** -- see
+``docs/invariants.md``.
+
+Delegates to:
+    :class:`~agent_baton.core.engine.executor.ExecutionEngine`
+    :class:`~agent_baton.core.engine.persistence.StatePersistence`
+    :class:`~agent_baton.core.orchestration.context.ContextManager`
+"""
 from __future__ import annotations
 
 import argparse
@@ -140,12 +156,73 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
 
 
 def _print_action(action: dict) -> None:
-    """Print an execution action in a human-readable format.
+    """Print an execution action in the structured text format that Claude Code parses.
 
-    IMPORTANT: This output format is the control protocol between Claude Code
-    (the orchestrator) and the execution engine. Changes to action type strings,
-    field labels, or output structure will break the orchestrator's ability to
-    parse engine responses. Treat this function as a public API.
+    **PUBLIC API** -- This function defines the control protocol between the
+    CLI output and the Claude Code orchestrator agent.  The orchestrator reads
+    stdout line-by-line and keys on the exact field labels and delimiters
+    emitted here to decide what to do next.
+
+    Any change to action type keywords (``DISPATCH``, ``GATE``, ``APPROVAL``,
+    ``COMPLETE``, ``FAILED``), field label prefixes (``Agent:``, ``Step:``,
+    ``Phase:``, ``Command:``), or section delimiters (``--- Delegation Prompt ---``,
+    ``--- End Prompt ---``, ``--- Approval Context ---``, ``--- End Context ---``)
+    is a **breaking change** and must be coordinated with updates to the
+    orchestrator agent definition and ``docs/invariants.md``.
+
+    Output formats by action type:
+
+    **DISPATCH** -- Instructs the orchestrator to spawn a subagent::
+
+        ACTION: DISPATCH
+          Agent: <agent_name>
+          Model: <agent_model>
+          Step:  <step_id>
+          Message: <human-readable description>
+
+        --- Delegation Prompt ---
+        <full prompt text for the subagent>
+        --- End Prompt ---
+
+    **GATE** -- Instructs the orchestrator to run a QA check::
+
+        ACTION: GATE
+          Type:    <gate_type>
+          Phase:   <phase_id>
+          Command: <shell command to run>
+          Message: <description>
+
+    **APPROVAL** -- Requests human approval before proceeding::
+
+        ACTION: APPROVAL
+          Phase:   <phase_id>
+          Message: <what needs approval>
+
+        --- Approval Context ---
+        <context for the approver>
+        --- End Context ---
+
+        Options: approve, reject, approve-with-feedback
+
+    **COMPLETE** -- Execution finished successfully::
+
+        ACTION: COMPLETE
+          <summary text>
+
+    **FAILED** -- Execution terminated due to failure::
+
+        ACTION: FAILED
+          <failure summary>
+
+    Args:
+        action: Dictionary from ``ExecutionAction.to_dict()``.  Must contain
+            at least an ``action_type`` key whose value is a string matching
+            one of the :class:`~agent_baton.models.execution.ActionType` enum
+            values.
+
+    Raises:
+        ValueError: If ``action_type`` is not a string (indicates a bug
+            where the raw enum was passed instead of calling ``.to_dict()``).
     """
     atype = action.get("action_type", "")
     if not isinstance(atype, str):

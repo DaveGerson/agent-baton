@@ -76,7 +76,13 @@ def _serialize_all(escalations: list[Escalation]) -> str:
 # ---------------------------------------------------------------------------
 
 class EscalationManager:
-    """Manage the escalation file at .claude/team-context/escalations.md."""
+    """Manage the escalation file at ``.claude/team-context/escalations.md``.
+
+    Provides CRUD operations over the escalation file: adding new
+    escalations, querying pending ones, resolving them with answers,
+    and purging resolved entries. All operations re-read the file from
+    disk to avoid stale state when multiple agents interact concurrently.
+    """
 
     def __init__(self, path: Path | None = None) -> None:
         self._path: Path = (path or Path(".claude/team-context/escalations.md")).resolve()

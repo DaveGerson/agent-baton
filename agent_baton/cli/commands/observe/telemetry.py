@@ -1,4 +1,13 @@
-"""baton telemetry — show or clear agent telemetry events."""
+"""``baton telemetry`` -- show or clear agent telemetry events.
+
+Telemetry events track fine-grained agent activity: file reads, file
+writes, tool invocations, and other observable actions. This command
+provides summary, per-agent, and recent-event views plus a clear
+operation.
+
+Delegates to:
+    agent_baton.core.observe.telemetry.AgentTelemetry
+"""
 from __future__ import annotations
 
 import argparse

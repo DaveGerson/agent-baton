@@ -1,4 +1,13 @@
-"""baton improve — run or view improvement cycle reports."""
+"""``baton improve`` -- run or view improvement cycle reports.
+
+The improvement loop is the top-level entry point for the closed-loop
+learning pipeline. A single cycle: detects anomalies, generates
+recommendations, auto-applies safe changes, escalates risky ones,
+and starts experiments.
+
+Delegates to:
+    agent_baton.core.improve.loop.ImprovementLoop
+"""
 from __future__ import annotations
 
 import argparse

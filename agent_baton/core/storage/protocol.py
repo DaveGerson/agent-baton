@@ -161,7 +161,7 @@ class StorageBackend(Protocol):
     def append_mission_log(self, task_id: str, entry: MissionLogEntry) -> None:
         ...
 
-    def read_mission_log(self, task_id: str) -> str | None:
+    def read_mission_log(self, task_id: str) -> str | list[MissionLogEntry] | None:
         ...
 
     # ── Shared Context & Profile ───────────────────────────────────────────

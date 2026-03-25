@@ -1,4 +1,11 @@
-"""baton escalations — show, resolve, or clear escalations."""
+"""``baton escalations`` -- show, resolve, or clear agent escalations.
+
+When agents encounter situations beyond their scope, they file escalation
+requests. This command manages the escalation queue.
+
+Delegates to:
+    agent_baton.core.govern.escalation.EscalationManager
+"""
 from __future__ import annotations
 
 import argparse

@@ -6,7 +6,6 @@ directory manageable as task volume grows.
 """
 from __future__ import annotations
 
-import json
 import shutil
 from datetime import datetime, timezone, timedelta
 from pathlib import Path

@@ -1,4 +1,19 @@
-"""Enhanced packaging module — checksum validation and dependency tracking."""
+"""Enhanced packaging module -- checksum validation and dependency tracking.
+
+Extends the base packaging in ``sharing.py`` with:
+
+* **SHA-256 checksums** for every file in the archive, stored in the
+  manifest and verified on install.
+* **Dependency tracking** via ``PackageDependency`` objects listing
+  required companion packages and their minimum versions.
+* **Comprehensive validation** (``PackageVerifier.validate_package``)
+  that checks archive integrity, manifest completeness, checksum
+  consistency, and agent definition correctness via ``AgentValidator``.
+
+The ``EnhancedManifest`` is backward-compatible with the base
+``PackageManifest``: old manifests that lack ``checksums`` and
+``dependencies`` fields are deserialized with empty defaults.
+"""
 from __future__ import annotations
 
 import hashlib
@@ -124,7 +139,17 @@ class PackageValidationResult:
 
 
 class PackageVerifier:
-    """Validates the integrity and content of agent-baton package archives."""
+    """Validates the integrity and content of agent-baton package archives.
+
+    Provides three levels of verification:
+
+    * **Checksum computation** -- SHA-256 hashes for every file member.
+    * **Checksum verification** -- compare computed hashes against expected
+      values (from the manifest or an external source).
+    * **Comprehensive validation** -- full pipeline that checks archive
+      readability, manifest presence and completeness, internal checksum
+      consistency, and agent definition correctness.
+    """
 
     # ------------------------------------------------------------------
     # Checksums

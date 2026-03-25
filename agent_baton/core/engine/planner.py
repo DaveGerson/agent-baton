@@ -1507,7 +1507,9 @@ class IntelligentPlanner:
                 paths = list(step.context_files or [])
                 tools: list[str] = []  # tools not tracked at plan time
 
-                step_violations = self._policy_engine.evaluate(  # type: ignore[union-attr]
+                if self._policy_engine is None:
+                    continue
+                step_violations = self._policy_engine.evaluate(
                     policy_set, agent, paths, tools
                 )
                 for v in step_violations:

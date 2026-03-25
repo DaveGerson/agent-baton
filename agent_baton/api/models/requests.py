@@ -214,6 +214,20 @@ class ApproveForgeRequest(BaseModel):
     )
 
 
+class ForgeSignalRequest(BaseModel):
+    """Request body for POST /pmo/signals/{signal_id}/forge — triage a signal into a plan.
+
+    Only ``project_id`` is required.  The Forge derives the plan description
+    from the signal itself; no ``plan`` payload is needed from the caller.
+    """
+
+    project_id: str = Field(
+        ...,
+        min_length=1,
+        description="ID of the registered project that will receive the triaged plan.",
+    )
+
+
 class CreateSignalRequest(BaseModel):
     """Request body for POST /pmo/signals — create a signal in the Signals Bar."""
 

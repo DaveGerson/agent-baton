@@ -1,4 +1,12 @@
-"""baton transfer — transfer agents, knowledge, and references between projects."""
+"""``baton transfer`` -- transfer agents, knowledge, and references between projects.
+
+Supports bidirectional transfer of distributable assets between
+project directories. The --discover mode analyses agent performance
+data to identify high-performing assets worth sharing.
+
+Delegates to:
+    agent_baton.core.distribute.experimental.transfer.ProjectTransfer
+"""
 from __future__ import annotations
 
 import argparse

@@ -41,6 +41,8 @@ import json
 import sys
 from pathlib import Path
 
+from agent_baton.cli.formatting import print_table
+
 # ---------------------------------------------------------------------------
 # Shortcut → SQL view mapping
 # ---------------------------------------------------------------------------
@@ -254,8 +256,6 @@ def _render_table(rows: list[dict], title: str = "") -> None:
     if title:
         print(title)
 
-    from agent_baton.cli.formatting import print_table
-
     columns = list(rows[0].keys())
     # Normalize all values to strings for print_table
     str_rows = [{col: str(row.get(col, "") or "") for col in columns} for row in rows]
@@ -270,7 +270,7 @@ def _render_json(rows: list[dict]) -> None:
     print(json.dumps(rows, indent=2, default=str))
 
 
-def _render_csv(rows: list[dict], title: str = "") -> None:
+def _render_csv(rows: list[dict], _title: str = "") -> None:
     if not rows:
         return
     buf = io.StringIO()

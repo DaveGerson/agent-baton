@@ -1,4 +1,16 @@
-"""CLI entry point for the baton command."""
+"""CLI entry point for the ``baton`` command.
+
+This module implements the top-level CLI dispatcher for Agent Baton. The
+CLI is built on argparse and uses a plugin-based architecture: every
+Python module under agent_baton.cli.commands (including nested sub-packages)
+is auto-discovered at import time. Each module must expose register(subparsers)
+and handler(args) functions.
+
+Command groups are organised into sub-packages that map to six functional
+domains: execution, observe, govern, improve, distribute, and agents.
+Standalone commands (pmo, sync, cquery, source, serve) live directly
+in cli/commands/.
+"""
 from __future__ import annotations
 
 import argparse

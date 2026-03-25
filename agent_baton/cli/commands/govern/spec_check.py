@@ -1,4 +1,11 @@
-"""baton spec-check — run spec validation checks against agent outputs."""
+"""``baton spec-check`` -- run spec validation checks against agent outputs.
+
+Validates that agent outputs conform to a specification: JSON against
+schema, expected files in a directory, or expected exports from a module.
+
+Delegates to:
+    agent_baton.core.govern.spec_validator.SpecValidator
+"""
 from __future__ import annotations
 
 import argparse

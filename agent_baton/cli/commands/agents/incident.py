@@ -1,4 +1,11 @@
-"""baton incident — manage incident response workflows."""
+"""``baton incident`` -- manage incident response workflows.
+
+Provides templated incident documents (P1-P4 severity) with predefined
+phases for incident response. This is an experimental feature.
+
+Delegates to:
+    agent_baton.core.distribute.experimental.incident.IncidentManager
+"""
 from __future__ import annotations
 
 import argparse

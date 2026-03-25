@@ -535,7 +535,7 @@ def auto_sync_current_project() -> SyncResult | None:
         except ValueError:
             pass
 
-    if best_project_id is None:
+    if best_project_id is None or best_path is None:
         _log.debug(
             "auto_sync_current_project: no registered project matches cwd %s", cwd
         )

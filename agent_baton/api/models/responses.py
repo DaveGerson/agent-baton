@@ -597,6 +597,17 @@ class PmoSignalResponse(BaseModel):
     forge_task_id: str = Field(default="", description="Plan task ID if this signal was triaged by Forge.")
 
 
+class ResolveSignalResponse(PmoSignalResponse):
+    """Response for POST /pmo/signals/{signal_id}/resolve.
+
+    Extends ``PmoSignalResponse`` with a ``resolved`` flag so callers
+    can confirm the operation succeeded and update their local state
+    with the full, authoritative signal object in a single round trip.
+    """
+
+    resolved: bool = Field(default=True, description="Always True on a successful resolve.")
+
+
 class ProgramHealthResponse(BaseModel):
     """Aggregate health metrics for a program."""
 

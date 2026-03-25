@@ -1,4 +1,14 @@
-"""baton experiment — manage improvement experiments."""
+"""``baton experiment`` -- manage improvement experiments.
+
+Experiments are controlled trials that test whether an improvement
+recommendation actually improves agent performance. Each experiment
+tracks a metric against a baseline and can be concluded or rolled back.
+
+Delegates to:
+    agent_baton.core.improve.experiments.ExperimentManager
+    agent_baton.core.improve.proposals.ProposalManager
+    agent_baton.core.improve.rollback.RollbackManager
+"""
 from __future__ import annotations
 
 import argparse

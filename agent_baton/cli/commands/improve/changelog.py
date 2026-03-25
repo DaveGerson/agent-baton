@@ -1,4 +1,11 @@
-"""baton changelog — show agent changelog entries or list backup files."""
+"""``baton changelog`` -- show agent changelog entries or list backup files.
+
+Tracks modifications to agent definition files: when a prompt was
+updated, what changed, and where the pre-change backup is stored.
+
+Delegates to:
+    agent_baton.core.improve.vcs.AgentVersionControl
+"""
 from __future__ import annotations
 
 import argparse

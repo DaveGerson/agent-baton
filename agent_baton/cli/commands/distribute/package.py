@@ -1,4 +1,12 @@
-"""baton package — create, inspect, or install agent-baton package archives."""
+"""``baton package`` -- create, inspect, or install agent-baton package archives.
+
+Packages bundle agents, references, and knowledge packs into a
+.tar.gz archive that can be shared, published to a registry,
+or installed into another project.
+
+Delegates to:
+    agent_baton.core.distribute.sharing.PackageBuilder
+"""
 from __future__ import annotations
 
 import argparse

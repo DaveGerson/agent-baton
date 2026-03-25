@@ -226,7 +226,7 @@ def _add(args: argparse.Namespace) -> None:
     print(f"Sync with: baton source sync {source_id}")
 
 
-def _list(args: argparse.Namespace) -> None:  # noqa: ARG001
+def _list(_args: argparse.Namespace) -> None:
     """List all registered external sources."""
     try:
         from agent_baton.core.storage.central import CentralStore
@@ -309,14 +309,15 @@ def _sync(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     # Load adapters — import triggers self-registration side effects.
+    AdapterRegistry = None  # type: ignore[assignment]
     try:
         from agent_baton.core.storage.adapters import AdapterRegistry
-        import agent_baton.core.storage.adapters.ado  # noqa: F401  triggers registration
+        import agent_baton.core.storage.adapters.ado  # noqa: F401  # type: ignore[import]  triggers registration
     except ImportError:
         pass
 
     try:
-        available = AdapterRegistry.available()
+        available = AdapterRegistry.available() if AdapterRegistry is not None else []
     except Exception:
         available = []
 
@@ -454,7 +455,6 @@ def _remove(args: argparse.Namespace) -> None:
 
 def _map(args: argparse.Namespace) -> None:
     """Map an external work item to a baton project/task."""
-    import json
     from datetime import datetime, timezone
 
     try:

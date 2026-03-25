@@ -1,4 +1,12 @@
-"""CLI command: ``baton decide`` — manage human decision requests."""
+"""``baton decide`` -- manage human decision requests.
+
+During daemon execution, agents may encounter situations requiring
+human judgment. These are persisted as decision requests that this
+command lists, inspects, and resolves.
+
+Delegates to:
+    agent_baton.core.runtime.decisions.DecisionManager
+"""
 from __future__ import annotations
 
 import argparse

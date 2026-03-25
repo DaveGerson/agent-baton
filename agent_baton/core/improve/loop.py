@@ -20,6 +20,7 @@ from agent_baton.core.improve.scoring import PerformanceScorer
 from agent_baton.core.improve.triggers import TriggerEvaluator
 from agent_baton.core.learn.recommender import Recommender
 from agent_baton.models.improvement import (
+    Experiment,
     ImprovementConfig,
     ImprovementReport,
     Recommendation,
@@ -184,7 +185,7 @@ class ImprovementLoop:
         rec.status = "applied"
         self._proposals.update_status(rec.rec_id, "applied")
 
-    def _create_experiment_for(self, rec: Recommendation) -> object | None:
+    def _create_experiment_for(self, rec: Recommendation) -> Experiment | None:
         """Create an experiment to track the impact of an applied recommendation."""
         # Determine baseline metric based on category
         metric = self._metric_for_category(rec.category)

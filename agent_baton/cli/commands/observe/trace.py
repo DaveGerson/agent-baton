@@ -1,4 +1,14 @@
-"""baton trace — list and inspect structured task execution traces."""
+"""``baton trace`` -- list and inspect structured task execution traces.
+
+Traces record the full lifecycle of an orchestrated task: every step
+dispatch, gate result, and completion event with timestamps. This
+command provides timeline and summary views for debugging and
+performance analysis.
+
+Delegates to:
+    agent_baton.core.observe.trace.TraceRecorder
+    agent_baton.core.observe.trace.TraceRenderer
+"""
 from __future__ import annotations
 
 import argparse

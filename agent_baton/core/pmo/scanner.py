@@ -1,7 +1,17 @@
-"""PmoScanner — scan registered projects and build the Kanban board state.
+"""PmoScanner — scan registered projects and build Kanban board state.
 
-For each registered project, reads execution-state.json via StatePersistence
-and maps ExecutionState.status to a PmoCard column.
+The scanner iterates over all projects registered in the PMO store,
+reads their execution state (from SQLite or legacy JSON files), and
+converts each active execution into a ``PmoCard`` with the appropriate
+Kanban column (``queued``, ``in_progress``, ``awaiting_human``,
+``deployed``).
+
+The scanner also detects saved plans that have no corresponding execution
+state (i.e. plans created but not yet started) and maps them to
+``queued`` cards.
+
+This module powers the ``baton pmo status`` CLI command and the PMO
+dashboard UI.
 """
 from __future__ import annotations
 
@@ -22,7 +32,17 @@ _log = logging.getLogger(__name__)
 
 
 class PmoScanner:
-    """Scan registered projects and produce Kanban board cards."""
+    """Scan registered projects and produce Kanban board cards.
+
+    The scanner supports both SQLite-backed and file-based projects.  For
+    each project it auto-detects the storage backend and reads all
+    execution states, converting each into a ``PmoCard`` with Kanban
+    column assignment.
+
+    Attributes:
+        _store: The PMO store providing the list of registered projects
+            and the archive of completed cards.
+    """
 
     def __init__(self, store: PmoStore) -> None:
         self._store = store
@@ -30,7 +50,20 @@ class PmoScanner:
     def _state_to_card(
         self, state: "ExecutionState", project: PmoProject
     ) -> PmoCard:
-        """Convert an ExecutionState to a PmoCard."""
+        """Convert an ``ExecutionState`` into a ``PmoCard``.
+
+        Maps the execution status to a Kanban column via
+        ``status_to_column()``, counts completed steps, failed steps,
+        and passed gates, and extracts the current phase name.
+
+        Args:
+            state: The execution state to convert.
+            project: The project this execution belongs to (provides
+                ``project_id`` and ``program``).
+
+        Returns:
+            A ``PmoCard`` representing this execution on the Kanban board.
+        """
         plan = state.plan
         completed = len([
             r for r in state.step_results if r.status == "complete"
@@ -66,11 +99,21 @@ class PmoScanner:
     def scan_project(self, project: PmoProject) -> list[PmoCard]:
         """Scan a single project for execution states and return cards.
 
-        Checks baton.db via SQLite backend first; falls back to file-based
-        StatePersistence scan for projects that have not yet migrated.
+        Auto-detects whether the project uses SQLite or file-based storage
+        via ``detect_backend()``.  For SQLite projects, reads from
+        ``baton.db``; for file-based projects, reads from
+        ``execution-state.json`` files (both namespaced and legacy flat).
 
-        Supports both namespaced executions (multiple plans per project)
-        and legacy flat execution-state.json files.
+        Also scans for saved plans without execution state (i.e. plans
+        created via ``baton plan --save`` but not yet started) and maps
+        them to ``queued`` cards.
+
+        Args:
+            project: The registered project to scan.
+
+        Returns:
+            List of ``PmoCard`` instances representing all executions
+            and queued plans found in the project.
         """
         context_root = Path(project.path) / ".claude" / "team-context"
         cards: list[PmoCard] = []
@@ -154,7 +197,16 @@ class PmoScanner:
         return cards
 
     def scan_all(self) -> list[PmoCard]:
-        """Scan all registered projects and return all cards."""
+        """Scan all registered projects and return all cards.
+
+        Iterates over every project in the PMO config, calls
+        ``scan_project`` for each, and appends up to 50 archived
+        (deployed) cards from the archive.  Duplicate card IDs between
+        active and archived cards are de-duplicated.
+
+        Returns:
+            Combined list of active and archived ``PmoCard`` instances.
+        """
         config = self._store.load_config()
         cards: list[PmoCard] = []
         for project in config.projects:
@@ -171,7 +223,19 @@ class PmoScanner:
         return cards
 
     def program_health(self) -> dict[str, ProgramHealth]:
-        """Compute aggregate health metrics per program."""
+        """Compute aggregate health metrics per program.
+
+        Scans all projects and classifies each card into one of four
+        buckets: ``completed`` (deployed), ``blocked`` (awaiting human),
+        ``failed`` (has error), or ``active`` (everything else).
+        Computes ``completion_pct`` as the ratio of completed to total
+        plans.
+
+        Returns:
+            Dict mapping program name to ``ProgramHealth`` with fields
+            ``total_plans``, ``completed``, ``blocked``, ``failed``,
+            ``active``, and ``completion_pct``.
+        """
         config = self._store.load_config()
         programs = config.programs or list({
             p.program for p in config.projects

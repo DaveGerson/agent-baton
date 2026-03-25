@@ -1,8 +1,38 @@
-"""Validate agent output against specifications (JSON Schema, file structure, API contracts)."""
+"""Validate agent output against specifications (JSON Schema, file structure,
+API contracts).
+
+This module provides gate checks that verify agent-produced artifacts
+match expected specifications. It supports four validation modes:
+
+1. **JSON Schema validation** -- validate a JSON file against a JSON
+   Schema document. Uses a built-in lightweight validator (no external
+   ``jsonschema`` dependency) that checks types, required fields, enums,
+   and nested structures. Does not support ``$ref``, ``allOf/anyOf/oneOf``,
+   ``pattern``, or ``format``.
+
+2. **File structure validation** -- verify that expected files exist under
+   a root directory.
+
+3. **Python export validation** -- verify that a Python module defines
+   expected classes, functions, or variables by scanning the source text
+   (no import required).
+
+4. **API contract validation** -- verify that a Python file implements
+   expected functions, classes, and methods by scanning definitions in
+   the source text.
+
+5. **Generic gate runner** -- execute arbitrary ``(name, callable)``
+   check pairs where each callable returns ``(bool, message)``.
+
+All validators produce ``SpecValidationResult`` objects containing
+individual ``SpecCheck`` entries. The result is considered passing only
+when every check passes.
+"""
 from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -173,7 +203,13 @@ def _validate_value_against_schema(
 
 
 class SpecValidator:
-    """Validate files and structures against JSON Schema or custom specs."""
+    """Validate files and structures against JSON Schema or custom specs.
+
+    Provides multiple validation strategies (JSON Schema, file structure,
+    Python exports, API contracts, and generic gates) that all produce
+    uniform ``SpecValidationResult`` output. The validator is stateless
+    and safe to reuse across multiple calls.
+    """
 
     # ------------------------------------------------------------------
     # JSON Schema validation
@@ -413,7 +449,7 @@ class SpecValidator:
     # ------------------------------------------------------------------
 
     def run_gate(
-        self, checks: list[tuple[str, callable]]
+        self, checks: list[tuple[str, Callable[[], tuple[bool, str]]]]
     ) -> SpecValidationResult:
         """Run a list of named check functions.
 

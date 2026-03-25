@@ -1,4 +1,11 @@
-"""baton classify — classify task sensitivity and select guardrail preset."""
+"""``baton classify`` -- classify task sensitivity and select guardrail preset.
+
+Analyses a task description (and optionally affected file paths) to
+determine the risk level, confidence, and appropriate guardrail preset.
+
+Delegates to:
+    agent_baton.core.govern.classifier.DataClassifier
+"""
 from __future__ import annotations
 
 import argparse

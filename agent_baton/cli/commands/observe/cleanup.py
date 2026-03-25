@@ -1,4 +1,12 @@
-"""baton cleanup — archive or remove old execution artifacts."""
+"""``baton cleanup`` -- archive or remove old execution artifacts.
+
+Removes traces, events, retrospectives, and other execution artifacts
+older than a configurable retention period. Supports --dry-run to
+preview what would be removed without making changes.
+
+Delegates to:
+    agent_baton.core.observe.archiver.DataArchiver
+"""
 from __future__ import annotations
 
 import argparse

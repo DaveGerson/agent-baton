@@ -1,4 +1,13 @@
-"""baton budget — show or refresh budget tier recommendations."""
+"""``baton budget`` -- show or refresh budget tier recommendations.
+
+The budget tuner analyses actual token consumption across tasks and
+compares it to budget tier ceilings (lean, standard, full). When a
+task type consistently uses fewer tokens than its tier allows, the
+tuner recommends a downgrade to save resources.
+
+Delegates to:
+    agent_baton.core.learn.budget_tuner.BudgetTuner
+"""
 from __future__ import annotations
 
 import argparse

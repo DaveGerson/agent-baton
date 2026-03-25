@@ -1,4 +1,12 @@
-"""baton context-profile — list and inspect agent context efficiency profiles."""
+"""``baton context-profile`` -- list and inspect agent context efficiency profiles.
+
+Context profiles measure how efficiently agents use their context window:
+how many files they read vs. how many they actually reference in their
+output. High redundancy indicates an agent is doing too much exploration.
+
+Delegates to:
+    agent_baton.core.observe.context_profiler.ContextProfiler
+"""
 from __future__ import annotations
 
 import argparse

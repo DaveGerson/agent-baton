@@ -1,4 +1,12 @@
-"""baton dashboard — generate or display the usage dashboard."""
+"""``baton dashboard`` -- generate or display the usage dashboard.
+
+Renders a markdown summary of orchestration activity including agent
+usage counts, gate pass rates, and token consumption. With --write,
+persists the dashboard to disk for later review.
+
+Delegates to:
+    agent_baton.core.observe.dashboard.DashboardGenerator
+"""
 from __future__ import annotations
 
 import argparse

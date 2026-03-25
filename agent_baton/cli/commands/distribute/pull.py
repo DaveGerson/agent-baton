@@ -1,4 +1,11 @@
-"""baton pull — install a package from a local registry directory."""
+"""``baton pull`` -- install a package from a local registry directory.
+
+Fetches a named package from a local registry and installs its agents,
+references, and knowledge packs into the project or user scope.
+
+Delegates to:
+    agent_baton.core.distribute.registry_client.RegistryClient
+"""
 from __future__ import annotations
 
 import argparse

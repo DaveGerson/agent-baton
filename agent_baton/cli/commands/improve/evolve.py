@@ -1,4 +1,11 @@
-"""baton evolve — analyze agent performance and propose prompt improvements."""
+"""``baton evolve`` -- analyse agent performance and propose prompt improvements.
+
+The evolution engine identifies underperforming agents and generates
+prompt improvement proposals based on failure patterns.
+
+Delegates to:
+    agent_baton.core.improve.evolution.PromptEvolutionEngine
+"""
 from __future__ import annotations
 
 import argparse

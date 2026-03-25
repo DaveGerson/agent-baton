@@ -1,4 +1,11 @@
-"""baton compliance — show compliance reports."""
+"""``baton compliance`` -- show compliance reports.
+
+Compliance reports are generated during execution for tasks that touch
+regulated domains. This command lists and displays them.
+
+Delegates to:
+    agent_baton.core.govern.compliance.ComplianceReportGenerator
+"""
 from __future__ import annotations
 
 import argparse

@@ -1,4 +1,10 @@
-"""baton install — install agents and references."""
+"""``baton install`` -- install agents and references to user or project scope.
+
+Non-interactive installer that copies agent definitions, reference
+documents, and templates from the agent-baton source tree. Supports
+--upgrade mode (overwrites agents/refs, merges settings.json) and
+--verify for post-install health checks.
+"""
 from __future__ import annotations
 
 import argparse

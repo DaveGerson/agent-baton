@@ -1,4 +1,12 @@
-"""baton anomalies — detect and display system anomalies."""
+"""``baton anomalies`` -- detect and display system anomalies.
+
+Anomalies are statistical deviations from normal agent behaviour:
+sudden drops in success rate, spikes in token usage, or elevated
+retry rates.
+
+Delegates to:
+    agent_baton.core.improve.triggers.TriggerEvaluator
+"""
 from __future__ import annotations
 
 import argparse

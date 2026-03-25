@@ -1,4 +1,13 @@
-"""baton plan — create an intelligent execution plan for a task."""
+"""``baton plan`` -- create an intelligent execution plan for a task.
+
+Generates a MachinePlan by analysing the task description, detecting the
+project stack, classifying risk, and routing to appropriate agents. The
+plan can be output as markdown or JSON, and optionally saved to
+.claude/team-context/plan.json for consumption by ``baton execute start``.
+
+Delegates to:
+    agent_baton.core.engine.planner.IntelligentPlanner
+"""
 from __future__ import annotations
 
 import argparse

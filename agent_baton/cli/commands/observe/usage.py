@@ -1,4 +1,12 @@
-"""baton usage — show usage statistics from the usage log."""
+"""``baton usage`` -- show usage statistics from the usage log.
+
+Provides aggregate and per-agent views of orchestration usage data
+including task counts, agent frequency, token consumption, retry
+rates, and gate pass rates.
+
+Delegates to:
+    agent_baton.core.observe.usage.UsageLogger
+"""
 from __future__ import annotations
 
 import argparse

@@ -1,4 +1,11 @@
-"""baton route — route roles to agent flavors."""
+"""``baton route`` -- route roles to agent flavors.
+
+Detects the project stack and resolves base agent roles to their
+stack-specific flavors (e.g. backend-engineer -> backend-engineer--python).
+
+Delegates to:
+    agent_baton.core.orchestration.router.AgentRouter
+"""
 from __future__ import annotations
 
 import argparse

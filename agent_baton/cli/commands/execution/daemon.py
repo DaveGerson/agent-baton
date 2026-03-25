@@ -1,4 +1,15 @@
-"""CLI command: ``baton daemon`` — background execution management."""
+"""``baton daemon`` -- background execution management.
+
+Manages long-running daemon processes that execute plans without a
+terminal-attached orchestrator. The daemon spawns an async worker
+that dispatches agents, processes gates, and records results.
+
+Subcommands: start, status, stop, list.
+
+Delegates to:
+    agent_baton.core.runtime.supervisor.WorkerSupervisor
+    agent_baton.core.runtime.launcher.AgentLauncher
+"""
 from __future__ import annotations
 
 import argparse
@@ -155,7 +166,9 @@ async def _run_daemon_with_api(
         logger.info("Daemon resuming (with API): task=%s host=%s port=%d", "?", host, port)
         engine.resume()
     else:
-        task_id = plan.task_id if plan else "?"
+        if plan is None:
+            raise RuntimeError("A plan file is required when not resuming (--plan PATH).")
+        task_id = plan.task_id
         logger.info(
             "Daemon starting (with API): task=%s host=%s port=%d",
             task_id, host, port,
@@ -398,6 +411,8 @@ def handler(args: argparse.Namespace) -> None:
         else:
             # ── Worker-only path (original behaviour) ────────────────────────
             try:
+                if plan is None:
+                    raise RuntimeError("A plan file is required when not resuming (--plan PATH).")
                 summary = supervisor.start(
                     plan=plan,
                     launcher=launcher,

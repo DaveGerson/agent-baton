@@ -1,4 +1,12 @@
-"""baton verify-package — validate a .tar.gz package before distribution."""
+"""``baton verify-package`` -- validate a .tar.gz package before distribution.
+
+Runs structural and content checks on a package archive: verifies the
+manifest, checks agent frontmatter, validates references, and optionally
+displays per-file SHA-256 checksums.
+
+Delegates to:
+    agent_baton.core.distribute.packager.PackageVerifier
+"""
 from __future__ import annotations
 
 import argparse
