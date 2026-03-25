@@ -1,8 +1,18 @@
-"""FileStorage — backward-compatible wrapper around existing file-based persistence.
+"""FileStorage -- backward-compatible wrapper around file-based persistence.
 
-Delegates to StatePersistence, UsageLogger, AgentTelemetry, EventPersistence,
-TraceRecorder, RetrospectiveEngine, PatternLearner, BudgetTuner, and
-ContextManager so legacy projects continue to work unchanged.
+Implements the ``StorageBackend`` protocol by delegating to the original
+file-based persistence classes: ``StatePersistence`` (execution-state.json),
+``EventPersistence`` (events/*.jsonl), ``UsageLogger`` (usage-log.jsonl),
+``AgentTelemetry`` (telemetry.jsonl), ``TraceRecorder`` (traces/*.json),
+``RetrospectiveEngine`` (retrospectives/*.json), ``PatternLearner``
+(learned-patterns.json), ``BudgetTuner`` (budget-recommendations.json),
+and ``ContextManager`` (shared-context.md / profile.md).
+
+This backend is selected automatically by ``get_project_storage`` when
+an existing project has not yet migrated to SQLite (i.e. no ``baton.db``
+exists but ``execution-state.json`` or ``executions/`` directory does).
+It allows legacy projects to keep working unchanged until they run
+``baton migrate``.
 """
 from __future__ import annotations
 
@@ -34,7 +44,13 @@ class FileStorage:
     """Backward-compatible file-based storage backend.
 
     Wraps existing persistence classes so projects that haven't migrated
-    to SQLite continue to work exactly as before.
+    to SQLite continue to work exactly as before.  Each method
+    instantiates the appropriate delegate on the fly -- there is no
+    persistent state beyond the ``context_root`` path.
+
+    Attributes:
+        _root: Path to the project's ``.claude/team-context/`` directory
+            where all JSON/JSONL files are stored.
     """
 
     def __init__(self, context_root: Path) -> None:

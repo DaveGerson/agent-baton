@@ -1,4 +1,18 @@
-"""baton validate — validate agent definition .md files."""
+"""``baton validate`` -- validate agent definition ``.md`` files.
+
+Checks agent definition files for required YAML frontmatter fields,
+valid structure, and common authoring mistakes.  Accepts individual
+files or directories (validates all ``.md`` files recursively).
+
+Supports ``--strict`` mode where warnings are treated as errors
+(non-zero exit code).
+
+Output: per-file status with errors and warnings, plus a summary line.
+Exit code 1 if any errors are found.
+
+Delegates to:
+    :class:`~agent_baton.core.govern.validator.AgentValidator`
+"""
 from __future__ import annotations
 
 import argparse

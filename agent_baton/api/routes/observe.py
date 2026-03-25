@@ -25,9 +25,23 @@ async def get_dashboard_view(
 ) -> DashboardResponse:
     """Return the pre-rendered usage dashboard as markdown.
 
-    Delegates entirely to DashboardGenerator.generate().  The metrics dict
-    is left empty — all structured data is embedded in the markdown for now.
-    A future work package can expose structured metrics separately.
+    GET /api/v1/dashboard
+
+    Delegates entirely to ``DashboardGenerator.generate()``.  The
+    ``metrics`` dict is left empty -- all structured data is embedded
+    in the markdown for now.  A future work package can expose
+    structured metrics separately.
+
+    Args:
+        dashboard: Injected ``DashboardGenerator`` singleton.
+
+    Returns:
+        A ``DashboardResponse`` with ``dashboard_markdown`` containing
+        the rendered markdown and an empty ``metrics`` dict.
+
+    Raises:
+        HTTPException 500: If the dashboard generator encounters an
+            error (e.g. corrupt usage log).
     """
     try:
         markdown = dashboard.generate()
@@ -42,7 +56,26 @@ async def get_trace(
     task_id: str,
     trace_recorder: TraceRecorder = Depends(get_trace_recorder),
 ) -> TraceResponse:
-    """Return the structured execution trace for a task."""
+    """Return the structured execution trace for a task.
+
+    GET /api/v1/traces/{task_id}
+
+    The trace contains a chronologically ordered list of events
+    (agent dispatches, gate checks, completions) plus a snapshot
+    of the plan as it existed at execution start.
+
+    Args:
+        task_id: The task identifier to load the trace for (URL path
+            parameter).
+        trace_recorder: Injected ``TraceRecorder`` singleton.
+
+    Returns:
+        A ``TraceResponse`` with the plan snapshot, ordered events,
+        timestamps, and final outcome.
+
+    Raises:
+        HTTPException 404: If no trace file exists for *task_id*.
+    """
     trace = trace_recorder.load_trace(task_id)
     if trace is None:
         raise HTTPException(
@@ -66,16 +99,32 @@ async def get_usage(
 ) -> UsageResponse:
     """Return usage records with optional filtering.
 
+    GET /api/v1/usage
+
     Query parameters:
-    - ``since``: ISO 8601 timestamp — only records whose ``timestamp`` is
-      lexicographically >= this value are returned.  ISO 8601 strings sort
-      correctly as strings, so no date parsing is needed.
-    - ``agent``: return only records where at least one agent_used entry
-      has the given name.
+
+    - ``since``: ISO 8601 timestamp -- only records whose ``timestamp``
+      is lexicographically >= this value are returned.  ISO 8601 strings
+      sort correctly as strings, so no date parsing is needed.
+    - ``agent``: return only records where at least one ``agents_used``
+      entry has the given name.
 
     DECISION: Filtering is done in-memory after reading all records.  The
     JSONL log is append-only and unindexed, so there is no cheaper path.
     For large logs a future work package should add cursor-based pagination.
+
+    Args:
+        since: Optional ISO 8601 lower-bound timestamp filter.
+        agent: Optional agent name filter.
+        usage_logger: Injected ``UsageLogger`` singleton.
+
+    Returns:
+        A ``UsageResponse`` containing filtered ``records`` and an
+        aggregated ``summary`` dict with ``total_tasks``,
+        ``total_tokens``, ``total_agents``, and ``outcome_counts``.
+
+    Raises:
+        HTTPException 500: If the usage log file cannot be read.
     """
     try:
         records = usage_logger.read_all()
@@ -107,7 +156,16 @@ async def get_usage(
 # ---------------------------------------------------------------------------
 
 def _build_summary(records: list) -> dict[str, Any]:
-    """Build a lightweight summary dict from the filtered record list."""
+    """Build a lightweight summary dict from the filtered record list.
+
+    Args:
+        records: List of ``TaskUsageRecord`` dataclasses to aggregate.
+
+    Returns:
+        A dict with keys ``total_tasks``, ``total_tokens``,
+        ``total_agents``, and ``outcome_counts`` (a dict mapping
+        outcome strings to their frequency).
+    """
     total_tasks = len(records)
     if total_tasks == 0:
         return {

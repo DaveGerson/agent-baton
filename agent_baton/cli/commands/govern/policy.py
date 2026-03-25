@@ -1,4 +1,19 @@
-"""baton policy — list, show, or check guardrail policy presets."""
+"""``baton policy`` -- list, show, or evaluate guardrail policy presets.
+
+Policy presets define rules that constrain agent behaviour (allowed file
+paths, permitted tools, required review patterns).  This command lists
+available presets, shows their rules, and evaluates an agent against a
+preset to check for violations.
+
+Display modes:
+    * ``baton policy`` -- List all available presets with descriptions.
+    * ``baton policy --show NAME`` -- Show rules of a specific preset.
+    * ``baton policy --check AGENT --preset NAME`` -- Evaluate an agent
+      against a preset and report violations.
+
+Delegates to:
+    :class:`~agent_baton.core.govern.policy.PolicyEngine`
+"""
 from __future__ import annotations
 
 import argparse

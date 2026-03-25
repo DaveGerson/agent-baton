@@ -1,4 +1,31 @@
-"""Retrospective engine — generates and manages task retrospectives."""
+"""Retrospective engine -- generates and manages task retrospectives.
+
+Retrospectives are the qualitative counterpart to usage records.  While
+:class:`~agent_baton.core.observe.usage.UsageLogger` captures numeric
+metrics, retrospectives record *why* things went well or poorly: which
+agents succeeded, which failed, what knowledge was missing, and what
+roster changes are recommended.
+
+Retrospectives bridge the observe and learn layers:
+
+* The :class:`RetrospectiveEngine` merges explicit ``KNOWLEDGE_GAP``
+  signals from execution with implicit gap detection (scanning narrative
+  text for phrases like "lacked context" or "assumed incorrectly").
+* :class:`~agent_baton.core.learn.pattern_learner.PatternLearner` reads
+  retrospective JSON sidecars to surface per-agent knowledge gaps.
+* :class:`~agent_baton.core.improve.scoring.PerformanceScorer` scans
+  retrospective markdown for positive/negative agent mentions to compute
+  qualitative scorecard signals.
+* :class:`~agent_baton.core.improve.evolution.PromptEvolutionEngine` uses
+  scorecard data (which includes retrospective mentions) to generate
+  prompt-improvement proposals.
+
+Storage format: each retrospective is persisted as a pair of files in
+``<team_context_root>/retrospectives/``:
+
+* ``<task_id>.md`` -- human-readable Markdown narrative.
+* ``<task_id>.json`` -- structured JSON sidecar for programmatic access.
+"""
 from __future__ import annotations
 
 import json
@@ -171,12 +198,20 @@ class RetrospectiveEngine:
         return gaps
 
     def save(self, retro: Retrospective) -> Path:
-        """Write a retrospective to disk as markdown with a JSON sidecar.
+        """Write a retrospective to disk as Markdown with a JSON sidecar.
 
-        Both files share the same stem so structured data can be reloaded
-        without markdown parsing.
+        Both files share the same stem (``<sanitized_task_id>``) so
+        structured data can be reloaded without Markdown parsing.  The
+        JSON sidecar is the preferred machine-readable format for
+        downstream consumers such as
+        :meth:`~agent_baton.core.learn.pattern_learner.PatternLearner.knowledge_gaps_for`
+        and :meth:`load_recent_feedback`.
 
-        Returns the path to the written markdown file.
+        Args:
+            retro: The retrospective to persist.
+
+        Returns:
+            Absolute path to the written Markdown file.
         """
         self._dir.mkdir(parents=True, exist_ok=True)
         # Sanitize task_id for filename
@@ -291,8 +326,17 @@ class RetrospectiveEngine:
     def extract_recommendations(self) -> list[RosterRecommendation]:
         """Extract all roster recommendations across all retrospectives.
 
-        Useful for the talent-builder and orchestrator to see patterns
-        in what agents/knowledge packs are repeatedly recommended.
+        Parses the ``## Roster Recommendations`` Markdown section from each
+        retrospective file, looking for lines matching the pattern
+        ``- **Action:** target-name``.  This is a legacy fallback used when
+        no JSON sidecars exist; prefer :meth:`load_recent_feedback` which
+        reads structured JSON when available.
+
+        Returns:
+            Aggregated list of roster recommendations extracted from all
+            retrospective files.  The list feeds into the orchestrator's
+            planning phase and the talent-builder agent for agent roster
+            evolution.
         """
         recommendations: list[RosterRecommendation] = []
         for path in self.list_retrospectives():

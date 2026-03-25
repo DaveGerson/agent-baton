@@ -1,6 +1,47 @@
-"""Unified Policy Engine — evaluate agent assignments against guardrail policy rules.
+"""Unified Policy Engine -- evaluate agent assignments against guardrail policy rules.
 
-**Status: Experimental** — built and tested but not yet validated with real usage data.
+The policy engine is the enforcement layer that checks whether an agent's
+planned file writes and tool usage comply with the active guardrail preset.
+Policies are expressed as declarative ``PolicyRule`` objects grouped into
+``PolicySet`` collections.
+
+Five standard presets are built in:
+
+* **standard_dev** (LOW risk) -- blocks writes to ``.env``, ``secrets/``,
+  ``node_modules/``; restricts review agents from Write/Bash tools.
+* **data_analysis** (LOW risk) -- constrains data agents to ``output/``
+  directories; blocks writes to source ``data/`` directories; requires
+  PII masking gate.
+* **infrastructure** (HIGH risk) -- limits infra file writes to devops
+  agents; requires auditor pre-review and a rollback plan gate.
+* **regulated** (HIGH/CRITICAL risk) -- requires subject-matter-expert
+  and auditor agents; enforces append-only historical records and full
+  audit trails; blocks Bash on regulated data.
+* **security** (HIGH risk) -- requires auditor and security-reviewer
+  agents; isolates auth code writes to the implementing agent; enforces
+  no-hardcoded-credentials gate.
+
+Custom presets can be persisted as JSON files under ``.claude/policies/``
+and are loaded on demand by the engine. On-disk presets take precedence
+over built-in presets of the same name.
+
+Rule types and their evaluation semantics:
+
+* ``path_block`` -- agent must not write to paths matching the glob pattern.
+* ``path_allow`` -- advisory: agent writes outside the allowed pattern
+  generate a warning.
+* ``tool_restrict`` -- agent must not use the listed tools.
+* ``require_agent`` -- the execution plan must include the named agent
+  (structural check, surfaced as a warning during per-agent evaluation).
+* ``require_gate`` -- the execution plan must include the named gate
+  check (structural check, surfaced as a warning).
+
+Each rule has a severity of ``"block"`` (hard failure) or ``"warn"``
+(advisory). The engine returns a list of ``PolicyViolation`` objects so the
+caller can decide how to handle blocks versus warnings.
+
+**Status: Experimental** -- built and tested but not yet validated with real
+usage data.
 """
 from __future__ import annotations
 
@@ -12,7 +53,32 @@ from pathlib import Path
 
 @dataclass
 class PolicyRule:
-    """A single guardrail policy rule."""
+    """A single guardrail policy rule.
+
+    Attributes:
+        name: Machine-readable identifier for the rule (e.g.
+            ``"block_env_files"``).
+        description: Human-readable explanation of what the rule enforces.
+        scope: Which agents this rule applies to. ``"all"`` matches every
+            agent; otherwise interpreted as an ``fnmatch`` pattern against
+            the agent name (e.g. ``"*reviewer*"``).
+        rule_type: The enforcement mechanism. One of:
+
+            - ``"path_block"`` -- block writes to matching paths.
+            - ``"path_allow"`` -- warn when writes occur outside allowed
+              paths.
+            - ``"tool_restrict"`` -- block use of specified tools.
+            - ``"require_agent"`` -- require the named agent in the plan.
+            - ``"require_gate"`` -- require the named gate check in the
+              plan.
+        pattern: The target of the rule. Interpretation depends on
+            ``rule_type``:
+
+            - For path rules: an ``fnmatch``-compatible glob pattern.
+            - For ``tool_restrict``: comma-separated tool names.
+            - For ``require_agent`` / ``require_gate``: the required name.
+        severity: ``"block"`` (hard failure) or ``"warn"`` (advisory).
+    """
 
     name: str
     description: str = ""
@@ -45,7 +111,14 @@ class PolicyRule:
 
 @dataclass
 class PolicyViolation:
-    """A rule violation detected during policy evaluation."""
+    """A rule violation detected during policy evaluation.
+
+    Attributes:
+        agent_name: The agent whose assignment triggered the violation.
+        rule: The ``PolicyRule`` that was violated.
+        details: Human-readable explanation of why the violation occurred
+            (e.g. which path matched, which tool was restricted).
+    """
 
     agent_name: str
     rule: PolicyRule
@@ -54,7 +127,20 @@ class PolicyViolation:
 
 @dataclass
 class PolicySet:
-    """A collection of policy rules (a guardrail preset as code)."""
+    """A collection of policy rules representing a guardrail preset.
+
+    A policy set groups related rules under a named preset. The five
+    standard presets (``standard_dev``, ``data_analysis``, ``infrastructure``,
+    ``regulated``, ``security``) are defined in this module. Custom presets
+    can be created, serialized to JSON, and loaded from disk.
+
+    Attributes:
+        name: Machine-readable preset name used as the filename when
+            persisted (e.g. ``"regulated"`` is stored as ``regulated.json``).
+        description: Human-readable explanation of the preset's purpose
+            and risk level.
+        rules: Ordered list of ``PolicyRule`` objects in this preset.
+    """
 
     name: str
     description: str = ""
@@ -416,9 +502,27 @@ class PolicyEngine:
         allowed_paths: list[str],
         tools: list[str],
     ) -> list[PolicyViolation]:
-        """Check an agent's assignment against a policy set.
+        """Check an agent's planned assignment against a policy set.
 
-        Returns a list of violations (empty list means compliant).
+        Iterates over every rule in the policy set, filters by scope, and
+        checks whether the agent's file paths or tools trigger a violation.
+
+        For ``path_block`` rules, each path in ``allowed_paths`` is tested
+        against the rule's glob pattern. For ``tool_restrict`` rules, the
+        agent's tool list is checked against the comma-separated restricted
+        tools. For ``require_agent`` and ``require_gate`` rules, a warning
+        violation is always emitted so the caller can verify the
+        requirement is satisfied at the plan level.
+
+        Args:
+            policy: The ``PolicySet`` to evaluate against.
+            agent_name: Name of the agent being checked.
+            allowed_paths: File paths the agent is expected to write to.
+            tools: Tool names the agent will have access to.
+
+        Returns:
+            A list of ``PolicyViolation`` objects. An empty list means the
+            agent assignment is fully compliant with the policy set.
         """
         violations: list[PolicyViolation] = []
 

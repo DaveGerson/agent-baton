@@ -6,7 +6,23 @@ from dataclasses import dataclass, field
 
 @dataclass
 class RegistryEntry:
-    """A single published package entry in the registry index."""
+    """Metadata for a single published agent package in the registry.
+
+    Each version of a package gets its own entry.  Entries are stored
+    in a ``RegistryIndex`` and used by ``baton pull`` to resolve
+    compatible packages for installation.
+
+    Attributes:
+        name: Package name (e.g. ``"data-science"``).
+        version: Semantic version string.
+        description: Short summary of the package contents.
+        path: Relative path inside the registry repository
+            (e.g. ``"packages/data-science"``).
+        published_at: ISO 8601 publication timestamp.
+        baton_version: Minimum compatible agent-baton version.
+        agent_count: Number of agent definitions in the package.
+        reference_count: Number of reference documents in the package.
+    """
 
     name: str
     version: str
@@ -45,9 +61,18 @@ class RegistryEntry:
 
 @dataclass
 class RegistryIndex:
-    """Top-level index of all packages in a registry repo."""
+    """Top-level index of all packages available in a registry repository.
 
-    # Maps package name → list of RegistryEntry (one per version, sorted oldest→newest)
+    The index is fetched by ``baton pull`` to discover available packages
+    and resolve version constraints.
+
+    Attributes:
+        packages: Mapping of package name to version-sorted list of
+            ``RegistryEntry`` instances (oldest first).
+        updated_at: ISO 8601 timestamp of the last index refresh.
+    """
+
+    # Maps package name -> list of RegistryEntry (one per version, sorted oldest->newest)
     packages: dict[str, list[RegistryEntry]] = field(default_factory=dict)
     updated_at: str = ""
 

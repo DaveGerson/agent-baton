@@ -1,4 +1,18 @@
-"""Gate runner — determines what QA gate checks to run and evaluates results."""
+"""Gate runner -- determines what QA gate checks to run and evaluates results.
+
+Gates are quality checkpoints inserted between execution phases.  Each gate
+type has specific pass/fail semantics:
+
+- **build** / **test**: pass when exit code is 0.
+- **lint**: pass when exit code is 0 AND no error markers are found in
+  output (warnings are tolerated).
+- **spec**: delegates to ``SpecValidator`` for structural validation.
+- **review**: advisory only -- always passes regardless of output.
+
+The ``GateRunner`` is stateless; each method operates on its arguments
+without side effects.  Gate evaluation results are recorded by the
+``ExecutionEngine`` which handles state transitions on pass/fail.
+"""
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -22,7 +36,13 @@ _LINT_ERROR_MARKERS = (
 
 
 def _has_lint_errors(output: str) -> bool:
-    """Return True if *output* contains lint error markers (not just warnings)."""
+    """Return True if *output* contains lint error markers (not just warnings).
+
+    Scans line-by-line for patterns emitted by common Python linters
+    (ruff, flake8, pylint, mypy, pyflakes).  Warnings without error
+    markers do not trigger a failure, allowing lint gates to be used
+    in ``warn`` mode without blocking progress.
+    """
     for line in output.splitlines():
         for marker in _LINT_ERROR_MARKERS:
             if marker in line:

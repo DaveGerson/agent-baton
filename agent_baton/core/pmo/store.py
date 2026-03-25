@@ -1,7 +1,20 @@
-"""PmoStore — read/write PMO config and archive.
+"""PmoStore -- legacy JSON file-based PMO configuration and archive.
 
-Config: ~/.baton/pmo-config.json (atomic write via tmp+rename)
-Archive: ~/.baton/pmo-archive.jsonl (append-only, same pattern as UsageLogger)
+This is the original file-based PMO persistence layer.  It has been
+superseded by ``PmoSqliteStore`` (backed by ``pmo.db`` or ``central.db``)
+for new installations, but remains available for backward compatibility.
+
+Persistence paths:
+    ``~/.baton/pmo-config.json`` -- project registry, programs, and signals.
+        Written atomically via tmp+rename to prevent partial writes.
+    ``~/.baton/pmo-archive.jsonl`` -- append-only log of completed
+        execution cards.  Each line is a JSON-serialized ``PmoCard``.
+
+The ``PmoSqliteStore`` in ``pmo_sqlite.py`` implements the same public
+interface (``register_project``, ``unregister_project``, ``get_project``,
+``add_signal``, ``resolve_signal``, ``get_open_signals``,
+``archive_card``, ``read_archive``, ``load_config``, ``save_config``)
+so callers can switch backends transparently.
 """
 from __future__ import annotations
 
@@ -17,7 +30,17 @@ _ARCHIVE_FILENAME = "pmo-archive.jsonl"
 
 
 class PmoStore:
-    """Read/write PMO configuration and completed-plan archive."""
+    """Read/write PMO configuration and completed-plan archive.
+
+    This is the legacy file-based implementation.  It stores all state in
+    two files: a JSON config file (projects, programs, signals) and a
+    JSONL archive (completed cards).  Config writes are atomic (tmp file
+    + rename).
+
+    Attributes:
+        _config_path: Path to ``pmo-config.json``.
+        _archive_path: Path to ``pmo-archive.jsonl``.
+    """
 
     def __init__(
         self,
@@ -39,7 +62,12 @@ class PmoStore:
     # ── Config (JSON, atomic write) ────────────────────────────────────────
 
     def load_config(self) -> PmoConfig:
-        """Load PMO config from disk. Returns empty config if not found."""
+        """Load PMO config from ``pmo-config.json``.
+
+        Returns:
+            A ``PmoConfig`` populated from the file, or an empty
+            ``PmoConfig`` if the file does not exist or is malformed.
+        """
         if not self._config_path.exists():
             return PmoConfig()
         try:

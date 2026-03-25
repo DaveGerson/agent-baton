@@ -1,6 +1,32 @@
-"""EscalationManager — read/write the escalations.md file.
+"""Escalation management -- read, write, and resolve human escalation requests.
 
-**Status: Experimental** — built and tested but not yet validated with real usage data.
+When an agent encounters a decision that exceeds its authority or requires
+domain expertise, it creates an ``Escalation`` record. The escalation flow
+is:
+
+1. **Agent raises an escalation** -- calls ``EscalationManager.add()`` with
+   the question, context, and suggested options.
+2. **Orchestrator detects pending escalations** -- calls ``has_pending()``
+   or ``get_pending()`` during the execution loop.
+3. **Human provides an answer** -- the orchestrator presents the question
+   to the user and records the decision via ``resolve()``.
+4. **Execution resumes** -- the agent reads the answer and proceeds.
+
+Escalations are serialized as markdown blocks in a single file at
+``.claude/team-context/escalations.md``. Each block has the format::
+
+    ### <timestamp> -- <agent_name> -- PENDING|RESOLVED
+    **Priority:** <priority>
+    **Question:** <question>
+    **Context:** <context>
+    **Options:** <option1>, <option2>, ...
+    **Answer:** <answer>
+
+Blocks are separated by horizontal rules (``---``). Resolved escalations
+remain in the file for audit purposes until ``clear_resolved()`` is called.
+
+**Status: Experimental** -- built and tested but not yet validated with real
+usage data.
 """
 from __future__ import annotations
 
@@ -76,7 +102,13 @@ def _serialize_all(escalations: list[Escalation]) -> str:
 # ---------------------------------------------------------------------------
 
 class EscalationManager:
-    """Manage the escalation file at .claude/team-context/escalations.md."""
+    """Manage the escalation file at ``.claude/team-context/escalations.md``.
+
+    Provides CRUD operations over the escalation file: adding new
+    escalations, querying pending ones, resolving them with answers,
+    and purging resolved entries. All operations re-read the file from
+    disk to avoid stale state when multiple agents interact concurrently.
+    """
 
     def __init__(self, path: Path | None = None) -> None:
         self._path: Path = (path or Path(".claude/team-context/escalations.md")).resolve()
@@ -112,13 +144,25 @@ class EscalationManager:
     # ── Public API ──────────────────────────────────────────────────────────
 
     def add(self, escalation: Escalation) -> None:
-        """Append an escalation to the file."""
+        """Append a new escalation to the file.
+
+        Creates the file and parent directories if they do not exist.
+
+        Args:
+            escalation: The ``Escalation`` to record. Its ``resolved``
+                field should be ``False`` on creation.
+        """
         existing = self._read_all()
         existing.append(escalation)
         self._write_all(existing)
 
     def get_pending(self) -> list[Escalation]:
-        """Return all unresolved escalations."""
+        """Return all unresolved escalations.
+
+        Returns:
+            List of ``Escalation`` objects where ``resolved`` is ``False``,
+            in file order (oldest first).
+        """
         return [e for e in self._read_all() if not e.resolved]
 
     def get_all(self) -> list[Escalation]:
@@ -128,7 +172,17 @@ class EscalationManager:
     def resolve(self, agent_name: str, answer: str) -> bool:
         """Resolve the oldest pending escalation from the given agent.
 
-        Returns True if an escalation was found and resolved, False otherwise.
+        Finds the first unresolved escalation whose ``agent_name`` matches,
+        marks it as resolved, records the answer, and writes the updated
+        file back to disk.
+
+        Args:
+            agent_name: Name of the agent whose escalation to resolve.
+            answer: The human's decision or response text.
+
+        Returns:
+            ``True`` if a matching pending escalation was found and resolved,
+            ``False`` if no pending escalation exists for that agent.
         """
         escalations = self._read_all()
         for esc in escalations:
@@ -143,9 +197,15 @@ class EscalationManager:
         """Resolve multiple escalations by agent name.
 
         For each agent name key, resolves the oldest pending escalation for
-        that agent with the corresponding answer value.
+        that agent with the corresponding answer value. Each call to
+        ``resolve()`` re-reads the file, so concurrent modifications are
+        handled safely.
 
-        Returns the count of successfully resolved escalations.
+        Args:
+            answers: Mapping of ``{agent_name: answer_text}``.
+
+        Returns:
+            The count of escalations that were successfully resolved.
         """
         count = 0
         for agent_name, answer in answers.items():

@@ -1,4 +1,22 @@
-"""ContextProfiler — analyse trace data to compute per-agent context efficiency."""
+"""ContextProfiler -- analyse trace data to compute per-agent context efficiency.
+
+Context efficiency measures how effectively each agent converts the files
+it reads into useful output (files written).  Agents that read many files
+but write few are flagged as "reading too broadly," which wastes context
+window budget and slows execution.
+
+This module sits between the trace layer (which records raw file I/O
+events) and the improvement layer (which can use efficiency data to
+recommend routing or prompt changes):
+
+* Reads :class:`~agent_baton.models.trace.TaskTrace` objects produced by
+  :class:`~agent_baton.core.observe.trace.TraceRecorder`.
+* Computes per-agent ``efficiency_score`` and cross-agent ``redundancy_rate``.
+* Persists :class:`~agent_baton.models.context_profile.TaskContextProfile`
+  objects as JSON for longitudinal analysis.
+* :meth:`ContextProfiler.agent_summary` aggregates scores across tasks to
+  reveal chronically inefficient agents.
+"""
 from __future__ import annotations
 
 import json
@@ -170,14 +188,30 @@ class ContextProfiler:
     # ── Aggregation ────────────────────────────────────────────────────────
 
     def agent_summary(self, agent_name: str) -> dict:
-        """Compute aggregate stats for *agent_name* across all saved profiles.
+        """Compute aggregate context-efficiency statistics for *agent_name*.
 
-        Returns a dict with:
-        - ``times_seen`` — number of tasks the agent appeared in
-        - ``avg_files_read`` — average number of files read per task
-        - ``avg_efficiency`` — average efficiency score across tasks
-        - ``most_read_files`` — top-5 most frequently read files (path → count)
-        - ``low_efficiency_tasks`` — task IDs where efficiency < 0.3
+        Scans all saved :class:`TaskContextProfile` objects and collects
+        metrics for agent entries matching *agent_name*.
+
+        Scoring methodology:
+            An ``efficiency_score`` below 0.3 indicates the agent read more
+            than 3x the files it actually modified -- a sign that the agent's
+            prompt is too exploratory or that knowledge packs should pre-supply
+            the context it needs.  Tasks with scores below this threshold are
+            flagged in ``low_efficiency_tasks`` for review.
+
+        Args:
+            agent_name: Exact agent name to filter by (case-sensitive).
+
+        Returns:
+            A dict with the following keys:
+
+            * ``times_seen`` -- number of tasks the agent appeared in.
+            * ``avg_files_read`` -- average number of files read per task.
+            * ``avg_efficiency`` -- mean efficiency score across tasks.
+            * ``most_read_files`` -- top-5 most frequently read files
+              (path to count mapping).
+            * ``low_efficiency_tasks`` -- task IDs where efficiency < 0.3.
         """
         all_paths = self.list_profiles(count=1_000)
         times_seen = 0
@@ -229,7 +263,17 @@ class ContextProfiler:
         }
 
     def generate_report(self) -> str:
-        """Return a markdown report of context efficiency across all saved profiles."""
+        """Return a Markdown report of context efficiency across all saved profiles.
+
+        Includes a per-task summary table (agents, reads, redundancy, avg
+        efficiency), overall statistics, and a flagged-agents section
+        highlighting any agent whose efficiency score fell below 0.3 --
+        meaning it read more than three times as many files as it wrote.
+
+        Returns:
+            A complete Markdown document string.  Returns a placeholder
+            message if no profiles have been saved yet.
+        """
         all_paths = self.list_profiles(count=1_000)
 
         if not all_paths:

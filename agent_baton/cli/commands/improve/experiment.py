@@ -1,4 +1,24 @@
-"""baton experiment — manage improvement experiments."""
+"""``baton experiment`` -- manage improvement experiments.
+
+Experiments are controlled trials that test whether an improvement
+recommendation actually improves agent performance.  Each experiment
+tracks a metric (e.g. success rate) against a baseline, collects
+samples over subsequent executions, and can be concluded or rolled
+back.
+
+Subcommands:
+    * ``list`` -- List all experiments with status and progress.
+    * ``show ID`` -- Show detailed experiment state.
+    * ``conclude ID --result improved|degraded|inconclusive`` -- Manually
+      conclude an experiment.
+    * ``rollback ID`` -- Roll back an experiment and its recommendation.
+      Triggers circuit breaker warning if 3+ rollbacks in 7 days.
+
+Delegates to:
+    :class:`~agent_baton.core.improve.experiments.ExperimentManager`
+    :class:`~agent_baton.core.improve.proposals.ProposalManager`
+    :class:`~agent_baton.core.improve.rollback.RollbackManager`
+"""
 from __future__ import annotations
 
 import argparse

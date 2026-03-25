@@ -1,4 +1,20 @@
-"""Trace recorder and renderer — capture and display structured task execution traces."""
+"""Trace recorder and renderer -- capture and display structured task execution traces.
+
+Traces are the primary observability primitive in Agent Baton's learning
+pipeline.  Each orchestrated task produces a single :class:`TaskTrace` that
+records every significant event (agent starts/completions, gate checks,
+file I/O, errors) as a DAG of :class:`TraceEvent` objects.
+
+Downstream consumers:
+
+* :class:`~agent_baton.core.observe.context_profiler.ContextProfiler` reads
+  traces to compute per-agent context-efficiency scores.
+* :class:`~agent_baton.core.observe.retrospective.RetrospectiveEngine` uses
+  trace data alongside usage records to build qualitative retrospectives.
+* Trace JSON files are archived by
+  :class:`~agent_baton.core.observe.archiver.DataArchiver` after the
+  configured retention period.
+"""
 from __future__ import annotations
 
 import json
@@ -62,7 +78,26 @@ class TraceRecorder:
         details: dict | None = None,
         duration_seconds: float | None = None,
     ) -> TraceEvent:
-        """Append a new event to *trace* and return it."""
+        """Append a new timestamped event to *trace* and return it.
+
+        Events are the atomic unit of trace data.  Common event types
+        include ``agent_start``, ``agent_complete``, ``gate_result``,
+        ``file_read``, ``file_write``, and ``error``.
+
+        Args:
+            trace: The in-memory trace to append the event to.
+            event_type: Identifier for the event kind (e.g. ``"agent_start"``).
+            agent_name: Name of the agent that produced this event, if any.
+            phase: 1-indexed phase number within the execution plan.
+            step: Step number within the phase.
+            details: Arbitrary key-value metadata (e.g. ``{"path": "foo.py"}``
+                for file events, ``{"result": "PASS"}`` for gate events).
+            duration_seconds: Wall-clock duration of the operation, if known.
+
+        Returns:
+            The newly created :class:`TraceEvent`, already appended to
+            ``trace.events``.
+        """
         event = TraceEvent(
             timestamp=_utcnow(),
             event_type=event_type,
@@ -80,7 +115,20 @@ class TraceRecorder:
         trace: TaskTrace,
         outcome: str | None = None,
     ) -> Path:
-        """Finalise *trace*, write it to disk, and return the file path."""
+        """Finalise *trace*, write it to disk, and return the file path.
+
+        Sets ``trace.completed_at`` to the current UTC time and
+        ``trace.outcome`` to the supplied value (typically ``"SHIP"`` or
+        ``"FAIL"``).  The trace is serialised as indented JSON to
+        ``<traces_dir>/<task_id>.json``.
+
+        Args:
+            trace: The in-memory trace to finalise.
+            outcome: Final outcome label for the task.
+
+        Returns:
+            Absolute path to the written JSON file.
+        """
         trace.completed_at = _utcnow()
         trace.outcome = outcome
 
@@ -189,7 +237,18 @@ class TraceRenderer:
         return "\n".join(lines)
 
     def render_summary(self, trace: TaskTrace) -> str:
-        """Return a compact one-screen summary for *trace*."""
+        """Return a compact one-screen summary for *trace*.
+
+        Includes task ID, outcome, wall-clock duration, event count,
+        participating agents, gate results, and a breakdown of event types
+        by frequency.
+
+        Args:
+            trace: The trace to summarise.
+
+        Returns:
+            Multi-line plain-text summary suitable for terminal display.
+        """
         events = trace.events
         total_events = len(events)
 

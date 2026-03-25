@@ -1,4 +1,15 @@
-"""baton classify — classify task sensitivity and select guardrail preset."""
+"""``baton classify`` -- classify task sensitivity and select guardrail preset.
+
+Analyses a task description (and optionally affected file paths) to
+determine the risk level, confidence, and appropriate guardrail preset.
+This is the same classification the planner runs internally; the CLI
+command exposes it for manual inspection and debugging.
+
+Output fields: Risk Level, Preset, Confidence, Signals, Explanation.
+
+Delegates to:
+    :class:`~agent_baton.core.govern.classifier.DataClassifier`
+"""
 from __future__ import annotations
 
 import argparse

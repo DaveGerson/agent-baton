@@ -1,4 +1,24 @@
-"""Agent registry — loads and queries agent definitions from disk."""
+"""Agent registry -- loads and queries agent definitions from disk.
+
+The registry is the canonical source of truth for which agents the system
+can dispatch.  It reads agent definition files (Markdown with YAML
+frontmatter) from two locations, applied in order:
+
+1. **Global** -- ``~/.claude/agents/`` (user-wide defaults).
+2. **Project** -- ``.claude/agents/`` (per-project overrides).
+
+Project-level definitions override global ones with the same name, so a
+team can customize or extend the default roster without forking it.
+
+Agent names follow the ``<base>--<flavor>`` convention.  The registry
+supports flavor-aware lookups: ``find_best_match("backend-engineer",
+"python")`` will return ``backend-engineer--python`` if it exists, falling
+back to the unflavored ``backend-engineer`` otherwise.
+
+This module is a pure in-memory index -- it does not persist state or
+emit events.  It is consumed by :class:`AgentRouter` (for stack-aware
+routing) and by the planner (for agent validation).
+"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -11,8 +31,28 @@ from agent_baton.utils.frontmatter import parse_frontmatter
 class AgentRegistry:
     """Load, index, and query agent definitions from markdown files.
 
-    Searches both project-level (.claude/agents/) and global (~/.claude/agents/)
-    directories, with project-level taking precedence on name collisions.
+    The registry builds an in-memory dictionary keyed by agent name.  It
+    searches both project-level (``.claude/agents/``) and global
+    (``~/.claude/agents/``) directories, with project-level taking
+    precedence on name collisions.
+
+    Lifecycle:
+        1. Instantiate the registry.
+        2. Call :meth:`load_default_paths` (or :meth:`load_directory` for
+           custom locations).
+        3. Query with :meth:`get`, :meth:`find_best_match`,
+           :meth:`get_flavors`, or :meth:`by_category`.
+
+    Collaborators:
+        - :class:`AgentRouter` -- uses this registry to validate that a
+          flavored agent actually exists before routing to it.
+        - Planner / Executor -- looks up agent definitions to build
+          delegation prompts and determine model/permission settings.
+
+    Attributes:
+        _agents: Internal dictionary mapping agent name to its
+            :class:`AgentDefinition`.  Access via the ``agents`` property
+            for a defensive copy.
     """
 
     def __init__(self) -> None:
@@ -107,7 +147,24 @@ class AgentRegistry:
         return [a for a in self._agents.values() if a.category == category]
 
     def _parse_agent_file(self, path: Path) -> AgentDefinition | None:
-        """Parse a single agent markdown file into an AgentDefinition."""
+        """Parse a single agent markdown file into an AgentDefinition.
+
+        The file format is Markdown with optional YAML frontmatter.
+        Frontmatter fields recognized: ``name``, ``description``, ``model``,
+        ``permissionMode``, ``color``, ``tools`` (comma-separated string or
+        list), and ``knowledge_packs`` (comma-separated string or list).
+
+        If ``name`` is absent from the frontmatter, the filename stem is used
+        (e.g. ``backend-engineer--python.md`` becomes
+        ``backend-engineer--python``).
+
+        Args:
+            path: Path to the ``.md`` agent definition file.
+
+        Returns:
+            An :class:`AgentDefinition` on success, or ``None`` if the file
+            cannot be read or decoded.
+        """
         try:
             content = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):

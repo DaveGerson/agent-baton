@@ -1,4 +1,15 @@
-"""baton detect — detect project stack."""
+"""``baton detect`` -- detect the project technology stack.
+
+Scans the project root for language and framework indicator files
+(e.g. ``package.json``, ``pyproject.toml``, ``Cargo.toml``) and
+reports the detected language, framework, and signal files.
+
+This is the same stack detection used by the planner and router to
+select appropriate agent flavors.
+
+Delegates to:
+    :class:`~agent_baton.core.orchestration.router.AgentRouter`
+"""
 from __future__ import annotations
 
 import argparse

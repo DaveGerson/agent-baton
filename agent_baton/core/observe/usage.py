@@ -1,4 +1,24 @@
-"""UsageLogger — append and read JSONL usage records."""
+"""UsageLogger -- append and read JSONL usage records.
+
+The usage log is the primary quantitative data source for the learning
+pipeline.  Every completed orchestrated task produces a single
+:class:`~agent_baton.models.usage.TaskUsageRecord` that captures which
+agents were used, how many tokens they consumed, how many retries they
+needed, gate results, and the overall task outcome.
+
+Downstream consumers:
+
+* :class:`~agent_baton.core.learn.pattern_learner.PatternLearner` reads
+  usage records to derive recurring orchestration patterns grouped by
+  sequencing mode.
+* :class:`~agent_baton.core.learn.budget_tuner.BudgetTuner` reads usage
+  records to recommend budget-tier adjustments based on historical token
+  consumption.
+* :class:`~agent_baton.core.improve.scoring.PerformanceScorer` reads
+  per-agent usage data to build agent scorecards.
+* :class:`~agent_baton.core.observe.dashboard.DashboardGenerator`
+  aggregates usage records into a human-readable Markdown dashboard.
+"""
 from __future__ import annotations
 
 import json
@@ -28,7 +48,15 @@ class UsageLogger:
     # ── Write ──────────────────────────────────────────────────────────────
 
     def log(self, record: TaskUsageRecord) -> None:
-        """Append a usage record as a JSON line to the log file."""
+        """Append a usage record as a JSON line to the log file.
+
+        Creates the parent directory if it does not exist.  Each call
+        appends exactly one line; the file is opened in append mode so
+        concurrent writers from different sessions do not corrupt data.
+
+        Args:
+            record: The completed task's usage data to persist.
+        """
         self._log_path.parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps(record.to_dict(), separators=(",", ":"))
         with self._log_path.open("a", encoding="utf-8") as f:
@@ -123,10 +151,25 @@ class UsageLogger:
         }
 
     def agent_stats(self, agent_name: str) -> dict:
-        """Compute stats for a specific agent across all tasks.
+        """Compute aggregate statistics for a specific agent across all tasks.
 
-        Returns: times_used, total_retries, avg_retries,
-                 gate_pass_rate, models_used
+        Scans every :class:`~agent_baton.models.usage.TaskUsageRecord` and
+        collects metrics for agent entries whose ``name`` matches
+        *agent_name*.
+
+        Args:
+            agent_name: Exact agent name to filter by (case-sensitive).
+
+        Returns:
+            A dict with the following keys:
+
+            * ``times_used`` -- total number of tasks the agent participated in.
+            * ``total_retries`` -- sum of retries across all participations.
+            * ``avg_retries`` -- mean retries per participation, rounded to 2
+              decimal places.
+            * ``gate_pass_rate`` -- fraction of gate results that are ``"PASS"``,
+              or ``None`` if the agent never went through a gate.
+            * ``models_used`` -- dict mapping model name to usage count.
         """
         records = self.read_all()
 

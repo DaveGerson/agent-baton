@@ -1,6 +1,40 @@
-"""BudgetTuner — analyse historical token usage and recommend budget tier changes.
+"""BudgetTuner -- analyse historical token usage and recommend budget tier changes.
 
-**Status: Experimental** — built and tested but not yet validated with real usage data.
+The budget tuner ensures that each task type is assigned to the
+appropriately-sized token budget tier.  It reads historical
+:class:`~agent_baton.models.usage.TaskUsageRecord` entries from the JSONL
+usage log, groups them by ``sequencing_mode``, and applies statistical
+rules to detect tier misalignment.
+
+Tier system:
+
+* **Lean** (0 -- 50,000 tokens): simple tasks, single-agent workflows.
+* **Standard** (50,001 -- 500,000 tokens): typical multi-agent tasks.
+* **Full** (500,001+ tokens): complex cross-cutting changes.
+
+Recommendation rules (per group with >= 3 records):
+
+* **Upgrade**: median token usage exceeds 80% of the current tier's upper
+  bound.  This signals the task type routinely needs more budget.
+* **Downgrade**: 95th-percentile usage falls below the current tier's lower
+  bound.  Even the worst case fits in a cheaper tier.
+
+Confidence formula::
+
+    confidence = min(1.0, sample_size / 10)
+
+This ramps linearly from 0 at 0 samples to 1.0 at 10+ samples.
+
+Integration with the improvement loop:
+
+* :class:`~agent_baton.core.learn.recommender.Recommender` wraps budget
+  recommendations into :class:`~agent_baton.models.improvement.Recommendation`
+  objects with guardrails: only *downgrades* are auto-applicable; upgrades
+  always require human approval.
+* :meth:`auto_apply_recommendations` enforces this guardrail directly.
+
+**Status: Experimental** -- built and tested but not yet validated with
+real usage data.
 """
 from __future__ import annotations
 
@@ -259,14 +293,23 @@ class BudgetTuner:
         """Return budget recommendations eligible for automatic application.
 
         Guardrail: only DOWNGRADE recommendations are returned.  Budget
-        upgrades (to more expensive tiers) are never auto-applied.
+        upgrades (to more expensive tiers) are never auto-applied because
+        increasing spend without human oversight violates the cost-safety
+        principle.
+
+        This method is called by
+        :class:`~agent_baton.core.improve.loop.ImprovementLoop` during the
+        closed-loop cycle to identify safe, automatic budget adjustments.
 
         Args:
-            threshold: Minimum confidence to include a recommendation.
+            threshold: Minimum confidence score (0.0 -- 1.0) to include a
+                recommendation.  Only recommendations meeting or exceeding
+                this value are returned.
 
         Returns:
             List of downgrade-only recommendations above the confidence
-            threshold.
+            threshold, suitable for automatic application without human
+            review.
         """
         all_recs = self.analyze()
         eligible: list[BudgetRecommendation] = []

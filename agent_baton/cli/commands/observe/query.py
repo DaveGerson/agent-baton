@@ -174,6 +174,19 @@ def handler(args: argparse.Namespace) -> None:
 
 
 def _dispatch(args: argparse.Namespace, engine: Any) -> None:
+    """Route to the appropriate predefined query or execute ad-hoc SQL.
+
+    Handles all 11 predefined subcommands (agent-reliability, agent-history,
+    tasks, task-detail, knowledge-gaps, roster-recommendations, gate-stats,
+    cost-by-type, cost-by-agent, current, patterns) plus ``--sql`` for
+    arbitrary read-only queries.
+
+    Args:
+        args: Parsed CLI arguments with ``subcommand``, ``target``, ``format``,
+            ``days``, ``limit``, and other query-specific options.
+        engine: An open query engine instance from
+            :func:`~agent_baton.core.storage.queries.open_query_engine`.
+    """
     fmt = args.format
 
     # ── Ad-hoc SQL ─────────────────────────────────────────────────────────

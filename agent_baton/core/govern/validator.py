@@ -1,4 +1,30 @@
-"""Validate agent definition markdown files for format correctness."""
+"""Validate agent definition markdown files for format correctness.
+
+Agent definitions follow a strict format: YAML frontmatter (delimited by
+``---``) followed by a markdown body. The frontmatter must include
+``name`` and ``description`` fields and may include ``model``,
+``permissionMode``, and ``tools``.
+
+Validation checks are split into two categories:
+
+**Errors** (blocking -- the definition is invalid):
+    - Missing or invalid YAML frontmatter.
+    - ``name`` missing, empty, or not in kebab-case format.
+    - ``description`` missing or empty.
+    - ``model`` not in the allowed set (opus, sonnet, haiku).
+    - ``permissionMode`` not in the allowed set (auto-edit, default).
+    - Unknown tool names (must be in the standard set or match the MCP
+      naming convention ``mcp__<server>__<tool>``).
+    - Empty markdown body.
+
+**Warnings** (non-blocking -- the definition works but could be improved):
+    - Single-line description (multi-line recommended for trigger matching).
+    - Agent name does not match the filename stem.
+    - Reviewer/auditor agents with ``permissionMode: auto-edit``
+      (should use ``default``).
+    - Missing ``model`` field.
+    - No top-level heading in the markdown body.
+"""
 from __future__ import annotations
 
 import re
@@ -33,6 +59,15 @@ _MCP_TOOL_RE = re.compile(r"^mcp__[a-zA-Z0-9_-]+__[a-zA-Z0-9_*-]+$")
 
 @dataclass
 class ValidationResult:
+    """Result of validating a single agent definition file.
+
+    Attributes:
+        path: Path to the validated file.
+        valid: ``True`` if no errors were found (warnings are allowed).
+        errors: List of blocking error messages.
+        warnings: List of non-blocking advisory messages.
+    """
+
     path: Path
     valid: bool
     errors: list[str] = field(default_factory=list)
@@ -40,12 +75,27 @@ class ValidationResult:
 
 
 class AgentValidator:
-    """Validate agent definition .md files for format correctness."""
+    """Validate agent definition ``.md`` files for structural correctness.
+
+    Checks frontmatter YAML (required fields, allowed values, naming
+    conventions) and markdown body (non-empty, has heading). Does not
+    evaluate the semantic quality of the agent prompt itself.
+
+    The validator is stateless and safe to reuse across multiple calls.
+    """
 
     def validate_file(self, path: Path) -> ValidationResult:
         """Validate a single agent markdown file.
 
-        Errors are blocking issues; warnings are non-blocking suggestions.
+        Reads the file, parses frontmatter, and runs all error and warning
+        checks. See the module docstring for the full list of checks.
+
+        Args:
+            path: Path to the agent definition ``.md`` file.
+
+        Returns:
+            A ``ValidationResult`` with ``valid=True`` if no errors were
+            found (warnings are allowed).
         """
         errors: list[str] = []
         warnings: list[str] = []
@@ -189,7 +239,16 @@ class AgentValidator:
         )
 
     def validate_directory(self, directory: Path) -> list[ValidationResult]:
-        """Validate all *.md files in a directory (non-recursive)."""
+        """Validate all ``*.md`` files in a directory (non-recursive).
+
+        Args:
+            directory: Path to the directory containing agent definitions.
+
+        Returns:
+            A list of ``ValidationResult`` objects, one per ``.md`` file
+            found, sorted alphabetically by filename. Returns a single
+            error result if the path is not a directory.
+        """
         if not directory.is_dir():
             return [
                 ValidationResult(

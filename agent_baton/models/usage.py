@@ -1,3 +1,10 @@
+"""Usage tracking models — token and resource consumption per agent and task.
+
+These records are persisted to the usage log after each execution
+completes.  They feed the budget tuner, pattern learner, and
+dashboard analytics.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
@@ -5,7 +12,22 @@ from dataclasses import dataclass, field, asdict
 
 @dataclass
 class AgentUsageRecord:
-    """Record of a single agent's usage within a task."""
+    """Resource consumption record for a single agent within a task.
+
+    One record is created per agent dispatch.  Multiple records for
+    the same agent appear when the agent is retried or dispatched
+    across different steps.
+
+    Attributes:
+        name: Agent name (matches ``AgentDefinition.name``).
+        model: LLM model used for this dispatch.
+        steps: Number of plan steps this agent handled.
+        retries: How many times the dispatch was retried.
+        gate_results: Gate outcome strings that followed this agent's work.
+        estimated_tokens: Estimated token consumption for the dispatch.
+        duration_seconds: Wall-clock time the agent was running.
+    """
+
     name: str
     model: str = "sonnet"
     steps: int = 1
@@ -32,7 +54,27 @@ class AgentUsageRecord:
 
 @dataclass
 class TaskUsageRecord:
-    """Record of a full orchestrated task's usage."""
+    """Aggregate resource consumption for a complete orchestrated task.
+
+    Written to the usage log when ``baton execute complete`` finalizes
+    an execution.  The budget tuner and pattern learner read these
+    records to generate ``BudgetRecommendation`` and ``LearnedPattern``
+    instances.
+
+    Attributes:
+        task_id: Unique execution identifier.
+        timestamp: ISO 8601 time when the record was written.
+        agents_used: Per-agent usage breakdowns.
+        total_agents: Count of distinct agents dispatched.
+        risk_level: Risk tier assigned to the plan.
+        sequencing_mode: Execution mode used (maps to ``ExecutionMode``).
+        gates_passed: Number of QA gates that passed.
+        gates_failed: Number of QA gates that failed.
+        outcome: Final verdict — ``"SHIP"``, ``"SHIP WITH NOTES"``,
+            ``"REVISE"``, or ``"BLOCK"``.
+        notes: Free-text notes from the orchestrator.
+    """
+
     task_id: str
     timestamp: str  # ISO format
     agents_used: list[AgentUsageRecord] = field(default_factory=list)

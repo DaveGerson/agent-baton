@@ -1,4 +1,40 @@
-"""Performance scorer — computes per-agent scorecards from usage and retrospective data."""
+"""Performance scorer -- computes per-agent scorecards from usage and retrospective data.
+
+The scorer bridges observational data and improvement actions.  It reads
+quantitative metrics from :class:`~agent_baton.core.observe.usage.UsageLogger`
+(retries, tokens, gate results) and qualitative signals from
+:class:`~agent_baton.core.observe.retrospective.RetrospectiveEngine`
+(positive/negative mentions, knowledge gaps cited) to produce an
+:class:`AgentScorecard` for each agent.
+
+Scoring methodology:
+
+* **first_pass_rate** -- fraction of agent uses with zero retries.  This is
+  the primary quality metric: higher means the agent produces acceptable
+  output on the first attempt.
+* **retry_rate** -- average retries per use.  High retry rates indicate
+  unclear instructions or mismatched expectations.
+* **gate_pass_rate** -- fraction of gate checks the agent's output passed.
+  Low rates indicate systematic output quality issues.
+* **health** -- categorical rating derived from the above:
+
+  - ``"strong"`` -- first_pass_rate >= 0.8 AND zero negative mentions.
+  - ``"adequate"`` -- first_pass_rate >= 0.5.
+  - ``"needs-improvement"`` -- first_pass_rate < 0.5.
+  - ``"unused"`` -- no usage data.
+
+* **trend detection** -- :meth:`PerformanceScorer.detect_trends` applies
+  simple linear regression over the last *N* tasks to classify the agent's
+  trajectory as ``"improving"``, ``"degrading"``, or ``"stable"``.
+
+Downstream consumers:
+
+* :class:`~agent_baton.core.improve.evolution.PromptEvolutionEngine` uses
+  scorecards to identify underperformers and generate prompt-improvement
+  proposals.
+* :class:`~agent_baton.core.learn.recommender.Recommender` uses
+  ``needs-improvement`` scorecards to generate routing recommendations.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -14,7 +50,36 @@ if TYPE_CHECKING:
 
 @dataclass
 class AgentScorecard:
-    """Performance scorecard for a single agent."""
+    """Performance scorecard for a single agent.
+
+    Combines quantitative metrics from usage logs with qualitative signals
+    from retrospective analysis into a single assessment.
+
+    Scoring thresholds:
+
+    * ``first_pass_rate >= 0.8`` with no negative mentions = ``"strong"``.
+    * ``first_pass_rate >= 0.5`` = ``"adequate"``.
+    * ``first_pass_rate < 0.5`` = ``"needs-improvement"`` -- this agent
+      is a candidate for prompt evolution or routing weight reduction.
+
+    Attributes:
+        agent_name: The agent being scored.
+        times_used: Total number of task participations.
+        first_pass_rate: Fraction of uses with zero retries (0.0 -- 1.0).
+            Higher is better; 1.0 means the agent never needed a retry.
+        retry_rate: Average retries per use.  Lower is better.
+        gate_pass_rate: Fraction of gate checks passed, or ``None`` if the
+            agent never went through a gate.
+        total_estimated_tokens: Cumulative token consumption.
+        avg_tokens_per_use: Mean tokens per participation.
+        models_used: Model name to usage count mapping.
+        positive_mentions: Count of lines mentioning this agent in
+            "What Worked" retrospective sections.
+        negative_mentions: Count of lines mentioning this agent in
+            "What Didn't Work" retrospective sections.
+        knowledge_gaps_cited: Count of knowledge gap entries citing this
+            agent in retrospective data.
+    """
     agent_name: str
     times_used: int = 0
     first_pass_rate: float = 0.0  # % of uses with 0 retries
@@ -30,7 +95,13 @@ class AgentScorecard:
 
     @property
     def health(self) -> str:
-        """Simple health rating based on metrics."""
+        """Categorical health rating derived from quantitative metrics.
+
+        Returns:
+            One of ``"unused"``, ``"strong"``, ``"adequate"``, or
+            ``"needs-improvement"``.  See class docstring for threshold
+            definitions.
+        """
         if self.times_used == 0:
             return "unused"
         if self.first_pass_rate >= 0.8 and self.negative_mentions == 0:
@@ -85,7 +156,28 @@ class PerformanceScorer:
         self._storage = storage
 
     def score_agent(self, agent_name: str) -> AgentScorecard:
-        """Compute a scorecard for a single agent."""
+        """Compute a full scorecard for a single agent.
+
+        Data sources:
+
+        1. **Usage log** -- provides ``times_used``, ``first_pass_rate``,
+           ``retry_rate``, ``gate_pass_rate``, ``total_estimated_tokens``,
+           ``avg_tokens_per_use``, and ``models_used``.
+        2. **Retrospectives** (from storage backend or filesystem) --
+           provides ``positive_mentions``, ``negative_mentions``, and
+           ``knowledge_gaps_cited`` by scanning Markdown sections.
+
+        When a ``StorageBackend`` is configured, retrospective data is read
+        from SQLite (which may be the only location in SQLite-mode projects).
+        Otherwise, filesystem-based retrospective Markdown files are scanned.
+
+        Args:
+            agent_name: Exact agent name to score (case-sensitive).
+
+        Returns:
+            A populated :class:`AgentScorecard`.  Returns a scorecard with
+            ``times_used=0`` if the agent has no usage history.
+        """
         stats = self._usage.agent_stats(agent_name)
 
         times_used = stats["times_used"]
@@ -186,14 +278,32 @@ class PerformanceScorer:
         )
 
     def score_all(self) -> list[AgentScorecard]:
-        """Compute scorecards for all agents found in usage logs."""
+        """Compute scorecards for all agents found in usage logs.
+
+        Discovers agent names from the usage summary's ``agent_frequency``
+        dict and scores each one.  Only agents with ``times_used > 0`` are
+        included in the result.
+
+        Returns:
+            List of scorecards sorted alphabetically by agent name,
+            excluding unused agents.
+        """
         summary = self._usage.summary()
         agent_names = list(summary.get("agent_frequency", {}).keys())
         scorecards = [self.score_agent(name) for name in sorted(agent_names)]
         return [sc for sc in scorecards if sc.times_used > 0]
 
     def generate_report(self) -> str:
-        """Generate a full markdown scorecard report."""
+        """Generate a full Markdown scorecard report.
+
+        Groups agents by health category (strong, adequate,
+        needs-improvement) and renders each scorecard's Markdown
+        representation.
+
+        Returns:
+            A complete Markdown document.  Returns a placeholder message
+            if no usage data is available.
+        """
         scorecards = self.score_all()
         if not scorecards:
             return "# Agent Performance Scorecards\n\nNo usage data available.\n"
@@ -219,14 +329,28 @@ class PerformanceScorer:
     def detect_trends(self, agent_name: str, window: int = 10) -> str:
         """Detect performance trend for an agent over the last *window* tasks.
 
-        Uses a simple linear regression slope on the agent's first-pass rate
-        (1 if zero retries, 0 otherwise) across the most recent *window*
-        tasks where the agent participated.
+        Algorithm:
+            Collects a binary success vector (1.0 = zero retries, 0.0 =
+            had retries) for each task where the agent participated, takes
+            the last *window* values, and computes the OLS linear regression
+            slope.  The slope represents the per-task rate of change in
+            first-pass success probability.
+
+        Thresholds:
+            * ``slope > 0.02`` -- ``"improving"`` (success rate rising by
+              more than 2 percentage points per task).
+            * ``slope < -0.02`` -- ``"degrading"`` (success rate falling).
+            * Otherwise -- ``"stable"``.
+
+        A minimum of 3 data points is required; with fewer, the result is
+        always ``"stable"`` since the trend is not statistically meaningful.
+
+        Args:
+            agent_name: Exact agent name to analyse.
+            window: Number of most-recent participations to consider.
 
         Returns:
-            "improving" if slope > 0.02,
-            "degrading" if slope < -0.02,
-            "stable" otherwise.
+            One of ``"improving"``, ``"degrading"``, or ``"stable"``.
         """
         records = self._usage.read_all()
         # Collect binary success values (1 = first pass, 0 = retry)

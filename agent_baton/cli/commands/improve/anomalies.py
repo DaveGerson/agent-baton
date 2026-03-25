@@ -1,4 +1,18 @@
-"""baton anomalies — detect and display system anomalies."""
+"""``baton anomalies`` -- detect and display system anomalies.
+
+Anomalies are statistical deviations from normal agent behaviour:
+sudden drops in success rate, spikes in token usage, or elevated
+retry rates.  The trigger evaluator scans recent data and flags
+metrics that exceed configurable thresholds.
+
+Display modes:
+    * ``baton anomalies`` -- Detect and display current anomalies.
+    * ``baton anomalies --watch`` -- Show trigger readiness status
+      alongside any active anomalies.
+
+Delegates to:
+    :class:`~agent_baton.core.improve.triggers.TriggerEvaluator`
+"""
 from __future__ import annotations
 
 import argparse

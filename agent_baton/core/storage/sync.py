@@ -168,15 +168,36 @@ def _utcnow() -> str:
 
 
 class SyncEngine:
-    """One-way sync from per-project baton.db to ~/.baton/central.db.
+    """One-way incremental sync from per-project baton.db to central.db.
+
+    The sync protocol works as follows:
+
+    1. For each table in ``SYNCABLE_TABLES``, read the last-synced
+       ``rowid`` watermark from ``sync_watermarks`` in central.db.
+    2. Fetch all rows with ``rowid > watermark`` from the source table
+       in the project's baton.db.
+    3. Insert them into central.db with ``project_id`` prepended to the
+       primary key.  Natural-PK tables use ``INSERT OR REPLACE``;
+       auto-increment tables use ``INSERT OR IGNORE`` with a UNIQUE
+       constraint on the natural key columns.
+    4. Advance the watermark to the maximum ``rowid`` seen.
+
+    Conflict resolution: central.db is a read replica -- the project's
+    baton.db is always authoritative.  ``INSERT OR REPLACE`` overwrites
+    any stale central row with the latest project data.
 
     Usage::
 
         engine = SyncEngine()
-        result = engine.push("my-project", Path("/srv/my-project/.claude/team-context/baton.db"))
+        result = engine.push("my-project", Path("...baton.db"))
 
     The engine is stateless between calls; all state is persisted in
-    central.db (sync_watermarks, sync_history).
+    central.db (``sync_watermarks``, ``sync_history``).
+
+    Attributes:
+        _central_path: Resolved path to ``central.db``.
+        _conn_mgr: ``ConnectionManager`` for the central database,
+            initialized with ``CENTRAL_SCHEMA_DDL``.
     """
 
     def __init__(self, central_db_path: Path | None = None) -> None:
@@ -310,9 +331,31 @@ class SyncEngine:
         spec: SyncTableSpec,
         watermark: int,
     ) -> int:
-        """Copy new rows from src to dst for one table.
+        """Copy new rows from a project table to the corresponding central table.
 
-        Returns the number of rows copied.
+        Algorithm:
+
+        1. Read column names from the source table via ``PRAGMA table_info``.
+        2. Build a ``SELECT ... WHERE rowid > ?`` query to fetch only
+           rows added since the last sync.
+        3. For each fetched row, prepend ``project_id`` to the values
+           and execute the appropriate INSERT statement into central.db.
+        4. After all rows are inserted, advance the watermark in
+           ``sync_watermarks``.
+
+        For tables with ``has_autoincrement_pk=True``, the source ``id``
+        column is dropped from the INSERT so that central.db assigns its
+        own auto-increment sequence.
+
+        Args:
+            src_conn: Read-only connection to the project's baton.db.
+            dst_conn: Read-write connection to central.db.
+            project_id: Project identifier prepended to every row.
+            spec: Metadata describing the table being synced.
+            watermark: The last ``rowid`` successfully synced.
+
+        Returns:
+            Number of rows successfully copied.
         """
         # Read column names from the source table to build the INSERT statement
         # dynamically (avoids breaking when new columns are added).
@@ -475,6 +518,20 @@ class SyncEngine:
         error: str,
         trigger: str = "manual",
     ) -> None:
+        """Record a sync run in the ``sync_history`` table for observability.
+
+        Args:
+            dst_conn: Connection to central.db.
+            project_id: The project that was synced.
+            started_at: ISO-8601 timestamp when the sync started.
+            completed_at: ISO-8601 timestamp when the sync finished.
+            status: ``'success'`` or ``'partial'`` (if errors occurred).
+            rows_synced: Total number of rows copied across all tables.
+            tables_synced: Number of tables that had new rows.
+            error: Semicolon-separated error messages, or empty string.
+            trigger: How the sync was initiated (``'manual'``, ``'auto'``,
+                or ``'rebuild'``).
+        """
         dst_conn.execute(
             """
             INSERT INTO sync_history

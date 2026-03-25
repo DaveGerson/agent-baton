@@ -65,7 +65,12 @@ _RISK_ORDINAL: dict[RiskLevel, int] = {
 
 
 def _select_git_strategy(risk: RiskLevel) -> GitStrategy:
-    """Return the appropriate git strategy for a given risk level."""
+    """Return the appropriate git strategy for a given risk level.
+
+    HIGH and CRITICAL risk tasks use branch-per-agent isolation so each
+    agent's work can be independently reverted.  MEDIUM and LOW risk tasks
+    use the lighter commit-per-agent strategy on a single feature branch.
+    """
     if risk in (RiskLevel.HIGH, RiskLevel.CRITICAL):
         return GitStrategy.BRANCH_PER_AGENT
     return GitStrategy.COMMIT_PER_AGENT
@@ -269,7 +274,14 @@ _TASK_TYPE_KEYWORDS: list[tuple[str, list[str]]] = [
 # ---------------------------------------------------------------------------
 
 class RetroEngine(Protocol):
-    """Structural type for any object that provides retrospective feedback."""
+    """Structural type for any object that provides retrospective feedback.
+
+    Decouples the planner from the concrete ``RetrospectiveEngine`` class
+    so the planner can be tested without the full retrospective subsystem.
+    The planner calls ``load_recent_feedback()`` during plan creation to
+    apply closed-loop learning: dropping agents with poor track records
+    and surfacing knowledge gaps from prior executions.
+    """
 
     def load_recent_feedback(self, limit: int = ...) -> RetrospectiveFeedback: ...
 
@@ -285,11 +297,32 @@ class IntelligentPlanner:
     decisions.  When no historical data exists the planner returns sensible
     defaults; as usage data accumulates the plans become progressively smarter.
 
+    The planner consults five data sources (all optional, graceful degradation):
+
+    1. ``PatternLearner`` -- learned patterns from prior executions.
+    2. ``PerformanceScorer`` -- per-agent health ratings.
+    3. ``BudgetTuner`` -- budget tier recommendations by task type.
+    4. ``RetrospectiveEngine`` -- closed-loop feedback (drop/prefer agents).
+    5. ``KnowledgeRegistry`` -- per-step knowledge attachment resolution.
+
     Usage::
 
         planner = IntelligentPlanner()
         plan = planner.create_plan("Add OAuth2 login to the API")
         print(planner.explain_plan(plan))
+
+    Attributes:
+        _pattern_learner: Finds high-confidence patterns matching the task
+            type and stack to guide agent selection and phase templates.
+        _scorer: Evaluates agent performance to warn about low-health agents.
+        _budget_tuner: Recommends budget tiers based on task type history.
+        _registry: Agent registry for resolving definitions and flavors.
+        _router: Routes base agent names to stack-specific flavored variants.
+        _classifier: Optional data classifier for sensitivity assessment.
+        _policy_engine: Optional policy engine for guardrail validation.
+        knowledge_registry: Optional knowledge registry for per-step
+            knowledge resolution.  When None, the knowledge resolution
+            step is skipped entirely.
     """
 
     def __init__(

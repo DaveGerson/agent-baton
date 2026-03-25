@@ -1,6 +1,27 @@
-"""Sensitive data classifier — auto-classifies task risk level and guardrail preset.
+"""Sensitive data classifier -- auto-classifies task risk level and guardrail preset.
 
-**Status: Experimental** — built and tested but not yet validated with real usage data.
+Scans task descriptions and file paths for signal keywords that indicate
+sensitivity, then assigns a risk level and the corresponding guardrail
+preset. The classification cascade is:
+
+1. **Regulated / PII signals** (compliance, HIPAA, GDPR, SSN, ...) --> HIGH,
+   preset "Regulated Data".
+2. **Security signals** (auth, secrets, credentials, ...) --> HIGH,
+   preset "Security-Sensitive".
+3. **Infrastructure signals** (terraform, docker, deploy, ...) --> HIGH,
+   preset "Infrastructure Changes".
+4. **Database signals** (migration, schema, alter table, ...) --> MEDIUM,
+   preset "Standard Development".
+5. **File-path patterns** (e.g. ``.env``, ``secrets/``, ``auth/``,
+   ``migrations/``) can elevate risk independently of description text.
+6. **Escalation to CRITICAL**: 3 or more regulated/PII signals in a single
+   task automatically raise the risk to CRITICAL.
+
+When no signals are detected, the task defaults to LOW risk with the
+"Standard Development" guardrail preset.
+
+**Status: Experimental** -- built and tested but not yet validated with real
+usage data.
 """
 from __future__ import annotations
 
@@ -13,7 +34,22 @@ from agent_baton.models.enums import RiskLevel
 
 @dataclass
 class ClassificationResult:
-    """Result of classifying a task's data sensitivity."""
+    """Result of classifying a task's data sensitivity.
+
+    Attributes:
+        risk_level: The assessed risk tier (LOW, MEDIUM, HIGH, or CRITICAL).
+        guardrail_preset: Name of the guardrail preset that should be applied.
+            One of "Standard Development", "Data Analysis",
+            "Infrastructure Changes", "Regulated Data", or
+            "Security-Sensitive".
+        signals_found: List of keyword matches that contributed to the
+            classification, formatted as ``"category:keyword"``
+            (e.g. ``"regulated:hipaa"``, ``"path:.env"``).
+        confidence: ``"high"`` when two or more signals were found or when
+            no signals were found (default is safe); ``"low"`` when exactly
+            one signal was found.
+        explanation: Human-readable summary of the classification reasoning.
+    """
 
     risk_level: RiskLevel
     guardrail_preset: str  # "Standard Development", "Data Analysis", "Infrastructure Changes", "Regulated Data", "Security-Sensitive"
@@ -22,6 +58,12 @@ class ClassificationResult:
     explanation: str = ""
 
     def to_markdown(self) -> str:
+        """Render the classification result as a human-readable markdown block.
+
+        Returns:
+            A markdown string with risk level, guardrail preset, confidence,
+            detected signals, and explanation.
+        """
         lines = [
             "## Data Classification",
             "",
@@ -90,7 +132,23 @@ HIGH_RISK_PATHS = [
 
 
 class DataClassifier:
-    """Classify task sensitivity and select guardrail preset."""
+    """Classify task sensitivity and select the appropriate guardrail preset.
+
+    The classifier uses a keyword-matching approach to scan task descriptions
+    and file paths for sensitivity signals. It applies a deterministic
+    cascade to resolve the final risk level when multiple signal categories
+    are present:
+
+    Risk escalation order (highest precedence first):
+        CRITICAL -- 3+ regulated/PII signals in a single task.
+        HIGH     -- Any regulated, PII, security, or infrastructure signal,
+                    or a file-path match against known sensitive paths.
+        MEDIUM   -- Database signals (schema migrations, DDL statements)
+                    when no higher signals are present.
+        LOW      -- No signals detected; standard development guardrails.
+
+    The classifier is stateless and safe to reuse across multiple calls.
+    """
 
     def classify(
         self,
@@ -99,8 +157,25 @@ class DataClassifier:
     ) -> ClassificationResult:
         """Classify a task's data sensitivity from its description and affected files.
 
-        Scans for signal keywords, checks file paths, and returns the
+        Scans the task description for signal keywords across five categories
+        (regulated, PII, security, infrastructure, database) and checks
+        file paths against known sensitive path patterns. Returns the
         highest applicable risk level with the matching guardrail preset.
+
+        The classification cascade is evaluated in priority order so that
+        regulated/PII signals always dominate security/infrastructure, and
+        database signals are only applied when no higher category matches.
+
+        Args:
+            task_description: Free-text description of the task to classify.
+                Matching is case-insensitive.
+            file_paths: Optional list of file paths that the task will touch.
+                Paths are matched against ``HIGH_RISK_PATHS`` patterns
+                (e.g. ``.env``, ``secrets/``, ``auth/``, ``migrations/``).
+
+        Returns:
+            A ``ClassificationResult`` containing the risk level, guardrail
+            preset name, matched signals, confidence, and explanation.
         """
         description_lower = task_description.lower()
         signals: list[str] = []
@@ -213,10 +288,21 @@ class DataClassifier:
         task_description: str,
         project_root: Path | None = None,
     ) -> ClassificationResult:
-        """Classify with automatic file path discovery.
+        """Classify with automatic file path discovery via ``git diff``.
 
-        Scans git diff or changed files to find affected paths.
-        Falls back to description-only classification if no git context is available.
+        Runs ``git diff --name-only HEAD`` in the project root to discover
+        changed files, then delegates to :meth:`classify` with both the
+        task description and the discovered paths. Falls back to
+        description-only classification if git is unavailable, the command
+        times out (5 s), or the working directory is not a git repository.
+
+        Args:
+            task_description: Free-text description of the task to classify.
+            project_root: Root directory of the git repository. Defaults to
+                the current working directory.
+
+        Returns:
+            A ``ClassificationResult`` (same as :meth:`classify`).
         """
         file_paths: list[str] = []
         root = project_root or Path.cwd()

@@ -1,8 +1,29 @@
-"""TriggerEvaluator — determines when enough new data has accumulated to
+"""TriggerEvaluator -- determines when enough new data has accumulated to
 warrant running the improvement analysis pipeline.
 
-Also provides ``detect_anomalies()`` to scan for agent failure rates, gate
-failures, budget overruns, retry spikes, and pattern drift.
+The trigger evaluator is the gatekeeper of the closed-loop improvement
+cycle.  It prevents unnecessary analysis runs (which consume time and
+create noise) by tracking how many new tasks have completed since the last
+analysis.  It also provides anomaly detection to surface urgent issues
+that should trigger immediate review.
+
+Integration:
+
+* :class:`~agent_baton.core.improve.loop.ImprovementLoop` calls
+  :meth:`TriggerEvaluator.should_analyze` at the start of each cycle.  If
+  the trigger is not met (and ``force=False``), the cycle is skipped.
+* After a successful analysis, the loop calls :meth:`mark_analyzed` to
+  record the watermark.
+* Anomaly detection is always run during a cycle, even when triggered by
+  ``force=True``, to ensure urgent issues are surfaced.
+
+Anomaly types detected by :meth:`detect_anomalies`:
+
+* **high_failure_rate** -- agent failure rate exceeds 30% (configurable).
+* **high_gate_failure_rate** -- gate failure rate exceeds 20%.
+* **budget_overrun** -- actual token usage deviates > 50% from expected
+  tier midpoint.
+* **retry_spike** -- average retries for an agent exceed 2.0.
 """
 from __future__ import annotations
 
@@ -18,7 +39,18 @@ _TRIGGER_STATE_FILE = "improvement-trigger-state.json"
 
 
 class TriggerEvaluator:
-    """Check whether enough new data has accumulated since the last analysis."""
+    """Check whether enough new data has accumulated since the last analysis.
+
+    State is persisted to ``improvement-trigger-state.json`` in the
+    team-context directory.  The state file contains a single watermark:
+    the total task count at the time of the last analysis.
+
+    Args:
+        config: Trigger thresholds.  Defaults to :class:`TriggerConfig`
+            with ``min_tasks_before_analysis=5``,
+            ``analysis_interval_tasks=5``.
+        team_context_root: Root directory for team context files.
+    """
 
     def __init__(
         self,
@@ -35,13 +67,18 @@ class TriggerEvaluator:
     # ------------------------------------------------------------------
 
     def should_analyze(self) -> bool:
-        """Return ``True`` if enough new tasks have been completed since the
-        last analysis to warrant a new improvement cycle.
+        """Return ``True`` if enough new data exists for a new improvement cycle.
 
-        Rules:
-        - At least ``min_tasks_before_analysis`` total tasks must exist.
-        - At least ``analysis_interval_tasks`` new tasks must have been
-          recorded since the last analysis.
+        Two conditions must both be met:
+
+        1. At least ``min_tasks_before_analysis`` total tasks must exist
+           in the usage log (avoids analysis on tiny datasets).
+        2. At least ``analysis_interval_tasks`` new tasks must have been
+           recorded since the last analysis (avoids redundant re-analysis).
+
+        Returns:
+            ``True`` if both conditions are met and a new improvement
+            cycle should be triggered.
         """
         records = self._read_records()
         total = len(records)
@@ -59,13 +96,29 @@ class TriggerEvaluator:
         self._write_state(len(records))
 
     def detect_anomalies(self) -> list[Anomaly]:
-        """Scan recent usage data for anomalies.
+        """Scan all usage data for anomalies that warrant immediate attention.
 
-        Checks:
-        - Agent failure rate > agent_failure_threshold (30%)
-        - Gate failure rate > gate_failure_threshold (20%)
-        - Budget overrun > budget_deviation_threshold (50%)
-        - Retry spikes (avg retries > 2.0)
+        Runs four independent checks against the full usage log:
+
+        1. **Per-agent failure rate**: for agents with >= 3 uses, flags
+           those whose retry-based failure rate exceeds
+           ``agent_failure_threshold`` (default 0.3).  Severity is
+           ``"high"`` if > 50%, ``"medium"`` otherwise.
+
+        2. **Retry spike**: for agents with >= 3 uses, flags those whose
+           average retry count exceeds 2.0.
+
+        3. **Gate failure rate**: across all tasks, flags if the overall
+           gate failure rate exceeds ``gate_failure_threshold`` (default
+           0.2).  Severity is ``"high"`` if > 40%.
+
+        4. **Budget overrun**: per-task check comparing actual token usage
+           to the tier midpoint implied by the task's risk level.  Flags
+           deviations exceeding ``budget_deviation_threshold`` (default 0.5).
+
+        Returns:
+            List of :class:`~agent_baton.models.improvement.Anomaly` objects,
+            possibly empty if no anomalies are detected.
         """
         records = self._read_records()
         if not records:

@@ -1,6 +1,33 @@
-"""Registry client — publish and pull agent-baton packages via a local registry repo.
+"""Registry client -- publish and pull agent-baton packages via a local
+registry directory.
 
-**Status: Experimental** — built and tested but not yet validated with real usage data.
+The registry is an ordinary filesystem directory (typically backed by a git
+repository) that stores multiple versions of multiple packages. Each package
+version lives in its own subdirectory under ``packages/<name>/<version>/``
+and contains the extracted archive contents (``manifest.json``, ``agents/``,
+``references/``, ``knowledge/``).
+
+An ``index.json`` file at the registry root tracks all published packages
+and their versions. The ``RegistryClient`` reads and updates this index
+on every publish/pull operation.
+
+Workflow:
+
+1. **Initialize** a registry with ``init_registry()`` (creates directory
+   structure and empty ``index.json``).
+2. **Publish** a ``.tar.gz`` archive with ``publish()`` -- extracts the
+   archive into the versioned directory and updates the index.
+3. **List/search** available packages with ``list_packages()`` and
+   ``search()``.
+4. **Pull** a package with ``pull()`` -- re-packages the registry
+   directory contents into a temporary archive and delegates to
+   ``PackageBuilder.install_package()`` for installation.
+
+The caller is responsible for git commit/push operations if the registry
+directory is a git repository.
+
+**Status: Experimental** -- built and tested but not yet validated with real
+usage data.
 """
 from __future__ import annotations
 

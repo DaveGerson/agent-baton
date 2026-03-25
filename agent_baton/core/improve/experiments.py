@@ -1,10 +1,30 @@
-"""ExperimentManager — creates experiments from applied recommendations,
+"""ExperimentManager -- creates experiments from applied recommendations,
 records samples, and evaluates outcomes.
 
-Constraints:
-- Max 2 active experiments per agent.
-- Min 5 samples before evaluating.
-- Stores experiments at ``.claude/team-context/improvements/experiments/<id>.json``.
+Experiments are the validation mechanism for the improvement loop.  When a
+recommendation is auto-applied, an experiment is created to track whether
+the change actually improved the target metric.  The experiment collects
+post-change metric samples and compares them to the pre-change baseline.
+
+Evaluation methodology:
+
+* Requires a minimum of 5 samples before evaluation (avoids premature
+  conclusions from noisy early data).
+* Computes ``change_pct = (avg_sample - baseline) / |baseline|``.
+* **Improved**: change_pct > +5% (metric improved beyond noise threshold).
+* **Degraded**: change_pct < -5% (metric worsened -- triggers auto-rollback).
+* **Inconclusive**: change within +/-5% (not enough signal to decide).
+* When baseline is 0, absolute thresholds are used instead.
+
+Safety constraints:
+
+* Maximum 2 active experiments per agent -- prevents compounding changes
+  that make it impossible to attribute metric shifts.
+* Degraded experiments are automatically rolled back by the
+  :class:`~agent_baton.core.improve.loop.ImprovementLoop` without human
+  approval.
+
+Storage: ``<improvements_dir>/experiments/<experiment_id>.json``.
 """
 from __future__ import annotations
 
@@ -23,7 +43,12 @@ _DEGRADATION_THRESHOLD = -0.05  # >5% loss = degraded
 
 
 class ExperimentManager:
-    """Track experiments that measure the impact of applied recommendations."""
+    """Track experiments that measure the impact of applied recommendations.
+
+    Manages the full experiment lifecycle: creation, sample recording,
+    evaluation, conclusion, and rollback marking.  Experiments are persisted
+    as individual JSON files for easy inspection and debugging.
+    """
 
     def __init__(self, improvements_dir: Path | None = None) -> None:
         self._dir = (improvements_dir or _DEFAULT_DIR).resolve()
@@ -47,8 +72,24 @@ class ExperimentManager:
     ) -> Experiment | None:
         """Create an experiment from an applied recommendation.
 
-        Returns ``None`` if the agent already has ``_MAX_ACTIVE_PER_AGENT``
-        active experiments.
+        The experiment's hypothesis is auto-generated from the
+        recommendation's action and the baseline/target values.  The
+        experiment starts in ``"running"`` status and awaits samples.
+
+        Args:
+            recommendation: The recommendation that was applied.
+            metric: Name of the metric to track (e.g.
+                ``"first_pass_rate"``, ``"avg_tokens_per_use"``).
+            baseline_value: Pre-change metric value.
+            target_value: Expected post-change metric value (typically
+                baseline * 1.05 for a 5% improvement target).
+            agent_name: Agent to track.  Falls back to
+                ``recommendation.target`` if empty.
+
+        Returns:
+            The created :class:`~agent_baton.models.improvement.Experiment`,
+            or ``None`` if the agent already has the maximum number of
+            active experiments (2).
         """
         effective_agent = agent_name or recommendation.target
 
@@ -78,9 +119,19 @@ class ExperimentManager:
     # ------------------------------------------------------------------
 
     def record_sample(self, experiment_id: str, value: float) -> Experiment | None:
-        """Record a new sample observation for an experiment.
+        """Record a new sample observation for a running experiment.
 
-        Returns the updated experiment, or ``None`` if not found.
+        Samples are appended to the experiment's ``samples`` list and
+        persisted immediately.  Only running experiments accept new samples;
+        concluded or rolled-back experiments are ignored.
+
+        Args:
+            experiment_id: Identifier of the experiment to record against.
+            value: The observed metric value for this sample.
+
+        Returns:
+            The updated :class:`~agent_baton.models.improvement.Experiment`,
+            or ``None`` if the experiment was not found or is not running.
         """
         exp = self.get(experiment_id)
         if exp is None or exp.status != "running":
@@ -95,15 +146,25 @@ class ExperimentManager:
     # ------------------------------------------------------------------
 
     def evaluate(self, experiment_id: str) -> str:
-        """Evaluate an experiment's outcome.
+        """Evaluate an experiment's outcome against its baseline.
 
-        Requires at least ``_MIN_SAMPLES`` samples.
+        Computes the average of all recorded samples and compares it to
+        the baseline using the +/-5% threshold (see module docstring for
+        the full methodology).  The experiment is concluded and persisted
+        with the result.
+
+        Args:
+            experiment_id: Identifier of the experiment to evaluate.
 
         Returns:
-            "improved" if >5% gain over baseline.
-            "degraded" if >5% loss from baseline.
-            "inconclusive" otherwise.
-            "insufficient_data" if not enough samples.
+            One of:
+
+            * ``"improved"`` -- metric gained > 5% over baseline.
+            * ``"degraded"`` -- metric dropped > 5% from baseline
+              (triggers auto-rollback in the improvement loop).
+            * ``"inconclusive"`` -- change within +/-5% noise band.
+            * ``"insufficient_data"`` -- fewer than 5 samples recorded.
+            * ``"not_found"`` -- no experiment with this ID exists.
         """
         exp = self.get(experiment_id)
         if exp is None:

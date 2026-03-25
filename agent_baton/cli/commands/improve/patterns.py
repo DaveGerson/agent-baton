@@ -1,4 +1,21 @@
-"""baton patterns — display and refresh learned orchestration patterns."""
+"""``baton patterns`` -- display and refresh learned orchestration patterns.
+
+Patterns capture recurring agent sequencing strategies that correlate
+with successful outcomes.  The pattern learner analyses the usage log,
+groups tasks by type and stack, and identifies high-confidence templates
+(agent orderings, budget tiers) that the planner can reuse.
+
+Display modes:
+    * ``baton patterns`` -- Show all stored patterns.
+    * ``baton patterns --refresh`` -- Re-analyse the usage log and update
+      ``learned-patterns.json``.
+    * ``baton patterns --task-type TYPE`` -- Filter by task type.
+    * ``baton patterns --recommendations`` -- Show sequencing recommendations
+      per task type.
+
+Delegates to:
+    :class:`~agent_baton.core.learn.pattern_learner.PatternLearner`
+"""
 from __future__ import annotations
 
 import argparse
@@ -108,11 +125,31 @@ def handler(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 
 def _confidence_bar(confidence: float, width: int = 10) -> str:
+    """Render a fixed-width ASCII confidence bar.
+
+    Args:
+        confidence: Value between 0.0 and 1.0.
+        width: Total bar width in characters (default 10).
+
+    Returns:
+        A string like ``[====      ]`` where filled characters represent
+        the confidence proportion.
+    """
     filled = round(confidence * width)
     return "[" + "=" * filled + " " * (width - filled) + "]"
 
 
 def _print_patterns(patterns: list, min_confidence: float) -> None:
+    """Print a formatted list of learned patterns filtered by confidence.
+
+    Each pattern is displayed with its task type, stack, confidence bar,
+    success rate, sample size, average token cost, template, and
+    recommended agents.
+
+    Args:
+        patterns: List of pattern objects to display.
+        min_confidence: Minimum confidence threshold for inclusion.
+    """
     shown = [p for p in patterns if p.confidence >= min_confidence]
     if not shown:
         return

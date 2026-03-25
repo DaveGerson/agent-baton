@@ -1,4 +1,21 @@
-"""baton spec-check — run spec validation checks against agent outputs."""
+"""``baton spec-check`` -- run spec validation checks against agent outputs.
+
+Validates that agent outputs conform to a specification.  Three validation
+modes are supported:
+
+* ``--json DATA --schema SCHEMA`` -- Validate a JSON file against a
+  JSON Schema.
+* ``--files ROOT --expect file1,file2,...`` -- Check that expected files
+  exist under a directory root.
+* ``--exports MODULE --expect name1,name2,...`` -- Check that a Python
+  module exports expected names.
+
+Each check is reported as PASS or FAIL with a message.  Exit code 1
+if any checks fail.
+
+Delegates to:
+    :class:`~agent_baton.core.govern.spec_validator.SpecValidator`
+"""
 from __future__ import annotations
 
 import argparse

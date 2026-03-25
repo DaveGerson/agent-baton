@@ -1,4 +1,25 @@
-"""baton plan — create an intelligent execution plan for a task."""
+"""``baton plan`` -- create an intelligent execution plan for a task.
+
+Generates a :class:`~agent_baton.models.execution.MachinePlan` by
+analysing the task description, detecting the project stack, classifying
+risk, and routing to appropriate agents.  The plan can be output as
+markdown or JSON, and optionally saved to
+``.claude/team-context/plan.json`` for consumption by ``baton execute start``.
+
+The planner integrates several core subsystems:
+
+* :class:`~agent_baton.core.engine.planner.IntelligentPlanner` -- Plan
+  generation with retrospective learning.
+* :class:`~agent_baton.core.govern.classifier.DataClassifier` -- Risk
+  classification for guardrail preset selection.
+* :class:`~agent_baton.core.govern.policy.PolicyEngine` -- Policy
+  enforcement based on risk level.
+* :class:`~agent_baton.core.orchestration.knowledge_registry.KnowledgeRegistry`
+  -- Knowledge pack and document attachment.
+
+Delegates to:
+    :class:`~agent_baton.core.engine.planner.IntelligentPlanner`
+"""
 from __future__ import annotations
 
 import argparse
@@ -77,6 +98,21 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
 
 
 def handler(args: argparse.Namespace) -> None:
+    """Generate an execution plan and optionally save it to disk.
+
+    When ``--save`` is specified, writes both ``plan.json`` (machine-readable)
+    and ``plan.md`` (human-readable) to the task-scoped directory under
+    ``.claude/team-context/executions/<task_id>/`` and also to the root
+    ``.claude/team-context/`` for backward compatibility.
+
+    When ``--explain`` is specified, outputs the planner's reasoning for
+    agent selection, risk classification, and budget tier choices.
+
+    Args:
+        args: Parsed CLI arguments including ``summary``, ``--task-type``,
+            ``--agents``, ``--project``, ``--json``, ``--save``, ``--explain``,
+            ``--knowledge``, ``--knowledge-pack``, ``--intervention``.
+    """
     project_root = Path(args.project) if args.project else Path.cwd()
     agents = [a.strip() for a in args.agents.split(",") if a.strip()] if args.agents else None
 

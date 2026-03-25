@@ -1,14 +1,27 @@
-"""ClaudeCodeLauncher — real AgentLauncher that invokes the ``claude`` CLI.
+"""ClaudeCodeLauncher -- production ``AgentLauncher`` that invokes the ``claude`` CLI.
 
-This module implements the :class:`AgentLauncher` protocol by launching
-``claude`` as an async subprocess.  Security properties:
+This module implements the ``AgentLauncher`` protocol by launching ``claude``
+as an async subprocess.  It is the only launcher used in production; all
+other launchers are test mocks.
 
-- Environment is built from an explicit whitelist; ``os.environ`` is never
-  copied wholesale.
-- The prompt is always passed as a separate list element (never interpolated
-  into a shell string), and ``create_subprocess_exec`` is used exclusively
-  (never ``create_subprocess_shell``).
-- The ``claude`` binary path is validated at construction time.
+Security invariants (enforced on every call):
+
+- **Environment whitelist**: The subprocess environment is built from an
+  explicit whitelist of variable names; ``os.environ`` is never copied
+  wholesale, preventing accidental secret leakage.
+- **No shell interpolation**: The prompt is always a separate list element
+  (never interpolated into a shell string), and ``create_subprocess_exec``
+  is used exclusively (never ``create_subprocess_shell``).
+- **Binary validation**: The ``claude`` binary path is resolved and validated
+  at construction time, catching misconfiguration eagerly.
+- **API key redaction**: Any Anthropic API key patterns in stderr output are
+  replaced with ``sk-ant-***REDACTED***`` before being stored in results.
+
+Retry behavior:
+
+- Rate-limit responses (429 / "rate limit" in stderr) trigger exponential
+  backoff retries up to ``max_retries`` attempts.
+- All other failures are returned immediately without retry.
 
 Typical usage::
 
@@ -43,7 +56,13 @@ _API_KEY_RE = re.compile(r"sk-ant-[A-Za-z0-9_-]+")
 
 
 def _redact_stderr(text: str) -> str:
-    """Strip Anthropic API key patterns from error text."""
+    """Strip Anthropic API key patterns from error text.
+
+    Matches the ``sk-ant-`` prefix followed by alphanumeric characters,
+    hyphens, and underscores.  Applied to all error output before it is
+    stored in ``LaunchResult.error`` to prevent accidental key exposure
+    in logs, traces, and retrospectives.
+    """
     return _API_KEY_RE.sub("sk-ant-***REDACTED***", text)
 
 
@@ -68,11 +87,14 @@ _DEFAULT_ENV_PASSTHROUGH: list[str] = [
 
 @dataclass
 class ClaudeCodeConfig:
-    """Configuration for :class:`ClaudeCodeLauncher`.
+    """Configuration for ``ClaudeCodeLauncher``.
 
     All fields have sensible defaults so callers can do simply::
 
         launcher = ClaudeCodeLauncher(ClaudeCodeConfig(model_timeouts={"opus": 1200.0}))
+
+    Serializable via ``to_dict()`` / ``from_dict()`` for persistence in
+    daemon configuration files.
     """
 
     claude_path: str = "claude"
@@ -146,18 +168,27 @@ class ClaudeCodeConfig:
 
 
 class ClaudeCodeLauncher:
-    """Real :class:`AgentLauncher` that invokes the ``claude`` CLI.
+    """Production ``AgentLauncher`` that invokes the ``claude`` CLI.
 
     Validates the ``claude`` binary at construction time so misconfiguration
-    is caught eagerly rather than at first launch.
+    is caught eagerly rather than at first launch.  Also checks for ``git``
+    availability (non-fatal) to enable ``files_changed`` and ``commit_hash``
+    population in launch results.
 
     Security invariants (enforced on every call):
 
-    - Environment is built from an explicit whitelist — never ``os.environ.copy()``.
-    - Subprocess is started with ``asyncio.create_subprocess_exec`` — never
+    - Environment is built from an explicit whitelist -- never
+      ``os.environ.copy()``.
+    - Subprocess is started with ``asyncio.create_subprocess_exec`` -- never
       ``create_subprocess_shell``.
-    - The prompt is always a separate list element — never an f-string
-      interpolated into a flag.
+    - The prompt is always a separate list element -- never interpolated.
+
+    Attributes:
+        _config: Launcher configuration (timeouts, retries, paths).
+        _registry: Optional agent registry for resolving agent definitions
+            and injecting system prompts, permission modes, and tool lists.
+        _claude_bin: Resolved absolute path to the ``claude`` binary.
+        _git_bin: Resolved path to ``git``, or None if unavailable.
     """
 
     def __init__(
@@ -417,7 +448,12 @@ class ClaudeCodeLauncher:
         )
 
     def _is_rate_limit(self, stderr: str) -> bool:
-        """Return ``True`` if *stderr* indicates a rate-limit response."""
+        """Return ``True`` if *stderr* indicates a rate-limit response.
+
+        Checks for "rate limit" (case-insensitive) or HTTP status code
+        "429" anywhere in the error text.  When True, the caller retries
+        with exponential backoff.
+        """
         lower = stderr.lower()
         return "rate limit" in lower or "429" in lower
 
@@ -469,7 +505,31 @@ class ClaudeCodeLauncher:
         step_id: str,
         start: float,
     ) -> LaunchResult:
-        """Run the ``claude`` subprocess once and return a :class:`LaunchResult`."""
+        """Run the ``claude`` subprocess once and return a ``LaunchResult``.
+
+        Handles three failure modes:
+
+        - **OSError** at subprocess creation (binary not found, permission
+          denied): returns a failed result immediately.
+        - **TimeoutError** during communication: kills the process and
+          returns a failed result with the timeout duration.
+        - **Non-zero exit code** or ``is_error`` in JSON output: returns
+          a failed result with redacted stderr.
+
+        Args:
+            cmd: Complete command list (claude binary + flags).
+            env: Whitelisted environment variables for the subprocess.
+            cwd: Working directory for the subprocess.
+            timeout: Maximum seconds to wait for the subprocess.
+            prompt_stdin: Prompt bytes for stdin delivery (when prompt
+                exceeds the file threshold), or None for ``-p`` flag delivery.
+            agent_name: Agent name for the result.
+            step_id: Step ID for the result.
+            start: ``time.monotonic()`` timestamp from launch start.
+
+        Returns:
+            A ``LaunchResult`` with status, outcome, and metadata.
+        """
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd,

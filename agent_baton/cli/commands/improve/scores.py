@@ -1,4 +1,20 @@
-"""baton scores — show agent performance scorecards."""
+"""``baton scores`` -- show agent performance scorecards.
+
+Scorecards aggregate agent performance metrics (success rate, retry
+rate, gate pass rate, token efficiency) into a health indicator.
+Used to identify underperforming agents that may benefit from prompt
+evolution.
+
+Display modes:
+    * ``baton scores`` -- Full report across all agents.
+    * ``baton scores --agent NAME`` -- Scorecard for a specific agent.
+    * ``baton scores --write`` -- Write the report to disk.
+    * ``baton scores --trends`` -- Show performance trend direction
+      (improving, stable, degrading) for each agent.
+
+Delegates to:
+    :class:`~agent_baton.core.improve.scoring.PerformanceScorer`
+"""
 from __future__ import annotations
 
 import argparse

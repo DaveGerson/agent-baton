@@ -1,4 +1,21 @@
-"""baton improve — run or view improvement cycle reports."""
+"""``baton improve`` -- run or view improvement cycle reports.
+
+The improvement loop is the top-level entry point for the closed-loop
+learning pipeline.  A single cycle: detects anomalies, generates
+recommendations, auto-applies safe changes (budget downgrades), escalates
+risky changes, and starts experiments.
+
+Display modes:
+    * ``baton improve`` -- Show the latest improvement report (default).
+    * ``baton improve --run`` -- Run a full improvement cycle.
+    * ``baton improve --force`` -- Force-run even if triggers haven't fired.
+    * ``baton improve --report`` -- Show the latest report (explicit).
+    * ``baton improve --experiments`` -- Show active experiments.
+    * ``baton improve --history`` -- Show all improvement reports.
+
+Delegates to:
+    :class:`~agent_baton.core.improve.loop.ImprovementLoop`
+"""
 from __future__ import annotations
 
 import argparse

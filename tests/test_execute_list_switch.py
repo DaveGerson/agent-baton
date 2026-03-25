@@ -28,17 +28,21 @@ class TestHandleListEmpty:
     def test_prints_no_executions_message_when_list_is_empty(
         self, capsys: pytest.CaptureFixture
     ) -> None:
-        with (
-            patch(f"{_MOD}.StatePersistence.list_executions", return_value=[]),
-            patch(f"{_MOD}.StatePersistence") as mock_sp_cls,
-            patch(f"{_MOD}.WorkerSupervisor.list_workers", return_value=[]),
-        ):
-            # The legacy load() call uses a fresh StatePersistence instance.
-            mock_sp_instance = MagicMock()
-            mock_sp_instance.load.return_value = None
-            mock_sp_cls.return_value = mock_sp_instance
-            patch(f"{_MOD}.StatePersistence.get_active_task_id", return_value=None).start()
+        # Build a mock class that carries both class-method mocks and behaves
+        # as a factory for per-task-id StatePersistence instances.
+        mock_sp_instance = MagicMock()
+        mock_sp_instance.load.return_value = None
 
+        mock_cls = MagicMock(return_value=mock_sp_instance)
+        mock_cls.list_executions = MagicMock(return_value=[])
+        mock_cls.get_active_task_id = MagicMock(return_value=None)
+
+        with (
+            patch(f"{_MOD}.StatePersistence", mock_cls),
+            patch(f"{_MOD}.WorkerSupervisor.list_workers", return_value=[]),
+            # Prevent the SQLite backend from returning real rows from baton.db
+            patch(f"{_MOD}.detect_backend", return_value="file"),
+        ):
             _handle_list()
 
         out = capsys.readouterr().out

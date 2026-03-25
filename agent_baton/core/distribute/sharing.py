@@ -1,6 +1,28 @@
-"""Agent Sharing / Packaging — create and install distributable .tar.gz archives.
+"""Agent sharing and packaging -- create and install distributable ``.tar.gz``
+archives of agent-baton configurations.
 
-**Status: Experimental** — built and tested but not yet validated with real usage data.
+A package archive contains:
+
+* ``manifest.json`` -- metadata (name, version, lists of agents/references/
+  knowledge packs, minimum baton version).
+* ``agents/*.md`` -- agent definition markdown files.
+* ``references/*.md`` -- reference documentation files.
+* ``knowledge/<pack-name>/**/*.md`` -- knowledge pack trees (optional).
+
+The ``PackageBuilder`` class provides the full build/extract/install cycle:
+
+1. **Build**: scan the project's ``.claude/`` directory and produce a
+   ``name-version.tar.gz`` archive.
+2. **Extract**: unpack an archive and read its manifest.
+3. **Install**: extract, validate, and copy agents/references/knowledge
+   into either ``project`` scope (``.claude/``) or ``user`` scope
+   (``~/.claude/``). Existing files are skipped unless ``force=True``.
+
+Archive extraction uses ``_safe_extractall`` to prevent path-traversal
+attacks (CVE-2007-4559 class).
+
+**Status: Experimental** -- built and tested but not yet validated with real
+usage data.
 """
 from __future__ import annotations
 
@@ -18,6 +40,14 @@ def _safe_extractall(tar: tarfile.TarFile, dest: Path) -> None:
 
     Prevents CVE-2007-4559 class attacks where crafted archives contain
     members with ``..`` or absolute paths that write outside *dest*.
+
+    Args:
+        tar: An open ``TarFile`` to extract.
+        dest: Destination directory for extraction.
+
+    Raises:
+        ValueError: If any archive member resolves to a path outside
+            ``dest`` after symlink/``..`` resolution.
     """
     dest_resolved = dest.resolve()
     for member in tar.getmembers():
@@ -31,7 +61,22 @@ def _safe_extractall(tar: tarfile.TarFile, dest: Path) -> None:
 
 @dataclass
 class PackageManifest:
-    """Manifest for a distributable agent-baton package."""
+    """Manifest for a distributable agent-baton package.
+
+    Stored as ``manifest.json`` inside the archive. Contains metadata
+    about the package and lists of included content.
+
+    Attributes:
+        name: Package name (used in the archive filename).
+        version: Semantic version string (e.g. ``"1.0.0"``).
+        description: Human-readable package description.
+        baton_version: Minimum compatible agent-baton version.
+        created_at: ISO-8601 timestamp of when the package was built.
+        agents: List of agent definition filenames included
+            (e.g. ``["architect.md", "backend-engineer.md"]``).
+        references: List of reference filenames included.
+        knowledge_packs: List of knowledge pack directory names included.
+    """
 
     name: str
     version: str = "1.0.0"
@@ -71,11 +116,20 @@ class PackageManifest:
 class PackageBuilder:
     """Create and install distributable archives of agent-baton configurations.
 
-    Archive layout (name-version.tar.gz):
+    Handles the full package lifecycle: build, extract, install, and
+    manifest reading. The source project's ``.claude/`` directory is used
+    as the content source for builds.
+
+    Archive layout (``name-version.tar.gz``)::
+
         manifest.json
         agents/*.md
         references/*.md
         knowledge/<pack>/**/*.md  (when included)
+
+    Installation copies files into either project scope (``.claude/``)
+    or user scope (``~/.claude/``), creating directories as needed.
+    Existing files are preserved unless ``force=True``.
     """
 
     def __init__(self, source_root: Path | None = None) -> None:

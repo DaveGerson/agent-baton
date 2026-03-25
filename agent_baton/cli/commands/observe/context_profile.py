@@ -1,4 +1,21 @@
-"""baton context-profile — list and inspect agent context efficiency profiles."""
+"""``baton context-profile`` -- list and inspect agent context efficiency profiles.
+
+Context profiles measure how efficiently agents use their context window:
+how many files they read vs. how many they actually reference in their
+output.  High redundancy (many reads, few references) indicates an agent
+is doing too much exploration.
+
+Display modes:
+    * ``baton context-profile`` -- List recent profiles with summary stats.
+    * ``baton context-profile TASK_ID`` -- Detailed profile for a task.
+    * ``baton context-profile --generate TASK_ID`` -- Generate a profile
+      from trace data and save it.
+    * ``baton context-profile --agent NAME`` -- Aggregate stats for an agent.
+    * ``baton context-profile --report`` -- Full markdown efficiency report.
+
+Delegates to:
+    :class:`~agent_baton.core.observe.context_profiler.ContextProfiler`
+"""
 from __future__ import annotations
 
 import argparse
@@ -126,7 +143,17 @@ def handler(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 
 def _print_profile(profile) -> None:
-    """Print a human-readable context profile to stdout."""
+    """Print a human-readable context profile to stdout.
+
+    Displays overall profile metrics (total reads, unique reads,
+    redundancy rate) followed by per-agent breakdowns showing
+    efficiency scores, file read/write counts, and token estimates.
+    Agents with efficiency below 0.3 are flagged as ``[BROAD READER]``.
+
+    Args:
+        profile: A :class:`~agent_baton.core.observe.context_profiler.ContextProfile`
+            instance.
+    """
     print(f"Context Profile: {profile.task_id}")
     print(f"  Created:        {profile.created_at}")
     print(f"  Total reads:    {profile.total_files_read}")

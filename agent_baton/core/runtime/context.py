@@ -26,7 +26,21 @@ from agent_baton.core.runtime.launcher import AgentLauncher
 
 @dataclass
 class ExecutionContext:
-    """Pre-wired execution components ready for use by TaskWorker."""
+    """Pre-wired execution components ready for use by TaskWorker.
+
+    The factory method ``build()`` guarantees that all components share the
+    same ``EventBus`` instance, preventing silent event loss from mismatched
+    bus references.  Callers should always use ``build()`` rather than
+    constructing this dataclass directly.
+
+    Attributes:
+        engine: The execution engine driving plan state transitions.
+        bus: Shared event bus for domain event publication and subscription.
+        launcher: Agent launcher implementation (real or dry-run).
+        persistence: EventPersistence reference from the engine, surfaced
+            so callers can replay events without constructing a parallel
+            reader.  May be None if event persistence is disabled.
+    """
 
     engine: ExecutionEngine
     bus: EventBus

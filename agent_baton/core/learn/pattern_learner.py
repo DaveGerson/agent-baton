@@ -1,6 +1,34 @@
-"""PatternLearner — derive recurring orchestration patterns from usage logs.
+"""PatternLearner -- derive recurring orchestration patterns from usage logs.
 
-**Status: Experimental** — built and tested but not yet validated with real usage data.
+The pattern learner is the core learning engine in Agent Baton's
+closed-loop pipeline.  It reads the historical record of completed tasks
+from :class:`~agent_baton.core.observe.usage.UsageLogger`, identifies
+recurring success patterns (agent combinations, sequencing modes, retry
+rates), and persists them to ``learned-patterns.json`` so the planner can
+reuse proven workflows for future tasks of the same type.
+
+Pattern derivation algorithm:
+
+1. Group :class:`~agent_baton.models.usage.TaskUsageRecord` objects by
+   ``sequencing_mode`` (proxy for task type).
+2. For each group with >= ``min_sample_size`` records, compute:
+
+   - ``success_rate`` = fraction of tasks with outcome ``"SHIP"``.
+   - ``confidence`` = min(1.0, (sample_size / 15) * success_rate).
+   - Most common agent combination (canonical sorted tuple).
+   - Average token cost (from successful tasks, falling back to all).
+   - Average retry rate and gate pass rate.
+
+3. Groups whose confidence exceeds ``min_confidence`` are emitted as
+   :class:`~agent_baton.models.pattern.LearnedPattern` objects.
+
+The learner also provides :meth:`knowledge_gaps_for`, which reads
+retrospective JSON sidecars to surface per-agent knowledge gaps --
+enabling the planner to attach relevant knowledge packs before dispatching
+agents that have historically lacked context.
+
+**Status: Experimental** -- built and tested but not yet validated with
+real usage data.
 """
 from __future__ import annotations
 
@@ -353,7 +381,17 @@ class PatternLearner:
         return [gap_by_description[d] for d in sorted_descriptions]
 
     def generate_report(self) -> str:
-        """Return a markdown report summarising all stored patterns."""
+        """Return a Markdown report summarising all stored patterns.
+
+        Each pattern section includes task type, stack affinity, confidence
+        bar, success rate, sample size, average token cost, recommended
+        template description, recommended agent list, and evidence task IDs.
+
+        Returns:
+            A complete Markdown document.  Returns a placeholder message
+            directing the user to run ``baton patterns --refresh`` if no
+            patterns have been computed yet.
+        """
         patterns = self.load_patterns()
 
         if not patterns:

@@ -1,4 +1,41 @@
-"""CLI entry point for the baton command."""
+"""CLI entry point for the ``baton`` command.
+
+This module implements the top-level CLI dispatcher for Agent Baton.  The
+CLI is built on :mod:`argparse` and uses a plugin-based architecture:
+every Python module under ``agent_baton.cli.commands`` (including nested
+sub-packages) is auto-discovered at import time.  Each module must expose
+a ``register(subparsers)`` function that returns an
+:class:`~argparse.ArgumentParser` and a ``handler(args)`` function that
+executes the command.
+
+Command groups are organised into sub-packages that map to the six
+functional domains of Agent Baton:
+
+* **execution** -- Plan, execute, and manage orchestrated tasks
+  (``baton plan``, ``baton execute``, ``baton daemon``, ``baton async``,
+  ``baton decide``).
+* **observe** -- Inspect execution artifacts, telemetry, and traces
+  (``baton dashboard``, ``baton trace``, ``baton usage``, ``baton telemetry``,
+  ``baton retro``, ``baton context-profile``, ``baton cleanup``,
+  ``baton migrate-storage``, ``baton query``, ``baton context``).
+* **govern** -- Policy enforcement, classification, and validation
+  (``baton classify``, ``baton compliance``, ``baton policy``,
+  ``baton escalations``, ``baton validate``, ``baton spec-check``,
+  ``baton detect``).
+* **improve** -- Scoring, patterns, evolution, and budget tuning
+  (``baton scores``, ``baton evolve``, ``baton patterns``, ``baton budget``,
+  ``baton changelog``, ``baton anomalies``, ``baton experiment``,
+  ``baton improve``).
+* **distribute** -- Packaging, publishing, and sharing
+  (``baton package``, ``baton publish``, ``baton pull``,
+  ``baton verify-package``, ``baton install``, ``baton transfer``).
+* **agents** -- Agent discovery, routing, events, and incidents
+  (``baton agents``, ``baton route``, ``baton events``, ``baton incident``).
+
+Standalone commands live directly in ``cli/commands/`` outside the
+sub-packages: ``baton pmo``, ``baton sync``, ``baton cquery``,
+``baton source``, ``baton serve``.
+"""
 from __future__ import annotations
 
 import argparse
@@ -23,11 +60,24 @@ _COMMAND_GROUPS: dict[str, list[str]] = {
 
 
 def discover_commands() -> dict[str, types.ModuleType]:
-    """Auto-discover all command modules in cli/commands/ and subdirectories.
+    """Auto-discover all command modules in ``cli/commands/`` and subdirectories.
 
-    Each module must expose:
-      - register(subparsers) -> ArgumentParser  (registers the subcommand)
-      - handler(args)        -> None             (executes the command)
+    Walks the ``commands`` package tree two levels deep:
+
+    1. Top-level modules (e.g. ``pmo_cmd.py``) are scanned directly.
+    2. Sub-packages (e.g. ``execution/``, ``observe/``) are entered and each
+       child module is scanned.
+
+    Each qualifying module must expose:
+      - ``register(subparsers) -> ArgumentParser``  -- registers the subcommand
+      - ``handler(args)        -> None``             -- executes the command
+
+    Returns:
+        A mapping from module name to the imported module object.  The keys
+        are the Python module names (e.g. ``"execute"``, ``"plan_cmd"``),
+        *not* the subcommand strings.  The subcommand strings are extracted
+        from the subparser ``prog`` attribute during registration in
+        :func:`main`.
     """
     found: dict[str, types.ModuleType] = {}
 
@@ -50,6 +100,17 @@ def discover_commands() -> dict[str, types.ModuleType]:
 
 
 def main(argv: list[str] | None = None) -> None:
+    """Parse CLI arguments and dispatch to the matching command handler.
+
+    This is the main entry point invoked by the ``baton`` console script.
+    It builds the argument parser, discovers and registers all command
+    modules, resolves the subcommand, and calls its ``handler(args)``
+    function.
+
+    Args:
+        argv: Explicit argument list for testing.  When ``None`` (the
+            default), ``sys.argv[1:]`` is used.
+    """
     from importlib.metadata import version, PackageNotFoundError
     try:
         _version = version("agent-baton")

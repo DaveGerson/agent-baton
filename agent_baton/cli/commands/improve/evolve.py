@@ -1,4 +1,19 @@
-"""baton evolve — analyze agent performance and propose prompt improvements."""
+"""``baton evolve`` -- analyse agent performance and propose prompt improvements.
+
+The evolution engine identifies underperforming agents (high retry rates,
+low gate pass rates, excessive token usage) and generates prompt
+improvement proposals based on failure patterns.
+
+Display modes:
+    * ``baton evolve`` -- Print the evolution report to stdout.
+    * ``baton evolve --agent NAME`` -- Proposal for a specific agent.
+    * ``baton evolve --save`` -- Save proposals to
+      ``.claude/team-context/evolution-proposals/``.
+    * ``baton evolve --write`` -- Write the full report to disk.
+
+Delegates to:
+    :class:`~agent_baton.core.improve.evolution.PromptEvolutionEngine`
+"""
 from __future__ import annotations
 
 import argparse

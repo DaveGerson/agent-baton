@@ -1,4 +1,29 @@
-"""Agent prompt version control — backups and changelog tracking."""
+"""Agent prompt version control -- backups and changelog tracking.
+
+The VCS module provides the safety net for the improvement loop.  Before
+any agent definition file is modified (whether by automated prompt
+evolution or manual editing), a timestamped backup is created and a
+changelog entry is written.
+
+This enables:
+
+* **Safe experimentation** -- applied recommendations can be reverted to
+  the exact pre-change state.
+* **Audit trail** -- the changelog records who changed what and why,
+  supporting post-hoc review.
+* **Rollback** --
+  :class:`~agent_baton.core.improve.rollback.RollbackManager` uses
+  :meth:`AgentVersionControl.restore_backup` to revert degraded
+  experiments automatically.
+
+Storage layout::
+
+    agents/
+      .backups/
+        architect.20260324-120000.md
+        backend-engineer.20260324-130000.md
+      changelog.md
+"""
 from __future__ import annotations
 
 import shutil
@@ -9,7 +34,17 @@ from pathlib import Path
 
 @dataclass
 class ChangelogEntry:
-    """A single entry in the agent changelog."""
+    """A single entry in the agent changelog.
+
+    Attributes:
+        timestamp: ISO 8601 UTC timestamp of the change.
+        agent_name: Name of the agent whose definition was modified.
+        action: Type of change: ``"created"``, ``"modified"``, or
+            ``"archived"``.
+        summary: Human-readable description of what changed and why.
+        backup_path: Relative path to the ``.bak`` file if the agent was
+            modified (empty string for creation events).
+    """
 
     timestamp: str  # ISO format
     agent_name: str
@@ -33,7 +68,17 @@ _CHANGELOG_HEADER = "# Agent Changelog\n\n"
 
 
 class AgentVersionControl:
-    """Track changes to agent definition files with backups and changelog."""
+    """Track changes to agent definition files with backups and changelog.
+
+    Provides three levels of API:
+
+    * **Low-level**: :meth:`backup_agent`, :meth:`log_change`,
+      :meth:`restore_backup` -- individual operations.
+    * **High-level**: :meth:`track_modification`, :meth:`track_creation`
+      -- combined backup + changelog in one call.
+    * **Query**: :meth:`read_changelog`, :meth:`get_agent_history`,
+      :meth:`list_backups` -- inspect the audit trail.
+    """
 
     def __init__(self, agents_dir: Path | None = None) -> None:
         # Default to the canonical distributable agents/ directory relative to
@@ -66,10 +111,19 @@ class AgentVersionControl:
     def backup_agent(self, agent_path: Path) -> Path:
         """Create a timestamped backup of an agent file before modifying it.
 
-        The backup filename follows the pattern:
+        The backup filename follows the pattern::
+
             <agents_dir>/.backups/<agent-name>.<YYYYMMDD-HHMMSS>.md
 
-        Returns the backup path.
+        If a backup with the same second-resolution timestamp already exists
+        (rare, but possible in tests), a microsecond suffix is appended to
+        guarantee uniqueness.
+
+        Args:
+            agent_path: Absolute path to the agent definition file to back up.
+
+        Returns:
+            Absolute path to the created backup file.
         """
         self.backup_dir.mkdir(parents=True, exist_ok=True)
         now = datetime.now(tz=timezone.utc)
@@ -90,11 +144,15 @@ class AgentVersionControl:
     # ------------------------------------------------------------------
 
     def log_change(self, entry: ChangelogEntry) -> None:
-        """Append a changelog entry to changelog.md.
+        """Append a changelog entry to ``changelog.md``.
 
         Creates the file with a header if it does not yet exist.
         New entries are prepended directly after the header so that the
-        most recent change appears first.
+        most recent change appears first -- matching the convention of
+        human-maintained changelogs.
+
+        Args:
+            entry: The changelog entry to persist.
         """
         new_block = entry.to_markdown()
 
@@ -118,10 +176,16 @@ class AgentVersionControl:
         self.changelog_path.write_text(updated, encoding="utf-8")
 
     def read_changelog(self) -> list[ChangelogEntry]:
-        """Parse changelog.md and return entries, most recent first.
+        """Parse ``changelog.md`` and return entries, most recent first.
 
         Parsing is tolerant: fields missing from a block are silently
-        defaulted to empty strings.
+        defaulted to empty strings.  Each entry block starts with a
+        ``### `` header line containing ``timestamp -- agent_name -- action``.
+
+        Returns:
+            List of :class:`ChangelogEntry` objects in reverse chronological
+            order (newest first).  Returns an empty list if the changelog
+            file does not exist.
         """
         if not self.changelog_path.exists():
             return []
@@ -197,7 +261,12 @@ class AgentVersionControl:
         """Restore a backup file to the target path.
 
         A safety backup of the current file is created first so that the
-        restore operation is itself reversible.
+        restore operation is itself reversible -- even a rollback can be
+        rolled back.
+
+        Args:
+            backup_path: Path to the backup file to restore from.
+            target_path: Path to the agent definition file to overwrite.
         """
         if target_path.exists():
             self.backup_agent(target_path)
@@ -210,11 +279,22 @@ class AgentVersionControl:
     def track_modification(self, agent_path: Path, summary: str) -> ChangelogEntry:
         """Back up the agent, log the change, and return the entry.
 
-        This is the primary method other code calls *before* writing changes
-        to an agent file:
-          1. Creates a timestamped backup.
-          2. Writes a changelog entry.
-          3. Returns the entry for the caller to inspect or forward.
+        This is the primary method other code calls *before* writing
+        changes to an agent file.  It combines three operations atomically:
+
+        1. Creates a timestamped backup via :meth:`backup_agent`.
+        2. Writes a changelog entry via :meth:`log_change`.
+        3. Returns the entry for the caller to inspect or forward.
+
+        Args:
+            agent_path: Absolute path to the agent definition file about
+                to be modified.
+            summary: Human-readable description of the change and its
+                motivation.
+
+        Returns:
+            The created :class:`ChangelogEntry` with the backup path
+            recorded.
         """
         backup_path = self.backup_agent(agent_path)
         ts = datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
@@ -235,7 +315,16 @@ class AgentVersionControl:
         return entry
 
     def track_creation(self, agent_path: Path, summary: str) -> ChangelogEntry:
-        """Log the creation of a new agent (no backup needed)."""
+        """Log the creation of a new agent (no backup needed).
+
+        Args:
+            agent_path: Absolute path to the newly created agent definition.
+            summary: Human-readable description of the new agent and its
+                purpose.
+
+        Returns:
+            The created :class:`ChangelogEntry` with ``action="created"``.
+        """
         ts = datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
         entry = ChangelogEntry(
             timestamp=ts,

@@ -1,11 +1,31 @@
-"""Execution engine — state machine that drives orchestrated task execution.
+"""Execution engine -- state machine that drives orchestrated task execution.
 
-The engine is called repeatedly by the driving session (Claude or CLI).
-Each call either advances the state or returns an action for the caller to
-perform.  State is persisted to disk between calls for crash recovery.
+This module contains the ``ExecutionEngine``, the central component of the
+orchestration system.  The engine implements the ``ExecutionDriver`` protocol
+and is called repeatedly by the driving session (Claude CLI or async
+``TaskWorker``).  Each call either advances the internal state machine or
+returns an action for the caller to perform (DISPATCH, GATE, APPROVAL,
+COMPLETE, FAILED, or WAIT).
+
+State is persisted to disk after every transition to enable crash recovery
+via ``engine.resume()``.  The engine supports both legacy file-based
+persistence and a SQLite storage backend, with automatic dual-write during
+the transition period.
+
+Key design decisions:
+
+- The engine is synchronous and stateless between calls.  The async runtime
+  layer (``TaskWorker``) wraps it for concurrent dispatch.
+- Event ownership is split: the engine publishes task-level and phase-level
+  events; step-level events are published by ``TaskWorker`` to avoid
+  duplication.
+- Knowledge gap detection (``KNOWLEDGE_GAP:`` signals in agent output) is
+  handled inline during ``record_step_result()``, with escalation routed
+  through the escalation matrix in ``knowledge_gap.py``.
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 from datetime import datetime, timezone
@@ -36,11 +56,13 @@ from agent_baton.core.engine.persistence import StatePersistence
 from agent_baton.core.events.bus import EventBus
 from agent_baton.core.events import events as evt
 from agent_baton.core.events.persistence import EventPersistence
+from agent_baton.core.events.projections import TaskView, project_task_view
 from agent_baton.core.observe.telemetry import AgentTelemetry, TelemetryEvent
 from agent_baton.core.observe.trace import TraceRecorder
 from agent_baton.models.trace import TaskTrace, TraceEvent
 from agent_baton.core.observe.usage import UsageLogger
 from agent_baton.core.observe.retrospective import RetrospectiveEngine
+from agent_baton.core.observe.context_profiler import ContextProfiler
 
 
 # ---------------------------------------------------------------------------
@@ -54,6 +76,7 @@ _log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _utcnow() -> str:
+    """Return the current UTC time as a seconds-precision ISO 8601 string."""
     return datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
 
 
@@ -71,15 +94,104 @@ def _elapsed_seconds(started_at: str) -> float:
 
 
 # ---------------------------------------------------------------------------
+# TaskViewSubscriber — materialized view maintained as events fire
+# ---------------------------------------------------------------------------
+
+_HIGH_RISK_LEVELS: frozenset[str] = frozenset({"HIGH", "CRITICAL"})
+
+
+class TaskViewSubscriber:
+    """EventBus subscriber that maintains a materialized TaskView on disk.
+
+    Each time an event is published, the subscriber re-projects the full
+    task view from the bus history and writes it to *view_path* as JSON.
+    This keeps ``task-view.json`` current without requiring on-demand
+    computation.
+    """
+
+    def __init__(self, task_id: str, bus: "EventBus", view_path: Path) -> None:
+        self._task_id = task_id
+        self._bus = bus
+        self._view_path = view_path
+
+    def __call__(self, event: "Event") -> None:  # noqa: F821
+        """Called synchronously by EventBus for every published event."""
+        if event.task_id != self._task_id:
+            return
+        try:
+            all_events = self._bus.replay(self._task_id)
+            view = project_task_view(all_events, task_id=self._task_id)
+            self._write(view)
+        except Exception as exc:  # pragma: no cover
+            _log.warning("TaskViewSubscriber: failed to update task-view.json: %s", exc)
+
+    def _write(self, view: TaskView) -> None:
+        """Serialise *view* to JSON and write atomically to *view_path*."""
+        self._view_path.parent.mkdir(parents=True, exist_ok=True)
+        data = {
+            "task_id": view.task_id,
+            "status": view.status,
+            "started_at": view.started_at,
+            "completed_at": view.completed_at,
+            "risk_level": view.risk_level,
+            "total_steps": view.total_steps,
+            "steps_completed": view.steps_completed,
+            "steps_failed": view.steps_failed,
+            "steps_dispatched": view.steps_dispatched,
+            "gates_passed": view.gates_passed,
+            "gates_failed": view.gates_failed,
+            "elapsed_seconds": view.elapsed_seconds,
+            "last_event_seq": view.last_event_seq,
+            "pending_decisions": view.pending_decisions,
+            "phases": {
+                str(pid): {
+                    "phase_id": ph.phase_id,
+                    "phase_name": ph.phase_name,
+                    "status": ph.status,
+                    "started_at": ph.started_at,
+                    "completed_at": ph.completed_at,
+                    "gate_status": ph.gate_status,
+                    "gate_output": ph.gate_output,
+                    "steps": {
+                        sid: {
+                            "step_id": sv.step_id,
+                            "agent_name": sv.agent_name,
+                            "status": sv.status,
+                            "dispatched_at": sv.dispatched_at,
+                            "completed_at": sv.completed_at,
+                            "duration_seconds": sv.duration_seconds,
+                            "outcome": sv.outcome,
+                            "error": sv.error,
+                            "files_changed": sv.files_changed,
+                            "commit_hash": sv.commit_hash,
+                        }
+                        for sid, sv in ph.steps.items()
+                    },
+                }
+                for pid, ph in view.phases.items()
+            },
+        }
+        tmp = self._view_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        tmp.replace(self._view_path)
+
+
+# ---------------------------------------------------------------------------
 # ExecutionEngine
 # ---------------------------------------------------------------------------
 
 class ExecutionEngine:
     """State machine that drives orchestrated task execution.
 
-    The engine is called repeatedly by the driving session (Claude or CLI).
-    Each call either advances the state or returns an action for the caller
-    to perform.  State is persisted to disk between calls for crash recovery.
+    The engine implements the ``ExecutionDriver`` protocol and is the single
+    source of truth for plan state.  It is designed to be called repeatedly
+    by the driving session (Claude CLI or ``TaskWorker``).  Each call either
+    advances the internal state machine or returns an action for the caller
+    to perform.
+
+    State is persisted to disk after every transition to enable crash
+    recovery via ``resume()``.  The engine supports both legacy file-based
+    persistence and a SQLite storage backend with automatic dual-write.
 
     Typical lifecycle::
 
@@ -100,6 +212,18 @@ class ExecutionEngine:
                 break
             elif action.action_type == ActionType.FAILED.value:
                 break
+
+    Attributes:
+        _root: Resolved path to the team-context directory where state,
+            traces, usage logs, and retrospectives are stored.
+        _storage: Optional SQLite storage backend; when set, the engine
+            routes persistence through it with file-based fallback.
+        _bus: Optional EventBus for domain event publication.
+        _knowledge_resolver: Optional resolver for runtime knowledge gap
+            auto-resolution.  When None, gaps fall through to best-effort
+            or queue-for-gate.
+        _trace: In-memory trace object populated during execution, written
+            to disk on ``complete()``.
     """
 
     _DEFAULT_CONTEXT_ROOT = Path(".claude/team-context")
@@ -179,6 +303,9 @@ class ExecutionEngine:
 
         # In-memory trace object, populated during start() / resume().
         self._trace = None
+
+        # TaskViewSubscriber — wired lazily in start() once task_id is known.
+        self._task_view_subscriber: TaskViewSubscriber | None = None
 
     # ── Storage routing helpers ──────────────────────────────────────────────
 
@@ -319,12 +446,46 @@ class ExecutionEngine:
             except Exception:
                 pass
 
+        # Wire the materialized-view subscriber now that we know the task_id.
+        # One subscriber per engine instance; replace any previous one.
+        if self._bus is not None:
+            if self._task_id:
+                view_dir = self._root / "executions" / self._task_id
+            else:
+                view_dir = self._root
+            view_path = view_dir / "task-view.json"
+            self._task_view_subscriber = TaskViewSubscriber(
+                task_id=plan.task_id,
+                bus=self._bus,
+                view_path=view_path,
+            )
+            self._bus.subscribe("*", self._task_view_subscriber)
+
+        # ── Risk-level pre-flight approval ───────────────────────────────────
+        # For HIGH/CRITICAL plans, ensure the user explicitly approves before
+        # any agents are dispatched — unless Phase 1 already carries an
+        # approval gate (planner-added checkpoints are sufficient).
+        initial_status = "running"
+        if plan.risk_level.upper() in _HIGH_RISK_LEVELS and plan.phases:
+            first_phase = plan.phases[0]
+            if not first_phase.approval_required:
+                first_phase.approval_required = True
+                first_phase.approval_description = (
+                    f"This plan is classified as **{plan.risk_level}** risk. "
+                    "Please review the plan summary and confirm you want to "
+                    "proceed before any agents are dispatched.\n\n"
+                    f"**Task**: {plan.task_summary}\n"
+                    f"**Phases**: {len(plan.phases)}\n"
+                    f"**Total steps**: {plan.total_steps}"
+                )
+                initial_status = "approval_pending"
+
         state = ExecutionState(
             task_id=plan.task_id,
             plan=plan,
             current_phase=0,
             current_step_index=0,
-            status="running",
+            status=initial_status,
         )
 
         # Initialise trace (in-memory; committed to disk on complete()).
@@ -740,6 +901,27 @@ class ExecutionEngine:
         )
         retro_path = self._save_retro(retro)
 
+        # Trigger improvement loop (best-effort, non-blocking).
+        # The loop has built-in guards: circuit breaker, trigger thresholds,
+        # and data-volume checks.  It no-ops if there isn't enough new data.
+        try:
+            from agent_baton.core.improve.loop import ImprovementLoop
+            loop = ImprovementLoop(improvements_dir=self._root / "improvements")
+            loop.run_cycle()
+        except Exception as exc:
+            _log.debug("Post-completion improvement cycle skipped: %s", exc)
+
+        # Compute context efficiency profile (best-effort, non-blocking).
+        # Saved to <team_context_root>/context-profiles/<task_id>.json.
+        context_profile_path: Path | None = None
+        try:
+            profiler = ContextProfiler(team_context_root=self._root)
+            profile = profiler.profile_task(state.task_id)
+            if profile is not None:
+                context_profile_path = profiler.save_profile(profile)
+        except Exception as exc:
+            _log.debug("Context profiling skipped (non-fatal): %s", exc)
+
         # Compose summary string.
         steps_done = len(state.completed_step_ids)
         gates_passed = sum(1 for g in state.gate_results if g.passed)
@@ -772,6 +954,8 @@ class ExecutionEngine:
         if trace_path:
             summary_lines.append(f"Trace: {trace_path}")
         summary_lines.append(f"Retrospective: {retro_path}")
+        if context_profile_path:
+            summary_lines.append(f"Context profile: {context_profile_path}")
         return "\n".join(summary_lines)
 
     def status(self) -> dict:
@@ -2081,7 +2265,13 @@ def _append_resolved_decisions(
 
 
 def _build_delegation_prompt(step: PlanStep, plan: MachinePlan) -> str:
-    """Build a minimal delegation prompt for a plan step."""
+    """Build a minimal delegation prompt for a plan step.
+
+    This is a lightweight fallback used internally when the full
+    ``PromptDispatcher`` is not needed (e.g., for trace reconstruction).
+    For actual agent dispatch, ``PromptDispatcher.build_delegation_prompt``
+    is used instead.
+    """
     lines = [
         f"# Agent Task: {step.step_id}",
         "",
@@ -2109,7 +2299,10 @@ def _build_delegation_prompt(step: PlanStep, plan: MachinePlan) -> str:
 
 
 def _model_for_step(plan: MachinePlan, step_id: str) -> str:
-    """Look up the model declared for *step_id* in *plan*."""
+    """Look up the model declared for *step_id* in *plan*.
+
+    Falls back to ``"sonnet"`` if the step is not found.
+    """
     for phase in plan.phases:
         for step in phase.steps:
             if step.step_id == step_id:
@@ -2145,7 +2338,11 @@ def _estimate_tokens_for_step(plan: MachinePlan, step_id: str) -> int:
 
 
 def _agents_in_phase(plan: MachinePlan, phase_id: int) -> list[str]:
-    """Return unique agent names for steps in *phase_id*."""
+    """Return unique agent names for steps in *phase_id*.
+
+    Used by ``_build_usage_record`` to associate gate results with the
+    agents that participated in the corresponding phase.
+    """
     seen: set[str] = set()
     result: list[str] = []
     for phase in plan.phases:

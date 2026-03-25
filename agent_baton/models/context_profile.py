@@ -6,7 +6,25 @@ from dataclasses import dataclass, field
 
 @dataclass
 class AgentContextProfile:
-    """Context efficiency profile for a single agent within a task."""
+    """Context efficiency profile for a single agent within a task.
+
+    Measures how effectively an agent used its context window by
+    comparing files read versus files actually written or referenced
+    in its output.  Used by the ``baton context-profile`` command to
+    identify agents that read too many irrelevant files.
+
+    Attributes:
+        agent_name: Name of the profiled agent.
+        files_read: Files the agent read during execution.
+        files_written: Files the agent created or modified.
+        files_referenced: Files mentioned in the agent's output but
+            not directly written.
+        context_tokens_estimate: Estimated tokens consumed by context
+            (files read + prompt).
+        output_tokens_estimate: Estimated tokens in the agent's output.
+        efficiency_score: Ratio of useful output to context consumed
+            (higher is better, range 0.0 to 1.0).
+    """
 
     agent_name: str
     files_read: list[str] = field(default_factory=list)
@@ -42,7 +60,21 @@ class AgentContextProfile:
 
 @dataclass
 class TaskContextProfile:
-    """Aggregated context efficiency profile for a complete orchestrated task."""
+    """Aggregated context efficiency profile for a complete orchestrated task.
+
+    Combines individual ``AgentContextProfile`` records to compute
+    cross-agent redundancy metrics — useful for identifying cases where
+    multiple agents read the same files unnecessarily.
+
+    Attributes:
+        task_id: Execution identifier this profile belongs to.
+        agent_profiles: Per-agent efficiency breakdowns.
+        total_files_read: Sum of all file reads across all agents.
+        unique_files_read: Number of distinct files read.
+        redundant_reads: ``total_files_read - unique_files_read``.
+        redundancy_rate: Fraction of reads that were redundant (0.0 to 1.0).
+        created_at: ISO 8601 timestamp when this profile was generated.
+    """
 
     task_id: str
     agent_profiles: list[AgentContextProfile] = field(default_factory=list)

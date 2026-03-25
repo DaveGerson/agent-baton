@@ -1,4 +1,33 @@
-"""Validate agent output against specifications (JSON Schema, file structure, API contracts)."""
+"""Validate agent output against specifications (JSON Schema, file structure,
+API contracts).
+
+This module provides gate checks that verify agent-produced artifacts
+match expected specifications. It supports four validation modes:
+
+1. **JSON Schema validation** -- validate a JSON file against a JSON
+   Schema document. Uses a built-in lightweight validator (no external
+   ``jsonschema`` dependency) that checks types, required fields, enums,
+   and nested structures. Does not support ``$ref``, ``allOf/anyOf/oneOf``,
+   ``pattern``, or ``format``.
+
+2. **File structure validation** -- verify that expected files exist under
+   a root directory.
+
+3. **Python export validation** -- verify that a Python module defines
+   expected classes, functions, or variables by scanning the source text
+   (no import required).
+
+4. **API contract validation** -- verify that a Python file implements
+   expected functions, classes, and methods by scanning definitions in
+   the source text.
+
+5. **Generic gate runner** -- execute arbitrary ``(name, callable)``
+   check pairs where each callable returns ``(bool, message)``.
+
+All validators produce ``SpecValidationResult`` objects containing
+individual ``SpecCheck`` entries. The result is considered passing only
+when every check passes.
+"""
 from __future__ import annotations
 
 import json
@@ -9,7 +38,17 @@ from pathlib import Path
 
 @dataclass
 class SpecCheck:
-    """Result of a single spec validation check."""
+    """Result of a single spec validation check.
+
+    Attributes:
+        name: Descriptive name for this check (e.g. ``"$.name: type"``
+            for JSON Schema checks, ``"exists: README.md"`` for file
+            structure checks).
+        passed: Whether the check passed.
+        expected: What was expected (for display on failure).
+        actual: What was found (for display on failure).
+        message: Human-readable explanation, especially on failure.
+    """
 
     name: str
     passed: bool
@@ -20,7 +59,17 @@ class SpecCheck:
 
 @dataclass
 class SpecValidationResult:
-    """Result of validating output against a spec."""
+    """Aggregate result of validating output against a specification.
+
+    Contains a list of individual ``SpecCheck`` entries. The overall
+    result is considered passing only when every check passes. An empty
+    checks list is treated as a failure (no checks were run).
+
+    Attributes:
+        spec_path: Path to the specification or root directory used for
+            validation. ``None`` for generic gate checks.
+        checks: Ordered list of individual check results.
+    """
 
     spec_path: Path | None = None
     checks: list[SpecCheck] = field(default_factory=list)
@@ -173,7 +222,13 @@ def _validate_value_against_schema(
 
 
 class SpecValidator:
-    """Validate files and structures against JSON Schema or custom specs."""
+    """Validate files and structures against JSON Schema or custom specs.
+
+    Provides multiple validation strategies (JSON Schema, file structure,
+    Python exports, API contracts, and generic gates) that all produce
+    uniform ``SpecValidationResult`` output. The validator is stateless
+    and safe to reuse across multiple calls.
+    """
 
     # ------------------------------------------------------------------
     # JSON Schema validation
@@ -182,13 +237,28 @@ class SpecValidator:
     def validate_json_against_schema(
         self, data_path: Path, schema_path: Path
     ) -> SpecValidationResult:
-        """Validate a JSON file against a JSON Schema file.
+        """Validate a JSON data file against a JSON Schema file.
 
-        Uses basic structural validation (no jsonschema dependency):
-        - Required fields present
-        - Types match (string, number, array, object, boolean)
-        - Enum values are valid
-        Does NOT support: $ref, allOf/anyOf/oneOf, pattern, format
+        Uses a built-in lightweight validator (no ``jsonschema`` dependency)
+        that recursively checks:
+
+        - Required fields are present.
+        - Value types match the declared JSON Schema type (string, number,
+          integer, boolean, array, object, null).
+        - Enum values are within the allowed set.
+        - Nested object properties and array items are validated recursively.
+
+        Limitations: does not support ``$ref``, ``allOf``/``anyOf``/
+        ``oneOf``, ``pattern``, or ``format`` keywords.
+
+        Args:
+            data_path: Path to the JSON file to validate.
+            schema_path: Path to the JSON Schema file.
+
+        Returns:
+            A ``SpecValidationResult`` with one check per validated
+            property/constraint. Early-returns with a single failing
+            check if either file cannot be read or parsed.
         """
         result = SpecValidationResult(spec_path=schema_path)
 
@@ -254,7 +324,16 @@ class SpecValidator:
     def validate_file_structure(
         self, root: Path, expected_files: list[str]
     ) -> SpecValidationResult:
-        """Validate that expected files exist under root."""
+        """Validate that expected files exist under a root directory.
+
+        Args:
+            root: Base directory to check relative paths against.
+            expected_files: List of relative file paths that must exist
+                under ``root`` (e.g. ``["src/main.py", "README.md"]``).
+
+        Returns:
+            A ``SpecValidationResult`` with one check per expected file.
+        """
         result = SpecValidationResult(spec_path=root)
 
         for rel_path in expected_files:
@@ -283,10 +362,20 @@ class SpecValidator:
     def validate_exports(
         self, module_path: Path, expected_names: list[str]
     ) -> SpecValidationResult:
-        """Validate that a Python module exports expected names.
+        """Validate that a Python module defines expected public names.
 
-        Reads the file and checks for class/function/variable definitions
-        matching expected_names. Does NOT import the module.
+        Reads the file as text and scans for top-level ``def``,
+        ``async def``, ``class``, and assignment statements matching
+        the expected names. Does NOT import the module, so it is safe
+        to use on files with unresolved dependencies.
+
+        Args:
+            module_path: Path to the Python source file.
+            expected_names: Names (functions, classes, or variables) that
+                must be defined at the module's top level.
+
+        Returns:
+            A ``SpecValidationResult`` with one check per expected name.
         """
         result = SpecValidationResult(spec_path=module_path)
 
@@ -327,17 +416,28 @@ class SpecValidator:
     def validate_api_contract(
         self, implementation_path: Path, contract: dict
     ) -> SpecValidationResult:
-        """Validate that a Python file implements expected functions/classes.
+        """Validate that a Python file implements an expected API contract.
 
-        contract format::
+        Scans the source text for top-level function and class definitions,
+        and for indented method definitions. Does NOT import the module.
 
-            {
-                "functions": ["func_name", ...],
-                "classes": ["ClassName", ...],
-                "methods": {"ClassName": ["method1", "method2"]}
-            }
+        Args:
+            implementation_path: Path to the Python source file.
+            contract: Dictionary describing the expected API surface::
 
-        Parses the file text (grep-based, not import-based) to check presence.
+                {
+                    "functions": ["func_name", ...],
+                    "classes": ["ClassName", ...],
+                    "methods": {"ClassName": ["method1", "method2"]}
+                }
+
+                All keys are optional. ``methods`` checks scan for
+                indented ``def``/``async def`` anywhere in the file
+                (scoping to a specific class is approximate).
+
+        Returns:
+            A ``SpecValidationResult`` with one check per expected
+            function, class, and method.
         """
         result = SpecValidationResult(spec_path=implementation_path)
 
@@ -415,11 +515,20 @@ class SpecValidator:
     def run_gate(
         self, checks: list[tuple[str, callable]]
     ) -> SpecValidationResult:
-        """Run a list of named check functions.
+        """Run a list of named check functions as a validation gate.
 
-        Each check is ``(name, callable)`` where the callable returns
-        ``(bool, message)``.  This is the generic escape hatch for custom
-        validations.
+        This is the generic escape hatch for custom validations that do
+        not fit the JSON Schema, file structure, or API contract patterns.
+        Each check callable is invoked in order; exceptions are caught
+        and recorded as failures.
+
+        Args:
+            checks: List of ``(name, callable)`` tuples. Each callable
+                must return a ``(bool, str)`` tuple of
+                ``(passed, message)``.
+
+        Returns:
+            A ``SpecValidationResult`` with one ``SpecCheck`` per entry.
         """
         result = SpecValidationResult()
 

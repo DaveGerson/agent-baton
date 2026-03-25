@@ -2,7 +2,28 @@
 
 Each response model includes a ``from_dataclass`` classmethod that converts
 from the corresponding internal dataclass.  This keeps the conversion logic
-co-located with the schema definition.
+co-located with the schema definition and ensures that the API contract is
+decoupled from internal data representations.
+
+The models are organized into groups:
+
+- **Plan**: ``PlanStepResponse``, ``PlanGateResponse``,
+  ``PlanPhaseResponse``, ``PlanResponse``
+- **Execution**: ``StepResultResponse``, ``ExecutionResponse``,
+  ``ActionResponse``
+- **Decisions**: ``DecisionResponse``, ``DecisionListResponse``,
+  ``ResolveResponse``
+- **Events**: ``EventResponse``
+- **Agents**: ``AgentResponse``, ``AgentListResponse``
+- **Observability**: ``DashboardResponse``, ``TraceEventResponse``,
+  ``TraceResponse``, ``AgentUsageResponse``, ``TaskUsageResponse``,
+  ``UsageResponse``
+- **System**: ``HealthResponse``, ``ReadyResponse``, ``WebhookResponse``,
+  ``ErrorResponse``
+- **PMO**: ``PmoProjectResponse``, ``PmoCardResponse``,
+  ``PmoSignalResponse``, ``ProgramHealthResponse``, ``PmoBoardResponse``
+- **Forge/ADO**: ``InterviewQuestionResponse``, ``InterviewResponse``,
+  ``AdoWorkItemResponse``, ``AdoSearchResponse``
 """
 from __future__ import annotations
 
@@ -17,7 +38,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class PlanStepResponse(BaseModel):
-    """A single step within a plan phase."""
+    """A single step within a plan phase.
+
+    Maps to ``agent_baton.models.execution.PlanStep``.  Each step
+    assigns a specific agent to a task with optional dependency
+    ordering, path enforcement, and context file hints.
+    """
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -53,7 +79,12 @@ class PlanStepResponse(BaseModel):
 
 
 class PlanGateResponse(BaseModel):
-    """A QA gate attached to a plan phase."""
+    """A QA gate attached to a plan phase.
+
+    Maps to ``agent_baton.models.execution.PlanGate``.  Gates run
+    after all steps in a phase complete and must pass before the
+    engine advances to the next phase.
+    """
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -72,7 +103,12 @@ class PlanGateResponse(BaseModel):
 
 
 class PlanPhaseResponse(BaseModel):
-    """A phase grouping steps and an optional gate."""
+    """A phase grouping steps and an optional gate.
+
+    Maps to ``agent_baton.models.execution.PlanPhase``.  Phases are
+    executed sequentially; all steps within a phase may run in
+    parallel if they have no inter-step dependencies.
+    """
 
     phase_id: int = Field(..., description="Phase index (0-based).")
     name: str = Field(..., description="Phase name.")
@@ -99,7 +135,12 @@ class PlanPhaseResponse(BaseModel):
 
 
 class PlanResponse(BaseModel):
-    """Full plan as returned from the planning endpoint."""
+    """Full plan as returned from the planning endpoint.
+
+    Maps to ``agent_baton.models.execution.MachinePlan``.  Contains
+    the complete phase/step/gate hierarchy, risk classification,
+    budget tier, and agent roster.
+    """
 
     plan_id: str = Field(..., description="Unique task/plan identifier.")
     task_summary: str = Field(..., description="Human-readable task description.")
@@ -138,7 +179,12 @@ class PlanResponse(BaseModel):
 
 
 class StepResultResponse(BaseModel):
-    """Outcome of a completed step."""
+    """Outcome of a completed step.
+
+    Maps to ``agent_baton.models.execution.StepResult``.  Contains
+    the agent's output, files changed, token usage, duration, and
+    any error information from failed steps.
+    """
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -161,7 +207,13 @@ class StepResultResponse(BaseModel):
 
 
 class ExecutionResponse(BaseModel):
-    """Current state of a running or completed execution."""
+    """Current state of a running or completed execution.
+
+    Maps to ``agent_baton.models.execution.ExecutionState``.  Provides
+    progress counters (steps completed/remaining/failed, gates passed),
+    the full list of step and gate results, and the pending decision
+    count for human-in-the-loop awareness.
+    """
 
     task_id: str = Field(..., description="Execution/task identifier.")
     status: str = Field(..., description="Current status: running, gate_pending, complete, failed.")
@@ -184,7 +236,20 @@ class ExecutionResponse(BaseModel):
         obj: object,
         pending_decisions: int = 0,
     ) -> ExecutionResponse:
-        """Convert from ``agent_baton.models.execution.ExecutionState``."""
+        """Convert from ``agent_baton.models.execution.ExecutionState``.
+
+        Computes derived counters (steps_completed, steps_remaining,
+        steps_failed, gates_passed) from the raw step and gate result
+        lists rather than trusting any pre-computed values on the state.
+
+        Args:
+            obj: An ``ExecutionState`` dataclass instance.
+            pending_decisions: Number of unresolved human decisions
+                (computed externally by the route handler).
+
+        Returns:
+            A fully populated ``ExecutionResponse``.
+        """
         step_results = [
             StepResultResponse.from_dataclass(r) for r in obj.step_results  # type: ignore[attr-defined]
         ]
@@ -214,7 +279,19 @@ class ExecutionResponse(BaseModel):
 
 
 class ActionResponse(BaseModel):
-    """An instruction from the execution engine to the driving session."""
+    """An instruction from the execution engine to the driving session.
+
+    Maps to ``agent_baton.models.execution.ExecutionAction``.  The
+    ``action_type`` determines which fields are populated:
+
+    - ``dispatch``: ``agent_name``, ``agent_model``, ``step_id``
+    - ``gate``: ``gate_type``, ``gate_command``, ``phase_id``
+    - ``complete``/``failed``: ``summary``
+    - ``wait``: no additional fields (waiting for external input)
+
+    Internal-only fields (``delegation_prompt``, ``path_enforcement``)
+    are intentionally omitted from the API response.
+    """
 
     action_type: str = Field(..., description="Action kind: dispatch, gate, complete, failed, wait.")
     message: str = Field(default="", description="Human-readable description.")
@@ -234,7 +311,16 @@ class ActionResponse(BaseModel):
     def from_dataclass(cls, obj: object) -> ActionResponse:
         """Convert from ``agent_baton.models.execution.ExecutionAction``.
 
-        Omits internal-only fields: ``delegation_prompt``, ``path_enforcement``.
+        Omits internal-only fields (``delegation_prompt``,
+        ``path_enforcement``) that should not be exposed to API clients.
+        Recursively converts any ``parallel_actions``.
+
+        Args:
+            obj: An ``ExecutionAction`` dataclass instance.
+
+        Returns:
+            An ``ActionResponse`` with the action type's relevant
+            fields populated.
         """
         parallel = [ActionResponse.from_dataclass(a) for a in obj.parallel_actions]  # type: ignore[attr-defined]
         return cls(
@@ -257,7 +343,13 @@ class ActionResponse(BaseModel):
 
 
 class DecisionResponse(BaseModel):
-    """A pending or resolved human decision."""
+    """A pending or resolved human decision.
+
+    Maps to ``agent_baton.models.decision.DecisionRequest``.  When
+    fetched via the detail endpoint (``GET /decisions/{request_id}``),
+    the ``context_file_contents`` field is populated with inline file
+    contents so remote UIs don't need filesystem access.
+    """
 
     request_id: str = Field(..., description="Unique decision request identifier.")
     task_id: str = Field(..., description="Task this decision belongs to.")
@@ -300,6 +392,15 @@ class DecisionListResponse(BaseModel):
 
     @classmethod
     def from_dataclass_list(cls, items: list) -> DecisionListResponse:
+        """Convert a list of ``DecisionRequest`` dataclasses.
+
+        Args:
+            items: List of ``DecisionRequest`` dataclass instances.
+
+        Returns:
+            A ``DecisionListResponse`` with the converted decisions
+            and an accurate count.
+        """
         decisions = [DecisionResponse.from_dataclass(d) for d in items]
         return cls(count=len(decisions), decisions=decisions)
 
@@ -320,7 +421,13 @@ class ResolveResponse(BaseModel):
 
 
 class EventResponse(BaseModel):
-    """A single event from the execution event stream."""
+    """A single event from the execution event stream.
+
+    Maps to ``agent_baton.models.events.Event``.  Events are delivered
+    via the SSE endpoint (``GET /events/{task_id}``) or via outbound
+    webhooks.  The ``topic`` field uses a dot-separated namespace
+    (e.g. ``step.completed``, ``gate.required``).
+    """
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -343,7 +450,13 @@ class EventResponse(BaseModel):
 
 
 class AgentResponse(BaseModel):
-    """An agent definition available in the registry."""
+    """An agent definition available in the registry.
+
+    Maps to ``agent_baton.models.agent.AgentDefinition``.  The full
+    ``instructions`` markdown body and ``source_path`` are intentionally
+    omitted to keep response payloads compact.  Use the agent definition
+    files on disk for the full content.
+    """
 
     name: str = Field(..., description="Agent identifier (e.g. 'backend-engineer--python').")
     description: str = Field(..., description="What this agent does.")
@@ -382,6 +495,15 @@ class AgentListResponse(BaseModel):
 
     @classmethod
     def from_dataclass_list(cls, items: list) -> AgentListResponse:
+        """Convert a list of ``AgentDefinition`` dataclasses.
+
+        Args:
+            items: List of ``AgentDefinition`` dataclass instances.
+
+        Returns:
+            An ``AgentListResponse`` with the converted agents and
+            an accurate count.
+        """
         agents = [AgentResponse.from_dataclass(a) for a in items]
         return cls(count=len(agents), agents=agents)
 
@@ -392,7 +514,12 @@ class AgentListResponse(BaseModel):
 
 
 class DashboardResponse(BaseModel):
-    """Dashboard data — pre-rendered markdown plus structured metrics."""
+    """Dashboard data -- pre-rendered markdown plus structured metrics.
+
+    The ``dashboard_markdown`` field contains a fully rendered dashboard
+    suitable for direct display.  The ``metrics`` dict is reserved for
+    future structured metric delivery (currently empty).
+    """
 
     dashboard_markdown: str = Field(..., description="Pre-rendered markdown dashboard content.")
     metrics: dict[str, Any] = Field(
@@ -421,7 +548,13 @@ class TraceEventResponse(BaseModel):
 
 
 class TraceResponse(BaseModel):
-    """Complete structured trace for a task execution."""
+    """Complete structured trace for a task execution.
+
+    Maps to ``agent_baton.models.trace.TaskTrace``.  Contains a
+    snapshot of the plan as it existed at execution start and a
+    chronologically ordered list of trace events covering the full
+    lifecycle (dispatches, gate checks, completions, failures).
+    """
 
     task_id: str = Field(..., description="Task identifier.")
     plan_snapshot: dict = Field(default_factory=dict, description="Snapshot of the plan at execution start.")
@@ -494,7 +627,13 @@ class TaskUsageResponse(BaseModel):
 
 
 class UsageResponse(BaseModel):
-    """Aggregated usage data with summary statistics."""
+    """Aggregated usage data with summary statistics.
+
+    The ``records`` list contains individual task usage entries, and the
+    ``summary`` dict provides aggregated metrics across all records
+    including ``total_tasks``, ``total_tokens``, ``total_agents``, and
+    ``outcome_counts``.
+    """
 
     records: list[TaskUsageResponse] = Field(default_factory=list, description="Individual task usage records.")
     summary: dict[str, Any] = Field(
@@ -610,7 +749,12 @@ class ProgramHealthResponse(BaseModel):
 
 
 class PmoBoardResponse(BaseModel):
-    """Full Kanban board state: all cards plus per-program health."""
+    """Full Kanban board state: all cards plus per-program health.
+
+    Returned by ``GET /pmo/board`` and ``GET /pmo/board/{program}``.
+    The ``cards`` list includes every tracked plan across all registered
+    projects, and ``health`` provides aggregate metrics per program code.
+    """
 
     cards: list[PmoCardResponse] = Field(
         default_factory=list,

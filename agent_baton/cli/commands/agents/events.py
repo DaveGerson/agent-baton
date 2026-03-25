@@ -1,4 +1,22 @@
-"""baton events — query the event log for a task."""
+"""``baton events`` -- query the event log for a task.
+
+The event log records domain events (step dispatched, step completed,
+gate passed, etc.) as an append-only sequence per task.  This command
+provides raw event listing, projected summary views, and JSON export.
+
+Display modes:
+    * ``baton events`` -- List all task IDs with event logs.
+    * ``baton events --task TASK_ID`` -- Show events for a specific task.
+    * ``baton events --task TASK_ID --summary`` -- Projected summary view
+      with phase/step/gate rollups.
+    * ``baton events --task TASK_ID --json`` -- JSON export.
+    * ``baton events --task TASK_ID --topic 'step.*'`` -- Filter by topic.
+    * ``baton events --list-tasks`` -- List task IDs with event counts.
+
+Delegates to:
+    :class:`~agent_baton.core.events.persistence.EventPersistence`
+    :func:`~agent_baton.core.events.projections.project_task_view`
+"""
 from __future__ import annotations
 
 import argparse

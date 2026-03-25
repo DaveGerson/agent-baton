@@ -1,23 +1,30 @@
-"""Context manager — shared context, mission log, and codebase profile.
+"""Context manager -- shared context, mission log, and codebase profile.
 
-Supports task-scoped directories for parallel plan execution::
+This module manages the ``team-context/`` directory tree that serves as the
+shared filesystem interface between the orchestrator and dispatched agents.
+Each agent reads the context document to understand the project environment,
+and the orchestrator writes mission log entries after each agent completes.
+
+Directory layout with task-scoped isolation for parallel execution::
 
     .claude/team-context/
-      executions/<task-id>/       ← task-scoped files
-        plan.json
-        plan.md
-        context.md
-        mission-log.md
-      shared/                     ← cross-task shared data
-        codebase-profile.md
-      active-task-id.txt          ← pointer to default task
+      executions/<task-id>/       <- task-scoped files (one per concurrent plan)
+        plan.json                    machine-readable execution plan
+        plan.md                      human-readable plan rendering
+        context.md                   stack/architecture/conventions snapshot
+        mission-log.md               timestamped agent completion log
+      shared/                     <- cross-task shared data
+        codebase-profile.md          cached codebase research
+      active-task-id.txt          <- pointer to the default task
 
 When ``task_id`` is provided, per-task files (plan, context, mission log)
 are written inside the task's execution directory.  Shared files (codebase
-profile) remain at the root or ``shared/`` level.
+profile) remain at the root level.
 
 When ``task_id`` is ``None``, the legacy flat layout is used for backward
-compatibility.
+compatibility -- all files are written directly to the ``team-context/``
+root.  This mode is preserved so that older plans and single-task
+workflows continue to function without migration.
 """
 from __future__ import annotations
 
@@ -32,18 +39,30 @@ _SHARED_DIR = "shared"
 
 
 class ContextManager:
-    """Manage the .claude/team-context/ directory and its files.
+    """Manage the ``.claude/team-context/`` directory and its files.
 
-    Handles reading/writing:
-    - plan.md / plan.json — execution plan (task-scoped when task_id set)
-    - context.md — shared project context for agents (task-scoped)
-    - mission-log.md — timestamped record of agent completions (task-scoped)
-    - codebase-profile.md — cached codebase research (shared across tasks)
+    This is the filesystem interface that the execution engine uses to share
+    state between the orchestrator and dispatched agents.  Each file type
+    serves a distinct purpose:
 
-    Args:
-        team_context_dir: Root of the team-context directory.
-        task_id: When set, per-task files are written to
-            ``executions/<task_id>/`` instead of the root.
+    - **plan.md / plan.json** -- the execution plan in human-readable and
+      machine-readable forms.  Task-scoped.
+    - **context.md** -- a snapshot of the project's stack, architecture,
+      conventions, guardrails, and agent assignments.  Read by every
+      dispatched agent to stay aligned.  Task-scoped.
+    - **mission-log.md** -- a timestamped, append-only record of agent
+      completions and outcomes.  Used for traceability and session
+      recovery.  Task-scoped.
+    - **codebase-profile.md** -- cached research about the codebase
+      (structure, key patterns, conventions).  Shared across tasks because
+      it describes the project rather than a specific execution.
+
+    Attributes:
+        _root: Resolved root directory of the ``team-context/`` tree.
+        _task_id: Optional task identifier for directory scoping.
+        _task_dir: Resolved directory for task-scoped files.  Equal to
+            ``_root`` in legacy (no task_id) mode, or
+            ``_root/executions/<task_id>/`` in scoped mode.
     """
 
     def __init__(
@@ -87,7 +106,18 @@ class ContextManager:
         return self._task_dir / "plan.json"
 
     def write_plan(self, plan: MachinePlan) -> Path:
-        """Write an execution plan to disk (both .md and .json)."""
+        """Write an execution plan to disk in both Markdown and JSON formats.
+
+        The JSON file is written atomically via a temporary file and rename
+        to prevent partial reads by concurrent processes.  The Markdown
+        rendering is written directly (it is advisory, not machine-parsed).
+
+        Args:
+            plan: The execution plan to persist.
+
+        Returns:
+            Path to the written ``plan.md`` file.
+        """
         import json
         self.ensure_dir()
         self.plan_path.write_text(plan.to_markdown(), encoding="utf-8")
@@ -122,7 +152,25 @@ class ContextManager:
         agent_assignments: str = "",
         domain_context: str = "",
     ) -> Path:
-        """Write the shared context document from structured sections."""
+        """Write the shared context document from structured sections.
+
+        Produces a Markdown file that every dispatched agent reads before
+        starting work.  Sections with empty content are rendered as
+        placeholder stubs so the document structure remains consistent.
+
+        Args:
+            task: Short task description used in the document title.
+            stack: Detected technology stack summary.
+            architecture: Project architecture notes.
+            conventions: Coding conventions and patterns.
+            guardrails: Active guardrail preset description.
+            agent_assignments: Agent-to-step mapping summary.
+            domain_context: Optional domain-specific business context
+                (omitted from the output when empty).
+
+        Returns:
+            Path to the written ``context.md`` file.
+        """
         self.ensure_dir()
         sections = [
             f"# Team Context — {task}",
@@ -166,7 +214,20 @@ class ContextManager:
         return self._task_dir / "mission-log.md"
 
     def init_mission_log(self, task: str, risk_level: str = "LOW") -> Path:
-        """Initialize a new mission log."""
+        """Initialize a new mission log with a header and metadata.
+
+        Creates (or overwrites) the mission log file with a title, ISO
+        timestamp, and risk level.  Subsequent entries are appended via
+        :meth:`append_to_mission_log`.
+
+        Args:
+            task: Short task description used in the log title.
+            risk_level: Risk classification string (e.g. ``"LOW"``,
+                ``"MEDIUM"``, ``"HIGH"``).
+
+        Returns:
+            Path to the created ``mission-log.md`` file.
+        """
         self.ensure_dir()
         content = "\n".join([
             f"# Mission Log — {task}",
@@ -181,7 +242,16 @@ class ContextManager:
         return self.mission_log_path
 
     def append_to_mission_log(self, entry: MissionLogEntry) -> None:
-        """Append an entry to the mission log."""
+        """Append a completion entry to the mission log.
+
+        If the mission log file does not yet exist, it is auto-initialized
+        with a placeholder title before appending.  Each entry is separated
+        by a Markdown horizontal rule for readability.
+
+        Args:
+            entry: The mission log entry to append, typically recording
+                an agent's completion status and outcome summary.
+        """
         self.ensure_dir()
         text = entry.to_markdown() + "\n---\n\n"
 
@@ -224,7 +294,17 @@ class ContextManager:
     # ── Recovery ───────────────────────────────────────────
 
     def recovery_files_exist(self) -> dict[str, bool]:
-        """Check which recovery files exist for session resumption."""
+        """Check which recovery-relevant files exist for session resumption.
+
+        Used by the ``baton execute resume`` command to determine whether
+        a crashed or interrupted session has enough state on disk to
+        continue execution without re-planning.
+
+        Returns:
+            Dictionary with keys ``"plan"``, ``"context"``,
+            ``"mission_log"``, and ``"profile"``, each mapping to a
+            boolean indicating whether the corresponding file exists.
+        """
         return {
             "plan": self.plan_path.exists(),
             "context": self.context_path.exists(),
@@ -236,7 +316,18 @@ class ContextManager:
 
     @staticmethod
     def list_task_ids(context_root: Path) -> list[str]:
-        """List all task IDs that have execution directories."""
+        """List all task IDs that have execution directories.
+
+        Scans the ``executions/`` subdirectory of *context_root* for
+        child directories, each representing a task-scoped execution.
+
+        Args:
+            context_root: The root ``team-context/`` directory to scan.
+
+        Returns:
+            Sorted list of task ID strings.  Empty list if the
+            ``executions/`` directory does not exist.
+        """
         exec_dir = context_root / _EXECUTIONS_DIR
         if not exec_dir.is_dir():
             return []

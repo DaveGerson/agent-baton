@@ -1,4 +1,22 @@
-"""baton budget — show or refresh budget tier recommendations."""
+"""``baton budget`` -- show or refresh budget tier recommendations.
+
+The budget tuner analyses actual token consumption across tasks and
+compares it to budget tier ceilings (lean, standard, full).  When a
+task type consistently uses fewer tokens than its tier allows, the
+tuner recommends a downgrade to save resources.
+
+Display modes:
+    * ``baton budget`` -- Show previously saved recommendations.
+    * ``baton budget --recommend`` -- Re-analyse and display fresh
+      recommendations.
+    * ``baton budget --save`` -- Save recommendations to
+      ``budget-recommendations.json``.
+    * ``baton budget --auto-apply`` -- Show only auto-applicable downgrades
+      above 80% confidence.
+
+Delegates to:
+    :class:`~agent_baton.core.learn.budget_tuner.BudgetTuner`
+"""
 from __future__ import annotations
 
 import argparse
@@ -84,6 +102,16 @@ def handler(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 
 def _direction(current: str, recommended: str) -> str:
+    """Determine whether a budget tier change is an upgrade or downgrade.
+
+    Args:
+        current: Current budget tier name (lean, standard, full).
+        recommended: Recommended budget tier name.
+
+    Returns:
+        ``"UPGRADE"`` if the recommended tier is more expensive, otherwise
+        ``"DOWNGRADE"``.
+    """
     _order = {"lean": 0, "standard": 1, "full": 2}
     if _order.get(recommended, 0) > _order.get(current, 0):
         return "UPGRADE"
@@ -91,6 +119,15 @@ def _direction(current: str, recommended: str) -> str:
 
 
 def _print_recommendations(recs: list) -> None:
+    """Print a formatted list of budget tier recommendations.
+
+    Each recommendation shows the direction (upgrade/downgrade), reason,
+    confidence, sample size, token statistics (avg, median, p95), and
+    potential savings.
+
+    Args:
+        recs: List of recommendation objects from the budget tuner.
+    """
     if not recs:
         return
     for rec in recs:

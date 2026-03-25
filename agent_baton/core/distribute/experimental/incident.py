@@ -1,6 +1,22 @@
-"""Incident Response — manage incident workflows with phased templates.
+"""Incident response management -- phased workflows driven by severity templates.
 
-**Status: Experimental** — built and tested but not yet validated with real usage data.
+Provides pre-built incident response templates for four severity levels:
+
+* **P1 (Critical)** -- all-hands response with triage, investigation, fix,
+  verification, and post-incident report phases. Involves orchestrator,
+  auditor, devops, and backend agents.
+* **P2 (Significant)** -- immediate investigation with investigation, fix,
+  verification, and report phases.
+* **P3 (Minor)** -- scheduled investigation with investigation, fix, and
+  verification phases.
+* **P4 (Cosmetic)** -- backlog fix with fix and verification phases.
+
+Each phase specifies which agents are involved and what gate check must
+pass before advancing. Incident documents are persisted as markdown files
+under ``.claude/team-context/incidents/``.
+
+**Status: Experimental** -- built and tested but not yet validated with real
+usage data.
 """
 from __future__ import annotations
 
@@ -11,7 +27,15 @@ from pathlib import Path
 
 @dataclass
 class IncidentPhase:
-    """A single phase in an incident response workflow."""
+    """A single phase in an incident response workflow.
+
+    Attributes:
+        name: Phase name (e.g. ``"Triage"``, ``"Investigate"``, ``"Fix"``).
+        description: What should happen during this phase.
+        agents: List of agent names that participate in this phase.
+        gate: Name of the gate check that must pass before the phase
+            is considered complete (e.g. ``"root_cause_identified"``).
+    """
 
     name: str
     description: str

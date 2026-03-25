@@ -56,7 +56,21 @@ router = APIRouter()
 async def get_board(
     scanner: PmoScanner = Depends(get_pmo_scanner),
 ) -> PmoBoardResponse:
-    """Return the full Kanban board with all cards and per-program health."""
+    """Return the full Kanban board with all cards and per-program health.
+
+    GET /api/v1/pmo/board
+
+    Scans all registered projects for execution states and maps each
+    plan to a Kanban card with its lifecycle column (queued, planning,
+    executing, gate_pending, deployed, failed).
+
+    Args:
+        scanner: Injected ``PmoScanner`` singleton.
+
+    Returns:
+        A ``PmoBoardResponse`` containing all Kanban cards and
+        per-program health metrics.
+    """
     cards = scanner.scan_all()
     health_map = scanner.program_health()
 
@@ -72,7 +86,23 @@ async def get_board_by_program(
     program: str,
     scanner: PmoScanner = Depends(get_pmo_scanner),
 ) -> PmoBoardResponse:
-    """Return the Kanban board filtered to a single program."""
+    """Return the Kanban board filtered to a single program.
+
+    GET /api/v1/pmo/board/{program}
+
+    Same as ``GET /pmo/board`` but only includes cards and health
+    metrics for the specified program code.  The comparison is
+    case-insensitive.
+
+    Args:
+        program: Program code to filter by (URL path parameter),
+            e.g. ``"NDS"``, ``"ATL"``.
+        scanner: Injected ``PmoScanner`` singleton.
+
+    Returns:
+        A ``PmoBoardResponse`` containing filtered cards and the
+        matching program's health metrics.
+    """
     cards = scanner.scan_all()
     program_upper = program.upper()
     filtered = [c for c in cards if c.program.upper() == program_upper]
@@ -96,7 +126,17 @@ async def get_board_by_program(
 async def list_projects(
     store: PmoStore = Depends(get_pmo_store),
 ) -> list[PmoProjectResponse]:
-    """Return all registered PMO projects."""
+    """Return all registered PMO projects.
+
+    GET /api/v1/pmo/projects
+
+    Args:
+        store: Injected PMO store singleton (SQLite-backed).
+
+    Returns:
+        A list of ``PmoProjectResponse`` objects for every registered
+        project.
+    """
     config = store.load_config()
     return [_project_response(p) for p in config.projects]
 
@@ -108,8 +148,24 @@ async def register_project(
 ) -> PmoProjectResponse:
     """Register a new project with the PMO.
 
-    If a project with the same ``project_id`` already exists it is replaced
-    — this is intentional to allow re-registration after path changes.
+    POST /api/v1/pmo/projects
+
+    If a project with the same ``project_id`` already exists it is
+    replaced -- this is intentional to allow re-registration after
+    path changes.
+
+    Args:
+        req: Validated request body with project_id, name, path,
+            program, and optional color/description.
+        store: Injected PMO store singleton.
+
+    Returns:
+        A ``PmoProjectResponse`` for the newly registered project
+        (201 Created).
+
+    Raises:
+        HTTPException 500: If the store fails to write or read back
+            the project.
     """
     project = PmoProject(
         project_id=req.project_id,
@@ -144,7 +200,18 @@ async def unregister_project(
 ) -> None:
     """Unregister a project from the PMO.
 
-    Returns 404 if no project with that ID exists.
+    DELETE /api/v1/pmo/projects/{project_id}
+
+    Removes the project from the PMO registry.  Associated plans and
+    execution states on disk are not deleted -- only the PMO registration
+    is removed.
+
+    Args:
+        project_id: The project slug to remove (URL path parameter).
+        store: Injected PMO store singleton.
+
+    Raises:
+        HTTPException 404: If no project with *project_id* exists.
     """
     removed = store.unregister_project(project_id)
     if not removed:
@@ -163,7 +230,20 @@ async def unregister_project(
 async def get_health(
     scanner: PmoScanner = Depends(get_pmo_scanner),
 ) -> dict[str, ProgramHealthResponse]:
-    """Return aggregate health metrics per program."""
+    """Return aggregate health metrics per program.
+
+    GET /api/v1/pmo/health
+
+    Provides counts of total, active, completed, blocked, and failed
+    plans plus a completion percentage for each program.
+
+    Args:
+        scanner: Injected ``PmoScanner`` singleton.
+
+    Returns:
+        A dict mapping program codes to ``ProgramHealthResponse``
+        objects.
+    """
     health_map = scanner.program_health()
     return {prog: _health_response(h) for prog, h in health_map.items()}
 
@@ -181,9 +261,26 @@ async def forge_plan(
 ) -> dict:
     """Create a plan via IntelligentPlanner for the given project.
 
-    The plan is returned as a raw dict for the UI to display and edit before
-    approval.  It is NOT saved to disk at this stage — call
+    POST /api/v1/pmo/forge/plan
+
+    The plan is returned as a raw dict for the UI to display and edit
+    before approval.  It is NOT saved to disk at this stage -- call
     ``POST /pmo/forge/approve`` to persist it.
+
+    Args:
+        req: Validated request body with description, program,
+            project_id, and optional task_type/priority.
+        forge: Injected ``ForgeSession`` singleton.
+        store: Injected PMO store singleton (to verify project exists).
+
+    Returns:
+        The generated plan as a raw dict (201 Created).
+
+    Raises:
+        HTTPException 400: If the description or parameters are
+            semantically invalid.
+        HTTPException 404: If the specified project is not registered.
+        HTTPException 500: If the planner encounters an internal error.
     """
     project = store.get_project(req.project_id)
     if project is None:
@@ -219,11 +316,25 @@ async def forge_approve(
 ) -> dict:
     """Save an approved plan to the project's team-context directory.
 
-    The caller supplies the (possibly edited) plan dict and the target
-    project_id.  The plan is written as ``plan.json`` and ``plan.md`` under
-    ``<project.path>/.claude/team-context/``.
+    POST /api/v1/pmo/forge/approve
 
-    Returns ``{"saved": true, "path": "<plan.json path>"}`` on success.
+    The caller supplies the (possibly edited) plan dict and the target
+    ``project_id``.  The plan is written as ``plan.json`` and
+    ``plan.md`` under ``<project.path>/.claude/team-context/``.
+
+    Args:
+        req: Validated request body with ``plan`` (dict) and
+            ``project_id``.
+        forge: Injected ``ForgeSession`` singleton.
+        store: Injected PMO store singleton (to resolve project path).
+
+    Returns:
+        ``{"saved": true, "path": "<plan.json path>"}``
+
+    Raises:
+        HTTPException 400: If the plan dict is malformed.
+        HTTPException 404: If the specified project is not registered.
+        HTTPException 500: If writing the plan files fails.
     """
     project = store.get_project(req.project_id)
     if project is None:
@@ -256,7 +367,26 @@ async def forge_interview(
     req: InterviewRequest,
     forge: ForgeSession = Depends(get_forge_session),
 ) -> InterviewResponse:
-    """Generate structured interview questions for plan refinement."""
+    """Generate structured interview questions for plan refinement.
+
+    POST /api/v1/pmo/forge/interview
+
+    Analyzes the provided plan and generates 3-5 targeted questions
+    to help refine the plan based on ambiguities, missing context,
+    or optimization opportunities.
+
+    Args:
+        req: Validated request body with the current ``plan`` dict
+            and optional ``feedback`` text.
+        forge: Injected ``ForgeSession`` singleton.
+
+    Returns:
+        An ``InterviewResponse`` containing the generated questions,
+        each with an ``answer_type`` of ``"choice"`` or ``"text"``.
+
+    Raises:
+        HTTPException 400: If the plan dict is malformed.
+    """
     from agent_baton.models.execution import MachinePlan
 
     try:
@@ -285,7 +415,28 @@ async def forge_regenerate(
     forge: ForgeSession = Depends(get_forge_session),
     store: PmoStore = Depends(get_pmo_store),
 ) -> dict:
-    """Re-generate a plan incorporating interview answers."""
+    """Re-generate a plan incorporating interview answers.
+
+    POST /api/v1/pmo/forge/regenerate
+
+    Takes the original plan, the user's interview answers, and the
+    original task description, then produces a refined plan that
+    incorporates the additional context from the interview.
+
+    Args:
+        req: Validated request body with ``project_id``,
+            ``description``, ``original_plan``, ``answers``, and
+            optional ``task_type``/``priority``.
+        forge: Injected ``ForgeSession`` singleton.
+        store: Injected PMO store singleton (to verify project exists).
+
+    Returns:
+        The regenerated plan as a raw dict (201 Created).
+
+    Raises:
+        HTTPException 404: If the specified project is not registered.
+        HTTPException 500: If the regeneration process fails.
+    """
     project = store.get_project(req.project_id)
     if project is None:
         raise HTTPException(status_code=404, detail=f"Project '{req.project_id}' not found.")
@@ -313,7 +464,20 @@ async def forge_regenerate(
 
 @router.get("/pmo/ado/search", response_model=AdoSearchResponse)
 async def ado_search(q: str = "") -> AdoSearchResponse:
-    """Search Azure DevOps work items (placeholder with mock data)."""
+    """Search Azure DevOps work items (placeholder with mock data).
+
+    GET /api/v1/pmo/ado/search
+
+    This endpoint returns hardcoded mock data simulating an ADO
+    integration.  The ``q`` query parameter filters items by
+    case-insensitive substring match against title, ID, and program.
+
+    Args:
+        q: Optional search query string (query parameter).
+
+    Returns:
+        An ``AdoSearchResponse`` with matching mock work items.
+    """
     mock_items = [
         AdoWorkItemResponse(id="F-4202", title="Phase 3 Flight Ops Optimization", type="Feature", program="NDS", owner="Kyle", priority="P0", description="Optimize flight operations through constraint-based scheduling."),
         AdoWorkItemResponse(id="F-4203", title="FTE Migration — NDS Components", type="Feature", program="NDS", owner="Dave C", priority="P1", description="Migrate NDS analytical components from contractor codebase."),
@@ -338,7 +502,17 @@ async def ado_search(q: str = "") -> AdoSearchResponse:
 async def list_signals(
     store: PmoStore = Depends(get_pmo_store),
 ) -> list[PmoSignalResponse]:
-    """Return all open (non-resolved) signals."""
+    """Return all open (non-resolved) signals.
+
+    GET /api/v1/pmo/signals
+
+    Args:
+        store: Injected PMO store singleton.
+
+    Returns:
+        A list of ``PmoSignalResponse`` objects for all signals with
+        status ``"open"`` or ``"triaged"``.
+    """
     signals = store.get_open_signals()
     return [_signal_response(s) for s in signals]
 
@@ -348,7 +522,23 @@ async def create_signal(
     req: CreateSignalRequest,
     store: PmoStore = Depends(get_pmo_store),
 ) -> PmoSignalResponse:
-    """Create a new signal (bug, escalation, or blocker)."""
+    """Create a new signal (bug, escalation, or blocker).
+
+    POST /api/v1/pmo/signals
+
+    Args:
+        req: Validated request body with signal_id, signal_type,
+            title, and optional description/source_project_id/severity.
+        store: Injected PMO store singleton.
+
+    Returns:
+        A ``PmoSignalResponse`` for the newly created signal
+        (201 Created).
+
+    Raises:
+        HTTPException 500: If the store fails to write or read back
+            the signal.
+    """
     signal = PmoSignal(
         signal_id=req.signal_id,
         signal_type=req.signal_type,
@@ -383,7 +573,20 @@ async def resolve_signal(
 ) -> dict:
     """Mark a signal as resolved.
 
-    Returns 404 if the signal does not exist.
+    POST /api/v1/pmo/signals/{signal_id}/resolve
+
+    Sets the signal's status to ``"resolved"``.  This is a one-way
+    transition; resolved signals cannot be re-opened.
+
+    Args:
+        signal_id: The signal identifier (URL path parameter).
+        store: Injected PMO store singleton.
+
+    Returns:
+        ``{"resolved": true, "signal_id": "<id>"}``
+
+    Raises:
+        HTTPException 404: If no signal with *signal_id* exists.
     """
     resolved = store.resolve_signal(signal_id)
     if not resolved:
@@ -403,15 +606,31 @@ async def forge_signal(
 ) -> dict:
     """Triage a signal into an execution plan via the Forge.
 
-    Generates a bug-fix plan from the signal description, links the signal
-    to the plan, and saves the plan to the project's team-context.  The
-    signal status is updated to ``triaged``.
+    POST /api/v1/pmo/signals/{signal_id}/forge
 
-    The ``project_id`` in the request body determines which project receives
-    the plan.  The ``plan`` field is ignored for this endpoint — the Forge
-    derives the description from the signal itself.
+    Generates a bug-fix plan from the signal description, links the
+    signal to the plan, and saves the plan to the project's
+    team-context.  The signal status is updated to ``triaged``.
 
-    Returns the generated plan dict plus the saved path.
+    The ``project_id`` in the request body determines which project
+    receives the plan.  The ``plan`` field in the request body is
+    ignored for this endpoint -- the Forge derives the description
+    from the signal itself.
+
+    Args:
+        signal_id: The signal to triage (URL path parameter).
+        req: Request body providing ``project_id`` (the ``plan``
+            field is ignored).
+        forge: Injected ``ForgeSession`` singleton.
+        store: Injected PMO store singleton.
+
+    Returns:
+        A dict with ``signal_id``, ``plan_id``, and ``path`` to the
+        saved plan file (201 Created).
+
+    Raises:
+        HTTPException 404: If the project or signal does not exist.
+        HTTPException 500: If the Forge triaging process fails.
     """
     project = store.get_project(req.project_id)
     if project is None:
@@ -448,7 +667,14 @@ async def forge_signal(
 
 
 def _project_response(p: object) -> PmoProjectResponse:
-    """Convert a PmoProject dataclass to a PmoProjectResponse."""
+    """Convert a ``PmoProject`` dataclass to a ``PmoProjectResponse``.
+
+    Args:
+        p: A ``PmoProject`` dataclass instance from the PMO store.
+
+    Returns:
+        A Pydantic ``PmoProjectResponse`` suitable for JSON serialization.
+    """
     return PmoProjectResponse(
         project_id=p.project_id,  # type: ignore[attr-defined]
         name=p.name,  # type: ignore[attr-defined]
@@ -461,7 +687,14 @@ def _project_response(p: object) -> PmoProjectResponse:
 
 
 def _card_response(c: object) -> PmoCardResponse:
-    """Convert a PmoCard dataclass to a PmoCardResponse."""
+    """Convert a ``PmoCard`` dataclass to a ``PmoCardResponse``.
+
+    Args:
+        c: A ``PmoCard`` dataclass instance from the PMO scanner.
+
+    Returns:
+        A Pydantic ``PmoCardResponse`` suitable for JSON serialization.
+    """
     return PmoCardResponse(
         card_id=c.card_id,  # type: ignore[attr-defined]
         project_id=c.project_id,  # type: ignore[attr-defined]
@@ -482,7 +715,15 @@ def _card_response(c: object) -> PmoCardResponse:
 
 
 def _health_response(h: object) -> ProgramHealthResponse:
-    """Convert a ProgramHealth dataclass to a ProgramHealthResponse."""
+    """Convert a ``ProgramHealth`` dataclass to a ``ProgramHealthResponse``.
+
+    Args:
+        h: A ``ProgramHealth`` dataclass instance from the PMO scanner.
+
+    Returns:
+        A Pydantic ``ProgramHealthResponse`` suitable for JSON
+        serialization.
+    """
     return ProgramHealthResponse(
         program=h.program,  # type: ignore[attr-defined]
         total_plans=h.total_plans,  # type: ignore[attr-defined]
@@ -495,7 +736,14 @@ def _health_response(h: object) -> ProgramHealthResponse:
 
 
 def _signal_response(s: object) -> PmoSignalResponse:
-    """Convert a PmoSignal dataclass to a PmoSignalResponse."""
+    """Convert a ``PmoSignal`` dataclass to a ``PmoSignalResponse``.
+
+    Args:
+        s: A ``PmoSignal`` dataclass instance from the PMO store.
+
+    Returns:
+        A Pydantic ``PmoSignalResponse`` suitable for JSON serialization.
+    """
     return PmoSignalResponse(
         signal_id=s.signal_id,  # type: ignore[attr-defined]
         signal_type=s.signal_type,  # type: ignore[attr-defined]

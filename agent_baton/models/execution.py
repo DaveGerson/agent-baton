@@ -1,4 +1,13 @@
-"""Execution engine models — machine-readable plans, state, and actions."""
+"""Execution engine models — machine-readable plans, state, and actions.
+
+This module defines the core data structures that flow through the
+execution engine: the plan hierarchy (``MachinePlan`` > ``PlanPhase`` >
+``PlanStep``), the persistent ``ExecutionState`` saved between CLI calls,
+result records (``StepResult``, ``GateResult``, ``ApprovalResult``), and
+the ``ExecutionAction`` instructions returned to the driving session.
+
+These models are the contract between the planner, executor, and CLI.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -17,6 +26,8 @@ from agent_baton.models.knowledge import (
 # ---------------------------------------------------------------------------
 
 class StepStatus(Enum):
+    """Lifecycle state of a single plan step."""
+
     PENDING = "pending"
     RUNNING = "running"
     COMPLETE = "complete"
@@ -26,6 +37,8 @@ class StepStatus(Enum):
 
 
 class PhaseStatus(Enum):
+    """Lifecycle state of a plan phase."""
+
     PENDING = "pending"
     RUNNING = "running"
     GATE_PENDING = "gate_pending"
@@ -49,7 +62,23 @@ class ActionType(Enum):
 
 @dataclass
 class TeamMember:
-    """A member of a coordinated agent team within a step."""
+    """A member of a coordinated agent team within a step.
+
+    Team steps allow multiple agents to collaborate on a single step,
+    with intra-step dependency ordering.  Each member is dispatched
+    individually and results are collected via ``TeamStepResult``.
+
+    Attributes:
+        member_id: Hierarchical ID (e.g. ``"1.1.a"``).
+        agent_name: Name of the agent assigned to this role.
+        role: Function within the team — ``"lead"``, ``"implementer"``,
+            or ``"reviewer"``.
+        task_description: What this team member should do.
+        model: LLM model to use.
+        depends_on: Other ``member_id`` values that must complete first.
+        deliverables: Expected output artifacts.
+    """
+
     member_id: str                          # e.g. "1.1.a"
     agent_name: str
     role: str = "implementer"               # "lead", "implementer", "reviewer"
@@ -84,7 +113,26 @@ class TeamMember:
 
 @dataclass
 class PlanStep:
-    """A single agent assignment in a plan."""
+    """A single agent assignment within a plan phase.
+
+    Steps are the atomic unit of work dispatched to agents.  They carry
+    the task description, path constraints (sandbox), dependency ordering,
+    and any knowledge attachments resolved during planning.
+
+    Attributes:
+        step_id: Hierarchical ID (e.g. ``"1.1"`` = phase 1, step 1).
+        agent_name: Agent to dispatch for this step.
+        task_description: What the agent should accomplish.
+        model: LLM model to use for this dispatch.
+        depends_on: ``step_id`` values that must complete before this step.
+        deliverables: Expected output artifacts.
+        allowed_paths: Filesystem paths the agent may write to (sandbox).
+        blocked_paths: Filesystem paths the agent must not modify.
+        context_files: Files the agent should read before starting.
+        team: If non-empty, this is a team step with multiple members.
+        knowledge: Knowledge documents attached by the planner.
+    """
+
     step_id: str                          # e.g. "1.1"
     agent_name: str
     task_description: str
@@ -134,7 +182,21 @@ class PlanStep:
 
 @dataclass
 class PlanGate:
-    """A QA gate between phases."""
+    """A QA gate that must pass before advancing to the next phase.
+
+    Gates run automated checks (tests, linting, builds) or request
+    manual review.  Gate failure triggers the ``GATE`` action in the
+    execution loop, giving the orchestrator a chance to re-plan or
+    request remediation.
+
+    Attributes:
+        gate_type: Category — ``"build"``, ``"test"``, ``"lint"``,
+            ``"spec"``, or ``"review"``.
+        command: Bash command to run (e.g. ``"pytest"``).
+        description: Human-readable explanation of what the gate checks.
+        fail_on: Criteria that constitute a failure.
+    """
+
     gate_type: str              # "build", "test", "lint", "spec", "review"
     command: str = ""           # bash command to run (e.g. "pytest")
     description: str = ""
@@ -160,7 +222,22 @@ class PlanGate:
 
 @dataclass
 class PlanPhase:
-    """A phase in an execution plan."""
+    """A phase in an execution plan, containing steps and an optional gate.
+
+    Phases group related steps and enforce a gate check or human approval
+    before the execution engine advances to the next phase.  The planner
+    creates phases based on logical work boundaries and risk thresholds.
+
+    Attributes:
+        phase_id: Sequential integer identifier.
+        name: Human-readable phase name (e.g. ``"Implementation"``).
+        steps: Ordered list of steps to execute in this phase.
+        gate: Optional QA gate to run after all steps complete.
+        approval_required: If ``True``, pause for human approval after
+            steps complete (before the gate, if any).
+        approval_description: What the human should review.
+    """
+
     phase_id: int
     name: str
     steps: list[PlanStep] = field(default_factory=list)
@@ -196,7 +273,39 @@ class PlanPhase:
 
 @dataclass
 class MachinePlan:
-    """Machine-readable execution plan — the contract between planner and executor."""
+    """Machine-readable execution plan — the contract between planner and executor.
+
+    Created by ``IntelligentPlanner.create_plan()`` and persisted as
+    ``plan.json``.  The ``ExecutionEngine`` reads this to drive the
+    dispatch loop, and ``to_markdown()`` renders it as ``plan.md`` for
+    human review.
+
+    Attributes:
+        task_id: Unique execution identifier.
+        task_summary: Human-readable description of the task.
+        risk_level: Classified risk tier (``"LOW"``, ``"MEDIUM"``,
+            ``"HIGH"``, ``"CRITICAL"``).
+        budget_tier: Token budget allocation (``"lean"``, ``"standard"``,
+            ``"full"``).
+        execution_mode: Step ordering strategy (``"phased"``,
+            ``"parallel"``, ``"sequential"``).
+        git_strategy: Version-control approach for agent commits.
+        phases: Ordered list of execution phases.
+        shared_context: Pre-built context string injected into all
+            agent prompts.
+        pattern_source: ``pattern_id`` of the learned pattern that
+            influenced this plan, if any.
+        created_at: ISO 8601 creation timestamp.
+        task_type: Inferred task category (e.g. ``"feature"``,
+            ``"bug-fix"``).
+        explicit_knowledge_packs: Pack names from ``--knowledge-pack``
+            CLI flag.
+        explicit_knowledge_docs: Document paths from ``--knowledge``
+            CLI flag.
+        intervention_level: Human intervention frequency —
+            ``"low"``, ``"medium"``, or ``"high"``.
+    """
+
     task_id: str
     task_summary: str
     risk_level: str = "LOW"
@@ -345,7 +454,26 @@ class MachinePlan:
 
 @dataclass
 class PlanAmendment:
-    """A recorded modification to the plan during execution."""
+    """A recorded modification to the plan during execution.
+
+    Amendments are created by ``baton execute amend`` when the plan
+    needs to be adjusted mid-flight — for example, after a gate fails
+    and remediation steps are added, or after human approval with
+    feedback.
+
+    Attributes:
+        amendment_id: Unique identifier for this amendment.
+        trigger: What caused the amendment — ``"gate_feedback"``,
+            ``"approval_feedback"``, or ``"manual"``.
+        trigger_phase_id: Phase that triggered the amendment.
+        description: What was changed and why.
+        phases_added: Phase IDs of newly inserted phases.
+        steps_added: Step IDs of newly inserted steps.
+        created_at: ISO 8601 timestamp.
+        feedback: Reviewer or approver feedback that motivated this
+            amendment.
+    """
+
     amendment_id: str
     trigger: str                    # "gate_feedback", "approval_feedback", "manual"
     trigger_phase_id: int
@@ -391,7 +519,19 @@ class PlanAmendment:
 
 @dataclass
 class TeamStepResult:
-    """Result of a single team member's work within a team step."""
+    """Result of a single team member's work within a team step.
+
+    Collected individually per member and aggregated into the parent
+    ``StepResult.member_results`` list.
+
+    Attributes:
+        member_id: Matches ``TeamMember.member_id``.
+        agent_name: Agent that executed this member role.
+        status: ``"complete"`` or ``"failed"``.
+        outcome: Free-text summary of the member's work.
+        files_changed: Files the member created or modified.
+    """
+
     member_id: str
     agent_name: str
     status: str = "complete"        # complete, failed
@@ -420,7 +560,30 @@ class TeamStepResult:
 
 @dataclass
 class StepResult:
-    """Outcome of a single step execution."""
+    """Outcome of a single step execution.
+
+    Recorded by ``baton execute record`` after each agent dispatch
+    completes or fails.  Stored in ``ExecutionState.step_results``
+    and used by the executor to determine the next action.
+
+    Attributes:
+        step_id: Matches ``PlanStep.step_id``.
+        agent_name: Agent that executed this step.
+        status: ``"complete"``, ``"failed"``, or ``"dispatched"``
+            (in-progress).
+        outcome: Free-text summary of what the agent accomplished.
+        files_changed: Filesystem paths created or modified.
+        commit_hash: Git commit SHA for this step's work.
+        estimated_tokens: Estimated token consumption.
+        duration_seconds: Wall-clock execution time.
+        retries: Number of retry attempts.
+        error: Error message if the step failed.
+        completed_at: ISO 8601 completion timestamp.
+        member_results: Per-member results for team steps.
+        deviations: Plan deviations reported by the agent during
+            execution.
+    """
+
     step_id: str
     agent_name: str
     status: str = "complete"        # complete, failed, dispatched
@@ -469,7 +632,20 @@ class StepResult:
 
 @dataclass
 class ApprovalResult:
-    """Outcome of a human approval checkpoint."""
+    """Outcome of a human approval checkpoint.
+
+    Recorded by ``baton execute approve`` when a phase with
+    ``approval_required=True`` reaches the approval gate.
+
+    Attributes:
+        phase_id: Phase that required approval.
+        result: Decision — ``"approve"``, ``"reject"``, or
+            ``"approve-with-feedback"`` (which inserts a remediation
+            phase via plan amendment).
+        feedback: Optional feedback from the reviewer.
+        decided_at: ISO 8601 timestamp of the decision.
+    """
+
     phase_id: int
     result: str                     # "approve", "reject", "approve-with-feedback"
     feedback: str = ""
@@ -499,7 +675,19 @@ class ApprovalResult:
 
 @dataclass
 class GateResult:
-    """Outcome of a QA gate check."""
+    """Outcome of a QA gate check.
+
+    Recorded by ``baton execute gate`` after running the gate command
+    and evaluating the result.
+
+    Attributes:
+        phase_id: Phase whose gate was checked.
+        gate_type: Gate category (matches ``PlanGate.gate_type``).
+        passed: Whether the gate check succeeded.
+        output: Command stdout/stderr or reviewer notes.
+        checked_at: ISO 8601 timestamp of the check.
+    """
+
     phase_id: int
     gate_type: str
     passed: bool
@@ -522,7 +710,31 @@ class GateResult:
 
 @dataclass
 class ExecutionState:
-    """Persistent state of a running execution — saved to disk between CLI calls."""
+    """Persistent state of a running execution, saved between CLI calls.
+
+    Serialized as ``execution-state.json`` in the execution directory.
+    Each ``baton execute`` subcommand reads, modifies, and writes this
+    state back.  The executor uses it to determine the next action via
+    ``ExecutionAction``.
+
+    Attributes:
+        task_id: Unique execution identifier.
+        plan: The ``MachinePlan`` being executed (may be amended).
+        current_phase: Index into ``plan.phases``.
+        current_step_index: Index into the current phase's steps.
+        status: Overall execution state — ``"running"``,
+            ``"gate_pending"``, ``"approval_pending"``, ``"complete"``,
+            or ``"failed"``.
+        step_results: Results recorded so far.
+        gate_results: Gate check outcomes.
+        approval_results: Human approval outcomes.
+        amendments: Modifications applied to the plan during execution.
+        started_at: ISO 8601 execution start time.
+        completed_at: ISO 8601 completion time, if finished.
+        pending_gaps: Unresolved knowledge gap signals.
+        resolved_decisions: Resolved gaps injected on re-dispatch.
+    """
+
     task_id: str
     plan: MachinePlan
     current_phase: int = 0              # index into plan.phases
@@ -564,6 +776,15 @@ class ExecutionState:
         return {r.step_id for r in self.step_results if r.status == "interrupted"}
 
     def get_step_result(self, step_id: str) -> StepResult | None:
+        """Look up the result for a specific step.
+
+        Args:
+            step_id: The step ID to search for.
+
+        Returns:
+            The matching ``StepResult``, or ``None`` if the step has
+            not been recorded yet.
+        """
         for r in self.step_results:
             if r.step_id == step_id:
                 return r
@@ -611,7 +832,32 @@ class ExecutionState:
 
 @dataclass
 class ExecutionAction:
-    """Instruction from the engine to the driving session."""
+    """Instruction from the execution engine to the driving session.
+
+    Returned by ``baton execute next`` to tell the orchestrator what
+    to do.  The ``action_type`` determines which fields are populated.
+    The CLI's ``_print_action()`` renders this as structured output
+    that Claude reads to drive the orchestration loop.
+
+    Attributes:
+        action_type: What kind of action is required.
+        message: Human-readable description of the action.
+        agent_name: Agent to dispatch (``DISPATCH`` only).
+        agent_model: Model for the dispatch (``DISPATCH`` only).
+        delegation_prompt: Full prompt to send to the agent
+            (``DISPATCH`` only).
+        step_id: Plan step being dispatched (``DISPATCH`` only).
+        path_enforcement: PreToolUse hook command for path sandboxing
+            (``DISPATCH`` only).
+        gate_type: Gate category (``GATE`` only).
+        gate_command: Bash command to run (``GATE`` only).
+        phase_id: Phase being gated or approved (``GATE`` / ``APPROVAL``).
+        approval_context: Summary for the reviewer (``APPROVAL`` only).
+        approval_options: Available approval choices (``APPROVAL`` only).
+        summary: Final execution summary (``COMPLETE`` / ``FAILED``).
+        parallel_actions: Batch of actions for parallel dispatch.
+    """
+
     action_type: ActionType             # strongly-typed; serialises to str via to_dict()
     message: str = ""                   # human-readable description
 

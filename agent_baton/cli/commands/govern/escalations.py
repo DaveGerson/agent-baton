@@ -1,4 +1,20 @@
-"""baton escalations — show, resolve, or clear escalations."""
+"""``baton escalations`` -- show, resolve, or clear agent escalations.
+
+When agents encounter situations beyond their scope or confidence,
+they file escalation requests.  This command manages the escalation
+queue: listing pending items, resolving them with answers, or clearing
+resolved entries.
+
+Display modes:
+    * ``baton escalations`` -- List pending escalations (default).
+    * ``baton escalations --all`` -- Include resolved escalations.
+    * ``baton escalations --resolve AGENT ANSWER`` -- Resolve the oldest
+      pending escalation for an agent.
+    * ``baton escalations --clear`` -- Remove all resolved escalations.
+
+Delegates to:
+    :class:`~agent_baton.core.govern.escalation.EscalationManager`
+"""
 from __future__ import annotations
 
 import argparse
