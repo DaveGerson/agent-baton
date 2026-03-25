@@ -70,7 +70,7 @@ Match the project's existing tools:
 6. **Critique.** Step back and ask: "Would someone unfamiliar with this
    data understand the chart in 5 seconds?" Revise if not.
 
-## When you finish
+## Output Format
 
 Return:
 1. **Files created/modified** (with paths)

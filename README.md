@@ -5,6 +5,26 @@ orchestrator plans it, delegates to the right agents, runs QA checks between
 phases, and delivers tested, reviewed code — all inside your normal Claude
 Code session.
 
+## Quick Start
+
+```bash
+# Install
+scripts/install.sh    # Linux/macOS
+# or
+scripts/install.ps1   # Windows (no admin required)
+
+# Plan a task
+baton plan "Add request logging middleware" --save --explain
+
+# Execute it
+baton execute start
+baton execute next     # get next action
+# ... dispatch agents, record results ...
+baton execute complete
+```
+
+See [docs/examples/first-run.md](docs/examples/first-run.md) for a complete walkthrough.
+
 ## What You Get
 
 **19 specialist agents** — backend, frontend, architect, devops, testing,
@@ -181,7 +201,10 @@ First time on a Go project? The `talent-builder` agent creates
 |----------|-------------|
 | `decision-framework.md` | When to use subagent vs skill vs reference doc |
 | `research-procedures.md` | 4 research modes the orchestrator runs inline |
+| `adaptive-execution.md` | Adaptive execution strategies and runtime adjustments |
 | `agent-routing.md` | Stack detection + agent flavor matching |
+| `baton-engine.md` | CLI reference for the execution engine |
+| `baton-patterns.md` | Design patterns catalog for orchestration |
 | `guardrail-presets.md` | Risk triage + standard guardrail configs |
 | `comms-protocols.md` | Delegation prompts, handoff briefs, logging |
 | `task-sequencing.md` | Phase ordering + parallel dispatch rules |

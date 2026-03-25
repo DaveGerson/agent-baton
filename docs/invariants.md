@@ -159,6 +159,54 @@ A docstring on `_print_action()` reads:
 > section delimiters, or ACTION type strings without updating the
 > orchestrator agent definition and the contract test.
 
+### Output Format Contract
+
+Each `baton execute` subcommand has a defined output format. Some outputs
+are human-readable (designed for Claude to parse as prose); others are
+machine-readable JSON (designed for programmatic consumption).
+
+| Subcommand | Format | Notes |
+|------------|--------|-------|
+| `start` | Session binding line + `_print_action()` | Human-readable |
+| `next` | `_print_action()` | Human-readable |
+| `next --all` | JSON array of action dicts | Machine-readable; may contain mixed action types |
+| `dispatched` | JSON `{"status": "dispatched", "step_id": "..."}` | Machine-readable |
+| `record` | Plain text confirmation | Human-readable |
+| `gate` | Plain text confirmation | Human-readable |
+| `approve` | Plain text confirmation | Human-readable |
+| `amend` | Plain text confirmation | Human-readable |
+| `team-record` | Plain text confirmation | Human-readable |
+| `complete` | Engine summary text | Human-readable |
+| `status` | Structured plain text | Human-readable |
+| `list` | Formatted table | Human-readable |
+
+**With `--all`**: Returns only actions that can be dispatched in parallel.
+When no parallel actions exist, falls back to a single-element array
+containing the next sequential action (GATE, APPROVAL, or COMPLETE).
+
+**With `--output json`**: All subcommands that accept `--output` return JSON
+to stdout instead of human-readable text. Text mode (default) is unchanged
+from the documented format above. The `list` and `switch` subcommands do not
+accept `--output` (they use separate parsers with no shared parent).
+
+| Subcommand | JSON shape (`--output json`) |
+|------------|------------------------------|
+| `start` | `{"task_id": "...", "action": <action-dict>}` |
+| `next` | `[<action-dict>]` (always a single-element array in non-`--all` mode) |
+| `next --all` | `[<action-dict>, ...]` |
+| `record` | `{"status": "recorded", "step_id": "...", "agent": "...", "result": "..."}` |
+| `gate` | `{"status": "recorded", "phase_id": N, "result": "pass\|fail"}` |
+| `approve` | `{"status": "recorded", "phase_id": N, "result": "..."}` |
+| `amend` | `{"status": "amended", "amendment_id": "...", "description": "..."}` |
+| `team-record` | `{"status": "recorded", "step_id": "...", "member_id": "...", "agent": "...", "result": "..."}` |
+| `complete` | `{"status": "complete", "summary": "..."}` |
+| `status` | Raw status dict (same schema as `engine.status()`) |
+| `resume` | `{"action": <action-dict>}` |
+
+Note: `gate` uses `--gate-output` (not `--output`) for capturing gate command
+output text, because `--output` is reserved for the format flag on all
+subcommands that inherit from the shared parent parser.
+
 ---
 
 ## Invariant 3: Execution State Disk Schema

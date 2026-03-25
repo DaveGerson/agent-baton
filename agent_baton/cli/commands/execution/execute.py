@@ -5,9 +5,12 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 
+from agent_baton.cli.colors import success, error as color_error, warning, info as color_info
+from agent_baton.cli.errors import user_error, validation_error
 from agent_baton.core.engine.executor import ExecutionEngine
 from agent_baton.core.engine.persistence import StatePersistence
 from agent_baton.core.events.bus import EventBus
@@ -21,6 +24,8 @@ from agent_baton.models.plan import MissionLogEntry
 
 _log = logging.getLogger(__name__)
 
+_STEP_ID_RE = re.compile(r'^\d+\.\d+$')
+
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     p = subparsers.add_parser(
@@ -33,6 +38,10 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         "--task-id",
         default=None,
         help="Target a specific execution by task ID (default: active execution)",
+    )
+    _task_id_parent.add_argument(
+        "--output", choices=["text", "json"], default="text",
+        help="Output format: text (human-readable, default) or json (machine-readable)",
     )
     sub = p.add_subparsers(dest="subcommand")
 
@@ -57,7 +66,7 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     p_record.add_argument("--step", "--step-id", required=True, dest="step_id", help="Step ID (e.g. 1.1)")
     p_record.add_argument("--agent", required=True, help="Agent name")
     p_record.add_argument("--status", default="complete", choices=["complete", "failed"], help="complete or failed")
-    p_record.add_argument("--outcome", "--summary", default="", dest="outcome", help="Summary of what was done")
+    p_record.add_argument("--outcome", "--summary", default="", dest="outcome", help="Summary of what was done (--summary is deprecated, use --outcome)")
     p_record.add_argument("--tokens", type=int, default=0, help="Estimated tokens used")
     p_record.add_argument("--duration", type=float, default=0.0, help="Duration in seconds")
     p_record.add_argument("--error", default="", help="Error message if failed")
@@ -70,12 +79,13 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     dispatched_p.add_argument("--step", "--step-id", required=True, dest="step_id")
     dispatched_p.add_argument("--agent", required=True)
 
-    # baton execute gate --phase-id N --result pass|fail [--output TEXT]
+    # baton execute gate --phase-id N --result pass|fail [--gate-output TEXT]
     p_gate = sub.add_parser("gate", parents=[_task_id_parent],
                             help="Record a QA gate result")
     p_gate.add_argument("--phase-id", type=int, required=True, help="Phase ID")
     p_gate.add_argument("--result", required=True, choices=["pass", "fail"], help="Gate result")
-    p_gate.add_argument("--output", default="", help="Gate command output")
+    p_gate.add_argument("--gate-output", default="", dest="gate_output",
+                        help="Gate command output (use --gate-output; --output is reserved for format)")
 
     # baton execute approve --phase-id N --result approve|reject|approve-with-feedback [--feedback TEXT]
     p_approve = sub.add_parser("approve", parents=[_task_id_parent],
@@ -100,7 +110,7 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     # baton execute team-record --step-id S --member-id M --agent NAME [--status S] [--outcome O] [--files F]
     p_team = sub.add_parser("team-record", parents=[_task_id_parent],
                             help="Record a team member completion")
-    p_team.add_argument("--step-id", required=True, dest="step_id", help="Parent team step ID")
+    p_team.add_argument("--step-id", "--step", required=True, dest="step_id", help="Parent team step ID")
     p_team.add_argument("--member-id", required=True, dest="member_id", help="Team member ID")
     p_team.add_argument("--agent", required=True, help="Agent name")
     p_team.add_argument("--status", default="complete", choices=["complete", "failed"])
@@ -138,7 +148,8 @@ def _print_action(action: dict) -> None:
     parse engine responses. Treat this function as a public API.
     """
     atype = action.get("action_type", "")
-    assert isinstance(atype, str), f"action_type must be str from to_dict(), got {type(atype)}"
+    if not isinstance(atype, str):
+        raise ValueError(f"Internal error: action_type must be str, got {type(atype).__name__}. Report this issue with the full execution trace.")
     msg = action.get("message", "")
 
     if atype == ActionType.DISPATCH.value:
@@ -186,8 +197,7 @@ def _print_action(action: dict) -> None:
 
 def handler(args: argparse.Namespace) -> None:
     if args.subcommand is None:
-        print("error: supply a subcommand: start, next, record, dispatched, gate, complete, status, resume, list, switch")
-        sys.exit(1)
+        validation_error("supply a subcommand: start, next, record, dispatched, gate, approve, amend, team-record, complete, status, resume, list, switch")
 
     if args.subcommand == "list":
         _handle_list()
@@ -214,11 +224,15 @@ def handler(args: argparse.Namespace) -> None:
     if args.subcommand == "start":
         plan_path = Path(args.plan)
         if not plan_path.exists():
-            print(f"error: plan file not found: {plan_path}")
-            print("Run 'baton plan --save \"task description\"' first.")
-            sys.exit(1)
-        data = json.loads(plan_path.read_text(encoding="utf-8"))
-        plan = MachinePlan.from_dict(data)
+            user_error(f"plan file not found: {plan_path}", hint="Run 'baton plan --save \"task description\"' first.")
+        try:
+            data = json.loads(plan_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            validation_error(f"plan.json is not valid JSON: {exc}", hint="Re-create with: baton plan --save \"task description\"")
+        try:
+            plan = MachinePlan.from_dict(data)
+        except (KeyError, ValueError, TypeError) as exc:
+            validation_error(f"plan.json has invalid structure: {exc}", hint="Re-create with: baton plan --save \"task description\"")
         # Use namespaced execution directory for the new plan
         task_id = plan.task_id
 
@@ -233,7 +247,11 @@ def handler(args: argparse.Namespace) -> None:
             knowledge_resolver=knowledge_resolver,
         )
         ContextManager(task_id=task_id).init_mission_log(plan.task_summary, risk_level=plan.risk_level)
-        action = engine.start(plan)
+        try:
+            action = engine.start(plan)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            sys.exit(1)
         # Mark this as the active execution
         try:
             storage.set_active_task(task_id)
@@ -241,40 +259,75 @@ def handler(args: argparse.Namespace) -> None:
             # Fallback to legacy persistence marker when storage is unavailable.
             if engine._persistence is not None:
                 engine._persistence.set_active()
-        _print_action(action.to_dict())
-        print(f"\nSession binding: export BATON_TASK_ID={task_id}")
-
-    elif args.subcommand == "next":
-        if args.all_actions:
-            actions = engine.next_actions()
-            if actions:
-                result = [a.to_dict() for a in actions]
-            else:
-                # Fall back to single next_action for terminal states
-                action = engine.next_action()
-                result = [action.to_dict()]
+        if getattr(args, "output", "text") == "json":
+            result = {"task_id": task_id, "action": action.to_dict()}
             print(json.dumps(result, indent=2))
         else:
-            action = engine.next_action()
+            print(f"Session binding: export BATON_TASK_ID={task_id}\n")
             _print_action(action.to_dict())
 
+    elif args.subcommand == "next":
+        try:
+            if getattr(args, "output", "text") == "json":
+                if args.all_actions:
+                    actions = engine.next_actions()
+                    if actions:
+                        result = [a.to_dict() for a in actions]
+                    else:
+                        action = engine.next_action()
+                        result = [action.to_dict()]
+                else:
+                    action = engine.next_action()
+                    result = [action.to_dict()]
+                print(json.dumps(result, indent=2))
+            elif args.all_actions:
+                actions = engine.next_actions()
+                if actions:
+                    result = [a.to_dict() for a in actions]
+                else:
+                    # Fall back to single next_action for terminal states
+                    action = engine.next_action()
+                    result = [action.to_dict()]
+                print(json.dumps(result, indent=2))
+            else:
+                action = engine.next_action()
+                _print_action(action.to_dict())
+        except RuntimeError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            print("Recovery options:", file=sys.stderr)
+            print("  baton execute resume    — resume from saved state", file=sys.stderr)
+            print("  baton execute status    — check current state", file=sys.stderr)
+            print("  baton execute list      — see all executions", file=sys.stderr)
+            sys.exit(1)
+
     elif args.subcommand == "dispatched":
+        if not _STEP_ID_RE.match(args.step_id):
+            validation_error(f"invalid step ID '{args.step_id}' (expected format: N.N, e.g. '1.1')")
         engine.mark_dispatched(step_id=args.step_id, agent_name=args.agent)
         print(json.dumps({"status": "dispatched", "step_id": args.step_id}))
 
     elif args.subcommand == "record":
+        # Deprecation warning for --summary
+        if "--summary" in sys.argv:
+            print("warning: --summary is deprecated, use --outcome instead", file=sys.stderr)
+        if not _STEP_ID_RE.match(args.step_id):
+            validation_error(f"invalid step ID '{args.step_id}' (expected format: N.N, e.g. '1.1')")
         files = [f.strip() for f in args.files.split(",") if f.strip()] if args.files else []
-        engine.record_step_result(
-            step_id=args.step_id,
-            agent_name=args.agent,
-            status=args.status,
-            outcome=args.outcome,
-            files_changed=files,
-            commit_hash=args.commit,
-            estimated_tokens=args.tokens,
-            duration_seconds=args.duration,
-            error=args.error,
-        )
+        try:
+            engine.record_step_result(
+                step_id=args.step_id,
+                agent_name=args.agent,
+                status=args.status,
+                outcome=args.outcome,
+                files_changed=files,
+                commit_hash=args.commit,
+                estimated_tokens=args.tokens,
+                duration_seconds=args.duration,
+                error=args.error,
+            )
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            sys.exit(1)
         log_status = "COMPLETE" if args.status == "complete" else "FAILED"
         entry = MissionLogEntry(
             agent_name=args.agent,
@@ -286,17 +339,23 @@ def handler(args: argparse.Namespace) -> None:
             issues=[args.error] if args.error else [],
         )
         ContextManager(task_id=task_id).append_to_mission_log(entry)
-        print(f"Recorded: step {args.step_id} ({args.agent}) — {args.status}")
+        if getattr(args, "output", "text") == "json":
+            print(json.dumps({"status": "recorded", "step_id": args.step_id, "agent": args.agent, "result": args.status}))
+        else:
+            print(f"Recorded: step {args.step_id} ({args.agent}) — {args.status}")
 
     elif args.subcommand == "gate":
         passed = args.result == "pass"
         engine.record_gate_result(
             phase_id=args.phase_id,
             passed=passed,
-            output=args.output,
+            output=args.gate_output,
         )
         status = "PASS" if passed else "FAIL"
-        print(f"Gate recorded: phase {args.phase_id} — {status}")
+        if getattr(args, "output", "text") == "json":
+            print(json.dumps({"status": "recorded", "phase_id": args.phase_id, "result": args.result}))
+        else:
+            print(f"Gate recorded: phase {args.phase_id} — {status}")
 
     elif args.subcommand == "approve":
         engine.record_approval_result(
@@ -304,7 +363,10 @@ def handler(args: argparse.Namespace) -> None:
             result=args.result,
             feedback=args.feedback,
         )
-        print(f"Approval recorded: phase {args.phase_id} — {args.result}")
+        if getattr(args, "output", "text") == "json":
+            print(json.dumps({"status": "recorded", "phase_id": args.phase_id, "result": args.result}))
+        else:
+            print(f"Approval recorded: phase {args.phase_id} — {args.result}")
 
     elif args.subcommand == "amend":
         new_phases = _parse_add_phases(args.add_phase) or None
@@ -316,7 +378,10 @@ def handler(args: argparse.Namespace) -> None:
             add_steps_to_phase=add_steps_to,
             new_steps=new_steps or None,
         )
-        print(f"Plan amended: {amendment.amendment_id} — {amendment.description}")
+        if getattr(args, "output", "text") == "json":
+            print(json.dumps({"status": "amended", "amendment_id": amendment.amendment_id, "description": amendment.description}))
+        else:
+            print(f"Plan amended: {amendment.amendment_id} — {amendment.description}")
 
     elif args.subcommand == "team-record":
         files = [f.strip() for f in args.files.split(",") if f.strip()] if args.files else []
@@ -328,46 +393,115 @@ def handler(args: argparse.Namespace) -> None:
             outcome=args.outcome,
             files_changed=files,
         )
-        print(f"Team member recorded: {args.member_id} ({args.agent}) — {args.status}")
+        if getattr(args, "output", "text") == "json":
+            print(json.dumps({"status": "recorded", "step_id": args.step_id, "member_id": args.member_id, "agent": args.agent, "result": args.status}))
+        else:
+            print(f"Team member recorded: {args.member_id} ({args.agent}) — {args.status}")
 
     elif args.subcommand == "complete":
         summary = engine.complete()
-        print(summary)
+        if getattr(args, "output", "text") == "json":
+            print(json.dumps({"status": "complete", "summary": summary}))
+        else:
+            print(summary)
 
         # Auto-sync to central.db (best-effort, non-blocking)
         try:
             from agent_baton.core.storage.sync import auto_sync_current_project
             sync_result = auto_sync_current_project()
-            if sync_result and sync_result.rows_synced > 0:
+            if sync_result and sync_result.rows_synced > 0 and getattr(args, "output", "text") != "json":
                 print(f"Synced {sync_result.rows_synced} rows to central.db")
-        except Exception:
-            pass  # sync failure must never block execution completion
+        except Exception as exc:
+            _log.warning("Auto-sync to central.db failed (non-blocking): %s", exc)
 
     elif args.subcommand == "status":
         st = engine.status()
-        if not st:
-            print("No active execution.")
+        if not st or st.get("status") == "no_active_execution":
+            if getattr(args, "output", "text") == "json":
+                print(json.dumps({"status": "no_active_execution"}))
+            else:
+                print("No active execution.")
+                print()
+                print("  List executions:  baton execute list")
+                print("  Switch execution: export BATON_TASK_ID=<task-id>")
+                print("  Start new:        baton plan --save \"task description\"")
+            return
+        if getattr(args, "output", "text") == "json":
+            print(json.dumps(st, indent=2))
             return
         print(f"Task:    {st.get('task_id', '?')}")
         # Determine binding source
         if getattr(args, "task_id", None):
             bound_via = "--task-id"
         elif os.environ.get("BATON_TASK_ID"):
-            bound_via = "BATON_TASK_ID"
+            bound_via = "BATON_TASK_ID (from env)"
         else:
             bound_via = "active-task-id.txt"
         print(f"Bound:   {bound_via}")
-        print(f"Status:  {st.get('status', '?')}")
-        print(f"Phase:   {st.get('current_phase', '?')}")
-        print(f"Steps:   {st.get('steps_complete', 0)}/{st.get('steps_total', 0)}")
-        print(f"Gates:   {st.get('gates_passed', 0)} passed, {st.get('gates_failed', 0)} failed")
+        status_text = st.get('status', '?')
+        if status_text == 'running':
+            status_text = color_info(status_text)
+        elif status_text == 'completed':
+            status_text = success(status_text)
+        elif status_text == 'failed':
+            status_text = color_error(status_text)
+        print(f"Status:  {status_text}")
+        total_phases = st.get("total_phases", "?")
+        print(f"Phase:   {st.get('current_phase', '?')} / {total_phases}")
+        print(f"Steps:   {st.get('steps_complete', 0)}/{st.get('steps_total', 0)} complete")
         elapsed = st.get("elapsed_seconds", 0)
         if elapsed:
             print(f"Elapsed: {elapsed:.0f}s")
 
+        # Step detail
+        step_results = st.get("step_results", [])
+        step_plan = st.get("step_plan", [])
+        if step_results or step_plan:
+            print()
+            print("Steps:")
+            shown_ids: set[str] = set()
+            for r in step_results:
+                sid = r.get("step_id", "?")
+                shown_ids.add(sid)
+                agent = r.get("agent_name", "?")
+                status_val = r.get("status", "?")
+                outcome = r.get("outcome", "")
+                if status_val == "complete":
+                    marker = success("done")
+                elif status_val == "dispatched":
+                    marker = color_info("  >>")
+                elif status_val == "failed":
+                    marker = color_error("FAIL")
+                else:
+                    marker = "  .."
+                outcome_short = f" ({outcome[:50]})" if outcome else ""
+                print(f"  {marker}  {sid:<5}  {agent:<24} — {status_val}{outcome_short}")
+            for sp in step_plan:
+                sid = sp.get("step_id", "?")
+                if sid not in shown_ids:
+                    agent = sp.get("agent_name", "?")
+                    print(f"  ...   {sid:<5}  {agent:<24} — pending")
+
+        # Gate detail
+        gate_results = st.get("gate_results", [])
+        if gate_results:
+            print()
+            print("Gates:")
+            for g in gate_results:
+                phase_id = g.get("phase_id", "?")
+                passed = g.get("passed", False)
+                gate_type = g.get("gate_type", "")
+                marker = "pass" if passed else "FAIL"
+                type_label = f" ({gate_type})" if gate_type else ""
+                print(f"  {marker}  Phase {phase_id}{type_label}")
+
     elif args.subcommand == "resume":
         action = engine.resume()
-        _print_action(action.to_dict())
+        if getattr(args, "output", "text") == "json":
+            result = {"action": action.to_dict()}
+            print(json.dumps(result, indent=2))
+        else:
+            _print_action(action.to_dict())
 
 
 # ---------------------------------------------------------------------------
@@ -429,8 +563,8 @@ def _handle_list() -> None:
             # Also check for active task in SQLite if not found on disk
             if active_task_id is None:
                 active_task_id = _sqlite_storage.get_active_task()
-        except Exception:
-            _log.debug("execute list: SQLite load failed, using file backend only", exc_info=True)
+        except Exception as exc:
+            _log.info("execute list: SQLite backend unavailable, using file backend: %s", exc)
     else:
         _log.debug("execute list: using file backend at %s", context_root)
 
@@ -458,8 +592,8 @@ def _handle_list() -> None:
         if state is None and _sqlite_storage is not None:
             try:
                 state = _sqlite_storage.load_execution(tid)
-            except Exception:
-                _log.debug("execute list: failed to load %s from SQLite", tid, exc_info=True)
+            except Exception as exc:
+                _log.info("execute list: failed to load %s from SQLite: %s", tid, exc)
         if state is None:
             continue
         steps_complete = sum(
@@ -500,18 +634,28 @@ def _handle_list() -> None:
         print("No executions found.")
         return
 
-    # Print header
-    print(f"  {'TASK ID':<38}  {'STATUS':<18}  {'STEPS':>7}  {'PID':>7}  SUMMARY")
-    print("-" * 90)
+    from agent_baton.cli.formatting import print_table
+
+    table_rows = []
     for rec in records:
         active_marker = "*" if rec.execution_id == active_task_id else " "
         steps_str = f"{rec.steps_complete}/{rec.steps_total}"
         pid_str = str(rec.worker_pid) if rec.worker_pid else "-"
-        summary = rec.plan_summary[:40]
-        print(
-            f"{active_marker} {rec.execution_id:<38}  {rec.status:<18}  "
-            f"{steps_str:>7}  {pid_str:>7}  {summary}"
-        )
+        table_rows.append({
+            "task_id": f"{active_marker} {rec.execution_id}",
+            "status": rec.status,
+            "steps": steps_str,
+            "pid": pid_str,
+            "summary": rec.plan_summary[:40],
+        })
+
+    print_table(
+        table_rows,
+        columns=["task_id", "status", "steps", "pid", "summary"],
+        headers={"task_id": "TASK ID", "status": "STATUS", "steps": "STEPS", "pid": "PID", "summary": "SUMMARY"},
+        alignments={"steps": ">", "pid": ">"},
+        prefix="  ",
+    )
 
 
 def _handle_switch(task_id: str) -> None:
@@ -529,13 +673,11 @@ def _handle_switch(task_id: str) -> None:
         try:
             _sqlite_storage = get_project_storage(context_root, backend="sqlite")
             exists_in_sqlite = _sqlite_storage.load_execution(task_id) is not None
-        except Exception:
-            _log.debug("execute switch: SQLite check failed", exc_info=True)
+        except Exception as exc:
+            _log.info("execute switch: SQLite check failed: %s", exc)
 
     if not exists_in_files and not exists_in_sqlite:
-        print(f"error: no execution found with task ID '{task_id}'")
-        print("Run 'baton execute list' to see available executions.")
-        sys.exit(1)
+        user_error(f"no execution found with task ID '{task_id}'", hint="Run 'baton execute list' to see available executions.")
 
     # Update active task in both backends that are available
     sp.set_active()
@@ -543,8 +685,8 @@ def _handle_switch(task_id: str) -> None:
         _log.debug("execute switch: setting active task in SQLite to %s", task_id)
         try:
             _sqlite_storage.set_active_task(task_id)
-        except Exception:
-            _log.debug("execute switch: SQLite set_active_task failed", exc_info=True)
+        except Exception as exc:
+            _log.info("execute switch: SQLite set_active_task failed: %s", exc)
 
     print(f"Active execution switched to: {task_id}")
 
@@ -559,7 +701,11 @@ def _parse_add_phases(specs: list[str]) -> list[PlanPhase]:
     for i, spec in enumerate(specs, start=1):
         parts = spec.split(":", 1)
         name = parts[0].strip()
+        if not name:
+            validation_error(f"--add-phase spec #{i} has empty name: '{spec}'", hint="Expected format: NAME:AGENT (e.g. 'Design phase:architect')")
         agent = parts[1].strip() if len(parts) > 1 else "backend-engineer"
+        if len(parts) == 1:
+            print(f"warning: --add-phase '{spec}' has no agent specified, defaulting to 'backend-engineer'", file=sys.stderr)
         phases.append(PlanPhase(
             phase_id=0,  # placeholder — renumbered by amend_plan
             name=name,
@@ -585,8 +731,11 @@ def _parse_add_steps(specs: list[str]) -> tuple[int | None, list[PlanStep]]:
     for i, spec in enumerate(specs, start=1):
         parts = spec.split(":", 2)
         if len(parts) < 2:
-            continue
-        phase_id = int(parts[0].strip())
+            validation_error(f"--add-step spec #{i} is malformed: '{spec}'", hint="Expected format: PHASE_ID:AGENT:DESCRIPTION (e.g. '2:data-engineer:Run migration')")
+        try:
+            phase_id = int(parts[0].strip())
+        except ValueError:
+            validation_error(f"--add-step spec #{i} has non-numeric phase ID: '{parts[0]}'")
         agent = parts[1].strip()
         desc = parts[2].strip() if len(parts) > 2 else f"Additional work in phase {phase_id}"
         if target_phase is None:

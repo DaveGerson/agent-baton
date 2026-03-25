@@ -48,7 +48,7 @@ statistically sound, reproducible, and practically useful.
 6. **Documentation** — Model card: what it does, how it performs, limitations,
    data requirements
 
-## When you finish
+## Output Format
 
 Return:
 1. **Files created/modified** (with paths)

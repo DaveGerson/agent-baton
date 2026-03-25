@@ -297,6 +297,12 @@ class ExecutionEngine:
         - Returns the first action (DISPATCH for the first step, or COMPLETE
           if the plan has no phases/steps)
         """
+        if not plan.phases:
+            raise ValueError(
+                "Plan has no phases. Check your planner output — "
+                "a valid plan must have at least one phase with one step."
+            )
+
         # Track the task_id for subsequent load/save calls.
         self._task_id = plan.task_id
         if self._storage is not None:
@@ -531,6 +537,16 @@ class ExecutionEngine:
 
         # Determine phase + step index for trace context.
         phase_idx, step_idx = self._locate_step(state, step_id)
+        if phase_idx == -1:
+            valid_ids = [
+                s.step_id
+                for p in state.plan.phases
+                for s in p.steps
+            ]
+            raise ValueError(
+                f"Step '{step_id}' not found in plan. "
+                f"Valid step IDs: {', '.join(valid_ids)}"
+            )
 
         # Emit trace event.
         if self._trace is not None:
@@ -761,9 +777,10 @@ class ExecutionEngine:
     def status(self) -> dict:
         """Return current execution status as a dict.
 
-        Keys: ``task_id``, ``status``, ``current_phase``, ``steps_complete``,
-        ``steps_total``, ``gates_passed``, ``gates_failed``,
-        ``elapsed_seconds``.
+        Keys: ``task_id``, ``status``, ``current_phase``, ``total_phases``,
+        ``steps_complete``, ``steps_total``, ``gates_passed``,
+        ``gates_failed``, ``elapsed_seconds``, ``step_results``,
+        ``step_plan``, ``gate_results``.
         """
         state = self._load_execution()
         if state is None:
@@ -772,15 +789,27 @@ class ExecutionEngine:
         gates_passed = sum(1 for g in state.gate_results if g.passed)
         gates_failed = sum(1 for g in state.gate_results if not g.passed)
 
+        # Build step_plan: all steps across all phases, preserving order
+        step_plan = [
+            {"step_id": step.step_id, "agent_name": step.agent_name,
+             "task_description": step.task_description}
+            for phase in state.plan.phases
+            for step in phase.steps
+        ]
+
         return {
             "task_id": state.task_id,
             "status": state.status,
             "current_phase": state.current_phase,
+            "total_phases": len(state.plan.phases),
             "steps_complete": len(state.completed_step_ids),
             "steps_total": state.plan.total_steps,
             "gates_passed": gates_passed,
             "gates_failed": gates_failed,
             "elapsed_seconds": _elapsed_seconds(state.started_at),
+            "step_results": [r.to_dict() for r in state.step_results],
+            "step_plan": step_plan,
+            "gate_results": [g.to_dict() for g in state.gate_results],
         }
 
     def resume(self) -> ExecutionAction:
@@ -1418,8 +1447,21 @@ class ExecutionEngine:
                 summary=f"Task {state.task_id} completed.",
             )
         if state.status == "failed":
-            failed_ids = list(state.failed_step_ids)
-            msg = f"Execution failed. Failed step(s): {', '.join(failed_ids) or 'gate'}"
+            # Check if the failure was caused by an approval rejection rather
+            # than a step failure — the message should reflect the distinction.
+            rejected_approval = next(
+                (a for a in reversed(state.approval_results) if a.result == "reject"),
+                None,
+            )
+            if rejected_approval is not None:
+                msg = (
+                    f"Phase {rejected_approval.phase_id} approval was rejected. "
+                    "To continue: amend the plan with 'baton execute amend', "
+                    "or finalize with 'baton execute complete'."
+                )
+            else:
+                failed_ids = list(state.failed_step_ids)
+                msg = f"Execution failed. Failed step(s): {', '.join(failed_ids) or 'gate'}"
             return ExecutionAction(
                 action_type=ActionType.FAILED,
                 message=msg,

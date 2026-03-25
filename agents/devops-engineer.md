@@ -24,7 +24,7 @@ reproducible deployment and development environments.
   managers, or `.env` files (gitignored).
 - **Idempotency.** Scripts and configs should be safe to run multiple times.
 
-## When you finish
+## Output Format
 
 Return:
 1. **Files created/modified** (with paths)

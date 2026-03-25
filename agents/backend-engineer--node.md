@@ -38,7 +38,7 @@ server-side TypeScript.
 - **Environment config.** Read from `process.env` through a validated
   config module, not scattered across files.
 
-## When you finish
+## Output Format
 
 Return:
 1. **Files created/modified** (with paths)

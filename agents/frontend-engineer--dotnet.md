@@ -51,7 +51,7 @@ using Blazor, Razor Pages, or ASP.NET MVC views.
   hosting model
 - Ignoring `@key` on list-rendered components (causes subtle re-render bugs)
 
-## When you finish
+## Output Format
 
 Return:
 1. **Files created/modified** (with paths)

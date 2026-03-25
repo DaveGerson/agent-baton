@@ -337,14 +337,14 @@ class TestExportHintOnStart:
         out = self._run_start(plan_task_id="exact-plan-id", tmp_path=tmp_path)
         assert "export BATON_TASK_ID=exact-plan-id" in out
 
-    def test_export_hint_appears_after_end_prompt_delimiter(self, tmp_path: Path) -> None:
+    def test_export_hint_appears_before_action(self, tmp_path: Path) -> None:
         out = self._run_start(plan_task_id="plan-seq", tmp_path=tmp_path)
-        end_prompt_pos = out.find("--- End Prompt ---")
+        action_pos = out.find("ACTION:")
         hint_pos = out.find("export BATON_TASK_ID=")
-        assert end_prompt_pos != -1, "--- End Prompt --- delimiter not found"
+        assert action_pos != -1, "ACTION: not found"
         assert hint_pos != -1, "export hint not found"
-        assert hint_pos > end_prompt_pos, (
-            "Export hint should appear after --- End Prompt --- delimiter"
+        assert hint_pos < action_pos, (
+            "Export hint should appear before the first ACTION: block"
         )
 
     def test_export_hint_uses_plan_task_id_not_stale_env_var(

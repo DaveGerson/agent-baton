@@ -257,9 +257,10 @@ class TestHandleSwitch:
             _handle_switch("no-such-task")
 
         assert exc_info.value.code == 1
-        out = capsys.readouterr().out
-        assert "error" in out.lower()
-        assert "no-such-task" in out
+        captured = capsys.readouterr()
+        output = captured.out + captured.err
+        assert "error" in output.lower()
+        assert "no-such-task" in output
 
     def test_set_active_not_called_for_invalid_task_id(self) -> None:
         mock_sp = MagicMock()

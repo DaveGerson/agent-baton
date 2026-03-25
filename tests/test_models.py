@@ -1,7 +1,6 @@
 """Tests for agent_baton data model classes."""
 from __future__ import annotations
 
-from datetime import datetime
 
 import pytest
 
@@ -148,7 +147,7 @@ class TestMissionLogEntryToMarkdown:
             agent_name="architect",
             status="COMPLETE",
             assignment="Design the API",
-            timestamp=datetime(2026, 1, 15, 10, 0, 0),
+            timestamp="2026-01-15T10:00:00+00:00",
         )
         defaults.update(kwargs)
         return MissionLogEntry(**defaults)
@@ -221,7 +220,7 @@ class TestMissionLogEntryToMarkdown:
         assert "Failure class:" not in md
 
     def test_timestamp_appears_in_header(self):
-        entry = self._make_entry(timestamp=datetime(2026, 1, 15, 10, 0, 0))
+        entry = self._make_entry(timestamp="2026-01-15T10:00:00+00:00")
         md = entry.to_markdown()
         assert "2026-01-15" in md
 

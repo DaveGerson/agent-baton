@@ -1,4 +1,11 @@
-"""baton query — typed and ad-hoc queries against baton.db.
+"""baton query — typed and ad-hoc queries against baton.db (per-project).
+
+This command queries the **local** ``baton.db`` for the current project.
+It covers execution history, agent step results, tasks, gates, and
+learned patterns scoped to this project.
+
+For **cross-project** analytics across all projects use ``baton cquery``,
+which targets the central ``~/.baton/central.db``.
 
 Subcommands (predefined)
 ------------------------
@@ -43,7 +50,10 @@ from typing import Any
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:  # type: ignore[type-arg]
     p = subparsers.add_parser(
         "query",
-        help="Query execution history, agent performance, and cross-project data",
+        help=(
+            "Query this project's execution history and agent performance (baton.db).  "
+            "For cross-project analytics use 'baton cquery'."
+        ),
     )
 
     # ── Predefined subcommand (positional, optional) ──────────────────────
@@ -526,4 +536,9 @@ def _print_help() -> None:
         "Database selection:\n"
         "  --db PATH       Explicit path to baton.db\n"
         "  --central       Query ~/.baton/central.db\n"
+        "\n"
+        "For cross-project analytics (all projects in central.db) use:\n"
+        "  baton cquery agents\n"
+        "  baton cquery costs --format json\n"
+        "  baton cquery --tables\n"
     )

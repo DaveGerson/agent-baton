@@ -8,6 +8,19 @@ import types
 
 from agent_baton.cli import commands as commands_pkg
 
+# Command groups for organized --help output
+_COMMAND_GROUPS: dict[str, list[str]] = {
+    "Core Workflow": ["plan", "execute", "status"],
+    "Agents & Routing": ["agents", "route", "events", "incident"],
+    "Observability": ["dashboard", "trace", "usage", "telemetry", "context-profile", "retro", "context"],
+    "Governance": ["classify", "compliance", "policy", "escalations", "validate", "spec-check", "detect"],
+    "Improvement": ["scores", "evolve", "patterns", "budget", "changelog", "experiment", "anomalies", "improve"],
+    "Distribution": ["install", "uninstall", "package", "publish", "pull", "transfer", "verify-package"],
+    "Storage & Sync": ["sync", "source", "cquery", "migrate-storage", "cleanup"],
+    "Execution (Advanced)": ["daemon", "async", "decide"],
+    "Portfolio": ["pmo", "serve"],
+}
+
 
 def discover_commands() -> dict[str, types.ModuleType]:
     """Auto-discover all command modules in cli/commands/ and subdirectories.
@@ -37,10 +50,18 @@ def discover_commands() -> dict[str, types.ModuleType]:
 
 
 def main(argv: list[str] | None = None) -> None:
+    from importlib.metadata import version, PackageNotFoundError
+    try:
+        _version = version("agent-baton")
+    except PackageNotFoundError:
+        _version = "dev"
+
     parser = argparse.ArgumentParser(
         prog="baton",
         description="Agent Baton — multi-agent orchestration tools",
     )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {_version}")
+    parser.add_argument("--no-color", action="store_true", help="Disable colored output")
     sub = parser.add_subparsers(dest="command")
 
     # Discover and register all command modules.
@@ -56,9 +77,55 @@ def main(argv: list[str] | None = None) -> None:
         subcommand = sp.prog.split(None, 1)[1] if " " in sp.prog else sp.prog
         dispatch[subcommand] = mod
 
+    # Build grouped help epilog
+    lines = ["\nCommand groups:"]
+    for group_name, cmd_names in _COMMAND_GROUPS.items():
+        # Only include commands that actually exist
+        available = [c for c in cmd_names if c in dispatch]
+        if available:
+            lines.append(f"\n  {group_name}:")
+            lines.append(f"    {', '.join(available)}")
+
+    # Any commands not in a group
+    grouped = {c for cmds in _COMMAND_GROUPS.values() for c in cmds}
+    ungrouped = sorted(set(dispatch.keys()) - grouped)
+    if ungrouped:
+        lines.append(f"\n  Other:")
+        lines.append(f"    {', '.join(ungrouped)}")
+
+    lines.append(f"\nQuick start:")
+    lines.append(f"  1. baton plan \"task description\" --save --explain")
+    lines.append(f"  2. baton execute start")
+    lines.append(f"  3. baton execute next              # get next action")
+    lines.append(f"     If DISPATCH: spawn agent, then:")
+    lines.append(f"     baton execute record --step-id ID --agent NAME --status complete")
+    lines.append(f"     If GATE: run test, then:")
+    lines.append(f"     baton execute gate --phase-id ID --result pass")
+    lines.append(f"  4. Repeat step 3 until ACTION: COMPLETE")
+    lines.append(f"  5. baton execute complete")
+    lines.append(f"")
+    lines.append(f"Full walkthrough: docs/examples/first-run.md")
+    lines.append(f"")
+
+    parser.epilog = "\n".join(lines)
+    parser.formatter_class = argparse.RawDescriptionHelpFormatter
+
     args = parser.parse_args(argv)
 
+    if getattr(args, "no_color", False):
+        from agent_baton.cli.colors import set_color_enabled
+        set_color_enabled(False)
+
     if args.command is None:
+        from pathlib import Path
+        if not Path(".claude/agents").exists():
+            print("Agent Baton is not installed in this project.\n")
+            print("Quick start:")
+            print("  baton install --scope project --source /path/to/agent-baton")
+            print()
+            print("Or run the install script from the agent-baton repo:")
+            print("  scripts/install.sh")
+            print()
         parser.print_help()
         return
 

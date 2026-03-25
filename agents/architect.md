@@ -34,3 +34,8 @@ Return your analysis as:
 3. **Risks and mitigations** — what could go wrong and how to handle it
 4. **Implementation guidance** — enough detail that a developer can build
    it without further clarification
+
+## Knowledge Packs
+
+If `.claude/knowledge/` contains domain-specific packs, read them before starting.
+They provide architectural context and design decisions for the project.

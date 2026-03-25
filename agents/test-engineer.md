@@ -25,7 +25,7 @@ that catch real bugs — not tests that just inflate coverage numbers.
   concurrency issues where relevant.
 - **Each test should fail for exactly one reason.** Keep tests focused.
 
-## When you finish
+## Output Format
 
 Return:
 1. **Test files created/modified** (with paths)

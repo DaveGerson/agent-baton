@@ -9,6 +9,32 @@ REFS_DIR="$ROOT_DIR/references"
 CLAUDE_MD="$ROOT_DIR/templates/CLAUDE.md"
 SETTINGS_JSON="$ROOT_DIR/templates/settings.json"
 
+# ---------------------------------------------------------------------------
+# Prerequisite checks
+# ---------------------------------------------------------------------------
+check_prereq() {
+    local cmd=$1
+    local install_hint=$2
+    if ! command -v "$cmd" &>/dev/null; then
+        echo "error: '$cmd' is required but not found in PATH"
+        echo "  $install_hint"
+        exit 1
+    fi
+}
+
+check_prereqs() {
+    check_prereq "python3" "Install Python 3.10+ from https://python.org"
+    check_prereq "git" "Install git from https://git-scm.com"
+
+    # Verify Python version >= 3.10
+    if ! python3 -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)" 2>/dev/null; then
+        echo "error: Python 3.10+ required (found: $(python3 --version 2>&1))"
+        exit 1
+    fi
+}
+
+check_prereqs
+
 if [ ! -d "$AGENTS_DIR" ]; then
     echo "Error: agents/ not found. Run from the skill folder."
     exit 1
@@ -45,6 +71,21 @@ REF_TARGET="$BASE/references"
 TEAM_CTX="$BASE/team-context"
 KNOWLEDGE_DIR="$BASE/knowledge"
 SKILLS_DIR="$BASE/skills"
+
+# Pre-flight: verify write permissions
+if ! mkdir -p "$BASE" 2>/dev/null; then
+    echo "error: cannot create directory '$BASE' — check permissions"
+    if [ "$SCOPE" = "user" ]; then
+        echo "  Try project-level install instead (option 2)"
+    fi
+    exit 1
+fi
+if ! touch "$BASE/.write-test" 2>/dev/null; then
+    echo "error: cannot write to '$BASE' — check permissions"
+    rm -f "$BASE/.write-test"
+    exit 1
+fi
+rm -f "$BASE/.write-test"
 
 # ── Step 2: Install Core Files ─────────────────────────────
 echo ""
@@ -106,7 +147,15 @@ src = json.loads(open('$SETTINGS_JSON').read())
 dst = json.loads(open('$settings_path').read())
 src_hooks = src.get('hooks', {})
 if src_hooks:
-    dst.setdefault('hooks', {}).update(src_hooks)
+    dst_hooks = dst.setdefault('hooks', {})
+    for event, src_entries in src_hooks.items():
+        existing = dst_hooks.get(event, [])
+        existing_cmds = {e.get('command','') for e in existing if isinstance(e,dict)}
+        for entry in src_entries:
+            cmd = entry.get('command','') if isinstance(entry,dict) else ''
+            if cmd not in existing_cmds:
+                existing.append(entry)
+        dst_hooks[event] = existing
 open('$settings_path', 'w').write(json.dumps(dst, indent=2) + '\n')
 print('  merge: settings.json hooks (' + str(len(src_hooks)) + ' events)')
 " 2>/dev/null || echo "  ! settings.json merge failed — merge hooks manually"

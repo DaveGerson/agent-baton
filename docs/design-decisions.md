@@ -267,7 +267,7 @@ rather than requesting help.
   analogous to ADR-01. Old retrospective JSON files are handled by
   `from_dict()` defaulting the new fields.
 
-**Status**: Designed (2026-03-24)
+**Status**: Implemented (2026-03-24)
 
 ---
 
@@ -354,4 +354,4 @@ became O(N) filesystem reads per PMO status request.
   column of `external_sources`. This means PAT rotation only requires
   updating the environment variable — no database writes, no migration.
 
-**Status**: Designed (2026-03-24)
+**Status**: Implemented (2026-03-24)
