@@ -60,9 +60,9 @@ baton plan "Add JWT authentication middleware with login/logout endpoints and in
 1. `baton execute resume` — recovers from saved state if it exists
 2. Otherwise: `baton plan --save "..." && baton execute start`
 
-### "status must be one of: complete, failed, dispatched"
+### "invalid choice" for --status (expected 'complete' or 'failed')
 **Cause**: `baton execute record --status pass` (or `done`, `success`, `ok`, etc.).
-**Fix**: Use only `complete` or `failed` as status values.
+**Fix**: Use only `complete` or `failed`. To mark a step as in-flight, use `baton execute dispatched` instead.
 
 ```
 # Wrong

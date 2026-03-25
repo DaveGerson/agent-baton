@@ -12,7 +12,7 @@ from agent_baton.cli import commands as commands_pkg
 _COMMAND_GROUPS: dict[str, list[str]] = {
     "Core Workflow": ["plan", "execute", "status"],
     "Agents & Routing": ["agents", "route", "events", "incident"],
-    "Observability": ["dashboard", "trace", "usage", "telemetry", "context-profile", "retro", "query"],
+    "Observability": ["dashboard", "trace", "usage", "telemetry", "context-profile", "retro", "context"],
     "Governance": ["classify", "compliance", "policy", "escalations", "validate", "spec-check", "detect"],
     "Improvement": ["scores", "evolve", "patterns", "budget", "changelog", "experiment", "anomalies", "improve"],
     "Distribution": ["install", "package", "publish", "pull", "transfer", "verify-package"],
