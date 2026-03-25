@@ -66,6 +66,15 @@ def handler(args: argparse.Namespace) -> None:
 
 
 def _handle_watch(evaluator: TriggerEvaluator) -> None:
+    """Print the improvement system status dashboard.
+
+    Shows whether the analysis trigger is ready to fire (enough new
+    data since last cycle) and lists any currently detected anomalies
+    in a compact one-line-per-anomaly format.
+
+    Args:
+        evaluator: An initialised trigger evaluator instance.
+    """
     ready = evaluator.should_analyze()
     anomalies = evaluator.detect_anomalies()
 

@@ -110,6 +110,16 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
 
 
 def handler(args: argparse.Namespace) -> None:
+    """Dispatch to the appropriate ``context`` subcommand.
+
+    Opens a query engine (project-local ``baton.db`` by default, or
+    ``~/.baton/central.db`` with ``--central``), dispatches to the
+    matching subcommand, and ensures the engine is closed on exit.
+
+    Args:
+        args: Parsed CLI arguments with ``subcommand``, database options,
+            and subcommand-specific fields.
+    """
     from agent_baton.core.storage.queries import open_query_engine
 
     sub = getattr(args, "subcommand", None)

@@ -409,11 +409,11 @@ Agent definitions are markdown files with YAML frontmatter. They live in
 |----------|---------|
 | `decision-framework.md` | When to use subagent vs. skill vs. reference doc |
 | `research-procedures.md` | 4 research modes the orchestrator runs inline |
-| `adaptive-execution.md` | Adaptive execution strategies and runtime adjustments |
-| `agent-routing.md` | Stack detection + agent flavor matching |
-| `baton-engine.md` | CLI reference for the execution engine |
-| `baton-patterns.md` | Design patterns catalog for orchestration |
-| `guardrail-presets.md` | Risk triage + standard guardrail configs |
+| `adaptive-execution.md` | Engagement level classification (Level 1/2/3) |
+| `agent-routing.md` | Stack detection and agent flavor matching |
+| `baton-engine.md` | Full CLI reference for the execution engine |
+| `baton-patterns.md` | Execution plan design patterns catalog |
+| `guardrail-presets.md` | Risk triage and standard guardrail configs |
 | `comms-protocols.md` | Delegation prompts, handoff briefs, logging |
 | `task-sequencing.md` | Phase ordering and parallel dispatch rules |
 | `git-strategy.md` | Commit conventions per risk level |
@@ -422,9 +422,6 @@ Agent definitions are markdown files with YAML frontmatter. They live in
 | `hooks-enforcement.md` | Mechanical guardrails via Claude Code hooks |
 | `doc-generation.md` | Document generation pipeline |
 | `knowledge-architecture.md` | Knowledge pack structure and conventions |
-| `adaptive-execution.md` | Engagement level classification (Level 1/2/3) |
-| `baton-engine.md` | Full CLI reference for the execution engine |
-| `baton-patterns.md` | Execution plan design patterns catalog |
 
 References are shared knowledge read by any agent that needs them. They
 live in `references/` and are copied to `.claude/references/` on install.

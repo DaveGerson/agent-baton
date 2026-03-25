@@ -35,7 +35,21 @@ from agent_baton.core.storage.connection import ConnectionManager
 from agent_baton.core.storage.schema import PROJECT_SCHEMA_DDL, SCHEMA_VERSION
 
 if TYPE_CHECKING:
-    pass
+    from agent_baton.models.budget import BudgetRecommendation
+    from agent_baton.models.events import Event
+    from agent_baton.models.execution import (
+        ApprovalResult,
+        ExecutionState,
+        GateResult,
+        MachinePlan,
+        PlanAmendment,
+        StepResult,
+    )
+    from agent_baton.models.pattern import LearnedPattern
+    from agent_baton.models.plan import MissionLogEntry
+    from agent_baton.models.retrospective import Retrospective
+    from agent_baton.models.trace import TaskTrace
+    from agent_baton.models.usage import TaskUsageRecord
 
 
 class SqliteStorage:

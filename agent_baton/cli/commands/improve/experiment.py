@@ -60,6 +60,12 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
 
 
 def handler(args: argparse.Namespace) -> None:
+    """Dispatch to the appropriate ``experiment`` subcommand handler.
+
+    Args:
+        args: Parsed CLI arguments including ``subcommand`` and
+            ``experiment_id`` or ``result`` where applicable.
+    """
     mgr = ExperimentManager()
 
     if args.subcommand == "list":
@@ -125,6 +131,16 @@ def _handle_conclude(
 
 
 def _handle_rollback(mgr: ExperimentManager, experiment_id: str) -> None:
+    """Roll back an experiment and its associated recommendation.
+
+    Reverts the recommendation that the experiment was testing, marks both
+    the experiment and recommendation as rolled back, and checks whether
+    the circuit breaker has been tripped (3+ rollbacks in 7 days).
+
+    Args:
+        mgr: The experiment manager instance.
+        experiment_id: ID of the experiment to roll back.
+    """
     exp = mgr.get(experiment_id)
     if exp is None:
         print(f"Experiment '{experiment_id}' not found.")

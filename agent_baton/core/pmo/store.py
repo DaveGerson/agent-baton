@@ -77,7 +77,15 @@ class PmoStore:
             return PmoConfig()
 
     def save_config(self, config: PmoConfig) -> None:
-        """Atomically write config to disk (tmp + rename)."""
+        """Atomically write config to disk via tmp file + rename.
+
+        Creates parent directories if needed, writes to a ``.json.tmp``
+        file, then renames to the final path.  This prevents readers from
+        seeing a partially-written file.
+
+        Args:
+            config: The PMO configuration to persist.
+        """
         self._config_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = self._config_path.with_suffix(".json.tmp")
         tmp_path.write_text(
@@ -89,7 +97,15 @@ class PmoStore:
     # ── Project registration ───────────────────────────────────────────────
 
     def register_project(self, project: PmoProject) -> None:
-        """Add a project to the config. Replaces if same project_id exists."""
+        """Add or update a project in the config.
+
+        Removes any existing project with the same ``project_id``, sets
+        ``registered_at`` if not already populated, appends the project,
+        and atomically writes the config to disk.
+
+        Args:
+            project: The project to register.
+        """
         config = self.load_config()
         config.projects = [
             p for p in config.projects if p.project_id != project.project_id
@@ -100,7 +116,15 @@ class PmoStore:
         self.save_config(config)
 
     def unregister_project(self, project_id: str) -> bool:
-        """Remove a project by ID. Returns True if found."""
+        """Remove a project from the config by ID.
+
+        Args:
+            project_id: The identifier of the project to remove.
+
+        Returns:
+            ``True`` if a matching project was found and removed,
+            ``False`` otherwise.
+        """
         config = self.load_config()
         before = len(config.projects)
         config.projects = [
@@ -112,7 +136,14 @@ class PmoStore:
         return False
 
     def get_project(self, project_id: str) -> PmoProject | None:
-        """Look up a project by ID."""
+        """Look up a project by ID.
+
+        Args:
+            project_id: The identifier to search for.
+
+        Returns:
+            The matching ``PmoProject``, or ``None`` if not found.
+        """
         config = self.load_config()
         for p in config.projects:
             if p.project_id == project_id:
@@ -122,7 +153,15 @@ class PmoStore:
     # ── Signals ────────────────────────────────────────────────────────────
 
     def add_signal(self, signal: PmoSignal) -> None:
-        """Add a signal to the config."""
+        """Add a signal to the config and persist.
+
+        Sets ``created_at`` to the current UTC timestamp if not already
+        populated.  The signal is appended to the in-memory config and
+        then atomically written to disk.
+
+        Args:
+            signal: The signal to add.
+        """
         config = self.load_config()
         if not signal.created_at:
             signal.created_at = datetime.now(timezone.utc).isoformat()
@@ -130,7 +169,17 @@ class PmoStore:
         self.save_config(config)
 
     def resolve_signal(self, signal_id: str) -> bool:
-        """Mark a signal as resolved. Returns True if found."""
+        """Mark a signal as resolved and persist.
+
+        Sets ``status = 'resolved'`` and ``resolved_at`` to the current
+        UTC timestamp.
+
+        Args:
+            signal_id: The signal to resolve.
+
+        Returns:
+            ``True`` if the signal was found, ``False`` otherwise.
+        """
         config = self.load_config()
         for s in config.signals:
             if s.signal_id == signal_id:
@@ -148,7 +197,15 @@ class PmoStore:
     # ── Archive (JSONL, append-only) ───────────────────────────────────────
 
     def archive_card(self, card: PmoCard) -> None:
-        """Append a completed card to the archive."""
+        """Append a completed card to the JSONL archive.
+
+        Each card is serialized as a single compact JSON line and appended
+        to ``pmo-archive.jsonl``.  The archive is append-only -- cards are
+        never updated or removed.
+
+        Args:
+            card: The completed execution card to archive.
+        """
         self._archive_path.parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps(card.to_dict(), separators=(",", ":"))
         with self._archive_path.open("a", encoding="utf-8") as f:

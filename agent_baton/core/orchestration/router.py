@@ -320,7 +320,12 @@ class AgentRouter:
         if stack is None:
             stack = self.detect_stack(project_root)
 
-        # Look up flavor mapping for this stack
+        # Look up flavor mapping for this stack.
+        # stack.language is str | None; FLAVOR_MAP keys require str, so skip
+        # the lookup entirely when no language was detected.
+        if stack.language is None:
+            return base_name
+
         key = (stack.language, stack.framework)
         flavors = FLAVOR_MAP.get(key, {})
         if not flavors:

@@ -179,9 +179,10 @@ class FileStorage:
     def read_telemetry(self, limit: int | None = None) -> list[dict]:
         t = AgentTelemetry(log_path=self._root / "telemetry.jsonl")
         events = t.read_events()
+        dicts: list[dict] = [e.to_dict() for e in events]
         if limit:
-            return events[-limit:]
-        return events
+            return dicts[-limit:]
+        return dicts
 
     # ── Retrospectives ─────────────────────────────────────────────────────
 

@@ -456,7 +456,16 @@ def _dispatch(args: argparse.Namespace, engine: Any) -> None:
 
 
 def _render(rows: list[dict], fmt: str, title: str = "") -> None:
-    """Dispatch to the appropriate formatter."""
+    """Dispatch to the appropriate output formatter (table, JSON, or CSV).
+
+    Args:
+        rows: List of dictionaries representing query result rows.  Column
+            order is determined by the key order of the first row.
+        fmt: Output format -- ``"table"`` for fixed-width aligned columns,
+            ``"json"`` for pretty-printed JSON array, or ``"csv"`` for
+            comma-separated values.
+        title: Optional title printed above the output.
+    """
     if not rows:
         if title:
             print(f"{title}: (no data)")
