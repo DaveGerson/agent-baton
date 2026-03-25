@@ -514,7 +514,7 @@ class TestVerifyPackageCommand:
         ("invalid", True, 1),
     ])
     def test_handler_exit_code(self, tmp_path: Path, capsys, archive_fn, expect_exit, exit_code):
-        from agent_baton.cli.commands.verify_package import handler
+        from agent_baton.cli.commands.distribute.verify_package import handler
         import argparse
 
         if archive_fn == "valid":
@@ -533,7 +533,7 @@ class TestVerifyPackageCommand:
             assert "PASS" in out
 
     def test_handler_prints_checksums_when_flag_set(self, tmp_path: Path, capsys):
-        from agent_baton.cli.commands.verify_package import handler
+        from agent_baton.cli.commands.distribute.verify_package import handler
         import argparse
 
         archive = _build_archive(tmp_path)
@@ -544,7 +544,7 @@ class TestVerifyPackageCommand:
         assert "Checksums" in out
 
     def test_handler_does_not_print_checksums_without_flag(self, tmp_path: Path, capsys):
-        from agent_baton.cli.commands.verify_package import handler
+        from agent_baton.cli.commands.distribute.verify_package import handler
         import argparse
 
         archive = _build_archive(tmp_path)
@@ -554,7 +554,7 @@ class TestVerifyPackageCommand:
         assert "Checksums" not in out
 
     def test_handler_shows_error_details_on_failure(self, tmp_path: Path, capsys):
-        from agent_baton.cli.commands.verify_package import handler
+        from agent_baton.cli.commands.distribute.verify_package import handler
         import argparse
 
         archive = _make_archive_without_manifest(tmp_path)
@@ -566,7 +566,7 @@ class TestVerifyPackageCommand:
 
     def test_register_creates_verify_package_subparser(self):
         import argparse
-        from agent_baton.cli.commands.verify_package import register
+        from agent_baton.cli.commands.distribute.verify_package import register
 
         parser = argparse.ArgumentParser()
         sub = parser.add_subparsers(dest="command")

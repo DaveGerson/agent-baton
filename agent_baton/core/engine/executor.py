@@ -38,6 +38,7 @@ from agent_baton.core.events import events as evt
 from agent_baton.core.events.persistence import EventPersistence
 from agent_baton.core.observe.telemetry import AgentTelemetry, TelemetryEvent
 from agent_baton.core.observe.trace import TraceRecorder
+from agent_baton.models.trace import TaskTrace, TraceEvent
 from agent_baton.core.observe.usage import UsageLogger
 from agent_baton.core.observe.retrospective import RetrospectiveEngine
 
@@ -109,11 +110,17 @@ class ExecutionEngine:
         bus: EventBus | None = None,
         task_id: str | None = None,
         storage=None,  # SqliteStorage | FileStorage | None
+        knowledge_resolver=None,  # KnowledgeResolver | None
     ) -> None:
         self._root = (team_context_root or self._DEFAULT_CONTEXT_ROOT).resolve()
         self._task_id = task_id
         self._storage = storage  # May be None (legacy file mode)
         self._bus = bus
+
+        # KnowledgeResolver for runtime gap auto-resolution.  Callers (CLI and
+        # tests) set this at construction time.  When None, gaps fall through to
+        # best-effort / queue-for-gate.
+        self._knowledge_resolver = knowledge_resolver
 
         if storage is not None:
             # StorageBackend mode — primary I/O goes through the storage
@@ -124,7 +131,19 @@ class ExecutionEngine:
             self._usage_logger = None
             self._telemetry = None
             self._retro_engine = None
-            self._event_persistence = None
+            # Wire EventPersistence even in storage mode so domain events are
+            # durably written to JSONL files alongside the SQLite/file state.
+            # Events are namespaced under the task directory when task_id is
+            # provided (mirrors the legacy-mode naming convention).
+            if self._bus is not None:
+                if task_id:
+                    events_dir = self._root / "executions" / task_id / "events"
+                else:
+                    events_dir = self._root / "events"
+                self._event_persistence = EventPersistence(events_dir=events_dir)
+                self._bus.subscribe("*", self._event_persistence.append)
+            else:
+                self._event_persistence = None
         else:
             # Legacy file mode — existing behavior unchanged.
             self._persistence = StatePersistence(self._root, task_id=task_id)
@@ -311,7 +330,7 @@ class ExecutionEngine:
         self._log_telemetry_event(TelemetryEvent(
             timestamp=_utcnow(),
             agent_name="engine",
-            event_type="execution_started",
+            event_type="execution.started",
             details=f"task_id={plan.task_id} risk={plan.risk_level}",
         ))
 
@@ -534,7 +553,7 @@ class ExecutionEngine:
 
         # Log telemetry event for this step.
         tel_event_type = (
-            "step_completed" if status == "complete" else "step_failed"
+            "step.completed" if status == "complete" else "step.failed"
         )
         duration_ms = int(duration_seconds * 1000)
         file_path = files_changed[0] if files_changed else ""
@@ -615,7 +634,7 @@ class ExecutionEngine:
         self._log_telemetry_event(TelemetryEvent(
             timestamp=_utcnow(),
             agent_name="engine",
-            event_type="gate_passed" if passed else "gate_failed",
+            event_type="gate.passed" if passed else "gate.failed",
             details=f"phase_id={phase_id} gate_type={gate_type}",
         ))
 
@@ -661,8 +680,13 @@ class ExecutionEngine:
         self._save_execution(state)
 
         # Finalise trace.
+        # In CLI mode each call creates a fresh engine instance, so self._trace
+        # is None.  Reconstruct a trace from the persisted ExecutionState so
+        # that baton trace always returns data after baton execute complete.
         trace_path: Path | None = None
         finished_trace = None
+        if self._trace is None:
+            self._trace = self._reconstruct_trace_from_state(state)
         if self._trace is not None:
             finished_trace = self._trace  # keep reference before complete_trace mutates it
             trace_path = self._tracer.complete_trace(finished_trace, outcome="SHIP")
@@ -715,7 +739,7 @@ class ExecutionEngine:
         self._log_telemetry_event(TelemetryEvent(
             timestamp=_utcnow(),
             agent_name="engine",
-            event_type="execution_completed",
+            event_type="execution.completed",
             duration_ms=int(elapsed * 1000),
             details=(
                 f"task_id={state.task_id} steps={steps_done}"
@@ -1069,6 +1093,82 @@ class ExecutionEngine:
         """Load state; routes to storage backend or legacy file."""
         return self._load_execution()
 
+    def _reconstruct_trace_from_state(self, state: ExecutionState) -> TaskTrace:
+        """Reconstruct an in-memory :class:`TaskTrace` from persisted state.
+
+        Called by :meth:`complete` when ``self._trace`` is ``None`` — the
+        typical situation when ``baton execute complete`` is invoked as a
+        separate CLI call that creates a fresh engine instance.
+
+        The reconstructed trace contains one event per step result and one
+        event per gate result, ordered by their ``completed_at`` timestamps.
+        This gives ``baton trace`` useful data even though the in-memory
+        trace was never populated during this process lifetime.
+        """
+        trace = TaskTrace(
+            task_id=state.task_id,
+            plan_snapshot=state.plan.to_dict(),
+            events=[],
+            started_at=state.started_at or _utcnow(),
+            completed_at=None,
+            outcome=None,
+        )
+
+        # Build a timestamp → phase/step index look-up from step results.
+        for result in state.step_results:
+            if result.status not in ("complete", "failed"):
+                # Skip dispatched/interrupted — they have no final outcome yet.
+                continue
+            phase_idx, step_idx = self._locate_step(state, result.step_id)
+            event_type = (
+                "agent_complete" if result.status == "complete" else "agent_failed"
+            )
+            trace.events.append(TraceEvent(
+                timestamp=result.completed_at or _utcnow(),
+                event_type=event_type,
+                agent_name=result.agent_name,
+                phase=phase_idx + 1,
+                step=step_idx + 1,
+                details={
+                    "step_id": result.step_id,
+                    "outcome": result.outcome,
+                    "commit_hash": result.commit_hash,
+                    "files_changed": result.files_changed,
+                    "error": result.error,
+                },
+                duration_seconds=(
+                    result.duration_seconds if result.duration_seconds else None
+                ),
+            ))
+
+        # Append gate result events.
+        for gate in state.gate_results:
+            phase_obj = state.plan.phases[gate.phase_id] if (
+                0 <= gate.phase_id < len(state.plan.phases)
+            ) else None
+            gate_type = (
+                phase_obj.gate.gate_type
+                if (phase_obj and phase_obj.gate)
+                else "unknown"
+            )
+            trace.events.append(TraceEvent(
+                timestamp=gate.checked_at or _utcnow(),
+                event_type="gate_result",
+                agent_name=None,
+                phase=gate.phase_id + 1,
+                step=0,
+                details={
+                    "gate_type": gate_type,
+                    "result": "PASS" if gate.passed else "FAIL",
+                    "output": gate.output,
+                },
+            ))
+
+        # Sort events by timestamp so the timeline is chronological.
+        trace.events.sort(key=lambda e: e.timestamp)
+
+        return trace
+
     def _build_usage_record(self, state: ExecutionState) -> TaskUsageRecord:
         """Convert *state* into a :class:`TaskUsageRecord` for the usage logger."""
         # Aggregate per-agent metrics from step results.
@@ -1090,7 +1190,13 @@ class ExecutionEngine:
                 )
             rec = agent_map[name]
             rec.steps += 1
-            rec.estimated_tokens += result.estimated_tokens
+            # Use the caller-supplied token count when available; fall back to a
+            # heuristic derived from the plan step's task description length.
+            # 1 token ≈ 4 characters (consistent with ContextProfiler / KnowledgeRegistry).
+            token_count = result.estimated_tokens
+            if token_count == 0:
+                token_count = _estimate_tokens_for_step(state.plan, result.step_id)
+            rec.estimated_tokens += token_count
             rec.duration_seconds += result.duration_seconds
             rec.retries += result.retries
 
@@ -1967,6 +2073,33 @@ def _model_for_step(plan: MachinePlan, step_id: str) -> str:
             if step.step_id == step_id:
                 return step.model
     return "sonnet"
+
+
+# Chars-per-token constant (1 token ≈ 4 chars) used throughout the codebase.
+_CHARS_PER_TOKEN = 4
+
+
+def _estimate_tokens_for_step(plan: MachinePlan, step_id: str) -> int:
+    """Estimate the token cost for *step_id* from its plan step content.
+
+    Uses the task description, deliverables, and shared context as a proxy for
+    the delegation prompt that was actually sent to the agent.  This heuristic
+    is intentionally conservative — real prompt tokens will be higher because
+    the dispatcher injects additional boilerplate and handoff context — but it
+    is far more useful than leaving ``estimated_tokens`` at 0.
+
+    Returns 0 if *step_id* is not found in the plan.
+    """
+    for phase in plan.phases:
+        for step in phase.steps:
+            if step.step_id == step_id:
+                content = step.task_description
+                if plan.shared_context:
+                    content += plan.shared_context
+                for deliverable in step.deliverables:
+                    content += deliverable
+                return max(1, len(content) // _CHARS_PER_TOKEN)
+    return 0
 
 
 def _agents_in_phase(plan: MachinePlan, phase_id: int) -> list[str]:

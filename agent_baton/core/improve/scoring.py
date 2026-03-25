@@ -3,9 +3,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from agent_baton.core.observe.usage import UsageLogger
 from agent_baton.core.observe.retrospective import RetrospectiveEngine
+
+if TYPE_CHECKING:
+    from agent_baton.core.storage.protocol import StorageBackend
 
 
 @dataclass
@@ -60,15 +64,25 @@ class AgentScorecard:
 
 
 class PerformanceScorer:
-    """Compute per-agent scorecards from usage logs and retrospective data."""
+    """Compute per-agent scorecards from usage logs and retrospective data.
+
+    When *storage* is provided (a :class:`StorageBackend`), retrospective data
+    is read from the storage backend rather than the filesystem.  This ensures
+    ``baton scores`` returns current data in SQLite-mode projects where retros
+    are written only to the database and not to the legacy filesystem path.
+
+    Fall-back order: storage backend → filesystem (``retro_engine``).
+    """
 
     def __init__(
         self,
         usage_logger: UsageLogger | None = None,
         retro_engine: RetrospectiveEngine | None = None,
+        storage: StorageBackend | None = None,
     ) -> None:
         self._usage = usage_logger or UsageLogger()
         self._retro = retro_engine or RetrospectiveEngine()
+        self._storage = storage
 
     def score_agent(self, agent_name: str) -> AgentScorecard:
         """Compute a scorecard for a single agent."""
@@ -92,35 +106,70 @@ class PerformanceScorer:
         first_pass_rate = zero_retry_uses / times_used if times_used > 0 else 0.0
         avg_tokens = total_tokens // times_used if times_used > 0 else 0
 
-        # Qualitative: scan retrospective files for agent mentions
+        # Qualitative: scan retrospectives for agent mentions.
+        # When a storage backend is configured, load retros from it so
+        # SQLite-mode projects return current data (retros in that mode are
+        # written only to the DB, not to the legacy filesystem path).
         positive = 0
         negative = 0
         gaps_cited = 0
-        for retro_path in self._retro.list_retrospectives():
+        if self._storage is not None:
             try:
-                content = retro_path.read_text(encoding="utf-8")
-            except OSError:
-                continue
-            in_worked = False
-            in_didnt = False
-            in_gaps = False
-            for line in content.splitlines():
-                if line.startswith("## What Worked"):
-                    in_worked, in_didnt, in_gaps = True, False, False
-                elif line.startswith("## What Didn't"):
-                    in_worked, in_didnt, in_gaps = False, True, False
-                elif line.startswith("## Knowledge Gaps"):
-                    in_worked, in_didnt, in_gaps = False, False, True
-                elif line.startswith("## "):
-                    in_worked, in_didnt, in_gaps = False, False, False
-
-                if agent_name in line:
-                    if in_worked:
-                        positive += 1
-                    elif in_didnt:
-                        negative += 1
-                    elif in_gaps:
-                        gaps_cited += 1
+                task_ids = self._storage.list_retrospective_ids(limit=200)
+            except Exception:
+                task_ids = []
+            for task_id in task_ids:
+                try:
+                    retro = self._storage.load_retrospective(task_id)
+                except Exception:
+                    continue
+                if retro is None:
+                    continue
+                content = retro.to_markdown()
+                in_worked = False
+                in_didnt = False
+                in_gaps = False
+                for line in content.splitlines():
+                    if line.startswith("## What Worked"):
+                        in_worked, in_didnt, in_gaps = True, False, False
+                    elif line.startswith("## What Didn't"):
+                        in_worked, in_didnt, in_gaps = False, True, False
+                    elif line.startswith("## Knowledge Gaps"):
+                        in_worked, in_didnt, in_gaps = False, False, True
+                    elif line.startswith("## "):
+                        in_worked, in_didnt, in_gaps = False, False, False
+                    if agent_name in line:
+                        if in_worked:
+                            positive += 1
+                        elif in_didnt:
+                            negative += 1
+                        elif in_gaps:
+                            gaps_cited += 1
+        else:
+            for retro_path in self._retro.list_retrospectives():
+                try:
+                    content = retro_path.read_text(encoding="utf-8")
+                except OSError:
+                    continue
+                in_worked = False
+                in_didnt = False
+                in_gaps = False
+                for line in content.splitlines():
+                    if line.startswith("## What Worked"):
+                        in_worked, in_didnt, in_gaps = True, False, False
+                    elif line.startswith("## What Didn't"):
+                        in_worked, in_didnt, in_gaps = False, True, False
+                    elif line.startswith("## Knowledge Gaps"):
+                        in_worked, in_didnt, in_gaps = False, False, True
+                    elif line.startswith("## "):
+                        in_worked, in_didnt, in_gaps = False, False, False
+                    if agent_name in line:
+                        if in_worked:
+                            positive += 1
+                        elif in_didnt:
+                            negative += 1
+                        elif in_gaps:
+                            gaps_cited += 1
 
         return AgentScorecard(
             agent_name=agent_name,

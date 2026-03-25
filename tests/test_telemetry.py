@@ -217,3 +217,129 @@ class TestClear:
         events = tel.read_events()
         assert len(events) == 1
         assert events[0].agent_name == "after"
+
+
+# ---------------------------------------------------------------------------
+# FIX-4: FileStorage.log_telemetry must not pass kwargs to log_event()
+# ---------------------------------------------------------------------------
+
+class TestFileStorageLogTelemetry:
+    """Verify that FileStorage.log_telemetry writes events correctly.
+
+    The historical bug was calling t.log_event(**event) where event is a dict,
+    but AgentTelemetry.log_event() expects a positional TelemetryEvent object,
+    not keyword arguments.  This caused:
+        TypeError: log_event() got an unexpected keyword argument 'timestamp'
+    and silently dropped every telemetry event written through FileStorage.
+    """
+
+    def test_log_telemetry_writes_event_to_disk(self, tmp_path: Path) -> None:
+        from agent_baton.core.storage.file_backend import FileStorage
+        store = FileStorage(tmp_path)
+        event_dict = {
+            "timestamp": "2026-03-24T10:00:00",
+            "agent_name": "backend-engineer",
+            "event_type": "step_completed",
+            "tool_name": "",
+            "file_path": "src/app.py",
+            "duration_ms": 500,
+            "details": "step_id=1.1 outcome=done",
+        }
+        store.log_telemetry(event_dict)
+        tel = AgentTelemetry(log_path=tmp_path / "telemetry.jsonl")
+        events = tel.read_events()
+        assert len(events) == 1
+
+    def test_log_telemetry_preserves_agent_name(self, tmp_path: Path) -> None:
+        from agent_baton.core.storage.file_backend import FileStorage
+        store = FileStorage(tmp_path)
+        store.log_telemetry({
+            "timestamp": "2026-03-24T10:00:00",
+            "agent_name": "test-engineer",
+            "event_type": "gate_passed",
+            "tool_name": "",
+            "file_path": "",
+            "duration_ms": 0,
+            "details": "gate_type=test",
+        })
+        tel = AgentTelemetry(log_path=tmp_path / "telemetry.jsonl")
+        events = tel.read_events()
+        assert events[0].agent_name == "test-engineer"
+
+    def test_log_telemetry_preserves_event_type(self, tmp_path: Path) -> None:
+        from agent_baton.core.storage.file_backend import FileStorage
+        store = FileStorage(tmp_path)
+        store.log_telemetry({
+            "timestamp": "2026-03-24T10:00:00",
+            "agent_name": "engine",
+            "event_type": "execution_completed",
+            "tool_name": "",
+            "file_path": "",
+            "duration_ms": 12000,
+            "details": "task_id=my-task",
+        })
+        tel = AgentTelemetry(log_path=tmp_path / "telemetry.jsonl")
+        events = tel.read_events()
+        assert events[0].event_type == "execution_completed"
+
+    def test_log_telemetry_multiple_events_all_written(
+        self, tmp_path: Path
+    ) -> None:
+        from agent_baton.core.storage.file_backend import FileStorage
+        store = FileStorage(tmp_path)
+        base = {
+            "timestamp": "2026-03-24T10:00:00",
+            "agent_name": "engine",
+            "tool_name": "",
+            "file_path": "",
+            "duration_ms": 0,
+            "details": "",
+        }
+        for et in ("execution_started", "step_completed", "execution_completed"):
+            store.log_telemetry({**base, "event_type": et})
+        tel = AgentTelemetry(log_path=tmp_path / "telemetry.jsonl")
+        events = tel.read_events()
+        assert len(events) == 3
+        assert [e.event_type for e in events] == [
+            "execution_started",
+            "step_completed",
+            "execution_completed",
+        ]
+
+    def test_log_telemetry_does_not_raise_type_error(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression: the old t.log_event(**event) raised TypeError."""
+        from agent_baton.core.storage.file_backend import FileStorage
+        store = FileStorage(tmp_path)
+        # Must not raise TypeError: log_event() got an unexpected keyword argument
+        store.log_telemetry({
+            "timestamp": "2026-03-24T10:00:00",
+            "agent_name": "engine",
+            "event_type": "step_completed",
+            "tool_name": "",
+            "file_path": "",
+            "duration_ms": 0,
+            "details": "",
+        })  # passes if no exception raised
+
+    def test_log_telemetry_event_is_readable_as_telemetry_event(
+        self, tmp_path: Path
+    ) -> None:
+        from agent_baton.core.storage.file_backend import FileStorage
+        store = FileStorage(tmp_path)
+        store.log_telemetry({
+            "timestamp": "2026-03-24T12:00:00",
+            "agent_name": "architect",
+            "event_type": "tool_call",
+            "tool_name": "Read",
+            "file_path": "docs/design.md",
+            "duration_ms": 25,
+            "details": "reading design doc",
+        })
+        tel = AgentTelemetry(log_path=tmp_path / "telemetry.jsonl")
+        event = tel.read_events()[0]
+        assert isinstance(event, TelemetryEvent)
+        assert event.tool_name == "Read"
+        assert event.file_path == "docs/design.md"
+        assert event.duration_ms == 25

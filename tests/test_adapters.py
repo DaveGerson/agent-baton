@@ -781,10 +781,10 @@ class TestSourceCmdIntegration:
         assert len(mappings) == 1
         assert mappings[0]["project_id"] == "proj-alpha"
 
-    def test_sync_no_adapter(self, tmp_path, monkeypatch, capsys):
-        """_sync() with unsupported source type prints informative message."""
+    def test_add_rejects_unimplemented_types(self, tmp_path, monkeypatch, capsys):
+        """_add() rejects jira/github/linear with a clear error and implementation hint."""
         import argparse
-        from agent_baton.cli.commands.source_cmd import _add, _sync
+        from agent_baton.cli.commands.source_cmd import _add
 
         central_db = tmp_path / "central.db"
         monkeypatch.setattr(
@@ -792,23 +792,48 @@ class TestSourceCmdIntegration:
             central_db,
         )
 
-        # Register a 'jira' source (no adapter implemented yet)
-        add_args = argparse.Namespace(
-            source_type="jira",
-            name="Jira",
-            org="jiraorg",
-            source_project="jiraproj",
-            pat_env="JIRA_TOKEN",
-            url="",
-        )
-        _add(add_args)
+        for source_type in ("jira", "github", "linear"):
+            add_args = argparse.Namespace(
+                source_type=source_type,
+                name="Test",
+                org="org",
+                source_project="proj",
+                pat_env="TOKEN",
+                url="",
+            )
+            with pytest.raises(SystemExit) as exc_info:
+                _add(add_args)
+            assert exc_info.value.code == 1
 
+            out = capsys.readouterr().out
+            assert "no adapter implemented" in out
+            assert source_type in out
+
+    def test_sync_no_adapter(self, tmp_path, monkeypatch, capsys):
+        """_sync() with a registered source whose type has no adapter prints informative message."""
+        import argparse
+        import json
+        from agent_baton.cli.commands.source_cmd import _sync
+
+        central_db = tmp_path / "central.db"
+        monkeypatch.setattr(
+            "agent_baton.core.storage.central._CENTRAL_DB_DEFAULT",
+            central_db,
+        )
+
+        # Insert a 'jira' source row directly (bypassing _add validation) to
+        # exercise the sync code path when no adapter is registered.
         store = CentralStore(central_db)
-        source_row = store.query("SELECT source_id FROM external_sources")[0]
+        store.execute(
+            "INSERT INTO external_sources "
+            "(source_id, source_type, display_name, config, enabled) "
+            "VALUES (?, ?, ?, ?, 1)",
+            ("jira-org-proj", "jira", "Jira", json.dumps({})),
+        )
         store.close()
 
         sync_args = argparse.Namespace(
-            source_id=source_row["source_id"],
+            source_id="jira-org-proj",
             sync_all=False,
         )
 

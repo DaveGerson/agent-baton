@@ -1250,3 +1250,516 @@ class TestParallelDispatch:
                 engine.record_step_result(action.step_id, action.agent_name)
             action = engine.next_action()
         assert dispatched == ["1.1", "1.2", "1.3"]
+
+
+# ---------------------------------------------------------------------------
+# FIX-1: EventPersistence wired as bus subscriber in storage mode
+# ---------------------------------------------------------------------------
+
+class TestEventPersistenceWiredInStorageMode:
+    """EventPersistence must be registered as an EventBus subscriber even when
+    a storage backend is active.  Before FIX-1, storage mode unconditionally
+    set _event_persistence = None, so domain events were never written to disk.
+    """
+
+    def test_event_persistence_subscribed_when_bus_and_storage_provided(
+        self, tmp_path: Path
+    ) -> None:
+        from agent_baton.core.events.bus import EventBus
+        from agent_baton.core.events.persistence import EventPersistence
+        from unittest.mock import MagicMock
+
+        bus = EventBus()
+        mock_storage = MagicMock()
+        mock_storage.load_execution.return_value = None
+        engine = ExecutionEngine(
+            team_context_root=tmp_path,
+            bus=bus,
+            task_id="fix1-task",
+            storage=mock_storage,
+        )
+        # _event_persistence must be an EventPersistence instance, not None
+        assert engine._event_persistence is not None
+        assert isinstance(engine._event_persistence, EventPersistence)
+
+    def test_event_persistence_is_none_when_no_bus_even_with_storage(
+        self, tmp_path: Path
+    ) -> None:
+        """When no bus is provided, there is nothing to subscribe to."""
+        from unittest.mock import MagicMock
+
+        mock_storage = MagicMock()
+        mock_storage.load_execution.return_value = None
+        engine = ExecutionEngine(
+            team_context_root=tmp_path,
+            task_id="fix1-task-no-bus",
+            storage=mock_storage,
+        )
+        assert engine._event_persistence is None
+
+    def test_events_written_to_jsonl_in_storage_mode(
+        self, tmp_path: Path
+    ) -> None:
+        """Domain events fired during start() are persisted to JSONL when a bus
+        is provided alongside a storage backend."""
+        from agent_baton.core.events.bus import EventBus
+        from agent_baton.core.events.persistence import EventPersistence
+        from unittest.mock import MagicMock
+
+        bus = EventBus()
+        mock_storage = MagicMock()
+        mock_storage.load_execution.return_value = None
+        mock_storage.save_execution.return_value = None
+        mock_storage.set_active_task.return_value = None
+
+        task_id = "fix1-write-test"
+        engine = ExecutionEngine(
+            team_context_root=tmp_path,
+            bus=bus,
+            task_id=task_id,
+            storage=mock_storage,
+        )
+        plan = _plan(task_id=task_id)
+        engine.start(plan)
+
+        # Events directory should have been created and contain at least
+        # task.started and phase.started events.
+        ep: EventPersistence = engine._event_persistence  # type: ignore[assignment]
+        events = ep.read(task_id)
+        assert len(events) >= 2
+        topics = [e.topic for e in events]
+        assert "task.started" in topics
+        assert "phase.started" in topics
+
+    def test_events_namespaced_under_task_dir_in_storage_mode(
+        self, tmp_path: Path
+    ) -> None:
+        """Events directory path is namespaced under executions/<task_id>/events."""
+        from agent_baton.core.events.bus import EventBus
+        from unittest.mock import MagicMock
+
+        bus = EventBus()
+        mock_storage = MagicMock()
+        mock_storage.load_execution.return_value = None
+        task_id = "fix1-namespaced"
+        engine = ExecutionEngine(
+            team_context_root=tmp_path,
+            bus=bus,
+            task_id=task_id,
+            storage=mock_storage,
+        )
+        expected_dir = tmp_path.resolve() / "executions" / task_id / "events"
+        assert engine._event_persistence.events_dir == expected_dir
+
+    def test_events_written_to_jsonl_in_file_mode_unchanged(
+        self, tmp_path: Path
+    ) -> None:
+        """FIX-1 must not break the legacy file-mode wiring — events still
+        persist when storage is None and a bus is provided."""
+        from agent_baton.core.events.bus import EventBus
+        from agent_baton.core.events.persistence import EventPersistence
+
+        bus = EventBus()
+        task_id = "fix1-legacy-mode"
+        engine = ExecutionEngine(
+            team_context_root=tmp_path,
+            bus=bus,
+            task_id=task_id,
+        )
+        plan = _plan(task_id=task_id)
+        engine.start(plan)
+
+        ep: EventPersistence = engine._event_persistence  # type: ignore[assignment]
+        events = ep.read(task_id)
+        assert len(events) >= 2
+        assert any(e.topic == "task.started" for e in events)
+
+
+# ---------------------------------------------------------------------------
+# FIX-2: KnowledgeResolver constructor parameter on ExecutionEngine
+# ---------------------------------------------------------------------------
+
+class TestKnowledgeResolverConstructorInjection:
+    """KnowledgeResolver must be injectable via the ExecutionEngine constructor
+    so the runtime knowledge gap auto-resolve path fires in production.
+    Before FIX-2, _knowledge_resolver was never set in __init__ — only tests
+    that assigned it directly after construction could exercise the auto-resolve
+    branch.
+    """
+
+    def test_knowledge_resolver_defaults_to_none(self, tmp_path: Path) -> None:
+        engine = _engine(tmp_path)
+        assert engine._knowledge_resolver is None
+
+    def test_knowledge_resolver_set_via_constructor(self, tmp_path: Path) -> None:
+        from unittest.mock import MagicMock
+
+        mock_resolver = MagicMock()
+        engine = ExecutionEngine(
+            team_context_root=tmp_path,
+            knowledge_resolver=mock_resolver,
+        )
+        assert engine._knowledge_resolver is mock_resolver
+
+    def test_knowledge_resolver_constructor_injects_into_gap_handling(
+        self, tmp_path: Path
+    ) -> None:
+        """When a KnowledgeResolver that returns attachments is injected via
+        constructor, a KNOWLEDGE_GAP signal auto-resolves instead of queuing."""
+        from unittest.mock import MagicMock
+        from agent_baton.models.knowledge import KnowledgeAttachment
+
+        mock_attachment = KnowledgeAttachment(
+            source="planner-matched:tag",
+            pack_name="test-pack",
+            document_name="api-schema.md",
+            path="/docs/api-schema.md",
+            delivery="reference",
+        )
+        mock_resolver = MagicMock()
+        mock_resolver.resolve.return_value = [mock_attachment]
+
+        engine = ExecutionEngine(
+            team_context_root=tmp_path,
+            knowledge_resolver=mock_resolver,
+        )
+        plan = _plan(
+            risk_level="LOW",
+            phases=[_phase(phase_id=1, steps=[_step("1.1")])],
+        )
+        engine.start(plan)
+
+        outcome_with_gap = (
+            "Work in progress.\n"
+            "KNOWLEDGE_GAP: Need the API schema for the orders endpoint\n"
+            "CONFIDENCE: low\n"
+            "TYPE: factual\n"
+        )
+        engine.record_step_result(
+            step_id="1.1",
+            agent_name="backend-engineer",
+            status="complete",
+            outcome=outcome_with_gap,
+        )
+
+        state = engine._load_state()
+        assert state is not None
+        # Auto-resolved: gap is NOT queued for a human gate
+        assert len(state.pending_gaps) == 0
+        # A ResolvedDecision was recorded
+        assert len(state.resolved_decisions) == 1
+        decision = state.resolved_decisions[0]
+        assert "orders endpoint" in decision.gap_description
+        assert "test-pack/api-schema.md" in decision.resolution
+
+    def test_no_resolver_falls_back_to_best_effort_low_risk(
+        self, tmp_path: Path
+    ) -> None:
+        """Without a resolver, LOW risk factual gaps still resolve to best-effort
+        (gap not queued, no ResolvedDecision)."""
+        engine = ExecutionEngine(team_context_root=tmp_path)
+        plan = _plan(
+            risk_level="LOW",
+            phases=[_phase(phase_id=1, steps=[_step("1.1")])],
+        )
+        engine.start(plan)
+
+        outcome_with_gap = (
+            "KNOWLEDGE_GAP: Preferred date format for log timestamps\n"
+            "CONFIDENCE: low\n"
+            "TYPE: factual\n"
+        )
+        engine.record_step_result(
+            step_id="1.1",
+            agent_name="backend-engineer",
+            status="complete",
+            outcome=outcome_with_gap,
+        )
+
+        state = engine._load_state()
+        assert state is not None
+        assert len(state.pending_gaps) == 0
+        assert len(state.resolved_decisions) == 0
+
+    def test_no_resolver_queues_gap_at_high_risk(self, tmp_path: Path) -> None:
+        """Without a resolver, HIGH risk factual gaps queue for human review."""
+        engine = ExecutionEngine(team_context_root=tmp_path)
+        plan = _plan(
+            risk_level="HIGH",
+            phases=[_phase(phase_id=1, steps=[_step("1.1")])],
+        )
+        engine.start(plan)
+
+        outcome_with_gap = (
+            "KNOWLEDGE_GAP: Compliance requirement for audit trail format\n"
+            "CONFIDENCE: low\n"
+            "TYPE: factual\n"
+        )
+        engine.record_step_result(
+            step_id="1.1",
+            agent_name="backend-engineer",
+            status="complete",
+            outcome=outcome_with_gap,
+        )
+
+        state = engine._load_state()
+        assert state is not None
+        assert len(state.pending_gaps) == 1
+
+
+# ---------------------------------------------------------------------------
+# FIX-3: complete() writes a trace even when self._trace is None (CLI mode)
+# ---------------------------------------------------------------------------
+
+def _drive_plan_through_fresh_engines(
+    tmp_path: Path,
+    plan: MachinePlan,
+) -> None:
+    """Simulate CLI mode: each baton execute call uses a fresh engine instance.
+
+    This is the real failure scenario: start(), record(), and complete()
+    all run in separate process invocations so self._trace is always None
+    except in the start() call (which never persists it to disk).
+    """
+    # baton execute start
+    engine_start = ExecutionEngine(team_context_root=tmp_path)
+    action = engine_start.start(plan)
+
+    # baton execute record (fresh engine per step)
+    phase = plan.phases[0]
+    for step in phase.steps:
+        engine_record = ExecutionEngine(team_context_root=tmp_path)
+        engine_record.record_step_result(
+            step_id=step.step_id,
+            agent_name=step.agent_name,
+            status="complete",
+            outcome="done",
+            files_changed=["src/app.py"],
+            duration_seconds=10.0,
+        )
+
+    # baton execute complete (fresh engine — self._trace is None)
+    engine_complete = ExecutionEngine(team_context_root=tmp_path)
+    engine_complete.complete()
+
+
+class TestCliModeTraceReconstruction:
+    """Verify that complete() writes a trace even when run in CLI mode.
+
+    In CLI mode each `baton execute` call creates a fresh ExecutionEngine so
+    self._trace is always None.  complete() must reconstruct the trace from
+    the persisted ExecutionState.
+    """
+
+    def test_trace_file_created_after_cli_mode_complete(
+        self, tmp_path: Path
+    ) -> None:
+        plan = _plan(task_id="cli-trace-001")
+        _drive_plan_through_fresh_engines(tmp_path, plan)
+        trace_path = tmp_path / "traces" / "cli-trace-001.json"
+        assert trace_path.exists(), "trace file must be written by complete()"
+
+    def test_trace_is_valid_json_with_correct_task_id(
+        self, tmp_path: Path
+    ) -> None:
+        import json
+        plan = _plan(task_id="cli-trace-002")
+        _drive_plan_through_fresh_engines(tmp_path, plan)
+        data = json.loads(
+            (tmp_path / "traces" / "cli-trace-002.json").read_text()
+        )
+        assert data["task_id"] == "cli-trace-002"
+
+    def test_trace_contains_step_events(self, tmp_path: Path) -> None:
+        import json
+        plan = _plan(task_id="cli-trace-003")
+        _drive_plan_through_fresh_engines(tmp_path, plan)
+        data = json.loads(
+            (tmp_path / "traces" / "cli-trace-003.json").read_text()
+        )
+        event_types = [e["event_type"] for e in data["events"]]
+        assert "agent_complete" in event_types
+
+    def test_trace_outcome_is_ship(self, tmp_path: Path) -> None:
+        import json
+        plan = _plan(task_id="cli-trace-004")
+        _drive_plan_through_fresh_engines(tmp_path, plan)
+        data = json.loads(
+            (tmp_path / "traces" / "cli-trace-004.json").read_text()
+        )
+        assert data["outcome"] == "SHIP"
+
+    def test_trace_plan_snapshot_populated(self, tmp_path: Path) -> None:
+        import json
+        plan = _plan(task_id="cli-trace-005")
+        _drive_plan_through_fresh_engines(tmp_path, plan)
+        data = json.loads(
+            (tmp_path / "traces" / "cli-trace-005.json").read_text()
+        )
+        assert data["plan_snapshot"]  # non-empty dict
+        assert data["plan_snapshot"].get("task_id") == "cli-trace-005"
+
+    def test_trace_readable_by_trace_recorder(self, tmp_path: Path) -> None:
+        from agent_baton.core.observe.trace import TraceRecorder
+        plan = _plan(task_id="cli-trace-006")
+        _drive_plan_through_fresh_engines(tmp_path, plan)
+        recorder = TraceRecorder(team_context_root=tmp_path)
+        trace = recorder.load_trace("cli-trace-006")
+        assert trace is not None
+        assert trace.task_id == "cli-trace-006"
+
+    def test_trace_get_last_trace_returns_reconstructed(
+        self, tmp_path: Path
+    ) -> None:
+        from agent_baton.core.observe.trace import TraceRecorder
+        plan = _plan(task_id="cli-trace-007")
+        _drive_plan_through_fresh_engines(tmp_path, plan)
+        recorder = TraceRecorder(team_context_root=tmp_path)
+        last = recorder.get_last_trace()
+        assert last is not None
+        assert last.task_id == "cli-trace-007"
+
+    def test_single_engine_trace_still_written(self, tmp_path: Path) -> None:
+        """Regression: single-instance path (daemon mode) must still work."""
+        import json
+        plan = _plan(task_id="single-engine-trace")
+        engine = ExecutionEngine(team_context_root=tmp_path)
+        action = engine.start(plan)
+        while action.action_type not in (ActionType.COMPLETE, ActionType.FAILED):
+            if action.action_type == ActionType.DISPATCH:
+                engine.record_step_result(
+                    action.step_id, action.agent_name, status="complete"
+                )
+            action = engine.next_action()
+        engine.complete()
+        data = json.loads(
+            (tmp_path / "traces" / "single-engine-trace.json").read_text()
+        )
+        assert data["task_id"] == "single-engine-trace"
+        assert data["outcome"] == "SHIP"
+
+    def test_gate_results_appear_in_reconstructed_trace(
+        self, tmp_path: Path
+    ) -> None:
+        import json
+        plan = _plan(
+            task_id="cli-trace-gate",
+            phases=[_phase(phase_id=0, gate=_gate())],
+        )
+        # start
+        engine_start = ExecutionEngine(team_context_root=tmp_path)
+        action = engine_start.start(plan)
+        # record step
+        engine_record = ExecutionEngine(team_context_root=tmp_path)
+        engine_record.record_step_result("1.1", "backend-engineer", status="complete")
+        # record gate
+        engine_gate = ExecutionEngine(team_context_root=tmp_path)
+        engine_gate.record_gate_result(phase_id=0, passed=True, output="ok")
+        # complete
+        engine_complete = ExecutionEngine(team_context_root=tmp_path)
+        engine_complete.complete()
+
+        data = json.loads(
+            (tmp_path / "traces" / "cli-trace-gate.json").read_text()
+        )
+        event_types = [e["event_type"] for e in data["events"]]
+        assert "gate_result" in event_types
+
+
+# ---------------------------------------------------------------------------
+# FIX-5: estimated_tokens population in usage records
+# ---------------------------------------------------------------------------
+
+class TestEstimatedTokensInUsageRecords:
+    """estimated_tokens must never be 0 in usage records after complete().
+
+    When the caller does not pass --tokens (defaults to 0), the engine must
+    auto-estimate from the plan step's task_description so BudgetTuner has
+    real data to work with.
+    """
+
+    def _run_to_complete(self, tmp_path: Path, task: str = "Build feature X") -> None:
+        """Drive a single-step plan to completion without supplying token counts."""
+        plan = _plan(
+            task_id="fix5-tokens",
+            phases=[_phase(steps=[_step(task=task)])],
+        )
+        engine = _engine(tmp_path)
+        engine.start(plan)
+        # Note: no estimated_tokens argument — defaults to 0
+        engine.record_step_result(
+            step_id="1.1",
+            agent_name="backend-engineer",
+            status="complete",
+            outcome="done",
+        )
+        engine.next_action()
+        engine.complete()
+
+    def test_usage_record_estimated_tokens_nonzero(self, tmp_path: Path) -> None:
+        """estimated_tokens in the logged usage record must be > 0."""
+        self._run_to_complete(tmp_path)
+        from agent_baton.core.observe.usage import UsageLogger
+        records = UsageLogger(log_path=tmp_path / "usage-log.jsonl").read_all()
+        assert records, "Expected at least one usage record"
+        total_tokens = sum(
+            agent.estimated_tokens
+            for rec in records
+            for agent in rec.agents_used
+        )
+        assert total_tokens > 0, "estimated_tokens must be non-zero after execution"
+
+    def test_longer_task_description_yields_more_tokens(self, tmp_path: Path) -> None:
+        """A longer task description should produce a higher token estimate."""
+        short_dir = tmp_path / "short"
+        long_dir = tmp_path / "long"
+        short_dir.mkdir()
+        long_dir.mkdir()
+
+        self._run_to_complete(short_dir, task="Fix a bug")
+        self._run_to_complete(
+            long_dir,
+            task=(
+                "Implement a comprehensive new feature with multiple components, "
+                "detailed documentation, and full test coverage across all layers "
+                "of the application stack including unit tests, integration tests, "
+                "and end-to-end tests using the full test suite."
+            ),
+        )
+
+        from agent_baton.core.observe.usage import UsageLogger
+        short_records = UsageLogger(log_path=short_dir / "usage-log.jsonl").read_all()
+        long_records = UsageLogger(log_path=long_dir / "usage-log.jsonl").read_all()
+
+        short_tokens = sum(
+            a.estimated_tokens for r in short_records for a in r.agents_used
+        )
+        long_tokens = sum(
+            a.estimated_tokens for r in long_records for a in r.agents_used
+        )
+        assert long_tokens > short_tokens, (
+            f"Longer description should yield more tokens: {long_tokens} vs {short_tokens}"
+        )
+
+    def test_explicit_tokens_take_precedence_over_heuristic(self, tmp_path: Path) -> None:
+        """When the caller passes estimated_tokens, it is used as-is (no heuristic)."""
+        plan = _plan(
+            task_id="fix5-explicit",
+            phases=[_phase(steps=[_step(task="short task")])],
+        )
+        engine = _engine(tmp_path)
+        engine.start(plan)
+        engine.record_step_result(
+            step_id="1.1",
+            agent_name="backend-engineer",
+            status="complete",
+            outcome="done",
+            estimated_tokens=99_999,  # explicit and distinctive
+        )
+        engine.next_action()
+        engine.complete()
+
+        from agent_baton.core.observe.usage import UsageLogger
+        records = UsageLogger(log_path=tmp_path / "usage-log.jsonl").read_all()
+        total = sum(a.estimated_tokens for r in records for a in r.agents_used)
+        assert total == 99_999, f"Expected explicit 99999 tokens, got {total}"

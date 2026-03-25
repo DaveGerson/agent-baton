@@ -2,14 +2,17 @@
 
 Subcommands
 -----------
-add         Register an external source (ADO, Jira, GitHub, Linear).
+add         Register an external source (ADO only — other adapters not yet implemented).
 list        List all registered external sources.
 sync        Pull work items from a source into central.db.
 remove      Remove a registered external source.
 map         Map an external item to a baton project/task.
 
-External source adapters are deferred. Sync operations print an informational
-message until an adapter is implemented for the requested source type.
+Only the ADO adapter is currently implemented. Support for Jira, GitHub, and
+Linear can be added by creating an adapter module in
+``agent_baton/core/storage/adapters/`` that satisfies the
+``ExternalSourceAdapter`` protocol and self-registers via
+``AdapterRegistry.register()``.
 """
 from __future__ import annotations
 
@@ -26,7 +29,7 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     """Register the ``source`` subcommand group."""
     p = subparsers.add_parser(
         "source",
-        help="Manage external work-item source connections (ADO, Jira, GitHub, Linear)",
+        help="Manage external work-item source connections (ADO adapter implemented)",
     )
     sub = p.add_subparsers(dest="subcommand")
 
@@ -35,7 +38,7 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     p_add.add_argument(
         "source_type",
         metavar="TYPE",
-        help="Source type: ado, jira, github, linear",
+        help="Source type: ado (jira/github/linear adapters not yet implemented)",
     )
     p_add.add_argument(
         "--name",
@@ -152,10 +155,19 @@ def _add(args: argparse.Namespace) -> None:
     """Register an external source in central.db."""
     import json
 
-    _SUPPORTED_TYPES = {"ado", "jira", "github", "linear"}
-    if args.source_type not in _SUPPORTED_TYPES:
+    _IMPLEMENTED_TYPES = {"ado"}
+    _PLANNED_TYPES = {"jira", "github", "linear"}
+    if args.source_type in _PLANNED_TYPES:
+        print(f"error: no adapter implemented for source type '{args.source_type}'")
+        print(f"implemented types: {', '.join(sorted(_IMPLEMENTED_TYPES))}")
+        print(
+            f"To add a '{args.source_type}' adapter, implement "
+            f"ExternalSourceAdapter in agent_baton/core/storage/adapters/{args.source_type}.py"
+        )
+        sys.exit(1)
+    if args.source_type not in _IMPLEMENTED_TYPES:
         print(f"error: unknown source type '{args.source_type}'")
-        print(f"supported types: {', '.join(sorted(_SUPPORTED_TYPES))}")
+        print(f"implemented types: {', '.join(sorted(_IMPLEMENTED_TYPES))}")
         sys.exit(1)
 
     # Build a stable source_id from type + org + project
@@ -230,7 +242,7 @@ def _list(args: argparse.Namespace) -> None:  # noqa: ARG001
 
     if not rows:
         print("No external sources registered.")
-        print("Add one with: baton source add ado --name NAME --org ORG --project PROJ --pat-env ENV_VAR")
+        print("Add one with: baton source add ado --name NAME --org ORG --project PROJ --pat-env ADO_PAT")
         return
 
     print(f"External Sources ({len(rows)} registered)")

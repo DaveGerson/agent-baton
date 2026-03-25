@@ -522,3 +522,131 @@ models  →  storage/  →  CLI (sync_cmd, query_cmd, source_cmd)
                      ↑
               execute.py (auto-sync hook, best-effort)
 ```
+
+---
+
+## 11. Functional Domains
+
+This section is the canonical domain taxonomy for agent-baton. Each domain
+corresponds to a traceable functional chain from a user-facing entry point
+through the subsystem path to its key contracts and outputs.
+
+### Domain 1: Plan Creation
+
+| Attribute | Value |
+|-----------|-------|
+| Entry | `baton plan "task description" [--save] [--explain] [--knowledge ...] [--knowledge-pack ...]` |
+| Subsystem path | `cli/execution/plan_cmd.py` → `IntelligentPlanner` → `AgentRouter` + `AgentRegistry` → `PatternLearner` + `BudgetTuner` → `PolicyEngine` → `KnowledgeResolver` |
+| Output | `plan.json` + `plan.md` written to `.claude/team-context/` |
+| Key contracts | `MachinePlan.to_dict()` / `from_dict()` — JSON serialization boundary. `plan.md` is human-editable before execution starts. `--knowledge` and `--knowledge-pack` flags attach knowledge at plan time (layer 1 of knowledge discovery). |
+| Notes | `PatternLearner` and `BudgetTuner` return empty results gracefully when no prior data exists. `KnowledgeResolver` is invoked at step 7.5 of the planning pipeline; skipped if `KnowledgeRegistry` is `None`. |
+
+### Domain 2: Execution Lifecycle
+
+| Attribute | Value |
+|-----------|-------|
+| Entry | `baton execute start` / `baton execute next` / `baton execute record` / `baton execute gate` / `baton execute complete` |
+| Subsystem path | `cli/execution/execute.py` → `ExecutionEngine` (state machine) → `StatePersistence` → `PromptDispatcher` → `GateRunner` → `EventBus` |
+| Output | `execution-state.json` (per-project), delegation prompts printed to stdout, gate results persisted |
+| Key contracts | `_print_action()` output format is the Claude-baton protocol (see Section 6.4). `ExecutionDriver` protocol (Section 6.1) is the interface between CLI and engine. `execution-state.json` schema is documented in `docs/invariants.md`. |
+| Notes | Each CLI call creates a fresh `ExecutionEngine` instance; state is reconstructed from `execution-state.json`. Traces and events are not wired in CLI mode (see audit report BUG-1, BUG-2). |
+
+### Domain 3: Knowledge Delivery
+
+| Attribute | Value |
+|-----------|-------|
+| Entry | `--knowledge` / `--knowledge-pack` flags on `baton plan`; `KNOWLEDGE_GAP` signal in agent output |
+| Subsystem path | `IntelligentPlanner` → `KnowledgeRegistry` → `KnowledgeResolver` → `PromptDispatcher` (injection) → `KnowledgeGap` handler → escalation matrix |
+| Output | Knowledge blocks embedded in delegation prompts; `KnowledgeGapRecord` entries in `execution_state.resolved_decisions` |
+| Key contracts | `KnowledgeAttachment` delivery decisions (inline vs. reference). Escalation matrix: gap type × risk level × intervention level (see Section 9.5). `KNOWLEDGE_GAP` / `CONFIDENCE` / `TYPE` signal format. |
+| Notes | Runtime gap auto-resolution requires `_knowledge_resolver` to be injected on `ExecutionEngine` — this is not done in the current CLI path (see audit report BUG-3). Five discovery layers at plan time (Section 9.3). |
+
+### Domain 4: Federated Sync
+
+| Attribute | Value |
+|-----------|-------|
+| Entry | `baton sync` / `baton sync --all` / auto-sync hook in `baton execute complete` |
+| Subsystem path | `cli/sync_cmd.py` → `SyncEngine` → sqlite3 (project `baton.db` → `~/.baton/central.db`) |
+| Output | Rows mirrored to `central.db` with `project_id` prepended; `sync_watermarks` updated |
+| Key contracts | One-way: project → central, never reverse. `central.db` is read-only from execution perspective. Auto-sync is best-effort (`try/except`). PMO migration fires once when `~/.baton/pmo.db` exists (Section 10.5). |
+| Notes | Five cross-project SQL views in `central.db` (Section 10.6). Watermark algorithm in Section 10.4. |
+
+### Domain 5: Improvement Loop
+
+| Attribute | Value |
+|-----------|-------|
+| Entry | `baton scores` / `baton patterns` / `baton budget` / `baton evolve` / `baton changelog` |
+| Subsystem path | `cli/improve/` → `PerformanceScorer` → `PatternLearner` → `BudgetTuner` → `PromptEvolutionEngine` → `AgentVersionControl` |
+| Output | Scored agent recommendations, pattern summaries, budget tier suggestions, evolved prompt variants |
+| Key contracts | `PerformanceScorer` reads retrospective JSON files from `.claude/team-context/retros/`. `PatternLearner` requires 5+ tasks per sequencing mode to surface patterns. `BudgetTuner` requires non-zero `estimated_tokens` in usage records. |
+| Notes | All logic is correct but recommendations are inert without upstream data (usage records have `estimated_tokens = 0`; retrospectives require SQLite-mode fix). |
+
+### Domain 6: Governance and Policy
+
+| Attribute | Value |
+|-----------|-------|
+| Entry | `baton classify` / `baton compliance` / `baton policy` / `baton validate` / `baton spec-check` / `baton detect` / `baton escalations` |
+| Subsystem path | `cli/govern/` → `DataClassifier` → `PolicyEngine` → `ComplianceReportGenerator` → `SpecValidator` → `EscalationManager` |
+| Output | Risk level classification, policy violation reports, compliance reports, escalation records |
+| Key contracts | `RiskLevel` enum (`LOW`, `MEDIUM`, `HIGH`, `CRITICAL`). Regulated domain tasks must involve `subject-matter-expert` and `auditor` agents (see `CLAUDE.md`). |
+| Notes | `PolicyEngine` and `ComplianceReportGenerator` are not wired into `baton plan` CLI path — policy enforcement is available via standalone commands only. |
+
+### Domain 7: Observability
+
+| Attribute | Value |
+|-----------|-------|
+| Entry | `baton trace` / `baton dashboard` / `baton usage` / `baton telemetry` / `baton retro` / `baton context-profile` |
+| Subsystem path | `cli/observe/` → `TraceRecorder` → `UsageLogger` → `DashboardGenerator` → `RetrospectiveEngine` → `AgentTelemetry` → `ContextProfiler` |
+| Output | Trace spans, usage reports, dashboard summaries, retrospective JSON files, telemetry event logs |
+| Key contracts | `TraceRecorder` requires a persistent engine instance (daemon path) to write spans — ephemeral CLI invocations lose trace data. `UsageLogger` reads from `.claude/team-context/usage/`. `RetrospectiveEngine` reads from `.claude/team-context/retros/`. |
+| Notes | Dashboard and usage commands work with real data from file-mode sessions. Trace writing is only active in daemon mode. |
+
+### Domain 8: Daemon and Async Execution
+
+| Attribute | Value |
+|-----------|-------|
+| Entry | `baton daemon start [--foreground] [--dry-run] [--serve]` / `baton async` |
+| Subsystem path | `cli/execution/daemon.py` → `WorkerSupervisor` → `TaskWorker` → `ClaudeCodeLauncher` (or `DryRunLauncher`) → `ExecutionDriver` protocol |
+| Output | Long-running background process managing execution queues; optionally co-starts API server (`--serve`) |
+| Key contracts | `ExecutionDriver` protocol (Section 6.1) — worker calls engine via protocol, not concrete class. `--dry-run` uses `DryRunLauncher` (safe for testing). `--serve` co-starts API server (shared entry with Domain 11). |
+| Notes | `ClaudeCodeLauncher` (real subprocess launching) has not been exercised in a live environment. `DryRunLauncher` path is verified. |
+
+### Domain 9: PMO
+
+| Attribute | Value |
+|-----------|-------|
+| Entry | `baton pmo serve` / `baton pmo status` / `baton pmo add` / `baton pmo health` |
+| Subsystem path | `cli/pmo_cmd.py` → `get_pmo_central_store()` → `_maybe_migrate_pmo` → `PmoSqliteStore` → `PMOScanner` → `PMOForge` → API routes (`routes/pmo.py`) |
+| Output | PMO board data in `central.db`; React UI served at `/pmo/`; health and signal reports |
+| Key contracts | PMO data lives in `central.db` (not a separate `pmo.db`). First-run migration from legacy `pmo.db` fires once (Section 10.5). `PmoSqliteStore` is the sole write path for PMO data. |
+| Notes | 11 of 15 API routes in `routes/pmo.py` have no HTTP-level tests. React UI (`pmo-ui/`) has no test coverage. CLI and store are production-validated. |
+
+### Domain 10: Distribution
+
+| Attribute | Value |
+|-----------|-------|
+| Entry | `baton package` / `baton publish` / `baton pull` / `baton verify-package` / `baton install` / `baton transfer` |
+| Subsystem path | `cli/distribute/` → `PackageBuilder` (`core/distribute/sharing.py`) → `RegistryClient` → `PackageVerifier` (`core/distribute/packager.py`) |
+| Output | `.tar.gz` package archive with `manifest.json`, agent definitions, references, knowledge packs |
+| Key contracts | Package format: `.tar.gz` with `manifest.json` at root. `PackageVerifier.validate_package()` returns `PackageValidationResult` with `valid`, `errors`, `warnings`, `checksums`. `baton install` target is a project directory. |
+| Notes | Full pipeline verified: package → publish → pull → verify. Produces a 194KB tarball with 42 agents in the reference build. `baton install` handler lacks dedicated tests. |
+
+### Domain 11: API Server
+
+| Attribute | Value |
+|-----------|-------|
+| Entry | `baton serve` (standalone) or `baton daemon start --serve` (combined with Domain 8) |
+| Subsystem path | `cli/serve.py` → FastAPI app (`agent_baton/api/`) → 9 route modules → backing subsystems |
+| Output | HTTP API serving execution data, agent metadata, PMO boards, SSE event streams |
+| Key contracts | 41 routes registered across 9 modules: `executions`, `plans`, `agents`, `pmo`, `events`, `usage`, `trace`, `knowledge`, `health`. Auth middleware enforces API tokens. `routes/pmo.py` (12 endpoints) and `routes/events.py` (SSE) are the least-tested modules. |
+| Notes | App creates and all 9 route modules import without error. `routes/pmo.py` and `routes/events.py` have zero HTTP-level tests. All other route modules have partial coverage. |
+
+### Domain 12: External Sources
+
+| Attribute | Value |
+|-----------|-------|
+| Entry | `baton source add ado` / `baton source list` / `baton source sync` / `baton source remove` / `baton source map` |
+| Subsystem path | `cli/source_cmd.py` → `ExternalSourceAdapter` protocol → `AdoAdapter` → `CentralStore` |
+| Output | Source registrations in `central.db.external_sources`; synced work items in `external_items`; mappings in `external_mappings` |
+| Key contracts | `ExternalSourceAdapter` protocol (`core/storage/adapters/__init__.py`): `source_type`, `connect(config)`, `fetch_items()`, `fetch_item()`. `AdapterRegistry.register(cls)` called at module import for self-registration. Only `ado` is implemented. |
+| Notes | ADO adapter verified end-to-end. Jira, GitHub, and Linear adapters are not implemented — `baton source add --type jira/github/linear` returns a clear error with implementation guidance. To add a new adapter: create `core/storage/adapters/<type>.py` implementing the `ExternalSourceAdapter` protocol and call `AdapterRegistry.register()` at module level. |

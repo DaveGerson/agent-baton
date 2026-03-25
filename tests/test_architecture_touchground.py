@@ -318,8 +318,8 @@ class TestTelemetryWired:
 
         tel = AgentTelemetry(log_path=tmp_path / "telemetry.jsonl")
         events = tel.read_events()
-        step_events = [e for e in events if e.event_type == "step_completed"]
-        assert step_events, "step_completed telemetry event must be written after record_step_result"
+        step_events = [e for e in events if e.event_type == "step.completed"]
+        assert step_events, "step.completed telemetry event must be written after record_step_result"
 
     def test_telemetry_logs_on_execution_complete(self, tmp_path: Path) -> None:
         engine = _engine(tmp_path)
@@ -330,9 +330,9 @@ class TestTelemetryWired:
         tel = AgentTelemetry(log_path=tmp_path / "telemetry.jsonl")
         events = tel.read_events()
         completion_events = [
-            e for e in events if e.event_type == "execution_completed"
+            e for e in events if e.event_type == "execution.completed"
         ]
-        assert completion_events, "execution_completed telemetry event must be written on complete()"
+        assert completion_events, "execution.completed telemetry event must be written on complete()"
 
     def test_telemetry_logs_execution_started(self, tmp_path: Path) -> None:
         engine = _engine(tmp_path)
@@ -340,8 +340,8 @@ class TestTelemetryWired:
 
         tel = AgentTelemetry(log_path=tmp_path / "telemetry.jsonl")
         events = tel.read_events()
-        start_events = [e for e in events if e.event_type == "execution_started"]
-        assert start_events, "execution_started telemetry event must be written on start()"
+        start_events = [e for e in events if e.event_type == "execution.started"]
+        assert start_events, "execution.started telemetry event must be written on start()"
 
     def test_telemetry_file_is_valid_jsonl(self, tmp_path: Path) -> None:
         """Every line in telemetry.jsonl must be valid JSON."""

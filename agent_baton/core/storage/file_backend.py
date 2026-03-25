@@ -12,7 +12,7 @@ from pathlib import Path
 from agent_baton.core.engine.persistence import StatePersistence
 from agent_baton.core.events.persistence import EventPersistence
 from agent_baton.core.observe.retrospective import RetrospectiveEngine
-from agent_baton.core.observe.telemetry import AgentTelemetry
+from agent_baton.core.observe.telemetry import AgentTelemetry, TelemetryEvent
 from agent_baton.core.observe.trace import TraceRecorder
 from agent_baton.core.observe.usage import UsageLogger
 from agent_baton.models.events import Event
@@ -138,7 +138,7 @@ class FileStorage:
 
     def read_events(self, task_id: str, from_seq: int = 0) -> list[Event]:
         ep = EventPersistence(events_dir=self._root / "events")
-        events = ep.replay(task_id=task_id)
+        events = ep.read(task_id=task_id)
         return [e for e in events if e.sequence >= from_seq]
 
     # ── Usage ──────────────────────────────────────────────────────────────
@@ -158,7 +158,7 @@ class FileStorage:
 
     def log_telemetry(self, event: dict) -> None:
         t = AgentTelemetry(log_path=self._root / "telemetry.jsonl")
-        t.log_event(**event)
+        t.log_event(TelemetryEvent.from_dict(event))
 
     def read_telemetry(self, limit: int | None = None) -> list[dict]:
         t = AgentTelemetry(log_path=self._root / "telemetry.jsonl")

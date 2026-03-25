@@ -282,3 +282,138 @@ class TestWriteReport:
         out_path = tmp_path / "reports" / "scorecards.md"
         scorer.write_report(out_path)
         assert out_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# FIX-7: PerformanceScorer reads retros from SQLite when storage is provided
+# ---------------------------------------------------------------------------
+
+class TestPerformanceScorerSQLiteStorage:
+    """When a storage backend is passed, retros come from it, not the filesystem.
+
+    This exercises the path that was broken in SQLite-mode projects where
+    retrospectives are only written to the DB.
+    """
+
+    def _make_retro(
+        self,
+        task_id: str,
+        agent_name: str,
+        *,
+        worked: bool = False,
+        didnt: bool = False,
+        gap: bool = False,
+    ) -> Retrospective:
+        return Retrospective(
+            task_id=task_id,
+            task_name="Test task",
+            timestamp="2026-03-01T00:00:00",
+            what_worked=(
+                [AgentOutcome(name=agent_name, worked_well="Nailed it")]
+                if worked
+                else []
+            ),
+            what_didnt=(
+                [AgentOutcome(name=agent_name, issues="Stumbled")]
+                if didnt
+                else []
+            ),
+            knowledge_gaps=(
+                [KnowledgeGap(description=f"{agent_name} lacked context")]
+                if gap
+                else []
+            ),
+        )
+
+    def _storage_with_retros(self, retros: list[Retrospective]):
+        """Build a minimal mock storage backend that serves the given retros."""
+        from unittest.mock import MagicMock
+        storage = MagicMock()
+        task_ids = [r.task_id for r in retros]
+        storage.list_retrospective_ids.return_value = task_ids
+        retro_map = {r.task_id: r for r in retros}
+        storage.load_retrospective.side_effect = lambda tid: retro_map.get(tid)
+        return storage
+
+    def test_positive_mentions_read_from_storage_backend(self, tmp_path: Path) -> None:
+        log_file = tmp_path / "usage.jsonl"
+        logger = UsageLogger(log_file)
+        logger.log(_task("t1", [_agent("arch")]))
+
+        retro = self._make_retro("t1", "arch", worked=True)
+        storage = self._storage_with_retros([retro])
+        scorer = PerformanceScorer(usage_logger=logger, storage=storage)
+
+        sc = scorer.score_agent("arch")
+        assert sc.positive_mentions >= 1
+
+    def test_negative_mentions_read_from_storage_backend(self, tmp_path: Path) -> None:
+        log_file = tmp_path / "usage.jsonl"
+        logger = UsageLogger(log_file)
+        logger.log(_task("t1", [_agent("arch")]))
+
+        retro = self._make_retro("t1", "arch", didnt=True)
+        storage = self._storage_with_retros([retro])
+        scorer = PerformanceScorer(usage_logger=logger, storage=storage)
+
+        sc = scorer.score_agent("arch")
+        assert sc.negative_mentions >= 1
+
+    def test_knowledge_gaps_read_from_storage_backend(self, tmp_path: Path) -> None:
+        log_file = tmp_path / "usage.jsonl"
+        logger = UsageLogger(log_file)
+        logger.log(_task("t1", [_agent("arch")]))
+
+        retro = self._make_retro("t1", "arch", gap=True)
+        storage = self._storage_with_retros([retro])
+        scorer = PerformanceScorer(usage_logger=logger, storage=storage)
+
+        sc = scorer.score_agent("arch")
+        assert sc.knowledge_gaps_cited >= 1
+
+    def test_filesystem_retros_ignored_when_storage_provided(self, tmp_path: Path) -> None:
+        """Storage backend takes priority; on-disk retro files are not read."""
+        log_file = tmp_path / "usage.jsonl"
+        retros_dir = tmp_path / "retros"
+        logger = UsageLogger(log_file)
+        logger.log(_task("t1", [_agent("arch")]))
+
+        # Write a filesystem retro claiming arch worked well.
+        retro_engine = RetrospectiveEngine(retros_dir)
+        retro_fs = Retrospective(
+            task_id="t1", task_name="T", timestamp="2026-03-01",
+            what_worked=[AgentOutcome(name="arch", worked_well="filesystem retro")],
+        )
+        retro_fs_path = retros_dir / "t1.md"
+        retros_dir.mkdir(parents=True, exist_ok=True)
+        retro_fs_path.write_text(retro_engine.save(retro_fs).read_text(encoding="utf-8"), encoding="utf-8")
+
+        # Storage returns NO retros — so positive_mentions should be 0.
+        storage = self._storage_with_retros([])
+        scorer = PerformanceScorer(
+            usage_logger=logger,
+            retro_engine=retro_engine,
+            storage=storage,
+        )
+
+        sc = scorer.score_agent("arch")
+        assert sc.positive_mentions == 0, (
+            "Filesystem retros must not be read when storage backend is configured"
+        )
+
+    def test_storage_exception_falls_through_gracefully(self, tmp_path: Path) -> None:
+        """If list_retrospective_ids raises, scorer degrades to zero qualitative signals."""
+        from unittest.mock import MagicMock
+        log_file = tmp_path / "usage.jsonl"
+        logger = UsageLogger(log_file)
+        logger.log(_task("t1", [_agent("arch")]))
+
+        storage = MagicMock()
+        storage.list_retrospective_ids.side_effect = RuntimeError("db locked")
+        scorer = PerformanceScorer(usage_logger=logger, storage=storage)
+
+        # Should not raise; qualitative signals default to 0.
+        sc = scorer.score_agent("arch")
+        assert sc.times_used == 1
+        assert sc.positive_mentions == 0
+        assert sc.negative_mentions == 0

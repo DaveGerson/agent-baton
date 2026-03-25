@@ -221,7 +221,17 @@ def handler(args: argparse.Namespace) -> None:
         plan = MachinePlan.from_dict(data)
         # Use namespaced execution directory for the new plan
         task_id = plan.task_id
-        engine = ExecutionEngine(bus=bus, task_id=task_id, storage=storage)
+
+        # Build a KnowledgeResolver from the plan's knowledge configuration so
+        # runtime KNOWLEDGE_GAP signals can be auto-resolved without human gates.
+        knowledge_resolver = _build_knowledge_resolver(plan)
+
+        engine = ExecutionEngine(
+            bus=bus,
+            task_id=task_id,
+            storage=storage,
+            knowledge_resolver=knowledge_resolver,
+        )
         ContextManager(task_id=task_id).init_mission_log(plan.task_summary, risk_level=plan.risk_level)
         action = engine.start(plan)
         # Mark this as the active execution
@@ -358,6 +368,36 @@ def handler(args: argparse.Namespace) -> None:
     elif args.subcommand == "resume":
         action = engine.resume()
         _print_action(action.to_dict())
+
+
+# ---------------------------------------------------------------------------
+# Knowledge resolver construction
+# ---------------------------------------------------------------------------
+
+def _build_knowledge_resolver(plan: MachinePlan):
+    """Construct a KnowledgeResolver from the plan's knowledge configuration.
+
+    Loads the default knowledge registry paths (same paths used at plan time)
+    and returns a resolver ready for runtime gap auto-resolution.  Returns
+    None (gracefully) if imports fail or the registry cannot be loaded.
+
+    The resolver is stored on the engine so that KNOWLEDGE_GAP signals in
+    agent output can be matched against the registry instead of falling
+    through to best-effort or queue-for-gate escalation.
+    """
+    try:
+        from agent_baton.core.engine.knowledge_resolver import KnowledgeResolver
+        from agent_baton.core.orchestration.knowledge_registry import KnowledgeRegistry
+
+        registry = KnowledgeRegistry()
+        registry.load_default_paths()
+
+        return KnowledgeResolver(registry)
+    except Exception as exc:
+        _log.debug(
+            "KnowledgeResolver construction failed (non-fatal): %s", exc
+        )
+        return None
 
 
 # ---------------------------------------------------------------------------

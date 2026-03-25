@@ -1,10 +1,10 @@
 """Tests for AgentTelemetry wiring into ExecutionEngine and DashboardGenerator.
 
 Verifies that:
-  - execution_started is logged when engine.start() is called
-  - step_completed / step_failed are logged by record_step_result()
-  - gate_passed / gate_failed are logged by record_gate_result()
-  - execution_completed is logged by complete()
+  - execution.started is logged when engine.start() is called
+  - step.completed / step.failed are logged by record_step_result()
+  - gate.passed / gate.failed are logged by record_gate_result()
+  - execution.completed is logged by complete()
   - a failing telemetry write never crashes execution (non-fatal)
   - EventBus domain events are mirrored to telemetry via the wildcard subscriber
   - DashboardGenerator includes a Telemetry section when events exist
@@ -140,13 +140,13 @@ class TestStartLogsToTelemetry:
         tel = _telemetry(tmp_path)
         events = tel.read_events(agent_name="engine")
         types = [e.event_type for e in events]
-        assert "execution_started" in types
+        assert "execution.started" in types
 
     def test_execution_started_details_contain_task_id(self, tmp_path: Path) -> None:
         _drive_to_complete(_engine(tmp_path), _plan(task_id="task-xyz"))
         events = _telemetry(tmp_path).read_events(agent_name="engine")
-        started = [e for e in events if e.event_type == "execution_started"]
-        assert started, "No execution_started event found"
+        started = [e for e in events if e.event_type == "execution.started"]
+        assert started, "No execution.started event found"
         assert "task-xyz" in started[0].details
 
 
@@ -158,13 +158,13 @@ class TestStepResultLogsToTelemetry:
     def test_step_completed_event_written(self, tmp_path: Path) -> None:
         _drive_to_complete(_engine(tmp_path), _plan())
         types = [e.event_type for e in _telemetry(tmp_path).read_events()]
-        assert "step_completed" in types
+        assert "step.completed" in types
 
     def test_step_failed_event_written_on_failed_step(self, tmp_path: Path) -> None:
         plan = _plan(phases=[_phase(steps=[_step("1.1")])])
         _drive_to_complete(_engine(tmp_path), plan, step_status="failed")
         types = [e.event_type for e in _telemetry(tmp_path).read_events()]
-        assert "step_failed" in types
+        assert "step.failed" in types
 
     def test_step_event_agent_name_matches_step(self, tmp_path: Path) -> None:
         plan = _plan(phases=[_phase(steps=[_step("1.1", agent_name="test-agent")])])
@@ -175,7 +175,7 @@ class TestStepResultLogsToTelemetry:
     def test_duration_ms_written_from_duration_seconds(self, tmp_path: Path) -> None:
         _drive_to_complete(_engine(tmp_path), _plan(), duration=2.5)
         events = _telemetry(tmp_path).read_events()
-        step_events = [e for e in events if e.event_type == "step_completed"]
+        step_events = [e for e in events if e.event_type == "step.completed"]
         assert step_events
         # 2.5 seconds → 2500 ms
         assert step_events[0].duration_ms == 2500
@@ -187,7 +187,7 @@ class TestStepResultLogsToTelemetry:
             files_changed=["agent_baton/core/engine/executor.py", "tests/test_x.py"],
         )
         events = _telemetry(tmp_path).read_events()
-        step_events = [e for e in events if e.event_type == "step_completed"]
+        step_events = [e for e in events if e.event_type == "step.completed"]
         assert step_events
         assert step_events[0].file_path == "agent_baton/core/engine/executor.py"
 
@@ -203,7 +203,7 @@ class TestGateResultLogsToTelemetry:
     def test_gate_passed_event_written(self, tmp_path: Path) -> None:
         _drive_to_complete(_engine(tmp_path), self._gated_plan(), gate_passes=True)
         types = [e.event_type for e in _telemetry(tmp_path).read_events()]
-        assert "gate_passed" in types
+        assert "gate.passed" in types
 
     def test_gate_failed_event_written(self, tmp_path: Path) -> None:
         plan = self._gated_plan()
@@ -212,7 +212,7 @@ class TestGateResultLogsToTelemetry:
         engine.record_step_result("1.1", "backend-engineer", status="complete")
         engine.record_gate_result(phase_id=0, passed=False, output="test failed")
         types = [e.event_type for e in _telemetry(tmp_path).read_events()]
-        assert "gate_failed" in types
+        assert "gate.failed" in types
 
     def test_gate_event_details_include_phase_id(self, tmp_path: Path) -> None:
         plan = self._gated_plan()
@@ -222,7 +222,7 @@ class TestGateResultLogsToTelemetry:
         engine.record_gate_result(phase_id=0, passed=True)
         gate_events = [
             e for e in _telemetry(tmp_path).read_events()
-            if e.event_type == "gate_passed"
+            if e.event_type == "gate.passed"
         ]
         assert gate_events
         assert "phase_id=0" in gate_events[0].details
@@ -236,12 +236,12 @@ class TestCompleteLogsToTelemetry:
     def test_execution_completed_event_written(self, tmp_path: Path) -> None:
         _drive_to_complete(_engine(tmp_path), _plan())
         types = [e.event_type for e in _telemetry(tmp_path).read_events()]
-        assert "execution_completed" in types
+        assert "execution.completed" in types
 
     def test_execution_completed_details_contain_task_id(self, tmp_path: Path) -> None:
         _drive_to_complete(_engine(tmp_path), _plan(task_id="task-done"))
         events = _telemetry(tmp_path).read_events(agent_name="engine")
-        completed = [e for e in events if e.event_type == "execution_completed"]
+        completed = [e for e in events if e.event_type == "execution.completed"]
         assert completed
         assert "task-done" in completed[0].details
 
@@ -307,7 +307,7 @@ class TestEventBusToTelemetry:
     ) -> None:
         """Bus subscriber logs bus domain events; engine logs its own.
 
-        execution_started comes only from the explicit log_event() call —
+        execution.started comes only from the explicit log_event() call —
         the bus publishes task.started (a different topic), so we should
         see both in the log.
         """
@@ -315,8 +315,8 @@ class TestEventBusToTelemetry:
         engine = _engine(tmp_path, bus=bus)
         _drive_to_complete(engine, _plan(task_id="dup-test"))
         all_events = _telemetry(tmp_path).read_events()
-        # "execution_started" is our synthetic engine-level event.
-        engine_started = [e for e in all_events if e.event_type == "execution_started"]
+        # "execution.started" is our synthetic engine-level event.
+        engine_started = [e for e in all_events if e.event_type == "execution.started"]
         assert len(engine_started) == 1
 
     def test_wildcard_subscriber_registered_with_bus(self, tmp_path: Path) -> None:
@@ -325,6 +325,75 @@ class TestEventBusToTelemetry:
         _engine(tmp_path, bus=bus)
         # Two subscribers: EventPersistence ("*") and telemetry ("*").
         assert bus.subscription_count == before + 2
+
+
+# ---------------------------------------------------------------------------
+# FIX-8: Telemetry event names use dot-separated convention consistently
+# ---------------------------------------------------------------------------
+
+class TestTelemetryEventNameNormalization:
+    """All engine-emitted telemetry events must use dot-separated naming.
+
+    The previous convention mixed underscores (direct engine calls) with
+    dot-notation (EventBus topics).  All direct engine telemetry events
+    are now normalized to dot-notation so dashboards and queries see a
+    single consistent naming scheme.
+    """
+
+    def _all_event_types(self, tmp_path: Path) -> list[str]:
+        return [e.event_type for e in _telemetry(tmp_path).read_events()]
+
+    def test_no_underscore_prefixed_engine_event_names(self, tmp_path: Path) -> None:
+        """None of the direct engine telemetry events use underscore-only naming."""
+        _drive_to_complete(_engine(tmp_path), _plan(phases=[_phase(gate=_gate())]))
+        types = self._all_event_types(tmp_path)
+        underscore_engine_events = [
+            t for t in types
+            if t in (
+                "execution_started", "execution_completed",
+                "step_completed", "step_failed",
+                "gate_passed", "gate_failed",
+            )
+        ]
+        assert underscore_engine_events == [], (
+            f"Found old underscore-style event names: {underscore_engine_events}"
+        )
+
+    @pytest.mark.parametrize("expected_type", [
+        "execution.started",
+        "execution.completed",
+        "step.completed",
+        "gate.passed",
+    ])
+    def test_dot_separated_event_emitted(
+        self, tmp_path: Path, expected_type: str
+    ) -> None:
+        """Each major execution milestone emits a dot-separated telemetry event."""
+        _drive_to_complete(
+            _engine(tmp_path / expected_type),
+            _plan(phases=[_phase(gate=_gate())]),
+        )
+        types = self._all_event_types(tmp_path / expected_type)
+        assert expected_type in types, (
+            f"Expected event type '{expected_type}' not found in {types}"
+        )
+
+    def test_gate_failed_uses_dot_notation(self, tmp_path: Path) -> None:
+        plan = _plan(phases=[_phase(gate=_gate())])
+        engine = _engine(tmp_path)
+        engine.start(plan)
+        engine.record_step_result("1.1", "backend-engineer", status="complete")
+        engine.record_gate_result(phase_id=0, passed=False, output="fail")
+        types = self._all_event_types(tmp_path)
+        assert "gate.failed" in types
+        assert "gate_failed" not in types
+
+    def test_step_failed_uses_dot_notation(self, tmp_path: Path) -> None:
+        plan = _plan(phases=[_phase(steps=[_step("1.1")])])
+        _drive_to_complete(_engine(tmp_path), plan, step_status="failed")
+        types = self._all_event_types(tmp_path)
+        assert "step.failed" in types
+        assert "step_failed" not in types
 
 
 # ---------------------------------------------------------------------------
@@ -373,7 +442,7 @@ class TestDashboardTelemetrySection:
         output = dash.generate()
 
         assert "## Telemetry" in output
-        assert "execution_started" in output or "step_completed" in output
+        assert "execution.started" in output or "step.completed" in output
 
     def test_telemetry_section_absent_when_no_events(self, tmp_path: Path) -> None:
         """Drive a full execution but point telemetry at an empty log."""

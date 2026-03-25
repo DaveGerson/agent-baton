@@ -1,4 +1,8 @@
-"""Tests for WorkerSupervisor (daemon mode) and SignalHandler."""
+"""Tests for WorkerSupervisor (daemon mode) and SignalHandler.
+
+Also includes E2E subprocess smoke tests for:
+  baton daemon start --dry-run --foreground --plan <file>
+"""
 from __future__ import annotations
 
 import argparse
@@ -6,6 +10,7 @@ import asyncio
 import fcntl
 import json
 import logging
+import subprocess
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -806,3 +811,154 @@ class TestDaemonPlanOptionalWithResume:
         captured = capsys.readouterr()
         # The plan-required error must NOT appear.
         assert "--plan is required" not in captured.out
+
+
+# ===========================================================================
+# E2E smoke tests — subprocess invocation of "baton daemon start"
+#
+# These tests exercise the full CLI entry point through the OS process
+# boundary.  They use --dry-run so no real Claude calls are made and
+# --foreground so the process stays attached to the test process and
+# terminates after the plan completes.
+# ===========================================================================
+
+
+def _write_smoke_plan(tmp_path: Path, task_id: str = "e2e-smoke") -> Path:
+    """Write a minimal MachinePlan JSON and return its path."""
+    plan = MachinePlan(
+        task_id=task_id,
+        task_summary="E2E smoke test plan",
+        phases=[
+            PlanPhase(
+                phase_id=0,
+                name="Implementation",
+                steps=[
+                    PlanStep(
+                        step_id="1.1",
+                        agent_name="backend-engineer--python",
+                        task_description="Implement smoke feature",
+                    )
+                ],
+                gate=PlanGate(gate_type="test", command="echo ok"),
+            )
+        ],
+    )
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(json.dumps(plan.to_dict(), indent=2), encoding="utf-8")
+    return plan_file
+
+
+def _run_daemon_e2e(
+    plan_file: Path,
+    project_dir: Path,
+    extra_args: list[str] | None = None,
+    timeout: float = 30.0,
+) -> subprocess.CompletedProcess:
+    """Invoke ``baton daemon start`` in foreground dry-run mode via subprocess."""
+    cmd = [
+        sys.executable, "-m", "agent_baton.cli.main",
+        "daemon", "start",
+        "--plan", str(plan_file),
+        "--dry-run",
+        "--foreground",
+        "--project-dir", str(project_dir),
+    ]
+    if extra_args:
+        cmd.extend(extra_args)
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+
+
+class TestDaemonE2ESmokeTests:
+    """End-to-end subprocess smoke tests for ``baton daemon start``."""
+
+    def test_exits_cleanly(self, tmp_path: Path) -> None:
+        """The daemon must exit with return code 0 when using DryRunLauncher."""
+        plan_file = _write_smoke_plan(tmp_path, task_id="e2e-clean")
+        project_dir = tmp_path / "proj"
+        project_dir.mkdir()
+        result = _run_daemon_e2e(plan_file, project_dir)
+        assert result.returncode == 0, (
+            f"Daemon exited with code {result.returncode}.\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+
+    def test_prints_startup_message_with_task_id(self, tmp_path: Path) -> None:
+        """Daemon must emit a startup message that includes the task ID."""
+        plan_file = _write_smoke_plan(tmp_path, task_id="e2e-task-id-check")
+        project_dir = tmp_path / "proj"
+        project_dir.mkdir()
+        result = _run_daemon_e2e(plan_file, project_dir)
+        combined = result.stdout + result.stderr
+        assert "e2e-task-id-check" in combined, (
+            f"Expected task ID in output.\nstdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+
+    def test_completes_within_timeout(self, tmp_path: Path) -> None:
+        """DryRunLauncher finishes instantly — the daemon must not hang."""
+        plan_file = _write_smoke_plan(tmp_path, task_id="e2e-timeout-check")
+        project_dir = tmp_path / "proj"
+        project_dir.mkdir()
+        # If this raises subprocess.TimeoutExpired the daemon hung.
+        _run_daemon_e2e(plan_file, project_dir, timeout=30.0)
+
+    def test_missing_plan_flag_prints_error_and_exits(self, tmp_path: Path) -> None:
+        """Invoking daemon start without --plan must print an error and exit."""
+        project_dir = tmp_path / "proj"
+        project_dir.mkdir()
+        cmd = [
+            sys.executable, "-m", "agent_baton.cli.main",
+            "daemon", "start",
+            "--dry-run",
+            "--foreground",
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10.0)
+        combined = result.stdout + result.stderr
+        assert "plan" in combined.lower() or "required" in combined.lower(), (
+            f"Expected error about missing --plan.\n{combined}"
+        )
+
+    def test_nonexistent_plan_file_prints_error(self, tmp_path: Path) -> None:
+        """A plan file path that does not exist must produce a clear error message."""
+        project_dir = tmp_path / "proj"
+        project_dir.mkdir()
+        cmd = [
+            sys.executable, "-m", "agent_baton.cli.main",
+            "daemon", "start",
+            "--plan", "/tmp/nonexistent-e2e-plan-xyz.json",
+            "--dry-run",
+            "--foreground",
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10.0)
+        combined = result.stdout + result.stderr
+        assert "not found" in combined.lower() or "error" in combined.lower(), (
+            f"Expected 'not found' error.\n{combined}"
+        )
+
+    def test_multi_phase_plan_completes(self, tmp_path: Path) -> None:
+        """A plan with two phases (including a gate) must also complete cleanly."""
+        plan = MachinePlan(
+            task_id="e2e-multi-phase",
+            task_summary="Multi-phase E2E smoke",
+            phases=[
+                PlanPhase(
+                    phase_id=0,
+                    name="Phase 1",
+                    steps=[PlanStep(step_id="1.1", agent_name="backend", task_description="step one")],
+                    gate=PlanGate(gate_type="test", command="echo ok"),
+                ),
+                PlanPhase(
+                    phase_id=1,
+                    name="Phase 2",
+                    steps=[PlanStep(step_id="2.1", agent_name="tester", task_description="step two")],
+                ),
+            ],
+        )
+        plan_file = tmp_path / "multi.json"
+        plan_file.write_text(json.dumps(plan.to_dict(), indent=2), encoding="utf-8")
+        project_dir = tmp_path / "proj"
+        project_dir.mkdir()
+
+        result = _run_daemon_e2e(plan_file, project_dir)
+        assert result.returncode == 0, (
+            f"Multi-phase E2E failed.\nstdout: {result.stdout}\nstderr: {result.stderr}"
+        )
