@@ -184,6 +184,29 @@ machine-readable JSON (designed for programmatic consumption).
 When no parallel actions exist, falls back to a single-element array
 containing the next sequential action (GATE, APPROVAL, or COMPLETE).
 
+**With `--output json`**: All subcommands that accept `--output` return JSON
+to stdout instead of human-readable text. Text mode (default) is unchanged
+from the documented format above. The `list` and `switch` subcommands do not
+accept `--output` (they use separate parsers with no shared parent).
+
+| Subcommand | JSON shape (`--output json`) |
+|------------|------------------------------|
+| `start` | `{"task_id": "...", "action": <action-dict>}` |
+| `next` | `[<action-dict>]` (always a single-element array in non-`--all` mode) |
+| `next --all` | `[<action-dict>, ...]` |
+| `record` | `{"status": "recorded", "step_id": "...", "agent": "...", "result": "..."}` |
+| `gate` | `{"status": "recorded", "phase_id": N, "result": "pass\|fail"}` |
+| `approve` | `{"status": "recorded", "phase_id": N, "result": "..."}` |
+| `amend` | `{"status": "amended", "amendment_id": "...", "description": "..."}` |
+| `team-record` | `{"status": "recorded", "step_id": "...", "member_id": "...", "agent": "...", "result": "..."}` |
+| `complete` | `{"status": "complete", "summary": "..."}` |
+| `status` | Raw status dict (same schema as `engine.status()`) |
+| `resume` | `{"action": <action-dict>}` |
+
+Note: `gate` uses `--gate-output` (not `--output`) for capturing gate command
+output text, because `--output` is reserved for the format flag on all
+subcommands that inherit from the shared parent parser.
+
 ---
 
 ## Invariant 3: Execution State Disk Schema

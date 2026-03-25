@@ -79,12 +79,13 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     dispatched_p.add_argument("--step", "--step-id", required=True, dest="step_id")
     dispatched_p.add_argument("--agent", required=True)
 
-    # baton execute gate --phase-id N --result pass|fail [--output TEXT]
+    # baton execute gate --phase-id N --result pass|fail [--gate-output TEXT]
     p_gate = sub.add_parser("gate", parents=[_task_id_parent],
                             help="Record a QA gate result")
     p_gate.add_argument("--phase-id", type=int, required=True, help="Phase ID")
     p_gate.add_argument("--result", required=True, choices=["pass", "fail"], help="Gate result")
-    p_gate.add_argument("--output", default="", help="Gate command output")
+    p_gate.add_argument("--gate-output", default="", dest="gate_output",
+                        help="Gate command output (use --gate-output; --output is reserved for format)")
 
     # baton execute approve --phase-id N --result approve|reject|approve-with-feedback [--feedback TEXT]
     p_approve = sub.add_parser("approve", parents=[_task_id_parent],
@@ -248,12 +249,28 @@ def handler(args: argparse.Namespace) -> None:
             # Fallback to legacy persistence marker when storage is unavailable.
             if engine._persistence is not None:
                 engine._persistence.set_active()
-        print(f"Session binding: export BATON_TASK_ID={task_id}\n")
-        _print_action(action.to_dict())
+        if getattr(args, "output", "text") == "json":
+            result = {"task_id": task_id, "action": action.to_dict()}
+            print(json.dumps(result, indent=2))
+        else:
+            print(f"Session binding: export BATON_TASK_ID={task_id}\n")
+            _print_action(action.to_dict())
 
     elif args.subcommand == "next":
         try:
-            if args.all_actions:
+            if getattr(args, "output", "text") == "json":
+                if args.all_actions:
+                    actions = engine.next_actions()
+                    if actions:
+                        result = [a.to_dict() for a in actions]
+                    else:
+                        action = engine.next_action()
+                        result = [action.to_dict()]
+                else:
+                    action = engine.next_action()
+                    result = [action.to_dict()]
+                print(json.dumps(result, indent=2))
+            elif args.all_actions:
                 actions = engine.next_actions()
                 if actions:
                     result = [a.to_dict() for a in actions]
@@ -312,17 +329,23 @@ def handler(args: argparse.Namespace) -> None:
             issues=[args.error] if args.error else [],
         )
         ContextManager(task_id=task_id).append_to_mission_log(entry)
-        print(f"Recorded: step {args.step_id} ({args.agent}) — {args.status}")
+        if getattr(args, "output", "text") == "json":
+            print(json.dumps({"status": "recorded", "step_id": args.step_id, "agent": args.agent, "result": args.status}))
+        else:
+            print(f"Recorded: step {args.step_id} ({args.agent}) — {args.status}")
 
     elif args.subcommand == "gate":
         passed = args.result == "pass"
         engine.record_gate_result(
             phase_id=args.phase_id,
             passed=passed,
-            output=args.output,
+            output=args.gate_output,
         )
         status = "PASS" if passed else "FAIL"
-        print(f"Gate recorded: phase {args.phase_id} — {status}")
+        if getattr(args, "output", "text") == "json":
+            print(json.dumps({"status": "recorded", "phase_id": args.phase_id, "result": args.result}))
+        else:
+            print(f"Gate recorded: phase {args.phase_id} — {status}")
 
     elif args.subcommand == "approve":
         engine.record_approval_result(
@@ -330,7 +353,10 @@ def handler(args: argparse.Namespace) -> None:
             result=args.result,
             feedback=args.feedback,
         )
-        print(f"Approval recorded: phase {args.phase_id} — {args.result}")
+        if getattr(args, "output", "text") == "json":
+            print(json.dumps({"status": "recorded", "phase_id": args.phase_id, "result": args.result}))
+        else:
+            print(f"Approval recorded: phase {args.phase_id} — {args.result}")
 
     elif args.subcommand == "amend":
         new_phases = _parse_add_phases(args.add_phase) or None
@@ -342,7 +368,10 @@ def handler(args: argparse.Namespace) -> None:
             add_steps_to_phase=add_steps_to,
             new_steps=new_steps or None,
         )
-        print(f"Plan amended: {amendment.amendment_id} — {amendment.description}")
+        if getattr(args, "output", "text") == "json":
+            print(json.dumps({"status": "amended", "amendment_id": amendment.amendment_id, "description": amendment.description}))
+        else:
+            print(f"Plan amended: {amendment.amendment_id} — {amendment.description}")
 
     elif args.subcommand == "team-record":
         files = [f.strip() for f in args.files.split(",") if f.strip()] if args.files else []
@@ -354,17 +383,23 @@ def handler(args: argparse.Namespace) -> None:
             outcome=args.outcome,
             files_changed=files,
         )
-        print(f"Team member recorded: {args.member_id} ({args.agent}) — {args.status}")
+        if getattr(args, "output", "text") == "json":
+            print(json.dumps({"status": "recorded", "step_id": args.step_id, "member_id": args.member_id, "agent": args.agent, "result": args.status}))
+        else:
+            print(f"Team member recorded: {args.member_id} ({args.agent}) — {args.status}")
 
     elif args.subcommand == "complete":
         summary = engine.complete()
-        print(summary)
+        if getattr(args, "output", "text") == "json":
+            print(json.dumps({"status": "complete", "summary": summary}))
+        else:
+            print(summary)
 
         # Auto-sync to central.db (best-effort, non-blocking)
         try:
             from agent_baton.core.storage.sync import auto_sync_current_project
             sync_result = auto_sync_current_project()
-            if sync_result and sync_result.rows_synced > 0:
+            if sync_result and sync_result.rows_synced > 0 and getattr(args, "output", "text") != "json":
                 print(f"Synced {sync_result.rows_synced} rows to central.db")
         except Exception as exc:
             _log.warning("Auto-sync to central.db failed (non-blocking): %s", exc)
@@ -372,11 +407,17 @@ def handler(args: argparse.Namespace) -> None:
     elif args.subcommand == "status":
         st = engine.status()
         if not st or st.get("status") == "no_active_execution":
-            print("No active execution.")
-            print()
-            print("  List executions:  baton execute list")
-            print("  Switch execution: export BATON_TASK_ID=<task-id>")
-            print("  Start new:        baton plan --save \"task description\"")
+            if getattr(args, "output", "text") == "json":
+                print(json.dumps({"status": "no_active_execution"}))
+            else:
+                print("No active execution.")
+                print()
+                print("  List executions:  baton execute list")
+                print("  Switch execution: export BATON_TASK_ID=<task-id>")
+                print("  Start new:        baton plan --save \"task description\"")
+            return
+        if getattr(args, "output", "text") == "json":
+            print(json.dumps(st, indent=2))
             return
         print(f"Task:    {st.get('task_id', '?')}")
         # Determine binding source
@@ -446,7 +487,11 @@ def handler(args: argparse.Namespace) -> None:
 
     elif args.subcommand == "resume":
         action = engine.resume()
-        _print_action(action.to_dict())
+        if getattr(args, "output", "text") == "json":
+            result = {"action": action.to_dict()}
+            print(json.dumps(result, indent=2))
+        else:
+            _print_action(action.to_dict())
 
 
 # ---------------------------------------------------------------------------
