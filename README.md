@@ -214,9 +214,6 @@ First time on a Go project? The `talent-builder` agent creates
 | `hooks-enforcement.md` | Mechanical guardrails via Claude Code hooks |
 | `doc-generation.md` | Document generation pipeline |
 | `knowledge-architecture.md` | Knowledge pack structure and conventions |
-| `adaptive-execution.md` | Engagement level classification (Level 1/2/3) |
-| `baton-engine.md` | Full CLI reference for the execution engine |
-| `baton-patterns.md` | Execution plan design patterns catalog |
 
 ## Optional: Python CLI (`baton`)
 
@@ -304,7 +301,7 @@ For full details see:
 
 ```
 agents/            ← 19 agent definitions (markdown + YAML frontmatter)
-references/        ← 12 reference procedures (shared knowledge)
+references/        ← 15 reference procedures (shared knowledge)
 templates/         ← CLAUDE.md + settings.json for target projects
 scripts/           ← Install scripts (Linux + Windows)
 docs/              ← Architecture documentation
