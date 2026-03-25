@@ -116,7 +116,8 @@ implementation plan — execute them as a chain.
    - Shared-file activities in sequence
    - Level 1 before Level 2 before Level 3 (when no dependency constraints)
    - Type/utility work before component work
-5. **Write chain context** to `.claude/team-context/context.md`:
+5. **Write chain context** to `.claude/team-context/context.md`
+   (this file is created at runtime by the orchestrator — it won't exist before execution starts):
    - Initiative summary (what the chain accomplishes)
    - Activity manifest (ordered list with engagement levels)
    - Cross-cutting notes (shared files, sequencing constraints)

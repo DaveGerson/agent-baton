@@ -28,7 +28,7 @@ performant user interfaces.
 - **Minimal dependencies.** Don't introduce new libraries unless the
   project already uses them or the task explicitly requires it.
 
-## When you finish
+## Output Format
 
 Return a structured summary:
 1. **Files created/modified** (with paths)

@@ -108,13 +108,19 @@ def handler(args: argparse.Namespace) -> None:
                 all_match = False
             rows.append((category, src, db, status))
 
-        col_w = max(len(r[0]) for r in rows) + 2
-        print(f"  {'Category':<{col_w}}  {'Source':>8}  {'DB':>8}  Status")
-        print(f"  {'-' * col_w}  {'-------':>8}  {'--':>8}  ------")
-        for category, src, db, status in rows:
-            print(
-                f"  {category:<{col_w}}  {src:>8}  {db:>8}  {status}"
-            )
+        from agent_baton.cli.formatting import print_table
+
+        verify_rows = [
+            {"category": category, "source": str(src), "db": str(db), "status": status}
+            for category, src, db, status in rows
+        ]
+        print_table(
+            verify_rows,
+            columns=["category", "source", "db", "status"],
+            headers={"category": "Category", "source": "Source", "db": "DB", "status": "Status"},
+            alignments={"source": ">", "db": ">"},
+            prefix="  ",
+        )
 
         print()
         if all_match:

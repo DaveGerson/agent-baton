@@ -159,3 +159,8 @@ When asked to review code or designs:
 - **Explain why, not just what.** Other agents need to understand the
   reasoning behind domain rules to make good implementation decisions when
   they encounter edge cases you didn't anticipate.
+
+## Knowledge Packs
+
+If `.claude/knowledge/` contains domain-specific packs, read them before starting.
+They are your primary source of project-specific domain context.

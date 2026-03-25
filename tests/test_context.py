@@ -1,7 +1,6 @@
 """Tests for agent_baton.core.context.ContextManager."""
 from __future__ import annotations
 
-from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -32,7 +31,7 @@ def _simple_entry(**kwargs) -> MissionLogEntry:
         agent_name="architect",
         status="COMPLETE",
         assignment="Design the schema",
-        timestamp=datetime(2026, 1, 15, 12, 0, 0),
+        timestamp="2026-01-15T12:00:00+00:00",
     )
     defaults.update(kwargs)
     return MissionLogEntry(**defaults)

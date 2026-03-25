@@ -24,6 +24,40 @@ if (-not (Test-Path $AgentsDir)) {
     exit 1
 }
 
+# ---------------------------------------------------------------------------
+# Prerequisite checks
+# ---------------------------------------------------------------------------
+function Test-Prerequisites {
+    # Check Python
+    $py = Get-Command python3 -ErrorAction SilentlyContinue
+    if (-not $py) {
+        $py = Get-Command python -ErrorAction SilentlyContinue
+    }
+    if (-not $py) {
+        Write-Error "Python 3.10+ is required but not found in PATH."
+        Write-Error "Install from https://python.org"
+        exit 1
+    }
+    $pyVersion = & $py.Source --version 2>&1
+    if ($pyVersion -match "(\d+)\.(\d+)") {
+        $major = [int]$Matches[1]
+        $minor = [int]$Matches[2]
+        if ($major -lt 3 -or ($major -eq 3 -and $minor -lt 10)) {
+            Write-Error "Python 3.10+ required (found: $pyVersion)"
+            exit 1
+        }
+    }
+
+    # Check git
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+        Write-Error "git is required but not found in PATH."
+        Write-Error "Install from https://git-scm.com"
+        exit 1
+    }
+}
+
+Test-Prerequisites
+
 # ── Step 1: Scope ──────────────────────────────────────────
 if ($Scope -eq "") {
     Write-Host "  STEP 1: Install Location"
@@ -45,6 +79,18 @@ $RefTarget   = Join-Path $Base "references"
 $TeamCtx     = Join-Path $Base "team-context"
 $KnowledgeDir = Join-Path $Base "knowledge"
 $SkillsDir   = Join-Path $Base "skills"
+
+# Test write permissions
+try {
+    $testFile = Join-Path $Base ".write-test"
+    New-Item -ItemType Directory -Force -Path $Base | Out-Null
+    [System.IO.File]::WriteAllText($testFile, "test")
+    Remove-Item $testFile -Force
+} catch {
+    Write-Error "Cannot write to $Base — check folder permissions."
+    Write-Error "If you don't have admin access, use project-level install (option 2)."
+    exit 1
+}
 
 # ── Step 2: Install Core Files ─────────────────────────────
 Write-Host ""
@@ -72,22 +118,72 @@ New-Item -ItemType Directory -Force -Path $KnowledgeDir | Out-Null
 New-Item -ItemType Directory -Force -Path $SkillsDir | Out-Null
 Write-Host "  + Dirs:      team-context/, knowledge/, skills/" -ForegroundColor Green
 
-# CLAUDE.md
-if ((Test-Path $ClaudeMd) -and ($Scope -eq "project")) {
-    if (Test-Path "CLAUDE.md") {
-        Write-Host "  ! CLAUDE.md exists — merge manually from: $ClaudeMd" -ForegroundColor Yellow
-    } else {
-        Copy-Item $ClaudeMd -Destination "CLAUDE.md" -Force
-        Write-Host "  + CLAUDE.md copied to project root" -ForegroundColor Green
+# CLAUDE.md — skip on upgrade (user may have customized it)
+if ($Upgrade) {
+    Write-Host "  ~ CLAUDE.md:  preserved (upgrade mode)" -ForegroundColor Yellow
+} else {
+    if (Test-Path $ClaudeMd) {
+        if ($Scope -eq "project") {
+            if (Test-Path "CLAUDE.md") {
+                Write-Host "  ! CLAUDE.md exists — merge manually from: $ClaudeMd" -ForegroundColor Yellow
+            } else {
+                Copy-Item $ClaudeMd -Destination "CLAUDE.md" -Force
+                Write-Host "  + CLAUDE.md copied to project root" -ForegroundColor Green
+            }
+        } elseif ($Scope -eq "user") {
+            $userClaudeMd = Join-Path $Base "CLAUDE.md"
+            if (Test-Path $userClaudeMd) {
+                Write-Host "  ! ~/.claude/CLAUDE.md exists — merge manually" -ForegroundColor Yellow
+            } else {
+                Copy-Item $ClaudeMd -Destination $userClaudeMd -Force
+                Write-Host "  + CLAUDE.md copied to ~/.claude/" -ForegroundColor Green
+            }
+        }
     }
 }
 
-# settings.json (hooks)
-if ((Test-Path $SettingsJ) -and ($Scope -eq "project")) {
-    if (Test-Path ".claude\settings.json") {
-        Write-Host "  ! settings.json exists — merge hooks manually" -ForegroundColor Yellow
+# settings.json (hooks) — merge on upgrade, copy on fresh install
+if (Test-Path $SettingsJ) {
+    if ($Scope -eq "project") {
+        $settingsPath = ".claude\settings.json"
     } else {
-        Copy-Item $SettingsJ -Destination ".claude\settings.json" -Force
+        $settingsPath = Join-Path $Base "settings.json"
+    }
+
+    if (Test-Path $settingsPath) {
+        # Merge hooks from template into existing settings
+        $py = Get-Command python3 -ErrorAction SilentlyContinue
+        if (-not $py) { $py = Get-Command python -ErrorAction SilentlyContinue }
+        if ($py) {
+            try {
+                $mergeScript = @"
+import json, sys
+src = json.loads(open(sys.argv[1]).read())
+dst = json.loads(open(sys.argv[2]).read())
+src_hooks = src.get('hooks', {})
+dst_hooks = dst.get('hooks', {})
+for event, src_entries in src_hooks.items():
+    existing = dst_hooks.get(event, [])
+    existing_cmds = {e.get('command','') for e in existing if isinstance(e,dict)}
+    for entry in src_entries:
+        cmd = entry.get('command','') if isinstance(entry,dict) else ''
+        if cmd not in existing_cmds:
+            existing.append(entry)
+            existing_cmds.add(cmd)
+    dst_hooks[event] = existing
+dst['hooks'] = dst_hooks
+open(sys.argv[2], 'w').write(json.dumps(dst, indent=2) + '\n')
+"@
+                & $py.Source -c $mergeScript $SettingsJ $settingsPath 2>$null
+                Write-Host "  + Hooks:     settings.json merged" -ForegroundColor Green
+            } catch {
+                Write-Host "  ! settings.json merge failed — merge hooks manually from: $SettingsJ" -ForegroundColor Yellow
+            }
+        } else {
+            Write-Host "  ! settings.json merge failed (no Python) — merge manually" -ForegroundColor Yellow
+        }
+    } else {
+        Copy-Item $SettingsJ -Destination $settingsPath -Force
         Write-Host "  + Hooks:     settings.json installed" -ForegroundColor Green
     }
 }
@@ -223,10 +319,37 @@ switch ($mcpChoice) {
     }
 }
 
+# ── Step 4: Central Database ─────────────────────────────
+$BatonDir = Join-Path $env:USERPROFILE ".baton"
+if (-not (Test-Path $BatonDir)) {
+    New-Item -ItemType Directory -Force -Path $BatonDir | Out-Null
+    Write-Host ""
+    Write-Host "  STEP 4: Central Database" -ForegroundColor Cyan
+    Write-Host "  ────────────────────────"
+    Write-Host "  + Created: ~/.baton/ (cross-project analytics)" -ForegroundColor Green
+    Write-Host "  central.db will be initialized on first 'baton' command." -ForegroundColor White
+} else {
+    # Check for migration needs
+    $centralDb = Join-Path $BatonDir "central.db"
+    $pmoDb = Join-Path $BatonDir "pmo.db"
+    if (Test-Path $pmoDb) {
+        if (-not (Test-Path $centralDb)) {
+            Write-Host "  ~ pmo.db found — will be migrated to central.db on next baton command" -ForegroundColor Yellow
+        }
+    }
+    if (Test-Path $centralDb) {
+        Write-Host "  ~ central.db exists — will be upgraded on next baton command" -ForegroundColor Yellow
+    }
+}
+
 # ── Summary ────────────────────────────────────────────────
 Write-Host ""
 Write-Host "  =====================================" -ForegroundColor Cyan
-Write-Host "  Installation Complete ($Scope-level)" -ForegroundColor Cyan
+if ($Upgrade) {
+    Write-Host "  Upgrade Complete ($Scope-level)" -ForegroundColor Cyan
+} else {
+    Write-Host "  Installation Complete ($Scope-level)" -ForegroundColor Cyan
+}
 Write-Host "  =====================================" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "  VERIFY:     Start Claude Code, run /agents"

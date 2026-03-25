@@ -54,7 +54,7 @@ Adapt to the request:
   recommended refresh cadence
 - **Data exploration** → Findings organized by insight, with queries attached
 
-## When you finish
+## Output Format
 
 Return:
 1. **Files created/modified** (with paths)

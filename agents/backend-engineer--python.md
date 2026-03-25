@@ -40,7 +40,7 @@ Python with modern tooling.
 - **Virtual environments.** Respect the project's package manager (Poetry,
   uv, pip-tools). Never `pip install` without updating the lock file.
 
-## When you finish
+## Output Format
 
 Return:
 1. **Files created/modified** (with paths)
@@ -48,3 +48,8 @@ Return:
 3. **Migration notes** — Alembic revisions, new dependencies, env vars
 4. **Integration notes** — what consumers need to know
 5. **Open questions**
+
+## Knowledge Packs
+
+If `.claude/knowledge/` contains domain-specific packs, read them before starting.
+They provide project context that improves your output quality.

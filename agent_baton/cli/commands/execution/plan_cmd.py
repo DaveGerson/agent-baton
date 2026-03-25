@@ -80,16 +80,20 @@ def handler(args: argparse.Namespace) -> None:
     project_root = Path(args.project) if args.project else Path.cwd()
     agents = [a.strip() for a in args.agents.split(",") if a.strip()] if args.agents else None
 
+    print("Planning...", file=sys.stderr)
+
     knowledge_registry = KnowledgeRegistry()
     knowledge_registry.load_default_paths()
 
     retro_engine = RetrospectiveEngine()
+    print("  Analyzing patterns and history...", file=sys.stderr)
     planner = IntelligentPlanner(
         retro_engine=retro_engine,
         classifier=DataClassifier(),
         policy_engine=PolicyEngine(),
         knowledge_registry=knowledge_registry,
     )
+    print("  Creating execution plan...", file=sys.stderr)
     plan = planner.create_plan(
         args.summary,
         task_type=args.task_type,
@@ -99,6 +103,7 @@ def handler(args: argparse.Namespace) -> None:
         explicit_knowledge_docs=args.knowledge,
         intervention_level=args.intervention,
     )
+    print("  Done.", file=sys.stderr)
 
     if args.save:
         from agent_baton.core.orchestration.context import ContextManager
@@ -120,6 +125,8 @@ def handler(args: argparse.Namespace) -> None:
         md_path.write_text(plan.to_markdown(), encoding="utf-8")
         print(f"Plan saved: {ctx.plan_json_path} and {ctx.plan_path}")
         print(f"  (also copied to {json_path} for backward compat)")
+        print()
+        print("Next: baton execute start")
 
     if args.explain:
         print(planner.explain_plan(plan))

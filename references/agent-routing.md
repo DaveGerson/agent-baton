@@ -52,6 +52,11 @@ frontend-engineer--react    React flavor
 frontend-engineer--dotnet   .NET flavor
 ```
 
+Note: Stack detection recognises Go, Vue/Nuxt, Angular, Rust, Ruby,
+Java/Kotlin, and SvelteKit. If no flavored agent exists for the detected
+stack, the base agent is used. Creating a new flavor is better than forcing
+a mismatch — see the talent-builder agent.
+
 ## Step 3: Match
 
 For each role needed in the plan:

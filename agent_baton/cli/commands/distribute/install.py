@@ -40,12 +40,22 @@ def _merge_settings(src_path: Path, dst_path: Path) -> bool:
     else:
         dst_data = {}
 
-    # Merge hooks: for each hook event in source, replace in destination
+    # Merge hooks: for each hook event in source, add entries that aren't
+    # already present (dedup by "command" string). User hooks are preserved.
     src_hooks = src_data.get("hooks", {})
     if src_hooks:
         dst_hooks = dst_data.setdefault("hooks", {})
-        for event, entries in src_hooks.items():
-            dst_hooks[event] = entries  # replace per-event (baton owns these)
+        for event, src_entries in src_hooks.items():
+            existing = dst_hooks.get(event, [])
+            existing_cmds = {
+                e.get("command", "") for e in existing if isinstance(e, dict)
+            }
+            for entry in src_entries:
+                cmd = entry.get("command", "") if isinstance(entry, dict) else ""
+                if cmd not in existing_cmds:
+                    existing.append(entry)
+                    existing_cmds.add(cmd)
+            dst_hooks[event] = existing
         print(f"  merge: settings.json hooks ({len(src_hooks)} events)")
 
     # All other top-level keys in destination are preserved untouched
