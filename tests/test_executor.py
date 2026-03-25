@@ -821,6 +821,46 @@ class TestStatePersistence:
         assert len(loaded.gate_results) == 1
         assert loaded.gate_results[0].passed is True
 
+    def test_save_is_atomic_no_tmp_file_left(self, tmp_path: Path) -> None:
+        """After save(), no .tmp file remains alongside execution-state.json.
+
+        The atomic write pattern writes to a .json.tmp file first, then
+        renames it to the target path.  A successful save must leave exactly
+        one file — the final state file — with no leftover .tmp artefacts.
+        """
+        from agent_baton.core.engine.persistence import StatePersistence
+
+        plan = _plan(task_id="atomic-test")
+        state = ExecutionState(task_id="atomic-test", plan=plan)
+        sp = StatePersistence(tmp_path)
+        sp.save(state)
+
+        # Target file must exist and be valid JSON.
+        assert sp.path.exists()
+        import json as _json
+        data = _json.loads(sp.path.read_text(encoding="utf-8"))
+        assert data["task_id"] == "atomic-test"
+
+        # No .tmp file must remain after a successful save.
+        tmp_files = list(tmp_path.glob("*.tmp"))
+        assert tmp_files == [], f"Leftover .tmp files: {tmp_files}"
+
+    def test_save_overwrites_previous_state(self, tmp_path: Path) -> None:
+        """A second save() replaces the state file cleanly with no residue."""
+        from agent_baton.core.engine.persistence import StatePersistence
+        import json as _json
+
+        plan_a = _plan(task_id="state-a")
+        plan_b = _plan(task_id="state-b")
+        sp = StatePersistence(tmp_path)
+
+        sp.save(ExecutionState(task_id="state-a", plan=plan_a))
+        sp.save(ExecutionState(task_id="state-b", plan=plan_b))
+
+        data = _json.loads(sp.path.read_text(encoding="utf-8"))
+        assert data["task_id"] == "state-b"
+        assert list(tmp_path.glob("*.tmp")) == []
+
 
 # ---------------------------------------------------------------------------
 # Phase-advance regression (1-based phase_ids, matching planner output)
@@ -933,6 +973,139 @@ class TestStepStatusValidation:
             engine = _engine(tmp_path)
             engine.start(plan)
             engine.record_step_result("1.1", "backend-engineer", status=status)
+
+
+# ---------------------------------------------------------------------------
+# Bug 7: complete() saves trace to SQLite when storage is available
+# ---------------------------------------------------------------------------
+
+class TestCompleteSavesTraceToSQLite:
+    """complete() must call storage.save_trace() when a storage backend is set.
+
+    Pipeline Bug 7: previously complete_trace() wrote the trace to the
+    filesystem but there was no call to self._storage.save_trace().
+    """
+
+    def _run_to_complete(self, engine: ExecutionEngine) -> None:
+        """Drive a single-step plan from start through complete()."""
+        engine.start(_plan(task_id="trace-task"))
+        engine.record_step_result("1.1", "backend-engineer")
+        engine.next_action()  # COMPLETE action — does not yet finalize
+        engine.complete()
+
+    def _make_passthrough_storage(self, saved_traces: list) -> object:
+        """Return a FakeStorage that delegates state persistence to an in-memory
+        dict and records save_trace() calls in *saved_traces*.
+
+        ExecutionEngine writes state via save_execution() and reads it back via
+        load_execution() / get_active_task().  A FakeStorage that returns None
+        from load_execution() causes record_step_result() to raise because there
+        is no active state.  This implementation stores the most-recently saved
+        ExecutionState so the engine can read it back correctly.
+        """
+        class FakeStorage:
+            def __init__(self):
+                self._states: dict[str, object] = {}
+                self._active: str | None = None
+
+            def save_execution(self, state):
+                self._states[state.task_id] = state
+
+            def load_execution(self, task_id):
+                return self._states.get(task_id)
+
+            def get_active_task(self):
+                return self._active
+
+            def set_active_task(self, task_id):
+                self._active = task_id
+
+            def log_usage(self, record):
+                pass
+
+            def log_telemetry(self, event):
+                pass
+
+            def save_retrospective(self, retro):
+                pass
+
+            def save_trace(self, trace):
+                saved_traces.append(trace)
+
+        return FakeStorage()
+
+    def test_save_trace_called_on_storage_when_present(self, tmp_path: Path) -> None:
+        """When a storage backend is provided, complete() calls save_trace()."""
+        saved_traces: list = []
+        storage = self._make_passthrough_storage(saved_traces)
+        engine = ExecutionEngine(
+            team_context_root=tmp_path,
+            storage=storage,
+        )
+        self._run_to_complete(engine)
+
+        assert len(saved_traces) == 1, (
+            "complete() must call storage.save_trace() exactly once"
+        )
+        trace = saved_traces[0]
+        assert trace.task_id == "trace-task"
+
+    def test_save_trace_not_called_when_no_storage(self, tmp_path: Path) -> None:
+        """In legacy file mode (no storage), no save_trace() call is made
+        (file-only path still works correctly — traces dir written to disk)."""
+        engine = _engine(tmp_path)
+        self._run_to_complete(engine)
+        # Trace must be written to disk in file mode.
+        traces_dir = tmp_path / "traces"
+        assert traces_dir.exists()
+        trace_files = list(traces_dir.glob("*.json"))
+        assert len(trace_files) == 1
+
+    def test_save_trace_failure_does_not_crash_complete(self, tmp_path: Path) -> None:
+        """A storage.save_trace() exception must not propagate — complete() logs
+        a warning and continues, returning the summary string."""
+        saved_traces: list = []
+
+        class BrokenTraceStorage:
+            def __init__(self):
+                self._states: dict[str, object] = {}
+                self._active: str | None = None
+
+            def save_execution(self, state):
+                self._states[state.task_id] = state
+
+            def load_execution(self, task_id):
+                return self._states.get(task_id)
+
+            def get_active_task(self):
+                return self._active
+
+            def set_active_task(self, task_id):
+                self._active = task_id
+
+            def log_usage(self, record):
+                pass
+
+            def log_telemetry(self, event):
+                pass
+
+            def save_retrospective(self, retro):
+                pass
+
+            def save_trace(self, trace):
+                raise RuntimeError("SQLite trace write failed")
+
+        engine = ExecutionEngine(
+            team_context_root=tmp_path,
+            storage=BrokenTraceStorage(),
+        )
+        # Must not raise — warning is logged, complete() returns normally.
+        engine.start(_plan(task_id="trace-err"))
+        engine.record_step_result("1.1", "backend-engineer")
+        engine.next_action()
+        summary = engine.complete()
+        assert isinstance(summary, str)
+
 
 
 # ---------------------------------------------------------------------------

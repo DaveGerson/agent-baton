@@ -1,6 +1,7 @@
 """Tests for WorkerSupervisor (daemon mode) and SignalHandler."""
 from __future__ import annotations
 
+import argparse
 import asyncio
 import fcntl
 import json
@@ -654,3 +655,154 @@ class TestDaemonizeFunction:
 
         with pytest.raises(RuntimeError, match="Second fork failed"):
             daemon_mod.daemonize()
+
+
+# ===========================================================================
+# TODO-4: daemon CLI handler wraps supervisor.start() RuntimeError cleanly
+# ===========================================================================
+
+class TestDaemonHandlerRuntimeErrorIsCaught:
+    """TODO-4: TOCTOU race — supervisor.start() can raise RuntimeError when
+    another daemon acquires the lock between the PID-probe check and the flock.
+    The handler must catch that error and print a clean message rather than
+    letting the traceback propagate to the user.
+    """
+
+    def _make_args(self, tmp_path: Path, resume: bool = False, plan: str | None = None) -> argparse.Namespace:
+        """Build a minimal Namespace that the daemon handler's 'start' branch expects."""
+        import argparse as _ap
+        return _ap.Namespace(
+            daemon_action="start",
+            plan=plan,
+            resume=resume,
+            dry_run=True,
+            foreground=True,
+            project_dir=None,
+            serve=False,
+            host="127.0.0.1",
+            port=8741,
+            token=None,
+            task_id=None,
+            max_parallel=1,
+        )
+
+    def test_runtime_error_from_supervisor_prints_clean_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """When supervisor.start() raises RuntimeError the handler prints
+        'Error: ...' and returns rather than propagating the exception."""
+        import agent_baton.cli.commands.execution.daemon as daemon_mod
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("Another daemon is already running")
+
+        monkeypatch.setattr(daemon_mod.WorkerSupervisor, "start", boom)
+
+        # Provide a real plan file so we get past the plan-loading step.
+        import json
+        from agent_baton.models.execution import MachinePlan, PlanPhase, PlanStep
+        plan = MachinePlan(
+            task_id="t1",
+            task_summary="test",
+            phases=[PlanPhase(phase_id=0, name="P", steps=[
+                PlanStep(step_id="1.1", agent_name="be", task_description="do")
+            ])],
+        )
+        plan_file = tmp_path / "plan.json"
+        plan_file.write_text(json.dumps(plan.to_dict()), encoding="utf-8")
+
+        args = self._make_args(tmp_path, plan=str(plan_file))
+        # Must not raise.
+        daemon_mod.handler(args)
+
+        captured = capsys.readouterr()
+        assert "Error:" in captured.out
+        assert "Already" in captured.out or "already running" in captured.out.lower()
+
+
+# ===========================================================================
+# TODO-6: --plan is optional when --resume is set
+# ===========================================================================
+
+class TestDaemonPlanOptionalWithResume:
+    """TODO-6: --plan must be optional when --resume is set.
+
+    Before the fix, --plan was required=True on the 'start' subparser so
+    users had to provide a dummy --plan argument when resuming.
+
+    After the fix, --plan defaults to None and the handler checks
+    ``not args.resume and not args.plan`` to produce the error only when
+    both are absent.
+    """
+
+    def test_plan_argument_not_required(self) -> None:
+        """Argparse must accept 'baton daemon start --resume' without --plan."""
+        from agent_baton.cli.commands.execution.daemon import register
+        import argparse as _ap
+
+        root = _ap.ArgumentParser()
+        subs = root.add_subparsers(dest="cmd")
+        register(subs)
+
+        # Should parse without error — no --plan provided, --resume present.
+        args = root.parse_args(["daemon", "start", "--resume"])
+        assert args.plan is None
+        assert args.resume is True
+
+    def test_plan_and_resume_both_absent_triggers_error(
+        self, capsys
+    ) -> None:
+        """Without --plan and without --resume the handler must print an error
+        and return rather than crashing."""
+        import agent_baton.cli.commands.execution.daemon as daemon_mod
+        import argparse as _ap
+
+        args = _ap.Namespace(
+            daemon_action="start",
+            plan=None,
+            resume=False,
+            dry_run=True,
+            foreground=True,
+            project_dir=None,
+            serve=False,
+            host="127.0.0.1",
+            port=8741,
+            token=None,
+            task_id=None,
+            max_parallel=1,
+        )
+        # Must not raise — just print the error message.
+        daemon_mod.handler(args)
+
+        captured = capsys.readouterr()
+        assert "--plan is required" in captured.out or "--plan" in captured.out
+
+    def test_resume_without_plan_does_not_trigger_plan_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """--resume without --plan must not print the '--plan is required' error."""
+        import agent_baton.cli.commands.execution.daemon as daemon_mod
+        import argparse as _ap
+
+        # Stub supervisor.start so we don't actually run execution.
+        monkeypatch.setattr(daemon_mod.WorkerSupervisor, "start", lambda *a, **kw: "resumed ok")
+
+        args = _ap.Namespace(
+            daemon_action="start",
+            plan=None,
+            resume=True,
+            dry_run=True,
+            foreground=True,
+            project_dir=None,
+            serve=False,
+            host="127.0.0.1",
+            port=8741,
+            token=None,
+            task_id=None,
+            max_parallel=1,
+        )
+        daemon_mod.handler(args)
+
+        captured = capsys.readouterr()
+        # The plan-required error must NOT appear.
+        assert "--plan is required" not in captured.out

@@ -378,6 +378,9 @@ def handler(args: argparse.Namespace) -> None:
             except KeyboardInterrupt:
                 summary = "Daemon interrupted by user."
                 logger.info("Daemon interrupted.")
+            except RuntimeError as exc:
+                summary = f"Error: {exc}"
+                logger.error("Daemon runtime error: %s", exc)
             except Exception as exc:
                 summary = f"Daemon failed: {exc}"
                 logger.exception("Daemon failed with exception.")
@@ -404,7 +407,6 @@ def handler(args: argparse.Namespace) -> None:
             except RuntimeError as exc:
                 print(f"Error: {exc}")
                 return
-            summary = summary  # already assigned
 
         # In foreground mode the process is still attached to the terminal and
         # can print the summary.  In daemon mode stdout has been redirected to

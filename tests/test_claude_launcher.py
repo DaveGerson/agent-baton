@@ -960,3 +960,40 @@ class TestAgentSpecialization:
         cmd = launcher._build_command("sonnet", agent)
 
         assert "--permission-mode" not in cmd
+
+
+# ===========================================================================
+# TODO-5: start_new_session=True is passed to create_subprocess_exec
+# ===========================================================================
+
+class TestStartNewSession:
+    """TODO-5: create_subprocess_exec must be called with start_new_session=True
+    so launched agents are placed in their own session, enabling clean
+    killpg-based cleanup and preventing them from inheriting the daemon's
+    controlling terminal.
+    """
+
+    def test_run_once_passes_start_new_session_true(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """_run_once() must forward start_new_session=True to create_subprocess_exec."""
+        captured_kwargs: list[dict] = []
+
+        async def capturing_exec(*args: Any, **kwargs: Any) -> FakeProcess:
+            captured_kwargs.append(kwargs)
+            return FakeProcess(stdout=_ok_json(), returncode=0)
+
+        _patch_which(monkeypatch)
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", capturing_exec)
+        launcher = ClaudeCodeLauncher()
+        launcher._git_bin = None
+
+        async def _run():
+            await launcher.launch("backend", "sonnet", "task", "sess.1")
+
+        asyncio.run(_run())
+
+        assert len(captured_kwargs) == 1
+        assert captured_kwargs[0].get("start_new_session") is True, (
+            "create_subprocess_exec must be called with start_new_session=True"
+        )

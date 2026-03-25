@@ -662,9 +662,20 @@ class ExecutionEngine:
 
         # Finalise trace.
         trace_path: Path | None = None
+        finished_trace = None
         if self._trace is not None:
-            trace_path = self._tracer.complete_trace(self._trace, outcome="SHIP")
+            finished_trace = self._trace  # keep reference before complete_trace mutates it
+            trace_path = self._tracer.complete_trace(finished_trace, outcome="SHIP")
             self._trace = None
+
+        # Persist trace to SQLite if storage backend is available.
+        if self._storage is not None and finished_trace is not None:
+            try:
+                self._storage.save_trace(finished_trace)
+            except Exception as exc:
+                _log.warning(
+                    "SQLite trace save failed (non-fatal): %s", exc
+                )
 
         # Build and log usage record.
         usage_record = self._build_usage_record(state)

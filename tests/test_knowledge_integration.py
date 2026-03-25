@@ -8,7 +8,7 @@ Covers the full pipeline:
   → RetrospectiveEngine implicit gap detection
   → intervention_level escalation shift
 
-What it does NOT test (pending integration, marked skip):
+Also covers SQLite storage and sync integration (section 14):
   - SqliteStorage.save_plan() / load_plan() with knowledge fields
   - SqliteStorage.save_execution() with KnowledgeGapSignal / ResolvedDecision
   - central.db schema includes knowledge columns

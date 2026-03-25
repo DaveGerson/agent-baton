@@ -31,6 +31,8 @@ credentials.json
 secrets/
 /.superpowers/
 .worktrees/
+docs/superpowers/
+docs/audit/
 
 # Session state files (not for main branch)
 PMO_UI_NEXTSTEP.md

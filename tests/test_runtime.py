@@ -281,3 +281,121 @@ class TestTaskWorkerBus:
         engine = ExecutionEngine(team_context_root=tmp_path)
         worker = TaskWorker(engine=engine, launcher=DryRunLauncher())
         assert worker.bus is not None
+
+
+# ===========================================================================
+# TODO-7: gate_poll_interval is configurable on TaskWorker
+# ===========================================================================
+
+class TestTaskWorkerGatePollInterval:
+    """TODO-7: The gate polling interval in _handle_gate() was hardcoded at 2 s.
+    It must now be configurable via the gate_poll_interval constructor parameter
+    so tests and callers can set an appropriate value without modifying source.
+    """
+
+    def test_default_gate_poll_interval_is_two_seconds(self, tmp_path: Path) -> None:
+        """Default value for gate_poll_interval must remain 2.0 s."""
+        engine = ExecutionEngine(team_context_root=tmp_path)
+        worker = TaskWorker(engine=engine, launcher=DryRunLauncher())
+        assert worker._gate_poll_interval == 2.0
+
+    def test_custom_gate_poll_interval_stored(self, tmp_path: Path) -> None:
+        """Constructor must store the caller-supplied gate_poll_interval."""
+        engine = ExecutionEngine(team_context_root=tmp_path)
+        worker = TaskWorker(
+            engine=engine,
+            launcher=DryRunLauncher(),
+            gate_poll_interval=0.1,
+        )
+        assert worker._gate_poll_interval == 0.1
+
+    def test_custom_interval_used_during_gate_polling(self, tmp_path: Path) -> None:
+        """A short gate_poll_interval causes the worker to poll more frequently.
+
+        We set a very small interval and verify the worker still completes the
+        plan after a review gate is resolved externally, proving the interval
+        is actually used by _handle_gate().
+        """
+        from agent_baton.core.runtime.decisions import DecisionManager
+
+        plan = _plan(phases=[
+            _phase(phase_id=0, steps=[_step("1.1")], gate=_gate("review")),
+            _phase(phase_id=1, steps=[_step("2.1", agent="tester")]),
+        ])
+        decisions_dir = tmp_path / "decisions"
+        dm = DecisionManager(decisions_dir=decisions_dir)
+
+        async def _run():
+            engine = ExecutionEngine(team_context_root=tmp_path)
+            engine.start(plan)
+            launcher = DryRunLauncher()
+            worker = TaskWorker(
+                engine=engine,
+                launcher=launcher,
+                decision_manager=dm,
+                gate_poll_interval=0.01,  # 10 ms — very fast
+            )
+
+            async def _resolver():
+                for _ in range(200):
+                    if dm.pending():
+                        break
+                    await asyncio.sleep(0.005)
+                if dm.pending():
+                    req = dm.pending()[0]
+                    dm.resolve(req.request_id, chosen_option="approve")
+
+            worker_task = asyncio.create_task(worker.run())
+            resolver_task = asyncio.create_task(_resolver())
+            results = await asyncio.gather(resolver_task, worker_task)
+            summary = results[1]
+            assert "completed" in summary.lower() or "complete" in summary.lower()
+
+        asyncio.run(_run())
+
+    def test_custom_interval_used_during_approval_polling(self, tmp_path: Path) -> None:
+        """Approval actions also use gate_poll_interval for polling.
+
+        Same pattern as the gate test above but with approval_required=True
+        on the phase, proving _handle_approval() respects the interval.
+        """
+        from agent_baton.core.runtime.decisions import DecisionManager
+
+        approval_phase = PlanPhase(
+            phase_id=0, name="P", steps=[_step("1.1")],
+            approval_required=True, approval_description="Review phase 0",
+        )
+        plan = _plan(phases=[
+            approval_phase,
+            _phase(phase_id=1, steps=[_step("2.1", agent="tester")]),
+        ])
+        decisions_dir = tmp_path / "decisions"
+        dm = DecisionManager(decisions_dir=decisions_dir)
+
+        async def _run():
+            engine = ExecutionEngine(team_context_root=tmp_path)
+            engine.start(plan)
+            launcher = DryRunLauncher()
+            worker = TaskWorker(
+                engine=engine,
+                launcher=launcher,
+                decision_manager=dm,
+                gate_poll_interval=0.01,
+            )
+
+            async def _resolver():
+                for _ in range(200):
+                    if dm.pending():
+                        break
+                    await asyncio.sleep(0.005)
+                if dm.pending():
+                    req = dm.pending()[0]
+                    dm.resolve(req.request_id, chosen_option="approve")
+
+            worker_task = asyncio.create_task(worker.run())
+            resolver_task = asyncio.create_task(_resolver())
+            results = await asyncio.gather(resolver_task, worker_task)
+            summary = results[1]
+            assert "completed" in summary.lower() or "complete" in summary.lower()
+
+        asyncio.run(_run())

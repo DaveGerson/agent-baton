@@ -251,6 +251,40 @@ class TestDecisionManagerResolve:
 
 
 # ===========================================================================
+# DecisionManager — get_resolution()  (TODO-1 fix verification)
+# ===========================================================================
+
+class TestDecisionManagerGetResolution:
+    """Verify get_resolution() is public and returns the correct resolution data."""
+
+    def test_returns_none_before_resolution(self, tmp_path: Path) -> None:
+        mgr = DecisionManager(decisions_dir=tmp_path)
+        mgr.request(_req(request_id="r1"))
+        assert mgr.get_resolution("r1") is None
+
+    def test_returns_resolution_dict_after_resolve(self, tmp_path: Path) -> None:
+        mgr = DecisionManager(decisions_dir=tmp_path)
+        mgr.request(_req(request_id="r1"))
+        mgr.resolve("r1", "approve", rationale="LGTM")
+        data = mgr.get_resolution("r1")
+        assert data is not None
+        assert data["chosen_option"] == "approve"
+        assert data["rationale"] == "LGTM"
+
+    def test_returns_none_for_unknown_request(self, tmp_path: Path) -> None:
+        mgr = DecisionManager(decisions_dir=tmp_path)
+        assert mgr.get_resolution("nonexistent") is None
+
+    def test_reject_option_preserved(self, tmp_path: Path) -> None:
+        mgr = DecisionManager(decisions_dir=tmp_path)
+        mgr.request(_req(request_id="r2"))
+        mgr.resolve("r2", "reject")
+        data = mgr.get_resolution("r2")
+        assert data is not None
+        assert data["chosen_option"] == "reject"
+
+
+# ===========================================================================
 # Integration: full lifecycle
 # ===========================================================================
 
