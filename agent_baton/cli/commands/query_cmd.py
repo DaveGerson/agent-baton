@@ -6,6 +6,16 @@ This command targets ``~/.baton/central.db`` exclusively and provides:
 - Ad-hoc SQL against any table in central.db
 - Schema introspection (``--tables``, ``--table TABLE``)
 
+Relationship to ``baton query``
+--------------------------------
+``baton query``  — queries the **local** ``baton.db`` for this project's
+                   execution history, agent steps, tasks, and patterns.
+                   Use it for per-project observability.
+
+``baton cquery`` — queries the **central** ``~/.baton/central.db`` which
+                   aggregates data across all projects.  Use it for
+                   cross-project analytics and federated views.
+
 Shortcuts
 ---------
 agents      SELECT * FROM v_agent_reliability
@@ -53,7 +63,10 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     """Register the ``cquery`` subcommand."""
     p = subparsers.add_parser(
         "cquery",
-        help="Cross-project SQL queries against central.db (~/.baton/central.db)",
+        help=(
+            "Cross-project SQL queries against central.db (~/.baton/central.db).  "
+            "For per-project queries use 'baton query'."
+        ),
     )
 
     # Positional: either a shortcut keyword or a raw SQL string
@@ -241,23 +254,14 @@ def _render_table(rows: list[dict], title: str = "") -> None:
     if title:
         print(title)
 
+    from agent_baton.cli.formatting import print_table
+
     columns = list(rows[0].keys())
-    # Compute column widths
-    widths: dict[str, int] = {col: len(col) for col in columns}
-    for row in rows:
-        for col in columns:
-            widths[col] = max(widths[col], len(str(row.get(col, "") or "")))
-
-    # Header
-    header = "  ".join(col.ljust(widths[col]) for col in columns)
-    separator = "  ".join("-" * widths[col] for col in columns)
-    print(header)
-    print(separator)
-
-    # Rows
-    for row in rows:
-        line = "  ".join(str(row.get(col, "") or "").ljust(widths[col]) for col in columns)
-        print(line)
+    # Normalize all values to strings for print_table
+    str_rows = [{col: str(row.get(col, "") or "") for col in columns} for row in rows]
+    # Use column keys as headers (lower-case keys become upper-case display labels
+    # via print_table's default behaviour, matching the original output)
+    print_table(str_rows, columns=columns)
 
     print(f"\n{len(rows)} row(s)")
 
@@ -283,6 +287,9 @@ def _render_csv(rows: list[dict], title: str = "") -> None:
 
 def _print_help() -> None:
     print("Usage: baton cquery QUERY [--format FORMAT] [--tables] [--table TABLE]")
+    print()
+    print("Targets ~/.baton/central.db (cross-project analytics).")
+    print("For per-project queries (local baton.db) use: baton query")
     print()
     print("Shortcuts:")
     for name, sql in _SHORTCUTS.items():

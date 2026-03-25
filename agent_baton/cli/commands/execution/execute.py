@@ -9,6 +9,8 @@ import re
 import sys
 from pathlib import Path
 
+from agent_baton.cli.colors import success, error as color_error, warning, info as color_info
+from agent_baton.cli.errors import user_error, validation_error
 from agent_baton.core.engine.executor import ExecutionEngine
 from agent_baton.core.engine.persistence import StatePersistence
 from agent_baton.core.events.bus import EventBus
@@ -37,6 +39,10 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         default=None,
         help="Target a specific execution by task ID (default: active execution)",
     )
+    _task_id_parent.add_argument(
+        "--output", choices=["text", "json"], default="text",
+        help="Output format: text (human-readable, default) or json (machine-readable)",
+    )
     sub = p.add_subparsers(dest="subcommand")
 
     # baton execute start [--plan PATH] [--task-id ID]
@@ -60,7 +66,7 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     p_record.add_argument("--step", "--step-id", required=True, dest="step_id", help="Step ID (e.g. 1.1)")
     p_record.add_argument("--agent", required=True, help="Agent name")
     p_record.add_argument("--status", default="complete", choices=["complete", "failed"], help="complete or failed")
-    p_record.add_argument("--outcome", "--summary", default="", dest="outcome", help="Summary of what was done")
+    p_record.add_argument("--outcome", "--summary", default="", dest="outcome", help="Summary of what was done (--summary is deprecated, use --outcome)")
     p_record.add_argument("--tokens", type=int, default=0, help="Estimated tokens used")
     p_record.add_argument("--duration", type=float, default=0.0, help="Duration in seconds")
     p_record.add_argument("--error", default="", help="Error message if failed")
@@ -190,8 +196,7 @@ def _print_action(action: dict) -> None:
 
 def handler(args: argparse.Namespace) -> None:
     if args.subcommand is None:
-        print("error: supply a subcommand: start, next, record, dispatched, gate, approve, amend, team-record, complete, status, resume, list, switch")
-        sys.exit(1)
+        validation_error("supply a subcommand: start, next, record, dispatched, gate, approve, amend, team-record, complete, status, resume, list, switch")
 
     if args.subcommand == "list":
         _handle_list()
@@ -218,21 +223,15 @@ def handler(args: argparse.Namespace) -> None:
     if args.subcommand == "start":
         plan_path = Path(args.plan)
         if not plan_path.exists():
-            print(f"error: plan file not found: {plan_path}")
-            print("Run 'baton plan --save \"task description\"' first.")
-            sys.exit(1)
+            user_error(f"plan file not found: {plan_path}", hint="Run 'baton plan --save \"task description\"' first.")
         try:
             data = json.loads(plan_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            print(f"error: plan.json is not valid JSON: {exc}", file=sys.stderr)
-            print("Re-create with: baton plan --save \"task description\"", file=sys.stderr)
-            sys.exit(1)
+            validation_error(f"plan.json is not valid JSON: {exc}", hint="Re-create with: baton plan --save \"task description\"")
         try:
             plan = MachinePlan.from_dict(data)
         except (KeyError, ValueError, TypeError) as exc:
-            print(f"error: plan.json has invalid structure: {exc}", file=sys.stderr)
-            print("Re-create with: baton plan --save \"task description\"", file=sys.stderr)
-            sys.exit(1)
+            validation_error(f"plan.json has invalid structure: {exc}", hint="Re-create with: baton plan --save \"task description\"")
         # Use namespaced execution directory for the new plan
         task_id = plan.task_id
         engine = ExecutionEngine(bus=bus, task_id=task_id, storage=storage)
@@ -276,15 +275,16 @@ def handler(args: argparse.Namespace) -> None:
 
     elif args.subcommand == "dispatched":
         if not _STEP_ID_RE.match(args.step_id):
-            print(f"error: invalid step ID '{args.step_id}' (expected format: N.N, e.g. '1.1')", file=sys.stderr)
-            sys.exit(1)
+            validation_error(f"invalid step ID '{args.step_id}' (expected format: N.N, e.g. '1.1')")
         engine.mark_dispatched(step_id=args.step_id, agent_name=args.agent)
         print(json.dumps({"status": "dispatched", "step_id": args.step_id}))
 
     elif args.subcommand == "record":
+        # Deprecation warning for --summary
+        if "--summary" in sys.argv:
+            print("warning: --summary is deprecated, use --outcome instead", file=sys.stderr)
         if not _STEP_ID_RE.match(args.step_id):
-            print(f"error: invalid step ID '{args.step_id}' (expected format: N.N, e.g. '1.1')", file=sys.stderr)
-            sys.exit(1)
+            validation_error(f"invalid step ID '{args.step_id}' (expected format: N.N, e.g. '1.1')")
         files = [f.strip() for f in args.files.split(",") if f.strip()] if args.files else []
         try:
             engine.record_step_result(
@@ -387,7 +387,14 @@ def handler(args: argparse.Namespace) -> None:
         else:
             bound_via = "active-task-id.txt"
         print(f"Bound:   {bound_via}")
-        print(f"Status:  {st.get('status', '?')}")
+        status_text = st.get('status', '?')
+        if status_text == 'running':
+            status_text = color_info(status_text)
+        elif status_text == 'completed':
+            status_text = success(status_text)
+        elif status_text == 'failed':
+            status_text = color_error(status_text)
+        print(f"Status:  {status_text}")
         total_phases = st.get("total_phases", "?")
         print(f"Phase:   {st.get('current_phase', '?')} / {total_phases}")
         print(f"Steps:   {st.get('steps_complete', 0)}/{st.get('steps_total', 0)} complete")
@@ -409,11 +416,11 @@ def handler(args: argparse.Namespace) -> None:
                 status_val = r.get("status", "?")
                 outcome = r.get("outcome", "")
                 if status_val == "complete":
-                    marker = "done"
+                    marker = success("done")
                 elif status_val == "dispatched":
-                    marker = "  >>"
+                    marker = color_info("  >>")
                 elif status_val == "failed":
-                    marker = "FAIL"
+                    marker = color_error("FAIL")
                 else:
                     marker = "  .."
                 outcome_short = f" ({outcome[:50]})" if outcome else ""
@@ -542,18 +549,28 @@ def _handle_list() -> None:
         print("No executions found.")
         return
 
-    # Print header
-    print(f"  {'TASK ID':<38}  {'STATUS':<18}  {'STEPS':>7}  {'PID':>7}  SUMMARY")
-    print("-" * 90)
+    from agent_baton.cli.formatting import print_table
+
+    table_rows = []
     for rec in records:
         active_marker = "*" if rec.execution_id == active_task_id else " "
         steps_str = f"{rec.steps_complete}/{rec.steps_total}"
         pid_str = str(rec.worker_pid) if rec.worker_pid else "-"
-        summary = rec.plan_summary[:40]
-        print(
-            f"{active_marker} {rec.execution_id:<38}  {rec.status:<18}  "
-            f"{steps_str:>7}  {pid_str:>7}  {summary}"
-        )
+        table_rows.append({
+            "task_id": f"{active_marker} {rec.execution_id}",
+            "status": rec.status,
+            "steps": steps_str,
+            "pid": pid_str,
+            "summary": rec.plan_summary[:40],
+        })
+
+    print_table(
+        table_rows,
+        columns=["task_id", "status", "steps", "pid", "summary"],
+        headers={"task_id": "TASK ID", "status": "STATUS", "steps": "STEPS", "pid": "PID", "summary": "SUMMARY"},
+        alignments={"steps": ">", "pid": ">"},
+        prefix="  ",
+    )
 
 
 def _handle_switch(task_id: str) -> None:
@@ -575,9 +592,7 @@ def _handle_switch(task_id: str) -> None:
             _log.info("execute switch: SQLite check failed: %s", exc)
 
     if not exists_in_files and not exists_in_sqlite:
-        print(f"error: no execution found with task ID '{task_id}'")
-        print("Run 'baton execute list' to see available executions.")
-        sys.exit(1)
+        user_error(f"no execution found with task ID '{task_id}'", hint="Run 'baton execute list' to see available executions.")
 
     # Update active task in both backends that are available
     sp.set_active()
@@ -602,9 +617,7 @@ def _parse_add_phases(specs: list[str]) -> list[PlanPhase]:
         parts = spec.split(":", 1)
         name = parts[0].strip()
         if not name:
-            print(f"error: --add-phase spec #{i} has empty name: '{spec}'", file=sys.stderr)
-            print("Expected format: NAME:AGENT (e.g. 'Design phase:architect')", file=sys.stderr)
-            sys.exit(1)
+            validation_error(f"--add-phase spec #{i} has empty name: '{spec}'", hint="Expected format: NAME:AGENT (e.g. 'Design phase:architect')")
         agent = parts[1].strip() if len(parts) > 1 else "backend-engineer"
         if len(parts) == 1:
             print(f"warning: --add-phase '{spec}' has no agent specified, defaulting to 'backend-engineer'", file=sys.stderr)
@@ -633,14 +646,11 @@ def _parse_add_steps(specs: list[str]) -> tuple[int | None, list[PlanStep]]:
     for i, spec in enumerate(specs, start=1):
         parts = spec.split(":", 2)
         if len(parts) < 2:
-            print(f"error: --add-step spec #{i} is malformed: '{spec}'", file=sys.stderr)
-            print("Expected format: PHASE_ID:AGENT:DESCRIPTION (e.g. '2:data-engineer:Run migration')", file=sys.stderr)
-            sys.exit(1)
+            validation_error(f"--add-step spec #{i} is malformed: '{spec}'", hint="Expected format: PHASE_ID:AGENT:DESCRIPTION (e.g. '2:data-engineer:Run migration')")
         try:
             phase_id = int(parts[0].strip())
         except ValueError:
-            print(f"error: --add-step spec #{i} has non-numeric phase ID: '{parts[0]}'", file=sys.stderr)
-            sys.exit(1)
+            validation_error(f"--add-step spec #{i} has non-numeric phase ID: '{parts[0]}'")
         agent = parts[1].strip()
         desc = parts[2].strip() if len(parts) > 2 else f"Additional work in phase {phase_id}"
         if target_phase is None:

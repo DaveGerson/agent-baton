@@ -162,8 +162,15 @@ src = json.loads(open(sys.argv[1]).read())
 dst = json.loads(open(sys.argv[2]).read())
 src_hooks = src.get('hooks', {})
 dst_hooks = dst.get('hooks', {})
-for event, entries in src_hooks.items():
-    dst_hooks[event] = entries
+for event, src_entries in src_hooks.items():
+    existing = dst_hooks.get(event, [])
+    existing_cmds = {e.get('command','') for e in existing if isinstance(e,dict)}
+    for entry in src_entries:
+        cmd = entry.get('command','') if isinstance(entry,dict) else ''
+        if cmd not in existing_cmds:
+            existing.append(entry)
+            existing_cmds.add(cmd)
+    dst_hooks[event] = existing
 dst['hooks'] = dst_hooks
 open(sys.argv[2], 'w').write(json.dumps(dst, indent=2) + '\n')
 "@
@@ -321,6 +328,18 @@ if (-not (Test-Path $BatonDir)) {
     Write-Host "  ────────────────────────"
     Write-Host "  + Created: ~/.baton/ (cross-project analytics)" -ForegroundColor Green
     Write-Host "  central.db will be initialized on first 'baton' command." -ForegroundColor White
+} else {
+    # Check for migration needs
+    $centralDb = Join-Path $BatonDir "central.db"
+    $pmoDb = Join-Path $BatonDir "pmo.db"
+    if (Test-Path $pmoDb) {
+        if (-not (Test-Path $centralDb)) {
+            Write-Host "  ~ pmo.db found — will be migrated to central.db on next baton command" -ForegroundColor Yellow
+        }
+    }
+    if (Test-Path $centralDb) {
+        Write-Host "  ~ central.db exists — will be upgraded on next baton command" -ForegroundColor Yellow
+    }
 }
 
 # ── Summary ────────────────────────────────────────────────

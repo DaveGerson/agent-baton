@@ -61,6 +61,7 @@ def main(argv: list[str] | None = None) -> None:
         description="Agent Baton — multi-agent orchestration tools",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {_version}")
+    parser.add_argument("--no-color", action="store_true", help="Disable colored output")
     sub = parser.add_subparsers(dest="command")
 
     # Discover and register all command modules.
@@ -93,15 +94,27 @@ def main(argv: list[str] | None = None) -> None:
         lines.append(f"    {', '.join(ungrouped)}")
 
     lines.append(f"\nQuick start:")
-    lines.append(f"  baton plan \"task description\" --save --explain")
-    lines.append(f"  baton execute start")
-    lines.append(f"  baton execute next")
+    lines.append(f"  1. baton plan \"task description\" --save --explain")
+    lines.append(f"  2. baton execute start")
+    lines.append(f"  3. baton execute next              # get next action")
+    lines.append(f"     If DISPATCH: spawn agent, then:")
+    lines.append(f"     baton execute record --step-id ID --agent NAME --status complete")
+    lines.append(f"     If GATE: run test, then:")
+    lines.append(f"     baton execute gate --phase-id ID --result pass")
+    lines.append(f"  4. Repeat step 3 until ACTION: COMPLETE")
+    lines.append(f"  5. baton execute complete")
+    lines.append(f"")
+    lines.append(f"Full walkthrough: docs/examples/first-run.md")
     lines.append(f"")
 
     parser.epilog = "\n".join(lines)
     parser.formatter_class = argparse.RawDescriptionHelpFormatter
 
     args = parser.parse_args(argv)
+
+    if getattr(args, "no_color", False):
+        from agent_baton.cli.colors import set_color_enabled
+        set_color_enabled(False)
 
     if args.command is None:
         from pathlib import Path

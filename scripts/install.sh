@@ -147,7 +147,15 @@ src = json.loads(open('$SETTINGS_JSON').read())
 dst = json.loads(open('$settings_path').read())
 src_hooks = src.get('hooks', {})
 if src_hooks:
-    dst.setdefault('hooks', {}).update(src_hooks)
+    dst_hooks = dst.setdefault('hooks', {})
+    for event, src_entries in src_hooks.items():
+        existing = dst_hooks.get(event, [])
+        existing_cmds = {e.get('command','') for e in existing if isinstance(e,dict)}
+        for entry in src_entries:
+            cmd = entry.get('command','') if isinstance(entry,dict) else ''
+            if cmd not in existing_cmds:
+                existing.append(entry)
+        dst_hooks[event] = existing
 open('$settings_path', 'w').write(json.dumps(dst, indent=2) + '\n')
 print('  merge: settings.json hooks (' + str(len(src_hooks)) + ' events)')
 " 2>/dev/null || echo "  ! settings.json merge failed — merge hooks manually"
