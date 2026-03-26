@@ -1082,3 +1082,190 @@ class TestDefaultModelOverride:
         """Every known task type should map to at least one agent."""
         for task_type, agents in _DEFAULT_AGENTS.items():
             assert agents, f"_DEFAULT_AGENTS['{task_type}'] is empty"
+
+
+# ---------------------------------------------------------------------------
+# Task 5: MachinePlan complexity fields
+# ---------------------------------------------------------------------------
+
+class TestMachinePlanComplexityFields:
+    def test_default_complexity_is_medium(self):
+        plan = MachinePlan(task_id="test", task_summary="test")
+        assert plan.complexity == "medium"
+
+    def test_default_classification_source(self):
+        plan = MachinePlan(task_id="test", task_summary="test")
+        assert plan.classification_source == "keyword-fallback"
+
+    def test_to_dict_includes_complexity(self):
+        plan = MachinePlan(task_id="test", task_summary="test", complexity="light")
+        d = plan.to_dict()
+        assert d["complexity"] == "light"
+        assert d["classification_source"] == "keyword-fallback"
+
+    def test_from_dict_reads_complexity(self):
+        data = {
+            "task_id": "test",
+            "task_summary": "test",
+            "complexity": "heavy",
+            "classification_source": "haiku",
+        }
+        plan = MachinePlan.from_dict(data)
+        assert plan.complexity == "heavy"
+        assert plan.classification_source == "haiku"
+
+    def test_from_dict_defaults_missing_complexity(self):
+        """Backward compat: plans without complexity field default to medium."""
+        data = {"task_id": "test", "task_summary": "test"}
+        plan = MachinePlan.from_dict(data)
+        assert plan.complexity == "medium"
+        assert plan.classification_source == "keyword-fallback"
+
+    def test_to_markdown_includes_complexity(self):
+        plan = MachinePlan(
+            task_id="test",
+            task_summary="test",
+            complexity="light",
+            classification_source="haiku",
+        )
+        md = plan.to_markdown()
+        assert "light" in md.lower()
+
+
+# ---------------------------------------------------------------------------
+# Task 6: Classification-aware planning
+# ---------------------------------------------------------------------------
+
+from agent_baton.core.engine.classifier import (
+    FallbackClassifier,
+    KeywordClassifier,
+    TaskClassification,
+    TaskClassifier,
+)
+
+
+class _StubClassifier:
+    """A stub classifier that returns a fixed classification."""
+    def __init__(self, classification: TaskClassification):
+        self._classification = classification
+
+    def classify(self, summary, registry, project_root=None):
+        return self._classification
+
+
+class TestClassificationAwarePlanning:
+    def test_light_plan_has_single_phase(self, planner: IntelligentPlanner):
+        stub = _StubClassifier(TaskClassification(
+            task_type="migration",
+            complexity="light",
+            agents=["backend-engineer"],
+            phases=["Implement"],
+            reasoning="Simple file move",
+            source="test-stub",
+        ))
+        planner._task_classifier = stub
+        plan = planner.create_plan("Move 3 files to docs/historical")
+        assert len(plan.phases) == 1
+        assert plan.phases[0].name == "Implement"
+        assert plan.complexity == "light"
+        assert plan.classification_source == "test-stub"
+
+    def test_light_plan_has_single_agent(self, planner: IntelligentPlanner):
+        stub = _StubClassifier(TaskClassification(
+            task_type="migration",
+            complexity="light",
+            agents=["backend-engineer"],
+            phases=["Implement"],
+            reasoning="Simple file move",
+            source="test-stub",
+        ))
+        planner._task_classifier = stub
+        plan = planner.create_plan("Move 3 files to docs/historical")
+        assert len(plan.all_agents) == 1
+
+    def test_medium_regression_unchanged(self, planner: IntelligentPlanner):
+        """When classifier returns medium, plan should match legacy behavior."""
+        stub = _StubClassifier(TaskClassification(
+            task_type="new-feature",
+            complexity="medium",
+            agents=["architect", "backend-engineer", "test-engineer", "code-reviewer"],
+            phases=["Design", "Implement", "Test", "Review"],
+            reasoning="Standard feature",
+            source="test-stub",
+        ))
+        planner._task_classifier = stub
+        plan = planner.create_plan("Add user authentication")
+        assert len(plan.phases) == 4
+        assert plan.complexity == "medium"
+
+    def test_explicit_task_type_bypasses_classifier(self, planner: IntelligentPlanner):
+        stub = _StubClassifier(TaskClassification(
+            task_type="bug-fix",
+            complexity="light",
+            agents=["backend-engineer"],
+            phases=["Implement"],
+            reasoning="Should not be used",
+            source="test-stub",
+        ))
+        planner._task_classifier = stub
+        plan = planner.create_plan(
+            "Fix something",
+            task_type="new-feature",
+        )
+        assert plan.task_type == "new-feature"
+
+    def test_explicit_agents_bypasses_classifier(self, planner: IntelligentPlanner):
+        stub = _StubClassifier(TaskClassification(
+            task_type="migration",
+            complexity="light",
+            agents=["backend-engineer"],
+            phases=["Implement"],
+            reasoning="Should not be used for agents",
+            source="test-stub",
+        ))
+        planner._task_classifier = stub
+        plan = planner.create_plan(
+            "Move 3 files",
+            agents=["architect", "test-engineer"],
+        )
+        # Explicit agents override classifier
+        agents_in_plan = plan.all_agents
+        assert any("architect" in a for a in agents_in_plan) or any(
+            "test-engineer" in a for a in agents_in_plan
+        )
+
+    def test_explicit_complexity_parameter(self, planner: IntelligentPlanner):
+        plan = planner.create_plan("Something", complexity="light")
+        assert plan.complexity == "light"
+
+    def test_explain_plan_includes_classification(self, planner: IntelligentPlanner):
+        stub = _StubClassifier(TaskClassification(
+            task_type="migration",
+            complexity="light",
+            agents=["backend-engineer"],
+            phases=["Implement"],
+            reasoning="Simple file relocation",
+            source="haiku",
+        ))
+        planner._task_classifier = stub
+        plan = planner.create_plan("Move 3 files")
+        explanation = planner.explain_plan(plan)
+        assert "light" in explanation.lower()
+        assert "haiku" in explanation.lower()
+
+
+# ---------------------------------------------------------------------------
+# Task 7: CLI --complexity override
+# ---------------------------------------------------------------------------
+
+class TestComplexityCLIOverride:
+    def test_complexity_parameter_flows_to_plan(self, planner: IntelligentPlanner):
+        plan = planner.create_plan("Add a login page", complexity="light")
+        assert plan.complexity == "light"
+        assert len(plan.phases) == 1
+        assert plan.phases[0].name == "Implement"
+
+    def test_complexity_heavy_preserves_full_plan(self, planner: IntelligentPlanner):
+        plan = planner.create_plan("Add a login page", complexity="heavy")
+        assert plan.complexity == "heavy"
+        assert len(plan.phases) >= 3

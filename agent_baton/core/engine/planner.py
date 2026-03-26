@@ -450,14 +450,17 @@ class IntelligentPlanner:
 
         # 3. Classify — determines task_type, complexity, agents, and phases.
         # Explicit overrides take precedence over the classifier.
+        # When complexity is explicitly provided, the caller is overriding
+        # classification — use the keyword path so phases are scaled to
+        # match the explicit complexity rather than the classifier's guess.
         classified_phases: list[str] | None = None
-        if task_type is None and agents is None and phases is None:
+        if task_type is None and agents is None and phases is None and complexity is None:
             classification = self._task_classifier.classify(
                 task_summary, self._registry, project_root
             )
             self._last_task_classification = classification
             inferred_type = classification.task_type
-            inferred_complexity = complexity or classification.complexity
+            inferred_complexity = classification.complexity
             resolved_agents = list(classification.agents)
             classified_phases = list(classification.phases)
         else:
@@ -567,6 +570,13 @@ class IntelligentPlanner:
             plan_phases = self._apply_pattern(pattern, inferred_type, task_summary)
             # Apply routed agent names to pattern-derived phases
             plan_phases = self._assign_agents_to_phases(plan_phases, resolved_agents, task_summary)
+        elif complexity is not None:
+            # Explicit complexity override — scale phases to match.
+            # Use KeywordClassifier phase scaling so light/heavy produces
+            # the right number of phases even in the legacy path.
+            from agent_baton.core.engine.classifier import KeywordClassifier as _KC
+            complexity_phases = _KC()._select_phases(inferred_type, inferred_complexity, _PHASE_NAMES)
+            plan_phases = self._build_phases_for_names(complexity_phases, resolved_agents, task_summary)
         else:
             plan_phases = self._default_phases(inferred_type, resolved_agents, task_summary)
 
