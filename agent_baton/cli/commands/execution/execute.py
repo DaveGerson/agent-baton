@@ -1,23 +1,9 @@
 """``baton execute`` -- drive the execution engine through an orchestrated task.
 
 This module implements the core execution loop CLI that an orchestrator
-agent (typically Claude Code) uses to advance a plan step-by-step.  It
-exposes 11 subcommands:
-
-* ``start``        -- Load a ``plan.json`` and begin execution.
-* ``next``         -- Retrieve the next action (DISPATCH, GATE, APPROVAL,
-                      COMPLETE, or FAILED).
-* ``dispatched``   -- Mark a step as in-flight (before spawning the agent).
-* ``record``       -- Record a step result (complete or failed).
-* ``gate``         -- Record a QA gate result (pass or fail).
-* ``approve``      -- Record a human approval decision.
-* ``amend``        -- Amend the running plan (add phases or steps).
-* ``team-record``  -- Record a team member completion within a team step.
-* ``complete``     -- Finalize execution (writes usage, trace, retro).
-* ``status``       -- Show current execution state summary.
-* ``resume``       -- Resume execution after a crash using persisted state.
-* ``list``         -- List all known executions with status.
-* ``switch``       -- Change the active execution task ID.
+agent (typically Claude Code) uses to advance a plan step-by-step.
+It exposes subcommands for starting, advancing, recording, gating,
+approving, amending, and completing orchestrated executions.
 
 The module also contains :func:`_print_action`, which formats engine
 actions into the text protocol that Claude Code parses to drive
@@ -58,17 +44,6 @@ _STEP_ID_RE = re.compile(r'^\d+\.\d+$')
 
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
-    """Register the ``execute`` subcommand and all its nested subcommands.
-
-    All subcommands accept an optional ``--task-id`` flag that targets a
-    specific execution by its task ID.  When omitted, resolution follows
-    a priority chain: ``--task-id`` flag > ``BATON_TASK_ID`` env var >
-    ``active-task-id.txt`` marker file > legacy flat-file state.
-
-    Returns:
-        The ``execute`` argument parser (used by the CLI dispatcher to
-        extract the registered subcommand name).
-    """
     p = subparsers.add_parser(
         "execute",
         help="Drive an orchestrated task through the execution engine",
@@ -246,7 +221,7 @@ def _print_action(action: dict) -> None:
             values.
 
     Raises:
-        AssertionError: If ``action_type`` is not a string (indicates a bug
+        ValueError: If ``action_type`` is not a string (indicates a bug
             where the raw enum was passed instead of calling ``.to_dict()``).
     """
     atype = action.get("action_type", "")
@@ -298,25 +273,6 @@ def _print_action(action: dict) -> None:
 
 
 def handler(args: argparse.Namespace) -> None:
-    """Dispatch to the appropriate ``execute`` subcommand handler.
-
-    Resolves the target task ID from the priority chain (``--task-id`` >
-    ``BATON_TASK_ID`` env var > ``active-task-id.txt``), instantiates the
-    :class:`~agent_baton.core.engine.executor.ExecutionEngine`, and
-    delegates to the matching subcommand logic.
-
-    Side effects:
-        * ``start`` persists an ``execution-state.json`` and sets the
-          active execution marker.
-        * ``record`` appends to the mission log via
-          :class:`~agent_baton.core.orchestration.context.ContextManager`.
-        * ``complete`` writes usage logs, trace data, and retrospectives,
-          then attempts a best-effort sync to ``central.db``.
-
-    Args:
-        args: Parsed CLI arguments including ``subcommand`` and
-            subcommand-specific fields.
-    """
     if args.subcommand is None:
         validation_error("supply a subcommand: start, next, record, dispatched, gate, approve, amend, team-record, complete, status, resume, list, switch")
 
@@ -340,13 +296,7 @@ def handler(args: argparse.Namespace) -> None:
 
     bus = EventBus()
     storage = get_project_storage(context_root)
-    # Build resolver for ALL subcommands so knowledge gap auto-resolution works
-    # on next/record/complete, not just start.
-    knowledge_resolver = _build_knowledge_resolver(None)
-    engine = ExecutionEngine(
-        bus=bus, task_id=task_id, storage=storage,
-        knowledge_resolver=knowledge_resolver,
-    )
+    engine = ExecutionEngine(bus=bus, task_id=task_id, storage=storage)
 
     if args.subcommand == "start":
         plan_path = Path(args.plan)
@@ -635,7 +585,7 @@ def handler(args: argparse.Namespace) -> None:
 # Knowledge resolver construction
 # ---------------------------------------------------------------------------
 
-def _build_knowledge_resolver(plan: "MachinePlan | None" = None):
+def _build_knowledge_resolver(plan: MachinePlan):
     """Construct a KnowledgeResolver from the plan's knowledge configuration.
 
     Loads the default knowledge registry paths (same paths used at plan time)
@@ -666,20 +616,7 @@ def _build_knowledge_resolver(plan: "MachinePlan | None" = None):
 # ---------------------------------------------------------------------------
 
 def _handle_list() -> None:
-    """Print a table of all known executions with status and worker info.
-
-    Merges execution records from two backends:
-
-    1. **File backend** -- Scans namespaced directories under
-       ``.claude/team-context/executions/<task_id>/`` plus a legacy
-       flat-file ``execution-state.json`` at the root.
-    2. **SQLite backend** -- Queries ``baton.db`` when the detected
-       storage backend is ``"sqlite"``.
-
-    Output columns: TASK ID, STATUS, STEPS (completed/total), PID
-    (daemon worker process if alive), SUMMARY.  The active execution
-    is marked with ``*``.
-    """
+    """Print a table of all known executions with status and worker info."""
     context_root = Path(".claude/team-context")
 
     # Collect task IDs from file backend (namespaced dirs)
@@ -799,16 +736,7 @@ def _handle_list() -> None:
 
 
 def _handle_switch(task_id: str) -> None:
-    """Switch the active execution to the given task ID.
-
-    Updates the active execution marker in both the file backend
-    (``active-task-id.txt``) and the SQLite backend (if available).
-    Exits with an error if no execution is found matching the
-    provided task ID in either backend.
-
-    Args:
-        task_id: The execution task ID to switch to.
-    """
+    """Switch the active execution to the given task ID."""
     context_root = Path(".claude/team-context")
     sp = StatePersistence(context_root, task_id=task_id)
 

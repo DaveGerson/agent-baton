@@ -265,7 +265,7 @@ class ExecutionEngine:
                 else:
                     events_dir = self._root / "events"
                 self._event_persistence = EventPersistence(events_dir=events_dir)
-                self._bus.subscribe("*", self._event_persistence.append)
+                self._bus.subscribe("*", self._persist_event)
             else:
                 self._event_persistence = None
         else:
@@ -281,7 +281,7 @@ class ExecutionEngine:
                 self._event_persistence = EventPersistence(
                     events_dir=events_dir
                 )
-                self._bus.subscribe("*", self._event_persistence.append)
+                self._bus.subscribe("*", self._persist_event)
             else:
                 self._event_persistence = None
             self._usage_logger = UsageLogger(
@@ -366,7 +366,8 @@ class ExecutionEngine:
                 if self._usage_logger is not None:
                     self._usage_logger.log(record)
         else:
-            self._usage_logger.log(record)
+            if self._usage_logger is not None:
+                self._usage_logger.log(record)
 
     def _log_telemetry_event(self, tel_event: TelemetryEvent) -> None:
         """Log a telemetry event via storage backend or legacy logger."""
@@ -392,10 +393,11 @@ class ExecutionEngine:
                     except Exception as fe:
                         _log.warning("File telemetry fallback also failed: %s", fe)
         else:
-            try:
-                self._telemetry.log_event(tel_event)
-            except Exception as e:
-                _log.warning("File telemetry log failed: %s", e)
+            if self._telemetry is not None:
+                try:
+                    self._telemetry.log_event(tel_event)
+                except Exception as e:
+                    _log.warning("File telemetry log failed: %s", e)
 
     def _save_retro(self, retro) -> "Path | None":
         """Persist a retrospective via storage backend or legacy engine."""
@@ -411,7 +413,9 @@ class ExecutionEngine:
                     return self._retro_engine.save(retro)
             return None
         else:
-            return self._retro_engine.save(retro)
+            if self._retro_engine is not None:
+                return self._retro_engine.save(retro)
+            return None
 
     # ── Public API ──────────────────────────────────────────────────────────
 
@@ -1274,6 +1278,16 @@ class ExecutionEngine:
     # Event ownership: Engine publishes task-level and phase-level events.
     # Step-level events (step.dispatched, step.completed, step.failed) are
     # published by the runtime layer (TaskWorker) to avoid duplication.
+
+    def _persist_event(self, event: Event) -> None:
+        """EventBus subscriber that appends *event* to the JSONL persistence log.
+
+        Wraps :meth:`EventPersistence.append` (which returns a ``Path``) so
+        that the method signature matches the ``EventHandler`` type alias
+        (``Callable[[Event], None]``).
+        """
+        if self._event_persistence is not None:
+            self._event_persistence.append(event)
 
     def _on_event_for_telemetry(self, event: Event) -> None:
         """EventBus subscriber that mirrors every domain event to telemetry.

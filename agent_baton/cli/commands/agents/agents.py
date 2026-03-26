@@ -1,11 +1,10 @@
 """``baton agents`` -- list available agents.
 
-Loads agent definitions from the default paths (``~/.claude/agents/``
-and ``.claude/agents/``) and displays them grouped by category
-(engineering, review, data, etc.) with model tags and flavor indicators.
+Loads agent definitions from default paths and displays them grouped
+by category with model tags and flavor indicators.
 
 Delegates to:
-    :class:`~agent_baton.core.orchestration.registry.AgentRegistry`
+    agent_baton.core.orchestration.registry.AgentRegistry
 """
 from __future__ import annotations
 

@@ -1,35 +1,4 @@
-"""Agent router -- detects project technology stack and maps roles to agent flavors.
-
-The router bridges the gap between the generic role names used in execution
-plans (``backend-engineer``, ``frontend-engineer``) and the technology-
-specific agent variants that actually know the right idioms for the project
-(``backend-engineer--python``, ``frontend-engineer--react``).
-
-Stack detection algorithm:
-    1. Build a scan list: the project root, its visible non-hidden child
-       directories, and their visible children (two levels deep).  Build
-       artifacts (``node_modules``, ``dist``, ``__pycache__``, etc.) are
-       skipped.
-    2. Check for **framework signals** first (``next.config.js`` implies
-       React + JavaScript, ``angular.json`` implies Angular + TypeScript,
-       etc.).  These are the most specific and take highest priority.
-    3. Check for **package-manager signals** (``pyproject.toml``,
-       ``package.json``, ``go.mod``).  Root-level signals override
-       subdirectory signals.  Within the same tier, ``typescript`` can
-       upgrade ``javascript`` when ``tsconfig.json`` is found.
-    4. Check for ``.csproj`` / ``.sln`` files (C# / .NET detection).
-    5. As a final heuristic, look for ``vite.config.*`` alongside a
-       ``package.json`` that lists ``react`` as a dependency.
-
-Once the stack is known, :data:`FLAVOR_MAP` translates (language, framework)
-tuples into agent flavor suffixes.  The router verifies that the flavored
-agent actually exists in the :class:`AgentRegistry` before recommending it;
-if not, it falls back to the base (unflavored) agent name.
-
-This design ensures that adding a new language or framework only requires
-adding entries to the signal dictionaries and flavor map -- no control-flow
-changes.
-"""
+"""Agent router — detects project stack and maps to agent flavors."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -43,9 +12,7 @@ _SKIP_DIRS: frozenset[str] = frozenset({
     "node_modules", "__pycache__", "dist", "build", ".git",
 })
 
-# Package-manager signals: filename -> (language, framework_hint).
-# These are generic language indicators (no framework opinion).  Root-level
-# hits take priority over subdirectory hits during detection.
+# Stack detection signals: filename → (language, framework_hint)
 PACKAGE_SIGNALS: dict[str, tuple[str, str | None]] = {
     "package.json": ("javascript", None),
     "tsconfig.json": ("typescript", None),
@@ -60,10 +27,6 @@ PACKAGE_SIGNALS: dict[str, tuple[str, str | None]] = {
     "pom.xml": ("java", None),
 }
 
-# Framework signals: filename -> (language, framework).
-# More specific than package signals.  Checked first during detection so
-# that a ``next.config.js`` is recognised as React before a bare
-# ``package.json`` is treated as generic JavaScript.
 FRAMEWORK_SIGNALS: dict[str, tuple[str, str]] = {
     "next.config.js": ("javascript", "react"),
     "next.config.ts": ("typescript", "react"),
@@ -77,11 +40,7 @@ FRAMEWORK_SIGNALS: dict[str, tuple[str, str]] = {
     "wsgi.py": ("python", "django"),
 }
 
-# Flavor map: (language, framework) -> {base_agent_name: flavor_suffix}.
-# This is the translation table that turns a detected stack into agent
-# flavor recommendations.  Multiple roles can be mapped in a single entry
-# (e.g. React projects get both ``frontend-engineer--react`` and
-# ``backend-engineer--node``).
+# Map (language, framework) → agent flavor suffix
 FLAVOR_MAP: dict[tuple[str, str | None], dict[str, str]] = {
     ("python", None): {"backend-engineer": "python"},
     ("python", "django"): {"backend-engineer": "python"},
@@ -96,86 +55,30 @@ FLAVOR_MAP: dict[tuple[str, str | None], dict[str, str]] = {
 
 @dataclass
 class StackProfile:
-    """Detected project technology stack.
-
-    Produced by :meth:`AgentRouter.detect_stack` and consumed by
-    :meth:`AgentRouter.route` to select the correct agent flavor.
-
-    Attributes:
-        language: Primary programming language detected (e.g. ``"python"``,
-            ``"typescript"``, ``"csharp"``).  ``None`` when detection
-            found no recognizable signals.
-        framework: Framework detected (e.g. ``"react"``, ``"django"``,
-            ``"dotnet"``).  ``None`` when only a language-level signal was
-            found.
-        detected_files: Relative paths of the signal files that contributed
-            to the detection.  Useful for debugging routing decisions.
-    """
-
+    """Detected project stack information."""
     language: str | None = None
     framework: str | None = None
     detected_files: list[str] = field(default_factory=list)
 
 
 class AgentRouter:
-    """Detect the project technology stack and route roles to agent flavors.
-
-    The router is stateless apart from its reference to the
-    :class:`AgentRegistry`.  Each call to :meth:`route` or
-    :meth:`route_team` can optionally accept a pre-computed
-    :class:`StackProfile` to avoid redundant filesystem scans.
-
-    The routing algorithm:
-        1. Determine the project's ``(language, framework)`` tuple via
-           :meth:`detect_stack`.
-        2. Look up the tuple in :data:`FLAVOR_MAP` to get a mapping of
-           base agent names to flavor suffixes.
-        3. If a flavor suffix is found for the requested role, verify
-           the flavored agent exists in the registry before returning it.
-        4. Fall back to the base agent name when no flavor match exists
-           or the flavored definition is missing.
-
-    Attributes:
-        _registry: The :class:`AgentRegistry` used to validate that
-            suggested flavored agents actually have definitions on disk.
-    """
+    """Detect project stack and route to the best agent flavor."""
 
     def __init__(self, registry: AgentRegistry) -> None:
         self._registry = registry
 
     def detect_stack(self, project_root: Path | None = None) -> StackProfile:
-        """Scan project files to determine the primary language and framework.
+        """Scan project files to determine language and framework.
 
-        The detection follows a priority chain designed to resolve ambiguity
-        in polyglot projects:
-
-        1. **Framework signals** (highest priority) -- config files like
-           ``next.config.js`` or ``angular.json`` that imply both a language
-           and a framework.  Checked across all scan directories.
-        2. **Root package signals** -- package manager files (``pyproject.toml``,
-           ``package.json``) found in the project root.  Within this tier,
-           ``typescript`` can upgrade ``javascript`` when ``tsconfig.json``
-           appears alongside ``package.json``.
-        3. **Subdirectory package signals** -- same files found in child
-           directories, used only when no root-level signal was found.
-        4. **C# / .NET detection** -- ``.csproj`` or ``.sln`` files found
-           via glob in any scan directory.
-        5. **Vite + React heuristic** (lowest priority) -- ``vite.config.*``
-           alongside a ``package.json`` that lists ``react`` as a dependency.
-           Only applies when no framework was detected by earlier stages.
-
-        Scanning is limited to two directory levels (root, children,
-        grandchildren), skipping hidden directories and common build/cache
-        directories listed in ``_SKIP_DIRS``.
+        Scans up to two levels of subdirectories (root + visible children +
+        visible grandchildren), skipping hidden directories and common
+        build/cache directories.
 
         Args:
-            project_root: Directory to scan.  Defaults to the current
-                working directory.
+            project_root: Directory to scan. Defaults to cwd.
 
         Returns:
-            A :class:`StackProfile` with the detected language, framework,
-            and the relative paths of the signal files that contributed to
-            the decision.
+            StackProfile with detected language/framework.
         """
         root = project_root or Path.cwd()
         profile = StackProfile()
@@ -296,36 +199,24 @@ class AgentRouter:
     ) -> str:
         """Determine the best agent name for a role given the project stack.
 
-        Resolution order:
-            1. Look up ``(language, framework)`` in ``FLAVOR_MAP``.
-            2. If no match, try ``(language, None)`` as a language-only
-               fallback.
-            3. If a flavor suffix is found for *base_name*, verify the
-               flavored agent definition exists in the registry.
-            4. Return the flavored name if it exists; otherwise return
-               *base_name* unchanged.
-
         Args:
-            base_name: Base agent name (e.g. ``"backend-engineer"``).
-            stack: Pre-detected stack profile.  When ``None``,
-                :meth:`detect_stack` is called automatically.
-            project_root: Project root passed to :meth:`detect_stack`
-                when *stack* is ``None``.
+            base_name: Base agent name (e.g., "backend-engineer").
+            stack: Pre-detected stack profile, or None to auto-detect.
+            project_root: Project root for auto-detection.
 
         Returns:
-            The best agent name -- either a flavored variant (e.g.
-            ``"backend-engineer--python"``) or the original *base_name*
-            when no matching flavor exists in the registry.
+            Agent name — either flavored (e.g., "backend-engineer--python")
+            or base if no matching flavor exists.
         """
         if stack is None:
             stack = self.detect_stack(project_root)
 
-        # Look up flavor mapping for this stack.
-        # stack.language is str | None; FLAVOR_MAP keys require str, so skip
-        # the lookup entirely when no language was detected.
+        # FLAVOR_MAP keys require a non-None language; when no language was
+        # detected there is no flavor to apply, so return the base name early.
         if stack.language is None:
             return base_name
 
+        # Look up flavor mapping for this stack
         key = (stack.language, stack.framework)
         flavors = FLAVOR_MAP.get(key, {})
         if not flavors:
@@ -350,22 +241,13 @@ class AgentRouter:
     ) -> dict[str, str]:
         """Route a list of base roles to their best agent names.
 
-        Convenience wrapper around :meth:`route` that detects the stack
-        once and reuses it for all roles, avoiding repeated filesystem
-        scans when routing an entire team.
-
         Args:
-            roles: List of base agent names (e.g.
-                ``["backend-engineer", "frontend-engineer"]``).
-            stack: Pre-detected stack profile, or ``None`` to
-                auto-detect once.
-            project_root: Passed to :meth:`detect_stack` when *stack*
-                is ``None``.
+            roles: List of base agent names.
+            stack: Pre-detected stack, or None.
+            project_root: For auto-detection.
 
         Returns:
-            Dictionary mapping each base role to its resolved agent name.
-            Values may be flavored (``"backend-engineer--python"``) or
-            unchanged (``"test-engineer"``) depending on the stack.
+            Dict mapping base role → resolved agent name.
         """
         if stack is None:
             stack = self.detect_stack(project_root)

@@ -601,7 +601,9 @@ async def resolve_signal(
     if hasattr(store, "get_signal"):
         signal = store.get_signal(signal_id)
         if signal is not None:
-            return _signal_response(signal).model_dump()
+            resp = _signal_response(signal).model_dump()
+            resp["resolved"] = True
+            return resp
     return {"resolved": True, "signal_id": signal_id}
 
 

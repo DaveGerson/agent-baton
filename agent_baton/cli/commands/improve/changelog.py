@@ -3,14 +3,8 @@
 Tracks modifications to agent definition files: when a prompt was
 updated, what changed, and where the pre-change backup is stored.
 
-Display modes:
-    * ``baton changelog`` -- Show all changelog entries.
-    * ``baton changelog --agent NAME`` -- Filter to a specific agent.
-    * ``baton changelog --backups`` -- List all backup files.
-    * ``baton changelog --backups NAME`` -- List backups for one agent.
-
 Delegates to:
-    :class:`~agent_baton.core.improve.vcs.AgentVersionControl`
+    agent_baton.core.improve.vcs.AgentVersionControl
 """
 from __future__ import annotations
 

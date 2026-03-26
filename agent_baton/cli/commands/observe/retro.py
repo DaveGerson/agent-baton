@@ -2,17 +2,10 @@
 
 Retrospectives are auto-generated after each completed execution and
 contain lessons learned, agent performance notes, and roster
-recommendations.  This command lists, searches, and inspects them.
-
-Display modes:
-    * ``baton retro`` -- List recent retrospectives.
-    * ``baton retro --task-id ID`` -- Show a specific retrospective.
-    * ``baton retro --search KEYWORD`` -- Search by keyword.
-    * ``baton retro --recommendations`` -- Extract roster recommendations
-      (add/remove/modify agent) from all retrospectives.
+recommendations. This command lists, searches, and inspects them.
 
 Delegates to:
-    :class:`~agent_baton.core.observe.retrospective.RetrospectiveEngine`
+    agent_baton.core.observe.retrospective.RetrospectiveEngine
 """
 from __future__ import annotations
 

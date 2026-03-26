@@ -3,13 +3,8 @@
 Fetches a named package from a local registry and installs its agents,
 references, and knowledge packs into the project or user scope.
 
-Modes:
-    * ``baton pull NAME --registry PATH`` -- Install a package.
-    * ``baton pull --list --registry PATH`` -- List available packages.
-    * ``baton pull --search QUERY --registry PATH`` -- Search by name.
-
 Delegates to:
-    :class:`~agent_baton.core.distribute.registry_client.RegistryClient`
+    agent_baton.core.distribute.registry_client.RegistryClient
 """
 from __future__ import annotations
 

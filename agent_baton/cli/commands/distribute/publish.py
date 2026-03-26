@@ -1,15 +1,10 @@
 """``baton publish`` -- publish a package archive to a local registry directory.
 
-Copies a ``.tar.gz`` package into a local registry directory structure
-and updates the registry index.  Also supports ``--init`` to create a
-new empty registry.
-
-Modes:
-    * ``baton publish ARCHIVE --registry PATH`` -- Publish an archive.
-    * ``baton publish --init PATH`` -- Initialise a new empty registry.
+Copies a .tar.gz package into a local registry directory structure
+and updates the registry index.
 
 Delegates to:
-    :class:`~agent_baton.core.distribute.registry_client.RegistryClient`
+    agent_baton.core.distribute.registry_client.RegistryClient
 """
 from __future__ import annotations
 

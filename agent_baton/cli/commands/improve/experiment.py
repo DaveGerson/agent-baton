@@ -1,23 +1,13 @@
 """``baton experiment`` -- manage improvement experiments.
 
 Experiments are controlled trials that test whether an improvement
-recommendation actually improves agent performance.  Each experiment
-tracks a metric (e.g. success rate) against a baseline, collects
-samples over subsequent executions, and can be concluded or rolled
-back.
-
-Subcommands:
-    * ``list`` -- List all experiments with status and progress.
-    * ``show ID`` -- Show detailed experiment state.
-    * ``conclude ID --result improved|degraded|inconclusive`` -- Manually
-      conclude an experiment.
-    * ``rollback ID`` -- Roll back an experiment and its recommendation.
-      Triggers circuit breaker warning if 3+ rollbacks in 7 days.
+recommendation actually improves agent performance. Each experiment
+tracks a metric against a baseline and can be concluded or rolled back.
 
 Delegates to:
-    :class:`~agent_baton.core.improve.experiments.ExperimentManager`
-    :class:`~agent_baton.core.improve.proposals.ProposalManager`
-    :class:`~agent_baton.core.improve.rollback.RollbackManager`
+    agent_baton.core.improve.experiments.ExperimentManager
+    agent_baton.core.improve.proposals.ProposalManager
+    agent_baton.core.improve.rollback.RollbackManager
 """
 from __future__ import annotations
 
@@ -60,12 +50,6 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
 
 
 def handler(args: argparse.Namespace) -> None:
-    """Dispatch to the appropriate ``experiment`` subcommand handler.
-
-    Args:
-        args: Parsed CLI arguments including ``subcommand`` and
-            ``experiment_id`` or ``result`` where applicable.
-    """
     mgr = ExperimentManager()
 
     if args.subcommand == "list":
@@ -131,16 +115,6 @@ def _handle_conclude(
 
 
 def _handle_rollback(mgr: ExperimentManager, experiment_id: str) -> None:
-    """Roll back an experiment and its associated recommendation.
-
-    Reverts the recommendation that the experiment was testing, marks both
-    the experiment and recommendation as rolled back, and checks whether
-    the circuit breaker has been tripped (3+ rollbacks in 7 days).
-
-    Args:
-        mgr: The experiment manager instance.
-        experiment_id: ID of the experiment to roll back.
-    """
     exp = mgr.get(experiment_id)
     if exp is None:
         print(f"Experiment '{experiment_id}' not found.")

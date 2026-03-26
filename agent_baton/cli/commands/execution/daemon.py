@@ -1,22 +1,14 @@
 """``baton daemon`` -- background execution management.
 
 Manages long-running daemon processes that execute plans without a
-terminal-attached orchestrator.  The daemon spawns an async worker
-that dispatches agents, processes gates, and records results
-autonomously.
+terminal-attached orchestrator. The daemon spawns an async worker
+that dispatches agents, processes gates, and records results.
 
-Subcommands:
-    * ``start``  -- Launch a daemon process (optionally with the HTTP API
-      server via ``--serve``).  Supports ``--foreground`` mode for debugging
-      and ``--resume`` to pick up from persisted state.
-    * ``status`` -- Show daemon liveness, PID, and execution progress.
-    * ``stop``   -- Send a stop signal to the running daemon.
-    * ``list``   -- List all daemon worker processes under a project.
+Subcommands: start, status, stop, list.
 
 Delegates to:
-    :class:`~agent_baton.core.runtime.supervisor.WorkerSupervisor`
-    :class:`~agent_baton.core.runtime.launcher.AgentLauncher`
-    :func:`~agent_baton.api.server.create_app` (when ``--serve`` is used)
+    agent_baton.core.runtime.supervisor.WorkerSupervisor
+    agent_baton.core.runtime.launcher.AgentLauncher
 """
 from __future__ import annotations
 
@@ -174,7 +166,9 @@ async def _run_daemon_with_api(
         logger.info("Daemon resuming (with API): task=%s host=%s port=%d", "?", host, port)
         engine.resume()
     else:
-        task_id = plan.task_id if plan else "?"
+        if plan is None:
+            raise RuntimeError("A plan file is required when not resuming (--plan PATH).")
+        task_id = plan.task_id
         logger.info(
             "Daemon starting (with API): task=%s host=%s port=%d",
             task_id, host, port,
@@ -278,18 +272,6 @@ async def _run_daemon_with_api(
 # ---------------------------------------------------------------------------
 
 def handler(args: argparse.Namespace) -> None:
-    """Dispatch to the appropriate ``daemon`` subcommand handler.
-
-    Handles ``start``, ``status``, ``stop``, and ``list`` subcommands.
-    For ``start``, validates the plan file, configures the launcher
-    (real or dry-run), optionally daemonizes the process, and runs
-    either the worker-only path or the combined worker + API path
-    depending on the ``--serve`` flag.
-
-    Args:
-        args: Parsed CLI arguments including ``daemon_action`` and
-            subcommand-specific fields.
-    """
     task_id: str | None = getattr(args, "task_id", None)
     supervisor = WorkerSupervisor(task_id=task_id)
 
@@ -429,6 +411,8 @@ def handler(args: argparse.Namespace) -> None:
         else:
             # ── Worker-only path (original behaviour) ────────────────────────
             try:
+                if plan is None:
+                    raise RuntimeError("A plan file is required when not resuming (--plan PATH).")
                 summary = supervisor.start(
                     plan=plan,
                     launcher=launcher,

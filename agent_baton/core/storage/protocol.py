@@ -88,117 +88,92 @@ class StorageBackend(Protocol):
     # ── Step/Gate/Approval Results ─────────────────────────────────────────
 
     def save_step_result(self, task_id: str, result: StepResult) -> None:
-        """Persist a single step result (upsert)."""
         ...
 
     def save_gate_result(self, task_id: str, result: GateResult) -> None:
-        """Append a gate check result."""
         ...
 
     def save_approval_result(self, task_id: str, result: ApprovalResult) -> None:
-        """Append an approval decision."""
         ...
 
     def save_amendment(self, task_id: str, amendment: PlanAmendment) -> None:
-        """Persist a plan amendment (upsert)."""
         ...
 
     # ── Events ─────────────────────────────────────────────────────────────
 
     def append_event(self, event: Event) -> None:
-        """Append a domain event to the event log."""
         ...
 
     def read_events(self, task_id: str, from_seq: int = 0) -> list[Event]:
-        """Return events for a task starting from a given sequence number."""
         ...
 
     # ── Usage ──────────────────────────────────────────────────────────────
 
     def log_usage(self, record: TaskUsageRecord) -> None:
-        """Persist a task usage record with agent-level detail."""
         ...
 
     def read_usage(self, limit: int | None = None) -> list[TaskUsageRecord]:
-        """Return usage records, most recent first."""
         ...
 
     # ── Telemetry ──────────────────────────────────────────────────────────
 
     def log_telemetry(self, event: dict) -> None:
-        """Append a telemetry event dict."""
         ...
 
     def read_telemetry(self, limit: int | None = None) -> list[dict]:
-        """Return telemetry events as dicts, most recent first."""
         ...
 
     # ── Retrospectives ─────────────────────────────────────────────────────
 
     def save_retrospective(self, retro: Retrospective) -> None:
-        """Persist a retrospective and all its child collections."""
         ...
 
     def load_retrospective(self, task_id: str) -> Retrospective | None:
-        """Load a retrospective by task ID. Returns None if not found."""
         ...
 
     def list_retrospective_ids(self, limit: int = 100) -> list[str]:
-        """Return task IDs of stored retrospectives, most recent first."""
         ...
 
     # ── Traces ─────────────────────────────────────────────────────────────
 
     def save_trace(self, trace: TaskTrace) -> None:
-        """Persist an execution trace and its events."""
         ...
 
     def load_trace(self, task_id: str) -> TaskTrace | None:
-        """Load a trace by task ID. Returns None if not found."""
         ...
 
     # ── Patterns & Budget ──────────────────────────────────────────────────
 
     def save_patterns(self, patterns: list) -> None:
-        """Replace all learned patterns (full replacement write)."""
         ...
 
     def load_patterns(self) -> list:
-        """Return all learned patterns."""
         ...
 
     def save_budget_recommendations(self, recs: list) -> None:
-        """Replace all budget recommendations (full replacement write)."""
         ...
 
     def load_budget_recommendations(self) -> list:
-        """Return all budget recommendations."""
         ...
 
     # ── Mission Log ────────────────────────────────────────────────────────
 
     def append_mission_log(self, task_id: str, entry: MissionLogEntry) -> None:
-        """Append a mission log entry for a dispatched agent."""
         ...
 
-    def read_mission_log(self, task_id: str) -> str | None:
-        """Read the mission log for a task."""
+    def read_mission_log(self, task_id: str) -> str | list[MissionLogEntry] | None:
         ...
 
     # ── Shared Context & Profile ───────────────────────────────────────────
 
     def save_context(self, task_id: str, content: str, **sections: str) -> None:
-        """Persist shared context for a task (free-text + structured sections)."""
         ...
 
     def read_context(self, task_id: str) -> str | None:
-        """Read the shared context content for a task."""
         ...
 
     def save_profile(self, content: str) -> None:
-        """Persist the singleton codebase profile."""
         ...
 
     def read_profile(self) -> str | None:
-        """Read the codebase profile content."""
         ...

@@ -1,18 +1,9 @@
 """``baton install`` -- install agents and references to user or project scope.
 
 Non-interactive installer that copies agent definitions, reference
-documents, and templates from the agent-baton source tree into
-``~/.claude/`` (user scope) or ``.claude/`` (project scope).
-
-Key behaviours:
-    * ``--upgrade`` mode overwrites agents and references (they improve
-      between versions) but preserves ``CLAUDE.md``, ``knowledge/``,
-      and ``team-context/``.  Merges hooks into ``settings.json``
-      additively, preserving user-specific keys.
-    * ``--force`` mode overwrites all files unconditionally.
-    * ``--verify`` runs a post-install health check: validates agent
-      frontmatter, checks reference readability, and tests directory
-      writability.
+documents, and templates from the agent-baton source tree. Supports
+--upgrade mode (overwrites agents/refs, merges settings.json) and
+--verify for post-install health checks.
 """
 from __future__ import annotations
 
@@ -33,20 +24,12 @@ def _copy_file(src: Path, dst: Path, *, force: bool) -> bool:
 
 
 def _merge_settings(src_path: Path, dst_path: Path) -> bool:
-    """Merge agent-baton hooks into existing ``settings.json``, preserving user keys.
+    """Merge agent-baton hooks into existing settings.json, preserving user keys.
 
-    Strategy: the source provides ``hooks``.  The destination may already
-    have ``hooks`` plus user-specific keys (``permissions``,
-    ``mcpServers``, ``env``, etc.).  Hook events from the source are
-    written per-event (baton owns these), while all other top-level keys
-    in the destination are preserved untouched.
-
-    Args:
-        src_path: Path to the source ``settings.json`` (from templates/).
-        dst_path: Path to the destination ``settings.json`` to merge into.
-
-    Returns:
-        True if the merge succeeded, False if the source could not be read.
+    Strategy: the source provides 'hooks'. The destination may have 'hooks'
+    plus user-specific keys (permissions, mcpServers, env, etc.).
+    We merge hook events additively — baton hooks are added/updated,
+    user hooks for other events are preserved.
     """
     import json
 
@@ -91,18 +74,7 @@ def _merge_settings(src_path: Path, dst_path: Path) -> bool:
 
 
 def _verify_install(base: Path, agents_dir: Path, refs_dir: Path, team_ctx: Path) -> None:
-    """Post-install health check.
-
-    Validates that agents have parseable YAML frontmatter, references
-    are present, the team-context directory is writable, and
-    ``settings.json`` exists.  Prints a summary of any issues found.
-
-    Args:
-        base: The ``.claude/`` or ``~/.claude/`` install root.
-        agents_dir: Path to the installed agents directory.
-        refs_dir: Path to the installed references directory.
-        team_ctx: Path to the team-context directory.
-    """
+    """Post-install health check."""
     issues: list[str] = []
 
     # Check agents directory

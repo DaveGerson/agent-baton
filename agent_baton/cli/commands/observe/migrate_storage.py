@@ -1,16 +1,11 @@
 """``baton migrate-storage`` -- migrate JSON/JSONL flat files to SQLite database.
 
 Scans the team-context directory for existing JSON/JSONL source files
-(usage logs, traces, events, retrospectives, etc.) and imports them
-into ``baton.db``.  Safe to run multiple times -- all inserts use
-``INSERT OR IGNORE`` so duplicate records are skipped.
-
-Supports ``--dry-run``, ``--verify`` (post-migration count comparison),
-and ``--remove-files`` (move originals to a backup directory after
-successful import).
+and imports them into baton.db. Safe to run multiple times -- all inserts
+use INSERT OR IGNORE so duplicate records are skipped.
 
 Delegates to:
-    :class:`~agent_baton.core.storage.migrate.StorageMigrator`
+    agent_baton.core.storage.migrate.StorageMigrator
 """
 from __future__ import annotations
 

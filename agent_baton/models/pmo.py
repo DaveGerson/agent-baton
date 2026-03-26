@@ -8,7 +8,6 @@ interview protocol.  These models back the PMO dashboard UI and the
 from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
-from datetime import datetime, timezone
 
 
 # ---------------------------------------------------------------------------

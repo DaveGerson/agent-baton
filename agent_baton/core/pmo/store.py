@@ -189,6 +189,14 @@ class PmoStore:
                 return True
         return False
 
+    def get_signal(self, signal_id: str) -> PmoSignal | None:
+        """Return a single signal by ID, or None if not found."""
+        config = self.load_config()
+        for s in config.signals:
+            if s.signal_id == signal_id:
+                return s
+        return None
+
     def get_open_signals(self) -> list[PmoSignal]:
         """Return all signals with status != resolved."""
         config = self.load_config()

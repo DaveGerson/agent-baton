@@ -2,23 +2,16 @@
 
 Anomalies are statistical deviations from normal agent behaviour:
 sudden drops in success rate, spikes in token usage, or elevated
-retry rates.  The trigger evaluator scans recent data and flags
-metrics that exceed configurable thresholds.
-
-Display modes:
-    * ``baton anomalies`` -- Detect and display current anomalies.
-    * ``baton anomalies --watch`` -- Show trigger readiness status
-      alongside any active anomalies.
+retry rates.
 
 Delegates to:
-    :class:`~agent_baton.core.improve.triggers.TriggerEvaluator`
+    agent_baton.core.improve.triggers.TriggerEvaluator
 """
 from __future__ import annotations
 
 import argparse
 
 from agent_baton.core.improve.triggers import TriggerEvaluator
-from agent_baton.models.improvement import TriggerConfig
 
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
@@ -66,15 +59,6 @@ def handler(args: argparse.Namespace) -> None:
 
 
 def _handle_watch(evaluator: TriggerEvaluator) -> None:
-    """Print the improvement system status dashboard.
-
-    Shows whether the analysis trigger is ready to fire (enough new
-    data since last cycle) and lists any currently detected anomalies
-    in a compact one-line-per-anomaly format.
-
-    Args:
-        evaluator: An initialised trigger evaluator instance.
-    """
     ready = evaluator.should_analyze()
     anomalies = evaluator.detect_anomalies()
 

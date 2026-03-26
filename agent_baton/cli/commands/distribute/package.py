@@ -1,16 +1,11 @@
 """``baton package`` -- create, inspect, or install agent-baton package archives.
 
 Packages bundle agents, references, and knowledge packs into a
-``.tar.gz`` archive that can be shared, published to a registry,
+.tar.gz archive that can be shared, published to a registry,
 or installed into another project.
 
-Modes:
-    * ``--name NAME`` -- Build a new package from the project source.
-    * ``--info ARCHIVE`` -- Show the manifest of an existing package.
-    * ``--install ARCHIVE`` -- Install a package to user or project scope.
-
 Delegates to:
-    :class:`~agent_baton.core.distribute.sharing.PackageBuilder`
+    agent_baton.core.distribute.sharing.PackageBuilder
 """
 from __future__ import annotations
 

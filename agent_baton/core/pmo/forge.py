@@ -1,25 +1,55 @@
-"""ForgeSession — consultative plan creation using IntelligentPlanner.
+"""ForgeSession — Smart Forge consultative plan creation.
 
-Does NOT call Anthropic API directly. Delegates entirely to
-IntelligentPlanner.create_plan() for plan generation.
+The Smart Forge provides an interactive, interview-driven workflow for
+creating execution plans.  It wraps ``IntelligentPlanner.create_plan()``
+and adds:
+
+- **Interview generation** — deterministic rule-based analysis of a
+  draft plan to identify ambiguities (missing tests, no gates, high risk,
+  multi-agent coordination concerns).  Returns structured questions.
+- **Plan refinement** — re-generates the plan incorporating the user's
+  interview answers as additional context.
+- **Signal triage** — converts a PMO signal (e.g. a production incident)
+  into a bug-fix plan and links them.
+
+This module does NOT call the Anthropic API directly.  All plan generation
+is delegated to ``IntelligentPlanner.create_plan()``, which handles agent
+routing, risk assessment, and phase sequencing.
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from agent_baton.core.engine.persistence import StatePersistence
 from agent_baton.core.pmo.store import PmoStore
-from agent_baton.models.execution import ExecutionState, MachinePlan
+from agent_baton.models.execution import MachinePlan
 from agent_baton.models.pmo import InterviewQuestion, InterviewAnswer, PmoProject
+
+if TYPE_CHECKING:
+    from agent_baton.core.engine.planner import IntelligentPlanner
 
 
 class ForgeSession:
-    """Create and save execution plans using baton's own planner."""
+    """Smart Forge session — create and refine execution plans.
+
+    Orchestrates the consultative plan creation flow:
+
+    1. ``create_plan`` — generate an initial plan from a description.
+    2. ``generate_interview`` — produce 3-5 targeted questions about
+       the plan's quality and completeness.
+    3. ``regenerate_plan`` — re-generate incorporating user answers.
+    4. ``save_plan`` — persist the approved plan to the project.
+
+    Attributes:
+        _planner: An ``IntelligentPlanner`` instance (typed as ``object``
+            to avoid circular imports).
+        _store: A ``PmoStore`` (or ``PmoSqliteStore``) used to look up
+            projects and signals.
+    """
 
     def __init__(
         self,
-        planner: object,  # IntelligentPlanner (typed loosely to avoid circular deps)
+        planner: IntelligentPlanner,
         store: PmoStore,
     ) -> None:
         self._planner = planner
@@ -28,30 +58,29 @@ class ForgeSession:
     def create_plan(
         self,
         description: str,
-        program: str,
+        program: str,  # noqa: ARG002
         project_id: str,
         *,
         task_type: str | None = None,
-        priority: int = 0,
+        priority: int = 0,  # noqa: ARG002
     ) -> MachinePlan:
-        """Create an execution plan via IntelligentPlanner.
+        """Create an execution plan via ``IntelligentPlanner``.
 
-        Parameters
-        ----------
-        description:
-            Natural-language task description (the PRD).
-        program:
-            Program code (e.g., "RW").
-        project_id:
-            ID of the registered project to scope the plan to.
-        task_type:
-            Optional task type override (e.g., "new-feature", "bug-fix").
-        priority:
-            0=normal, 1=high, 2=critical.
+        Looks up the project by ``project_id`` in the PMO store to
+        determine the project root path, then delegates to
+        ``IntelligentPlanner.create_plan()`` for agent routing, risk
+        assessment, and phase sequencing.
 
-        Returns
-        -------
-        MachinePlan ready for review and approval.
+        Args:
+            description: Natural-language task description (the PRD).
+            program: Program code (e.g. ``"RW"``).
+            project_id: ID of the registered project to scope the plan to.
+            task_type: Optional task type override (e.g. ``"new-feature"``,
+                ``"bug-fix"``).
+            priority: 0=normal, 1=high, 2=critical.
+
+        Returns:
+            A ``MachinePlan`` ready for review, interview, and approval.
         """
         project = self._store.get_project(project_id)
         project_root = Path(project.path) if project else None
@@ -68,13 +97,21 @@ class ForgeSession:
         plan: MachinePlan,
         project: PmoProject,
     ) -> Path:
-        """Save an approved plan to the project's team-context.
+        """Save an approved plan to the project's team-context directory.
 
-        Writes both plan.json (for the engine) and plan.md (for humans).
-        Does NOT create an ExecutionState — that happens when
+        Writes both ``plan.json`` (consumed by the execution engine) and
+        ``plan.md`` (human-readable) into the task-scoped subdirectory
+        under ``.claude/team-context/executions/<task_id>/``.
+
+        Does NOT create an ``ExecutionState`` — that happens when
         ``baton execute start`` is run.
 
-        Returns the path to the written plan.json.
+        Args:
+            plan: The approved plan to persist.
+            project: The target project (provides the filesystem path).
+
+        Returns:
+            The absolute path to the written ``plan.json`` file.
         """
         from agent_baton.core.orchestration.context import ContextManager
         context_root = Path(project.path) / ".claude" / "team-context"
@@ -94,9 +131,20 @@ class ForgeSession:
     ) -> list[InterviewQuestion]:
         """Generate structured interview questions from plan analysis.
 
-        Examines the plan's structure to identify ambiguities and
-        missing context. Returns 3-5 targeted questions. This is
-        deterministic rule-based analysis, not an LLM call.
+        Examines the plan's structure to identify ambiguities and missing
+        context using deterministic rule-based analysis (no LLM call).
+        Checks for missing testing steps, high risk without review gates,
+        multi-agent coordination concerns, missing QA gates, and scope
+        concerns on large plans.
+
+        Args:
+            plan: The draft plan to analyze.
+            feedback: Optional user feedback from a previous iteration.
+                If provided, a follow-up question is generated.
+
+        Returns:
+            A list of 3-5 ``InterviewQuestion`` instances with
+            ``answer_type`` of ``'choice'`` or ``'text'``.
         """
         questions: list[InterviewQuestion] = []
         all_agents = {
@@ -184,12 +232,24 @@ class ForgeSession:
         answers: list[InterviewAnswer],
         *,
         task_type: str | None = None,
-        priority: int = 0,
+        priority: int = 0,  # noqa: ARG002
     ) -> MachinePlan:
         """Re-generate a plan incorporating interview answers.
 
-        Builds an enriched description by appending answered questions
-        as structured context, then delegates to IntelligentPlanner.
+        Builds an enriched description by appending the user's answered
+        questions as structured refinement context (one bullet per answer),
+        then delegates to ``IntelligentPlanner.create_plan()`` which treats
+        the additional context as planning constraints.
+
+        Args:
+            description: Original task description.
+            project_id: Target project ID.
+            answers: User responses to the interview questions.
+            task_type: Optional task type override.
+            _priority: Priority level (currently unused by the planner).
+
+        Returns:
+            A new ``MachinePlan`` reflecting the user's refinements.
         """
         enriched_parts = [description, "\n\n--- Refinement Context ---"]
         for ans in answers:
@@ -211,10 +271,21 @@ class ForgeSession:
         signal_id: str,
         project_id: str,
     ) -> MachinePlan | None:
-        """Triage a signal into a plan via the Forge.
+        """Triage a PMO signal into a bug-fix plan via the Forge.
 
-        Looks up the signal, generates a bug-fix plan, and links them.
-        Returns None if signal not found.
+        Looks up the signal by ID, constructs a bug-fix description from
+        the signal's title and body, generates a plan via
+        ``create_plan(task_type="bug-fix")``, and links the signal to
+        the resulting plan by setting ``signal.forge_task_id`` and
+        ``signal.status = "triaged"``.
+
+        Args:
+            signal_id: The signal to triage.
+            project_id: The project to scope the bug-fix plan to.
+
+        Returns:
+            The generated ``MachinePlan``, or ``None`` if the signal or
+            project was not found.
         """
         config = self._store.load_config()
         signal = next(

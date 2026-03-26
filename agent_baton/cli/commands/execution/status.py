@@ -1,11 +1,11 @@
 """``baton status`` -- show team-context file status.
 
-Lists the presence or absence of key files in ``.claude/team-context/``
+Lists the presence or absence of key files in .claude/team-context/
 (plan, execution state, mission log, etc.) to help diagnose incomplete
 or interrupted orchestration sessions.
 
 Delegates to:
-    :class:`~agent_baton.core.orchestration.context.ContextManager`
+    agent_baton.core.orchestration.context.ContextManager
 """
 from __future__ import annotations
 

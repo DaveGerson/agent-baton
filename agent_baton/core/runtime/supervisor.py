@@ -23,7 +23,6 @@ import fcntl
 import json
 import logging
 import os
-import signal as signal_module
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -31,8 +30,6 @@ from pathlib import Path
 from agent_baton.core.engine.executor import ExecutionEngine
 from agent_baton.core.engine.protocols import ExecutionDriver
 from agent_baton.core.events.bus import EventBus
-from agent_baton.core.events.persistence import EventPersistence
-from agent_baton.core.events.projections import project_task_view
 from agent_baton.core.runtime.context import ExecutionContext
 from agent_baton.core.runtime.launcher import AgentLauncher
 from agent_baton.core.runtime.signals import SignalHandler
@@ -180,7 +177,7 @@ class WorkerSupervisor:
         try:
             worker_task = asyncio.create_task(worker.run())
             signal_task = asyncio.create_task(handler.wait())
-            done, pending = await asyncio.wait(
+            done, _pending = await asyncio.wait(
                 {worker_task, signal_task},
                 return_when=asyncio.FIRST_COMPLETED,
             )

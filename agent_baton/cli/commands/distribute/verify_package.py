@@ -1,13 +1,11 @@
-"""``baton verify-package`` -- validate a ``.tar.gz`` package before distribution.
+"""``baton verify-package`` -- validate a .tar.gz package before distribution.
 
 Runs structural and content checks on a package archive: verifies the
-manifest is present and valid, checks agent frontmatter, validates
-references, and optionally displays per-file SHA-256 checksums.
-
-Exit code 1 if validation fails.
+manifest, checks agent frontmatter, validates references, and optionally
+displays per-file SHA-256 checksums.
 
 Delegates to:
-    :class:`~agent_baton.core.distribute.packager.PackageVerifier`
+    agent_baton.core.distribute.packager.PackageVerifier
 """
 from __future__ import annotations
 

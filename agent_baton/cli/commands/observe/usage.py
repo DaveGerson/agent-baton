@@ -4,13 +4,8 @@ Provides aggregate and per-agent views of orchestration usage data
 including task counts, agent frequency, token consumption, retry
 rates, and gate pass rates.
 
-Display modes:
-    * ``baton usage`` -- Overall summary across all tasks.
-    * ``baton usage --recent N`` -- Last N usage records with details.
-    * ``baton usage --agent NAME`` -- Per-agent statistics and model usage.
-
 Delegates to:
-    :class:`~agent_baton.core.observe.usage.UsageLogger`
+    agent_baton.core.observe.usage.UsageLogger
 """
 from __future__ import annotations
 

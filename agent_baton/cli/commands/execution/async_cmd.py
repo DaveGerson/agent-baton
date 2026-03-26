@@ -1,13 +1,11 @@
 """``baton async`` -- dispatch and track asynchronous tasks.
 
 Provides a lightweight task queue for fire-and-forget shell commands,
-scripts, or manual tasks.  Tasks are persisted to disk and can be
+scripts, or manual tasks. Tasks are persisted to disk and can be
 checked later for completion status.
 
-This is an experimental feature in ``core/distribute/experimental/``.
-
 Delegates to:
-    :class:`~agent_baton.core.distribute.experimental.async_dispatch.AsyncDispatcher`
+    agent_baton.core.distribute.experimental.async_dispatch.AsyncDispatcher
 """
 from __future__ import annotations
 

@@ -894,3 +894,91 @@ class TestForgeSignal:
             json={"plan": _minimal_plan().to_dict(), "project_id": "no-such-proj"},
         )
         assert r.status_code == 404
+
+    # ------------------------------------------------------------------
+    # Regression: F-AF-1 — ForgeSignalRequest must not require `plan`
+    # ------------------------------------------------------------------
+
+    def test_forge_signal_accepts_project_id_only(self, client: TestClient) -> None:
+        """POST with only project_id must return 201, not 422.
+
+        Previously the endpoint used ApproveForgeRequest which required a
+        ``plan`` field.  The frontend sends only {"project_id": "..."},
+        causing a 422 rejection.  ForgeSignalRequest fixes this.
+        """
+        _register_project(client, project_id="fsig7-proj", program="FS7")
+        _create_signal(client, signal_id="fsig7-001")
+        r = client.post(
+            "/api/v1/pmo/signals/fsig7-001/forge",
+            json={"project_id": "fsig7-proj"},
+        )
+        assert r.status_code == 201, f"Expected 201, got {r.status_code}: {r.text}"
+
+    def test_forge_signal_project_id_only_returns_signal_id(self, client: TestClient) -> None:
+        """Response from the minimal payload must include signal_id."""
+        _register_project(client, project_id="fsig8-proj", program="FS8")
+        _create_signal(client, signal_id="fsig8-001")
+        body = client.post(
+            "/api/v1/pmo/signals/fsig8-001/forge",
+            json={"project_id": "fsig8-proj"},
+        ).json()
+        assert body["signal_id"] == "fsig8-001"
+
+
+# ===========================================================================
+# POST /api/v1/pmo/signals/{signal_id}/resolve — full signal response
+# (regression: F-AF-2)
+# ===========================================================================
+
+
+class TestResolveSignalFullResponse:
+    """Regression tests for F-AF-2.
+
+    Before the fix, resolve returned only {"resolved": true, "signal_id": "..."}.
+    The frontend expected a full PmoSignal object to replace the signal in its
+    local state array.  The fix returns a ResolveSignalResponse that is a
+    superset: it contains all PmoSignalResponse fields plus ``resolved: true``.
+    """
+
+    def test_resolve_signal_returns_full_signal(self, client: TestClient) -> None:
+        """Resolved response must include signal_id, title, severity, and status."""
+        _create_signal(
+            client,
+            signal_id="full-res-001",
+            signal_type="bug",
+            title="Critical null pointer",
+            severity="critical",
+        )
+        body = client.post("/api/v1/pmo/signals/full-res-001/resolve").json()
+        for field in ("signal_id", "title", "severity", "status"):
+            assert field in body, f"Missing field '{field}' in resolve response"
+
+    def test_resolve_signal_status_is_resolved(self, client: TestClient) -> None:
+        """The ``status`` field in the response must be ``"resolved"``."""
+        _create_signal(client, signal_id="status-res-001")
+        body = client.post("/api/v1/pmo/signals/status-res-001/resolve").json()
+        assert body["status"] == "resolved"
+
+    def test_resolve_signal_resolved_flag_is_true(self, client: TestClient) -> None:
+        """The ``resolved`` flag must still be present and True (backward compat)."""
+        _create_signal(client, signal_id="flag-res-001")
+        body = client.post("/api/v1/pmo/signals/flag-res-001/resolve").json()
+        assert body["resolved"] is True
+
+    def test_resolve_signal_returns_correct_signal_id(self, client: TestClient) -> None:
+        """The ``signal_id`` in the response must match the URL parameter."""
+        _create_signal(client, signal_id="id-res-001")
+        body = client.post("/api/v1/pmo/signals/id-res-001/resolve").json()
+        assert body["signal_id"] == "id-res-001"
+
+    def test_resolve_signal_returns_title(self, client: TestClient) -> None:
+        """The ``title`` field must reflect the original signal title."""
+        _create_signal(client, signal_id="title-res-001", title="Memory leak in allocator")
+        body = client.post("/api/v1/pmo/signals/title-res-001/resolve").json()
+        assert body["title"] == "Memory leak in allocator"
+
+    def test_resolve_signal_returns_severity(self, client: TestClient) -> None:
+        """The ``severity`` field must be present in the response."""
+        _create_signal(client, signal_id="sev-res-001", severity="high")
+        body = client.post("/api/v1/pmo/signals/sev-res-001/resolve").json()
+        assert body["severity"] == "high"

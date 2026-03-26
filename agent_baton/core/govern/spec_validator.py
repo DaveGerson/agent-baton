@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -513,7 +514,7 @@ class SpecValidator:
     # ------------------------------------------------------------------
 
     def run_gate(
-        self, checks: list[tuple[str, callable]]
+        self, checks: list[tuple[str, Callable[[], tuple[bool, str]]]]
     ) -> SpecValidationResult:
         """Run a list of named check functions as a validation gate.
 

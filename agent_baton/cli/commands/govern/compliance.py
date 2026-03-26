@@ -1,14 +1,10 @@
 """``baton compliance`` -- show compliance reports.
 
 Compliance reports are generated during execution for tasks that touch
-regulated domains.  This command lists and displays them.
-
-Display modes:
-    * ``baton compliance`` -- List recent compliance reports.
-    * ``baton compliance --task-id ID`` -- Show a specific report.
+regulated domains. This command lists and displays them.
 
 Delegates to:
-    :class:`~agent_baton.core.govern.compliance.ComplianceReportGenerator`
+    agent_baton.core.govern.compliance.ComplianceReportGenerator
 """
 from __future__ import annotations
 

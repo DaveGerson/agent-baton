@@ -1,14 +1,11 @@
 """``baton decide`` -- manage human decision requests.
 
 During daemon execution, agents may encounter situations requiring
-human judgment (e.g. architecture choices, scope decisions).  These
-are persisted as decision requests that this command lists, inspects,
-and resolves.
-
-Default action (no flags): list pending decisions.
+human judgment. These are persisted as decision requests that this
+command lists, inspects, and resolves.
 
 Delegates to:
-    :class:`~agent_baton.core.runtime.decisions.DecisionManager`
+    agent_baton.core.runtime.decisions.DecisionManager
 """
 from __future__ import annotations
 
