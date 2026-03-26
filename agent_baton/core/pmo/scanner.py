@@ -31,6 +31,24 @@ from agent_baton.models.pmo import (
 
 _log = logging.getLogger(__name__)
 
+_RISK_TO_PRIORITY: dict[str, int] = {
+    "CRITICAL": 2,
+    "HIGH": 1,
+}
+
+
+def _risk_level_to_priority(risk_level: str) -> int:
+    """Map a plan's ``risk_level`` string to a ``PmoCard.priority`` int.
+
+    Args:
+        risk_level: Risk tier from ``MachinePlan.risk_level`` (e.g.
+            ``"LOW"``, ``"MEDIUM"``, ``"HIGH"``, ``"CRITICAL"``).
+
+    Returns:
+        2 for CRITICAL, 1 for HIGH, 0 for everything else.
+    """
+    return _RISK_TO_PRIORITY.get(risk_level.upper(), 0)
+
 
 class PmoScanner:
     """Scan registered projects and produce Kanban board cards.
@@ -87,6 +105,7 @@ class PmoScanner:
             title=plan.task_summary,
             column=status_to_column(state.status),
             risk_level=plan.risk_level,
+            priority=_risk_level_to_priority(plan.risk_level),
             agents=list(plan.all_agents),
             steps_completed=completed,
             steps_total=plan.total_steps,
@@ -186,6 +205,7 @@ class PmoScanner:
                         title=plan.task_summary,
                         column="queued",
                         risk_level=plan.risk_level,
+                        priority=_risk_level_to_priority(plan.risk_level),
                         agents=list(plan.all_agents),
                         steps_total=plan.total_steps,
                         created_at=plan.created_at,

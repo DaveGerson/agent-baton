@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { KanbanCard } from './KanbanCard';
 import { HealthBar } from './HealthBar';
 import { SignalsBar } from './SignalsBar';
@@ -6,6 +6,7 @@ import { usePmoBoard } from '../hooks/usePmoBoard';
 import type { ConnectionMode } from '../hooks/usePmoBoard';
 import { usePersistedState } from '../hooks/usePersistedState';
 import { T, COLUMNS } from '../styles/tokens';
+import { api } from '../api/client';
 import type { PmoCard, PmoSignal } from '../api/types';
 
 interface KanbanBoardProps {
@@ -20,6 +21,18 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
   const { cards, health, loading, error, lastUpdated, connectionMode } = usePmoBoard();
   const [filter, setFilter] = usePersistedState<string>('pmo:board-filter', 'all');
   const [openSignalCount, setOpenSignalCount] = useState(0);
+
+  // Keep signal badge current regardless of whether SignalsBar is mounted.
+  useEffect(() => {
+    function fetchCount() {
+      api.getSignals()
+        .then(signals => setOpenSignalCount(signals.filter(s => s.status !== 'resolved').length))
+        .catch(() => {});
+    }
+    fetchCount();
+    const id = setInterval(fetchCount, 30_000);
+    return () => clearInterval(id);
+  }, []);
 
   const programs = Array.from(new Set(cards.map(c => c.program))).sort();
 

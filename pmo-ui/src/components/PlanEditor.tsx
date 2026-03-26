@@ -54,20 +54,27 @@ export function PlanEditor({ plan, onPlanChange }: PlanEditorProps) {
   }
 
   function addStep(phaseIdx: number) {
-    updatePhase(phaseIdx, phase => ({
-      ...phase,
-      steps: [...phase.steps, {
-        step_id: `${phase.phase_id + 1}.${phase.steps.length + 1}`,
-        agent_name: 'backend-engineer',
-        task_description: 'New step',
-        model: 'sonnet',
-        depends_on: [],
-        deliverables: [],
-        allowed_paths: [],
-        blocked_paths: [],
-        context_files: [],
-      }],
-    }));
+    updatePhase(phaseIdx, phase => {
+      const maxStepNum = phase.steps.reduce((max, s) => {
+        const num = parseInt(s.step_id.split('.').pop() || '0', 10);
+        return num > max ? num : max;
+      }, 0);
+      const newStepId = `${phase.phase_id + 1}.${maxStepNum + 1}`;
+      return {
+        ...phase,
+        steps: [...phase.steps, {
+          step_id: newStepId,
+          agent_name: 'backend-engineer',
+          task_description: 'New step',
+          model: 'sonnet',
+          depends_on: [],
+          deliverables: [],
+          allowed_paths: [],
+          blocked_paths: [],
+          context_files: [],
+        }],
+      };
+    });
   }
 
   function removePhase(phaseIdx: number) {

@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from agent_baton.core.engine.persistence import StatePersistence
-from agent_baton.core.pmo.scanner import PmoScanner
+from agent_baton.core.pmo.scanner import PmoScanner, _risk_level_to_priority
 from agent_baton.core.pmo.store import PmoStore
 from agent_baton.models.execution import (
     ExecutionState,
@@ -589,3 +589,73 @@ class TestProgramHealth:
 
         health = _scanner(store).program_health()
         assert health["NDS"].total_plans == 2
+
+
+# ---------------------------------------------------------------------------
+# _risk_level_to_priority — unit tests for the helper function
+# ---------------------------------------------------------------------------
+
+class TestRiskLevelToPriority:
+    @pytest.mark.parametrize("risk_level,expected", [
+        ("CRITICAL", 2),
+        ("HIGH",     1),
+        ("MEDIUM",   0),
+        ("LOW",      0),
+    ])
+    def test_known_risk_levels(self, risk_level: str, expected: int):
+        assert _risk_level_to_priority(risk_level) == expected
+
+    def test_unknown_risk_level_returns_zero(self):
+        assert _risk_level_to_priority("UNKNOWN") == 0
+
+    @pytest.mark.parametrize("risk_level,expected", [
+        ("critical", 2),
+        ("Critical", 2),
+        ("high",     1),
+        ("High",     1),
+        ("medium",   0),
+        ("low",      0),
+    ])
+    def test_case_insensitive(self, risk_level: str, expected: int):
+        assert _risk_level_to_priority(risk_level) == expected
+
+
+# ---------------------------------------------------------------------------
+# Priority field — integration with _state_to_card and queued plan path
+# ---------------------------------------------------------------------------
+
+class TestCardPriorityFromRiskLevel:
+    @pytest.mark.parametrize("risk_level,expected_priority", [
+        ("CRITICAL", 2),
+        ("HIGH",     1),
+        ("MEDIUM",   0),
+        ("LOW",      0),
+    ])
+    def test_execution_state_card_priority(
+        self, tmp_path: Path, risk_level: str, expected_priority: int
+    ):
+        store = _store(tmp_path)
+        project_root, project = _project_dir(tmp_path)
+        plan = _plan(risk_level=risk_level)
+        state = _execution_state(plan=plan)
+        _write_execution_state(project_root, state)
+
+        cards = _scanner(store).scan_project(project)
+        assert cards[0].priority == expected_priority
+
+    @pytest.mark.parametrize("risk_level,expected_priority", [
+        ("CRITICAL", 2),
+        ("HIGH",     1),
+        ("MEDIUM",   0),
+        ("LOW",      0),
+    ])
+    def test_queued_plan_json_card_priority(
+        self, tmp_path: Path, risk_level: str, expected_priority: int
+    ):
+        store = _store(tmp_path)
+        project_root, project = _project_dir(tmp_path)
+        plan = _plan(risk_level=risk_level)
+        _write_plan_json(project_root, plan)
+
+        cards = _scanner(store).scan_project(project)
+        assert cards[0].priority == expected_priority
