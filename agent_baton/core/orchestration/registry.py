@@ -143,7 +143,7 @@ class AgentRegistry:
         return AgentDefinition(
             name=name,
             description=description,
-            model=metadata.get("model", "sonnet"),
+            model=metadata.get("model", ""),
             permission_mode=metadata.get("permissionMode", "default"),
             color=metadata.get("color"),
             tools=tools,

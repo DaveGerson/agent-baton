@@ -59,7 +59,7 @@ class StatePersistence:
             json.dumps(state.to_dict(), indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
-        tmp_path.rename(self._state_path)
+        tmp_path.replace(self._state_path)
 
     def load(self) -> ExecutionState | None:
         """Load state from disk. Returns None if no state or parse error."""
