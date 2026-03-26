@@ -188,3 +188,21 @@ export interface AdoSearchResponse {
   items: AdoWorkItem[];
   message?: string;
 }
+
+// ---------------------------------------------------------------------------
+// Execution launch types
+// ---------------------------------------------------------------------------
+
+export interface ExecuteCardBody {
+  model?: string;
+  dry_run?: boolean;
+  max_steps?: number;
+}
+
+export interface ExecuteCardResponse {
+  task_id: string;
+  pid: number;
+  status: 'launched';
+  model: string;
+  dry_run: boolean;
+}

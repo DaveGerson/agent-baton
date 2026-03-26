@@ -133,6 +133,18 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     p_team.add_argument("--outcome", default="", help="Summary of work done")
     p_team.add_argument("--files", default="", help="Comma-separated files changed")
 
+    # baton execute run [--plan PATH] [--task-id ID] [--model MODEL] [--max-steps N] [--dry-run]
+    p_run = sub.add_parser("run", parents=[_task_id_parent],
+                           help="Autonomous execution loop (no Claude Code session needed)")
+    p_run.add_argument("--plan", default=".claude/team-context/plan.json",
+                       help="Path to plan.json (default: .claude/team-context/plan.json)")
+    p_run.add_argument("--model", default="sonnet",
+                       help="Default model for dispatched agents (default: sonnet)")
+    p_run.add_argument("--max-steps", type=int, default=50, dest="max_steps",
+                       help="Safety limit: maximum steps before aborting (default: 50)")
+    p_run.add_argument("--dry-run", action="store_true", dest="dry_run",
+                       help="Print actions without executing them")
+
     # baton execute complete [--task-id ID]
     sub.add_parser("complete", parents=[_task_id_parent],
                    help="Finalize execution (writes usage, trace, retrospective)")
@@ -274,7 +286,7 @@ def _print_action(action: dict) -> None:
 
 def handler(args: argparse.Namespace) -> None:
     if args.subcommand is None:
-        validation_error("supply a subcommand: start, next, record, dispatched, gate, approve, amend, team-record, complete, status, resume, list, switch")
+        validation_error("supply a subcommand: start, next, record, dispatched, gate, approve, amend, team-record, complete, status, resume, list, switch, run")
 
     if args.subcommand == "list":
         _handle_list()
@@ -282,6 +294,10 @@ def handler(args: argparse.Namespace) -> None:
 
     if args.subcommand == "switch":
         _handle_switch(args.switch_task_id)
+        return
+
+    if args.subcommand == "run":
+        _handle_run(args)
         return
 
     # Resolve task_id: explicit flag → BATON_TASK_ID env var → SQLite active_task →
@@ -622,6 +638,261 @@ def _build_knowledge_resolver(plan: MachinePlan):
             "KnowledgeResolver construction failed (non-fatal): %s", exc
         )
         return None
+
+
+# ---------------------------------------------------------------------------
+# Autonomous execution loop
+# ---------------------------------------------------------------------------
+
+def _handle_run(args: argparse.Namespace) -> None:
+    """Drive the full execution loop autonomously using headless Claude.
+
+    This is the standalone CLI execution mode: no active Claude Code session
+    needed.  It starts (or resumes) an execution, then loops through
+    DISPATCH → agent launch → record until COMPLETE or FAILED.
+
+    Gate checks are run as shell subprocesses.  Approval actions pause
+    for user input on stdin.
+    """
+    import subprocess as _subprocess
+
+    plan_path = Path(args.plan)
+    context_root = Path(".claude/team-context").resolve()
+    max_steps = args.max_steps
+    dry_run = args.dry_run
+    model_override = args.model
+
+    # Resolve or create the execution
+    bus = EventBus()
+    storage = get_project_storage(context_root)
+    task_id = getattr(args, "task_id", None)
+
+    if task_id is None:
+        task_id = os.environ.get("BATON_TASK_ID")
+
+    # If no active execution, start from plan
+    engine: ExecutionEngine | None = None
+    if task_id:
+        engine = ExecutionEngine(bus=bus, task_id=task_id, storage=storage)
+        st = engine.status()
+        if st and st.get("status") in ("running", "pending"):
+            print(f"Resuming execution: {task_id}", file=sys.stderr)
+        else:
+            engine = None  # Stale or completed — start fresh
+
+    if engine is None:
+        if not plan_path.exists():
+            user_error(
+                f"plan file not found: {plan_path}",
+                hint="Run 'baton plan --save \"task description\"' first.",
+            )
+        try:
+            data = json.loads(plan_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            validation_error(f"plan.json is not valid JSON: {exc}")
+        try:
+            plan = MachinePlan.from_dict(data)
+        except (KeyError, ValueError, TypeError) as exc:
+            validation_error(f"plan.json has invalid structure: {exc}")
+        task_id = plan.task_id
+        knowledge_resolver = _build_knowledge_resolver(plan)
+        engine = ExecutionEngine(
+            bus=bus, task_id=task_id, storage=storage,
+            knowledge_resolver=knowledge_resolver,
+        )
+        ContextManager(task_id=task_id).init_mission_log(
+            plan.task_summary, risk_level=plan.risk_level
+        )
+        action = engine.start(plan)
+        try:
+            storage.set_active_task(task_id)
+        except Exception:
+            if engine._persistence is not None:
+                engine._persistence.set_active()
+        print(f"Started execution: {task_id}", file=sys.stderr)
+    else:
+        action = engine.next_action()
+
+    # Import the launcher (deferred so it only fails when actually running)
+    from agent_baton.core.runtime.claude_launcher import ClaudeCodeLauncher, ClaudeCodeConfig
+    from agent_baton.core.orchestration.registry import AgentRegistry
+
+    launcher: ClaudeCodeLauncher | None = None
+    if not dry_run:
+        try:
+            registry = AgentRegistry()
+            registry.load_default_paths()
+            launcher = ClaudeCodeLauncher(
+                config=ClaudeCodeConfig(
+                    working_directory=Path.cwd(),
+                ),
+                registry=registry,
+            )
+        except RuntimeError as exc:
+            user_error(
+                f"Cannot initialize Claude launcher: {exc}",
+                hint="Install Claude Code CLI or use --dry-run.",
+            )
+
+    steps_executed = 0
+    action_dict = action.to_dict()
+
+    while True:
+        atype = action_dict.get("action_type", "")
+
+        if atype == ActionType.COMPLETE.value:
+            summary = engine.complete()
+            print(f"\n{success('COMPLETE')}: {summary}")
+            # Auto-sync
+            try:
+                from agent_baton.core.storage.sync import auto_sync_current_project
+                sync_result = auto_sync_current_project()
+                if sync_result and sync_result.rows_synced > 0:
+                    print(f"Synced {sync_result.rows_synced} rows to central.db")
+            except Exception:
+                pass
+            return
+
+        if atype == ActionType.FAILED.value:
+            print(f"\n{color_error('FAILED')}: {action_dict.get('summary', action_dict.get('message', ''))}", file=sys.stderr)
+            sys.exit(1)
+
+        if steps_executed >= max_steps:
+            print(f"\n{warning('ABORTED')}: reached max-steps limit ({max_steps})", file=sys.stderr)
+            sys.exit(1)
+
+        if atype == ActionType.DISPATCH.value:
+            agent_name = action_dict.get("agent_name", "")
+            step_id = action_dict.get("step_id", "")
+            agent_model = action_dict.get("agent_model", model_override)
+            prompt = action_dict.get("delegation_prompt", "")
+            msg = action_dict.get("message", "")
+
+            print(f"\n  [{step_id}] Dispatching {agent_name} (model={agent_model})...", file=sys.stderr)
+            if msg:
+                print(f"    {msg[:120]}", file=sys.stderr)
+
+            engine.mark_dispatched(step_id=step_id, agent_name=agent_name)
+
+            if dry_run:
+                print(f"  [DRY RUN] Would launch {agent_name} with {len(prompt)} char prompt", file=sys.stderr)
+                engine.record_step_result(
+                    step_id=step_id, agent_name=agent_name,
+                    status="complete", outcome="dry-run skip",
+                )
+            else:
+                import asyncio as _asyncio
+                assert launcher is not None  # guarded by user_error above
+                result = _asyncio.run(launcher.launch(
+                    agent_name=agent_name,
+                    model=agent_model,
+                    prompt=prompt,
+                    step_id=step_id,
+                ))
+                engine.record_step_result(
+                    step_id=step_id,
+                    agent_name=agent_name,
+                    status=result.status,
+                    outcome=result.outcome,
+                    files_changed=result.files_changed,
+                    commit_hash=result.commit_hash,
+                    estimated_tokens=result.estimated_tokens,
+                    duration_seconds=result.duration_seconds,
+                    error=result.error,
+                )
+                status_marker = success("done") if result.status == "complete" else color_error("FAIL")
+                print(f"  [{step_id}] {status_marker} ({result.duration_seconds:.1f}s)", file=sys.stderr)
+                if result.error:
+                    print(f"    Error: {result.error[:200]}", file=sys.stderr)
+
+                # Log to mission log
+                log_status = "COMPLETE" if result.status == "complete" else "FAILED"
+                entry = MissionLogEntry(
+                    agent_name=agent_name,
+                    status=log_status,
+                    assignment=step_id,
+                    result=result.outcome[:200],
+                    files=result.files_changed,
+                    commit_hash=result.commit_hash,
+                    issues=[result.error] if result.error else [],
+                )
+                ContextManager(task_id=task_id).append_to_mission_log(entry)
+
+            steps_executed += 1
+
+        elif atype == ActionType.GATE.value:
+            gate_cmd = action_dict.get("gate_command", "")
+            phase_id = action_dict.get("phase_id", 0)
+            gate_type = action_dict.get("gate_type", "")
+
+            print(f"\n  [GATE] Phase {phase_id} ({gate_type}): {gate_cmd}", file=sys.stderr)
+
+            if dry_run:
+                print(f"  [DRY RUN] Would run: {gate_cmd}", file=sys.stderr)
+                engine.record_gate_result(phase_id=phase_id, passed=True, output="dry-run skip")
+            else:
+                try:
+                    proc = _subprocess.run(
+                        gate_cmd, shell=True, capture_output=True, text=True,
+                        timeout=300, cwd=str(Path.cwd()),
+                    )
+                    passed = proc.returncode == 0
+                    output = proc.stdout[-2000:] if proc.stdout else ""
+                    if not passed and proc.stderr:
+                        output += f"\n--- stderr ---\n{proc.stderr[-1000:]}"
+                    engine.record_gate_result(
+                        phase_id=phase_id, passed=passed, output=output,
+                    )
+                    marker = success("PASS") if passed else color_error("FAIL")
+                    print(f"  [GATE] {marker}", file=sys.stderr)
+                except _subprocess.TimeoutExpired:
+                    engine.record_gate_result(
+                        phase_id=phase_id, passed=False, output="Gate timed out after 300s",
+                    )
+                    print(f"  [GATE] {color_error('TIMEOUT')}", file=sys.stderr)
+
+        elif atype == ActionType.APPROVAL.value:
+            phase_id = action_dict.get("phase_id", 0)
+            msg = action_dict.get("message", "")
+            context = action_dict.get("approval_context", "")
+
+            print(f"\n  [APPROVAL REQUIRED] Phase {phase_id}", file=sys.stderr)
+            print(f"    {msg}", file=sys.stderr)
+            if context:
+                print(f"    Context: {context[:300]}", file=sys.stderr)
+
+            if dry_run:
+                print("  [DRY RUN] Auto-approving", file=sys.stderr)
+                engine.record_approval_result(
+                    phase_id=phase_id, result="approve",
+                )
+            else:
+                # Interactive approval prompt
+                print("  Options: approve, reject, approve-with-feedback", file=sys.stderr)
+                try:
+                    choice = input("  Decision> ").strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    choice = "reject"
+                feedback = ""
+                if choice == "approve-with-feedback":
+                    try:
+                        feedback = input("  Feedback> ").strip()
+                    except (EOFError, KeyboardInterrupt):
+                        feedback = ""
+                if choice not in ("approve", "reject", "approve-with-feedback"):
+                    choice = "approve"
+                engine.record_approval_result(
+                    phase_id=phase_id, result=choice, feedback=feedback,
+                )
+                print(f"  [APPROVAL] {choice}", file=sys.stderr)
+
+        # Get next action
+        try:
+            next_act = engine.next_action()
+            action_dict = next_act.to_dict()
+        except RuntimeError as exc:
+            print(f"\n{color_error('ERROR')}: {exc}", file=sys.stderr)
+            sys.exit(1)
 
 
 # ---------------------------------------------------------------------------

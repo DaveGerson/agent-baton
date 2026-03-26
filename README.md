@@ -19,11 +19,14 @@ scripts/install.ps1   # Windows (no admin required)
 # Plan a task
 baton plan "Add request logging middleware" --save --explain
 
-# Execute it
+# Execute interactively (in Claude Code session)
 baton execute start
 baton execute next     # get next action
 # ... dispatch agents, record results ...
 baton execute complete
+
+# Or execute autonomously (no Claude Code session needed)
+baton execute run      # drives the full loop headlessly
 ```
 
 See [docs/examples/first-run.md](docs/examples/first-run.md) for a complete walkthrough.
@@ -128,9 +131,25 @@ Every task is classified by risk level:
 
 ### Smart Forge
 
-AI-driven task planning with interactive refinement. Propose tasks, get
-decomposed execution plans, and refine them before committing. Integrates
-with the PMO UI for visual plan review.
+AI-driven task planning powered by headless Claude Code subprocess. The
+Forge generates real LLM-quality plans (not rule-based templates) by
+calling `claude --print` under the hood. When the Claude CLI isn't
+available, it falls back to the built-in IntelligentPlanner. Includes
+interactive interview-based refinement and integrates with the PMO UI
+for visual plan review.
+
+### Headless Execution
+
+Run the full orchestration loop without an active Claude Code session:
+
+```bash
+baton execute run --plan .claude/team-context/plan.json
+```
+
+The `run` subcommand drives autonomous execution: it starts (or resumes)
+a plan, dispatches agents via headless `claude --print`, runs gate checks
+as shell subprocesses, and loops until COMPLETE or FAILED. The PMO UI
+can also launch executions directly from the Kanban board.
 
 ### Federated Sync and Cross-Project Queries
 
@@ -264,13 +283,18 @@ baton plan "task" --save \
     --knowledge-pack compliance \
     --intervention medium
 
-# Execute
+# Execute interactively (Claude Code session drives the loop)
 baton execute start
 baton execute next              # Single next action
 baton execute next --all        # All parallel-dispatchable actions
 baton execute record --step-id 1.1 --agent backend-engineer --status complete
 baton execute gate --phase-id 2 --result pass
 baton execute complete
+
+# Execute autonomously (no Claude Code session needed)
+baton execute run               # Full loop: start → dispatch → gate → complete
+baton execute run --dry-run     # Preview what would run without executing
+baton execute run --model opus  # Override default model for all agents
 
 # Concurrent execution
 export BATON_TASK_ID=<task-id>  # Bind terminal to specific execution
@@ -446,6 +470,7 @@ with `pip install -e ".[dev]"`.
 | `baton execute approve` | Record a human approval decision |
 | `baton execute amend` | Add phases or steps mid-execution |
 | `baton execute team-record` | Record team member completions |
+| `baton execute run` | Autonomous execution loop (no Claude Code session) |
 | `baton execute complete` | Finalize execution (writes traces, usage, retro) |
 | `baton execute status` | Show current execution state |
 | `baton execute resume` | Resume after crash or interruption |
@@ -551,7 +576,7 @@ API route groups:
 | `/api/v1/decisions` | Human decision requests |
 | `/api/v1/events` | Event log queries, SSE streaming |
 | `/api/v1/webhooks` | Webhook registration and delivery |
-| `/api/v1/pmo` | PMO projects, board, health |
+| `/api/v1/pmo` | PMO projects, board, health, forge, execution launch |
 
 Interactive API docs available at `http://localhost:8741/docs` when the
 server is running.
@@ -563,6 +588,14 @@ server is running.
 A React/Vite frontend for portfolio management served at `/pmo/` by the
 API server. Shows a Kanban board of projects, program health, and task
 status across all your baton-managed work.
+
+Features:
+- **Kanban board** with execution status cards, step progress, and error display
+- **The Forge** — interactive plan builder powered by headless Claude
+- **One-click execution** — launch autonomous execution directly from the board or Forge
+- **Signal management** — bug/escalation/blocker signals sorted by severity
+- **ADO integration** — import work items from Azure DevOps
+- **Keyboard shortcuts** — N=new plan, S=signals, Esc=board
 
 ```bash
 # Start the API server (serves PMO UI at /pmo/)
@@ -601,7 +634,7 @@ agent_baton/       <- Python package (orchestration engine)
     learn/         <- Pattern learner, budget tuner
     distribute/    <- Packaging, sharing, registry client
     events/        <- Event bus, domain events, persistence, projections
-    runtime/       <- Async worker, supervisor, launcher, decisions
+    runtime/       <- Async worker, supervisor, launcher, headless Claude, decisions
   api/             <- FastAPI REST API server
     routes/        <- 9 route modules (plans, executions, agents, etc.)
     middleware/    <- CORS, bearer token auth

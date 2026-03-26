@@ -1,9 +1,14 @@
 """ForgeSession — Smart Forge consultative plan creation.
 
 The Smart Forge provides an interactive, interview-driven workflow for
-creating execution plans.  It wraps ``IntelligentPlanner.create_plan()``
-and adds:
+creating execution plans.  It uses a **headless Claude Code subprocess**
+(``claude --print``) to generate LLM-quality plans, falling back to the
+rule-based ``IntelligentPlanner`` when the Claude CLI is unavailable.
 
+Capabilities:
+
+- **LLM plan generation** — headless Claude produces context-aware plans
+  with appropriate agent routing, risk assessment, and phase sequencing.
 - **Interview generation** — deterministic rule-based analysis of a
   draft plan to identify ambiguities (missing tests, no gates, high risk,
   multi-agent coordination concerns).  Returns structured questions.
@@ -11,22 +16,23 @@ and adds:
   interview answers as additional context.
 - **Signal triage** — converts a PMO signal (e.g. a production incident)
   into a bug-fix plan and links them.
-
-This module does NOT call the Anthropic API directly.  All plan generation
-is delegated to ``IntelligentPlanner.create_plan()``, which handles agent
-routing, risk assessment, and phase sequencing.
 """
 from __future__ import annotations
 
+import asyncio
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from agent_baton.core.pmo.store import PmoStore
+from agent_baton.core.runtime.headless import HeadlessClaude
 from agent_baton.models.execution import MachinePlan
 from agent_baton.models.pmo import InterviewQuestion, InterviewAnswer, PmoProject
 
 if TYPE_CHECKING:
     from agent_baton.core.engine.planner import IntelligentPlanner
+
+logger = logging.getLogger(__name__)
 
 
 class ForgeSession:
@@ -34,15 +40,16 @@ class ForgeSession:
 
     Orchestrates the consultative plan creation flow:
 
-    1. ``create_plan`` — generate an initial plan from a description.
+    1. ``create_plan`` — generate an initial plan via headless Claude
+       (falls back to IntelligentPlanner if CLI unavailable).
     2. ``generate_interview`` — produce 3-5 targeted questions about
        the plan's quality and completeness.
     3. ``regenerate_plan`` — re-generate incorporating user answers.
     4. ``save_plan`` — persist the approved plan to the project.
 
     Attributes:
-        _planner: An ``IntelligentPlanner`` instance (typed as ``object``
-            to avoid circular imports).
+        _planner: An ``IntelligentPlanner`` instance used as fallback.
+        _headless: A ``HeadlessClaude`` instance for LLM plan generation.
         _store: A ``PmoStore`` (or ``PmoSqliteStore``) used to look up
             projects and signals.
         _session_started: ISO 8601 timestamp set on the first call to
@@ -54,27 +61,29 @@ class ForgeSession:
         self,
         planner: IntelligentPlanner,
         store: PmoStore,
+        headless: HeadlessClaude | None = None,
     ) -> None:
         self._planner = planner
         self._store = store
+        self._headless = headless or HeadlessClaude()
         self._session_started: str | None = None
         self._plans_created: int = 0
 
     def create_plan(
         self,
         description: str,
-        program: str,  # noqa: ARG002
+        program: str,
         project_id: str,
         *,
         task_type: str | None = None,
-        priority: int = 0,  # noqa: ARG002
+        priority: int = 0,
     ) -> MachinePlan:
-        """Create an execution plan via ``IntelligentPlanner``.
+        """Create an execution plan via headless Claude (with fallback).
 
-        Looks up the project by ``project_id`` in the PMO store to
-        determine the project root path, then delegates to
-        ``IntelligentPlanner.create_plan()`` for agent routing, risk
-        assessment, and phase sequencing.
+        Tries the headless Claude Code subprocess first for LLM-quality
+        plan generation.  Falls back to the rule-based
+        ``IntelligentPlanner`` if the Claude CLI is unavailable or if
+        the LLM call fails.
 
         Args:
             description: Natural-language task description (the PRD).
@@ -95,7 +104,38 @@ class ForgeSession:
         project = self._store.get_project(project_id)
         project_root = Path(project.path) if project else None
 
-        plan: MachinePlan = self._planner.create_plan(
+        # Try headless Claude first for real LLM-quality plans
+        if self._headless.is_available:
+            try:
+                plan = asyncio.get_event_loop().run_until_complete(
+                    self._headless.generate_plan(
+                        description=description,
+                        project_id=project_id,
+                        project_path=str(project_root) if project_root else "",
+                        task_type=task_type,
+                        priority=priority,
+                    )
+                )
+            except RuntimeError:
+                # No event loop — create one
+                plan = asyncio.run(
+                    self._headless.generate_plan(
+                        description=description,
+                        project_id=project_id,
+                        project_path=str(project_root) if project_root else "",
+                        task_type=task_type,
+                        priority=priority,
+                    )
+                )
+            if plan is not None:
+                plan.classification_source = "headless-claude"
+                self._plans_created += 1
+                logger.info("Forge: plan generated via headless Claude")
+                return plan
+            logger.warning("Forge: headless Claude failed, falling back to IntelligentPlanner")
+
+        # Fallback to rule-based planner
+        plan = self._planner.create_plan(
             task_summary=description,
             task_type=task_type,
             project_root=project_root,
@@ -243,34 +283,69 @@ class ForgeSession:
         answers: list[InterviewAnswer],
         *,
         task_type: str | None = None,
-        priority: int = 0,  # noqa: ARG002
+        priority: int = 0,
     ) -> MachinePlan:
         """Re-generate a plan incorporating interview answers.
 
-        Builds an enriched description by appending the user's answered
-        questions as structured refinement context (one bullet per answer),
-        then delegates to ``IntelligentPlanner.create_plan()`` which treats
-        the additional context as planning constraints.
+        Builds refinement context from the user's interview answers and
+        sends it to headless Claude for a refined plan.  Falls back to
+        the rule-based planner if Claude is unavailable.
 
         Args:
             description: Original task description.
             project_id: Target project ID.
             answers: User responses to the interview questions.
             task_type: Optional task type override.
-            _priority: Priority level (currently unused by the planner).
+            priority: Priority level (0=normal, 1=high, 2=critical).
 
         Returns:
             A new ``MachinePlan`` reflecting the user's refinements.
         """
+        refinement_parts = []
+        for ans in answers:
+            refinement_parts.append(f"- {ans.question_id}: {ans.answer}")
+        refinement_context = "\n".join(refinement_parts)
+
+        project = self._store.get_project(project_id)
+        project_root = Path(project.path) if project else None
+
+        # Try headless Claude with refinement context
+        if self._headless.is_available:
+            try:
+                plan = asyncio.get_event_loop().run_until_complete(
+                    self._headless.generate_plan(
+                        description=description,
+                        project_id=project_id,
+                        project_path=str(project_root) if project_root else "",
+                        task_type=task_type,
+                        priority=priority,
+                        refinement_context=refinement_context,
+                    )
+                )
+            except RuntimeError:
+                plan = asyncio.run(
+                    self._headless.generate_plan(
+                        description=description,
+                        project_id=project_id,
+                        project_path=str(project_root) if project_root else "",
+                        task_type=task_type,
+                        priority=priority,
+                        refinement_context=refinement_context,
+                    )
+                )
+            if plan is not None:
+                plan.classification_source = "headless-claude"
+                logger.info("Forge: regenerated plan via headless Claude")
+                return plan
+            logger.warning("Forge: headless regen failed, falling back to IntelligentPlanner")
+
+        # Fallback: enrich description with answers and use rule-based planner
         enriched_parts = [description, "\n\n--- Refinement Context ---"]
         for ans in answers:
             enriched_parts.append(f"- {ans.question_id}: {ans.answer}")
         enriched = "\n".join(enriched_parts)
 
-        project = self._store.get_project(project_id)
-        project_root = Path(project.path) if project else None
-
-        plan: MachinePlan = self._planner.create_plan(
+        plan = self._planner.create_plan(
             task_summary=enriched,
             task_type=task_type,
             project_root=project_root,

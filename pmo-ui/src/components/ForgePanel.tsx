@@ -353,29 +353,92 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
 
         {/* SAVED */}
         {phase === 'saved' && (
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12, paddingTop: 40 }}>
-            <div style={{
-              width: 48, height: 48, borderRadius: '50%',
-              background: T.green + '20', border: `2px solid ${T.green}`,
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              fontSize: 22, color: T.green,
-            }}>{'\u2713'}</div>
-            <div style={{ fontSize: 14, fontWeight: 700, color: T.green }}>Plan Saved & Queued</div>
-            {savePath && (
-              <div style={{ fontSize: 9, color: T.text3, fontFamily: 'monospace' }}>{savePath}</div>
-            )}
-            <div style={{ display: 'flex', gap: 8 }}>
-              <button onClick={() => { setPhase('intake'); setDescription(''); setPlan(null); }} style={{
-                padding: '5px 14px', borderRadius: 4, border: `1px solid ${T.border}`,
-                background: 'transparent', color: T.text2, fontSize: 9, cursor: 'pointer',
-              }}>New Plan</button>
-              <button onClick={onBack} style={{
-                padding: '5px 14px', borderRadius: 4, border: 'none',
-                background: T.accent, color: '#fff', fontSize: 9, fontWeight: 600, cursor: 'pointer',
-              }}>Back to Board</button>
-            </div>
-          </div>
+          <SavedPhase
+            savePath={savePath}
+            plan={plan}
+            onNewPlan={() => { setPhase('intake'); setDescription(''); setPlan(null); }}
+            onBack={onBack}
+          />
         )}
+      </div>
+    </div>
+  );
+}
+
+function SavedPhase({
+  savePath, plan, onNewPlan, onBack,
+}: {
+  savePath: string | null;
+  plan: ForgePlanResponse | null;
+  onNewPlan: () => void;
+  onBack: () => void;
+}) {
+  const [execLoading, setExecLoading] = useState(false);
+  const [execResult, setExecResult] = useState<string | null>(null);
+
+  async function handleExecute() {
+    if (!plan) return;
+    setExecLoading(true);
+    setExecResult(null);
+    try {
+      const resp = await api.executeCard(plan.task_id);
+      setExecResult(`Execution launched (PID ${resp.pid})`);
+    } catch (err) {
+      setExecResult(err instanceof Error ? err.message : 'Launch failed');
+    } finally {
+      setExecLoading(false);
+    }
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12, paddingTop: 40 }}>
+      <div style={{
+        width: 48, height: 48, borderRadius: '50%',
+        background: T.green + '20', border: `2px solid ${T.green}`,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        fontSize: 22, color: T.green,
+      }}>{'\u2713'}</div>
+      <div style={{ fontSize: 14, fontWeight: 700, color: T.green }}>Plan Saved & Queued</div>
+      {savePath && (
+        <div style={{ fontSize: 9, color: T.text3, fontFamily: 'monospace' }}>{savePath}</div>
+      )}
+
+      {/* Execution launch */}
+      <button
+        onClick={handleExecute}
+        disabled={execLoading || !plan}
+        style={{
+          padding: '7px 24px', borderRadius: 4, border: 'none',
+          background: execLoading ? T.bg3 : `linear-gradient(135deg, ${T.green}, #059669)`,
+          color: '#fff', fontSize: 11, fontWeight: 700,
+          cursor: execLoading ? 'not-allowed' : 'pointer',
+          opacity: execLoading ? 0.6 : 1,
+        }}
+      >
+        {execLoading ? 'Launching...' : '\u25B6 Start Execution'}
+      </button>
+
+      {execResult && (
+        <div style={{
+          fontSize: 9,
+          color: execResult.startsWith('Execution launched') ? T.green : T.red,
+          padding: '4px 10px',
+          background: execResult.startsWith('Execution launched') ? T.green + '12' : T.red + '12',
+          borderRadius: 4,
+        }}>
+          {execResult}
+        </div>
+      )}
+
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button onClick={onNewPlan} style={{
+          padding: '5px 14px', borderRadius: 4, border: `1px solid ${T.border}`,
+          background: 'transparent', color: T.text2, fontSize: 9, cursor: 'pointer',
+        }}>New Plan</button>
+        <button onClick={onBack} style={{
+          padding: '5px 14px', borderRadius: 4, border: 'none',
+          background: T.accent, color: '#fff', fontSize: 9, fontWeight: 600, cursor: 'pointer',
+        }}>Back to Board</button>
       </div>
     </div>
   );

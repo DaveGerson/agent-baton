@@ -8,6 +8,7 @@ interface KanbanCardProps {
   card: PmoCard;
   columnColor: string;
   onForge?: (card: PmoCard) => void;
+  onExecute?: (card: PmoCard) => void;
 }
 
 function Chip({ children, color = T.text2 }: { children: React.ReactNode; color?: string }) {
@@ -59,13 +60,31 @@ function ProgramDot({ program, size = 7 }: { program: string; size?: number }) {
   );
 }
 
-export function KanbanCard({ card, columnColor, onForge }: KanbanCardProps) {
+export function KanbanCard({ card, columnColor, onForge, onExecute }: KanbanCardProps) {
   const [expanded, setExpanded] = useState(false);
   const [showPlan, setShowPlan] = useState(false);
   const [planData, setPlanData] = useState<ForgePlanResponse | null>(null);
   const [planLoading, setPlanLoading] = useState(false);
+  const [execLoading, setExecLoading] = useState(false);
+  const [execResult, setExecResult] = useState<string | null>(null);
   const isHuman = card.column === 'awaiting_human';
+  const isQueued = card.column === 'queued';
   const priorityColor = PRIORITY_COLOR[card.priority] ?? T.text2;
+
+  async function handleExecute(e: React.MouseEvent) {
+    e.stopPropagation();
+    setExecLoading(true);
+    setExecResult(null);
+    try {
+      const resp = await api.executeCard(card.card_id);
+      setExecResult(`Launched (PID ${resp.pid})`);
+      onExecute?.(card);
+    } catch (err) {
+      setExecResult(err instanceof Error ? err.message : 'Launch failed');
+    } finally {
+      setExecLoading(false);
+    }
+  }
 
   async function handleViewPlan(e: React.MouseEvent) {
     e.stopPropagation();
@@ -229,6 +248,26 @@ export function KanbanCard({ card, columnColor, onForge }: KanbanCardProps) {
 
           {/* Actions row */}
           <div style={{ display: 'flex', gap: 4, marginTop: 4, paddingTop: 4, borderTop: `1px solid ${T.border}` }}>
+            {isQueued && (
+              <button
+                onClick={handleExecute}
+                disabled={execLoading}
+                style={{
+                  padding: '3px 9px',
+                  borderRadius: 3,
+                  border: `1px solid ${T.green}44`,
+                  background: `linear-gradient(135deg, ${T.green}18, ${T.green}0c)`,
+                  color: T.green,
+                  fontSize: 9,
+                  fontWeight: 600,
+                  cursor: execLoading ? 'not-allowed' : 'pointer',
+                  opacity: execLoading ? 0.6 : 1,
+                }}
+                title="Launch autonomous execution for this card"
+              >
+                {execLoading ? 'Launching...' : '\u25B6 Execute'}
+              </button>
+            )}
             {onForge && (
               <>
                 <button
@@ -282,6 +321,20 @@ export function KanbanCard({ card, columnColor, onForge }: KanbanCardProps) {
               {showPlan ? 'Hide Plan' : 'View Plan'}
             </button>
           </div>
+
+          {/* Execution result */}
+          {execResult && (
+            <div style={{
+              fontSize: 8,
+              color: execResult.startsWith('Launched') ? T.green : T.red,
+              padding: '3px 6px',
+              marginTop: 4,
+              background: T.bg1,
+              borderRadius: 3,
+            }}>
+              {execResult}
+            </div>
+          )}
 
           {/* Plan preview */}
           {showPlan && (

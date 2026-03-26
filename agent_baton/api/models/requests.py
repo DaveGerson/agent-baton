@@ -326,6 +326,29 @@ class CreateSignalRequest(BaseModel):
     )
 
 
+class ExecuteCardRequest(BaseModel):
+    """Request body for ``POST /api/v1/pmo/execute/{card_id}``.
+
+    Launches headless execution for a queued card.  The ``model``
+    field overrides the default agent model for all dispatched steps.
+    """
+
+    model: str = Field(
+        default="sonnet",
+        description="Default model for dispatched agents (e.g. 'opus', 'sonnet').",
+    )
+    dry_run: bool = Field(
+        default=False,
+        description="If true, print actions without executing them.",
+    )
+    max_steps: int = Field(
+        default=50,
+        ge=1,
+        le=200,
+        description="Safety limit: maximum steps before aborting.",
+    )
+
+
 class BatchResolveRequest(BaseModel):
     """Request body for ``POST /api/v1/pmo/signals/batch/resolve``.
 

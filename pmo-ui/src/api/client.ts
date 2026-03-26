@@ -12,6 +12,8 @@ import type {
   InterviewResponse,
   RegenerateBody,
   AdoSearchResponse,
+  ExecuteCardBody,
+  ExecuteCardResponse,
 } from './types';
 
 const BASE = '/api/v1/pmo';
@@ -91,6 +93,14 @@ export const api = {
     return request(`/cards/${encodeURIComponent(cardId)}`);
   },
 
+  // Execution
+  executeCard(cardId: string, body: ExecuteCardBody = {}): Promise<ExecuteCardResponse> {
+    return request(`/execute/${encodeURIComponent(cardId)}`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  },
+
   // ADO search
   searchAdo(q: string): Promise<AdoSearchResponse> {
     return request(`/ado/search?q=${encodeURIComponent(q)}`);
@@ -98,4 +108,4 @@ export const api = {
 };
 
 // Re-export types for convenience
-export type { PmoCard, PmoProject, ProgramHealth, PmoSignal, BoardResponse, PlanResponse, ForgePlanBody, ForgePlanResponse, ForgeApproveBody, ForgeApproveResponse, InterviewResponse, RegenerateBody, AdoSearchResponse };
+export type { PmoCard, PmoProject, ProgramHealth, PmoSignal, BoardResponse, PlanResponse, ForgePlanBody, ForgePlanResponse, ForgeApproveBody, ForgeApproveResponse, InterviewResponse, RegenerateBody, AdoSearchResponse, ExecuteCardBody, ExecuteCardResponse };

@@ -8,8 +8,9 @@ POST /pmo/projects                      — Register a project
 DELETE /pmo/projects/{project_id}       — Unregister a project
 GET  /pmo/health                        — Program health metrics
 GET  /pmo/events                        — SSE stream of board-relevant events
-POST /pmo/forge/plan                    — Create a plan via IntelligentPlanner
+POST /pmo/forge/plan                    — Create a plan via headless Claude
 POST /pmo/forge/approve                 — Save an approved plan to a project
+POST /pmo/execute/{card_id}             — Launch headless execution for a card
 GET  /pmo/signals                       — List all open signals
 POST /pmo/signals                       — Create a signal
 POST /pmo/signals/batch/resolve         — Resolve multiple signals in one call
@@ -32,6 +33,7 @@ from agent_baton.api.models.requests import (
     BatchResolveRequest,
     CreateForgeRequest,
     CreateSignalRequest,
+    ExecuteCardRequest,
     ForgeSignalRequest,
     InterviewRequest,
     RegenerateRequest,
@@ -626,6 +628,112 @@ async def forge_regenerate(
         raise HTTPException(status_code=500, detail=f"Regeneration failed: {exc}") from exc
 
     return plan.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# Execution launch
+# ---------------------------------------------------------------------------
+
+
+@router.post("/pmo/execute/{card_id}", status_code=202)
+async def execute_card(
+    card_id: str,
+    req: ExecuteCardRequest,
+    scanner: PmoScanner = Depends(get_pmo_scanner),
+    store: PmoStore = Depends(get_pmo_store),
+) -> dict:
+    """Launch headless execution for a queued card.
+
+    POST /api/v1/pmo/execute/{card_id}
+
+    Finds the card's plan on disk, then spawns an autonomous ``baton
+    execute run`` subprocess that drives the full execution loop without
+    an active Claude Code session.
+
+    The execution runs in the background; the endpoint returns immediately
+    with the task ID and PID of the spawned process.
+
+    Args:
+        card_id: The task ID of the card to execute (URL path parameter).
+        req: Execution options (model, dry_run, max_steps).
+        scanner: Injected ``PmoScanner`` singleton.
+        store: Injected PMO store singleton.
+
+    Returns:
+        ``{"task_id": "<id>", "pid": <pid>, "status": "launched"}``
+        (202 Accepted).
+
+    Raises:
+        HTTPException 404: If the card or its plan cannot be found.
+        HTTPException 500: If the execution process fails to start.
+    """
+    import subprocess
+    import sys
+
+    # Find the card and its project
+    try:
+        card, plan_dict = scanner.find_card(card_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Card '{card_id}' not found.")
+
+    if plan_dict is None:
+        raise HTTPException(status_code=404, detail=f"No plan found for card '{card_id}'.")
+
+    project = store.get_project(card.project_id)
+    if project is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Project '{card.project_id}' not registered.",
+        )
+
+    # Locate the plan.json file on disk
+    from pathlib import Path
+
+    project_root = Path(project.path)
+    plan_path = (
+        project_root / ".claude" / "team-context" / "executions" / card_id / "plan.json"
+    )
+    if not plan_path.exists():
+        # Try root-level fallback
+        plan_path = project_root / ".claude" / "team-context" / "plan.json"
+        if not plan_path.exists():
+            raise HTTPException(
+                status_code=404,
+                detail=f"Plan file not found for card '{card_id}'.",
+            )
+
+    # Build the baton execute run command
+    cmd = [
+        sys.executable, "-m", "agent_baton", "execute", "run",
+        "--plan", str(plan_path),
+        "--task-id", card_id,
+        "--model", req.model,
+        "--max-steps", str(req.max_steps),
+    ]
+    if req.dry_run:
+        cmd.append("--dry-run")
+
+    try:
+        process = subprocess.Popen(
+            cmd,
+            cwd=str(project_root),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to start execution process: {exc}",
+        )
+
+    return {
+        "task_id": card_id,
+        "pid": process.pid,
+        "status": "launched",
+        "model": req.model,
+        "dry_run": req.dry_run,
+    }
 
 
 @router.get("/pmo/ado/search", response_model=AdoSearchResponse)

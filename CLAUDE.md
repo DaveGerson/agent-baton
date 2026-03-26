@@ -24,8 +24,8 @@ agent_baton/       ← Python package (orchestration engine)
     distribute/    ← Packaging, sharing, registry client
     │  experimental/ ← Incident, async dispatch, transfer (not production)
     events/        ← Event bus, domain events, persistence, projections
-    runtime/       ← Async worker, supervisor, launcher, decisions,
-                     ExecutionContext factory
+    runtime/       ← Async worker, supervisor, launcher, headless Claude,
+                     decisions, ExecutionContext factory
   cli/             ← CLI interface (38 commands via `baton`)
     commands/
       execution/   ← execute, plan, status, daemon, async, decide
@@ -146,6 +146,11 @@ loop:
     baton execute complete
     break
 ```
+
+**Headless execution:** For autonomous execution without a Claude Code
+session, use `baton execute run`. This drives the full loop (start → dispatch
+→ gate → complete) by spawning `claude --print` subprocesses. The PMO UI
+can also launch execution directly from the board.
 
 **Depth limit:** The orchestrator MUST run at the top level of a conversation,
 never as a dispatched subagent. It needs to spawn its own agents, and Claude
