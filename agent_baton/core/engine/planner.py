@@ -1178,7 +1178,7 @@ class IntelligentPlanner:
             gate: PlanGate | None = None
             if gate_dict:
                 gate = PlanGate(
-                    gate_type=gate_dict.get("gate_type", "build"),
+                    gate_type=gate_dict.get("gate_type") or gate_dict.get("type", "build"),
                     command=gate_dict.get("command", ""),
                     description=gate_dict.get("description", ""),
                     fail_on=gate_dict.get("fail_on", []),
