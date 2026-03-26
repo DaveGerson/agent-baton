@@ -334,7 +334,16 @@ class ExecutionEngine:
             self._persistence.save(state)
 
     def _load_execution(self) -> ExecutionState | None:
-        """Load execution state via storage backend or legacy file."""
+        """Load execution state via storage backend or legacy file.
+
+        When a specific ``task_id`` was requested (either explicitly or via
+        ``active-task-id.txt``), this method validates that the loaded state
+        actually belongs to that task.  If the file-based fallback returns a
+        state for a *different* task (i.e. a stale ``execution-state.json``
+        from a previous run), it is discarded and ``None`` is returned so
+        the caller can fail gracefully rather than silently resuming the
+        wrong execution.
+        """
         if self._storage is not None:
             try:
                 task_id = self._task_id
@@ -349,10 +358,34 @@ class ExecutionEngine:
                     "SQLite load failed, falling back to file persistence: %s", e
                 )
                 if self._persistence is not None:
-                    return self._persistence.load()
+                    state = self._persistence.load()
+                    # Discard if the file belongs to a different task so we
+                    # never resume the wrong execution via a stale file.
+                    if state is not None and self._task_id and state.task_id != self._task_id:
+                        _log.warning(
+                            "File state task_id %r does not match requested %r — "
+                            "discarding stale file state",
+                            state.task_id,
+                            self._task_id,
+                        )
+                        return None
+                    return state
                 return None
         else:
-            return self._persistence.load()
+            state = self._persistence.load()
+            # In file mode the persistence path is already namespaced to
+            # self._task_id (when provided), but a stale legacy flat file
+            # could have been written for a different task.  Guard against
+            # returning wrong-task state.
+            if state is not None and self._task_id and state.task_id != self._task_id:
+                _log.warning(
+                    "File state task_id %r does not match requested %r — "
+                    "discarding stale file state",
+                    state.task_id,
+                    self._task_id,
+                )
+                return None
+            return state
 
     def _log_usage(self, record: TaskUsageRecord) -> None:
         """Log a TaskUsageRecord via storage backend or legacy logger."""
@@ -1003,15 +1036,49 @@ class ExecutionEngine:
     def resume(self) -> ExecutionAction:
         """Resume from a saved state (crash recovery).
 
+        Resolution order when a specific ``task_id`` is known:
+
+        1. Primary: load via ``_load_execution()`` (storage backend or
+           namespaced file).
+        2. SQLite fallback: if the primary load returns ``None`` *and* we
+           have a storage backend with the requested task, reconstruct the
+           state directly from SQLite.  This handles the case where
+           ``execution-state.json`` was overwritten by a concurrent run or
+           e2e test but ``baton.db`` still holds the correct state.
+
         - Loads state from disk.
         - Determines where execution left off.
         - Returns the appropriate next action.
         """
         state = self._load_execution()
+
+        # If file-based load came up empty but we have a task_id and a storage
+        # backend, try reconstructing directly from SQLite before giving up.
+        if state is None and self._task_id and self._storage is not None:
+            _log.info(
+                "Primary load returned no state for task %r; "
+                "attempting SQLite reconstruction",
+                self._task_id,
+            )
+            try:
+                state = self._storage.load_execution(self._task_id)
+                if state is not None:
+                    _log.info(
+                        "Reconstructed execution state for task %r from SQLite",
+                        self._task_id,
+                    )
+            except Exception as exc:
+                _log.warning(
+                    "SQLite reconstruction for task %r failed: %s",
+                    self._task_id,
+                    exc,
+                )
+
         if state is None:
+            task_hint = f" (task {self._task_id!r})" if self._task_id else ""
             return ExecutionAction(
                 action_type=ActionType.FAILED,
-                message="No execution state found on disk. Cannot resume.",
+                message=f"No execution state found{task_hint}. Cannot resume.",
                 summary="No execution state on disk.",
             )
 

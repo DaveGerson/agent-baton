@@ -636,6 +636,112 @@ class TestResume:
 
 
 # ---------------------------------------------------------------------------
+# Resume: stale execution-state.json vs active-task-id.txt mismatch
+# ---------------------------------------------------------------------------
+
+class TestResumeStaleStateFix:
+    """Verify that resume() loads the correct task when execution-state.json
+    belongs to a different task than active-task-id.txt points to.
+
+    Scenario:
+        - Task A is started and its state is saved to execution-state.json.
+        - Task B is started (e.g. by an e2e test) and stored in baton.db
+          with active-task-id.txt updated to task-B.
+        - execution-state.json still contains task A's stale state on disk.
+        - ``baton execute resume`` must load task B from SQLite, not task A.
+    """
+
+    def test_resume_uses_sqlite_when_file_has_stale_task(self, tmp_path: Path) -> None:
+        """SQLite takes precedence over a stale execution-state.json.
+
+        After task-A finishes (its file state is written), task-B is created
+        in baton.db and made active.  A new engine created with task_id=task-B
+        must resume task-B from SQLite, ignoring the stale file for task-A.
+        """
+        from agent_baton.core.storage.sqlite_backend import SqliteStorage
+        from agent_baton.core.engine.persistence import StatePersistence
+
+        db = SqliteStorage(tmp_path / "baton.db")
+
+        # --- Set up task-A via a file-only engine ----------------------------
+        engine_a = ExecutionEngine(team_context_root=tmp_path, task_id="task-A")
+        plan_a = _plan(task_id="task-A")
+        engine_a.start(plan_a)
+        # task-A's execution-state.json is now on disk at the legacy flat path
+        # (no storage backend, so no SQLite row for task-A).
+        stale_legacy = tmp_path / "execution-state.json"
+        # Write a copy to the legacy flat file so it looks like the old-style
+        # stale artifact that would confuse a file-only fallback.
+        state_a_data = json.loads(
+            (tmp_path / "executions" / "task-A" / "execution-state.json").read_text()
+        )
+        stale_legacy.write_text(json.dumps(state_a_data), encoding="utf-8")
+
+        # --- Set up task-B via a SQLite-backed engine -------------------------
+        plan_b = _plan(task_id="task-B")
+        engine_b = ExecutionEngine(
+            team_context_root=tmp_path,
+            task_id="task-B",
+            storage=db,
+        )
+        engine_b.start(plan_b)
+        # Mark task-B as active in both backends.
+        db.set_active_task("task-B")
+        StatePersistence.get_active_task_id  # referenced for clarity
+        (tmp_path / "active-task-id.txt").write_text("task-B", encoding="utf-8")
+
+        # --- Resume using the active task (task-B) ---------------------------
+        # Simulate what the CLI does: read active-task-id.txt → task-B, then
+        # build an engine with that task_id and the SQLite storage backend.
+        active_id = StatePersistence.get_active_task_id(tmp_path)
+        assert active_id == "task-B"
+
+        resume_engine = ExecutionEngine(
+            team_context_root=tmp_path,
+            task_id=active_id,
+            storage=db,
+        )
+        action = resume_engine.resume()
+
+        # Must resume task-B, not task-A.
+        assert action.action_type == ActionType.DISPATCH, (
+            f"Expected DISPATCH but got {action.action_type}: {action.message!r}"
+        )
+        assert action.step_id == "1.1"
+
+    def test_resume_discards_stale_file_state_in_file_mode(self, tmp_path: Path) -> None:
+        """In file mode, resume() returns FAILED when the file's task_id does
+        not match the requested task_id (stale legacy flat file scenario).
+
+        This prevents silently resuming the wrong task when no SQLite backend
+        is available to reconstruct from.
+        """
+        from agent_baton.core.engine.persistence import StatePersistence
+
+        # Write a state file for task-A at the legacy flat-file location.
+        engine_a = ExecutionEngine(team_context_root=tmp_path, task_id="task-A")
+        engine_a.start(_plan(task_id="task-A"))
+
+        # Manually write task-A's state to the legacy flat file so it appears
+        # stale when a task-B engine tries to read it.
+        namespaced = tmp_path / "executions" / "task-A" / "execution-state.json"
+        legacy = tmp_path / "execution-state.json"
+        legacy.write_text(namespaced.read_text(encoding="utf-8"), encoding="utf-8")
+
+        # Mark task-B as active on disk (no SQLite, no namespaced file for task-B).
+        (tmp_path / "active-task-id.txt").write_text("task-B", encoding="utf-8")
+
+        # Engine for task-B in file mode: its namespaced file doesn't exist,
+        # and the legacy flat file has task-A state — must not resume task-A.
+        engine_b = ExecutionEngine(team_context_root=tmp_path, task_id="task-B")
+        action = engine_b.resume()
+
+        assert action.action_type == ActionType.FAILED, (
+            f"Expected FAILED for stale file state, got {action.action_type!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # End-to-end: multi-phase plan
 # ---------------------------------------------------------------------------
 
