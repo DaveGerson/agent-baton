@@ -73,13 +73,6 @@ export const api = {
   batchResolveSignals(ids: string[]): Promise<{ resolved: string[]; count: number }> {
     return request('/signals/batch/resolve', { method: 'POST', body: JSON.stringify({ ids }) });
   },
-  signalToForge(id: string, projectId: string): Promise<PlanResponse> {
-    return request(`/signals/${encodeURIComponent(id)}/forge`, {
-      method: 'POST',
-      body: JSON.stringify({ project_id: projectId }),
-    });
-  },
-
   // Forge interview & regeneration
   forgeInterview(body: { plan: ForgePlanResponse; feedback?: string }): Promise<InterviewResponse> {
     return request('/forge/interview', { method: 'POST', body: JSON.stringify(body) });

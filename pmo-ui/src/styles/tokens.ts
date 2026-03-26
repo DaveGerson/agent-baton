@@ -41,10 +41,9 @@ export const SEVERITY_COLOR: Record<string, string> = {
 };
 
 export const PRIORITY_COLOR: Record<number, string> = {
-  0: T.red,
-  1: T.orange,
-  2: T.yellow,
-  3: T.text2,
+  2: T.red,      // P0 — critical
+  1: T.orange,   // P1 — high
+  0: T.text2,    // P2 — normal (no chip needed)
 };
 
 export const FONT_SIZES = {

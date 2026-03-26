@@ -25,7 +25,7 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
 
   const filtered = filter === 'all'
     ? cards
-    : cards.filter(c => c.program === filter);
+    : cards.filter(c => c.program.toUpperCase() === filter.toUpperCase());
 
   const awaitingHuman = cards.filter(c => c.column === 'awaiting_human').length;
   const executing = cards.filter(c => c.column === 'executing').length;

@@ -8,7 +8,6 @@ interface KanbanCardProps {
   card: PmoCard;
   columnColor: string;
   onForge?: (card: PmoCard) => void;
-  onExecute?: (card: PmoCard) => void;
 }
 
 function Chip({ children, color = T.text2 }: { children: React.ReactNode; color?: string }) {
@@ -60,7 +59,7 @@ function ProgramDot({ program, size = 7 }: { program: string; size?: number }) {
   );
 }
 
-export function KanbanCard({ card, columnColor, onForge, onExecute }: KanbanCardProps) {
+export function KanbanCard({ card, columnColor, onForge }: KanbanCardProps) {
   const [expanded, setExpanded] = useState(false);
   const [showPlan, setShowPlan] = useState(false);
   const [planData, setPlanData] = useState<ForgePlanResponse | null>(null);
@@ -78,7 +77,6 @@ export function KanbanCard({ card, columnColor, onForge, onExecute }: KanbanCard
     try {
       const resp = await api.executeCard(card.card_id);
       setExecResult(`Launched (PID ${resp.pid})`);
-      onExecute?.(card);
     } catch (err) {
       setExecResult(err instanceof Error ? err.message : 'Launch failed');
     } finally {
@@ -152,8 +150,8 @@ export function KanbanCard({ card, columnColor, onForge, onExecute }: KanbanCard
         {/* Meta row */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 3, flexWrap: 'wrap', marginBottom: 3 }}>
           <span style={{ fontSize: 9, color: T.text4, fontFamily: 'monospace' }}>{card.card_id}</span>
-          {card.priority <= 1 && (
-            <Chip color={priorityColor}>P{card.priority}</Chip>
+          {card.priority >= 1 && (
+            <Chip color={priorityColor}>P{card.priority === 2 ? '0' : '1'}</Chip>
           )}
           {card.risk_level && card.risk_level !== 'low' && (
             <Chip color={card.risk_level === 'high' ? T.red : T.yellow}>
