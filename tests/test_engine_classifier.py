@@ -317,3 +317,273 @@ class TestFallbackClassifier:
         classifier = FallbackClassifier()
         result = classifier.classify("Move 3 files", self.registry)
         assert result.source == "keyword-fallback"
+
+
+# ---------------------------------------------------------------------------
+# Edge cases: empty registry
+# ---------------------------------------------------------------------------
+
+class TestKeywordClassifierEmptyRegistry:
+    """Verify the classifier degrades gracefully when no agents are registered."""
+
+    def setup_method(self):
+        self.classifier = KeywordClassifier()
+        self.empty_registry = AgentRegistry()  # no agents loaded
+
+    def test_empty_registry_returns_valid_result(self):
+        result = self.classifier.classify("Add a new feature", self.empty_registry)
+        assert isinstance(result, TaskClassification)
+        assert result.source == "keyword-fallback"
+
+    def test_empty_registry_agents_nonempty(self):
+        """Even with no registry agents, a fallback agent name must be returned."""
+        result = self.classifier.classify("Add a new feature", self.empty_registry)
+        assert len(result.agents) >= 1
+
+    def test_empty_registry_phases_nonempty(self):
+        result = self.classifier.classify("Add a new feature", self.empty_registry)
+        assert len(result.phases) >= 1
+
+    def test_empty_registry_light_task_still_produces_single_agent(self):
+        result = self.classifier.classify("Rename 1 file", self.empty_registry)
+        assert result.complexity == "light"
+        assert len(result.agents) == 1
+
+
+# ---------------------------------------------------------------------------
+# Edge cases: very long task summaries
+# ---------------------------------------------------------------------------
+
+class TestKeywordClassifierLongSummary:
+    """Verify no crash or pathological behaviour on very long input strings."""
+
+    def setup_method(self):
+        self.classifier = KeywordClassifier()
+        self.registry = _make_registry()
+
+    def test_1000_word_summary_returns_result(self):
+        long_summary = ("redesign the entire system " * 200).strip()  # 800+ words
+        result = self.classifier.classify(long_summary, self.registry)
+        assert isinstance(result, TaskClassification)
+
+    def test_1000_word_summary_complexity_is_valid(self):
+        long_summary = ("redesign the entire system " * 200).strip()
+        result = self.classifier.classify(long_summary, self.registry)
+        assert result.complexity in ("light", "medium", "heavy")
+
+    def test_long_summary_with_heavy_keywords_classified_heavy(self):
+        # Repeat enough times that heavy signals dominate
+        long_summary = (
+            "Redesign the entire authentication system across frontend and backend. " * 20
+        )
+        result = self.classifier.classify(long_summary, self.registry)
+        assert result.complexity == "heavy"
+
+    def test_single_character_summary_does_not_crash(self):
+        result = self.classifier.classify("x", self.registry)
+        assert isinstance(result, TaskClassification)
+
+    def test_empty_summary_does_not_crash(self):
+        result = self.classifier.classify("", self.registry)
+        assert isinstance(result, TaskClassification)
+
+
+# ---------------------------------------------------------------------------
+# Edge cases: HaikuClassifier markdown-wrapped JSON
+# ---------------------------------------------------------------------------
+
+class TestHaikuClassifierMarkdownWrapping:
+    """HaikuClassifier must strip markdown code fences before parsing JSON."""
+
+    def setup_method(self):
+        self.classifier = HaikuClassifier()
+        self.registry = _make_registry()
+
+    def _valid_payload(self) -> dict:
+        return {
+            "task_type": "new-feature",
+            "complexity": "medium",
+            "agents": ["backend-engineer"],
+            "phases": ["Design", "Implement"],
+            "reasoning": "Moderate new feature",
+        }
+
+    def test_json_fenced_with_backticks_parsed(self):
+        raw = "```\n" + json.dumps(self._valid_payload()) + "\n```"
+        result = self.classifier._parse_response(raw, self.registry)
+        assert result.task_type == "new-feature"
+        assert result.source == "haiku"
+
+    def test_json_fenced_with_language_tag_parsed(self):
+        raw = "```json\n" + json.dumps(self._valid_payload()) + "\n```"
+        result = self.classifier._parse_response(raw, self.registry)
+        assert result.complexity == "medium"
+        assert result.source == "haiku"
+
+    def test_invalid_complexity_in_markdown_json_defaults_to_medium(self):
+        payload = self._valid_payload()
+        payload["complexity"] = "extreme"  # invalid
+        raw = "```json\n" + json.dumps(payload) + "\n```"
+        result = self.classifier._parse_response(raw, self.registry)
+        assert result.complexity == "medium"
+
+    def test_invalid_task_type_in_markdown_json_defaults_to_new_feature(self):
+        payload = self._valid_payload()
+        payload["task_type"] = "unknown-type"  # invalid
+        raw = "```json\n" + json.dumps(payload) + "\n```"
+        result = self.classifier._parse_response(raw, self.registry)
+        assert result.task_type == "new-feature"
+
+    def test_missing_phases_in_response_defaults_to_implement(self):
+        payload = self._valid_payload()
+        del payload["phases"]
+        raw = json.dumps(payload)
+        result = self.classifier._parse_response(raw, self.registry)
+        assert result.phases == ["Implement"]
+
+    def test_empty_phases_in_response_defaults_to_implement(self):
+        payload = self._valid_payload()
+        payload["phases"] = []
+        raw = json.dumps(payload)
+        result = self.classifier._parse_response(raw, self.registry)
+        assert result.phases == ["Implement"]
+
+    def test_missing_reasoning_uses_fallback_string(self):
+        payload = self._valid_payload()
+        del payload["reasoning"]
+        raw = json.dumps(payload)
+        result = self.classifier._parse_response(raw, self.registry)
+        assert isinstance(result.reasoning, str)
+        assert len(result.reasoning) > 0
+
+
+# ---------------------------------------------------------------------------
+# Edge cases: complexity signal interactions
+# ---------------------------------------------------------------------------
+
+class TestComplexitySignalBoundaries:
+    """Test the boundary conditions in _infer_complexity scoring logic."""
+
+    def setup_method(self):
+        self.classifier = KeywordClassifier()
+        self.registry = _make_registry()
+
+    def test_heavy_beats_light_when_two_heavy_signals(self):
+        # "entire" (scope) + "redesign" (arch) + "3 files" (light quantifier)
+        summary = "Redesign the entire API with 3 new files"
+        result = self.classifier.classify(summary, self.registry)
+        assert result.complexity == "heavy"
+
+    def test_single_heavy_signal_with_light_signal_is_medium(self):
+        # "entire" (1 heavy) + "rename" (1 light) → medium
+        summary = "Rename the entire config namespace"
+        result = self.classifier.classify(summary, self.registry)
+        assert result.complexity == "medium"
+
+    def test_one_heavy_signal_no_light_is_heavy(self):
+        # "across frontend and backend" (multi-domain, 1 heavy signal), no light signals
+        summary = "Update API across frontend and backend services"
+        result = self.classifier.classify(summary, self.registry)
+        assert result.complexity == "heavy"
+
+    def test_light_quantifier_alone_gives_light(self):
+        summary = "Add 2 test fixtures"
+        result = self.classifier.classify(summary, self.registry)
+        assert result.complexity == "light"
+
+    def test_light_verb_alone_gives_light(self):
+        summary = "Delete the unused helper"
+        result = self.classifier.classify(summary, self.registry)
+        assert result.complexity == "light"
+
+
+# ---------------------------------------------------------------------------
+# Task 8: End-to-end integration tests (classifier -> planner -> plan)
+# ---------------------------------------------------------------------------
+
+class TestEndToEndClassification:
+    """Integration tests — classifier -> planner -> plan."""
+
+    def test_simple_task_produces_light_plan(self):
+        from agent_baton.core.engine.planner import IntelligentPlanner
+
+        planner = IntelligentPlanner(task_classifier=KeywordClassifier())
+        plan = planner.create_plan("Move 3 files to docs/historical")
+        assert plan.complexity == "light"
+        assert len(plan.phases) == 1
+        assert plan.total_steps == 1
+
+    def test_complex_task_produces_heavy_plan(self):
+        from agent_baton.core.engine.planner import IntelligentPlanner
+
+        planner = IntelligentPlanner(task_classifier=KeywordClassifier())
+        plan = planner.create_plan(
+            "Redesign the entire authentication system across frontend and backend"
+        )
+        assert plan.complexity == "heavy"
+        assert len(plan.phases) >= 3
+        assert plan.total_steps >= 3
+
+    @patch("agent_baton.core.engine.classifier._call_haiku", side_effect=Exception("no api"))
+    def test_default_planner_uses_fallback_classifier(self, _mock):
+        """Default planner (no explicit classifier) should still work via keyword fallback."""
+        from agent_baton.core.engine.planner import IntelligentPlanner
+
+        planner = IntelligentPlanner()
+        plan = planner.create_plan("Add user authentication")
+        assert plan.complexity in ("light", "medium", "heavy")
+        assert plan.classification_source in ("haiku", "keyword-fallback")
+
+    def test_light_plan_has_single_phase_implement(self):
+        from agent_baton.core.engine.planner import IntelligentPlanner
+
+        planner = IntelligentPlanner(task_classifier=KeywordClassifier())
+        plan = planner.create_plan("Rename the config file")
+        assert plan.complexity == "light"
+        assert plan.phases[0].name == "Implement"
+
+    def test_heavy_plan_includes_review_phase(self):
+        from agent_baton.core.engine.planner import IntelligentPlanner
+
+        planner = IntelligentPlanner(task_classifier=KeywordClassifier())
+        plan = planner.create_plan(
+            "Overhaul the entire data pipeline across frontend and backend"
+        )
+        assert plan.complexity == "heavy"
+        phase_names = [p.name for p in plan.phases]
+        assert any("Review" in name or "Test" in name for name in phase_names)
+
+    def test_classification_source_recorded_on_plan(self):
+        from agent_baton.core.engine.planner import IntelligentPlanner
+
+        planner = IntelligentPlanner(task_classifier=KeywordClassifier())
+        plan = planner.create_plan("Fix the login bug")
+        assert plan.classification_source == "keyword-fallback"
+
+    @patch("agent_baton.core.engine.classifier._call_haiku")
+    def test_haiku_classifier_source_recorded_on_plan(self, mock_call):
+        from agent_baton.core.engine.planner import IntelligentPlanner
+
+        mock_call.return_value = json.dumps({
+            "task_type": "bug-fix",
+            "complexity": "light",
+            "agents": ["backend-engineer"],
+            "phases": ["Implement"],
+            "reasoning": "Simple fix",
+        })
+        planner = IntelligentPlanner(task_classifier=HaikuClassifier())
+        plan = planner.create_plan("Fix the login bug")
+        assert plan.classification_source == "haiku"
+        assert plan.complexity == "light"
+
+    def test_explicit_complexity_override_bypasses_classifier(self):
+        """Passing complexity= to create_plan should skip classification entirely."""
+        from agent_baton.core.engine.planner import IntelligentPlanner
+
+        planner = IntelligentPlanner(task_classifier=KeywordClassifier())
+        # Summary would be classified as light, but we force heavy
+        plan = planner.create_plan(
+            "Move 1 file",
+            complexity="heavy",
+        )
+        assert plan.complexity == "heavy"
