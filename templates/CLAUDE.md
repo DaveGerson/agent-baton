@@ -1,8 +1,19 @@
 # Project Orchestration Rules
 
-This project uses a multi-agent orchestration system powered by the
-agent-baton execution engine. Agent definitions are in `.claude/agents/`
-and reference procedures are in `.claude/references/`.
+## What is Agent Baton?
+
+Agent Baton is an **installed Python CLI tool** (`baton`) that orchestrates
+multi-agent execution plans for Claude Code. It is a local command-line
+program — not a concept or methodology. Run `baton --help` to see all
+available commands. The core workflow is: `baton plan` generates a phased
+execution plan with agent assignments, risk assessment, and QA gates;
+`baton execute` drives that plan step-by-step, dispatching specialist
+agents, running gates, and recording results. All state is persisted to
+`.claude/team-context/` so sessions can crash and resume. Use `/baton-help`
+for the full CLI reference.
+
+Agent definitions are in `.claude/agents/` and reference procedures are
+in `.claude/references/`.
 
 ## Orchestrator Behavior (MANDATORY)
 

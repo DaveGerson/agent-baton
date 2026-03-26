@@ -14,10 +14,11 @@ Write-Host ""
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RootDir   = Split-Path -Parent $ScriptDir
-$AgentsDir = Join-Path $RootDir "agents"
-$RefsDir   = Join-Path $RootDir "references"
-$ClaudeMd  = Join-Path $RootDir "templates" "CLAUDE.md"
-$SettingsJ = Join-Path $RootDir "templates" "settings.json"
+$AgentsDir  = Join-Path $RootDir "agents"
+$RefsDir    = Join-Path $RootDir "references"
+$SkillsSrc  = Join-Path $RootDir "templates" "skills"
+$ClaudeMd   = Join-Path $RootDir "templates" "CLAUDE.md"
+$SettingsJ  = Join-Path $RootDir "templates" "settings.json"
 
 if (-not (Test-Path $AgentsDir)) {
     Write-Host "  Error: agents/ not found. Run from the skill folder." -ForegroundColor Red
@@ -116,11 +117,80 @@ Get-ChildItem "$RefsDir\*.md" | ForEach-Object {
 New-Item -ItemType Directory -Force -Path $TeamCtx | Out-Null
 New-Item -ItemType Directory -Force -Path $KnowledgeDir | Out-Null
 New-Item -ItemType Directory -Force -Path $SkillsDir | Out-Null
+
+# Install skills from templates/skills/
+$skillCount = 0
+if (Test-Path $SkillsSrc) {
+    Get-ChildItem -Path $SkillsSrc -Directory | ForEach-Object {
+        $targetSkillDir = Join-Path $SkillsDir $_.Name
+        New-Item -ItemType Directory -Force -Path $targetSkillDir | Out-Null
+        Copy-Item (Join-Path $_.FullName "*") -Destination $targetSkillDir -Force
+        Write-Host "  + Skill:     $($_.Name)" -ForegroundColor Green
+        $skillCount++
+    }
+}
+
 Write-Host "  + Dirs:      team-context/, knowledge/, skills/" -ForegroundColor Green
 
-# CLAUDE.md — skip on upgrade (user may have customized it)
+# CLAUDE.md — skip on upgrade, but merge identity block if missing
 if ($Upgrade) {
-    Write-Host "  ~ CLAUDE.md:  preserved (upgrade mode)" -ForegroundColor Yellow
+    # Find the existing CLAUDE.md
+    $existingClaudeMd = $null
+    if ($Scope -eq "project" -and (Test-Path "CLAUDE.md")) {
+        $existingClaudeMd = "CLAUDE.md"
+    } elseif ($Scope -eq "user") {
+        $userClaudeMd = Join-Path $Base "CLAUDE.md"
+        if (Test-Path $userClaudeMd) { $existingClaudeMd = $userClaudeMd }
+    }
+
+    if ($existingClaudeMd -and -not (Select-String -Path $existingClaudeMd -Pattern "What is Agent Baton" -Quiet)) {
+        # Merge the identity block into the existing CLAUDE.md
+        $py = Get-Command python3 -ErrorAction SilentlyContinue
+        if (-not $py) { $py = Get-Command python -ErrorAction SilentlyContinue }
+        if ($py) {
+            try {
+                $mergeIdentity = @"
+import sys
+identity = '''## What is Agent Baton?
+
+Agent Baton is an **installed Python CLI tool** (``baton``) that orchestrates
+multi-agent execution plans for Claude Code. It is a local command-line
+program - not a concept or methodology. Run ``baton --help`` to see all
+available commands. The core workflow is: ``baton plan`` generates a phased
+execution plan with agent assignments, risk assessment, and QA gates;
+``baton execute`` drives that plan step-by-step, dispatching specialist
+agents, running gates, and recording results. All state is persisted to
+``.claude/team-context/`` so sessions can crash and resume. Use ``/baton-help``
+for the full CLI reference.
+
+'''
+with open(sys.argv[1], 'r', encoding='utf-8') as f:
+    content = f.read()
+lines = content.split('\n')
+insert_at = 0
+for i, line in enumerate(lines):
+    if line.startswith('# '):
+        insert_at = i + 1
+        if insert_at < len(lines) and lines[insert_at].strip() == '':
+            insert_at += 1
+        break
+lines.insert(insert_at, identity)
+with open(sys.argv[1], 'w', encoding='utf-8') as f:
+    f.write('\n'.join(lines))
+"@
+                & $py.Source -c $mergeIdentity $existingClaudeMd 2>$null
+                Write-Host "  + CLAUDE.md:  identity block merged" -ForegroundColor Green
+            } catch {
+                Write-Host "  ! CLAUDE.md identity merge failed - add manually" -ForegroundColor Yellow
+            }
+        } else {
+            Write-Host "  ! CLAUDE.md identity merge skipped (no Python)" -ForegroundColor Yellow
+        }
+    } elseif ($existingClaudeMd) {
+        Write-Host "  ~ CLAUDE.md:  identity block present (upgrade mode)" -ForegroundColor Yellow
+    } else {
+        Write-Host "  ~ CLAUDE.md:  not found (upgrade mode)" -ForegroundColor Yellow
+    }
 } else {
     if (Test-Path $ClaudeMd) {
         if ($Scope -eq "project") {
@@ -189,7 +259,7 @@ open(sys.argv[2], 'w').write(json.dumps(dst, indent=2) + '\n')
 }
 
 Write-Host ""
-Write-Host "  Installed: $agentCount agents + $refCount references" -ForegroundColor Green
+Write-Host "  Installed: $agentCount agents + $refCount references + $skillCount skills" -ForegroundColor Green
 
 # ── Step 3: MCP / Knowledge Infrastructure ─────────────────
 Write-Host ""

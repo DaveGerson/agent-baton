@@ -6,6 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 AGENTS_DIR="$ROOT_DIR/agents"
 REFS_DIR="$ROOT_DIR/references"
+SKILLS_SRC="$ROOT_DIR/templates/skills"
 CLAUDE_MD="$ROOT_DIR/templates/CLAUDE.md"
 SETTINGS_JSON="$ROOT_DIR/templates/settings.json"
 
@@ -108,11 +109,74 @@ for f in "$REFS_DIR"/*.md; do
     ref_count=$((ref_count + 1))
 done
 
+# Install skills from templates/skills/
+skill_count=0
+if [ -d "$SKILLS_SRC" ]; then
+    for skill_dir in "$SKILLS_SRC"/*/; do
+        [ -d "$skill_dir" ] || continue
+        skill_name="$(basename "$skill_dir")"
+        target_skill_dir="$SKILLS_DIR/$skill_name"
+        mkdir -p "$target_skill_dir"
+        cp "$skill_dir"/* "$target_skill_dir/" 2>/dev/null
+        echo "  + Skill:     $skill_name"
+        skill_count=$((skill_count + 1))
+    done
+fi
+
 echo "  + Dirs:      team-context/, knowledge/, skills/"
 
-# CLAUDE.md — skip on upgrade (user may have customized it)
+# CLAUDE.md — skip on upgrade, but merge identity block if missing
 if [ "$UPGRADE" = true ]; then
-    echo "  ~ CLAUDE.md:  preserved (upgrade mode)"
+    # Find the existing CLAUDE.md
+    if [ "$SCOPE" = "project" ] && [ -f "CLAUDE.md" ]; then
+        _EXISTING_CLAUDE="CLAUDE.md"
+    elif [ "$SCOPE" = "user" ] && [ -f "$BASE/CLAUDE.md" ]; then
+        _EXISTING_CLAUDE="$BASE/CLAUDE.md"
+    else
+        _EXISTING_CLAUDE=""
+    fi
+
+    if [ -n "$_EXISTING_CLAUDE" ]; then
+        if ! grep -q "What is Agent Baton" "$_EXISTING_CLAUDE" 2>/dev/null; then
+            # Merge the identity block into the existing CLAUDE.md
+            python3 -c "
+import sys
+identity = '''## What is Agent Baton?
+
+Agent Baton is an **installed Python CLI tool** (\`\`baton\`\`) that orchestrates
+multi-agent execution plans for Claude Code. It is a local command-line
+program — not a concept or methodology. Run \`\`baton --help\`\` to see all
+available commands. The core workflow is: \`\`baton plan\`\` generates a phased
+execution plan with agent assignments, risk assessment, and QA gates;
+\`\`baton execute\`\` drives that plan step-by-step, dispatching specialist
+agents, running gates, and recording results. All state is persisted to
+\`\`.claude/team-context/\`\` so sessions can crash and resume. Use \`\`/baton-help\`\`
+for the full CLI reference.
+
+'''
+with open(sys.argv[1], 'r', encoding='utf-8') as f:
+    content = f.read()
+# Insert after the first heading line
+lines = content.split('\n')
+insert_at = 0
+for i, line in enumerate(lines):
+    if line.startswith('# '):
+        insert_at = i + 1
+        # Skip blank line after heading if present
+        if insert_at < len(lines) and lines[insert_at].strip() == '':
+            insert_at += 1
+        break
+lines.insert(insert_at, identity)
+with open(sys.argv[1], 'w', encoding='utf-8') as f:
+    f.write('\n'.join(lines))
+print('  merge: CLAUDE.md identity block added')
+" "$_EXISTING_CLAUDE" 2>/dev/null || echo "  ! CLAUDE.md identity merge failed — add manually"
+        else
+            echo "  ~ CLAUDE.md:  identity block present (upgrade mode)"
+        fi
+    else
+        echo "  ~ CLAUDE.md:  not found (upgrade mode)"
+    fi
 else
     if [ -f "$CLAUDE_MD" ] && [ "$SCOPE" = "project" ]; then
         if [ -f "CLAUDE.md" ]; then
@@ -168,7 +232,7 @@ print('  merge: settings.json hooks (' + str(len(src_hooks)) + ' events)')
 fi
 
 echo ""
-echo "  Installed: $agent_count agents + $ref_count references"
+echo "  Installed: $agent_count agents + $ref_count references + $skill_count skills"
 
 # ── Step 3: Knowledge Infrastructure ──────────────────────
 echo ""
