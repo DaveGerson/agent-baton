@@ -40,6 +40,10 @@ baton plan "description" --save --explain \
 | `--agents LIST` | No | Comma-separated agent names; bypasses auto-selection |
 | `--project PATH` | No | Project root for stack detection (default: cwd) |
 | `--json` | No | Output the plan as JSON instead of markdown |
+| `--model MODEL` | No | Default model for dispatched agents (e.g. `opus`, `sonnet`). Agent definitions with explicit models take priority. |
+| `--knowledge PATH` | No | Attach a knowledge document globally to all steps (repeatable) |
+| `--knowledge-pack NAME` | No | Attach a knowledge pack globally to all steps (repeatable) |
+| `--intervention LEVEL` | No | Escalation threshold: `low` (default), `medium`, `high` |
 
 **Typical usage:**
 
