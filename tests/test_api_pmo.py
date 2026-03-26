@@ -1070,44 +1070,78 @@ def sse_app(tmp_path: Path, store: PmoStore, bus: EventBus):
     return _app
 
 
-@pytest.mark.skip(reason="SSE streaming endpoint blocks TestClient — needs async test harness")
 class TestPmoEventsSSEContract:
-    """HTTP contract tests for GET /api/v1/pmo/events using the real app.
+    """HTTP contract tests for GET /api/v1/pmo/events.
 
-    These tests require an async test harness (httpx.AsyncClient) because
-    the SSE endpoint opens an infinite stream that blocks synchronous
-    TestClient. Skipped until async test infrastructure is added.
+    Uses a real uvicorn server in a thread because sse-starlette's
+    EventSourceResponse does not cooperate with httpx.ASGITransport
+    or Starlette's synchronous TestClient for streaming responses.
     """
+
+    @staticmethod
+    def _run_server(app, port: int, started: "threading.Event"):
+        """Start uvicorn in a daemon thread, signaling when ready."""
+        import uvicorn
+
+        config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error")
+        server = uvicorn.Server(config)
+
+        # Patch startup to signal the event
+        original_startup = server.startup
+
+        async def _startup(*a, **kw):
+            await original_startup(*a, **kw)
+            started.set()
+
+        server.startup = _startup
+        server.run()
 
     def test_endpoint_returns_200(self, sse_app) -> None:
         """The SSE endpoint must respond with HTTP 200."""
+        import asyncio
         import threading
+        import httpx
 
-        result: dict = {}
-        def _fetch():
-            with TestClient(sse_app) as client:
-                with client.stream("GET", "/api/v1/pmo/events") as resp:
-                    result["status"] = resp.status_code
-
-        t = threading.Thread(target=_fetch, daemon=True)
+        started = threading.Event()
+        port = 18742
+        t = threading.Thread(
+            target=self._run_server, args=(sse_app, port, started), daemon=True
+        )
         t.start()
-        t.join(timeout=3)
-        assert result.get("status") == 200
+        started.wait(timeout=5)
+
+        async def _check():
+            async with httpx.AsyncClient() as client:
+                async with client.stream(
+                    "GET", f"http://127.0.0.1:{port}/api/v1/pmo/events", timeout=3.0
+                ) as resp:
+                    assert resp.status_code == 200
+
+        asyncio.run(_check())
 
     def test_endpoint_returns_event_stream_content_type(self, sse_app) -> None:
         """Content-Type must be text/event-stream."""
+        import asyncio
         import threading
+        import httpx
 
-        result: dict = {}
-        def _fetch():
-            with TestClient(sse_app) as client:
-                with client.stream("GET", "/api/v1/pmo/events") as resp:
-                    result["content_type"] = resp.headers.get("content-type", "")
-
-        t = threading.Thread(target=_fetch, daemon=True)
+        started = threading.Event()
+        port = 18743
+        t = threading.Thread(
+            target=self._run_server, args=(sse_app, port, started), daemon=True
+        )
         t.start()
-        t.join(timeout=3)
-        assert "text/event-stream" in result.get("content_type", "")
+        started.wait(timeout=5)
+
+        async def _check():
+            async with httpx.AsyncClient() as client:
+                async with client.stream(
+                    "GET", f"http://127.0.0.1:{port}/api/v1/pmo/events", timeout=3.0
+                ) as resp:
+                    ct = resp.headers.get("content-type", "")
+                    assert "text/event-stream" in ct
+
+        asyncio.run(_check())
 
 
 class TestPmoEventsSseWireFormat:
