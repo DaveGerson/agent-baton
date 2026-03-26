@@ -1,4 +1,10 @@
-"""PMO data models — portfolio management overlay for orchestration plans."""
+"""PMO data models — portfolio management overlay for orchestration plans.
+
+Defines the Kanban board abstraction, project registration, signals
+(bugs/blockers/escalations), program health metrics, and the Forge
+interview protocol.  These models back the PMO dashboard UI and the
+``baton pmo`` CLI commands.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
@@ -10,7 +16,6 @@ from dataclasses import dataclass, field, asdict
 
 PMO_COLUMNS = [
     "queued",
-    "planning",
     "executing",
     "awaiting_human",
     "validating",
@@ -28,7 +33,16 @@ _STATUS_TO_COLUMN: dict[str, str] = {
 
 
 def status_to_column(execution_status: str | None) -> str:
-    """Map an ExecutionState status string to a Kanban column."""
+    """Map an ``ExecutionState.status`` string to a PMO Kanban column.
+
+    Args:
+        execution_status: The status from ``ExecutionState`` (e.g.
+            ``"running"``, ``"complete"``), or ``None`` for plans
+            that have not started executing.
+
+    Returns:
+        The corresponding column name from ``PMO_COLUMNS``.
+    """
     if execution_status is None:
         return "queued"
     return _STATUS_TO_COLUMN.get(execution_status, "executing")
@@ -40,7 +54,23 @@ def status_to_column(execution_status: str | None) -> str:
 
 @dataclass
 class PmoProject:
-    """A project registered with the PMO."""
+    """A project registered with the PMO for cross-project visibility.
+
+    Each project maps to a filesystem directory containing a ``.claude/``
+    workspace.  Projects are grouped into programs for portfolio-level
+    reporting.
+
+    Attributes:
+        project_id: Short slug identifier (e.g. ``"nds"``).
+        name: Human-readable project name.
+        path: Absolute filesystem path to the project root.
+        program: Program this project belongs to (e.g. ``"RW"``).
+        color: Optional color for dashboard display.
+        description: Short description of the project.
+        registered_at: ISO 8601 timestamp of PMO registration.
+        ado_project: Azure DevOps project name (reserved for future use).
+    """
+
     project_id: str                             # slug, e.g. "nds"
     name: str
     path: str                                   # absolute filesystem path
@@ -74,7 +104,31 @@ class PmoProject:
 
 @dataclass
 class PmoCard:
-    """A Kanban card representing a plan's lifecycle state."""
+    """A Kanban card tracking a plan's position on the PMO board.
+
+    Each card maps 1:1 to a ``MachinePlan`` and is updated as execution
+    progresses.  The ``column`` field determines where the card appears
+    on the Kanban board.
+
+    Attributes:
+        card_id: Matches ``MachinePlan.task_id``.
+        project_id: Owning project's slug.
+        program: Program grouping for portfolio views.
+        title: Display title (from ``MachinePlan.task_summary``).
+        column: Current Kanban column (one of ``PMO_COLUMNS``).
+        risk_level: Risk tier from the plan.
+        priority: Urgency — 0 = normal, 1 = high, 2 = critical.
+        agents: Agent names involved in the plan.
+        steps_completed: Number of steps finished.
+        steps_total: Total steps in the plan.
+        gates_passed: Number of QA gates passed so far.
+        current_phase: Name of the phase currently executing.
+        error: Error message if the execution has failed.
+        created_at: ISO 8601 card creation time.
+        updated_at: ISO 8601 time of the most recent update.
+        external_id: Azure DevOps work item ID (reserved for future use).
+    """
+
     card_id: str                                # task_id from MachinePlan
     project_id: str
     program: str
@@ -124,7 +178,27 @@ class PmoCard:
 
 @dataclass
 class PmoSignal:
-    """A signal (bug, escalation, blocker) in the Signals Bar."""
+    """A signal surfaced in the PMO dashboard's Signals Bar.
+
+    Signals represent cross-cutting issues — bugs, escalations, or
+    blockers — that may affect multiple plans or projects.  They can
+    optionally trigger a Forge plan to address the issue.
+
+    Attributes:
+        signal_id: Unique signal identifier.
+        signal_type: Category — ``"bug"``, ``"escalation"``, or ``"blocker"``.
+        title: Short description of the signal.
+        description: Extended details.
+        source_project_id: Project that originated the signal.
+        severity: Impact level — ``"low"``, ``"medium"``, ``"high"``,
+            or ``"critical"``.
+        status: Lifecycle state — ``"open"``, ``"triaged"``, or ``"resolved"``.
+        created_at: ISO 8601 creation timestamp.
+        resolved_at: ISO 8601 resolution timestamp, if resolved.
+        forge_task_id: Task ID of a Forge plan spawned to address this
+            signal, if applicable.
+    """
+
     signal_id: str
     signal_type: str                            # bug|escalation|blocker
     title: str
@@ -161,7 +235,21 @@ class PmoSignal:
 
 @dataclass
 class ProgramHealth:
-    """Aggregate health metrics for a program."""
+    """Aggregate health metrics for a program across all its projects.
+
+    Computed on the fly by the PMO store and displayed in the program
+    health panel of the dashboard.
+
+    Attributes:
+        program: Program identifier.
+        total_plans: Total execution plans across all projects.
+        active: Plans currently executing.
+        completed: Plans that finished successfully.
+        blocked: Plans waiting on human input or a blocker signal.
+        failed: Plans that ended in failure.
+        completion_pct: ``completed / total_plans * 100`` (0.0 to 100.0).
+    """
+
     program: str
     total_plans: int = 0
     active: int = 0
@@ -192,7 +280,19 @@ class ProgramHealth:
 
 @dataclass
 class PmoConfig:
-    """Global PMO configuration — persisted to ~/.baton/pmo-config.json."""
+    """Global PMO configuration persisted to ``~/.baton/pmo-config.json``.
+
+    This is the root configuration object for the PMO subsystem,
+    containing all registered projects, program definitions, and
+    active signals.
+
+    Attributes:
+        projects: Registered projects visible to the PMO.
+        programs: Program names used for grouping.
+        signals: Active signals (bugs, blockers, escalations).
+        version: Schema version for forward compatibility.
+    """
+
     projects: list[PmoProject] = field(default_factory=list)
     programs: list[str] = field(default_factory=list)
     signals: list[PmoSignal] = field(default_factory=list)
@@ -226,7 +326,21 @@ class PmoConfig:
 
 @dataclass
 class InterviewQuestion:
-    """A structured question generated during Forge plan refinement."""
+    """A structured question generated during Forge plan refinement.
+
+    The Forge interview protocol asks the user clarifying questions
+    before generating a full execution plan, ensuring the plan is
+    well-scoped and addresses domain constraints.
+
+    Attributes:
+        id: Question identifier within the interview session.
+        question: The question text shown to the user.
+        context: Background information explaining why this matters.
+        answer_type: ``"choice"`` for multiple-choice or ``"text"``
+            for free-form answers.
+        choices: Available options when ``answer_type`` is ``"choice"``.
+    """
+
     id: str
     question: str
     context: str

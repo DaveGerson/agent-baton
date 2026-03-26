@@ -1,3 +1,10 @@
+"""Agent definition model — the in-memory representation of an agent.
+
+Each ``.md`` file under ``agents/`` (or ``.claude/agents/``) is parsed
+into an ``AgentDefinition`` at startup.  The registry, router, and
+planner all consume this model to discover, select, and configure agents.
+"""
+
 from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -7,7 +14,29 @@ from agent_baton.models.enums import AgentCategory
 
 @dataclass
 class AgentDefinition:
-    """Represents a parsed agent definition from a markdown file."""
+    """Parsed agent definition loaded from a markdown file.
+
+    Agent definitions are the fundamental building block of the roster.
+    They carry the agent's identity, model preference, permission scope,
+    and the full instruction prompt that will be injected when the
+    agent is dispatched by the execution engine.
+
+    Attributes:
+        name: Canonical agent name, optionally including a flavor suffix
+            separated by ``--`` (e.g. ``backend-engineer--python``).
+        description: Short human-readable summary of the agent's role.
+        model: LLM model to use (e.g. ``"sonnet"``, ``"opus"``).
+        permission_mode: Claude Code permission mode for the agent session.
+        color: Optional ANSI color for CLI output.
+        tools: List of MCP tool names the agent is allowed to use.
+        instructions: Full markdown body from the agent definition file,
+            injected as the system prompt during dispatch.
+        source_path: Filesystem path of the ``.md`` file this was parsed
+            from, or ``None`` if created programmatically.
+        knowledge_packs: Names of knowledge packs that should be attached
+            to every dispatch of this agent (declared in frontmatter).
+    """
+
     name: str
     description: str
     model: str = "sonnet"
@@ -39,7 +68,12 @@ class AgentDefinition:
 
     @property
     def category(self) -> AgentCategory:
-        """Categorize the agent based on its name."""
+        """Classify the agent into a functional category based on its base name.
+
+        Returns:
+            The matching ``AgentCategory``, defaulting to ``ENGINEERING``
+            for unrecognized agent names.
+        """
         engineering = {"architect", "backend-engineer", "frontend-engineer",
                        "devops-engineer", "test-engineer", "data-engineer"}
         data = {"data-scientist", "data-analyst", "visualization-expert"}

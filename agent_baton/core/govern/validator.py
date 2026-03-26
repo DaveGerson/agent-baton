@@ -59,6 +59,15 @@ _MCP_TOOL_RE = re.compile(r"^mcp__[a-zA-Z0-9_-]+__[a-zA-Z0-9_*-]+$")
 
 @dataclass
 class ValidationResult:
+    """Result of validating a single agent definition file.
+
+    Attributes:
+        path: Path to the validated file.
+        valid: ``True`` if no errors were found (warnings are allowed).
+        errors: List of blocking error messages.
+        warnings: List of non-blocking advisory messages.
+    """
+
     path: Path
     valid: bool
     errors: list[str] = field(default_factory=list)
@@ -78,7 +87,15 @@ class AgentValidator:
     def validate_file(self, path: Path) -> ValidationResult:
         """Validate a single agent markdown file.
 
-        Errors are blocking issues; warnings are non-blocking suggestions.
+        Reads the file, parses frontmatter, and runs all error and warning
+        checks. See the module docstring for the full list of checks.
+
+        Args:
+            path: Path to the agent definition ``.md`` file.
+
+        Returns:
+            A ``ValidationResult`` with ``valid=True`` if no errors were
+            found (warnings are allowed).
         """
         errors: list[str] = []
         warnings: list[str] = []
@@ -222,7 +239,16 @@ class AgentValidator:
         )
 
     def validate_directory(self, directory: Path) -> list[ValidationResult]:
-        """Validate all *.md files in a directory (non-recursive)."""
+        """Validate all ``*.md`` files in a directory (non-recursive).
+
+        Args:
+            directory: Path to the directory containing agent definitions.
+
+        Returns:
+            A list of ``ValidationResult`` objects, one per ``.md`` file
+            found, sorted alphabetically by filename. Returns a single
+            error result if the path is not a directory.
+        """
         if not directory.is_dir():
             return [
                 ValidationResult(

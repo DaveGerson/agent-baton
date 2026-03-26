@@ -1,7 +1,21 @@
 """Pydantic request models for the Agent Baton API.
 
-Each model validates incoming JSON payloads.  Field descriptions are
-surfaced in the auto-generated OpenAPI schema.
+Each model validates incoming JSON payloads and their field descriptions
+are surfaced in the auto-generated OpenAPI schema.  These models form
+the inbound contract for the API -- all request bodies are validated
+against these schemas before reaching route handler logic.
+
+The models are organized into groups:
+
+- **Core execution**: ``CreatePlanRequest``, ``StartExecutionRequest``,
+  ``RecordStepRequest``, ``RecordGateRequest``
+- **Decisions**: ``ResolveDecisionRequest``
+- **Webhooks**: ``RegisterWebhookRequest``
+- **PMO**: ``RegisterProjectRequest``, ``CreateForgeRequest``,
+  ``ApproveForgeRequest``, ``CreateSignalRequest``,
+  ``BatchResolveRequest``
+- **Forge interview**: ``InterviewRequest``, ``InterviewAnswerPayload``,
+  ``RegenerateRequest``
 """
 from __future__ import annotations
 
@@ -11,7 +25,12 @@ from pydantic import BaseModel, Field, model_validator
 
 
 class CreatePlanRequest(BaseModel):
-    """Request body for POST /plans — generate an execution plan."""
+    """Request body for ``POST /api/v1/plans`` -- generate an execution plan.
+
+    The only required field is ``description``.  All other fields are
+    optional overrides that let the caller influence agent selection,
+    task classification, or project scoping.
+    """
 
     description: str = Field(
         ...,
@@ -33,10 +52,11 @@ class CreatePlanRequest(BaseModel):
 
 
 class StartExecutionRequest(BaseModel):
-    """Request body for POST /executions — begin executing a plan.
+    """Request body for ``POST /api/v1/executions`` -- begin executing a plan.
 
     Supply *either* ``plan_id`` (referencing a previously created plan) or
-    ``plan`` (an inline plan dict).  Providing both or neither is an error.
+    ``plan`` (an inline plan dict).  Providing both or neither is rejected
+    by the ``_exactly_one_plan_source`` model validator.
     """
 
     plan_id: Optional[str] = Field(
@@ -50,6 +70,12 @@ class StartExecutionRequest(BaseModel):
 
     @model_validator(mode="after")
     def _exactly_one_plan_source(self) -> StartExecutionRequest:
+        """Ensure exactly one plan source is provided.
+
+        Raises:
+            ValueError: If both ``plan_id`` and ``plan`` are set, or if
+                neither is set.
+        """
         if self.plan_id and self.plan:
             raise ValueError("Provide plan_id or plan, not both.")
         if not self.plan_id and not self.plan:
@@ -58,7 +84,12 @@ class StartExecutionRequest(BaseModel):
 
 
 class RecordStepRequest(BaseModel):
-    """Request body for POST /executions/{task_id}/record — record a step outcome."""
+    """Request body for ``POST /api/v1/executions/{task_id}/record``.
+
+    Records the outcome of a subagent step.  The ``step_id``, ``agent``,
+    and ``status`` fields are required; the remaining fields capture
+    optional telemetry (summary, token usage, duration).
+    """
 
     step_id: str = Field(..., description="Step identifier (e.g. '1.1').")
     agent: str = Field(..., description="Name of the agent that executed the step.")
@@ -83,7 +114,12 @@ class RecordStepRequest(BaseModel):
 
 
 class RecordGateRequest(BaseModel):
-    """Request body for POST /executions/{task_id}/gate — record a gate result."""
+    """Request body for ``POST /api/v1/executions/{task_id}/gate``.
+
+    Records the outcome of a QA gate check.  The ``result`` field uses
+    a literal type to restrict values to ``pass``, ``fail``, or
+    ``pass_with_notes``.
+    """
 
     phase_id: int = Field(..., description="Phase index the gate belongs to.")
     result: Literal["pass", "fail", "pass_with_notes"] = Field(
@@ -97,7 +133,12 @@ class RecordGateRequest(BaseModel):
 
 
 class ResolveDecisionRequest(BaseModel):
-    """Request body for POST /decisions/{request_id}/resolve."""
+    """Request body for ``POST /api/v1/decisions/{request_id}/resolve``.
+
+    The ``option`` must be one of the choices listed in the
+    ``DecisionRequest.options`` list.  An optional ``rationale``
+    captures the human reasoning behind the choice.
+    """
 
     option: str = Field(
         ...,
@@ -115,7 +156,12 @@ class ResolveDecisionRequest(BaseModel):
 
 
 class RegisterWebhookRequest(BaseModel):
-    """Request body for POST /webhooks — subscribe to event notifications."""
+    """Request body for ``POST /api/v1/webhooks`` -- subscribe to event notifications.
+
+    Event patterns use glob-style matching (e.g. ``step.*`` matches
+    ``step.completed`` and ``step.failed``).  At least one event
+    pattern is required.
+    """
 
     url: str = Field(
         ...,
@@ -138,7 +184,12 @@ class RegisterWebhookRequest(BaseModel):
 
 
 class RegisterProjectRequest(BaseModel):
-    """Request body for POST /pmo/projects — register a project with the PMO."""
+    """Request body for ``POST /api/v1/pmo/projects`` -- register a project.
+
+    All string fields require a minimum length of 1 to prevent
+    accidental empty registrations.  Re-registration with the same
+    ``project_id`` overwrites the existing entry.
+    """
 
     project_id: str = Field(
         ...,
@@ -171,7 +222,11 @@ class RegisterProjectRequest(BaseModel):
 
 
 class CreateForgeRequest(BaseModel):
-    """Request body for POST /pmo/forge/plan — create a plan via IntelligentPlanner."""
+    """Request body for ``POST /api/v1/pmo/forge/plan``.
+
+    Creates a plan via ``IntelligentPlanner`` for the specified project.
+    The ``priority`` field maps to: 0=normal, 1=high, 2=critical.
+    """
 
     description: str = Field(
         ...,
@@ -201,7 +256,12 @@ class CreateForgeRequest(BaseModel):
 
 
 class ApproveForgeRequest(BaseModel):
-    """Request body for POST /pmo/forge/approve — save an approved plan to a project."""
+    """Request body for ``POST /api/v1/pmo/forge/approve``.
+
+    Saves an approved (and possibly user-edited) plan to the target
+    project's team-context directory.  The ``plan`` dict must conform
+    to ``MachinePlan.to_dict()`` shape.
+    """
 
     plan: dict = Field(
         ...,
@@ -215,21 +275,26 @@ class ApproveForgeRequest(BaseModel):
 
 
 class ForgeSignalRequest(BaseModel):
-    """Request body for POST /pmo/signals/{signal_id}/forge — triage a signal into a plan.
+    """Request body for ``POST /api/v1/pmo/signals/{signal_id}/forge``.
 
-    Only ``project_id`` is required.  The Forge derives the plan description
-    from the signal itself; no ``plan`` payload is needed from the caller.
+    Dedicated model for signal-to-forge triage — only requires project_id.
+    Fixes F-AF-1 (Pydantic 422 when reusing ApproveForgeRequest).
     """
 
     project_id: str = Field(
         ...,
         min_length=1,
-        description="ID of the registered project that will receive the triaged plan.",
+        description="ID of the registered project to forge a plan for.",
     )
 
 
 class CreateSignalRequest(BaseModel):
-    """Request body for POST /pmo/signals — create a signal in the Signals Bar."""
+    """Request body for ``POST /api/v1/pmo/signals``.
+
+    Creates a signal (bug report, escalation, or blocker) in the PMO
+    Signals Bar.  The ``signal_type`` and ``severity`` fields are
+    validated against fixed pattern sets.
+    """
 
     signal_id: str = Field(
         ...,
@@ -261,13 +326,34 @@ class CreateSignalRequest(BaseModel):
     )
 
 
+class BatchResolveRequest(BaseModel):
+    """Request body for ``POST /api/v1/pmo/signals/batch/resolve``.
+
+    Resolves multiple signals in a single round-trip.  Each signal ID in
+    the list is marked as ``"resolved"``; IDs that do not match any known
+    signal are silently skipped (reported in the ``not_found`` list of the
+    response).
+    """
+
+    signal_ids: list[str] = Field(
+        ...,
+        min_length=1,
+        description="IDs of signals to resolve.",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Forge interview / regeneration requests
 # ---------------------------------------------------------------------------
 
 
 class InterviewRequest(BaseModel):
-    """Request body for POST /pmo/forge/interview."""
+    """Request body for ``POST /api/v1/pmo/forge/interview``.
+
+    Submits a plan for analysis and receives structured interview
+    questions that help refine the plan based on identified ambiguities
+    or missing context.
+    """
 
     plan: dict = Field(
         ...,
@@ -280,14 +366,25 @@ class InterviewRequest(BaseModel):
 
 
 class InterviewAnswerPayload(BaseModel):
-    """A single answered interview question."""
+    """A single answered interview question.
+
+    Used as a nested element within ``RegenerateRequest.answers``.
+    The ``question_id`` must correspond to a question returned by
+    the interview endpoint.
+    """
 
     question_id: str = Field(..., description="ID of the question being answered.")
     answer: str = Field(..., description="User's answer (selected choice or free text).")
 
 
 class RegenerateRequest(BaseModel):
-    """Request body for POST /pmo/forge/regenerate."""
+    """Request body for ``POST /api/v1/pmo/forge/regenerate``.
+
+    Regenerates a plan incorporating the user's interview answers.
+    The ``original_plan`` is provided as context so the planner can
+    understand what was previously generated and refine it based on
+    the new information from ``answers``.
+    """
 
     project_id: str = Field(..., min_length=1, description="Target project ID.")
     description: str = Field(..., min_length=1, description="Original task description.")

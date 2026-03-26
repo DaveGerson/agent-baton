@@ -184,12 +184,20 @@ def _maybe_migrate_pmo(
 
 
 class CentralStore:
-    """Read-only query interface for ~/.baton/central.db.
+    """Read-only query interface for ``~/.baton/central.db``.
 
-    Backed by a ConnectionManager that applies CENTRAL_SCHEMA_DDL on
-    first access.  All public query methods are safe to call from any
-    thread.  The ``query`` method enforces a read-only guard — it
-    raises ValueError for any SQL that contains write keywords.
+    Backed by a ``ConnectionManager`` that applies ``CENTRAL_SCHEMA_DDL``
+    on first access.  All public query methods are safe to call from any
+    thread (one WAL-mode connection per thread).
+
+    The ``query`` method enforces a read-only guard -- it raises
+    ``ValueError`` for any SQL whose first token is a write keyword.
+    The ``execute`` method allows limited writes to the three
+    external-source tables only; all other writes must go through
+    ``SyncEngine``.
+
+    Attributes:
+        _conn_mgr: ``ConnectionManager`` for the central database.
     """
 
     def __init__(self, db_path: Path | None = None) -> None:
@@ -211,10 +219,20 @@ class CentralStore:
     # ------------------------------------------------------------------
 
     def agent_reliability(self, min_steps: int = 5) -> list[dict]:
-        """Return agent reliability stats from v_agent_reliability.
+        """Return cross-project agent reliability stats.
+
+        Queries the ``v_agent_reliability`` analytics view, which
+        aggregates ``step_results`` across all synced projects.  Results
+        are sorted by success rate descending, then total steps descending.
 
         Args:
-            min_steps: Only return agents with at least this many total steps.
+            min_steps: Only return agents with at least this many total
+                steps (filters out agents with insufficient data).
+
+        Returns:
+            List of dicts with keys: ``agent_name``, ``total_steps``,
+            ``successful_steps``, ``success_rate``, ``avg_retries``,
+            ``avg_duration_seconds``, ``avg_tokens``.
         """
         rows = self._conn().execute(
             """
@@ -228,7 +246,17 @@ class CentralStore:
         return [dict(r) for r in rows]
 
     def cost_by_task_type(self) -> list[dict]:
-        """Return aggregated cost data from v_cost_by_task_type."""
+        """Return cross-project token cost data grouped by task type.
+
+        Queries the ``v_cost_by_task_type`` analytics view, which joins
+        ``plans`` with ``agent_usage`` to compute token costs per task
+        type, sorted by total tokens descending.
+
+        Returns:
+            List of dicts with keys: ``task_type_hint``, ``task_count``,
+            ``total_tokens``, ``avg_tokens_per_agent``,
+            ``total_duration_seconds``, ``project_id``.
+        """
         rows = self._conn().execute(
             """
             SELECT *
@@ -239,7 +267,16 @@ class CentralStore:
         return [dict(r) for r in rows]
 
     def recurring_knowledge_gaps(self) -> list[dict]:
-        """Return knowledge gaps that appear in 2 or more projects."""
+        """Return knowledge gaps that recur across 2+ projects.
+
+        Queries the ``v_recurring_knowledge_gaps`` analytics view, which
+        groups ``knowledge_gaps`` rows by ``(description, affected_agent)``
+        and filters to those appearing in at least 2 distinct projects.
+
+        Returns:
+            List of dicts with keys: ``description``, ``affected_agent``,
+            ``project_count``, ``projects`` (comma-separated project IDs).
+        """
         rows = self._conn().execute(
             """
             SELECT *
@@ -250,7 +287,16 @@ class CentralStore:
         return [dict(r) for r in rows]
 
     def project_failure_rates(self) -> list[dict]:
-        """Return per-project failure rates from v_project_failure_rate."""
+        """Return per-project execution failure rates.
+
+        Queries the ``v_project_failure_rate`` analytics view, which
+        counts total vs. failed executions per ``project_id``.
+
+        Returns:
+            List of dicts with keys: ``project_id``, ``total_executions``,
+            ``failed_executions``, ``failure_rate``.  Sorted by failure
+            rate descending.
+        """
         rows = self._conn().execute(
             """
             SELECT *
@@ -261,10 +307,23 @@ class CentralStore:
         return [dict(r) for r in rows]
 
     def external_plan_mapping(self, source_type: str | None = None) -> list[dict]:
-        """Return external-item-to-baton-plan mappings.
+        """Return mappings between external work items and baton plans.
+
+        Queries the ``v_external_plan_mapping`` analytics view, which
+        joins ``external_mappings``, ``external_sources``,
+        ``external_items``, and ``plans`` to provide a unified view of
+        which external items are linked to which execution plans.
 
         Args:
-            source_type: Optional filter by external source type (e.g. 'ado').
+            source_type: Optional filter by external source type
+                (e.g. ``'ado'``).  If ``None``, all source types are
+                included.
+
+        Returns:
+            List of dicts with keys: ``source_id``, ``external_id``,
+            ``external_title``, ``external_state``, ``source_type``,
+            ``source_name``, ``project_id``, ``task_id``,
+            ``mapping_type``, ``plan_summary``.
         """
         if source_type is not None:
             rows = self._conn().execute(

@@ -1,4 +1,32 @@
-"""Knowledge registry — loads and queries knowledge packs from disk."""
+"""Knowledge registry -- loads, indexes, and queries knowledge packs from disk.
+
+Knowledge packs are curated collections of Markdown documents that provide
+domain context, reference material, and grounding information to agents
+during execution.  A pack lives in a directory under ``.claude/knowledge/``
+(project-level) or ``~/.claude/knowledge/`` (global), with the same
+override semantics as the agent registry: project packs shadow global packs
+that share the same name.
+
+Each pack directory may contain:
+    - ``knowledge.yaml`` -- pack manifest with name, description, tags,
+      target agents, and default delivery mode.
+    - ``*.md`` files -- individual knowledge documents with optional YAML
+      frontmatter (name, description, tags, grounding, priority).
+
+Resolution strategy (used by the engine's knowledge resolver):
+    1. **Explicit attachment** -- the user passes ``--knowledge`` or
+       ``--knowledge-pack`` flags at plan time.
+    2. **Agent binding** -- the manifest's ``target_agents`` field lists
+       agents that should always receive the pack.
+    3. **Tag matching** -- :meth:`find_by_tags` returns documents whose
+       tags overlap with the task's inferred tags.
+    4. **TF-IDF relevance** -- :meth:`search` performs a term-frequency /
+       inverse-document-frequency search over pack and document metadata
+       as a last-resort fallback.
+
+Document content is lazily loaded: only metadata is indexed at startup.
+This keeps memory usage low even with large knowledge bases.
+"""
 from __future__ import annotations
 
 import logging
@@ -32,7 +60,12 @@ def _estimate_tokens(path: Path) -> int:
 
 
 def _normalise_tags(raw: object) -> list[str]:
-    """Coerce a YAML tags value to a flat list of strings."""
+    """Coerce a YAML ``tags`` value to a flat list of stripped strings.
+
+    Handles the two common YAML representations:
+        - List: ``["python", "backend"]``
+        - Comma-separated string: ``"python, backend"``
+    """
     if isinstance(raw, list):
         return [str(t).strip() for t in raw if t]
     if isinstance(raw, str):
@@ -41,7 +74,11 @@ def _normalise_tags(raw: object) -> list[str]:
 
 
 def _normalise_list_of_strings(raw: object) -> list[str]:
-    """Coerce a YAML list-or-string field to a list of strings."""
+    """Coerce a YAML list-or-string field to a list of stripped strings.
+
+    Same logic as :func:`_normalise_tags` but semantically used for
+    non-tag fields like ``target_agents``.
+    """
     if isinstance(raw, list):
         return [str(v).strip() for v in raw if v]
     if isinstance(raw, str):
@@ -54,12 +91,23 @@ def _normalise_list_of_strings(raw: object) -> list[str]:
 # ---------------------------------------------------------------------------
 
 def _tokenise(text: str) -> list[str]:
-    """Split text into lowercase alphanumeric tokens."""
+    """Split text into lowercase alphanumeric tokens for TF-IDF indexing.
+
+    Strips punctuation and special characters, producing only ``[a-z0-9]+``
+    tokens.  This is intentionally simple -- no stemming or stop-word
+    removal -- because the corpus is small (metadata strings, not full
+    document bodies).
+    """
     return re.findall(r"[a-z0-9]+", text.lower())
 
 
 def _build_corpus_text(pack: KnowledgePack, doc: KnowledgeDocument) -> str:
-    """Build the metadata corpus string for a (pack, doc) pair."""
+    """Build the metadata corpus string for a (pack, doc) pair.
+
+    Concatenates all searchable metadata fields (names, descriptions, tags)
+    from both the pack and the document into a single string for tokenisation.
+    Document content is intentionally excluded to keep the index lightweight.
+    """
     parts = [
         pack.name,
         pack.description,
@@ -74,8 +122,25 @@ def _build_corpus_text(pack: KnowledgePack, doc: KnowledgeDocument) -> str:
 class _TFIDFIndex:
     """Minimal TF-IDF index over (pack, doc) corpus entries.
 
-    Built once when the registry is loaded. No external dependencies.
-    Uses log-normalised IDF: idf(t) = log(N / df(t)) + 1.
+    Built once when the registry is loaded, then lazily rebuilt whenever
+    new entries are added (tracked via the ``_dirty`` flag).  No external
+    dependencies -- uses only ``collections.Counter`` and ``math.log``.
+
+    The scoring formula for each (query, document) pair is::
+
+        score = sum( query_tf[t] * (doc_tf[t] / doc_len) * idf[t]
+                     for t in query_tokens if t in doc_tokens )
+
+    where ``idf(t) = log(N / df(t)) + 1`` (log-normalised with +1 smoothing
+    to avoid zero scores for terms that appear in every document).
+
+    Attributes:
+        _entries: List of ``(pack, doc, Counter)`` triples, where the
+            Counter maps each token to its raw frequency in the corpus
+            text for that (pack, doc) pair.
+        _idf: Pre-computed IDF values per term.  Rebuilt when ``_dirty``
+            is True.
+        _dirty: Flag indicating whether IDF values need recomputation.
     """
 
     def __init__(self) -> None:
@@ -85,12 +150,26 @@ class _TFIDFIndex:
         self._dirty = True
 
     def add(self, pack: KnowledgePack, doc: KnowledgeDocument) -> None:
+        """Add a (pack, document) pair to the index.
+
+        Tokenises the metadata corpus text and stores the term frequency
+        counter.  Marks the IDF cache as dirty so it is rebuilt on the
+        next search.
+
+        Args:
+            pack: The knowledge pack containing the document.
+            doc: The knowledge document to index.
+        """
         corpus_text = _build_corpus_text(pack, doc)
         tokens = _tokenise(corpus_text)
         self._entries.append((pack, doc, Counter(tokens)))
         self._dirty = True
 
     def _rebuild_idf(self) -> None:
+        """Recompute the IDF dictionary from all current entries.
+
+        Called lazily before the first search after entries are added.
+        """
         n = len(self._entries)
         if n == 0:
             self._idf = {}
@@ -109,6 +188,22 @@ class _TFIDFIndex:
     def search(
         self, query: str, *, limit: int = 10, threshold: float = 0.3
     ) -> list[tuple[KnowledgeDocument, float]]:
+        """Search the index for documents relevant to *query*.
+
+        Tokenises the query, computes TF-IDF similarity against each
+        indexed document, and returns matches above *threshold* sorted
+        by descending score.
+
+        Args:
+            query: Free-text search string (e.g. a task description).
+            limit: Maximum number of results to return.
+            threshold: Minimum score to include in results.  The default
+                of 0.3 filters out weak matches.
+
+        Returns:
+            List of ``(KnowledgeDocument, score)`` tuples, sorted by
+            descending relevance score.
+        """
         if self._dirty:
             self._rebuild_idf()
 
@@ -146,12 +241,32 @@ class _TFIDFIndex:
 class KnowledgeRegistry:
     """Load, index, and query knowledge packs from directory trees.
 
-    Scans both project-level (.claude/knowledge/) and global
-    (~/.claude/knowledge/) directories. Project packs override global packs
-    with the same name — identical precedence model to AgentRegistry.
+    Scans both project-level (``.claude/knowledge/``) and global
+    (``~/.claude/knowledge/``) directories.  Project packs override global
+    packs with the same name -- identical precedence model to
+    :class:`AgentRegistry`.
 
-    Document content is NOT loaded at index time (lazy, on-demand via
-    get_document() or direct KnowledgeDocument.source_path reads).
+    The registry supports three query strategies, ordered from most specific
+    to least specific:
+
+    1. **Exact lookup** -- :meth:`get_pack` / :meth:`get_document` by name.
+    2. **Strict matching** -- :meth:`packs_for_agent` (agent binding) and
+       :meth:`find_by_tags` (tag intersection).
+    3. **Relevance fallback** -- :meth:`search` (TF-IDF over metadata).
+
+    The engine's knowledge resolver chains these strategies: explicit
+    attachments first, then agent bindings, then tags, then TF-IDF as a
+    last resort.
+
+    Document content is NOT loaded at index time.  Only metadata (name,
+    description, tags, grounding, priority, token estimate) is stored.
+    Content is read lazily via ``doc.source_path`` when the document is
+    actually delivered to an agent.
+
+    Attributes:
+        _packs: Internal dictionary mapping pack name to its
+            :class:`KnowledgePack`.
+        _tfidf: The TF-IDF index built from all pack/document metadata.
     """
 
     def __init__(self) -> None:

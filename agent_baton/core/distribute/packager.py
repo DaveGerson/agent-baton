@@ -33,7 +33,13 @@ from agent_baton.core.govern.validator import AgentValidator
 
 @dataclass
 class PackageDependency:
-    """A named dependency on another agent-baton package."""
+    """A named dependency on another agent-baton package.
+
+    Attributes:
+        name: Name of the required package.
+        min_version: Minimum version required (semver string). Empty
+            string means any version is acceptable.
+    """
 
     name: str
     min_version: str = ""
@@ -122,7 +128,20 @@ class EnhancedManifest:
 
 @dataclass
 class PackageValidationResult:
-    """Result of a comprehensive package validation run."""
+    """Result of a comprehensive package validation run.
+
+    Attributes:
+        valid: ``True`` if no errors were found (warnings are allowed).
+        errors: List of blocking error messages (e.g. missing manifest,
+            checksum mismatch, invalid agent definition).
+        warnings: List of non-blocking advisory messages (e.g. empty
+            ``created_at``, package contains no content).
+        agent_count: Number of agents listed in the manifest.
+        reference_count: Number of references listed in the manifest.
+        knowledge_count: Number of knowledge packs listed in the manifest.
+        checksums: SHA-256 checksums computed from the archive contents,
+            keyed by archive member name.
+    """
 
     valid: bool
     errors: list[str]
@@ -355,7 +374,17 @@ class PackageVerifier:
         archive_path: Path,
         agent_names: list[str],
     ) -> list[str]:
-        """Extract agent files into a temp dir and run AgentValidator on them."""
+        """Extract agent files into a temp dir and run AgentValidator on them.
+
+        Args:
+            archive_path: Path to the ``.tar.gz`` package archive.
+            agent_names: List of agent filenames to validate (from the
+                manifest's ``agents`` list).
+
+        Returns:
+            List of error messages from agent validation. Empty list
+            means all agents are valid.
+        """
         errors: list[str] = []
         validator = AgentValidator()
 

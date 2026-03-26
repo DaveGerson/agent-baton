@@ -15,6 +15,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
+from agent_baton.core.engine.classifier import (
+    FallbackClassifier,
+    TaskClassification,
+    TaskClassifier,
+)
 from agent_baton.core.govern.classifier import ClassificationResult, DataClassifier
 from agent_baton.core.govern.policy import PolicyEngine, PolicySet, PolicyViolation
 from agent_baton.core.improve.scoring import AgentScorecard, PerformanceScorer
@@ -65,7 +70,12 @@ _RISK_ORDINAL: dict[RiskLevel, int] = {
 
 
 def _select_git_strategy(risk: RiskLevel) -> GitStrategy:
-    """Return the appropriate git strategy for a given risk level."""
+    """Return the appropriate git strategy for a given risk level.
+
+    HIGH and CRITICAL risk tasks use branch-per-agent isolation so each
+    agent's work can be independently reverted.  MEDIUM and LOW risk tasks
+    use the lighter commit-per-agent strategy on a single feature branch.
+    """
     if risk in (RiskLevel.HIGH, RiskLevel.CRITICAL):
         return GitStrategy.BRANCH_PER_AGENT
     return GitStrategy.COMMIT_PER_AGENT
@@ -269,7 +279,14 @@ _TASK_TYPE_KEYWORDS: list[tuple[str, list[str]]] = [
 # ---------------------------------------------------------------------------
 
 class RetroEngine(Protocol):
-    """Structural type for any object that provides retrospective feedback."""
+    """Structural type for any object that provides retrospective feedback.
+
+    Decouples the planner from the concrete ``RetrospectiveEngine`` class
+    so the planner can be tested without the full retrospective subsystem.
+    The planner calls ``load_recent_feedback()`` during plan creation to
+    apply closed-loop learning: dropping agents with poor track records
+    and surfacing knowledge gaps from prior executions.
+    """
 
     def load_recent_feedback(self, limit: int = ...) -> RetrospectiveFeedback: ...
 
@@ -285,11 +302,32 @@ class IntelligentPlanner:
     decisions.  When no historical data exists the planner returns sensible
     defaults; as usage data accumulates the plans become progressively smarter.
 
+    The planner consults five data sources (all optional, graceful degradation):
+
+    1. ``PatternLearner`` -- learned patterns from prior executions.
+    2. ``PerformanceScorer`` -- per-agent health ratings.
+    3. ``BudgetTuner`` -- budget tier recommendations by task type.
+    4. ``RetrospectiveEngine`` -- closed-loop feedback (drop/prefer agents).
+    5. ``KnowledgeRegistry`` -- per-step knowledge attachment resolution.
+
     Usage::
 
         planner = IntelligentPlanner()
         plan = planner.create_plan("Add OAuth2 login to the API")
         print(planner.explain_plan(plan))
+
+    Attributes:
+        _pattern_learner: Finds high-confidence patterns matching the task
+            type and stack to guide agent selection and phase templates.
+        _scorer: Evaluates agent performance to warn about low-health agents.
+        _budget_tuner: Recommends budget tiers based on task type history.
+        _registry: Agent registry for resolving definitions and flavors.
+        _router: Routes base agent names to stack-specific flavored variants.
+        _classifier: Optional data classifier for sensitivity assessment.
+        _policy_engine: Optional policy engine for guardrail validation.
+        knowledge_registry: Optional knowledge registry for per-step
+            knowledge resolution.  When None, the knowledge resolution
+            step is skipped entirely.
     """
 
     def __init__(
@@ -299,6 +337,7 @@ class IntelligentPlanner:
         policy_engine: PolicyEngine | None = None,
         retro_engine: RetroEngine | None = None,
         knowledge_registry: KnowledgeRegistry | None = None,
+        task_classifier: TaskClassifier | None = None,
     ) -> None:
         self._team_context_root = team_context_root
         self._pattern_learner = PatternLearner(team_context_root)
@@ -328,6 +367,11 @@ class IntelligentPlanner:
         self._last_classification: ClassificationResult | None = None
         self._last_policy_violations: list[PolicyViolation] = []
 
+        # Task classifier — determines complexity and agent selection.
+        # Uses FallbackClassifier by default (Haiku -> keyword).
+        self._task_classifier: TaskClassifier = task_classifier or FallbackClassifier()
+        self._last_task_classification: TaskClassification | None = None
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -337,6 +381,7 @@ class IntelligentPlanner:
         task_summary: str,
         *,
         task_type: str | None = None,
+        complexity: str | None = None,
         project_root: Path | None = None,
         agents: list[str] | None = None,
         phases: list[dict] | None = None,
@@ -390,6 +435,7 @@ class IntelligentPlanner:
         self._last_classification = None
         self._last_policy_violations = []
         self._last_retro_feedback = None
+        self._last_task_classification = None
 
         # 1. Task ID
         task_id = self._generate_task_id(task_summary)
@@ -402,12 +448,31 @@ class IntelligentPlanner:
             except Exception:
                 pass
 
-        # 3. Task type
-        inferred_type = task_type or self._infer_task_type(task_summary)
+        # 3. Classify — determines task_type, complexity, agents, and phases.
+        # Explicit overrides take precedence over the classifier.
+        classified_phases: list[str] | None = None
+        if task_type is None and agents is None and phases is None:
+            classification = self._task_classifier.classify(
+                task_summary, self._registry, project_root
+            )
+            self._last_task_classification = classification
+            inferred_type = classification.task_type
+            inferred_complexity = complexity or classification.complexity
+            resolved_agents = list(classification.agents)
+            classified_phases = list(classification.phases)
+        else:
+            inferred_type = task_type or self._infer_task_type(task_summary)
+            inferred_complexity = complexity or "medium"
+            classified_phases = None  # let downstream logic handle phases
+            # 5. Agent selection (legacy path for explicit overrides)
+            if agents is None:
+                resolved_agents = list(_DEFAULT_AGENTS.get(inferred_type, []))
+            else:
+                resolved_agents = list(agents)
 
-        # 4. Pattern lookup
+        # 4. Pattern lookup — only if classifier didn't provide agents
         pattern: LearnedPattern | None = None
-        if not agents and not phases:
+        if not self._last_task_classification and not agents and not phases:
             try:
                 stack_key = (
                     f"{stack_profile.language}/{stack_profile.framework}"
@@ -421,18 +486,11 @@ class IntelligentPlanner:
                     if cand.confidence >= _MIN_PATTERN_CONFIDENCE:
                         pattern = cand
                         self._last_pattern_used = pattern
+                        # Override agents from pattern
+                        resolved_agents = list(pattern.recommended_agents)
                         break
             except Exception:
                 pass
-
-        # 5. Determine agents list
-        if agents is None:
-            if pattern is not None:
-                resolved_agents = list(pattern.recommended_agents)
-            else:
-                resolved_agents = list(_DEFAULT_AGENTS.get(inferred_type, []))
-        else:
-            resolved_agents = list(agents)
 
         # 5b. Retrospective feedback — filter dropped agents and record gaps.
         # This is consulted before routing so the feedback applies to base names.
@@ -500,6 +558,11 @@ class IntelligentPlanner:
         # 9. Build phases
         if phases is not None:
             plan_phases = self._phases_from_dicts(phases, resolved_agents, task_summary)
+        elif classified_phases is not None:
+            # Use classifier-provided phase names
+            plan_phases = self._build_phases_for_names(
+                classified_phases, resolved_agents, task_summary
+            )
         elif pattern is not None:
             plan_phases = self._apply_pattern(pattern, inferred_type, task_summary)
             # Apply routed agent names to pattern-derived phases
@@ -654,6 +717,12 @@ class IntelligentPlanner:
             explicit_knowledge_packs=list(explicit_knowledge_packs or []),
             explicit_knowledge_docs=list(explicit_knowledge_docs or []),
             intervention_level=intervention_level,
+            complexity=inferred_complexity,
+            classification_source=(
+                self._last_task_classification.source
+                if self._last_task_classification
+                else "keyword-fallback"
+            ),
         )
         shared_context = self._build_shared_context(tmp_plan)
         tmp_plan.shared_context = shared_context
@@ -749,6 +818,21 @@ class IntelligentPlanner:
                 "## Data Classification",
                 "",
                 "No classifier configured. Risk assessed via keyword signals only.",
+                "",
+            ]
+
+        # Task classification (complexity / agent selection)
+        if self._last_task_classification is not None:
+            tc = self._last_task_classification
+            lines += [
+                "## Task Classification",
+                "",
+                f"**Source:** {tc.source}",
+                f"**Task Type:** {tc.task_type}",
+                f"**Complexity:** {tc.complexity}",
+                f"**Reasoning:** {tc.reasoning}",
+                f"**Selected Agents:** {', '.join(tc.agents)}",
+                f"**Selected Phases:** {', '.join(tc.phases)}",
                 "",
             ]
 
@@ -1210,19 +1294,14 @@ class IntelligentPlanner:
     def _default_gate(self, phase_name: str) -> PlanGate | None:
         """Return an appropriate QA gate for a phase name.
 
-        - 'Implement' or 'Fix' → build check (pytest)
+        Every code-producing phase gets a test gate. Only purely
+        investigative or review phases skip automated testing.
+
         - 'Test' → test gate (pytest with coverage)
-        - 'Review' → no automated gate (human review)
-        - All others → None
+        - 'Investigate', 'Research', 'Review' → no automated gate
+        - All others (Implement, Fix, etc.) → build check (pytest)
         """
         name_lower = phase_name.lower()
-        if name_lower in ("implement", "fix"):
-            return PlanGate(
-                gate_type="build",
-                command="pytest",
-                description="Run test suite to verify the implementation builds cleanly.",
-                fail_on=["test failure", "import error"],
-            )
         if name_lower == "test":
             return PlanGate(
                 gate_type="test",
@@ -1230,8 +1309,17 @@ class IntelligentPlanner:
                 description="Run full test suite with coverage report.",
                 fail_on=["test failure", "coverage below threshold"],
             )
-        # Review phases and everything else get no automated gate
-        return None
+        if name_lower in ("investigate", "research", "review"):
+            # No automated gate — these phases don't produce code
+            return None
+        # All other phases (implement, fix, migrate, refactor, etc.)
+        # get a mandatory test gate
+        return PlanGate(
+            gate_type="build",
+            command="pytest",
+            description="Run test suite to verify the implementation builds cleanly.",
+            fail_on=["test failure", "import error"],
+        )
 
     @staticmethod
     def _consolidate_team_step(phase: PlanPhase) -> PlanStep:

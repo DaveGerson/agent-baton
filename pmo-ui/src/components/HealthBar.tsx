@@ -3,13 +3,15 @@ import { T } from '../styles/tokens';
 
 interface HealthBarProps {
   health: Record<string, ProgramHealth>;
+  onProgramClick?: (program: string) => void;
+  activeProgram?: string | null;
 }
 
 function clamp(n: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, n));
 }
 
-export function HealthBar({ health }: HealthBarProps) {
+export function HealthBar({ health, onProgramClick, activeProgram }: HealthBarProps) {
   const programs = Object.values(health);
 
   if (programs.length === 0) {
@@ -39,12 +41,14 @@ export function HealthBar({ health }: HealthBarProps) {
     }}>
       {programs.map((pg) => {
         const pct = clamp(Math.round(pg.completion_pct), 0, 100);
-        // Pick a consistent color by hashing the program name
         const barColor = programColor(pg.program);
+        const isActive = activeProgram === pg.program;
+        const isClickable = !!onProgramClick;
 
         return (
           <div
             key={pg.program}
+            onClick={isClickable ? () => onProgramClick(pg.program) : undefined}
             style={{
               flex: '1 1 140px',
               minWidth: 120,
@@ -52,10 +56,14 @@ export function HealthBar({ health }: HealthBarProps) {
               background: T.bg2,
               borderRadius: 5,
               borderLeft: `3px solid ${barColor}`,
+              outline: isActive ? `2px solid ${barColor}` : '2px solid transparent',
+              outlineOffset: 1,
+              cursor: isClickable ? 'pointer' : 'default',
+              transition: 'outline-color 0.15s',
             }}
           >
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 3 }}>
-              <span style={{ fontSize: 10, fontWeight: 700, color: T.text0 }}>{pg.program}</span>
+              <span style={{ fontSize: 10, fontWeight: 700, color: isActive ? barColor : T.text0 }}>{pg.program}</span>
               <span style={{ fontSize: 9, fontWeight: 600, color: barColor, fontFamily: 'monospace' }}>
                 {pct}%
               </span>
@@ -69,7 +77,7 @@ export function HealthBar({ health }: HealthBarProps) {
                 transition: 'width 0.5s',
               }} />
             </div>
-            <div style={{ fontSize: 7, color: T.text3, marginTop: 2 }}>
+            <div style={{ fontSize: 9, color: T.text3, marginTop: 2 }}>
               {pg.total_plans} plans
               {pg.active > 0 && ` · ${pg.active} active`}
               {pg.completed > 0 && ` · ${pg.completed} done`}

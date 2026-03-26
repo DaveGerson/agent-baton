@@ -27,7 +27,23 @@ from pathlib import Path
 
 @dataclass
 class AsyncTask:
-    """A task dispatched for asynchronous execution."""
+    """A task dispatched for asynchronous execution.
+
+    Attributes:
+        task_id: Unique identifier for the task.
+        command: Shell command, script path, or free-text description
+            of the work to perform.
+        dispatch_type: How the task is executed. One of ``"shell"``
+            (subprocess), ``"script"`` (script file), or ``"manual"``
+            (human action).
+        status: Current lifecycle state. One of ``"pending"``,
+            ``"dispatched"``, ``"completed"``, or ``"failed"``.
+        dispatched_at: ISO-8601 timestamp of when the task was dispatched.
+        completed_at: ISO-8601 timestamp of completion or failure.
+        result: Output text or summary from the completed task.
+        exit_code: Process exit code (``None`` if not applicable or
+            not yet completed).
+    """
 
     task_id: str
     command: str  # shell command, script path, or description
@@ -65,11 +81,16 @@ class AsyncTask:
 
 
 class AsyncDispatcher:
-    """Dispatch and track long-running tasks.
+    """Dispatch and track long-running tasks via on-disk JSON files.
 
     Task specs are stored as individual JSON files under
-    .claude/team-context/async-tasks/ (or a custom directory supplied at
-    construction).  Each file is named <task_id>.json.
+    ``.claude/team-context/async-tasks/`` (or a custom directory supplied at
+    construction). Each file is named ``<task_id>.json`` with unsafe
+    characters replaced by hyphens.
+
+    The dispatcher does not execute tasks itself -- it records dispatch
+    intent and tracks status transitions. The actual execution is the
+    caller's responsibility.
     """
 
     _DEFAULT_TASKS_DIR = Path(".claude/team-context/async-tasks")
@@ -99,9 +120,15 @@ class AsyncDispatcher:
     def dispatch(self, task: AsyncTask) -> Path:
         """Write task spec to disk and mark as dispatched.
 
-        For shell tasks the caller is responsible for actually launching
-        the subprocess; this method records the intent on disk so status
-        can be polled later.
+        Sets the task's status to ``"dispatched"`` and persists it as a
+        JSON file. The caller is responsible for actually launching the
+        subprocess or triggering the external action.
+
+        Args:
+            task: The ``AsyncTask`` to dispatch.
+
+        Returns:
+            Path to the written JSON file.
         """
         task.status = "dispatched"
         return self._write_task(task)
@@ -109,7 +136,15 @@ class AsyncDispatcher:
     # ── Status ─────────────────────────────────────────────────────────────
 
     def check_status(self, task_id: str) -> AsyncTask | None:
-        """Read task status from disk. Returns None if not found."""
+        """Read task status from disk.
+
+        Args:
+            task_id: Identifier of the task to check.
+
+        Returns:
+            The ``AsyncTask`` if found, or ``None`` if the task file
+            does not exist or cannot be parsed.
+        """
         path = self._task_path(task_id)
         if not path.exists():
             return None
@@ -122,7 +157,15 @@ class AsyncDispatcher:
     def mark_complete(
         self, task_id: str, result: str = "", exit_code: int = 0
     ) -> None:
-        """Mark a task as completed with result."""
+        """Mark a task as completed with an optional result.
+
+        No-op if the task does not exist on disk.
+
+        Args:
+            task_id: Identifier of the task to complete.
+            result: Output text or summary from the completed task.
+            exit_code: Process exit code (default 0 for success).
+        """
         task = self.check_status(task_id)
         if task is None:
             return
@@ -134,7 +177,15 @@ class AsyncDispatcher:
     def mark_failed(
         self, task_id: str, result: str = "", exit_code: int = 1
     ) -> None:
-        """Mark a task as failed."""
+        """Mark a task as failed with an optional error message.
+
+        No-op if the task does not exist on disk.
+
+        Args:
+            task_id: Identifier of the task that failed.
+            result: Error message or failure summary.
+            exit_code: Process exit code (default 1 for failure).
+        """
         task = self.check_status(task_id)
         if task is None:
             return
@@ -146,7 +197,16 @@ class AsyncDispatcher:
     # ── List ───────────────────────────────────────────────────────────────
 
     def list_tasks(self, status: str | None = None) -> list[AsyncTask]:
-        """List all tasks, optionally filtered by status."""
+        """List all tasks, optionally filtered by status.
+
+        Args:
+            status: If provided, only return tasks with this status
+                (e.g. ``"pending"``, ``"dispatched"``, ``"completed"``,
+                ``"failed"``). If ``None``, returns all tasks.
+
+        Returns:
+            List of ``AsyncTask`` objects sorted by filename (task ID).
+        """
         if not self._dir.is_dir():
             return []
         tasks: list[AsyncTask] = []

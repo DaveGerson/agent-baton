@@ -217,3 +217,114 @@ class TestDashboardGeneratorWrite:
         assert result == out_path
         assert out_path.exists()
         assert out_path.read_text(encoding="utf-8") == expected
+
+
+# ---------------------------------------------------------------------------
+# DashboardGenerator — SQLite storage integration
+# Tests that DashboardGenerator merges records from a StorageBackend when
+# one is provided, and that task_ids present in storage are not duplicated.
+# ---------------------------------------------------------------------------
+
+class _FakeStorage:
+    """Minimal StorageBackend stub that returns a fixed list of TaskUsageRecords."""
+
+    def __init__(self, records: list[TaskUsageRecord]) -> None:
+        self._records = records
+
+    def read_usage(self, limit: int | None = None) -> list[TaskUsageRecord]:
+        if limit is not None:
+            return self._records[:limit]
+        return list(self._records)
+
+    # Satisfy the rest of the StorageBackend protocol with no-ops.
+    def close(self) -> None: ...
+    def save_execution(self, state) -> None: ...
+    def load_execution(self, task_id): return None
+    def list_executions(self): return []
+    def delete_execution(self, task_id): ...
+    def set_active_task(self, task_id): ...
+    def get_active_task(self): return None
+    def save_plan(self, plan): ...
+    def load_plan(self, task_id): return None
+    def save_step_result(self, task_id, result): ...
+    def save_gate_result(self, task_id, result): ...
+    def save_approval_result(self, task_id, result): ...
+    def save_amendment(self, task_id, amendment): ...
+    def append_event(self, event): ...
+    def read_events(self, task_id, from_seq=0): return []
+    def log_usage(self, record): ...
+    def log_telemetry(self, event): ...
+    def read_telemetry(self, limit=None): return []
+    def save_retrospective(self, retro): ...
+    def load_retrospective(self, task_id): return None
+    def list_retrospective_ids(self, limit=100): return []
+    def save_trace(self, trace): ...
+    def load_trace(self, task_id): return None
+    def save_patterns(self, patterns): ...
+    def load_patterns(self): return []
+    def save_budget_recommendations(self, recs): ...
+    def load_budget_recommendations(self): return []
+    def append_mission_log(self, task_id, entry): ...
+    def read_mission_log(self, task_id): return None
+    def save_context(self, task_id, content, **sections): ...
+    def read_context(self, task_id): return None
+    def save_profile(self, content): ...
+    def read_profile(self): return None
+
+
+class TestDashboardStorageIntegration:
+    """DashboardGenerator reads from StorageBackend when provided."""
+
+    def test_storage_records_appear_in_dashboard(self, tmp_path: Path) -> None:
+        """Records returned by storage.read_usage() show up in the generated output."""
+        record = _task("sqlite-task", [_agent("arch", tokens=9000)])
+        storage = _FakeStorage([record])
+        empty_logger = UsageLogger(tmp_path / "empty.jsonl")
+        gen = DashboardGenerator(usage_logger=empty_logger, storage=storage)
+        result = gen.generate()
+        assert "sqlite-task" in result or "1 tasks tracked" in result
+        assert "arch" in result
+
+    def test_storage_records_not_duplicated_with_jsonl(self, tmp_path: Path) -> None:
+        """A task in both storage and JSONL must only appear once."""
+        shared = _task("shared-task", [_agent("arch", tokens=1000)])
+        storage = _FakeStorage([shared])
+        # Write the same task_id to JSONL as well.
+        logger = UsageLogger(tmp_path / "usage.jsonl")
+        logger.log(shared)
+        gen = DashboardGenerator(usage_logger=logger, storage=storage)
+        result = gen.generate()
+        # Total tasks should be 1, not 2.
+        assert "1 tasks tracked" in result
+
+    def test_jsonl_only_tasks_included_when_storage_present(self, tmp_path: Path) -> None:
+        """JSONL tasks with different task_ids are merged in alongside storage records."""
+        storage_record = _task("from-sqlite", [_agent("be", tokens=500)])
+        jsonl_record = _task("from-jsonl", [_agent("arch", tokens=800)])
+        storage = _FakeStorage([storage_record])
+        logger = UsageLogger(tmp_path / "usage.jsonl")
+        logger.log(jsonl_record)
+        gen = DashboardGenerator(usage_logger=logger, storage=storage)
+        result = gen.generate()
+        # Both task_ids contribute; total tasks = 2.
+        assert "2 tasks tracked" in result
+
+    def test_no_storage_falls_back_to_jsonl(self, tmp_path: Path) -> None:
+        """Without storage, the generator behaves as before (JSONL only)."""
+        logger = _logger_with_data(tmp_path)
+        gen = DashboardGenerator(usage_logger=logger, storage=None)
+        result = gen.generate()
+        assert "2 tasks tracked" in result
+
+    def test_storage_failure_falls_back_to_jsonl(self, tmp_path: Path) -> None:
+        """If storage.read_usage() raises, fall back to JSONL silently."""
+        class _BrokenStorage(_FakeStorage):
+            def read_usage(self, limit=None):
+                raise RuntimeError("db locked")
+
+        storage = _BrokenStorage([])
+        logger = _logger_with_data(tmp_path)
+        gen = DashboardGenerator(usage_logger=logger, storage=storage)
+        # Must not raise; should produce the JSONL dashboard.
+        result = gen.generate()
+        assert "2 tasks tracked" in result

@@ -14,17 +14,38 @@ from agent_baton.core.runtime.launcher import AgentLauncher, LaunchResult
 
 @dataclass
 class SchedulerConfig:
-    """Configuration for StepScheduler."""
+    """Configuration for StepScheduler.
+
+    Attributes:
+        max_concurrent: Maximum number of agent launches that can run
+            simultaneously.  This controls the ``asyncio.Semaphore``
+            inside ``StepScheduler``.  Set lower on resource-constrained
+            machines or when agents are competing for shared resources
+            (e.g., same git repository).
+    """
     max_concurrent: int = 3
 
 
 class StepScheduler:
     """Dispatch parallel steps with bounded concurrency.
 
+    Uses ``asyncio.Semaphore`` to cap the number of simultaneously running
+    agent launches.  All steps in a batch are started concurrently as
+    asyncio tasks, but at most ``max_concurrent`` actually run at the same
+    time.
+
+    The scheduler is stateless between batches and can be reused across
+    multiple dispatch rounds within the same ``TaskWorker`` session.
+
     Example usage::
 
         scheduler = StepScheduler(SchedulerConfig(max_concurrent=2))
         results = await scheduler.dispatch_batch(steps, launcher)
+
+    Attributes:
+        _config: Scheduler configuration (concurrency limit).
+        _semaphore: Asyncio semaphore enforcing the concurrency cap.
+        _active: Current count of in-flight launches (for observability).
     """
 
     def __init__(self, config: SchedulerConfig | None = None) -> None:

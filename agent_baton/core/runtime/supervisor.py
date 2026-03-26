@@ -1,10 +1,20 @@
-"""WorkerSupervisor — lifecycle management for daemon-mode execution.
+"""WorkerSupervisor -- lifecycle management for daemon-mode execution.
 
-The supervisor wraps :class:`TaskWorker` with:
-- PID file management for ``baton daemon status`` / ``stop``
-- Structured logging to a daemon log file
-- Graceful shutdown via :class:`SignalHandler`
-- Status querying from execution state + event log
+The supervisor wraps ``TaskWorker`` with production-grade process management:
+
+- **PID file management** with ``flock()``-based locking to prevent
+  duplicate daemons.  The OS releases the lock automatically when the
+  process exits, eliminating stale-PID-file race conditions.
+- **Structured logging** via ``RotatingFileHandler`` (10 MB, 3 backups).
+- **Graceful shutdown** via ``SignalHandler`` (SIGTERM/SIGINT) with a
+  30-second drain timeout for in-flight agents.
+- **Status querying** from execution state + event log, readable by
+  ``baton daemon status`` without requiring a running daemon.
+- **Namespaced execution** directories for concurrent plans when
+  ``task_id`` is provided.
+
+The supervisor is the entry point for ``baton daemon start``.  It blocks
+the calling process until the worker completes or a shutdown signal arrives.
 """
 from __future__ import annotations
 
@@ -32,13 +42,16 @@ def _utcnow() -> str:
 
 
 class WorkerSupervisor:
-    """Manage the lifecycle of a :class:`TaskWorker` in daemon mode.
+    """Manage the lifecycle of a ``TaskWorker`` in daemon mode.
+
+    The supervisor handles everything outside the worker loop itself:
+    PID file locking, log rotation, signal handling, and status snapshots.
 
     Files managed (legacy, when *task_id* is ``None``):
 
-    - ``daemon.pid`` — PID of the running process.
-    - ``daemon.log`` — structured log output from the worker.
-    - ``daemon-status.json`` — snapshot of last known execution status.
+    - ``daemon.pid`` -- PID of the running process (flock-locked).
+    - ``daemon.log`` -- structured log output from the worker.
+    - ``daemon-status.json`` -- snapshot of last known execution status.
 
     When *task_id* is provided, files are namespaced under
     ``executions/<task_id>/``:
@@ -46,6 +59,10 @@ class WorkerSupervisor:
     - ``executions/<task_id>/worker.pid``
     - ``executions/<task_id>/worker.log``
     - ``executions/<task_id>/worker-status.json``
+
+    Attributes:
+        _root: Resolved team-context root directory.
+        _task_id: Optional task ID for namespaced execution directories.
     """
 
     def __init__(

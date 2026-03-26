@@ -32,7 +32,19 @@ from agent_baton.core.improve.scoring import PerformanceScorer
 
 @dataclass
 class TransferManifest:
-    """What to transfer between projects."""
+    """Specification of what to transfer between projects.
+
+    Attributes:
+        agents: Agent definition filenames to transfer
+            (e.g. ``["architect.md"]``).
+        knowledge_packs: Knowledge pack directory names to transfer
+            (e.g. ``["agent-baton"]``).
+        references: Reference filenames to transfer
+            (e.g. ``["git-strategy.md"]``).
+        source_project: Absolute path to the source project root
+            (informational, for audit/logging).
+        reason: Human-readable reason for the transfer.
+    """
 
     agents: list[str] = field(default_factory=list)          # agent filenames (e.g. "architect.md")
     knowledge_packs: list[str] = field(default_factory=list)  # knowledge dir names (e.g. "agent-baton")
@@ -79,9 +91,13 @@ class TransferManifest:
 
 
 class ProjectTransfer:
-    """Transfer agents, knowledge, and references between projects.
+    """Transfer agents, knowledge packs, and references between projects.
 
-    The canonical .claude/ layout used by this class:
+    Operates directly on the ``.claude/`` directory structures of source
+    and target projects. All file operations are additive -- existing
+    files in the target are never overwritten unless ``force=True``.
+
+    The canonical ``.claude/`` layout used by this class::
 
         <project_root>/
         └── .claude/

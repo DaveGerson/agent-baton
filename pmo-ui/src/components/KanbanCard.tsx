@@ -1,10 +1,13 @@
 import { useState } from 'react';
-import type { PmoCard } from '../api/types';
+import type { PmoCard, ForgePlanResponse } from '../api/types';
 import { T, PRIORITY_COLOR } from '../styles/tokens';
+import { api } from '../api/client';
+import { PlanPreview } from './PlanPreview';
 
 interface KanbanCardProps {
   card: PmoCard;
   columnColor: string;
+  onForge?: (card: PmoCard) => void;
 }
 
 function Chip({ children, color = T.text2 }: { children: React.ReactNode; color?: string }) {
@@ -56,10 +59,32 @@ function ProgramDot({ program, size = 7 }: { program: string; size?: number }) {
   );
 }
 
-export function KanbanCard({ card, columnColor }: KanbanCardProps) {
+export function KanbanCard({ card, columnColor, onForge }: KanbanCardProps) {
   const [expanded, setExpanded] = useState(false);
+  const [showPlan, setShowPlan] = useState(false);
+  const [planData, setPlanData] = useState<ForgePlanResponse | null>(null);
+  const [planLoading, setPlanLoading] = useState(false);
   const isHuman = card.column === 'awaiting_human';
   const priorityColor = PRIORITY_COLOR[card.priority] ?? T.text2;
+
+  async function handleViewPlan(e: React.MouseEvent) {
+    e.stopPropagation();
+    if (showPlan) {
+      setShowPlan(false);
+      return;
+    }
+    setShowPlan(true);
+    if (planData) return; // already fetched — use cache
+    setPlanLoading(true);
+    try {
+      const result = await api.getCardDetail(card.card_id);
+      setPlanData(result.plan);
+    } catch {
+      // silent — plan unavailable
+    } finally {
+      setPlanLoading(false);
+    }
+  }
 
   const borderColor = isHuman ? T.orange + '55' : expanded ? columnColor + '55' : T.border;
 
@@ -91,7 +116,7 @@ export function KanbanCard({ card, columnColor }: KanbanCardProps) {
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 4, marginBottom: 3 }}>
           <ProgramDot program={card.program} size={6} />
           <div style={{
-            fontSize: 9,
+            fontSize: 12,
             fontWeight: 600,
             color: T.text0,
             lineHeight: 1.25,
@@ -107,7 +132,7 @@ export function KanbanCard({ card, columnColor }: KanbanCardProps) {
 
         {/* Meta row */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 3, flexWrap: 'wrap', marginBottom: 3 }}>
-          <span style={{ fontSize: 7, color: T.text4, fontFamily: 'monospace' }}>{card.card_id}</span>
+          <span style={{ fontSize: 9, color: T.text4, fontFamily: 'monospace' }}>{card.card_id}</span>
           {card.priority <= 1 && (
             <Chip color={priorityColor}>P{card.priority}</Chip>
           )}
@@ -122,7 +147,7 @@ export function KanbanCard({ card, columnColor }: KanbanCardProps) {
         {card.steps_total > 0 && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 3 }}>
             <Pips done={card.steps_completed} total={card.steps_total} color={columnColor} />
-            <span style={{ fontSize: 7, color: T.text3 }}>
+            <span style={{ fontSize: 9, color: T.text3 }}>
               {card.steps_completed}/{card.steps_total}
             </span>
           </div>
@@ -131,7 +156,7 @@ export function KanbanCard({ card, columnColor }: KanbanCardProps) {
         {/* Current phase / error */}
         {card.current_phase && !card.error && (
           <div style={{
-            fontSize: 7,
+            fontSize: 9,
             color: isHuman ? T.orange : T.text2,
             lineHeight: 1.2,
             marginTop: 2,
@@ -147,7 +172,7 @@ export function KanbanCard({ card, columnColor }: KanbanCardProps) {
         )}
         {card.error && (
           <div style={{
-            fontSize: 7,
+            fontSize: 9,
             color: T.red,
             lineHeight: 1.2,
             marginTop: 2,
@@ -162,18 +187,18 @@ export function KanbanCard({ card, columnColor }: KanbanCardProps) {
 
         {/* Footer */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 5 }}>
-          <span style={{ fontSize: 7, color: T.text3 }}>{card.project_id}</span>
+          <span style={{ fontSize: 9, color: T.text3 }}>{card.project_id}</span>
           {card.agents.length > 0 && (
             <>
-              <span style={{ fontSize: 6, color: T.text4 }}>·</span>
-              <span style={{ fontSize: 7, color: T.text3 }}>
+              <span style={{ fontSize: 9, color: T.text4 }}>·</span>
+              <span style={{ fontSize: 9, color: T.text3 }}>
                 {card.agents.slice(0, 2).join(', ')}
                 {card.agents.length > 2 && ` +${card.agents.length - 2}`}
               </span>
             </>
           )}
           <div style={{ flex: 1 }} />
-          <span style={{ fontSize: 6, color: T.text4 }}>{fmtTime(card.updated_at)}</span>
+          <span style={{ fontSize: 9, color: T.text4 }}>{fmtTime(card.updated_at)}</span>
         </div>
       </div>
 
@@ -186,19 +211,105 @@ export function KanbanCard({ card, columnColor }: KanbanCardProps) {
         }}>
           <div style={{ display: 'flex', gap: 8, marginBottom: 4 }}>
             <div>
-              <span style={{ fontSize: 7, color: T.text3 }}>Program: </span>
-              <span style={{ fontSize: 7, color: T.text0, fontWeight: 600 }}>{card.program}</span>
+              <span style={{ fontSize: 9, color: T.text3 }}>Program: </span>
+              <span style={{ fontSize: 9, color: T.text0, fontWeight: 600 }}>{card.program}</span>
             </div>
             <div>
-              <span style={{ fontSize: 7, color: T.text3 }}>Gates passed: </span>
-              <span style={{ fontSize: 7, color: T.text0, fontWeight: 600 }}>{card.gates_passed}</span>
+              <span style={{ fontSize: 9, color: T.text3 }}>Gates passed: </span>
+              <span style={{ fontSize: 9, color: T.text0, fontWeight: 600 }}>{card.gates_passed}</span>
             </div>
           </div>
           {card.agents.length > 0 && (
-            <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap', marginBottom: 6 }}>
               {card.agents.map(a => (
                 <Chip key={a} color={T.cyan}>{a}</Chip>
               ))}
+            </div>
+          )}
+
+          {/* Actions row */}
+          <div style={{ display: 'flex', gap: 4, marginTop: 4, paddingTop: 4, borderTop: `1px solid ${T.border}` }}>
+            {onForge && (
+              <>
+                <button
+                  onClick={e => { e.stopPropagation(); onForge(card); }}
+                  style={{
+                    padding: '3px 9px',
+                    borderRadius: 3,
+                    border: `1px solid ${T.accent}44`,
+                    background: T.accent + '12',
+                    color: T.accent,
+                    fontSize: 9,
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                  }}
+                  title="Open Forge with this card's context"
+                >
+                  Re-forge
+                </button>
+                <button
+                  onClick={e => { e.stopPropagation(); onForge(card); }}
+                  style={{
+                    padding: '3px 9px',
+                    borderRadius: 3,
+                    border: `1px solid ${T.purple}44`,
+                    background: T.purple + '12',
+                    color: T.purple,
+                    fontSize: 9,
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                  }}
+                  title="Edit this plan in Forge"
+                >
+                  Edit in Forge
+                </button>
+              </>
+            )}
+            <button
+              onClick={handleViewPlan}
+              style={{
+                padding: '3px 9px',
+                borderRadius: 3,
+                border: `1px solid ${T.green}44`,
+                background: showPlan ? T.green + '18' : T.green + '0c',
+                color: T.green,
+                fontSize: 9,
+                fontWeight: 600,
+                cursor: 'pointer',
+              }}
+              title="View the execution plan for this card"
+            >
+              {showPlan ? 'Hide Plan' : 'View Plan'}
+            </button>
+          </div>
+
+          {/* Plan preview */}
+          {showPlan && (
+            <div
+              onClick={e => e.stopPropagation()}
+              style={{
+                marginTop: 6,
+                maxHeight: 300,
+                overflowY: 'auto',
+                borderRadius: 4,
+                border: `1px solid ${T.border}`,
+                background: T.bg1,
+                padding: 6,
+              }}
+            >
+              {planLoading && (
+                <div style={{ fontSize: 8, color: T.text3, fontStyle: 'italic', padding: 8 }}>
+                  Loading plan…
+                </div>
+              )}
+              {!planLoading && planData && (
+                <PlanPreview plan={planData} />
+              )}
+              {!planLoading && !planData && (
+                <div style={{ fontSize: 8, color: T.text3, fontStyle: 'italic', padding: 8 }}>
+                  No plan available for this card.
+                </div>
+              )}
             </div>
           )}
         </div>

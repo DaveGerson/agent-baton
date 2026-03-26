@@ -1,6 +1,24 @@
-"""Prompt dispatcher — generates delegation prompts for agent subagents."""
+"""Prompt dispatcher -- generates delegation prompts for agent subagents.
+
+This module translates ``PlanStep`` objects into complete delegation prompts
+following the comms-protocols template.  It handles three prompt types:
+
+- **Single-agent delegation** (``build_delegation_prompt``): standard
+  step-by-step dispatch with shared context, knowledge, handoff, and
+  boundary enforcement.
+- **Team member delegation** (``build_team_delegation_prompt``): per-member
+  prompts within a team step, including role context and inter-member
+  dependencies.
+- **Gate prompts** (``build_gate_prompt``): instructions for running QA
+  gate checks, either automated commands or reviewer prompts.
+
+The class is stateless; every method operates purely on its arguments.
+Knowledge sections are built lazily -- inline documents are loaded from
+disk only when the attachment delivery is ``inline``.
+"""
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 
 from agent_baton.utils.frontmatter import parse_frontmatter
@@ -461,6 +479,14 @@ class PromptDispatcher:
             delegation_prompt.  path_enforcement is populated whenever the
             step declares allowed_paths or blocked_paths.
         """
+        if step.agent_name == "orchestrator":
+            warnings.warn(
+                "Dispatching 'orchestrator' as a subagent will fail — "
+                "it requires depth-2 nesting which Claude Code does not support. "
+                "Run orchestration at the top level instead.",
+                stacklevel=2,
+            )
+
         prompt = self.build_delegation_prompt(
             step,
             shared_context=shared_context,

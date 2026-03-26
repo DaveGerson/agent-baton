@@ -1,33 +1,105 @@
-"""Dashboard generator — produces a markdown usage dashboard from JSONL logs."""
+"""Dashboard generator -- produces a Markdown usage dashboard from JSONL logs.
+
+The dashboard is the human-facing summary of the observe layer.  It
+aggregates data from :class:`~agent_baton.core.observe.usage.UsageLogger`
+and :class:`~agent_baton.core.observe.telemetry.AgentTelemetry` into a
+single Markdown document covering cost trends, agent utilization, retry
+rates, model mix, risk distribution, sequencing modes, and (optionally)
+telemetry event breakdowns.
+
+The generated dashboard is written to
+``.claude/team-context/usage-dashboard.md`` by default and is intended for
+periodic review by the human operator to spot trends before the automated
+:mod:`~agent_baton.core.learn` and :mod:`~agent_baton.core.improve`
+subsystems flag them.
+"""
 from __future__ import annotations
 
 from collections import Counter
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from agent_baton.core.observe.telemetry import AgentTelemetry
 from agent_baton.core.observe.usage import UsageLogger
+from agent_baton.models.usage import TaskUsageRecord
+
+if TYPE_CHECKING:
+    from agent_baton.core.storage.protocol import StorageBackend
 
 
 class DashboardGenerator:
-    """Generate a markdown usage dashboard from JSONL logs.
+    """Generate a markdown usage dashboard from JSONL logs and/or SQLite storage.
 
     Produces .claude/team-context/usage-dashboard.md with cost trends,
     agent utilization, retry rates, and model mix.  When *telemetry* is
     supplied (or the default telemetry.jsonl exists), a telemetry summary
     section is appended.
+
+    When *storage* is provided (a :class:`StorageBackend` instance), usage
+    records are read from it and merged with any JSONL-file records.
+    Records that exist in both sources are deduplicated by task_id, with
+    the SQLite version taking precedence.
     """
 
     def __init__(
         self,
         usage_logger: UsageLogger | None = None,
         telemetry: AgentTelemetry | None = None,
+        storage: "StorageBackend | None" = None,
     ) -> None:
         self._usage = usage_logger or UsageLogger()
         self._telemetry = telemetry or AgentTelemetry()
+        self._storage = storage
+
+    def _read_records(self) -> list[TaskUsageRecord]:
+        """Return usage records, merging JSONL and SQLite sources.
+
+        When a storage backend is available its records take precedence.
+        Any task_ids present in the backend are excluded from the JSONL
+        result to avoid double-counting.
+        """
+        storage_records: list[TaskUsageRecord] = []
+        if self._storage is not None:
+            try:
+                storage_records = self._storage.read_usage()
+            except Exception:
+                storage_records = []
+
+        jsonl_records = self._usage.read_all()
+
+        if not storage_records:
+            return jsonl_records
+
+        # Deduplicate: storage wins; exclude task_ids already in storage.
+        storage_task_ids = {r.task_id for r in storage_records}
+        jsonl_only = [r for r in jsonl_records if r.task_id not in storage_task_ids]
+        return storage_records + jsonl_only
 
     def generate(self) -> str:
-        """Generate the full dashboard markdown."""
-        records = self._usage.read_all()
+        """Generate the full dashboard as a Markdown string.
+
+        Reads all usage records (merging JSONL and SQLite sources when a
+        storage backend is configured) and all telemetry events, then
+        computes aggregate metrics and formats them into titled sections
+        with Markdown tables.
+
+        Sections produced:
+
+        * **Overview** -- total tasks, agent uses, tokens, retry rate, gate
+          pass rate.
+        * **Outcomes** -- distribution of task outcomes (e.g. SHIP, FAIL).
+        * **Risk Distribution** -- tasks per risk level.
+        * **Model Mix** -- model usage counts.
+        * **Agent Utilization** -- per-agent use count and average retries.
+        * **Sequencing Modes** -- tasks per sequencing mode.
+        * **Telemetry** (optional) -- event counts by agent and type, plus
+          files read/written, when telemetry data is available.
+
+        Returns:
+            A complete Markdown document string.  Returns a short
+            placeholder message if no usage data exists yet.
+        """
+        records = self._read_records()
         if not records:
             return "# Usage Dashboard\n\nNo usage data available yet.\n"
 
@@ -199,7 +271,15 @@ class DashboardGenerator:
         return "\n".join(lines)
 
     def write(self, path: Path | None = None) -> Path:
-        """Write the dashboard to disk."""
+        """Write the dashboard to disk.
+
+        Args:
+            path: Destination path.  Defaults to
+                ``.claude/team-context/usage-dashboard.md``.
+
+        Returns:
+            Absolute path to the written file.
+        """
         out_path = (path or Path(".claude/team-context/usage-dashboard.md")).resolve()
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(self.generate(), encoding="utf-8")

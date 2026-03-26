@@ -1,8 +1,20 @@
-"""RollbackManager — restores agents to pre-experiment state via
-AgentVersionControl.
+"""RollbackManager -- restores agents to pre-experiment state via VCS.
 
-Circuit breaker: 3+ rollbacks in 7 days pauses all auto-apply and escalates.
-Logs to ``.claude/team-context/improvements/rollbacks.jsonl``.
+The rollback system is the automatic safety valve of the improvement loop.
+When an experiment detects degradation (metric drop > 5% from baseline),
+the :class:`~agent_baton.core.improve.loop.ImprovementLoop` calls
+:meth:`RollbackManager.rollback` to restore the agent to its
+pre-experiment state -- no human approval needed.
+
+Circuit breaker:
+
+If 3 or more rollbacks occur within a 7-day window, the circuit breaker
+trips and all auto-apply is paused.  This prevents the system from
+thrashing on changes that consistently degrade performance.  The operator
+must manually review and reset before auto-apply resumes.
+
+Rollback audit trail is stored as JSONL at
+``.claude/team-context/improvements/rollbacks.jsonl``.
 """
 from __future__ import annotations
 
@@ -19,7 +31,11 @@ _CIRCUIT_BREAKER_WINDOW_DAYS = 7
 
 
 class RollbackEntry:
-    """A single rollback audit record."""
+    """A single rollback audit record.
+
+    Captures which recommendation was rolled back, for which agent, and
+    why.  Used by the circuit breaker to count recent rollbacks.
+    """
 
     def __init__(
         self,
@@ -80,11 +96,21 @@ class RollbackManager:
     def rollback(self, recommendation: Recommendation, reason: str) -> RollbackEntry:
         """Execute a rollback for a recommendation and log the entry.
 
-        If the recommendation targets an agent prompt, restores the latest
-        backup via VCS.  For other categories (budget, routing, sequencing),
-        the rollback_spec is logged for the caller to act on.
+        For ``agent_prompt`` recommendations, the most recent VCS backup
+        of the target agent is restored to the agent's definition file.
+        For other categories (budget, routing, sequencing), only the
+        rollback audit entry is logged -- the ``rollback_spec`` on the
+        recommendation provides the caller with the information needed to
+        reverse the change in the relevant subsystem.
 
-        Returns the created RollbackEntry.
+        Args:
+            recommendation: The recommendation whose application is being
+                reverted.
+            reason: Human-readable reason for the rollback (e.g.
+                ``"Experiment exp-abc123 degraded"``).
+
+        Returns:
+            The created :class:`RollbackEntry` with the rollback timestamp.
         """
         entry = RollbackEntry(
             rec_id=recommendation.rec_id,
@@ -109,9 +135,15 @@ class RollbackManager:
     # ------------------------------------------------------------------
 
     def circuit_breaker_tripped(self) -> bool:
-        """Return ``True`` if 3+ rollbacks occurred in the last 7 days.
+        """Return ``True`` if the circuit breaker is tripped.
 
-        This indicates systemic issues and auto-apply should be paused.
+        The breaker trips when 3 or more rollbacks have occurred within the
+        last 7 days.  This indicates systemic issues -- the improvement
+        loop is repeatedly applying changes that degrade performance.
+        Auto-apply should be paused until a human investigates.
+
+        Returns:
+            ``True`` if the circuit breaker threshold has been reached.
         """
         recent = self.recent_rollbacks(days=_CIRCUIT_BREAKER_WINDOW_DAYS)
         return len(recent) >= _CIRCUIT_BREAKER_COUNT

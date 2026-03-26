@@ -7,7 +7,22 @@ from datetime import datetime, timezone
 
 @dataclass
 class Escalation:
-    """A question from an agent that needs user input."""
+    """A question from an agent that requires human input before proceeding.
+
+    Escalations are created when an agent encounters ambiguity it cannot
+    resolve autonomously.  They are persisted to ``escalations.json`` and
+    surfaced via ``baton status`` or the PMO dashboard.
+
+    Attributes:
+        agent_name: The agent that raised the escalation.
+        question: The specific question needing a human answer.
+        context: Background information to help the human decide.
+        options: Suggested answer choices, if applicable.
+        priority: ``"blocking"`` halts execution; ``"normal"`` is advisory.
+        timestamp: ISO 8601 creation time (auto-populated if blank).
+        resolved: Whether the human has answered.
+        answer: The human's response, set when resolved.
+    """
 
     agent_name: str
     question: str

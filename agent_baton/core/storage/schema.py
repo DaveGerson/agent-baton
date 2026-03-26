@@ -1,12 +1,46 @@
-"""SQL DDL for Agent-Baton databases.
+"""SQL DDL definitions for all Agent Baton SQLite databases.
 
-PROJECT_SCHEMA_DDL — per-project baton.db
-PMO_SCHEMA_DDL — global pmo.db
-CENTRAL_SCHEMA_DDL — global ~/.baton/central.db (read-replica + PMO + external)
-MIGRATIONS — sequential migration scripts keyed by version
+This module is the single source of truth for the database schemas used
+throughout the storage subsystem.  Three distinct schemas are defined:
+
+``PROJECT_SCHEMA_DDL``
+    Per-project ``baton.db`` -- stores execution state, plans, step results,
+    events, usage, telemetry, retrospectives, traces, learned patterns,
+    budget recommendations, mission log entries, shared context, and the
+    codebase profile.  All tables use ``task_id`` as the primary key or
+    foreign key; no ``project_id`` column exists here.
+
+``PMO_SCHEMA_DDL``
+    Global ``~/.baton/pmo.db`` (legacy) -- projects, programs, signals,
+    archived cards, forge sessions, and PMO metrics.  Superseded by
+    ``central.db`` (see below) but still supported for backward
+    compatibility and standalone PMO use.
+
+``CENTRAL_SCHEMA_DDL``
+    Global ``~/.baton/central.db`` -- the cross-project read replica.
+    Contains:
+
+    * **Sync infrastructure** -- ``sync_watermarks`` and ``sync_history``
+      tables used by ``SyncEngine``.
+    * **PMO tables** -- identical schema to ``PMO_SCHEMA_DDL``, migrated
+      once from ``pmo.db`` by ``_maybe_migrate_pmo``.
+    * **External source tables** -- ``external_sources``, ``external_items``,
+      ``external_mappings`` for adapter integrations.
+    * **Synced project tables** -- mirrors of every project-level table
+      with an added ``project_id`` column.  Written exclusively by
+      ``SyncEngine.push``.
+    * **Analytics views** -- ``v_agent_reliability``,
+      ``v_cost_by_task_type``, ``v_recurring_knowledge_gaps``,
+      ``v_project_failure_rate``, and ``v_external_plan_mapping``.
+
+``MIGRATIONS``
+    A ``dict[int, str]`` mapping schema version numbers to incremental
+    ALTER TABLE / CREATE TABLE scripts.  ``ConnectionManager._run_migrations``
+    applies these sequentially when an existing database is behind the
+    current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -24,6 +58,12 @@ ALTER TABLE plan_steps ADD COLUMN knowledge_attachments TEXT NOT NULL DEFAULT '[
 
 ALTER TABLE executions ADD COLUMN pending_gaps         TEXT NOT NULL DEFAULT '[]';
 ALTER TABLE executions ADD COLUMN resolved_decisions   TEXT NOT NULL DEFAULT '[]';
+""",
+    3: """
+-- v3: add deviations column to step_results.
+-- Active data loss fix: StepResult.deviations was not persisted to SQLite.
+
+ALTER TABLE step_results ADD COLUMN deviations TEXT NOT NULL DEFAULT '[]';
 """,
 }
 
@@ -136,6 +176,7 @@ CREATE TABLE IF NOT EXISTS step_results (
     retries           INTEGER NOT NULL DEFAULT 0,
     error             TEXT NOT NULL DEFAULT '',
     completed_at      TEXT NOT NULL DEFAULT '',
+    deviations        TEXT NOT NULL DEFAULT '[]',
     PRIMARY KEY (task_id, step_id),
     FOREIGN KEY (task_id) REFERENCES executions(task_id) ON DELETE CASCADE
 );

@@ -11,7 +11,16 @@ from typing import Callable
 
 
 class SignalHandler:
-    """Installs signal handlers and exposes a shutdown event.
+    """Installs POSIX signal handlers and exposes an asyncio shutdown event.
+
+    Used by ``WorkerSupervisor`` to enable graceful daemon shutdown.  When
+    SIGTERM or SIGINT is received, the shutdown event is set, which allows
+    the worker loop to drain in-flight agents before exiting rather than
+    killing them abruptly.
+
+    The handler preserves and restores original signal handlers on
+    ``uninstall()``, making it safe to use in contexts where other code
+    also installs signal handlers.
 
     Usage::
 
@@ -19,6 +28,11 @@ class SignalHandler:
         handler.install()          # installs SIGTERM + SIGINT handlers
         await handler.wait()       # blocks until signal received
         handler.uninstall()        # restores original handlers
+
+    Attributes:
+        _shutdown: asyncio.Event set when a signal is received.
+        _original_handlers: Saved original handlers for restoration.
+        _installed: Guard against double-install.
     """
 
     def __init__(self) -> None:

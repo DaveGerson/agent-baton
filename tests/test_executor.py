@@ -17,6 +17,7 @@ from agent_baton.models.execution import (
     StepResult,
 )
 from agent_baton.core.engine.executor import ExecutionEngine
+from agent_baton.core.events.bus import EventBus
 
 
 # ---------------------------------------------------------------------------
@@ -450,6 +451,56 @@ class TestComplete:
         assert isinstance(result, str)
         assert "No active" in result
 
+    def test_complete_writes_context_profile_json(self, tmp_path: Path) -> None:
+        """complete() auto-invokes ContextProfiler and writes context-profile.json."""
+        from agent_baton.core.observe.trace import TraceRecorder
+        from agent_baton.models.trace import TraceEvent
+
+        engine = _engine(tmp_path)
+        engine.start(_plan(task_id="profile-task"))
+
+        # Inject a file_read trace event so the profiler has data to save.
+        tracer = TraceRecorder(team_context_root=tmp_path)
+        trace = tracer.start_trace("profile-task")
+        trace.events.append(TraceEvent(
+            timestamp="2026-03-24T10:00:00+00:00",
+            event_type="file_read",
+            agent_name="backend-engineer",
+            phase=1,
+            step=1,
+            details={"path": "src/main.py"},
+        ))
+        tracer.complete_trace(trace)
+
+        engine.record_step_result("1.1", "backend-engineer")
+        engine.next_action()
+        summary = engine.complete()
+
+        profile_path = tmp_path / "context-profiles" / "profile-task.json"
+        assert profile_path.exists(), "context-profile.json not written by complete()"
+        import json as _json
+        data = _json.loads(profile_path.read_text())
+        assert data["task_id"] == "profile-task"
+        assert "Context profile" in summary
+
+    def test_complete_context_profiling_is_nonfatal_on_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """complete() must not raise even if ContextProfiler explodes."""
+        from agent_baton.core.observe import context_profiler as cp_module
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("profiler exploded")
+
+        monkeypatch.setattr(cp_module.ContextProfiler, "profile_task", _boom)
+
+        engine = _engine(tmp_path)
+        engine.start(_plan(task_id="safe-task"))
+        engine.record_step_result("1.1", "backend-engineer")
+        engine.next_action()
+        summary = engine.complete()  # must not raise
+        assert isinstance(summary, str)
+
 
 # ---------------------------------------------------------------------------
 # status() — snapshot dict
@@ -582,6 +633,112 @@ class TestResume:
         action = resumed.resume()
         # 1.1 complete, so next should be 1.2
         assert action.step_id == "1.2"
+
+
+# ---------------------------------------------------------------------------
+# Resume: stale execution-state.json vs active-task-id.txt mismatch
+# ---------------------------------------------------------------------------
+
+class TestResumeStaleStateFix:
+    """Verify that resume() loads the correct task when execution-state.json
+    belongs to a different task than active-task-id.txt points to.
+
+    Scenario:
+        - Task A is started and its state is saved to execution-state.json.
+        - Task B is started (e.g. by an e2e test) and stored in baton.db
+          with active-task-id.txt updated to task-B.
+        - execution-state.json still contains task A's stale state on disk.
+        - ``baton execute resume`` must load task B from SQLite, not task A.
+    """
+
+    def test_resume_uses_sqlite_when_file_has_stale_task(self, tmp_path: Path) -> None:
+        """SQLite takes precedence over a stale execution-state.json.
+
+        After task-A finishes (its file state is written), task-B is created
+        in baton.db and made active.  A new engine created with task_id=task-B
+        must resume task-B from SQLite, ignoring the stale file for task-A.
+        """
+        from agent_baton.core.storage.sqlite_backend import SqliteStorage
+        from agent_baton.core.engine.persistence import StatePersistence
+
+        db = SqliteStorage(tmp_path / "baton.db")
+
+        # --- Set up task-A via a file-only engine ----------------------------
+        engine_a = ExecutionEngine(team_context_root=tmp_path, task_id="task-A")
+        plan_a = _plan(task_id="task-A")
+        engine_a.start(plan_a)
+        # task-A's execution-state.json is now on disk at the legacy flat path
+        # (no storage backend, so no SQLite row for task-A).
+        stale_legacy = tmp_path / "execution-state.json"
+        # Write a copy to the legacy flat file so it looks like the old-style
+        # stale artifact that would confuse a file-only fallback.
+        state_a_data = json.loads(
+            (tmp_path / "executions" / "task-A" / "execution-state.json").read_text()
+        )
+        stale_legacy.write_text(json.dumps(state_a_data), encoding="utf-8")
+
+        # --- Set up task-B via a SQLite-backed engine -------------------------
+        plan_b = _plan(task_id="task-B")
+        engine_b = ExecutionEngine(
+            team_context_root=tmp_path,
+            task_id="task-B",
+            storage=db,
+        )
+        engine_b.start(plan_b)
+        # Mark task-B as active in both backends.
+        db.set_active_task("task-B")
+        StatePersistence.get_active_task_id  # referenced for clarity
+        (tmp_path / "active-task-id.txt").write_text("task-B", encoding="utf-8")
+
+        # --- Resume using the active task (task-B) ---------------------------
+        # Simulate what the CLI does: read active-task-id.txt → task-B, then
+        # build an engine with that task_id and the SQLite storage backend.
+        active_id = StatePersistence.get_active_task_id(tmp_path)
+        assert active_id == "task-B"
+
+        resume_engine = ExecutionEngine(
+            team_context_root=tmp_path,
+            task_id=active_id,
+            storage=db,
+        )
+        action = resume_engine.resume()
+
+        # Must resume task-B, not task-A.
+        assert action.action_type == ActionType.DISPATCH, (
+            f"Expected DISPATCH but got {action.action_type}: {action.message!r}"
+        )
+        assert action.step_id == "1.1"
+
+    def test_resume_discards_stale_file_state_in_file_mode(self, tmp_path: Path) -> None:
+        """In file mode, resume() returns FAILED when the file's task_id does
+        not match the requested task_id (stale legacy flat file scenario).
+
+        This prevents silently resuming the wrong task when no SQLite backend
+        is available to reconstruct from.
+        """
+        from agent_baton.core.engine.persistence import StatePersistence
+
+        # Write a state file for task-A at the legacy flat-file location.
+        engine_a = ExecutionEngine(team_context_root=tmp_path, task_id="task-A")
+        engine_a.start(_plan(task_id="task-A"))
+
+        # Manually write task-A's state to the legacy flat file so it appears
+        # stale when a task-B engine tries to read it.
+        namespaced = tmp_path / "executions" / "task-A" / "execution-state.json"
+        legacy = tmp_path / "execution-state.json"
+        legacy.write_text(namespaced.read_text(encoding="utf-8"), encoding="utf-8")
+
+        # Mark task-B as active on disk (no SQLite, no namespaced file for task-B).
+        (tmp_path / "active-task-id.txt").write_text("task-B", encoding="utf-8")
+
+        # Engine for task-B in file mode: its namespaced file doesn't exist,
+        # and the legacy flat file has task-A state — must not resume task-A.
+        engine_b = ExecutionEngine(team_context_root=tmp_path, task_id="task-B")
+        action = engine_b.resume()
+
+        assert action.action_type == ActionType.FAILED, (
+            f"Expected FAILED for stale file state, got {action.action_type!r}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1763,3 +1920,188 @@ class TestEstimatedTokensInUsageRecords:
         records = UsageLogger(log_path=tmp_path / "usage-log.jsonl").read_all()
         total = sum(a.estimated_tokens for r in records for a in r.agents_used)
         assert total == 99_999, f"Expected explicit 99999 tokens, got {total}"
+
+
+# ---------------------------------------------------------------------------
+# Fix 1: Risk-based pre-flight approval (HIGH / CRITICAL plans)
+# ---------------------------------------------------------------------------
+
+class TestRiskBasedApproval:
+    """start() should return APPROVAL (not DISPATCH) for HIGH/CRITICAL plans
+    unless Phase 1 already carries an approval gate."""
+
+    @pytest.mark.parametrize("risk_level", ["HIGH", "CRITICAL"])
+    def test_high_risk_start_returns_approval(
+        self, tmp_path: Path, risk_level: str
+    ) -> None:
+        plan = _plan(risk_level=risk_level)
+        action = _engine(tmp_path).start(plan)
+        assert action.action_type == ActionType.APPROVAL, (
+            f"Expected APPROVAL for {risk_level} plan, got {action.action_type}"
+        )
+
+    def test_low_risk_start_returns_dispatch(self, tmp_path: Path) -> None:
+        action = _engine(tmp_path).start(_plan(risk_level="LOW"))
+        assert action.action_type == ActionType.DISPATCH
+
+    def test_medium_risk_start_returns_dispatch(self, tmp_path: Path) -> None:
+        action = _engine(tmp_path).start(_plan(risk_level="MEDIUM"))
+        assert action.action_type == ActionType.DISPATCH
+
+    def test_approval_context_mentions_risk_level(self, tmp_path: Path) -> None:
+        plan = _plan(risk_level="HIGH")
+        action = _engine(tmp_path).start(plan)
+        assert "HIGH" in action.approval_context
+
+    def test_approval_context_mentions_task_summary(self, tmp_path: Path) -> None:
+        plan = _plan(risk_level="HIGH", task_summary="Deploy to production")
+        action = _engine(tmp_path).start(plan)
+        assert "Deploy to production" in action.approval_context
+
+    def test_approval_options_include_approve(self, tmp_path: Path) -> None:
+        plan = _plan(risk_level="HIGH")
+        action = _engine(tmp_path).start(plan)
+        assert "approve" in action.approval_options
+
+    def test_state_status_is_approval_pending(self, tmp_path: Path) -> None:
+        engine = _engine(tmp_path)
+        engine.start(_plan(risk_level="CRITICAL"))
+        state = engine._load_state()
+        assert state.status == "approval_pending"
+
+    def test_after_approval_next_action_is_dispatch(self, tmp_path: Path) -> None:
+        """Approving the pre-flight checkpoint unblocks dispatch."""
+        plan = _plan(risk_level="HIGH")
+        engine = _engine(tmp_path)
+        action = engine.start(plan)
+        assert action.action_type == ActionType.APPROVAL
+
+        phase_id = action.phase_id
+        engine.record_approval_result(phase_id=phase_id, result="approve")
+        next_action = engine.next_action()
+        assert next_action.action_type == ActionType.DISPATCH
+
+    def test_reject_approval_halts_execution(self, tmp_path: Path) -> None:
+        plan = _plan(risk_level="HIGH")
+        engine = _engine(tmp_path)
+        action = engine.start(plan)
+        engine.record_approval_result(phase_id=action.phase_id, result="reject")
+        next_action = engine.next_action()
+        assert next_action.action_type == ActionType.FAILED
+
+    def test_existing_approval_gate_not_duplicated(self, tmp_path: Path) -> None:
+        """If Phase 1 already has approval_required, start() must not add another.
+
+        The planner-added approval gate fires after Phase 1 steps complete
+        (post-phase check), not before dispatching.  Our pre-flight check
+        should not inject a second approval before steps run.
+        """
+        phase = PlanPhase(
+            phase_id=1,
+            name="Implementation",
+            steps=[_step()],
+            approval_required=True,
+            approval_description="Custom reviewer note",
+        )
+        plan = MachinePlan(
+            task_id="dup-check",
+            task_summary="High risk task",
+            risk_level="HIGH",
+            phases=[phase],
+        )
+        engine = _engine(tmp_path)
+        action = engine.start(plan)
+        # Pre-flight is skipped — the engine dispatches the first step directly.
+        assert action.action_type == ActionType.DISPATCH
+        # After the step completes the post-phase approval fires with the
+        # original custom description intact.
+        engine.record_step_result("1.1", "backend-engineer")
+        post_action = engine.next_action()
+        assert post_action.action_type == ActionType.APPROVAL
+        assert "Custom reviewer note" in post_action.approval_context
+
+
+# ---------------------------------------------------------------------------
+# Fix 2: TaskViewSubscriber — materialized task-view.json
+# ---------------------------------------------------------------------------
+
+def _engine_with_bus(tmp_path: Path, task_id: str = "task-view-001") -> ExecutionEngine:
+    """Return an engine wired with a live EventBus."""
+    bus = EventBus()
+    return ExecutionEngine(team_context_root=tmp_path, bus=bus, task_id=task_id)
+
+
+class TestTaskViewSubscriber:
+    """EventBus subscriber writes task-view.json to the execution directory."""
+
+    def test_task_view_created_on_start(self, tmp_path: Path) -> None:
+        tid = "tview-001"
+        engine = _engine_with_bus(tmp_path, task_id=tid)
+        engine.start(_plan(task_id=tid))
+        view_path = tmp_path / "executions" / tid / "task-view.json"
+        assert view_path.exists(), "task-view.json should be created after start()"
+
+    def test_task_view_is_valid_json(self, tmp_path: Path) -> None:
+        tid = "tview-002"
+        engine = _engine_with_bus(tmp_path, task_id=tid)
+        engine.start(_plan(task_id=tid))
+        view_path = tmp_path / "executions" / tid / "task-view.json"
+        data = json.loads(view_path.read_text())
+        assert data["task_id"] == tid
+
+    def test_task_view_status_running_after_start(self, tmp_path: Path) -> None:
+        tid = "tview-003"
+        engine = _engine_with_bus(tmp_path, task_id=tid)
+        engine.start(_plan(task_id=tid))
+        view_path = tmp_path / "executions" / tid / "task-view.json"
+        data = json.loads(view_path.read_text())
+        assert data["status"] == "running"
+
+    def test_task_view_reflects_risk_level(self, tmp_path: Path) -> None:
+        tid = "tview-004"
+        engine = _engine_with_bus(tmp_path, task_id=tid)
+        plan = _plan(task_id=tid, risk_level="HIGH")
+        engine.start(plan)
+        # Approve the pre-flight so the view proceeds past approval_pending.
+        state = engine._load_state()
+        phase_id = state.plan.phases[0].phase_id
+        engine.record_approval_result(phase_id=phase_id, result="approve")
+        view_path = tmp_path / "executions" / tid / "task-view.json"
+        data = json.loads(view_path.read_text())
+        assert data["risk_level"] == "HIGH"
+
+    def test_task_view_total_steps_correct(self, tmp_path: Path) -> None:
+        tid = "tview-005"
+        engine = _engine_with_bus(tmp_path, task_id=tid)
+        plan = _plan(
+            task_id=tid,
+            phases=[_phase(steps=[_step("1.1"), _step("1.2")])],
+        )
+        engine.start(plan)
+        view_path = tmp_path / "executions" / tid / "task-view.json"
+        data = json.loads(view_path.read_text())
+        assert data["total_steps"] == 2
+
+    def test_task_view_updates_on_step_complete(self, tmp_path: Path) -> None:
+        """After a step.completed event, task-view.json should show steps_completed > 0."""
+        from agent_baton.core.events import events as evt
+
+        tid = "tview-006"
+        bus = EventBus()
+        engine = ExecutionEngine(team_context_root=tmp_path, bus=bus, task_id=tid)
+        engine.start(_plan(task_id=tid))
+        # Manually publish a step.completed event so the subscriber fires.
+        bus.publish(evt.step_completed(tid, "1.1", "backend-engineer", outcome="done"))
+        view_path = tmp_path / "executions" / tid / "task-view.json"
+        data = json.loads(view_path.read_text())
+        assert data["steps_completed"] == 1
+
+    def test_task_view_not_created_without_bus(self, tmp_path: Path) -> None:
+        """Without a bus, no task-view.json should be written."""
+        tid = "tview-007"
+        engine = _engine(tmp_path)  # no bus
+        engine.start(_plan(task_id=tid))
+        view_path = tmp_path / "executions" / tid / "task-view.json"
+        assert not view_path.exists(), (
+            "task-view.json must not be created when no EventBus is wired"
+        )

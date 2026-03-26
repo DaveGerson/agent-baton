@@ -110,6 +110,9 @@ class TestHandleListMultiple:
         with (
             patch(f"{_MOD}.StatePersistence", mock_cls),
             patch(f"{_MOD}.WorkerSupervisor.list_workers", return_value=workers or []),
+            # Force file-backend so that SQLite detection doesn't override the
+            # active_task_id supplied to this helper.
+            patch(f"{_MOD}.detect_backend", return_value="file"),
         ):
             import io
             from contextlib import redirect_stdout

@@ -6,7 +6,25 @@ from dataclasses import dataclass, field
 
 @dataclass
 class TraceEvent:
-    """A single timestamped event in a task trace DAG."""
+    """A single timestamped event in a task execution trace.
+
+    Trace events form a DAG that captures every significant action
+    during execution — agent dispatches, gate checks, file operations,
+    and decisions.  The ``baton trace`` command reads these to produce
+    a timeline view.
+
+    Attributes:
+        timestamp: ISO 8601 time when the event occurred.
+        event_type: Category of event — one of ``"agent_start"``,
+            ``"agent_complete"``, ``"gate_check"``, ``"gate_result"``,
+            ``"escalation"``, ``"replan"``, ``"file_read"``,
+            ``"file_write"``, or ``"decision"``.
+        agent_name: Agent involved, or ``None`` for system-level events.
+        phase: Phase index within the plan.
+        step: Step index within the phase.
+        details: Event-specific payload (e.g. file paths, gate output).
+        duration_seconds: Elapsed time for the event, if measurable.
+    """
 
     timestamp: str          # ISO 8601 format
     event_type: str         # "agent_start", "agent_complete", "gate_check",
@@ -44,7 +62,23 @@ class TraceEvent:
 
 @dataclass
 class TaskTrace:
-    """A complete structured trace for a single orchestrated task."""
+    """Complete execution trace for a single orchestrated task.
+
+    Contains a snapshot of the plan at execution start and an ordered
+    list of all ``TraceEvent`` instances emitted during execution.
+    Persisted as ``trace.json`` in the execution directory.
+
+    Attributes:
+        task_id: Execution identifier.
+        plan_snapshot: Serialized ``MachinePlan.to_dict()`` captured at
+            execution start, providing a frozen baseline for comparison.
+        events: Chronologically ordered trace events.
+        started_at: ISO 8601 timestamp of execution start.
+        completed_at: ISO 8601 timestamp of completion, or ``None``
+            if the execution is still running.
+        outcome: Final outcome string (e.g. ``"SHIP"``, ``"FAIL"``),
+            or ``None`` if not yet determined.
+    """
 
     task_id: str
     plan_snapshot: dict = field(default_factory=dict)

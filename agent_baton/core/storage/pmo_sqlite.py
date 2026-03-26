@@ -1,9 +1,28 @@
-"""SQLite-backed PMO store — replaces JSON file persistence.
+"""SQLite-backed PMO store -- replaces the legacy JSON file persistence.
 
-Backed by ~/.baton/pmo.db (or a caller-supplied path).
-Implements the same interface as PmoStore and extends it with
-list_projects, list_programs, add_program, get_signal, forge session
-management, and metrics recording.
+Backed by ``~/.baton/pmo.db`` (or a caller-supplied path, commonly
+``central.db`` via ``get_pmo_central_store``).  Implements the same
+interface as the file-based ``PmoStore`` and extends it with:
+
+* ``list_projects`` / ``list_programs`` / ``add_program`` -- program
+  management.
+* ``get_signal`` -- lookup by signal ID.
+* ``create_forge_session`` / ``complete_forge_session`` /
+  ``list_forge_sessions`` -- Smart Forge session lifecycle.
+* ``record_metric`` / ``read_metrics`` -- time-series PMO metrics.
+
+All public methods use parameterised queries; no string interpolation in
+SQL.  The schema is defined in ``schema.PMO_SCHEMA_DDL`` and applied
+automatically by ``ConnectionManager`` on first access.
+
+Database tables accessed:
+    ``projects`` -- registered project entries (PK: ``project_id``).
+    ``programs`` -- program names (PK: ``name``).
+    ``signals`` -- cross-project signals/alerts (PK: ``signal_id``).
+    ``archived_cards`` -- completed execution cards (PK: ``card_id``).
+    ``forge_sessions`` -- Smart Forge plan-creation sessions
+        (PK: ``session_id``).
+    ``pmo_metrics`` -- time-series metric data points (auto-increment PK).
 """
 from __future__ import annotations
 
@@ -23,8 +42,13 @@ def _utcnow() -> str:
 class PmoSqliteStore:
     """SQLite-backed PMO store replacing JSON file persistence.
 
-    Implements the same interface as PmoStore but backed by ~/.baton/pmo.db.
-    All public methods use parameterised queries; no string interpolation in SQL.
+    Implements the same interface as ``PmoStore`` but backed by an SQLite
+    database (``~/.baton/pmo.db`` or ``central.db``).  Thread-safe via
+    ``ConnectionManager`` (one connection per thread, WAL mode).
+
+    Attributes:
+        _conn_mgr: The underlying ``ConnectionManager`` managing the
+            SQLite connection and schema initialization.
     """
 
     def __init__(self, db_path: Path) -> None:
@@ -50,7 +74,15 @@ class PmoSqliteStore:
     # ------------------------------------------------------------------
 
     def register_project(self, project: PmoProject) -> None:
-        """INSERT OR REPLACE into projects. Sets registered_at if absent."""
+        """Register (or update) a project in the ``projects`` table.
+
+        Uses ``INSERT OR REPLACE`` against the ``projects`` table keyed on
+        ``project_id``.  If ``project.registered_at`` is falsy, it is set
+        to the current UTC timestamp before insertion.
+
+        Args:
+            project: The project to register.  All fields are persisted.
+        """
         if not project.registered_at:
             project.registered_at = _utcnow()
         conn = self._conn()
@@ -75,7 +107,15 @@ class PmoSqliteStore:
         conn.commit()
 
     def unregister_project(self, project_id: str) -> bool:
-        """Delete a project by ID. Returns True if a row was removed."""
+        """Remove a project from the ``projects`` table.
+
+        Args:
+            project_id: Primary key of the project to remove.
+
+        Returns:
+            ``True`` if a row was deleted, ``False`` if no matching row
+            existed.
+        """
         conn = self._conn()
         cur = conn.execute(
             "DELETE FROM projects WHERE project_id = ?", (project_id,)
@@ -84,7 +124,14 @@ class PmoSqliteStore:
         return cur.rowcount > 0
 
     def get_project(self, project_id: str) -> PmoProject | None:
-        """Return a single project by ID, or None."""
+        """Fetch a single project from the ``projects`` table by primary key.
+
+        Args:
+            project_id: The project identifier to look up.
+
+        Returns:
+            A ``PmoProject`` instance if found, otherwise ``None``.
+        """
         row = self._conn().execute(
             "SELECT * FROM projects WHERE project_id = ?", (project_id,)
         ).fetchone()
@@ -121,7 +168,15 @@ class PmoSqliteStore:
     # ------------------------------------------------------------------
 
     def add_signal(self, signal: PmoSignal) -> None:
-        """Insert a new signal. Sets created_at if absent."""
+        """Insert or replace a signal in the ``signals`` table.
+
+        If ``signal.created_at`` is falsy, it is set to the current UTC
+        timestamp before insertion.  Uses ``INSERT OR REPLACE`` so
+        re-submitting the same ``signal_id`` updates the existing row.
+
+        Args:
+            signal: The signal to persist.
+        """
         if not signal.created_at:
             signal.created_at = _utcnow()
         conn = self._conn()
@@ -149,7 +204,18 @@ class PmoSqliteStore:
         conn.commit()
 
     def resolve_signal(self, signal_id: str) -> bool:
-        """Mark a signal as resolved. Returns True if the signal existed."""
+        """Mark a signal as resolved in the ``signals`` table.
+
+        Sets ``status = 'resolved'`` and ``resolved_at`` to the current
+        UTC timestamp.
+
+        Args:
+            signal_id: Primary key of the signal to resolve.
+
+        Returns:
+            ``True`` if a row was updated, ``False`` if the signal was
+            not found.
+        """
         conn = self._conn()
         cur = conn.execute(
             """
@@ -176,12 +242,54 @@ class PmoSqliteStore:
         ).fetchone()
         return _row_to_signal(row) if row else None
 
+    def resolve_signals(self, signal_ids: list[str]) -> tuple[list[str], list[str]]:
+        """Resolve multiple signals in a single transaction.
+
+        Issues one ``UPDATE`` per signal ID within a single connection
+        transaction, collecting which IDs were found vs. not found.
+
+        Args:
+            signal_ids: List of signal IDs to resolve.
+
+        Returns:
+            A ``(resolved, not_found)`` tuple where ``resolved`` contains
+            the IDs that were successfully updated and ``not_found``
+            contains IDs that matched no row.
+        """
+        conn = self._conn()
+        now = _utcnow()
+        resolved: list[str] = []
+        not_found: list[str] = []
+        for sid in signal_ids:
+            cur = conn.execute(
+                """
+                UPDATE signals
+                   SET status = 'resolved', resolved_at = ?
+                 WHERE signal_id = ?
+                """,
+                (now, sid),
+            )
+            if cur.rowcount > 0:
+                resolved.append(sid)
+            else:
+                not_found.append(sid)
+        conn.commit()
+        return resolved, not_found
+
     # ------------------------------------------------------------------
     # Archive
     # ------------------------------------------------------------------
 
     def archive_card(self, card: PmoCard) -> None:
-        """Insert a completed card into the archived_cards table."""
+        """Persist a completed execution card in the ``archived_cards`` table.
+
+        Uses ``INSERT OR REPLACE`` keyed on ``card_id``.  The ``agents``
+        list is JSON-serialised before storage.  Archived cards appear on
+        the PMO dashboard as "deployed" column items.
+
+        Args:
+            card: The card to archive.
+        """
         conn = self._conn()
         conn.execute(
             """
@@ -214,7 +322,20 @@ class PmoSqliteStore:
         conn.commit()
 
     def read_archive(self, limit: int = 100) -> list[PmoCard]:
-        """Return the most-recent *limit* archived cards (by rowid insertion order)."""
+        """Return the most-recent *limit* archived cards.
+
+        Queries the ``archived_cards`` table ordered by ``rowid``
+        descending (insertion order) and reverses the result so the
+        caller receives oldest-first within the window, matching the
+        original JSONL append-only behaviour.
+
+        Args:
+            limit: Maximum number of cards to return.
+
+        Returns:
+            List of ``PmoCard`` instances, oldest-first within the
+            requested window.
+        """
         rows = self._conn().execute(
             """
             SELECT * FROM archived_cards
@@ -233,7 +354,18 @@ class PmoSqliteStore:
     def create_forge_session(
         self, session_id: str, project_id: str, title: str
     ) -> None:
-        """Create a new forge session with status 'active'."""
+        """Create a new Smart Forge session in the ``forge_sessions`` table.
+
+        A forge session tracks the lifecycle of a consultative plan
+        creation flow.  It starts as ``'active'`` and transitions to
+        ``'completed'`` via ``complete_forge_session`` once the user
+        approves the generated plan.
+
+        Args:
+            session_id: Unique session identifier (typically a UUID).
+            project_id: The project this forge session belongs to.
+            title: Human-readable title describing the planned work.
+        """
         conn = self._conn()
         conn.execute(
             """
@@ -246,7 +378,16 @@ class PmoSqliteStore:
         conn.commit()
 
     def complete_forge_session(self, session_id: str, task_id: str) -> None:
-        """Mark a forge session as completed and record its resulting task_id."""
+        """Mark a forge session as completed and record the resulting plan.
+
+        Updates the ``forge_sessions`` row: sets ``status = 'completed'``,
+        records the ``task_id`` of the generated execution plan, and
+        timestamps ``completed_at``.
+
+        Args:
+            session_id: The session to complete.
+            task_id: The ``task_id`` of the plan produced by this session.
+        """
         conn = self._conn()
         conn.execute(
             """
@@ -259,7 +400,18 @@ class PmoSqliteStore:
         conn.commit()
 
     def list_forge_sessions(self, status: str | None = None) -> list[dict]:
-        """Return forge sessions as plain dicts, optionally filtered by status."""
+        """Return forge sessions as plain dicts, most recent first.
+
+        Queries the ``forge_sessions`` table ordered by ``created_at``
+        descending.
+
+        Args:
+            status: Optional filter (e.g. ``'active'`` or ``'completed'``).
+                If ``None``, all sessions are returned.
+
+        Returns:
+            List of dicts with keys matching the ``forge_sessions`` columns.
+        """
         if status is not None:
             rows = self._conn().execute(
                 "SELECT * FROM forge_sessions WHERE status = ? ORDER BY created_at DESC",
@@ -278,7 +430,17 @@ class PmoSqliteStore:
     def record_metric(
         self, program: str, metric_name: str, value: float
     ) -> None:
-        """Append a metric data-point."""
+        """Append a metric data-point to the ``pmo_metrics`` table.
+
+        Each call inserts a new row timestamped with the current UTC time.
+        Metrics are never updated in place -- the table acts as a
+        time-series append log for trend analysis.
+
+        Args:
+            program: Program code this metric belongs to (e.g. ``"RW"``).
+            metric_name: Name of the metric (e.g. ``"completion_rate"``).
+            value: Numeric metric value.
+        """
         conn = self._conn()
         conn.execute(
             """
@@ -292,7 +454,18 @@ class PmoSqliteStore:
     def read_metrics(
         self, metric_name: str, limit: int = 100
     ) -> list[dict]:
-        """Return the most-recent *limit* data-points for *metric_name*."""
+        """Return the most-recent data-points for a given metric.
+
+        Queries ``pmo_metrics`` filtered by ``metric_name``, ordered by
+        ``timestamp`` descending.
+
+        Args:
+            metric_name: The metric to query.
+            limit: Maximum number of data-points to return.
+
+        Returns:
+            List of dicts with keys matching the ``pmo_metrics`` columns.
+        """
         rows = self._conn().execute(
             """
             SELECT * FROM pmo_metrics
@@ -309,7 +482,15 @@ class PmoSqliteStore:
     # ------------------------------------------------------------------
 
     def load_config(self) -> PmoConfig:
-        """Build a PmoConfig from DB tables for backward compatibility."""
+        """Build a ``PmoConfig`` from DB tables for backward compatibility.
+
+        Reads ``projects``, ``programs``, and ``signals`` tables and
+        assembles them into the legacy in-memory ``PmoConfig`` structure.
+        Used by callers that expect the JSON-based ``PmoStore`` interface.
+
+        Returns:
+            A ``PmoConfig`` populated from all database rows.
+        """
         return PmoConfig(
             projects=self.list_projects(),
             programs=self.list_programs(),
@@ -320,9 +501,15 @@ class PmoSqliteStore:
         )
 
     def save_config(self, config: PmoConfig) -> None:
-        """Write a PmoConfig to DB tables for backward compatibility.
+        """Write a ``PmoConfig`` to DB tables for backward compatibility.
 
-        Projects and signals are upserted; programs are merged (no removals).
+        Iterates over ``config.projects``, ``config.programs``, and
+        ``config.signals``, upserting each into the corresponding table.
+        Programs use ``INSERT OR IGNORE`` so existing entries are never
+        removed -- this is a merge-only operation.
+
+        Args:
+            config: The configuration to persist.
         """
         for project in config.projects:
             self.register_project(project)
@@ -334,6 +521,11 @@ class PmoSqliteStore:
 
 # ------------------------------------------------------------------
 # Private row-to-model converters
+#
+# These functions map ``sqlite3.Row`` objects returned by queries
+# against the PMO tables into their corresponding data-model instances.
+# Null columns are coerced to empty strings to satisfy model field
+# defaults.
 # ------------------------------------------------------------------
 
 def _row_to_project(row) -> PmoProject:

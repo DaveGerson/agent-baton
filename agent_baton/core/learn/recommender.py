@@ -1,8 +1,35 @@
-"""Unified Recommender — runs all analysis engines and produces ranked
-Recommendation objects with confidence, risk, and auto_applicable flags.
+"""Unified Recommender -- the central recommendation aggregator.
 
-Categories: agent_prompt, budget_tier, routing, sequencing, gate_config, roster.
-Deduplicates by (category, target) and ranks by impact.
+The Recommender sits at the boundary between the learn and improve layers.
+It runs all analysis engines (budget tuner, pattern learner, performance
+scorer, prompt evolution engine) and produces a single, deduplicated,
+ranked list of :class:`~agent_baton.models.improvement.Recommendation`
+objects.
+
+Each recommendation carries:
+
+* **category** -- one of ``agent_prompt``, ``budget_tier``, ``routing``,
+  ``sequencing``, ``gate_config``, or ``roster``.
+* **confidence** -- numeric score (0.0 -- 1.0) reflecting statistical
+  certainty.
+* **risk** -- ``low``, ``medium``, or ``high``, governing whether the
+  recommendation can be auto-applied.
+* **auto_applicable** -- boolean flag enforcing guardrails (see below).
+
+Guardrail enforcement:
+
+* **Prompt changes**: NEVER auto-apply (always ``high`` risk, always
+  escalated to human review).
+* **Budget changes**: auto-apply only DOWNWARD (cheaper tier).
+* **Routing changes**: auto-apply only if confidence >= 0.9 and the change
+  is additive (subtractive changes like "reduce weight" are not auto-applied).
+* **Sequencing changes**: auto-apply only if confidence >= 0.8 AND
+  success_rate >= 0.9.
+* **All other categories**: only LOW-risk recommendations auto-apply.
+
+Deduplication is by ``(category, target)``; when duplicates exist the
+highest-confidence entry wins.  Final ranking is confidence descending,
+then risk ascending (low before high).
 """
 from __future__ import annotations
 
@@ -52,10 +79,24 @@ class Recommender:
     # ------------------------------------------------------------------
 
     def analyze(self) -> list[Recommendation]:
-        """Run all analysis engines and return a deduplicated, ranked list of
-        recommendations.
+        """Run all analysis engines and return a deduplicated, ranked list.
 
-        Order: highest confidence first, then by risk (low before high).
+        Executes four analysis pipelines in sequence:
+
+        1. **Budget recommendations** -- from :class:`BudgetTuner`.
+        2. **Prompt recommendations** -- from :class:`PromptEvolutionEngine`.
+        3. **Sequencing recommendations** -- from :class:`PatternLearner`.
+        4. **Scoring recommendations** -- from :class:`PerformanceScorer`
+           (flags agents with ``health="needs-improvement"``).
+
+        After collection, recommendations are deduplicated by
+        ``(category, target)`` (highest confidence wins) and sorted by
+        confidence descending, then risk ascending (low before high).
+
+        Returns:
+            Ranked list of :class:`Recommendation` objects ready for the
+            :class:`~agent_baton.core.improve.loop.ImprovementLoop` to
+            classify and apply.
         """
         recs: list[Recommendation] = []
 

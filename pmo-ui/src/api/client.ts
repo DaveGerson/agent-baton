@@ -68,6 +68,9 @@ export const api = {
   resolveSignal(id: string): Promise<PmoSignal> {
     return request(`/signals/${encodeURIComponent(id)}/resolve`, { method: 'POST' });
   },
+  batchResolveSignals(ids: string[]): Promise<{ resolved: string[]; count: number }> {
+    return request('/signals/batch/resolve', { method: 'POST', body: JSON.stringify({ ids }) });
+  },
   signalToForge(id: string, projectId: string): Promise<PlanResponse> {
     return request(`/signals/${encodeURIComponent(id)}/forge`, {
       method: 'POST',
@@ -83,7 +86,12 @@ export const api = {
     return request('/forge/regenerate', { method: 'POST', body: JSON.stringify(body) });
   },
 
-  // ADO search (placeholder)
+  // Cards
+  getCardDetail(cardId: string): Promise<{ card: PmoCard; plan: ForgePlanResponse | null }> {
+    return request(`/cards/${encodeURIComponent(cardId)}`);
+  },
+
+  // ADO search
   searchAdo(q: string): Promise<AdoSearchResponse> {
     return request(`/ado/search?q=${encodeURIComponent(q)}`);
   },

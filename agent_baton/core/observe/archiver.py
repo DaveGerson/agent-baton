@@ -1,8 +1,21 @@
 """Data archival and cleanup for execution artifacts.
 
 Provides retention-based cleanup for traces, events, retrospectives,
-telemetry, and completed execution states. Keeps the team-context
+telemetry, and completed execution states.  Keeps the team-context
 directory manageable as task volume grows.
+
+The archiver operates on all data produced by the observe layer:
+
+* Execution state directories (``executions/``)
+* Trace JSON files (``traces/``)
+* Event JSONL streams (``events/``)
+* Retrospective Markdown + JSON sidecars (``retrospectives/``)
+* Context profile JSON files (``context-profiles/``)
+* JSONL rotation for ``telemetry.jsonl`` (keeps last 10,000 lines)
+
+Files older than the configured retention period (default 90 days) are
+eligible for cleanup.  The archiver supports both dry-run scanning and
+destructive cleanup.
 """
 from __future__ import annotations
 
@@ -26,10 +39,21 @@ class DataArchiver:
         self._root = context_root
 
     def scan(self, retention_days: int = 90) -> dict[str, list[Path]]:
-        """Scan for files older than retention_days.
+        """Scan for files older than *retention_days*.
 
-        Returns a dict mapping category → list of paths eligible for cleanup.
-        Does NOT modify anything — read-only scan.
+        Examines five artifact categories (executions, traces, events,
+        retrospectives, context_profiles) and identifies files whose
+        modification time is older than the retention cutoff.  For
+        execution directories, the newest file inside the directory is
+        used as the age reference.
+
+        Args:
+            retention_days: Number of days to retain.  Files older than
+                this are eligible for cleanup.
+
+        Returns:
+            Dict mapping category name to list of paths eligible for
+            cleanup.  Does NOT modify anything -- read-only scan.
         """
         cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
         cutoff_ts = cutoff.timestamp()

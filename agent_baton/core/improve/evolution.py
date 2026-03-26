@@ -1,6 +1,52 @@
-"""Prompt evolution engine — data-driven agent prompt improvement proposals.
+"""Prompt evolution engine -- data-driven agent prompt improvement proposals.
 
-**Status: Experimental** — built and tested but not yet validated with real usage data.
+The evolution engine is the most impactful -- and most carefully guarded --
+component of the improvement layer.  It analyses agent scorecards to
+identify underperformers and generates specific, actionable prompt
+modification proposals.
+
+Evolution strategy:
+
+Proposals are generated based on a cascade of quantitative and qualitative
+signals, each contributing specific suggestions:
+
+1. **First-pass rate < 0.5** (``"needs-improvement"`` health):
+
+   - "Add more specific instructions for common failure modes"
+   - "Include negative examples (what NOT to do)"
+
+2. **First-pass rate 0.5 -- 0.8** (``"adequate"`` health):
+
+   - "Review retry patterns in retrospectives for recurring issues"
+
+3. **Retry rate > 1.0**:
+
+   - "Tighten acceptance criteria in the agent's output format section"
+
+4. **Gate pass rate < 0.7**:
+
+   - "Add quality checklist to the agent's prompt"
+
+5. **Negative retrospective mentions**:
+
+   - "Read retrospective 'What Didn't Work' entries and address failures"
+
+6. **Knowledge gaps cited**:
+
+   - "Create or update knowledge pack to fill cited gaps"
+   - "Add 'Before Starting' section pointing to relevant knowledge packs"
+
+Safety guardrails:
+
+* Prompt changes are ALWAYS classified as ``risk="high"`` and
+  ``auto_applicable=False`` in the recommendation pipeline.  They are never
+  auto-applied -- always escalated to human review.
+* :class:`~agent_baton.core.improve.vcs.AgentVersionControl` creates a
+  timestamped backup before any modification.
+* Rollback is automatic on detected degradation via the experiment system.
+
+**Status: Experimental** -- built and tested but not yet validated with
+real usage data.
 """
 from __future__ import annotations
 
@@ -16,7 +62,23 @@ from agent_baton.core.orchestration.registry import AgentRegistry
 
 @dataclass
 class EvolutionProposal:
-    """A proposed change to an agent's prompt."""
+    """A proposed change to an agent's prompt.
+
+    Proposals capture the evidence (scorecard, identified issues) and the
+    specific suggestions for how to modify the agent's definition file.
+    They are designed for human review -- the operator decides which
+    suggestions to implement.
+
+    Attributes:
+        agent_name: Name of the agent targeted for evolution.
+        scorecard: The agent's current :class:`AgentScorecard` providing
+            the quantitative basis for the proposal.
+        issues: Human-readable descriptions of identified problems.
+        suggestions: Specific, actionable prompt modifications.
+        priority: ``"high"`` if the agent's health is
+            ``"needs-improvement"``; ``"normal"`` otherwise.
+        timestamp: ISO 8601 timestamp of when the proposal was generated.
+    """
 
     agent_name: str
     scorecard: AgentScorecard
@@ -77,9 +139,24 @@ class PromptEvolutionEngine:
         self._proposals_dir = (proposals_dir or Path(".claude/team-context/evolution-proposals")).resolve()
 
     def analyze(self) -> list[EvolutionProposal]:
-        """Analyze all agents and generate proposals for those needing improvement.
+        """Analyse all agents and generate proposals for those needing improvement.
 
-        Returns proposals sorted by priority (high first).
+        Scores every agent via :class:`PerformanceScorer`, then applies the
+        signal cascade (see module docstring) to identify issues and generate
+        suggestions.  Only agents with at least one identified issue produce
+        a proposal.
+
+        Proposals are sorted by:
+
+        1. Priority descending (``"high"`` before ``"normal"``).
+        2. First-pass rate ascending (worst performers first).
+
+        This ordering ensures the most impactful improvements are reviewed
+        first.
+
+        Returns:
+            List of :class:`EvolutionProposal` objects, possibly empty if
+            all agents are performing well.
         """
         scorecards = self._scorer.score_all()
         proposals = []
@@ -150,7 +227,17 @@ class PromptEvolutionEngine:
     def propose_for_agent(self, agent_name: str) -> EvolutionProposal | None:
         """Generate an evolution proposal for a specific agent.
 
-        Returns None if the agent has no usage data or no issues.
+        Runs the full analysis pipeline and returns only the proposal
+        matching *agent_name*.  This is a convenience method for targeted
+        review; for batch analysis use :meth:`analyze`.
+
+        Args:
+            agent_name: Exact agent name to generate a proposal for.
+
+        Returns:
+            An :class:`EvolutionProposal` if the agent has identified
+            issues, or ``None`` if the agent has no usage data or is
+            performing well.
         """
         proposals = self.analyze()
         for p in proposals:
@@ -159,7 +246,17 @@ class PromptEvolutionEngine:
         return None
 
     def save_proposals(self, proposals: list[EvolutionProposal]) -> list[Path]:
-        """Write proposals to disk as markdown files."""
+        """Write proposals to disk as Markdown files.
+
+        Each proposal is saved to
+        ``<proposals_dir>/<agent_name>.md`` for human review.
+
+        Args:
+            proposals: The proposals to persist.
+
+        Returns:
+            List of absolute paths to the written files.
+        """
         self._proposals_dir.mkdir(parents=True, exist_ok=True)
         paths = []
         for proposal in proposals:
@@ -170,7 +267,16 @@ class PromptEvolutionEngine:
         return paths
 
     def generate_report(self) -> str:
-        """Generate a summary report of all evolution proposals."""
+        """Generate a summary Markdown report of all evolution proposals.
+
+        Groups proposals by priority (high / normal) and lists each
+        agent's identified issues.  The report is intended for the human
+        operator to review before deciding which suggestions to implement.
+
+        Returns:
+            A complete Markdown document.  Returns a positive message if
+            all agents are performing well and no proposals were generated.
+        """
         proposals = self.analyze()
         if not proposals:
             return "# Prompt Evolution Report\n\nAll agents are performing well. No changes proposed.\n"

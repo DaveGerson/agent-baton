@@ -1,6 +1,22 @@
-"""Incident Response — manage incident workflows with phased templates.
+"""Incident response management -- phased workflows driven by severity templates.
 
-**Status: Experimental** — built and tested but not yet validated with real usage data.
+Provides pre-built incident response templates for four severity levels:
+
+* **P1 (Critical)** -- all-hands response with triage, investigation, fix,
+  verification, and post-incident report phases. Involves orchestrator,
+  auditor, devops, and backend agents.
+* **P2 (Significant)** -- immediate investigation with investigation, fix,
+  verification, and report phases.
+* **P3 (Minor)** -- scheduled investigation with investigation, fix, and
+  verification phases.
+* **P4 (Cosmetic)** -- backlog fix with fix and verification phases.
+
+Each phase specifies which agents are involved and what gate check must
+pass before advancing. Incident documents are persisted as markdown files
+under ``.claude/team-context/incidents/``.
+
+**Status: Experimental** -- built and tested but not yet validated with real
+usage data.
 """
 from __future__ import annotations
 
@@ -11,7 +27,15 @@ from pathlib import Path
 
 @dataclass
 class IncidentPhase:
-    """A single phase in an incident response workflow."""
+    """A single phase in an incident response workflow.
+
+    Attributes:
+        name: Phase name (e.g. ``"Triage"``, ``"Investigate"``, ``"Fix"``).
+        description: What should happen during this phase.
+        agents: List of agent names that participate in this phase.
+        gate: Name of the gate check that must pass before the phase
+            is considered complete (e.g. ``"root_cause_identified"``).
+    """
 
     name: str
     description: str
@@ -21,7 +45,21 @@ class IncidentPhase:
 
 @dataclass
 class IncidentTemplate:
-    """Pre-built phased template for incident response."""
+    """Pre-built phased template for incident response.
+
+    Each template defines a sequence of phases appropriate for its
+    severity level. Templates are immutable once created and serve as
+    blueprints for ``IncidentManager.create_incident()``.
+
+    Attributes:
+        name: Human-readable template name (e.g. ``"Critical Production
+            Outage"``).
+        description: Explanation of when this template applies.
+        severity: Priority level: ``"P1"`` (critical) through ``"P4"``
+            (cosmetic/low-priority).
+        phases: Ordered list of ``IncidentPhase`` objects defining the
+            response workflow.
+    """
 
     name: str
     description: str
@@ -195,10 +233,12 @@ _TEMPLATES: dict[str, IncidentTemplate] = {
 # ---------------------------------------------------------------------------
 
 class IncidentManager:
-    """Manage incident response workflows.
+    """Manage incident response workflows using severity-based templates.
 
-    Incident documents are written to .claude/team-context/incidents/
-    (or a custom directory supplied at construction).
+    Creates, lists, and loads incident response documents. Each incident
+    is generated from a pre-built template matching its severity level
+    (P1--P4) and persisted as a markdown file under
+    ``.claude/team-context/incidents/`` (configurable).
     """
 
     _DEFAULT_INCIDENTS_DIR = Path(".claude/team-context/incidents")
@@ -227,7 +267,18 @@ class IncidentManager:
     ) -> Path:
         """Create an incident response document from the matching template.
 
-        Returns the path to the written markdown file.
+        Selects the template for the given severity, renders it as markdown
+        with the incident metadata, and writes the file to disk.
+
+        Args:
+            incident_id: Unique identifier for the incident (used in the
+                filename with unsafe characters replaced by hyphens).
+            severity: Priority level (``"P1"`` through ``"P4"``).
+                Unknown values default to the P2 template.
+            description: Human-readable description of the incident.
+
+        Returns:
+            Path to the written markdown file.
         """
         template = self.get_template(severity)
         self._dir.mkdir(parents=True, exist_ok=True)
@@ -249,13 +300,27 @@ class IncidentManager:
         return path
 
     def list_incidents(self) -> list[Path]:
-        """List all incident documents, sorted by name."""
+        """List all incident document file paths, sorted by name.
+
+        Returns:
+            A sorted list of ``Path`` objects pointing to ``*.md`` files
+            in the incidents directory. Returns an empty list if the
+            directory does not exist.
+        """
         if not self._dir.is_dir():
             return []
         return sorted(self._dir.glob("*.md"))
 
     def load_incident(self, incident_id: str) -> str | None:
-        """Read an incident document by ID. Returns markdown content or None."""
+        """Read an incident document by ID.
+
+        Args:
+            incident_id: Identifier of the incident to load.
+
+        Returns:
+            The raw markdown content of the incident document, or ``None``
+            if no document exists for the given ID.
+        """
         safe_id = re.sub(r'[^a-zA-Z0-9_.-]', '-', incident_id)
         path = self._dir / f"{safe_id}.md"
         if path.exists():

@@ -29,7 +29,32 @@ EventHandler = Callable[[Event], None]
 
 
 class EventBus:
-    """In-process event bus with glob-style topic routing."""
+    """In-process event bus with glob-style topic routing.
+
+    The bus is the central nervous system of the execution runtime.
+    Components publish :class:`Event` objects with topic strings (e.g.
+    ``step.completed``, ``gate.required``) and subscribers register
+    handlers for ``fnmatch``-style topic patterns.
+
+    Design choices:
+        - **Synchronous dispatch** -- handlers run inline during
+          ``publish()``.  This keeps the execution deterministic and
+          easy to debug (no concurrency surprises).
+        - **In-memory history** -- the bus retains all published events
+          for replay queries.  The :class:`EventPersistence` layer handles
+          durable storage separately, typically wired as a subscriber.
+        - **Monotonic sequencing** -- each task gets an auto-incrementing
+          sequence counter.  When an event arrives with ``sequence == 0``,
+          the bus assigns the next number, ensuring a total order per task.
+
+    Attributes:
+        _subscriptions: Map from subscription ID to ``(pattern, handler)``
+            tuple.
+        _by_pattern: Reverse index from topic pattern to subscription IDs,
+            used internally for fast pattern-grouped operations.
+        _sequences: Per-task monotonic sequence counters.
+        _history: Ordered list of all published events (in-memory).
+    """
 
     def __init__(self) -> None:
         # subscription_id -> (pattern, handler)
@@ -46,8 +71,18 @@ class EventBus:
     def publish(self, event: Event) -> None:
         """Publish an event, invoking all matching subscribers synchronously.
 
-        If the event's ``sequence`` is 0, the bus auto-assigns the next
-        monotonic sequence number for the event's ``task_id``.
+        The event is appended to the in-memory history, and then every
+        subscriber whose topic pattern matches the event's topic is
+        called in registration order.  Handlers execute inline -- if a
+        handler raises, the exception propagates to the publisher.
+
+        If the event's ``sequence`` is 0 (the default from factory
+        functions), the bus auto-assigns the next monotonic sequence
+        number for the event's ``task_id``.
+
+        Args:
+            event: The event to publish.  Its ``sequence`` field may be
+                mutated if it was 0.
         """
         if event.sequence == 0:
             self._sequences[event.task_id] += 1
@@ -68,7 +103,20 @@ class EventBus:
     ) -> str:
         """Register a handler for events matching *topic_pattern*.
 
-        Returns a subscription ID that can be passed to :meth:`unsubscribe`.
+        The pattern uses ``fnmatch``-style globbing:
+            - ``"step.*"`` matches ``step.completed``, ``step.failed``, etc.
+            - ``"*"`` matches all topics.
+            - ``"gate.passed"`` matches only the exact topic.
+
+        Args:
+            topic_pattern: Glob pattern to match event topics against.
+            handler: Callable that receives the :class:`Event` when a
+                matching event is published.  Must not block for extended
+                periods since all handlers execute synchronously.
+
+        Returns:
+            A subscription ID (8-character hex string) that can be passed
+            to :meth:`unsubscribe` to remove this subscription.
         """
         sub_id = uuid.uuid4().hex[:8]
         self._subscriptions[sub_id] = (topic_pattern, handler)
@@ -94,7 +142,20 @@ class EventBus:
     ) -> list[Event]:
         """Return events for *task_id* with sequence >= *from_seq*.
 
-        Optionally filter by *topic_pattern* (glob).
+        Used by the execution engine to rebuild state after a crash or
+        to catch up a late-joining subscriber.  Events are returned in
+        publish order.
+
+        Args:
+            task_id: The task whose events to replay.
+            from_seq: Minimum sequence number (inclusive).  Use this to
+                replay only events newer than the last processed one.
+            topic_pattern: Optional glob pattern to filter by topic
+                (e.g. ``"step.*"``).  When ``None``, all topics are
+                included.
+
+        Returns:
+            List of matching events in publish order.
         """
         results: list[Event] = []
         for event in self._history:

@@ -631,6 +631,235 @@ class QueryEngine:
 
         return "\n".join(lines)
 
+    # ── Plans ──────────────────────────────────────────────────────────────
+
+    def plans_list(self, limit: int = 20, days: int | None = None) -> list[dict]:
+        """List plans with phase and step counts, sorted by created_at DESC.
+
+        Returns dicts with keys: task_id, summary, risk_level, phase_count,
+        step_count, created_at.
+
+        Args:
+            limit: Maximum number of rows to return.
+            days: When given, only include plans created within this many days.
+        """
+        days_clause = (
+            "WHERE p.created_at >= datetime('now', ? || ' days')" if days is not None else ""
+        )
+        params: tuple
+        if days is not None:
+            params = (f"-{days}", limit)
+        else:
+            params = (limit,)
+
+        sql = f"""
+        SELECT
+            p.task_id,
+            p.task_summary                       AS summary,
+            p.risk_level,
+            COUNT(DISTINCT pp.phase_id)          AS phase_count,
+            COUNT(DISTINCT ps.step_id)           AS step_count,
+            p.created_at
+        FROM plans p
+        LEFT JOIN plan_phases pp ON pp.task_id = p.task_id
+        LEFT JOIN plan_steps  ps ON ps.task_id = p.task_id
+        {days_clause}
+        GROUP BY p.task_id
+        ORDER BY p.created_at DESC
+        LIMIT ?
+        """
+        return self._fetchall(sql, params)
+
+    # ── Phase Status ────────────────────────────────────────────────────────
+
+    def phase_status(self, task_id: str) -> list[dict]:
+        """Phase-by-phase status for a specific task.
+
+        Returns one dict per phase with keys: phase_id, phase_name,
+        steps_completed, steps_total, gate_type, gate_passed, is_current.
+
+        Args:
+            task_id: The task to inspect.
+        """
+        exec_row = self._fetchone(
+            "SELECT current_phase, status FROM executions WHERE task_id = ?",
+            (task_id,),
+        )
+        if exec_row is None:
+            return []
+
+        current_phase = exec_row["current_phase"]
+
+        phases = self._fetchall(
+            """
+            SELECT phase_id, name AS phase_name, gate_type
+            FROM plan_phases
+            WHERE task_id = ?
+            ORDER BY phase_id
+            """,
+            (task_id,),
+        )
+
+        # Steps per phase: total
+        steps_total_rows = self._fetchall(
+            """
+            SELECT phase_id, COUNT(*) AS cnt
+            FROM plan_steps
+            WHERE task_id = ?
+            GROUP BY phase_id
+            """,
+            (task_id,),
+        )
+        steps_total_map = {r["phase_id"]: r["cnt"] for r in steps_total_rows}
+
+        # Steps per phase: completed (via step_results with status='complete')
+        steps_done_rows = self._fetchall(
+            """
+            SELECT ps.phase_id, COUNT(*) AS cnt
+            FROM plan_steps ps
+            JOIN step_results sr ON sr.task_id = ps.task_id
+                                 AND sr.step_id = ps.step_id
+                                 AND sr.status  = 'complete'
+            WHERE ps.task_id = ?
+            GROUP BY ps.phase_id
+            """,
+            (task_id,),
+        )
+        steps_done_map = {r["phase_id"]: r["cnt"] for r in steps_done_rows}
+
+        # Gate results per phase
+        gate_rows = self._fetchall(
+            """
+            SELECT phase_id, passed
+            FROM gate_results
+            WHERE task_id = ?
+            ORDER BY id DESC
+            """,
+            (task_id,),
+        )
+        # Most-recent gate result per phase
+        gate_map: dict[int, int | None] = {}
+        for gr in gate_rows:
+            pid = gr["phase_id"]
+            if pid not in gate_map:
+                gate_map[pid] = gr["passed"]
+
+        result: list[dict] = []
+        for ph in phases:
+            pid = ph["phase_id"]
+            total = steps_total_map.get(pid, 0)
+            done = steps_done_map.get(pid, 0)
+            gate_passed_raw = gate_map.get(pid)
+            gate_passed: str
+            if gate_passed_raw is None:
+                gate_passed = "pending"
+            elif gate_passed_raw:
+                gate_passed = "passed"
+            else:
+                gate_passed = "failed"
+
+            result.append(
+                {
+                    "phase_id": pid,
+                    "phase_name": ph["phase_name"],
+                    "steps_completed": done,
+                    "steps_total": total,
+                    "gate_type": ph["gate_type"] or "",
+                    "gate_passed": gate_passed,
+                    "is_current": ">" if pid == current_phase else "",
+                }
+            )
+        return result
+
+    # ── Forge Sessions ─────────────────────────────────────────────────────
+
+    def forge_sessions(self, limit: int = 20) -> list[dict]:
+        """List forge sessions from the PMO store.
+
+        Returns dicts with keys: session_id, project_id, status, title,
+        created_at, completed_at.
+
+        Works against both per-project baton.db (if the ``forge_sessions``
+        table exists) and central.db.
+
+        Args:
+            limit: Maximum number of sessions to return.
+        """
+        sql = """
+        SELECT
+            session_id,
+            project_id,
+            status,
+            title,
+            created_at,
+            COALESCE(completed_at, '') AS completed_at
+        FROM forge_sessions
+        ORDER BY created_at DESC
+        LIMIT ?
+        """
+        try:
+            return self._fetchall(sql, (limit,))
+        except Exception:  # noqa: BLE001 — table may not exist in local DB
+            return []
+
+    # ── Stalled Executions ─────────────────────────────────────────────────
+
+    def stalled_executions(self, hours: int = 24) -> list[dict]:
+        """Find running executions that have not been updated recently.
+
+        Returns dicts with keys: task_id, status, current_phase,
+        started_at, updated_at, hours_stalled.
+
+        Args:
+            hours: Executions not updated within this many hours are considered
+                stalled (default: 24).
+        """
+        sql = """
+        SELECT
+            task_id,
+            status,
+            current_phase,
+            started_at,
+            updated_at,
+            ROUND(
+                (julianday('now') - julianday(updated_at)) * 24,
+                1
+            ) AS hours_stalled
+        FROM executions
+        WHERE
+            status = 'running'
+            AND updated_at < datetime('now', ? || ' hours')
+        ORDER BY hours_stalled DESC
+        """
+        return self._fetchall(sql, (f"-{hours}",))
+
+    # ── Portfolio ──────────────────────────────────────────────────────────
+
+    def portfolio(self) -> list[dict]:
+        """Cross-project portfolio summary.
+
+        Groups executions by project_id and status to give per-project
+        counts.  Works against central.db (where executions has a
+        ``project_id`` column); returns an empty list against a local
+        baton.db that lacks ``project_id``.
+
+        Returns dicts with keys: project_id, status, count.
+        """
+        # central.db executions has project_id; local baton.db does not
+        sql = """
+        SELECT
+            project_id,
+            status,
+            COUNT(*) AS count
+        FROM executions
+        GROUP BY project_id, status
+        ORDER BY project_id, status
+        """
+        try:
+            return self._fetchall(sql)
+        except Exception:  # noqa: BLE001 — project_id column absent in local db
+            return []
+
     # ── Ad-hoc ─────────────────────────────────────────────────────────────
 
     def raw_query(self, sql: str, params: tuple = ()) -> list[dict]:

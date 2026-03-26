@@ -27,18 +27,26 @@ async def register_webhook(
 ) -> WebhookResponse:
     """Register a new outbound webhook subscription.
 
+    POST /api/v1/webhooks
+
     The webhook will receive a POST request for every event whose topic
     matches one of the supplied ``events`` patterns.  Patterns are
     glob-style (e.g. ``step.*`` matches ``step.completed`` and
     ``step.failed``).
 
     When a ``secret`` is supplied, every delivery will include an
-    ``X-Baton-Signature`` header carrying the HMAC-SHA256 hex digest of the
-    request body, computed with the secret as key.  Receivers can use this
-    to verify payload authenticity.
+    ``X-Baton-Signature`` header carrying the HMAC-SHA256 hex digest of
+    the request body, computed with the secret as key.  Receivers can
+    use this to verify payload authenticity.
+
+    Args:
+        body: Validated request body with ``url``, ``events`` list,
+            and optional ``secret``.
+        registry: Injected ``WebhookRegistry`` singleton.
 
     Returns:
-        The registered webhook with its auto-assigned ``webhook_id``.
+        A ``WebhookResponse`` with the auto-assigned ``webhook_id``
+        (201 Created).
     """
     entry = registry.register(
         url=body.url,
@@ -63,9 +71,17 @@ async def list_webhooks(
 ) -> list[WebhookResponse]:
     """Return all registered webhook subscriptions.
 
-    Includes both enabled and disabled webhooks.  Disabled webhooks are those
-    that have been automatically paused after exceeding the consecutive-failure
-    threshold.
+    GET /api/v1/webhooks
+
+    Includes both enabled and disabled webhooks.  Disabled webhooks are
+    those that have been automatically paused after exceeding the
+    consecutive-failure threshold (10 consecutive failures).
+
+    Args:
+        registry: Injected ``WebhookRegistry`` singleton.
+
+    Returns:
+        A list of ``WebhookResponse`` objects.
     """
     entries = registry.list_all()
     return [
@@ -90,11 +106,18 @@ async def delete_webhook(
 ) -> dict:
     """Remove a webhook subscription permanently.
 
-    Raises:
-        HTTPException 404: If no webhook with the given ``webhook_id`` exists.
+    DELETE /api/v1/webhooks/{webhook_id}
+
+    Args:
+        webhook_id: The webhook registration ID (URL path parameter).
+        registry: Injected ``WebhookRegistry`` singleton.
 
     Returns:
         ``{"deleted": true}``
+
+    Raises:
+        HTTPException 404: If no webhook with the given *webhook_id*
+            exists.
     """
     deleted = registry.delete(webhook_id)
     if not deleted:

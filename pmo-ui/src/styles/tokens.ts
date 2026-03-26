@@ -25,7 +25,6 @@ export type TokenKey = keyof typeof T;
 
 export const COLUMNS = [
   { id: 'queued' as const, label: 'Queued', color: T.text2, desc: 'Plan ready, awaiting execution slot' },
-  { id: 'planning' as const, label: 'Planning', color: T.cyan, desc: 'Claude decomposing scope into steps' },
   { id: 'executing' as const, label: 'Executing', color: T.yellow, desc: 'Baton steps actively running' },
   { id: 'awaiting_human' as const, label: 'Awaiting Human', color: T.orange, desc: 'Interactive step paused for input' },
   { id: 'validating' as const, label: 'Validating', color: T.purple, desc: 'Test suites, baseline comparison' },
@@ -47,3 +46,11 @@ export const PRIORITY_COLOR: Record<number, string> = {
   2: T.yellow,
   3: T.text2,
 };
+
+export const FONT_SIZES = {
+  xs: '9px',    // minimum — only for tertiary metadata
+  sm: '11px',   // scannable content floor
+  md: '12px',   // card titles, form labels
+  lg: '14px',   // section headers
+  xl: '16px',   // page titles
+} as const;

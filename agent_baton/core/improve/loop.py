@@ -1,11 +1,36 @@
-"""ImprovementLoop — the closed-loop orchestrator.
+"""ImprovementLoop -- the closed-loop orchestrator that drives improvement cycles.
 
-``run_cycle()`` checks triggers -> generates recommendations -> classifies
-(auto_applicable + low risk + high confidence = auto-apply; everything else
-= escalate) -> applies safe ones -> creates experiments -> escalates risky
-ones via DecisionManager -> returns ImprovementReport.
+This module is the top-level coordinator of the entire closed-loop learning
+pipeline.  A single call to :meth:`ImprovementLoop.run_cycle` performs the
+complete improvement cycle:
 
-Reports stored at ``.claude/team-context/improvements/reports/<id>.json``.
+1. **Trigger check** -- :class:`TriggerEvaluator` decides if enough new
+   data has accumulated since the last analysis.
+2. **Anomaly detection** -- scans for high failure rates, retry spikes,
+   gate failures, and budget overruns.
+3. **Recommendation generation** -- :class:`Recommender` runs all analysis
+   engines (budget tuner, pattern learner, scorer, evolution engine).
+4. **Classification** -- each recommendation is classified as auto-apply
+   or escalate based on guardrails (see :meth:`_should_auto_apply`).
+5. **Application** -- safe recommendations are applied and tracked via
+   :class:`ProposalManager`.
+6. **Experiment creation** -- each applied recommendation spawns an
+   :class:`~agent_baton.models.improvement.Experiment` to track impact.
+7. **Experiment evaluation** -- running experiments with enough samples are
+   evaluated; degraded experiments trigger automatic rollback.
+8. **Report persistence** -- the cycle produces an
+   :class:`~agent_baton.models.improvement.ImprovementReport` saved to
+   ``improvements/reports/<id>.json``.
+
+Safety mechanisms:
+
+* **Circuit breaker** -- 3+ rollbacks in 7 days pauses all auto-apply
+  (checked before the cycle runs).
+* **Manual pause** -- ``config.paused`` flag skips the cycle.
+* **Guardrails** -- prompt changes never auto-apply; budget upgrades never
+  auto-apply; routing reductions never auto-apply.
+
+Reports are stored at ``.claude/team-context/improvements/reports/<id>.json``.
 """
 from __future__ import annotations
 
@@ -33,12 +58,18 @@ _DEFAULT_DIR = Path(".claude/team-context/improvements")
 class ImprovementLoop:
     """Drive the closed-loop improvement cycle.
 
-    Wires together:
-    - TriggerEvaluator: decides when to run
-    - Recommender: produces recommendations
-    - ProposalManager: persists recommendations
-    - ExperimentManager: tracks experiments
-    - RollbackManager: handles rollbacks + circuit breaker
+    Wires together all subsystems of the improvement pipeline:
+
+    * :class:`TriggerEvaluator` -- decides when to run.
+    * :class:`Recommender` -- produces recommendations from all engines.
+    * :class:`ProposalManager` -- persists recommendation lifecycle.
+    * :class:`ExperimentManager` -- tracks applied recommendation impact.
+    * :class:`RollbackManager` -- handles rollbacks and circuit breaker.
+    * :class:`PerformanceScorer` -- provides current metric values for
+      experiment baselines.
+
+    The loop is typically invoked by the ``baton`` CLI or at the end of an
+    orchestrated task to continuously improve agent performance.
     """
 
     def __init__(
@@ -70,10 +101,25 @@ class ImprovementLoop:
     def run_cycle(self, force: bool = False) -> ImprovementReport:
         """Run a complete improvement cycle.
 
-        Args:
-            force: If ``True``, skip the trigger check and run anyway.
+        Executes the full pipeline: trigger check, anomaly detection,
+        recommendation generation, classification, application, experiment
+        creation, experiment evaluation, and report persistence.
 
-        Returns an ImprovementReport summarising the cycle.
+        The cycle short-circuits early if:
+
+        * The circuit breaker is tripped (3+ recent rollbacks).
+        * ``config.paused`` is ``True``.
+        * ``force=False`` and the trigger evaluator says not enough new
+          data exists.
+
+        Args:
+            force: If ``True``, skip the trigger check and run the analysis
+                regardless of how many new tasks have accumulated.
+
+        Returns:
+            An :class:`~agent_baton.models.improvement.ImprovementReport`
+            summarising what was detected, recommended, applied, escalated,
+            and experimented on.
         """
         report_id = f"report-{uuid.uuid4().hex[:8]}"
 
@@ -143,7 +189,15 @@ class ImprovementLoop:
     def evaluate_experiments(self) -> list[tuple[str, str]]:
         """Evaluate all running experiments and auto-rollback degraded ones.
 
-        Returns list of (experiment_id, result) tuples.
+        For each running experiment with sufficient samples (>= 5), the
+        experiment is evaluated against its baseline.  Degraded experiments
+        (> 5% metric drop) are automatically rolled back via
+        :class:`RollbackManager` without human approval.
+
+        Returns:
+            List of ``(experiment_id, result)`` tuples where result is one
+            of ``"improved"``, ``"degraded"``, ``"inconclusive"``, or
+            ``"insufficient_data"``.
         """
         return self._evaluate_running_experiments()
 
@@ -154,13 +208,22 @@ class ImprovementLoop:
     def _should_auto_apply(self, rec: Recommendation) -> bool:
         """Determine if a recommendation should be auto-applied.
 
-        Guardrails:
-        - Only LOW-risk recommendations auto-apply.
-        - Budget changes only auto-apply DOWNWARD.
-        - Prompt changes NEVER auto-apply.
-        - Routing changes auto-apply only if confidence >= 0.9 and additive.
-        - Sequencing changes auto-apply only if confidence >= 0.8 and success >= 0.9.
-        - Must meet the auto_apply_threshold from config.
+        Enforces a multi-layer guardrail system to prevent unsafe changes:
+
+        1. Prompt changes (``category="agent_prompt"``) NEVER auto-apply.
+        2. Must be marked ``auto_applicable=True`` by the
+           :class:`Recommender` (which enforces category-specific rules).
+        3. Must have ``risk="low"``.
+        4. Must meet the ``auto_apply_threshold`` confidence from config.
+
+        All other recommendations are escalated for human review.
+
+        Args:
+            rec: The recommendation to classify.
+
+        Returns:
+            ``True`` if all guardrail conditions are met and the
+            recommendation can be safely applied without human review.
         """
         # Prompt changes never auto-apply
         if rec.category == "agent_prompt":

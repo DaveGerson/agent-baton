@@ -25,15 +25,35 @@ async def list_agents(
 ) -> AgentListResponse:
     """List all available agents from the registry.
 
-    Supports optional filtering:
-    - ``category``: matches the AgentCategory enum value (case-insensitive).
-    - ``stack``: filters to agents whose flavor matches the given stack string.
+    GET /api/v1/agents
+
+    Supports optional filtering via query parameters:
+
+    - ``category``: matches the ``AgentCategory`` enum value
+      (case-insensitive).
+    - ``stack``: filters to agents whose flavor matches the given stack
+      string (substring match).
 
     DECISION: The ``stack`` filter is a simple substring match on
-    ``agent.flavor`` — it is intentionally lenient to avoid 404s when
-    the caller provides a partial stack name (e.g. "py" matching "python").
-    Strict equality would be more correct but less ergonomic for exploratory
-    API usage.
+    ``agent.flavor`` -- it is intentionally lenient to avoid 404s when
+    the caller provides a partial stack name (e.g. ``"py"`` matching
+    ``"python"``).  Strict equality would be more correct but less
+    ergonomic for exploratory API usage.
+
+    Args:
+        category: Optional query parameter to filter by agent category
+            (e.g. ``"Engineering"``, ``"Data"``).
+        stack: Optional query parameter to filter by flavor/stack
+            (e.g. ``"python"``, ``"react"``).
+        registry: Injected ``AgentRegistry`` singleton.
+
+    Returns:
+        An ``AgentListResponse`` containing the filtered agent list
+        and a count.
+
+    Raises:
+        HTTPException 400: If *category* is provided but does not match
+            any known ``AgentCategory`` value.
     """
     if category is not None:
         # Try to resolve the string to an AgentCategory enum value.
@@ -68,7 +88,26 @@ async def get_agent(
     name: str,
     registry: AgentRegistry = Depends(get_registry),
 ) -> AgentResponse:
-    """Return a single agent definition by name."""
+    """Return a single agent definition by name.
+
+    GET /api/v1/agents/{name}
+
+    The response omits the full ``instructions`` markdown body and
+    ``source_path`` to keep payloads compact.  Use the agent
+    definition files on disk for the full content.
+
+    Args:
+        name: Agent identifier (URL path parameter), e.g.
+            ``"backend-engineer--python"``.
+        registry: Injected ``AgentRegistry`` singleton.
+
+    Returns:
+        An ``AgentResponse`` with the agent's metadata.
+
+    Raises:
+        HTTPException 404: If no agent with the given *name* exists
+            in the registry.
+    """
     agent = registry.get(name)
     if agent is None:
         raise HTTPException(
@@ -83,7 +122,15 @@ async def get_agent(
 # ---------------------------------------------------------------------------
 
 def _resolve_category(value: str) -> AgentCategory | None:
-    """Case-insensitive lookup of AgentCategory by value string."""
+    """Case-insensitive lookup of ``AgentCategory`` by value string.
+
+    Args:
+        value: The category string to resolve (e.g. ``"engineering"``).
+
+    Returns:
+        The matching ``AgentCategory`` enum member, or ``None`` if no
+        match is found.
+    """
     value_lower = value.lower()
     for cat in AgentCategory:
         if cat.value.lower() == value_lower:

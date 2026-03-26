@@ -27,10 +27,23 @@ _ACTIVE_TASK_FILE = "active-task-id.txt"
 class StatePersistence:
     """Manages ExecutionState serialization to disk.
 
+    Provides atomic read/write of ``ExecutionState`` as JSON files,
+    supporting crash recovery.  Writes use a tmp-then-rename pattern
+    to guarantee that readers never see a partially-written state file.
+
     When *task_id* is provided, state is stored under
-    ``<context_root>/executions/<task_id>/execution-state.json``.
-    Otherwise, falls back to the legacy flat path
-    ``<context_root>/execution-state.json``.
+    ``<context_root>/executions/<task_id>/execution-state.json``,
+    enabling multiple concurrent executions.  Otherwise, falls back to
+    the legacy flat path ``<context_root>/execution-state.json``.
+
+    The class also manages the ``active-task-id.txt`` marker file that
+    lets the CLI identify the default execution when no explicit task ID
+    is provided.
+
+    Attributes:
+        _root: The team-context root directory.
+        _task_id: Optional task ID for namespaced storage.
+        _state_path: Resolved path to the execution-state.json file.
     """
 
     def __init__(

@@ -43,10 +43,24 @@ async def list_decisions(
 ) -> DecisionListResponse:
     """Return a list of decision requests.
 
-    - If ``status="pending"``, calls :meth:`DecisionManager.pending` directly.
-    - If any other ``status`` is supplied, filters the full list by that status.
+    GET /api/v1/decisions
+
+    - If ``status="pending"``, calls ``DecisionManager.pending()`` directly.
+    - If any other ``status`` is supplied, filters the full list by that
+      status string.
     - If ``task_id`` is supplied, filters the result set by task.
     - Both filters may be combined.
+
+    Args:
+        status: Optional query parameter to filter by decision status
+            (``"pending"``, ``"resolved"``, ``"expired"``).
+        task_id: Optional query parameter to filter decisions belonging
+            to a specific task.
+        decision_manager: Injected ``DecisionManager`` singleton.
+
+    Returns:
+        A ``DecisionListResponse`` with the matching decisions and a
+        count.
     """
     if status == "pending":
         items = decision_manager.pending()
@@ -72,13 +86,26 @@ async def get_decision(
 ) -> DecisionResponse:
     """Return a single decision request by ID.
 
-    Context files listed in the decision are read from disk and their contents
-    are embedded in the ``context_file_contents`` extra field so that remote
-    UIs do not need filesystem access.  Files that cannot be read (missing,
-    permissions) are silently omitted from the enrichment.
+    GET /api/v1/decisions/{request_id}
+
+    Context files listed in the decision are read from disk and their
+    contents are embedded in the ``context_file_contents`` field so
+    that remote UIs do not need filesystem access.  Files that cannot
+    be read (missing, permissions) are silently omitted from the
+    enrichment.
+
+    Args:
+        request_id: Unique decision request identifier (URL path
+            parameter).
+        decision_manager: Injected ``DecisionManager`` singleton.
+
+    Returns:
+        A ``DecisionResponse`` with the decision details and optional
+        inline context file contents.
 
     Raises:
-        HTTPException 404: If no decision with the given ``request_id`` exists.
+        HTTPException 404: If no decision with the given *request_id*
+            exists.
     """
     req = decision_manager.get(request_id)
     if req is None:
@@ -117,12 +144,29 @@ async def resolve_decision(
 ) -> ResolveResponse:
     """Resolve a pending decision request.
 
-    The resolution is persisted to disk and an event is published on the shared
-    ``EventBus`` so waiting workers can unblock.
+    POST /api/v1/decisions/{request_id}/resolve
+
+    The resolution is persisted to disk and a ``decision.resolved``
+    event is published on the shared ``EventBus`` so waiting workers
+    can unblock.
+
+    Args:
+        request_id: Unique decision request identifier (URL path
+            parameter).
+        body: Validated request body with the chosen option, optional
+            rationale, and optional resolved_by identity.
+        decision_manager: Injected ``DecisionManager`` singleton.
+
+    Returns:
+        A ``ResolveResponse`` confirming the resolution.
 
     Raises:
-        HTTPException 404: If no decision with the given ``request_id`` exists.
-        HTTPException 400: If the decision has already been resolved (or expired).
+        HTTPException 400: If the decision has already been resolved
+            or has expired.
+        HTTPException 404: If no decision with the given *request_id*
+            exists.
+        HTTPException 409: If a concurrent modification prevented the
+            resolution from being written.
     """
     existing = decision_manager.get(request_id)
     if existing is None:

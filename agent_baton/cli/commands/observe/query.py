@@ -20,6 +20,11 @@ cost-by-type            Token costs grouped by task type
 cost-by-agent           Token costs grouped by agent
 current                 What is running right now
 patterns                Learned patterns with confidence scores
+plans                   All plans with phase/step counts
+phase-status TASK_ID    Phase-by-phase status for a specific task
+forge-sessions          PMO forge sessions (use --central for central.db)
+stalled                 Running executions not updated recently (--hours N)
+portfolio               Cross-project status summary (use --central)
 
 Ad-hoc SQL
 ----------
@@ -73,12 +78,18 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
             "cost-by-agent",
             "current",
             "patterns",
+            "plans",
+            "phase-status",
+            "forge-sessions",
+            "stalled",
+            "portfolio",
         ],
         help=(
             "Predefined query to run.  "
             "One of: agent-reliability, agent-history, tasks, task-detail, "
             "knowledge-gaps, roster-recommendations, gate-stats, cost-by-type, "
-            "cost-by-agent, current, patterns"
+            "cost-by-agent, current, patterns, plans, phase-status, "
+            "forge-sessions, stalled, portfolio"
         ),
     )
 
@@ -135,6 +146,13 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         metavar="N",
         dest="min_frequency",
         help="Minimum occurrence frequency for knowledge-gaps (default: 1)",
+    )
+    p.add_argument(
+        "--hours",
+        type=int,
+        default=24,
+        metavar="N",
+        help="Staleness threshold in hours for the 'stalled' subcommand (default: 24)",
     )
     p.add_argument(
         "--db",
@@ -434,6 +452,97 @@ def _dispatch(args: argparse.Namespace, engine: Any) -> None:
         _render(rows, fmt, title="Learned Patterns")
         return
 
+    # ── plans ──────────────────────────────────────────────────────────────
+    if sub == "plans":
+        days_filter: int | None = getattr(args, "days", None)
+        data = engine.plans_list(limit=args.limit, days=days_filter)
+        if not data:
+            print("No plans found.")
+            return
+        rows = [
+            {
+                "task_id": r["task_id"],
+                "summary": (r["summary"] or "")[:50] + (
+                    "..." if len(r["summary"] or "") > 50 else ""
+                ),
+                "risk": r["risk_level"],
+                "phases": r["phase_count"],
+                "steps": r["step_count"],
+                "created_at": (r["created_at"] or "")[:19],
+            }
+            for r in data
+        ]
+        _render(rows, fmt, title="Plans")
+        return
+
+    # ── phase-status <task-id> ──────────────────────────────────────────────
+    if sub == "phase-status":
+        task_id = args.target
+        if not task_id:
+            _err("phase-status requires a task ID: baton query phase-status <task-id>")
+            return
+        data = engine.phase_status(task_id)
+        if not data:
+            print(f"No phase data found for task '{task_id}'.")
+            return
+        _render(data, fmt, title=f"Phase Status: {task_id}")
+        return
+
+    # ── forge-sessions ─────────────────────────────────────────────────────
+    if sub == "forge-sessions":
+        data = engine.forge_sessions(limit=args.limit)
+        if not data:
+            print("No forge sessions found.  Use --central to query central.db.")
+            return
+        rows = [
+            {
+                "session_id": r["session_id"],
+                "project_id": r["project_id"],
+                "status": r["status"],
+                "title": (r["title"] or "")[:50] + (
+                    "..." if len(r["title"] or "") > 50 else ""
+                ),
+                "created_at": (r["created_at"] or "")[:19],
+                "completed_at": (r["completed_at"] or "")[:19],
+            }
+            for r in data
+        ]
+        _render(rows, fmt, title="Forge Sessions")
+        return
+
+    # ── stalled ────────────────────────────────────────────────────────────
+    if sub == "stalled":
+        hours: int = getattr(args, "hours", 24)
+        data = engine.stalled_executions(hours=hours)
+        if not data:
+            print(f"No stalled executions found (threshold: >{hours}h without update).")
+            return
+        rows = [
+            {
+                "task_id": r["task_id"],
+                "status": r["status"],
+                "phase": r["current_phase"],
+                "started_at": (r["started_at"] or "")[:19],
+                "updated_at": (r["updated_at"] or "")[:19],
+                "hours_stalled": r["hours_stalled"],
+            }
+            for r in data
+        ]
+        _render(rows, fmt, title=f"Stalled Executions (>{hours}h)")
+        return
+
+    # ── portfolio ──────────────────────────────────────────────────────────
+    if sub == "portfolio":
+        data = engine.portfolio()
+        if not data:
+            print(
+                "No portfolio data found.  "
+                "Use --central to query central.db for cross-project data."
+            )
+            return
+        _render(data, fmt, title="Portfolio Summary")
+        return
+
     _print_help()
 
 
@@ -528,10 +637,20 @@ def _print_help() -> None:
         "  cost-by-agent                  Token costs by agent\n"
         "  current                        What is running right now\n"
         "  patterns                       Learned patterns\n"
+        "  plans                          All plans with phase/step counts\n"
+        "  phase-status <task-id>         Phase-by-phase status for a task\n"
+        "  forge-sessions                 PMO forge sessions (use --central)\n"
+        "  stalled                        Running executions not updated recently\n"
+        "  portfolio                      Cross-project summary (use --central)\n"
         "\n"
         "Ad-hoc SQL (read-only):\n"
         "  baton query --sql \"SELECT agent_name, COUNT(*) FROM step_results "
         "GROUP BY agent_name\"\n"
+        "\n"
+        "Filters:\n"
+        "  --limit N       Maximum rows returned (default: 20)\n"
+        "  --days N        Time window in days for time-bounded queries\n"
+        "  --hours N       Staleness threshold in hours for 'stalled' (default: 24)\n"
         "\n"
         "Database selection:\n"
         "  --db PATH       Explicit path to baton.db\n"

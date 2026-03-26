@@ -45,6 +45,9 @@ class ForgeSession:
             to avoid circular imports).
         _store: A ``PmoStore`` (or ``PmoSqliteStore``) used to look up
             projects and signals.
+        _session_started: ISO 8601 timestamp set on the first call to
+            ``create_plan()``.  ``None`` until the session becomes active.
+        _plans_created: Running count of plans created in this session.
     """
 
     def __init__(
@@ -54,6 +57,8 @@ class ForgeSession:
     ) -> None:
         self._planner = planner
         self._store = store
+        self._session_started: str | None = None
+        self._plans_created: int = 0
 
     def create_plan(
         self,
@@ -82,6 +87,11 @@ class ForgeSession:
         Returns:
             A ``MachinePlan`` ready for review, interview, and approval.
         """
+        from datetime import datetime, timezone
+
+        if self._session_started is None:
+            self._session_started = datetime.now(timezone.utc).isoformat()
+
         project = self._store.get_project(project_id)
         project_root = Path(project.path) if project else None
 
@@ -90,6 +100,7 @@ class ForgeSession:
             task_type=task_type,
             project_root=project_root,
         )
+        self._plans_created += 1
         return plan
 
     def save_plan(

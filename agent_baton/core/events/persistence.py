@@ -18,7 +18,27 @@ from agent_baton.models.events import Event
 
 
 class EventPersistence:
-    """Append-only JSONL event log per task."""
+    """Append-only JSONL event log per task.
+
+    Each task gets its own ``.jsonl`` file under the events directory
+    (default ``/.claude/team-context/events/``).  Events are serialised
+    as one JSON object per line and appended on write.
+
+    This class is independent of the :class:`EventBus` and can be used
+    in two modes:
+
+    1. **As a bus subscriber** -- wire ``self.append`` as a handler for
+       ``"*"`` to persistently log every event as it flows through the bus.
+    2. **Standalone** -- read events from disk for post-hoc analysis,
+       dashboard rendering, or crash recovery via :meth:`read`.
+
+    File naming:  task IDs are sanitised to filesystem-safe characters
+    (alphanumeric, underscore, hyphen, period) before being used as
+    filenames.
+
+    Attributes:
+        _dir: Resolved path to the events directory.
+    """
 
     _DEFAULT_DIR = Path(".claude/team-context/events")
 
@@ -34,8 +54,19 @@ class EventPersistence:
     def append(self, event: Event) -> Path:
         """Append *event* to the JSONL file for its task_id.
 
-        Creates the events directory and file if they don't exist.
-        Returns the path to the JSONL file.
+        The event is serialised to a single JSON line and appended to the
+        file.  The events directory and file are created lazily if they
+        do not exist.
+
+        This method is safe to use as an :class:`EventBus` handler
+        (matches the ``Callable[[Event], None]`` signature when the
+        return value is ignored).
+
+        Args:
+            event: The event to persist.
+
+        Returns:
+            Path to the JSONL file that was written to.
         """
         self._dir.mkdir(parents=True, exist_ok=True)
         path = self._task_log_path(event.task_id)
@@ -54,7 +85,21 @@ class EventPersistence:
     ) -> list[Event]:
         """Read events for *task_id* from disk.
 
-        Optionally filter by minimum sequence number and/or topic pattern.
+        Parses the JSONL file line by line, deserialising each line into
+        an :class:`Event`.  Malformed lines are silently skipped to
+        tolerate partial writes from crashes.
+
+        Args:
+            task_id: The task whose events to read.
+            from_seq: Minimum sequence number (inclusive).  Events with
+                lower sequence numbers are excluded.
+            topic_pattern: Optional ``fnmatch``-style glob to filter by
+                topic (e.g. ``"step.*"``).
+
+        Returns:
+            List of matching events in file order (which corresponds to
+            publication order).  Empty list if no log file exists for
+            the task.
         """
         path = self._task_log_path(task_id)
         if not path.exists():
@@ -116,5 +161,17 @@ class EventPersistence:
     # ── Internal ────────────────────────────────────────────────────────────
 
     def _task_log_path(self, task_id: str) -> Path:
+        """Build the filesystem path for a task's event log.
+
+        Sanitises the task ID by replacing non-alphanumeric characters
+        (except ``_``, ``.``, ``-``) with hyphens to produce a safe
+        filename.
+
+        Args:
+            task_id: Raw task identifier.
+
+        Returns:
+            Path to ``<events_dir>/<sanitised_task_id>.jsonl``.
+        """
         safe_id = re.sub(r"[^a-zA-Z0-9_.-]", "-", task_id)
         return self._dir / f"{safe_id}.jsonl"

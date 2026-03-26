@@ -19,7 +19,24 @@ def step_dispatched(
     model: str = "sonnet",
     sequence: int = 0,
 ) -> Event:
-    """An agent has been dispatched for a plan step."""
+    """Create an event indicating an agent has been dispatched for a plan step.
+
+    Published by the executor when it spawns a subagent via the Agent tool.
+    Consumed by :class:`EventPersistence` (for durable logging) and
+    projections (to update :class:`StepView` status to ``"dispatched"``).
+
+    Args:
+        task_id: The execution task identifier.
+        step_id: The plan step being worked on.
+        agent_name: Resolved agent name (may be flavored, e.g.
+            ``"backend-engineer--python"``).
+        model: The model used for the agent session.
+        sequence: Event sequence number.  Defaults to 0, which tells
+            the bus to auto-assign the next monotonic value.
+
+    Returns:
+        An :class:`Event` with topic ``"step.dispatched"``.
+    """
     return Event.create(
         topic="step.dispatched",
         task_id=task_id,
@@ -43,7 +60,26 @@ def step_completed(
     estimated_tokens: int = 0,
     sequence: int = 0,
 ) -> Event:
-    """An agent finished its step successfully."""
+    """Create an event indicating an agent finished its step successfully.
+
+    Published by the executor after ``baton execute record --status complete``.
+    Consumed by projections (updates :class:`StepView` to ``"completed"``),
+    persistence, the mission log writer, and the usage tracker.
+
+    Args:
+        task_id: The execution task identifier.
+        step_id: The plan step that was completed.
+        agent_name: The agent that performed the work.
+        outcome: Human-readable summary of what the agent accomplished.
+        files_changed: List of file paths modified by the agent.
+        commit_hash: Git commit hash for the agent's work, if committed.
+        duration_seconds: Wall-clock time the agent spent on the step.
+        estimated_tokens: Approximate token usage for the agent session.
+        sequence: Event sequence number (0 = auto-assign).
+
+    Returns:
+        An :class:`Event` with topic ``"step.completed"``.
+    """
     return Event.create(
         topic="step.completed",
         task_id=task_id,
@@ -68,7 +104,23 @@ def step_failed(
     duration_seconds: float = 0.0,
     sequence: int = 0,
 ) -> Event:
-    """An agent's step failed."""
+    """Create an event indicating an agent's step failed.
+
+    Published by the executor after ``baton execute record --status failed``.
+    Consumed by projections (updates :class:`StepView` to ``"failed"``)
+    and the retrospective system for failure analysis.
+
+    Args:
+        task_id: The execution task identifier.
+        step_id: The plan step that failed.
+        agent_name: The agent that attempted the work.
+        error: Description of the failure.
+        duration_seconds: Wall-clock time before the failure.
+        sequence: Event sequence number (0 = auto-assign).
+
+    Returns:
+        An :class:`Event` with topic ``"step.failed"``.
+    """
     return Event.create(
         topic="step.failed",
         task_id=task_id,
@@ -91,7 +143,23 @@ def gate_required(
     command: str = "",
     sequence: int = 0,
 ) -> Event:
-    """A QA gate needs to be run."""
+    """Create an event indicating a QA gate needs to be executed.
+
+    Published by the executor when a phase's gate check is due.  The
+    orchestrator reads this event to run the gate command (typically
+    ``pytest`` or a custom validation script) and then publishes either
+    ``gate.passed`` or ``gate.failed``.
+
+    Args:
+        task_id: The execution task identifier.
+        phase_id: Numeric ID of the phase requiring the gate.
+        gate_type: Type of gate (e.g. ``"test"``, ``"lint"``, ``"review"``).
+        command: Shell command to execute for the gate check.
+        sequence: Event sequence number (0 = auto-assign).
+
+    Returns:
+        An :class:`Event` with topic ``"gate.required"``.
+    """
     return Event.create(
         topic="gate.required",
         task_id=task_id,
@@ -111,7 +179,22 @@ def gate_passed(
     output: str = "",
     sequence: int = 0,
 ) -> Event:
-    """A QA gate passed."""
+    """Create an event indicating a QA gate passed successfully.
+
+    Published by the executor after ``baton execute gate --result pass``.
+    Consumed by projections (updates :class:`PhaseView` gate status and
+    increments ``TaskView.gates_passed``).
+
+    Args:
+        task_id: The execution task identifier.
+        phase_id: Numeric ID of the phase whose gate passed.
+        gate_type: Type of gate (e.g. ``"test"``).
+        output: Captured output from the gate command.
+        sequence: Event sequence number (0 = auto-assign).
+
+    Returns:
+        An :class:`Event` with topic ``"gate.passed"``.
+    """
     return Event.create(
         topic="gate.passed",
         task_id=task_id,
@@ -131,7 +214,24 @@ def gate_failed(
     output: str = "",
     sequence: int = 0,
 ) -> Event:
-    """A QA gate failed."""
+    """Create an event indicating a QA gate failed.
+
+    Published by the executor after ``baton execute gate --result fail``.
+    Consumed by projections (sets :class:`PhaseView` gate status to
+    ``"failed"`` and increments ``TaskView.gates_failed``).  The
+    orchestrator may decide to halt execution or re-dispatch agents
+    based on this event.
+
+    Args:
+        task_id: The execution task identifier.
+        phase_id: Numeric ID of the phase whose gate failed.
+        gate_type: Type of gate (e.g. ``"test"``).
+        output: Captured output from the gate command showing failures.
+        sequence: Event sequence number (0 = auto-assign).
+
+    Returns:
+        An :class:`Event` with topic ``"gate.failed"``.
+    """
     return Event.create(
         topic="gate.failed",
         task_id=task_id,
@@ -155,7 +255,31 @@ def human_decision_needed(
     context_files: list[str] | None = None,
     sequence: int = 0,
 ) -> Event:
-    """The execution needs a human decision to proceed."""
+    """Create an event indicating execution is blocked on a human decision.
+
+    Published by the executor when an APPROVAL action or a runtime
+    decision point is reached.  The orchestrator presents the decision
+    context to the user and waits for input before publishing
+    ``human.decision_resolved``.
+
+    Projections add the *request_id* to ``TaskView.pending_decisions``,
+    which is cleared when the corresponding resolved event arrives.
+
+    Args:
+        task_id: The execution task identifier.
+        request_id: Unique identifier for this decision request, used
+            to correlate with the resolution event.
+        decision_type: Category of decision (e.g. ``"approval"``,
+            ``"risk_escalation"``, ``"plan_amendment"``).
+        summary: Human-readable description of what needs to be decided.
+        options: List of available choices (e.g.
+            ``["approve", "reject", "approve-with-feedback"]``).
+        context_files: File paths relevant to the decision.
+        sequence: Event sequence number (0 = auto-assign).
+
+    Returns:
+        An :class:`Event` with topic ``"human.decision_needed"``.
+    """
     return Event.create(
         topic="human.decision_needed",
         task_id=task_id,
@@ -178,7 +302,24 @@ def human_decision_resolved(
     resolved_by: str = "human",
     sequence: int = 0,
 ) -> Event:
-    """A human decision has been resolved."""
+    """Create an event indicating a human decision has been resolved.
+
+    Published after the user responds to a decision request.  Projections
+    remove the *request_id* from ``TaskView.pending_decisions``, allowing
+    execution to continue.
+
+    Args:
+        task_id: The execution task identifier.
+        request_id: Matches the ``request_id`` from the corresponding
+            ``human.decision_needed`` event.
+        chosen_option: The option selected by the user.
+        rationale: Optional explanation for the decision.
+        resolved_by: Who resolved it (default ``"human"``).
+        sequence: Event sequence number (0 = auto-assign).
+
+    Returns:
+        An :class:`Event` with topic ``"human.decision_resolved"``.
+    """
     return Event.create(
         topic="human.decision_resolved",
         task_id=task_id,
@@ -201,7 +342,23 @@ def task_started(
     total_steps: int = 0,
     sequence: int = 0,
 ) -> Event:
-    """An execution task has started."""
+    """Create an event indicating an execution task has started.
+
+    Published by ``baton execute start``.  This is typically the first
+    event in a task's stream and initialises the :class:`TaskView` with
+    status ``"running"``, the risk level, and the expected step count.
+
+    Args:
+        task_id: The execution task identifier.
+        task_summary: Brief description of the task being executed.
+        risk_level: Risk classification (``"LOW"``, ``"MEDIUM"``,
+            ``"HIGH"``, ``"CRITICAL"``).
+        total_steps: Total number of steps in the execution plan.
+        sequence: Event sequence number (0 = auto-assign).
+
+    Returns:
+        An :class:`Event` with topic ``"task.started"``.
+    """
     return Event.create(
         topic="task.started",
         task_id=task_id,
@@ -221,7 +378,23 @@ def task_completed(
     elapsed_seconds: float = 0.0,
     sequence: int = 0,
 ) -> Event:
-    """An execution task completed successfully."""
+    """Create an event indicating an execution task completed successfully.
+
+    Published by ``baton execute complete``.  This is typically the last
+    event in a successful task's stream.  Projections set the
+    :class:`TaskView` status to ``"completed"`` and record the total
+    elapsed time.
+
+    Args:
+        task_id: The execution task identifier.
+        steps_completed: Number of steps that completed successfully.
+        gates_passed: Number of QA gates that passed.
+        elapsed_seconds: Total wall-clock time for the execution.
+        sequence: Event sequence number (0 = auto-assign).
+
+    Returns:
+        An :class:`Event` with topic ``"task.completed"``.
+    """
     return Event.create(
         topic="task.completed",
         task_id=task_id,
@@ -240,7 +413,22 @@ def task_failed(
     failed_step_id: str = "",
     sequence: int = 0,
 ) -> Event:
-    """An execution task failed."""
+    """Create an event indicating an execution task failed.
+
+    Published when the executor determines the task cannot continue
+    (e.g. a critical step failed, or a gate failed with no recovery
+    path).  Projections set the :class:`TaskView` status to ``"failed"``.
+
+    Args:
+        task_id: The execution task identifier.
+        reason: Human-readable explanation of the failure.
+        failed_step_id: The step that caused the task to fail, if
+            applicable.
+        sequence: Event sequence number (0 = auto-assign).
+
+    Returns:
+        An :class:`Event` with topic ``"task.failed"``.
+    """
     return Event.create(
         topic="task.failed",
         task_id=task_id,
@@ -261,7 +449,23 @@ def phase_started(
     step_count: int = 0,
     sequence: int = 0,
 ) -> Event:
-    """A plan phase has started."""
+    """Create an event indicating a plan phase has started.
+
+    Published by the executor when it begins processing a new phase.
+    Projections create or update a :class:`PhaseView` with status
+    ``"running"`` and track the current phase ID so subsequent step
+    events are placed in the correct phase.
+
+    Args:
+        task_id: The execution task identifier.
+        phase_id: Numeric ID of the phase (1-indexed, from the plan).
+        phase_name: Human-readable phase name.
+        step_count: Number of steps in this phase.
+        sequence: Event sequence number (0 = auto-assign).
+
+    Returns:
+        An :class:`Event` with topic ``"phase.started"``.
+    """
     return Event.create(
         topic="phase.started",
         task_id=task_id,
@@ -280,7 +484,21 @@ def phase_completed(
     phase_name: str = "",
     sequence: int = 0,
 ) -> Event:
-    """A plan phase completed."""
+    """Create an event indicating a plan phase completed.
+
+    Published after all steps in the phase are done and the phase's gate
+    (if any) has passed.  Projections set the :class:`PhaseView` status
+    to ``"completed"``.
+
+    Args:
+        task_id: The execution task identifier.
+        phase_id: Numeric ID of the completed phase.
+        phase_name: Human-readable phase name.
+        sequence: Event sequence number (0 = auto-assign).
+
+    Returns:
+        An :class:`Event` with topic ``"phase.completed"``.
+    """
     return Event.create(
         topic="phase.completed",
         task_id=task_id,
@@ -301,7 +519,22 @@ def approval_required(
     description: str = "",
     sequence: int = 0,
 ) -> Event:
-    """Execution paused for human approval."""
+    """Create an event indicating execution is paused for human approval.
+
+    Published when the executor encounters an APPROVAL action in the plan.
+    The orchestrator presents the approval context to the user and waits
+    for ``baton execute approve`` before proceeding.
+
+    Args:
+        task_id: The execution task identifier.
+        phase_id: The phase awaiting approval.
+        phase_name: Human-readable phase name.
+        description: Context for what is being approved.
+        sequence: Event sequence number (0 = auto-assign).
+
+    Returns:
+        An :class:`Event` with topic ``"approval.required"``.
+    """
     return Event.create(
         topic="approval.required",
         task_id=task_id,
@@ -321,7 +554,25 @@ def approval_resolved(
     feedback: str = "",
     sequence: int = 0,
 ) -> Event:
-    """Human approval decision recorded."""
+    """Create an event recording a human approval decision.
+
+    Published after ``baton execute approve``.  The *result* determines
+    how execution proceeds: ``"approve"`` continues normally,
+    ``"reject"`` halts the task, and ``"approve-with-feedback"`` inserts
+    a remediation phase before continuing.
+
+    Args:
+        task_id: The execution task identifier.
+        phase_id: The phase that was approved or rejected.
+        result: Decision outcome (``"approve"``, ``"reject"``, or
+            ``"approve-with-feedback"``).
+        feedback: Optional user feedback, typically used when the result
+            is ``"approve-with-feedback"`` to guide remediation.
+        sequence: Event sequence number (0 = auto-assign).
+
+    Returns:
+        An :class:`Event` with topic ``"approval.resolved"``.
+    """
     return Event.create(
         topic="approval.resolved",
         task_id=task_id,
@@ -345,7 +596,26 @@ def plan_amended(
     steps_added: list[str] | None = None,
     sequence: int = 0,
 ) -> Event:
-    """Plan was amended during execution."""
+    """Create an event indicating the execution plan was amended mid-flight.
+
+    Published after ``baton execute amend``.  Amendments allow the
+    orchestrator to add phases or steps to a running plan without
+    restarting the entire execution.  This event records the amendment
+    for traceability in the event stream.
+
+    Args:
+        task_id: The execution task identifier.
+        amendment_id: Unique identifier for this amendment.
+        description: Human-readable description of what was changed.
+        trigger: What caused the amendment (``"manual"``,
+            ``"gate_failure"``, ``"approval_feedback"``).
+        phases_added: IDs of newly added phases, if any.
+        steps_added: IDs of newly added steps, if any.
+        sequence: Event sequence number (0 = auto-assign).
+
+    Returns:
+        An :class:`Event` with topic ``"plan.amended"``.
+    """
     return Event.create(
         topic="plan.amended",
         task_id=task_id,
@@ -370,7 +640,24 @@ def team_member_completed(
     outcome: str = "",
     sequence: int = 0,
 ) -> Event:
-    """A team member finished their work."""
+    """Create an event indicating a team member finished their part of a step.
+
+    Published by ``baton execute team-record`` for team steps where
+    multiple agents collaborate on the same step.  Each member records
+    their completion individually; the step is considered complete only
+    when all members have reported.
+
+    Args:
+        task_id: The execution task identifier.
+        step_id: The team step being worked on.
+        member_id: Unique identifier for this team member within the step.
+        agent_name: The agent that performed the member's work.
+        outcome: Summary of what this member accomplished.
+        sequence: Event sequence number (0 = auto-assign).
+
+    Returns:
+        An :class:`Event` with topic ``"team.member_completed"``.
+    """
     return Event.create(
         topic="team.member_completed",
         task_id=task_id,

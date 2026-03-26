@@ -1,4 +1,18 @@
-"""DecisionManager — persists human decision requests to disk and publishes events."""
+"""DecisionManager -- persists human decision requests to disk and publishes events.
+
+During async/daemon execution, certain actions (gates, approvals) require
+human input that cannot be provided interactively.  The ``DecisionManager``
+bridges this gap by:
+
+1. Writing decision requests as JSON files + human-readable ``.md`` summaries.
+2. Publishing ``human_decision_needed`` events via the EventBus.
+3. Polling for resolution files written by ``baton decide --resolve``.
+4. Publishing ``human_decision_resolved`` events to unblock waiting workers.
+
+This file-based protocol enables out-of-band human interaction: the daemon
+writes a decision request, the operator reviews it, and resolves it from
+a separate CLI session.
+"""
 from __future__ import annotations
 
 import json
@@ -18,6 +32,11 @@ class DecisionManager:
 
     Each pending request also gets a companion human-readable ``.md`` file
     at the same path so operators can inspect it without JSON knowledge.
+
+    Attributes:
+        _dir: Absolute path to the decisions directory where request and
+            resolution JSON files are stored.
+        _bus: Optional EventBus for publishing decision-related domain events.
     """
 
     _DEFAULT_DIR = Path(".claude/team-context/decisions")

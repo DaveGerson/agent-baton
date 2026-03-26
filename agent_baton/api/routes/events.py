@@ -47,21 +47,33 @@ async def stream_events(
 ) -> EventSourceResponse:
     """Open a Server-Sent Events stream for *task_id*.
 
-    The stream begins with a replay of every event already stored in the bus
-    for the requested task.  After the replay is exhausted, newly published
-    events are forwarded in real time.  A ``keepalive`` comment is sent every
-    30 seconds when the task produces no activity, so that load balancers and
-    browser ``EventSource`` implementations do not close the connection.
+    GET /api/v1/events/{task_id}
+    Accept: text/event-stream
 
-    The subscription is cleaned up automatically when the client disconnects.
+    The stream begins with a replay of every event already stored in
+    the bus for the requested task.  After the replay is exhausted,
+    newly published events are forwarded in real time.  A ``keepalive``
+    comment is sent every 30 seconds when the task produces no
+    activity, so that load balancers and browser ``EventSource``
+    implementations do not close the connection.
+
+    The subscription is cleaned up automatically when the client
+    disconnects.
+
+    Requires ``sse-starlette`` as an optional dependency.  If not
+    installed, the route module is skipped during registration.
 
     Args:
-        task_id: The task whose event stream to subscribe to.
-        request: Injected by FastAPI; used to detect client disconnection.
-        bus: The shared :class:`~agent_baton.core.events.bus.EventBus` instance.
+        task_id: The task whose event stream to subscribe to (URL
+            path parameter).
+        request: Injected by FastAPI; used to detect client
+            disconnection via ``request.is_disconnected()``.
+        bus: The shared ``EventBus`` instance.
 
     Returns:
-        A streaming :class:`sse_starlette.sse.EventSourceResponse`.
+        A streaming ``EventSourceResponse`` yielding SSE frames with
+        ``event`` (topic), ``id`` (event_id), and ``data`` (JSON dict)
+        fields.
     """
 
     async def event_generator():

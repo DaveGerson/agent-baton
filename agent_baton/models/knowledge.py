@@ -1,4 +1,10 @@
-"""Data models for knowledge delivery during plan execution."""
+"""Data models for knowledge delivery during plan execution.
+
+The knowledge system resolves domain-specific documents and packs at
+plan time, attaches them to steps, and delivers them to agents as
+inline context or file references.  These models also capture knowledge
+gap signals emitted by agents when they encounter missing information.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -7,7 +13,26 @@ from pathlib import Path
 
 @dataclass
 class KnowledgeDocument:
-    """A single knowledge document within a pack."""
+    """A single knowledge document within a pack.
+
+    Documents are indexed at startup but their ``content`` is loaded
+    on demand when the planner attaches them to a step.  The
+    ``KnowledgeRegistry`` manages discovery and content loading.
+
+    Attributes:
+        name: Document identifier (unique within its pack).
+        description: Short summary used for relevance matching.
+        source_path: Filesystem path to the markdown source file.
+        content: Full document text, loaded on demand.
+        tags: Metadata tags for planner-side relevance matching.
+        grounding: Agent-facing context string prepended to the
+            document when delivered inline.
+        priority: Delivery priority — ``"high"`` documents are always
+            inlined; ``"low"`` may be omitted under budget pressure.
+        token_estimate: Approximate token count, computed by the
+            registry for budget accounting.
+    """
+
     name: str
     description: str
     source_path: Path | None = None
@@ -46,7 +71,25 @@ class KnowledgeDocument:
 
 @dataclass
 class KnowledgePack:
-    """A curated collection of related knowledge documents."""
+    """A curated collection of related knowledge documents.
+
+    Packs are defined by a ``pack.yaml`` manifest in the
+    ``.claude/knowledge/`` directory.  They group documents that share
+    a domain concern (e.g. "data-validation-rules") and can be
+    attached to agents via frontmatter or to plans via ``--knowledge-pack``.
+
+    Attributes:
+        name: Pack identifier (matches the directory name).
+        description: Summary used for relevance matching by the planner.
+        source_path: Filesystem path to the pack's directory.
+        tags: Metadata tags for discovery and matching.
+        target_agents: Agent names that should always receive this pack.
+        default_delivery: How documents are delivered by default —
+            ``"inline"`` embeds content in the prompt, ``"reference"``
+            provides a file path the agent can read.
+        documents: The documents contained in this pack.
+    """
+
     name: str
     description: str
     source_path: Path | None = None
@@ -82,7 +125,29 @@ class KnowledgePack:
 
 @dataclass
 class KnowledgeAttachment:
-    """A resolved knowledge item attached to a plan step."""
+    """A resolved knowledge item attached to a plan step.
+
+    Created by the knowledge resolver during planning.  Each attachment
+    specifies exactly which document to deliver to which step, how it
+    was selected, and how it should be delivered.
+
+    Attributes:
+        source: How this attachment was selected — ``"explicit"`` (user
+            CLI flag), ``"agent-declared"`` (agent frontmatter),
+            ``"planner-matched:tag"`` or ``"planner-matched:relevance"``
+            (auto-matched by planner), or ``"gap-suggested"`` (from a
+            previous knowledge gap).
+        pack_name: Owning pack name, or ``None`` for standalone documents.
+        document_name: Name of the knowledge document.
+        path: Absolute filesystem path to the document.
+        delivery: ``"inline"`` embeds content in the prompt;
+            ``"reference"`` provides the path for the agent to read.
+        retrieval: How to load the content — ``"file"`` for local
+            filesystem, ``"mcp-rag"`` for MCP-based retrieval.
+        grounding: Agent-facing context string prepended when delivered.
+        token_estimate: Approximate token cost of this attachment.
+    """
+
     source: str          # "explicit" | "agent-declared" | "planner-matched:tag"
                          # | "planner-matched:relevance" | "gap-suggested"
     pack_name: str | None    # None for standalone docs
@@ -121,7 +186,23 @@ class KnowledgeAttachment:
 
 @dataclass
 class KnowledgeGapSignal:
-    """Parsed from agent output when they self-interrupt for knowledge."""
+    """Structured signal emitted by an agent when it lacks critical knowledge.
+
+    Parsed from the agent's output when it self-interrupts using the
+    ``KNOWLEDGE_GAP`` protocol.  The engine may attempt auto-resolution
+    via the knowledge registry, or escalate to the user.
+
+    Attributes:
+        description: What information the agent needs.
+        confidence: Agent's confidence level in proceeding without it —
+            ``"none"``, ``"low"``, or ``"partial"``.
+        gap_type: Nature of the gap — ``"factual"`` (needs a fact) or
+            ``"contextual"`` (needs domain context).
+        step_id: The plan step where the gap was encountered.
+        agent_name: The agent that reported the gap.
+        partial_outcome: Work the agent completed before interrupting.
+    """
+
     description: str
     confidence: str      # none | low | partial
     gap_type: str        # factual | contextual
@@ -153,7 +234,24 @@ class KnowledgeGapSignal:
 
 @dataclass
 class KnowledgeGapRecord:
-    """Persisted in retrospective data for the feedback loop."""
+    """Persisted knowledge gap record for the retrospective feedback loop.
+
+    Created after a ``KnowledgeGapSignal`` is resolved (or left unresolved).
+    Stored in retrospectives and the central database so the improvement
+    system can identify recurring gaps and recommend new knowledge packs.
+
+    Attributes:
+        description: What information was missing.
+        gap_type: ``"factual"`` or ``"contextual"``.
+        resolution: How the gap was resolved — ``"auto-resolved"``,
+            ``"human-answered"``, ``"best-effort"``, or ``"unresolved"``.
+        resolution_detail: The pack/doc that resolved it, or the
+            human's answer text.
+        agent_name: The agent that encountered the gap.
+        task_summary: Summary of the task where the gap occurred.
+        task_type: Inferred task type, if available.
+    """
+
     description: str
     gap_type: str            # factual | contextual
     resolution: str          # auto-resolved | human-answered | best-effort | unresolved
@@ -205,7 +303,20 @@ class KnowledgeGapRecord:
 
 @dataclass
 class ResolvedDecision:
-    """A knowledge gap that has been answered — injected on re-dispatch as final."""
+    """A previously answered knowledge gap, injected on agent re-dispatch.
+
+    When an agent is re-dispatched after a knowledge gap is resolved,
+    the resolution is included in the prompt as a ``ResolvedDecision``
+    so the agent treats it as authoritative and does not re-ask.
+
+    Attributes:
+        gap_description: The original gap description from the signal.
+        resolution: The answer — either a human response or
+            ``"auto-resolved via {pack_name}"``.
+        step_id: Step being re-dispatched.
+        timestamp: ISO 8601 time the decision was recorded.
+    """
+
     gap_description: str
     resolution: str      # human answer or "auto-resolved via {pack_name}"
     step_id: str

@@ -1,15 +1,27 @@
-"""TaskWorker — async event loop that drives a single task's execution.
+"""TaskWorker -- async event loop that drives a single task's execution.
 
-The worker wraps the existing ExecutionEngine (which remains the source of
-truth for plan state) and adds async dispatch via StepScheduler.
+The worker wraps the synchronous ``ExecutionEngine`` (which remains the
+single source of truth for plan state) and adds async dispatch via
+``StepScheduler``.  It is the primary consumer of the ``ExecutionDriver``
+protocol.
 
 Responsibilities:
-1. Call engine.next_actions() to get all parallel-dispatchable work.
-2. Mark steps as dispatched via engine.mark_dispatched().
-3. Dispatch agents concurrently via StepScheduler.
-4. Record results back via engine.record_step_result().
-5. Auto-approve GATE actions (callers can override by subclassing).
-6. Publish events via EventBus.
+
+1. Call ``engine.next_actions()`` to get all parallel-dispatchable work.
+2. Mark steps as dispatched via ``engine.mark_dispatched()``.
+3. Dispatch agents concurrently via ``StepScheduler``.
+4. Record results back via ``engine.record_step_result()``.
+5. Handle GATE actions: auto-approve programmatic gates (test/build/lint);
+   route human-required gates through ``DecisionManager``.
+6. Handle APPROVAL actions: route through ``DecisionManager`` or auto-approve.
+7. Publish step-level domain events via ``EventBus`` (the engine handles
+   task-level and phase-level events).
+
+Event ownership split:
+    - **Engine** publishes: ``task.started``, ``task.completed``,
+      ``phase.started``, ``phase.completed``, ``gate.passed``, ``gate.failed``.
+    - **Worker** publishes: ``step.dispatched``, ``step.completed``,
+      ``step.failed``.
 """
 from __future__ import annotations
 
@@ -28,15 +40,16 @@ from agent_baton.models.execution import ActionType
 class TaskWorker:
     """Drives a single task's execution asynchronously.
 
-    Wraps the existing :class:`ExecutionEngine` — the engine remains the
-    source of truth for plan state.  The worker's job is to:
+    Wraps the synchronous ``ExecutionEngine`` -- the engine remains the
+    single source of truth for plan state.  The worker's job is to:
 
     1. Call ``engine.next_actions()`` to get parallel work.
-    2. Dispatch agents via :class:`StepScheduler`.
+    2. Dispatch agents via ``StepScheduler``.
     3. Record results back via ``engine.record_step_result()``.
-    4. Publish events via :class:`EventBus`.
+    4. Publish step-level events via ``EventBus``.
     5. Handle WAIT actions (sleep briefly then re-check).
-    6. Auto-approve GATE actions (override :meth:`_handle_gate` to customise).
+    6. Handle GATE/APPROVAL actions (auto-approve or route to
+       ``DecisionManager``).
 
     Typical usage::
 
@@ -44,6 +57,19 @@ class TaskWorker:
         engine.start(plan)
         worker = TaskWorker(engine=engine, launcher=DryRunLauncher())
         summary = await worker.run()
+
+    Attributes:
+        _engine: The execution engine implementing ``ExecutionDriver``.
+        _launcher: Agent launcher for spawning agents.
+        _bus: Event bus for publishing step-level domain events.
+        _scheduler: Bounded-concurrency scheduler for parallel dispatch.
+        _running: True while ``run()`` is executing.
+        _decision_manager: Optional manager for human decision routing.
+            When None, gates and approvals are auto-approved.
+        _shutdown_event: Optional asyncio.Event for graceful shutdown.
+            When set, the worker drains and exits.
+        _gate_poll_interval: Seconds between polls when waiting for a
+            human decision on a gate or approval.
     """
 
     def __init__(

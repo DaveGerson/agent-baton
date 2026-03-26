@@ -53,7 +53,7 @@ class TestFlagBeatsEnvVar:
     def test_engine_receives_flag_task_id_not_env_var(self) -> None:
         received: list[str | None] = []
 
-        def fake_engine_factory(bus=None, task_id=None, storage=None):  # noqa: ARG001
+        def fake_engine_factory(bus=None, task_id=None, storage=None, **_kwargs):  # noqa: ARG001
             received.append(task_id)
             e = MagicMock()
             e.status.return_value = {
@@ -74,6 +74,7 @@ class TestFlagBeatsEnvVar:
             patch(f"{_MOD}.ExecutionEngine", side_effect=fake_engine_factory),
             patch(f"{_MOD}.EventBus"),
             patch(f"{_MOD}.get_project_storage"),
+            patch(f"{_MOD}._build_knowledge_resolver", return_value=None),
             patch.dict("os.environ", {"BATON_TASK_ID": "task-A"}),
         ):
             _capture_handler(args)
@@ -85,7 +86,7 @@ class TestFlagBeatsEnvVar:
     def test_engine_does_not_receive_env_var_value_when_flag_set(self) -> None:
         received: list[str | None] = []
 
-        def fake_engine_factory(bus=None, task_id=None, storage=None):  # noqa: ARG001
+        def fake_engine_factory(bus=None, task_id=None, storage=None, **_kwargs):  # noqa: ARG001
             received.append(task_id)
             e = MagicMock()
             e.status.return_value = {
@@ -106,6 +107,7 @@ class TestFlagBeatsEnvVar:
             patch(f"{_MOD}.ExecutionEngine", side_effect=fake_engine_factory),
             patch(f"{_MOD}.EventBus"),
             patch(f"{_MOD}.get_project_storage"),
+            patch(f"{_MOD}._build_knowledge_resolver", return_value=None),
             patch.dict("os.environ", {"BATON_TASK_ID": "env-task"}),
         ):
             _capture_handler(args)
@@ -123,7 +125,7 @@ class TestEnvVarBeatsActiveMarker:
     def test_engine_receives_env_var_not_active_marker(self) -> None:
         received: list[str | None] = []
 
-        def fake_engine_factory(bus=None, task_id=None, storage=None):  # noqa: ARG001
+        def fake_engine_factory(bus=None, task_id=None, storage=None, **_kwargs):  # noqa: ARG001
             received.append(task_id)
             e = MagicMock()
             e.status.return_value = {
@@ -145,6 +147,7 @@ class TestEnvVarBeatsActiveMarker:
             patch(f"{_MOD}.ExecutionEngine", side_effect=fake_engine_factory),
             patch(f"{_MOD}.EventBus"),
             patch(f"{_MOD}.get_project_storage"),
+            patch(f"{_MOD}._build_knowledge_resolver", return_value=None),
             patch(f"{_MOD}.StatePersistence.get_active_task_id", return_value="task-B"),
             patch.dict("os.environ", {"BATON_TASK_ID": "task-A"}),
         ):
@@ -193,7 +196,7 @@ class TestFallbackToActiveMarker:
     def test_engine_receives_active_marker_task_id(self) -> None:
         received: list[str | None] = []
 
-        def fake_engine_factory(bus=None, task_id=None, storage=None):  # noqa: ARG001
+        def fake_engine_factory(bus=None, task_id=None, storage=None, **_kwargs):  # noqa: ARG001
             received.append(task_id)
             e = MagicMock()
             e.status.return_value = {
@@ -220,6 +223,9 @@ class TestFallbackToActiveMarker:
             patch(f"{_MOD}.ExecutionEngine", side_effect=fake_engine_factory),
             patch(f"{_MOD}.EventBus"),
             patch(f"{_MOD}.get_project_storage"),
+            # Force file backend so that the SQLite-first path is bypassed and
+            # the active-task-id.txt fallback is exercised.
+            patch(f"{_MOD}.detect_backend", return_value="file"),
             patch(
                 f"{_MOD}.StatePersistence.get_active_task_id",
                 return_value="marker-task",
@@ -253,6 +259,9 @@ class TestFallbackToActiveMarker:
             patch(f"{_MOD}.ExecutionEngine", return_value=mock_engine),
             patch(f"{_MOD}.EventBus"),
             patch(f"{_MOD}.get_project_storage"),
+            # Force file backend so that the SQLite-first path is bypassed and
+            # the active-task-id.txt fallback is exercised.
+            patch(f"{_MOD}.detect_backend", return_value="file"),
             patch(
                 f"{_MOD}.StatePersistence.get_active_task_id",
                 return_value="marker-task",

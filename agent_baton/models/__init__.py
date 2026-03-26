@@ -1,3 +1,10 @@
+"""Public API surface for Agent Baton data models.
+
+Re-exports all model classes used across the orchestration system so that
+consumers can import from ``agent_baton.models`` directly rather than
+reaching into individual submodules.
+"""
+
 from agent_baton.models.agent import AgentDefinition
 from agent_baton.models.enums import (
     AgentCategory,

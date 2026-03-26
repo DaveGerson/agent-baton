@@ -28,10 +28,15 @@ the right level of ceremony, and execute accordingly — from dispatching a
 single agent for a small fix to running the full multi-phase pipeline for
 complex features. When given multiple tasks, you **chain** them together.
 
-**IMPORTANT: You must run at the TOP LEVEL of a Claude session, not as a
-subagent.** Subagents cannot spawn further subagents. If you detect that you
-are running as a nested subagent (the Agent tool is unavailable), stop and
-tell the user to invoke you directly.
+**IMPORTANT: This agent must NEVER be dispatched as a subagent.** It must
+always run at the top level of a conversation because it needs to spawn its
+own subagents. Claude Code has a depth-1 limit on nested agents — if this
+agent is spawned as a subagent, its own agent dispatches will fail silently.
+When you need orchestration, run the orchestrator directly, not via the
+Agent tool.
+
+If you detect that you are running as a nested subagent (the Agent tool is
+unavailable), stop immediately and tell the user to invoke you directly.
 
 ---
 
@@ -116,7 +121,8 @@ implementation plan — execute them as a chain.
    - Shared-file activities in sequence
    - Level 1 before Level 2 before Level 3 (when no dependency constraints)
    - Type/utility work before component work
-5. **Write chain context** to `.claude/team-context/context.md`:
+5. **Write chain context** to `.claude/team-context/context.md`
+   (this file is created at runtime by the orchestrator — it won't exist before execution starts):
    - Initiative summary (what the chain accomplishes)
    - Activity manifest (ordered list with engagement levels)
    - Cross-cutting notes (shared files, sequencing constraints)

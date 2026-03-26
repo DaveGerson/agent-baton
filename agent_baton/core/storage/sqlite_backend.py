@@ -1,7 +1,27 @@
-"""SQLite storage backend for Agent-Baton per-project persistence.
+"""SQLite storage backend for Agent Baton per-project persistence.
 
-Replaces all JSON/JSONL flat-file persistence with a single baton.db database.
-All multi-table writes are wrapped in transactions for atomicity.
+Replaces all JSON/JSONL flat-file persistence with a single ``baton.db``
+database.  ``SqliteStorage`` implements the ``StorageBackend`` protocol
+(see ``protocol.py``) and is the default backend for all new projects.
+
+Key design decisions:
+
+* **Transactional writes** -- every public write method uses ``with conn:``
+  to wrap the full operation (including multi-table upserts) in a single
+  implicit transaction.  If any INSERT fails, all changes in that call are
+  rolled back.
+* **DELETE-then-INSERT pattern** -- for child collections that are fully
+  replaced on each save (step_results, gate_results, retrospective
+  outcomes, etc.), the method deletes all existing child rows and
+  re-inserts from the in-memory model.  This avoids stale rows left by
+  removed list items.
+* **INSERT OR REPLACE** -- used for natural-PK tables (executions, plans,
+  learned_patterns) where the caller expects upsert semantics.
+* **No raw SQL in callers** -- consumers interact exclusively through
+  typed Python methods; SQL stays encapsulated here and in ``queries.py``.
+
+Database tables accessed:
+    All tables defined in ``schema.PROJECT_SCHEMA_DDL``.
 """
 from __future__ import annotations
 
@@ -15,16 +35,35 @@ from agent_baton.core.storage.connection import ConnectionManager
 from agent_baton.core.storage.schema import PROJECT_SCHEMA_DDL, SCHEMA_VERSION
 
 if TYPE_CHECKING:
-    pass
+    from agent_baton.models.budget import BudgetRecommendation
+    from agent_baton.models.events import Event
+    from agent_baton.models.execution import (
+        ApprovalResult,
+        ExecutionState,
+        GateResult,
+        MachinePlan,
+        PlanAmendment,
+        StepResult,
+    )
+    from agent_baton.models.pattern import LearnedPattern
+    from agent_baton.models.plan import MissionLogEntry
+    from agent_baton.models.retrospective import Retrospective
+    from agent_baton.models.trace import TaskTrace
+    from agent_baton.models.usage import TaskUsageRecord
 
 
 class SqliteStorage:
-    """SQLite-backed storage for a single project's baton.db.
+    """SQLite-backed storage for a single project's ``baton.db``.
 
-    Thread-safe: one connection per thread via ConnectionManager.
-    All public methods acquire a connection on each call; no connection
-    is kept open across calls (connections are cached per-thread by
-    ConnectionManager).
+    Implements the full ``StorageBackend`` protocol.  Thread-safe: one
+    connection per thread via ``ConnectionManager``.  All public methods
+    acquire a connection on each call; connections are cached per-thread
+    by ``ConnectionManager`` and opened with WAL mode.
+
+    Attributes:
+        _conn_mgr: ``ConnectionManager`` responsible for connection
+            lifecycle and schema initialization against
+            ``PROJECT_SCHEMA_DDL``.
     """
 
     def __init__(self, db_path: Path) -> None:
@@ -47,7 +86,24 @@ class SqliteStorage:
     # ==========================================================================
 
     def save_execution(self, state: "ExecutionState") -> None:  # noqa: F821
-        """Persist a full ExecutionState — upserts all related tables."""
+        """Persist a full ``ExecutionState`` -- upserts all related tables.
+
+        Within a single transaction, this method:
+
+        1. ``INSERT OR REPLACE`` the ``executions`` row.
+        2. Upsert the plan via ``_upsert_plan`` (``plans``, ``plan_phases``,
+           ``plan_steps``, ``team_members``).
+        3. DELETE + INSERT all ``step_results`` and ``team_step_results``.
+        4. DELETE + INSERT all ``gate_results``.
+        5. DELETE + INSERT all ``approval_results``.
+        6. DELETE + INSERT all ``amendments``.
+
+        The DELETE-then-INSERT pattern ensures removed list items (e.g. a
+        step result that was retracted) do not leave stale rows.
+
+        Args:
+            state: The complete execution state to persist.
+        """
         from agent_baton.models.execution import ExecutionState  # noqa: F401
 
         conn = self._conn()
@@ -88,8 +144,9 @@ class SqliteStorage:
                     INSERT INTO step_results
                         (task_id, step_id, agent_name, status, outcome,
                          files_changed, commit_hash, estimated_tokens,
-                         duration_seconds, retries, error, completed_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         duration_seconds, retries, error, completed_at,
+                         deviations)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         state.task_id,
@@ -104,6 +161,7 @@ class SqliteStorage:
                         sr.retries,
                         sr.error,
                         sr.completed_at,
+                        json.dumps(sr.deviations),
                     ),
                 )
                 # team step results cascade from step_results, delete via FK
@@ -194,7 +252,21 @@ class SqliteStorage:
                 )
 
     def load_execution(self, task_id: str) -> "ExecutionState | None":
-        """Reconstruct a full ExecutionState from normalized tables."""
+        """Reconstruct a full ``ExecutionState`` from normalised tables.
+
+        Reads from ``executions``, ``plans``, ``plan_phases``,
+        ``plan_steps``, ``team_members``, ``step_results``,
+        ``team_step_results``, ``gate_results``, ``approval_results``,
+        and ``amendments`` tables.  Team step results are grouped by
+        ``step_id`` and attached to their parent ``StepResult``.
+
+        Args:
+            task_id: The execution to load.
+
+        Returns:
+            A fully hydrated ``ExecutionState``, or ``None`` if the
+            ``task_id`` does not exist in the ``executions`` table.
+        """
         from agent_baton.models.execution import (
             ApprovalResult,
             ExecutionState,
@@ -256,6 +328,9 @@ class SqliteStorage:
                     error=sr["error"],
                     completed_at=sr["completed_at"],
                     member_results=member_results,
+                    deviations=json.loads(
+                        sr["deviations"] if "deviations" in sr.keys() else "[]"
+                    ),
                 )
             )
 
@@ -374,8 +449,13 @@ class SqliteStorage:
     def save_plan(self, plan: "MachinePlan") -> None:  # noqa: F821
         """Save a plan without starting an execution.
 
-        Creates an executions row with status='queued' so that the plans
-        foreign-key constraint is satisfied.
+        Creates an ``executions`` row with ``status='queued'`` so that
+        the ``plans`` table's foreign-key constraint on ``task_id`` is
+        satisfied.  The plan's phases, steps, and team members are
+        persisted via ``_upsert_plan``.
+
+        Args:
+            plan: The plan to persist.
         """
         conn = self._conn()
         with conn:
@@ -393,7 +473,17 @@ class SqliteStorage:
             _upsert_plan(conn, plan)
 
     def load_plan(self, task_id: str) -> "MachinePlan | None":
-        """Load a MachinePlan from plans + plan_phases + plan_steps."""
+        """Load a ``MachinePlan`` from normalised tables.
+
+        Delegates to ``_load_plan_struct`` which reads from ``plans``,
+        ``plan_phases``, ``plan_steps``, and ``team_members``.
+
+        Args:
+            task_id: The plan to load.
+
+        Returns:
+            A fully hydrated ``MachinePlan``, or ``None`` if not found.
+        """
         conn = self._conn()
         return _load_plan_struct(conn, task_id)
 
@@ -402,7 +492,16 @@ class SqliteStorage:
     # ==========================================================================
 
     def save_step_result(self, task_id: str, result: "StepResult") -> None:  # noqa: F821
-        """Upsert a single StepResult (and its TeamStepResults)."""
+        """Upsert a single ``StepResult`` and its ``TeamStepResult`` children.
+
+        Uses ``INSERT OR REPLACE`` for the ``step_results`` row (keyed on
+        ``task_id, step_id``), then DELETE + INSERT for
+        ``team_step_results`` children of this step.
+
+        Args:
+            task_id: The parent execution's task ID.
+            result: The step result to persist.
+        """
         conn = self._conn()
         with conn:
             conn.execute(
@@ -410,8 +509,9 @@ class SqliteStorage:
                 INSERT OR REPLACE INTO step_results
                     (task_id, step_id, agent_name, status, outcome,
                      files_changed, commit_hash, estimated_tokens,
-                     duration_seconds, retries, error, completed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     duration_seconds, retries, error, completed_at,
+                     deviations)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task_id,
@@ -426,6 +526,7 @@ class SqliteStorage:
                     result.retries,
                     result.error,
                     result.completed_at,
+                    json.dumps(result.deviations),
                 ),
             )
             # Replace team member results for this step
@@ -453,7 +554,15 @@ class SqliteStorage:
                 )
 
     def save_gate_result(self, task_id: str, result: "GateResult") -> None:  # noqa: F821
-        """Append a GateResult row."""
+        """Append a ``GateResult`` row to the ``gate_results`` table.
+
+        Gate results use an auto-increment PK, so each call always
+        inserts a new row (no upsert).
+
+        Args:
+            task_id: The parent execution's task ID.
+            result: The gate check result to record.
+        """
         conn = self._conn()
         with conn:
             conn.execute(
@@ -473,7 +582,12 @@ class SqliteStorage:
             )
 
     def save_approval_result(self, task_id: str, result: "ApprovalResult") -> None:  # noqa: F821
-        """Append an ApprovalResult row."""
+        """Append an ``ApprovalResult`` row to the ``approval_results`` table.
+
+        Args:
+            task_id: The parent execution's task ID.
+            result: The approval decision to record.
+        """
         conn = self._conn()
         with conn:
             conn.execute(
@@ -492,7 +606,14 @@ class SqliteStorage:
             )
 
     def save_amendment(self, task_id: str, amendment: "PlanAmendment") -> None:  # noqa: F821
-        """Upsert a PlanAmendment row."""
+        """Upsert a ``PlanAmendment`` row in the ``amendments`` table.
+
+        Uses ``INSERT OR REPLACE`` keyed on ``(task_id, amendment_id)``.
+
+        Args:
+            task_id: The parent execution's task ID.
+            amendment: The plan amendment to persist.
+        """
         conn = self._conn()
         with conn:
             conn.execute(
@@ -521,7 +642,14 @@ class SqliteStorage:
     # ==========================================================================
 
     def append_event(self, event: "Event") -> None:  # noqa: F821
-        """Append a domain Event to the events table."""
+        """Append a domain ``Event`` to the ``events`` table.
+
+        Uses ``INSERT OR REPLACE`` keyed on ``event_id``.
+
+        Args:
+            event: The domain event to persist.  Its ``payload`` dict is
+                JSON-serialised before storage.
+        """
         conn = self._conn()
         with conn:
             conn.execute(
@@ -541,7 +669,19 @@ class SqliteStorage:
             )
 
     def read_events(self, task_id: str, from_seq: int = 0) -> list["Event"]:
-        """Return all events for task_id with sequence >= from_seq."""
+        """Return all events for a task starting from a given sequence.
+
+        Queries the ``events`` table filtered by ``task_id`` and
+        ``sequence >= from_seq``, ordered by ``sequence`` then ``rowid``.
+
+        Args:
+            task_id: The execution to read events for.
+            from_seq: Minimum event sequence number (inclusive).
+
+        Returns:
+            List of ``Event`` instances with ``payload`` deserialised
+            from JSON.
+        """
         from agent_baton.models.events import Event
 
         conn = self._conn()
@@ -576,7 +716,15 @@ class SqliteStorage:
     # ==========================================================================
 
     def log_usage(self, record: "TaskUsageRecord") -> None:  # noqa: F821
-        """Insert (or replace) a TaskUsageRecord and its AgentUsageRecords."""
+        """Insert (or replace) a ``TaskUsageRecord`` and its agent details.
+
+        Upserts into ``usage_records`` (keyed on ``task_id``), then
+        deletes and re-inserts all rows in ``agent_usage`` for that
+        task (auto-increment PK has no natural upsert key).
+
+        Args:
+            record: The usage record to persist.
+        """
         conn = self._conn()
         with conn:
             conn.execute(
@@ -624,7 +772,17 @@ class SqliteStorage:
                 )
 
     def read_usage(self, limit: int | None = None) -> list["TaskUsageRecord"]:
-        """Return TaskUsageRecords ordered by timestamp descending."""
+        """Return ``TaskUsageRecord`` objects ordered by timestamp descending.
+
+        For each ``usage_records`` row, the corresponding ``agent_usage``
+        rows are fetched and assembled into ``AgentUsageRecord`` instances.
+
+        Args:
+            limit: Maximum number of records to return.  ``None`` returns all.
+
+        Returns:
+            List of ``TaskUsageRecord`` instances, most recent first.
+        """
         from agent_baton.models.usage import AgentUsageRecord, TaskUsageRecord
 
         conn = self._conn()
@@ -715,7 +873,19 @@ class SqliteStorage:
         ]
 
     def telemetry_summary(self) -> dict:
-        """Return aggregated telemetry statistics."""
+        """Return aggregated telemetry statistics from the ``telemetry`` table.
+
+        Computes:
+
+        * ``total_events`` -- count of all telemetry rows.
+        * ``events_by_agent`` -- ``{agent_name: count}`` breakdown.
+        * ``events_by_type`` -- ``{event_type: count}`` breakdown.
+        * ``files_read`` -- list of file paths with ``event_type='file_read'``.
+        * ``files_written`` -- list of file paths with ``event_type='file_write'``.
+
+        Returns:
+            Dict with the keys described above.
+        """
         conn = self._conn()
         total = conn.execute("SELECT COUNT(*) AS n FROM telemetry").fetchone()["n"]
 
@@ -756,7 +926,22 @@ class SqliteStorage:
     # ==========================================================================
 
     def save_retrospective(self, retro: "Retrospective") -> None:  # noqa: F821
-        """Persist a Retrospective and all its child collections."""
+        """Persist a ``Retrospective`` and all its child collections.
+
+        Within a single transaction:
+
+        1. ``INSERT OR REPLACE`` into ``retrospectives`` (includes the
+           rendered markdown).
+        2. DELETE + INSERT ``retrospective_outcomes`` (``what_worked``
+           stored with ``category='worked'``, ``what_didnt`` with
+           ``category='didnt'``).
+        3. DELETE + INSERT ``knowledge_gaps``.
+        4. DELETE + INSERT ``roster_recommendations``.
+        5. DELETE + INSERT ``sequencing_notes``.
+
+        Args:
+            retro: The retrospective to persist.
+        """
         conn = self._conn()
         with conn:
             conn.execute(
@@ -871,7 +1056,19 @@ class SqliteStorage:
                 )
 
     def load_retrospective(self, task_id: str) -> "Retrospective | None":
-        """Reconstruct a Retrospective from the database."""
+        """Reconstruct a ``Retrospective`` from the database.
+
+        Reads from ``retrospectives``, ``retrospective_outcomes``,
+        ``knowledge_gaps``, ``roster_recommendations``, and
+        ``sequencing_notes`` tables.  Outcomes are split by the
+        ``category`` column into ``what_worked`` and ``what_didnt``.
+
+        Args:
+            task_id: The retrospective to load.
+
+        Returns:
+            A fully hydrated ``Retrospective``, or ``None`` if not found.
+        """
         from agent_baton.models.retrospective import (
             AgentOutcome,
             KnowledgeGap,
@@ -980,7 +1177,15 @@ class SqliteStorage:
     # ==========================================================================
 
     def save_trace(self, trace: "TaskTrace") -> None:  # noqa: F821
-        """Persist a TaskTrace (upsert header + DELETE/INSERT events)."""
+        """Persist a ``TaskTrace`` -- upsert header + DELETE/INSERT events.
+
+        The ``traces`` row is upserted via ``INSERT OR REPLACE``.
+        ``trace_events`` children are fully replaced (DELETE + INSERT)
+        to ensure consistency with the in-memory model.
+
+        Args:
+            trace: The execution trace to persist.
+        """
         conn = self._conn()
         with conn:
             conn.execute(
@@ -1021,7 +1226,14 @@ class SqliteStorage:
                 )
 
     def load_trace(self, task_id: str) -> "TaskTrace | None":
-        """Reconstruct a TaskTrace from the database."""
+        """Reconstruct a ``TaskTrace`` from the ``traces`` and ``trace_events`` tables.
+
+        Args:
+            task_id: The trace to load.
+
+        Returns:
+            A fully hydrated ``TaskTrace``, or ``None`` if not found.
+        """
         from agent_baton.models.trace import TaskTrace, TraceEvent
 
         conn = self._conn()
@@ -1062,7 +1274,14 @@ class SqliteStorage:
     # ==========================================================================
 
     def save_patterns(self, patterns: list["LearnedPattern"]) -> None:  # noqa: F821
-        """Full replacement: delete all existing patterns then insert."""
+        """Replace all learned patterns in the ``learned_patterns`` table.
+
+        Uses a DELETE-all-then-INSERT strategy so that patterns removed
+        from the in-memory list are also removed from the database.
+
+        Args:
+            patterns: The complete set of learned patterns to persist.
+        """
         conn = self._conn()
         with conn:
             conn.execute("DELETE FROM learned_patterns")
@@ -1121,7 +1340,13 @@ class SqliteStorage:
     def save_budget_recommendations(
         self, recs: list["BudgetRecommendation"]  # noqa: F821
     ) -> None:
-        """Full replacement: delete all then insert."""
+        """Replace all budget recommendations in the ``budget_recommendations`` table.
+
+        Uses a DELETE-all-then-INSERT strategy, same as ``save_patterns``.
+
+        Args:
+            recs: The complete set of budget recommendations to persist.
+        """
         conn = self._conn()
         with conn:
             conn.execute("DELETE FROM budget_recommendations")
@@ -1180,7 +1405,17 @@ class SqliteStorage:
     def append_mission_log(
         self, task_id: str, entry: "MissionLogEntry"  # noqa: F821
     ) -> None:
-        """Append a MissionLogEntry row for the given task."""
+        """Append a ``MissionLogEntry`` row to the ``mission_log_entries`` table.
+
+        Mission log entries are append-only -- each dispatched agent
+        records its assignment, result, files changed, decisions, and
+        issues.  The ``failure_class`` enum value is stored as a string
+        (or NULL when absent).
+
+        Args:
+            task_id: The parent execution's task ID.
+            entry: The mission log entry to persist.
+        """
         conn = self._conn()
         ts = (
             entry.timestamp.isoformat()
@@ -1216,7 +1451,19 @@ class SqliteStorage:
             )
 
     def read_mission_log(self, task_id: str) -> list["MissionLogEntry"]:
-        """Return all MissionLogEntry rows for a task, in insertion order."""
+        """Return all ``MissionLogEntry`` rows for a task in insertion order.
+
+        Reads from ``mission_log_entries`` ordered by auto-increment ``id``.
+        JSON-encoded list columns (``files``, ``decisions``, ``issues``)
+        are deserialized.  The ``failure_class`` string is converted back
+        to the ``FailureClass`` enum (or ``None`` if absent or invalid).
+
+        Args:
+            task_id: The execution whose mission log to read.
+
+        Returns:
+            List of ``MissionLogEntry`` instances, oldest first.
+        """
         from datetime import datetime
 
         from agent_baton.models.enums import FailureClass
@@ -1332,9 +1579,17 @@ class SqliteStorage:
 
 
 def _upsert_plan(conn: sqlite3.Connection, plan: "MachinePlan") -> None:  # noqa: F821
-    """Insert or replace a MachinePlan and its phases/steps/team_members.
+    """Insert or replace a ``MachinePlan`` and its child rows.
 
-    Caller is responsible for the surrounding transaction.
+    Writes to ``plans``, ``plan_phases``, ``plan_steps``, and
+    ``team_members`` tables.  Phases are fully replaced (DELETE + INSERT)
+    so that removed phases are cleaned up; the FK CASCADE from
+    ``plan_phases`` to ``plan_steps`` handles step cleanup.
+
+    Args:
+        conn: An open ``sqlite3.Connection`` already inside a
+            ``with conn:`` transaction block managed by the caller.
+        plan: The plan to persist.
     """
     conn.execute(
         """
@@ -1443,7 +1698,26 @@ def _upsert_plan(conn: sqlite3.Connection, plan: "MachinePlan") -> None:  # noqa
 def _load_plan_struct(
     conn: sqlite3.Connection, task_id: str
 ) -> "MachinePlan | None":  # noqa: F821
-    """Reconstruct a MachinePlan from plans + plan_phases + plan_steps + team_members."""
+    """Reconstruct a ``MachinePlan`` from normalised tables.
+
+    Reads ``plans``, ``plan_phases``, ``plan_steps``, and
+    ``team_members`` for the given ``task_id``.  Steps and members are
+    grouped by ``phase_id`` / ``step_id`` respectively and assembled
+    into the nested ``PlanPhase > PlanStep > TeamMember`` hierarchy.
+
+    Knowledge-delivery columns (``explicit_knowledge_packs``,
+    ``explicit_knowledge_docs``, ``intervention_level``, ``task_type``)
+    are read with graceful fallback for databases created before schema
+    v2.
+
+    Args:
+        conn: An open ``sqlite3.Connection``.
+        task_id: The plan to load.
+
+    Returns:
+        A fully hydrated ``MachinePlan``, or ``None`` if no matching
+        row exists in the ``plans`` table.
+    """
     from agent_baton.models.execution import (
         MachinePlan,
         PlanGate,
