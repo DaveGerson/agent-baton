@@ -83,20 +83,19 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         help="How aggressively agents escalate knowledge gaps (default: low)",
     )
     p.add_argument(
-<<<<<<< HEAD
         "--model",
         dest="model",
         default=None,
         help="Default model for dispatched agents (e.g. 'opus', 'sonnet'). "
              "Overrides the built-in 'sonnet' default; agent definitions still take priority.",
-=======
+    )
+    p.add_argument(
         "--complexity",
         dest="complexity",
         default=None,
         choices=["light", "medium", "heavy"],
         help="Override task complexity (light, medium, heavy). "
              "Skips automatic classification when provided.",
->>>>>>> pmo-ux-remediation
     )
     return p
 
