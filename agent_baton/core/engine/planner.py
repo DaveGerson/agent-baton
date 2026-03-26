@@ -15,6 +15,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
+from agent_baton.core.engine.classifier import (
+    FallbackClassifier,
+    TaskClassification,
+    TaskClassifier,
+)
 from agent_baton.core.govern.classifier import ClassificationResult, DataClassifier
 from agent_baton.core.govern.policy import PolicyEngine, PolicySet, PolicyViolation
 from agent_baton.core.improve.scoring import AgentScorecard, PerformanceScorer
@@ -332,6 +337,7 @@ class IntelligentPlanner:
         policy_engine: PolicyEngine | None = None,
         retro_engine: RetroEngine | None = None,
         knowledge_registry: KnowledgeRegistry | None = None,
+        task_classifier: TaskClassifier | None = None,
     ) -> None:
         self._team_context_root = team_context_root
         self._pattern_learner = PatternLearner(team_context_root)
@@ -361,6 +367,11 @@ class IntelligentPlanner:
         self._last_classification: ClassificationResult | None = None
         self._last_policy_violations: list[PolicyViolation] = []
 
+        # Task classifier — determines complexity and agent selection.
+        # Uses FallbackClassifier by default (Haiku -> keyword).
+        self._task_classifier: TaskClassifier = task_classifier or FallbackClassifier()
+        self._last_task_classification: TaskClassification | None = None
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -370,6 +381,7 @@ class IntelligentPlanner:
         task_summary: str,
         *,
         task_type: str | None = None,
+        complexity: str | None = None,
         project_root: Path | None = None,
         agents: list[str] | None = None,
         phases: list[dict] | None = None,
@@ -422,6 +434,7 @@ class IntelligentPlanner:
         self._last_classification = None
         self._last_policy_violations = []
         self._last_retro_feedback = None
+        self._last_task_classification = None
 
         # 1. Task ID
         task_id = self._generate_task_id(task_summary)
@@ -434,12 +447,31 @@ class IntelligentPlanner:
             except Exception:
                 pass
 
-        # 3. Task type
-        inferred_type = task_type or self._infer_task_type(task_summary)
+        # 3. Classify — determines task_type, complexity, agents, and phases.
+        # Explicit overrides take precedence over the classifier.
+        classified_phases: list[str] | None = None
+        if task_type is None and agents is None and phases is None:
+            classification = self._task_classifier.classify(
+                task_summary, self._registry, project_root
+            )
+            self._last_task_classification = classification
+            inferred_type = classification.task_type
+            inferred_complexity = complexity or classification.complexity
+            resolved_agents = list(classification.agents)
+            classified_phases = list(classification.phases)
+        else:
+            inferred_type = task_type or self._infer_task_type(task_summary)
+            inferred_complexity = complexity or "medium"
+            classified_phases = None  # let downstream logic handle phases
+            # 5. Agent selection (legacy path for explicit overrides)
+            if agents is None:
+                resolved_agents = list(_DEFAULT_AGENTS.get(inferred_type, []))
+            else:
+                resolved_agents = list(agents)
 
-        # 4. Pattern lookup
+        # 4. Pattern lookup — only if classifier didn't provide agents
         pattern: LearnedPattern | None = None
-        if not agents and not phases:
+        if not self._last_task_classification and not agents and not phases:
             try:
                 stack_key = (
                     f"{stack_profile.language}/{stack_profile.framework}"
@@ -453,18 +485,11 @@ class IntelligentPlanner:
                     if cand.confidence >= _MIN_PATTERN_CONFIDENCE:
                         pattern = cand
                         self._last_pattern_used = pattern
+                        # Override agents from pattern
+                        resolved_agents = list(pattern.recommended_agents)
                         break
             except Exception:
                 pass
-
-        # 5. Determine agents list
-        if agents is None:
-            if pattern is not None:
-                resolved_agents = list(pattern.recommended_agents)
-            else:
-                resolved_agents = list(_DEFAULT_AGENTS.get(inferred_type, []))
-        else:
-            resolved_agents = list(agents)
 
         # 5b. Retrospective feedback — filter dropped agents and record gaps.
         # This is consulted before routing so the feedback applies to base names.

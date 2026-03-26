@@ -304,6 +304,10 @@ class MachinePlan:
             CLI flag.
         intervention_level: Human intervention frequency —
             ``"low"``, ``"medium"``, or ``"high"``.
+        complexity: Plan complexity tier — ``"light"``, ``"medium"``,
+            or ``"heavy"``.
+        classification_source: How the classification was determined —
+            ``"haiku"`` or ``"keyword-fallback"``.
     """
 
     task_id: str
@@ -320,6 +324,8 @@ class MachinePlan:
     explicit_knowledge_packs: list[str] = field(default_factory=list)  # from --knowledge-pack
     explicit_knowledge_docs: list[str] = field(default_factory=list)   # from --knowledge
     intervention_level: str = "low"     # low | medium | high
+    complexity: str = "medium"          # light | medium | heavy
+    classification_source: str = "keyword-fallback"  # haiku | keyword-fallback
 
     def __post_init__(self) -> None:
         if not self.created_at:
@@ -353,6 +359,8 @@ class MachinePlan:
             "explicit_knowledge_packs": self.explicit_knowledge_packs,
             "explicit_knowledge_docs": self.explicit_knowledge_docs,
             "intervention_level": self.intervention_level,
+            "complexity": self.complexity,
+            "classification_source": self.classification_source,
         }
 
     @classmethod
@@ -372,6 +380,8 @@ class MachinePlan:
             explicit_knowledge_packs=data.get("explicit_knowledge_packs", []),
             explicit_knowledge_docs=data.get("explicit_knowledge_docs", []),
             intervention_level=data.get("intervention_level", "low"),
+            complexity=data.get("complexity", "medium"),
+            classification_source=data.get("classification_source", "keyword-fallback"),
         )
 
     def to_markdown(self) -> str:
@@ -393,6 +403,8 @@ class MachinePlan:
             lines.append(f"**Task Type**: {self.task_type}")
         if self.intervention_level != "low":
             lines.append(f"**Intervention Level**: {self.intervention_level}")
+        lines.append(f"**Complexity**: {self.complexity}")
+        lines.append(f"**Classification Source**: {self.classification_source}")
         if self.explicit_knowledge_packs:
             lines.append(f"**Explicit Knowledge Packs**: {', '.join(self.explicit_knowledge_packs)}")
         if self.explicit_knowledge_docs:
