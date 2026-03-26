@@ -241,3 +241,30 @@ def test_default_gates_all_values_are_plan_gate() -> None:
 def test_default_gate_attributes(key: str, attr: str, check) -> None:
     gate = GateRunner.default_gates()[key]
     assert check(getattr(gate, attr))
+
+
+# ---------------------------------------------------------------------------
+# PlanGate.from_dict — "type" fallback (LLM compatibility)
+# ---------------------------------------------------------------------------
+
+
+def test_plan_gate_from_dict_accepts_type_as_fallback() -> None:
+    """PlanGate.from_dict should accept 'type' when 'gate_type' is absent."""
+    data = {"type": "test", "command": "pytest"}
+    gate = PlanGate.from_dict(data)
+    assert gate.gate_type == "test"
+    assert gate.command == "pytest"
+
+
+def test_plan_gate_from_dict_prefers_gate_type_over_type() -> None:
+    """When both 'gate_type' and 'type' are present, 'gate_type' wins."""
+    data = {"gate_type": "build", "type": "test", "command": "make"}
+    gate = PlanGate.from_dict(data)
+    assert gate.gate_type == "build"
+
+
+def test_plan_gate_from_dict_canonical_gate_type_still_works() -> None:
+    """The canonical 'gate_type' key continues to work."""
+    data = {"gate_type": "lint", "command": "ruff check ."}
+    gate = PlanGate.from_dict(data)
+    assert gate.gate_type == "lint"

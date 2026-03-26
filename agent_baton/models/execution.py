@@ -150,8 +150,10 @@ class PlanGate:
 
     @classmethod
     def from_dict(cls, data: dict) -> PlanGate:
+        # Accept both "gate_type" (canonical) and "type" (common LLM variant)
+        gate_type = data.get("gate_type") or data.get("type", "")
         return cls(
-            gate_type=data["gate_type"],
+            gate_type=gate_type,
             command=data.get("command", ""),
             description=data.get("description", ""),
             fail_on=data.get("fail_on", []),

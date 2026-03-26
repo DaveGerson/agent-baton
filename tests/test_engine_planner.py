@@ -1012,6 +1012,72 @@ class TestDefaultAgentsDocumentation:
             f"Expected at least one review agent in {agents}"
         )
 
+
+# ---------------------------------------------------------------------------
+# create_plan — default_model override
+# ---------------------------------------------------------------------------
+
+class TestDefaultModelOverride:
+    def test_default_model_applied_when_agent_has_no_model(
+        self, tmp_path: Path,
+    ):
+        """When default_model is specified, steps whose agent has no model
+        definition should use the default_model instead of 'sonnet'."""
+        # Create agents WITHOUT model fields so default_model takes effect
+        agents_dir = tmp_path / "nomodel-agents"
+        agents_dir.mkdir()
+        for name in ("architect", "backend-engineer", "test-engineer", "code-reviewer"):
+            content = (
+                f"---\nname: {name}\ndescription: Specialist.\n"
+                f"permissionMode: default\ntools: Read, Write\n---\n\n# {name}\n"
+            )
+            (agents_dir / f"{name}.md").write_text(content, encoding="utf-8")
+
+        from agent_baton.core.orchestration.registry import AgentRegistry
+        from agent_baton.core.orchestration.router import AgentRouter
+
+        ctx = tmp_path / "team-context-nomodel"
+        ctx.mkdir()
+        p = IntelligentPlanner(team_context_root=ctx)
+        reg = AgentRegistry()
+        reg.load_directory(agents_dir)
+        p._registry = reg
+        p._router = AgentRouter(reg)
+
+        plan = p.create_plan("Add a utility function", default_model="opus")
+        for phase in plan.phases:
+            for step in phase.steps:
+                assert step.model == "opus", (
+                    f"Step {step.step_id} has model '{step.model}', expected 'opus'"
+                )
+
+    def test_agent_definition_model_overrides_default_model(
+        self, planner: IntelligentPlanner,
+    ):
+        """Agent definitions with explicit model take priority over default_model."""
+        plan = planner.create_plan(
+            "Add a simple utility function",
+            default_model="haiku",
+        )
+        # architect has model: opus in the fixture — should keep opus
+        design_step = plan.phases[0].steps[0]
+        assert design_step.agent_name == "architect"
+        assert design_step.model == "opus", (
+            "Agent definition model should take priority over default_model"
+        )
+
+    def test_default_model_none_keeps_sonnet(self, planner: IntelligentPlanner):
+        """When default_model is None, the built-in 'sonnet' default is used."""
+        plan = planner.create_plan("Fix a typo", default_model=None)
+        for phase in plan.phases:
+            for step in phase.steps:
+                # Steps get either the agent definition model or default "sonnet"
+                agent_def = planner._registry.get(step.agent_name)
+                if agent_def and agent_def.model:
+                    assert step.model == agent_def.model
+                else:
+                    assert step.model == "sonnet"
+
     def test_all_task_types_have_non_empty_agents(self) -> None:
         """Every known task type should map to at least one agent."""
         for task_type, agents in _DEFAULT_AGENTS.items():

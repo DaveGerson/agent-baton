@@ -82,6 +82,13 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         choices=["low", "medium", "high"],
         help="How aggressively agents escalate knowledge gaps (default: low)",
     )
+    p.add_argument(
+        "--model",
+        dest="model",
+        default=None,
+        help="Default model for dispatched agents (e.g. 'opus', 'sonnet'). "
+             "Overrides the built-in 'sonnet' default; agent definitions still take priority.",
+    )
     return p
 
 
@@ -111,6 +118,7 @@ def handler(args: argparse.Namespace) -> None:
         explicit_knowledge_packs=args.knowledge_pack,
         explicit_knowledge_docs=args.knowledge,
         intervention_level=args.intervention,
+        default_model=getattr(args, "model", None),
     )
     print("  Done.", file=sys.stderr)
 

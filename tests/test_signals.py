@@ -127,9 +127,12 @@ class TestSignalHandlerInstallUninstall:
 
     def test_install_restores_original_handlers_on_uninstall(self) -> None:
         """Original signal handlers are restored when uninstall() is called."""
-        original_sigterm = signal.getsignal(signal.SIGTERM)
-        original_sigint = signal.getsignal(signal.SIGINT)
         async def _run():
+            # Capture originals INSIDE the event loop — asyncio.run() itself
+            # installs its own SIGINT handler, so the "original" from the
+            # loop's perspective differs from the pre-run() value.
+            original_sigterm = signal.getsignal(signal.SIGTERM)
+            original_sigint = signal.getsignal(signal.SIGINT)
             handler = SignalHandler()
             handler.install()
             handler.uninstall()

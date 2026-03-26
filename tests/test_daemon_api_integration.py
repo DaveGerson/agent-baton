@@ -25,6 +25,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+# agent_baton.api.server imports fastapi at module level — the patch()
+# calls in this file resolve through that module, so we must skip if
+# fastapi (and uvicorn) are not installed.
+fastapi = pytest.importorskip("fastapi")
+pytest.importorskip("uvicorn")
+
 from agent_baton.cli.commands.execution.daemon import (
     _run_daemon_with_api,
     handler,

@@ -343,6 +343,7 @@ class IntelligentPlanner:
         explicit_knowledge_packs: list[str] | None = None,
         explicit_knowledge_docs: list[str] | None = None,
         intervention_level: str = "low",
+        default_model: str | None = None,
     ) -> MachinePlan:
         """Create a complete, data-driven execution plan.
 
@@ -612,13 +613,21 @@ class IntelligentPlanner:
                     step.context_files = ["CLAUDE.md"]
 
         # 13b. Model inheritance — inherit model preference from agent definition.
-        # If the agent definition specifies a model, use it; otherwise keep the
-        # PlanStep default ("sonnet").
+        # Priority: agent definition model > explicit default_model > "sonnet".
         for phase in plan_phases:
             for step in phase.steps:
                 agent_def = self._registry.get(step.agent_name)
                 if agent_def and agent_def.model:
                     step.model = agent_def.model
+                elif default_model:
+                    step.model = default_model
+                # Also propagate to team members
+                for member in step.team:
+                    member_def = self._registry.get(member.agent_name)
+                    if member_def and member_def.model:
+                        member.model = member_def.model
+                    elif default_model:
+                        member.model = default_model
 
         # 13c. Context richness — extract file paths from task summary and append
         # to every step's context_files (deduplicated).
@@ -1169,7 +1178,7 @@ class IntelligentPlanner:
             gate: PlanGate | None = None
             if gate_dict:
                 gate = PlanGate(
-                    gate_type=gate_dict.get("gate_type", "build"),
+                    gate_type=gate_dict.get("gate_type") or gate_dict.get("type", "build"),
                     command=gate_dict.get("command", ""),
                     description=gate_dict.get("description", ""),
                     fail_on=gate_dict.get("fail_on", []),
