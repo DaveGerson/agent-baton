@@ -323,6 +323,7 @@ class ExecutionEngine:
                 return
             # Dual-write: keep file-based readers current during transition
             # (only when a file persistence layer exists alongside the backend).
+            # TODO(T4): remove file dual-write once all readers use SQLite.
             if self._persistence is not None:
                 try:
                     self._persistence.save(state)
@@ -474,7 +475,8 @@ class ExecutionEngine:
                 self._storage.set_active_task(plan.task_id)
             except Exception as exc:
                 _log.warning("Failed to set active task in storage: %s", exc)
-        # Keep file-based active marker in sync.
+        # Keep file-based active-task-id.txt in sync during the SQLite transition.
+        # TODO(T4): remove active-task-id.txt dual-write once all readers use SQLite.
         if self._persistence is not None:
             try:
                 # Update persistence's task_id then write the active marker.
@@ -565,6 +567,7 @@ class ExecutionEngine:
             except Exception:
                 pass
         elif self._persistence is not None:
+            # TODO(T4): remove active-task-id.txt dual-write once all readers use SQLite.
             self._persistence.set_active()
         return self._determine_action(state)
 
@@ -1347,7 +1350,12 @@ class ExecutionEngine:
     # published by the runtime layer (TaskWorker) to avoid duplication.
 
     def _persist_event(self, event: Event) -> None:
-        """EventBus subscriber that appends *event* to the JSONL persistence log.
+        """EventBus subscriber that appends *event* to all active persistence stores.
+
+        Writes to the JSONL flat-file log (``EventPersistence.append``) and,
+        when a SQLite storage backend is configured, also to the ``events``
+        table via ``storage.append_event()``.  Both writes are best-effort;
+        a failure in either path logs a warning and does not crash execution.
 
         Wraps :meth:`EventPersistence.append` (which returns a ``Path``) so
         that the method signature matches the ``EventHandler`` type alias
@@ -1355,6 +1363,15 @@ class ExecutionEngine:
         """
         if self._event_persistence is not None:
             self._event_persistence.append(event)
+        # Write to SQLite events table so the events table is populated for
+        # CLI-driven executions (not just async TaskWorker runs).
+        if self._storage is not None:
+            try:
+                self._storage.append_event(event)
+            except Exception as exc:
+                _log.warning(
+                    "SQLite append_event failed (non-fatal): %s", exc
+                )
 
     def _on_event_for_telemetry(self, event: Event) -> None:
         """EventBus subscriber that mirrors every domain event to telemetry.

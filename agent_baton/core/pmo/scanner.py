@@ -223,7 +223,74 @@ class PmoScanner:
 
         return cards
 
-    def program_health(self) -> dict[str, ProgramHealth]:
+    def find_card(
+        self, card_id: str
+    ) -> "tuple[PmoCard, dict | None]":
+        """Scan all projects until a card matching ``card_id`` is found.
+
+        Returns the matching ``PmoCard`` and the serialized plan dict
+        (``MachinePlan.to_dict()``) if a plan file can be located on
+        disk, or ``None`` for the plan if no plan file is found.
+
+        Args:
+            card_id: The ``task_id`` of the card to locate.
+
+        Returns:
+            A ``(PmoCard, plan_dict | None)`` tuple.  ``plan_dict`` is
+            the raw plan from ``plan.json`` when available, otherwise
+            ``None``.
+
+        Raises:
+            KeyError: If no card with the given ``card_id`` is found in
+                any registered project.
+        """
+        import json as _json
+        from agent_baton.models.execution import MachinePlan as _MachinePlan
+
+        config = self._store.load_config()
+        for project in config.projects:
+            project_cards = self.scan_project(project)
+            for card in project_cards:
+                if card.card_id == card_id:
+                    # Try to load the plan file for extra detail
+                    plan_dict: dict | None = None
+                    context_root = (
+                        Path(project.path) / ".claude" / "team-context"
+                    )
+                    # Task-scoped path first, then legacy root plan.json
+                    candidates = [
+                        context_root / "executions" / card_id / "plan.json",
+                        context_root / "plan.json",
+                    ]
+                    for candidate in candidates:
+                        if candidate.exists():
+                            try:
+                                data = _json.loads(
+                                    candidate.read_text(encoding="utf-8")
+                                )
+                                plan = _MachinePlan.from_dict(data)
+                                if plan.task_id == card_id:
+                                    plan_dict = plan.to_dict()
+                                    break
+                            except (
+                                _json.JSONDecodeError,
+                                KeyError,
+                                TypeError,
+                            ):
+                                pass
+                    return card, plan_dict
+
+        # Also check archive
+        archived = self._store.read_archive(limit=500)
+        for card in archived:
+            if card.card_id == card_id:
+                return card, None
+
+        raise KeyError(f"Card '{card_id}' not found in any registered project")
+
+    def program_health(
+        self, cards: "list[PmoCard] | None" = None
+    ) -> dict[str, ProgramHealth]:
         """Compute aggregate health metrics per program.
 
         Scans all projects and classifies each card into one of four
@@ -231,6 +298,12 @@ class PmoScanner:
         ``failed`` (has error), or ``active`` (everything else).
         Computes ``completion_pct`` as the ratio of completed to total
         plans.
+
+        Args:
+            cards: Optional pre-scanned card list.  When provided the
+                scan is skipped and these cards are used directly,
+                avoiding a redundant filesystem scan.  When ``None``
+                (the default), ``scan_all()`` is called internally.
 
         Returns:
             Dict mapping program name to ``ProgramHealth`` with fields
@@ -246,7 +319,8 @@ class PmoScanner:
         for prog in programs:
             health[prog] = ProgramHealth(program=prog)
 
-        cards = self.scan_all()
+        if cards is None:
+            cards = self.scan_all()
         for card in cards:
             h = health.get(card.program)
             if h is None:

@@ -21,7 +21,8 @@ The models are organized into groups:
 - **System**: ``HealthResponse``, ``ReadyResponse``, ``WebhookResponse``,
   ``ErrorResponse``
 - **PMO**: ``PmoProjectResponse``, ``PmoCardResponse``,
-  ``PmoSignalResponse``, ``ProgramHealthResponse``, ``PmoBoardResponse``
+  ``PmoCardDetailResponse``, ``PmoSignalResponse``,
+  ``ProgramHealthResponse``, ``PmoBoardResponse``
 - **Forge/ADO**: ``InterviewQuestionResponse``, ``InterviewResponse``,
   ``AdoWorkItemResponse``, ``AdoSearchResponse``
 """
@@ -700,6 +701,7 @@ class PmoProjectResponse(BaseModel):
     color: str = Field(default="", description="Display color for the PMO board.")
     description: str = Field(default="", description="Optional project description.")
     registered_at: str = Field(default="", description="ISO 8601 registration timestamp.")
+    ado_project: str = Field(default="", description="Azure DevOps project name (reserved for future use).")
 
 
 class PmoCardResponse(BaseModel):
@@ -720,6 +722,21 @@ class PmoCardResponse(BaseModel):
     error: str = Field(default="", description="Last failure error message, if any.")
     created_at: str = Field(default="", description="ISO 8601 plan creation timestamp.")
     updated_at: str = Field(default="", description="ISO 8601 last-updated timestamp.")
+    external_id: str = Field(default="", description="Azure DevOps work item ID (reserved for future use).")
+
+
+class PmoCardDetailResponse(PmoCardResponse):
+    """Extended card detail response, including the raw plan dict when available.
+
+    Returned by ``GET /pmo/cards/{card_id}``.  Extends ``PmoCardResponse``
+    with the ``plan`` field containing the full serialised ``MachinePlan``
+    dict when the plan file can be found on disk.
+    """
+
+    plan: Optional[dict] = Field(
+        default=None,
+        description="Full plan dict (MachinePlan.to_dict() shape) when available.",
+    )
 
 
 class PmoSignalResponse(BaseModel):
@@ -819,4 +836,8 @@ class AdoSearchResponse(BaseModel):
     items: list[AdoWorkItemResponse] = Field(
         default_factory=list,
         description="Matching ADO work items.",
+    )
+    message: str = Field(
+        default="",
+        description="Status message (e.g. configuration guidance when ADO is not connected).",
     )

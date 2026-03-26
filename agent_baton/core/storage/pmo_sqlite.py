@@ -242,6 +242,40 @@ class PmoSqliteStore:
         ).fetchone()
         return _row_to_signal(row) if row else None
 
+    def resolve_signals(self, signal_ids: list[str]) -> tuple[list[str], list[str]]:
+        """Resolve multiple signals in a single transaction.
+
+        Issues one ``UPDATE`` per signal ID within a single connection
+        transaction, collecting which IDs were found vs. not found.
+
+        Args:
+            signal_ids: List of signal IDs to resolve.
+
+        Returns:
+            A ``(resolved, not_found)`` tuple where ``resolved`` contains
+            the IDs that were successfully updated and ``not_found``
+            contains IDs that matched no row.
+        """
+        conn = self._conn()
+        now = _utcnow()
+        resolved: list[str] = []
+        not_found: list[str] = []
+        for sid in signal_ids:
+            cur = conn.execute(
+                """
+                UPDATE signals
+                   SET status = 'resolved', resolved_at = ?
+                 WHERE signal_id = ?
+                """,
+                (now, sid),
+            )
+            if cur.rowcount > 0:
+                resolved.append(sid)
+            else:
+                not_found.append(sid)
+        conn.commit()
+        return resolved, not_found
+
     # ------------------------------------------------------------------
     # Archive
     # ------------------------------------------------------------------

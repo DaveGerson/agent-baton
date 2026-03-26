@@ -48,7 +48,7 @@ export function AdoCombobox({ onSelect }: AdoComboboxProps) {
         value={query}
         onChange={e => setQuery(e.target.value)}
         onFocus={() => items.length > 0 && setOpen(true)}
-        placeholder="Search ADO work items (placeholder)..."
+        placeholder="Search ADO work items..."
         style={{
           width: '100%', padding: '6px 8px', borderRadius: 4,
           border: `1px solid ${T.border}`, background: T.bg1,

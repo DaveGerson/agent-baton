@@ -223,6 +223,9 @@ class TestFallbackToActiveMarker:
             patch(f"{_MOD}.ExecutionEngine", side_effect=fake_engine_factory),
             patch(f"{_MOD}.EventBus"),
             patch(f"{_MOD}.get_project_storage"),
+            # Force file backend so that the SQLite-first path is bypassed and
+            # the active-task-id.txt fallback is exercised.
+            patch(f"{_MOD}.detect_backend", return_value="file"),
             patch(
                 f"{_MOD}.StatePersistence.get_active_task_id",
                 return_value="marker-task",
@@ -256,6 +259,9 @@ class TestFallbackToActiveMarker:
             patch(f"{_MOD}.ExecutionEngine", return_value=mock_engine),
             patch(f"{_MOD}.EventBus"),
             patch(f"{_MOD}.get_project_storage"),
+            # Force file backend so that the SQLite-first path is bypassed and
+            # the active-task-id.txt fallback is exercised.
+            patch(f"{_MOD}.detect_backend", return_value="file"),
             patch(
                 f"{_MOD}.StatePersistence.get_active_task_id",
                 return_value="marker-task",

@@ -3,7 +3,7 @@ export interface PmoCard {
   project_id: string;
   program: string;
   title: string;
-  column: 'queued' | 'planning' | 'executing' | 'awaiting_human' | 'validating' | 'deployed';
+  column: 'queued' | 'executing' | 'awaiting_human' | 'validating' | 'deployed';
   risk_level: string;
   priority: number;
   agents: string[];
@@ -14,6 +14,7 @@ export interface PmoCard {
   error: string;
   created_at: string;
   updated_at: string;
+  external_id: string;
 }
 
 export interface PmoProject {
@@ -23,6 +24,8 @@ export interface PmoProject {
   program: string;
   color: string;
   description: string;
+  registered_at: string;
+  ado_project: string;
 }
 
 export interface ProgramHealth {
@@ -44,6 +47,7 @@ export interface PmoSignal {
   status: string;
   created_at: string;
   forge_task_id: string;
+  source_project_id: string;
 }
 
 export interface BoardResponse {
@@ -167,7 +171,7 @@ export interface RegenerateBody {
 }
 
 // ---------------------------------------------------------------------------
-// ADO placeholder
+// ADO types
 // ---------------------------------------------------------------------------
 
 export interface AdoWorkItem {
@@ -182,4 +186,5 @@ export interface AdoWorkItem {
 
 export interface AdoSearchResponse {
   items: AdoWorkItem[];
+  message?: string;
 }

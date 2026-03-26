@@ -2,15 +2,16 @@ import { useState, useCallback } from 'react';
 import { KanbanBoard } from './components/KanbanBoard';
 import { ForgePanel } from './components/ForgePanel';
 import { useHotkeys } from './hooks/useHotkeys';
+import { usePersistedState } from './hooks/usePersistedState';
 import { T } from './styles/tokens';
 import type { PmoCard, PmoSignal } from './api/types';
 
 type View = 'kanban' | 'forge';
 
 export default function App() {
-  const [view, setView] = useState<View>('kanban');
+  const [view, setView] = usePersistedState<View>('pmo:active-view', 'kanban');
   const [forgeSignal, setForgeSignal] = useState<PmoSignal | null>(null);
-  const [showSignals, setShowSignals] = useState(false);
+  const [showSignals, setShowSignals] = usePersistedState('pmo:show-signals', false);
 
   function openForge(signal?: PmoSignal) {
     setForgeSignal(signal ?? null);
@@ -31,6 +32,7 @@ export default function App() {
       status: 'open',
       created_at: card.updated_at,
       forge_task_id: card.card_id,
+      source_project_id: card.project_id,
     };
     openForge(signal);
   }

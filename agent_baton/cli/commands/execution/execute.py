@@ -284,15 +284,28 @@ def handler(args: argparse.Namespace) -> None:
         _handle_switch(args.switch_task_id)
         return
 
-    # Resolve task_id: explicit flag → BATON_TASK_ID env var → active marker → None (legacy flat file)
+    # Resolve task_id: explicit flag → BATON_TASK_ID env var → SQLite active_task →
+    #   file active-task-id.txt → None (legacy flat file)
     task_id = getattr(args, "task_id", None)
     context_root = Path(".claude/team-context").resolve()
     if task_id is None:
         task_id = os.environ.get("BATON_TASK_ID")
     if task_id is None and args.subcommand != "start":
-        task_id = StatePersistence.get_active_task_id(
-            Path(".claude/team-context")
-        )
+        # SQLite-first: read active task from baton.db before falling back to
+        # the file-based active-task-id.txt marker.
+        _backend = detect_backend(context_root)
+        if _backend == "sqlite":
+            try:
+                _early_storage = get_project_storage(context_root, backend="sqlite")
+                task_id = _early_storage.get_active_task()
+            except Exception as _exc:
+                _log.debug(
+                    "SQLite active-task lookup failed, falling back to file: %s", _exc
+                )
+        if task_id is None:
+            task_id = StatePersistence.get_active_task_id(
+                Path(".claude/team-context")
+            )
 
     bus = EventBus()
     storage = get_project_storage(context_root)
@@ -626,7 +639,8 @@ def _handle_list() -> None:
     legacy_sp = StatePersistence(context_root)
     legacy_state = legacy_sp.load()
 
-    active_task_id = StatePersistence.get_active_task_id(context_root)
+    # Resolve active task ID: SQLite-first, then file-based fallback.
+    active_task_id: str | None = None
 
     # Collect task IDs from SQLite backend (union with file IDs)
     sqlite_task_ids: list[str] = []
@@ -637,13 +651,16 @@ def _handle_list() -> None:
         try:
             _sqlite_storage = get_project_storage(context_root, backend="sqlite")
             sqlite_task_ids = _sqlite_storage.list_executions()
-            # Also check for active task in SQLite if not found on disk
-            if active_task_id is None:
-                active_task_id = _sqlite_storage.get_active_task()
+            # SQLite-first: prefer the active task recorded in baton.db.
+            active_task_id = _sqlite_storage.get_active_task()
         except Exception as exc:
             _log.info("execute list: SQLite backend unavailable, using file backend: %s", exc)
     else:
         _log.debug("execute list: using file backend at %s", context_root)
+
+    # Fall back to file-based active marker when SQLite didn't yield a result.
+    if active_task_id is None:
+        active_task_id = StatePersistence.get_active_task_id(context_root)
 
     # Merge: union of file and SQLite task IDs, preserving file order first
     all_task_ids_seen: set[str] = set(file_task_ids)
@@ -662,15 +679,20 @@ def _handle_list() -> None:
     records: list[ExecutionRecord] = []
 
     for tid in merged_task_ids:
-        # Try file backend first, then SQLite
+        # SQLite-first: when the SQLite backend is available, read from it
+        # directly instead of going through the file-based StatePersistence
+        # loader.  Fall back to file only if SQLite has no record for this
+        # task (handles executions that pre-date the SQLite migration).
         state = None
-        sp = StatePersistence(context_root, task_id=tid)
-        state = sp.load()
-        if state is None and _sqlite_storage is not None:
+        if _sqlite_storage is not None:
             try:
                 state = _sqlite_storage.load_execution(tid)
             except Exception as exc:
                 _log.info("execute list: failed to load %s from SQLite: %s", tid, exc)
+        if state is None:
+            # File fallback: covers pre-migration tasks and SQLite-unavailable envs.
+            sp = StatePersistence(context_root, task_id=tid)
+            state = sp.load()
         if state is None:
             continue
         steps_complete = sum(

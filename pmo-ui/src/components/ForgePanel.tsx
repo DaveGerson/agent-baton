@@ -3,6 +3,7 @@ import { api } from '../api/client';
 import { PlanEditor } from './PlanEditor';
 import { InterviewPanel } from './InterviewPanel';
 import { AdoCombobox } from './AdoCombobox';
+import { usePersistedState } from '../hooks/usePersistedState';
 import { T } from '../styles/tokens';
 import type { PmoProject, PmoSignal, ForgePlanResponse, InterviewQuestion, InterviewAnswer } from '../api/types';
 
@@ -33,14 +34,18 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
   const [projects, setProjects] = useState<PmoProject[]>([]);
   const [projectsLoading, setProjectsLoading] = useState(true);
 
-  const [description, setDescription] = useState(
-    initialSignal
-      ? `Signal: ${initialSignal.title}\n\nSeverity: ${initialSignal.severity}\nType: ${initialSignal.signal_type}\n\n${initialSignal.description ?? ''}`
-      : ''
-  );
+  const signalDesc = initialSignal
+    ? `Signal: ${initialSignal.title}\n\nSeverity: ${initialSignal.severity}\nType: ${initialSignal.signal_type}\n\n${initialSignal.description ?? ''}`
+    : null;
+  const [description, setDescription] = usePersistedState('pmo:forge-description', signalDesc ?? '');
   const [projectId, setProjectId] = useState('');
-  const [taskType, setTaskType] = useState('');
-  const [priority, setPriority] = useState<number>(1);
+  const [taskType, setTaskType] = usePersistedState('pmo:forge-task-type', '');
+  const [priority, setPriority] = usePersistedState<number>('pmo:forge-priority', 1);
+
+  // When opened from a signal, override persisted draft with signal content.
+  useEffect(() => {
+    if (signalDesc) setDescription(signalDesc);
+  }, [signalDesc]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const [plan, setPlan] = useState<ForgePlanResponse | null>(null);
   const [interviewQuestions, setInterviewQuestions] = useState<InterviewQuestion[]>([]);
@@ -225,7 +230,7 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
             </div>
 
             {/* ADO Import */}
-            <FormField label="Import from ADO (placeholder)">
+            <FormField label="Import from ADO">
               <AdoCombobox onSelect={item => {
                 setDescription(item.description || item.title);
               }} />

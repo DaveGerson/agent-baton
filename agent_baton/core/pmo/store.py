@@ -197,6 +197,38 @@ class PmoStore:
                 return s
         return None
 
+    def resolve_signals(self, signal_ids: list[str]) -> tuple[list[str], list[str]]:
+        """Resolve multiple signals in a single config write.
+
+        Marks each matching signal as ``"resolved"`` with ``resolved_at``
+        set to the current UTC timestamp, then atomically writes the config
+        once.  Unknown IDs are collected and returned so callers can report
+        them to the client.
+
+        Args:
+            signal_ids: List of signal IDs to resolve.
+
+        Returns:
+            A ``(resolved, not_found)`` tuple where ``resolved`` contains
+            the IDs that were successfully resolved and ``not_found``
+            contains IDs that had no matching signal.
+        """
+        config = self.load_config()
+        signal_map = {s.signal_id: s for s in config.signals}
+        resolved: list[str] = []
+        not_found: list[str] = []
+        now = datetime.now(timezone.utc).isoformat()
+        for sid in signal_ids:
+            if sid in signal_map:
+                signal_map[sid].status = "resolved"
+                signal_map[sid].resolved_at = now
+                resolved.append(sid)
+            else:
+                not_found.append(sid)
+        if resolved:
+            self.save_config(config)
+        return resolved, not_found
+
     def get_open_signals(self) -> list[PmoSignal]:
         """Return all signals with status != resolved."""
         config = self.load_config()

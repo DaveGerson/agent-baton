@@ -20,8 +20,11 @@ export function SignalsBar({ onForge, onOpenCountChange }: SignalsBarProps) {
   const [error, setError] = useState<string | null>(null);
   const [showAdd, setShowAdd] = useState(false);
   const [newTitle, setNewTitle] = useState('');
+  const [newSignalType, setNewSignalType] = useState<'bug' | 'escalation' | 'blocker'>('bug');
   const [newSeverity, setNewSeverity] = useState('medium');
   const [submitting, setSubmitting] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [batchResolving, setBatchResolving] = useState(false);
   const mountedRef = useRef(true);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -65,8 +68,36 @@ export function SignalsBar({ onForge, onOpenCountChange }: SignalsBarProps) {
         onOpenCountChange?.(openCount);
         return next;
       });
+      setSelected(prev => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
     } catch {
       // silent — not critical
+    }
+  }
+
+  async function handleBatchResolve() {
+    if (selected.size === 0) return;
+    setBatchResolving(true);
+    try {
+      const ids = Array.from(selected);
+      const result = await api.batchResolveSignals(ids);
+      const resolvedSet = new Set(result.resolved);
+      setSignals(prev => {
+        const next = prev.map(s =>
+          resolvedSet.has(s.signal_id) ? { ...s, status: 'resolved' } : s
+        );
+        const openCount = next.filter(s => s.status !== 'resolved').length;
+        onOpenCountChange?.(openCount);
+        return next;
+      });
+      setSelected(new Set());
+    } catch {
+      // silent — not critical
+    } finally {
+      if (mountedRef.current) setBatchResolving(false);
     }
   }
 
@@ -76,7 +107,7 @@ export function SignalsBar({ onForge, onOpenCountChange }: SignalsBarProps) {
     try {
       const sig = await api.createSignal({
         signal_id: `sig-${Date.now()}`,
-        signal_type: 'bug',
+        signal_type: newSignalType,
         title: newTitle.trim(),
         severity: newSeverity,
         status: 'open',
@@ -96,7 +127,28 @@ export function SignalsBar({ onForge, onOpenCountChange }: SignalsBarProps) {
     }
   }
 
+  function toggleSelect(id: string) {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  }
+
   const open = signals.filter(s => s.status !== 'resolved');
+  const allSelected = open.length > 0 && selected.size === open.length;
+
+  function toggleSelectAll() {
+    if (allSelected) {
+      setSelected(new Set());
+    } else {
+      setSelected(new Set(open.map(s => s.signal_id)));
+    }
+  }
 
   return (
     <div style={{
@@ -108,30 +160,62 @@ export function SignalsBar({ onForge, onOpenCountChange }: SignalsBarProps) {
     }}>
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 5 }}>
-        <span style={{
-          fontSize: 9,
-          fontWeight: 700,
-          color: T.red,
-          textTransform: 'uppercase',
-          letterSpacing: 0.5,
-        }}>
-          Signals — {open.length} open
-        </span>
-        <button
-          onClick={() => setShowAdd(!showAdd)}
-          style={{
-            padding: '2px 6px',
-            borderRadius: 3,
-            border: `1px solid ${T.red}44`,
-            background: showAdd ? T.red + '15' : 'transparent',
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          {open.length > 0 && (
+            <input
+              type="checkbox"
+              checked={allSelected}
+              onChange={toggleSelectAll}
+              title="Select all signals"
+              style={{ cursor: 'pointer', width: 11, height: 11, accentColor: T.accent }}
+            />
+          )}
+          <span style={{
+            fontSize: 9,
+            fontWeight: 700,
             color: T.red,
-            fontSize: 7,
-            fontWeight: 600,
-            cursor: 'pointer',
-          }}
-        >
-          {showAdd ? 'Cancel' : '+ Add Signal'}
-        </button>
+            textTransform: 'uppercase',
+            letterSpacing: 0.5,
+          }}>
+            Signals — {open.length} open
+          </span>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          {selected.size > 0 && (
+            <button
+              onClick={handleBatchResolve}
+              disabled={batchResolving}
+              style={{
+                padding: '2px 7px',
+                borderRadius: 3,
+                border: `1px solid ${T.green}44`,
+                background: T.green + '15',
+                color: T.green,
+                fontSize: 7,
+                fontWeight: 600,
+                cursor: batchResolving ? 'not-allowed' : 'pointer',
+                opacity: batchResolving ? 0.6 : 1,
+              }}
+            >
+              {batchResolving ? 'Resolving…' : `Resolve Selected (${selected.size})`}
+            </button>
+          )}
+          <button
+            onClick={() => setShowAdd(!showAdd)}
+            style={{
+              padding: '2px 6px',
+              borderRadius: 3,
+              border: `1px solid ${T.red}44`,
+              background: showAdd ? T.red + '15' : 'transparent',
+              color: T.red,
+              fontSize: 7,
+              fontWeight: 600,
+              cursor: 'pointer',
+            }}
+          >
+            {showAdd ? 'Cancel' : '+ Add Signal'}
+          </button>
+        </div>
       </div>
 
       {/* Add form */}
@@ -153,6 +237,22 @@ export function SignalsBar({ onForge, onOpenCountChange }: SignalsBarProps) {
               outline: 'none',
             }}
           />
+          <select
+            value={newSignalType}
+            onChange={e => setNewSignalType(e.target.value as 'bug' | 'escalation' | 'blocker')}
+            style={{
+              padding: '4px 6px',
+              borderRadius: 3,
+              border: `1px solid ${T.border}`,
+              background: T.bg1,
+              color: T.text0,
+              fontSize: 8,
+            }}
+          >
+            <option value="bug">Bug</option>
+            <option value="escalation">Escalation</option>
+            <option value="blocker">Blocker</option>
+          </select>
           <select
             value={newSeverity}
             onChange={e => setNewSeverity(e.target.value)}
@@ -208,13 +308,20 @@ export function SignalsBar({ onForge, onOpenCountChange }: SignalsBarProps) {
             alignItems: 'center',
             gap: 6,
             padding: '4px 8px',
-            background: T.bg1,
+            background: selected.has(sig.signal_id) ? T.accent + '0a' : T.bg1,
             borderRadius: 3,
-            border: `1px solid ${T.border}`,
+            border: `1px solid ${selected.has(sig.signal_id) ? T.accent + '44' : T.border}`,
             borderLeft: `3px solid ${severityColor(sig.severity)}`,
             marginBottom: 3,
           }}
         >
+          <input
+            type="checkbox"
+            checked={selected.has(sig.signal_id)}
+            onChange={() => toggleSelect(sig.signal_id)}
+            onClick={e => e.stopPropagation()}
+            style={{ cursor: 'pointer', width: 11, height: 11, accentColor: T.accent, flexShrink: 0 }}
+          />
           <span style={{ fontSize: 7, color: T.text3, fontFamily: 'monospace' }}>
             {sig.signal_id.slice(0, 12)}
           </span>

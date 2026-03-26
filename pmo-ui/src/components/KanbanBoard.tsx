@@ -3,6 +3,8 @@ import { KanbanCard } from './KanbanCard';
 import { HealthBar } from './HealthBar';
 import { SignalsBar } from './SignalsBar';
 import { usePmoBoard } from '../hooks/usePmoBoard';
+import type { ConnectionMode } from '../hooks/usePmoBoard';
+import { usePersistedState } from '../hooks/usePersistedState';
 import { T, COLUMNS } from '../styles/tokens';
 import type { PmoCard, PmoSignal } from '../api/types';
 
@@ -15,8 +17,8 @@ interface KanbanBoardProps {
 }
 
 export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSignals, onToggleSignals }: KanbanBoardProps) {
-  const { cards, health, loading, error, lastUpdated } = usePmoBoard();
-  const [filter, setFilter] = useState<string>('all');
+  const { cards, health, loading, error, lastUpdated, connectionMode } = usePmoBoard();
+  const [filter, setFilter] = usePersistedState<string>('pmo:board-filter', 'all');
   const [openSignalCount, setOpenSignalCount] = useState(0);
 
   const programs = Array.from(new Set(cards.map(c => c.program))).sort();
@@ -28,9 +30,17 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
   const awaitingHuman = cards.filter(c => c.column === 'awaiting_human').length;
   const executing = cards.filter(c => c.column === 'executing').length;
 
+  function handleProgramClick(program: string) {
+    setFilter(prev => prev === program ? 'all' : program);
+  }
+
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-      <HealthBar health={health} />
+      <HealthBar
+        health={health}
+        activeProgram={filter === 'all' ? null : filter}
+        onProgramClick={handleProgramClick}
+      />
 
       {/* Toolbar */}
       <div style={{
@@ -135,6 +145,7 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
             </span>
           )}
           {loading && <span style={{ color: T.text4, fontSize: 7 }}>refreshing…</span>}
+          <ConnectionIndicator mode={connectionMode} />
         </div>
 
         <button
@@ -174,7 +185,7 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
           fontSize: 8,
           color: T.red,
         }}>
-          {error} — retrying every 5s
+          {error} — retrying every {connectionMode === 'sse' ? '15' : '5'}s
         </div>
       )}
 
@@ -276,6 +287,46 @@ function FilterBtn({
     >
       {children}
     </button>
+  );
+}
+
+function ConnectionIndicator({ mode }: { mode: ConnectionMode }) {
+  const isLive = mode === 'sse';
+  const isConnecting = mode === 'connecting';
+
+  const dotColor = isLive ? T.green : isConnecting ? T.yellow : T.text3;
+  const label = isLive ? 'live' : isConnecting ? 'connecting' : 'polling';
+  const title = isLive
+    ? 'Real-time updates via SSE'
+    : isConnecting
+    ? 'Establishing SSE connection…'
+    : 'SSE unavailable — polling fallback active';
+
+  return (
+    <div
+      title={title}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 3,
+        padding: '2px 5px',
+        borderRadius: 3,
+        border: `1px solid ${dotColor}33`,
+        background: dotColor + '10',
+      }}
+    >
+      <div
+        style={{
+          width: 5,
+          height: 5,
+          borderRadius: '50%',
+          background: dotColor,
+          animation: isLive ? 'none' : isConnecting ? 'pulse 1.5s infinite' : 'none',
+          flexShrink: 0,
+        }}
+      />
+      <span style={{ fontSize: 7, color: dotColor, fontWeight: 600 }}>{label}</span>
+    </div>
   );
 }
 

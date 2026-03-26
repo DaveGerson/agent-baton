@@ -62,14 +62,14 @@ def _health(**kwargs) -> ProgramHealth:
 # ---------------------------------------------------------------------------
 
 class TestPmoColumns:
-    def test_contains_six_columns(self):
-        assert len(PMO_COLUMNS) == 6
+    def test_contains_five_columns(self):
+        assert len(PMO_COLUMNS) == 5
 
     def test_contains_queued(self):
         assert "queued" in PMO_COLUMNS
 
-    def test_contains_planning(self):
-        assert "planning" in PMO_COLUMNS
+    def test_does_not_contain_planning(self):
+        assert "planning" not in PMO_COLUMNS
 
     def test_contains_executing(self):
         assert "executing" in PMO_COLUMNS

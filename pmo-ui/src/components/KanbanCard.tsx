@@ -1,6 +1,8 @@
 import { useState } from 'react';
-import type { PmoCard } from '../api/types';
+import type { PmoCard, ForgePlanResponse } from '../api/types';
 import { T, PRIORITY_COLOR } from '../styles/tokens';
+import { api } from '../api/client';
+import { PlanPreview } from './PlanPreview';
 
 interface KanbanCardProps {
   card: PmoCard;
@@ -59,8 +61,30 @@ function ProgramDot({ program, size = 7 }: { program: string; size?: number }) {
 
 export function KanbanCard({ card, columnColor, onForge }: KanbanCardProps) {
   const [expanded, setExpanded] = useState(false);
+  const [showPlan, setShowPlan] = useState(false);
+  const [planData, setPlanData] = useState<ForgePlanResponse | null>(null);
+  const [planLoading, setPlanLoading] = useState(false);
   const isHuman = card.column === 'awaiting_human';
   const priorityColor = PRIORITY_COLOR[card.priority] ?? T.text2;
+
+  async function handleViewPlan(e: React.MouseEvent) {
+    e.stopPropagation();
+    if (showPlan) {
+      setShowPlan(false);
+      return;
+    }
+    setShowPlan(true);
+    if (planData) return; // already fetched — use cache
+    setPlanLoading(true);
+    try {
+      const result = await api.getCardDetail(card.card_id);
+      setPlanData(result.plan);
+    } catch {
+      // silent — plan unavailable
+    } finally {
+      setPlanLoading(false);
+    }
+  }
 
   const borderColor = isHuman ? T.orange + '55' : expanded ? columnColor + '55' : T.border;
 
@@ -203,41 +227,89 @@ export function KanbanCard({ card, columnColor, onForge }: KanbanCardProps) {
             </div>
           )}
 
-          {/* Forge navigation actions */}
-          {onForge && (
-            <div style={{ display: 'flex', gap: 4, marginTop: 4, paddingTop: 4, borderTop: `1px solid ${T.border}` }}>
-              <button
-                onClick={e => { e.stopPropagation(); onForge(card); }}
-                style={{
-                  padding: '3px 9px',
-                  borderRadius: 3,
-                  border: `1px solid ${T.accent}44`,
-                  background: T.accent + '12',
-                  color: T.accent,
-                  fontSize: 9,
-                  fontWeight: 600,
-                  cursor: 'pointer',
-                }}
-                title="Open Forge with this card's context"
-              >
-                Re-forge
-              </button>
-              <button
-                onClick={e => { e.stopPropagation(); onForge(card); }}
-                style={{
-                  padding: '3px 9px',
-                  borderRadius: 3,
-                  border: `1px solid ${T.purple}44`,
-                  background: T.purple + '12',
-                  color: T.purple,
-                  fontSize: 9,
-                  fontWeight: 600,
-                  cursor: 'pointer',
-                }}
-                title="Edit this plan in Forge"
-              >
-                Edit in Forge
-              </button>
+          {/* Actions row */}
+          <div style={{ display: 'flex', gap: 4, marginTop: 4, paddingTop: 4, borderTop: `1px solid ${T.border}` }}>
+            {onForge && (
+              <>
+                <button
+                  onClick={e => { e.stopPropagation(); onForge(card); }}
+                  style={{
+                    padding: '3px 9px',
+                    borderRadius: 3,
+                    border: `1px solid ${T.accent}44`,
+                    background: T.accent + '12',
+                    color: T.accent,
+                    fontSize: 9,
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                  }}
+                  title="Open Forge with this card's context"
+                >
+                  Re-forge
+                </button>
+                <button
+                  onClick={e => { e.stopPropagation(); onForge(card); }}
+                  style={{
+                    padding: '3px 9px',
+                    borderRadius: 3,
+                    border: `1px solid ${T.purple}44`,
+                    background: T.purple + '12',
+                    color: T.purple,
+                    fontSize: 9,
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                  }}
+                  title="Edit this plan in Forge"
+                >
+                  Edit in Forge
+                </button>
+              </>
+            )}
+            <button
+              onClick={handleViewPlan}
+              style={{
+                padding: '3px 9px',
+                borderRadius: 3,
+                border: `1px solid ${T.green}44`,
+                background: showPlan ? T.green + '18' : T.green + '0c',
+                color: T.green,
+                fontSize: 9,
+                fontWeight: 600,
+                cursor: 'pointer',
+              }}
+              title="View the execution plan for this card"
+            >
+              {showPlan ? 'Hide Plan' : 'View Plan'}
+            </button>
+          </div>
+
+          {/* Plan preview */}
+          {showPlan && (
+            <div
+              onClick={e => e.stopPropagation()}
+              style={{
+                marginTop: 6,
+                maxHeight: 300,
+                overflowY: 'auto',
+                borderRadius: 4,
+                border: `1px solid ${T.border}`,
+                background: T.bg1,
+                padding: 6,
+              }}
+            >
+              {planLoading && (
+                <div style={{ fontSize: 8, color: T.text3, fontStyle: 'italic', padding: 8 }}>
+                  Loading plan…
+                </div>
+              )}
+              {!planLoading && planData && (
+                <PlanPreview plan={planData} />
+              )}
+              {!planLoading && !planData && (
+                <div style={{ fontSize: 8, color: T.text3, fontStyle: 'italic', padding: 8 }}>
+                  No plan available for this card.
+                </div>
+              )}
             </div>
           )}
         </div>

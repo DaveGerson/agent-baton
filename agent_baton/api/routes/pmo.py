@@ -1,28 +1,35 @@
 """PMO (Portfolio Management Office) endpoints for the Agent Baton API.
 
-GET  /pmo/board                       — Full Kanban board (cards + health)
-GET  /pmo/board/{program}             — Filter board by program
-GET  /pmo/projects                    — List registered projects
-POST /pmo/projects                    — Register a project
-DELETE /pmo/projects/{project_id}     — Unregister a project
-GET  /pmo/health                      — Program health metrics
-POST /pmo/forge/plan                  — Create a plan via IntelligentPlanner
-POST /pmo/forge/approve               — Save an approved plan to a project
-GET  /pmo/signals                     — List all open signals
-POST /pmo/signals                     — Create a signal
-POST /pmo/signals/{signal_id}/resolve — Resolve a signal
-POST /pmo/signals/{signal_id}/forge   — Triage signal into a plan
+GET  /pmo/board                          — Full Kanban board (cards + health)
+GET  /pmo/board/{program}               — Filter board by program
+GET  /pmo/cards/{card_id}               — Card detail (card + plan)
+GET  /pmo/projects                      — List registered projects
+POST /pmo/projects                      — Register a project
+DELETE /pmo/projects/{project_id}       — Unregister a project
+GET  /pmo/health                        — Program health metrics
+GET  /pmo/events                        — SSE stream of board-relevant events
+POST /pmo/forge/plan                    — Create a plan via IntelligentPlanner
+POST /pmo/forge/approve                 — Save an approved plan to a project
+GET  /pmo/signals                       — List all open signals
+POST /pmo/signals                       — Create a signal
+POST /pmo/signals/batch/resolve         — Resolve multiple signals in one call
+POST /pmo/signals/{signal_id}/resolve   — Resolve a signal
+POST /pmo/signals/{signal_id}/forge     — Triage signal into a plan
 """
 from __future__ import annotations
 
+import asyncio
 import json
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
+from sse_starlette.sse import EventSourceResponse
 
-from agent_baton.api.deps import get_forge_session, get_pmo_scanner, get_pmo_store
+from agent_baton.api.deps import get_bus, get_forge_session, get_pmo_scanner, get_pmo_store
+from agent_baton.core.events.bus import EventBus
 from agent_baton.api.models.requests import (
     ApproveForgeRequest,
+    BatchResolveRequest,
     CreateForgeRequest,
     CreateSignalRequest,
     ForgeSignalRequest,
@@ -36,6 +43,7 @@ from agent_baton.api.models.responses import (
     InterviewQuestionResponse,
     InterviewResponse,
     PmoBoardResponse,
+    PmoCardDetailResponse,
     PmoCardResponse,
     PmoProjectResponse,
     PmoSignalResponse,
@@ -74,7 +82,7 @@ async def get_board(
         per-program health metrics.
     """
     cards = scanner.scan_all()
-    health_map = scanner.program_health()
+    health_map = scanner.program_health(cards=cards)
 
     card_responses = [_card_response(c) for c in cards]
     health_responses = {
@@ -108,7 +116,7 @@ async def get_board_by_program(
     cards = scanner.scan_all()
     program_upper = program.upper()
     filtered = [c for c in cards if c.program.upper() == program_upper]
-    health_map = scanner.program_health()
+    health_map = scanner.program_health(cards=cards)
 
     card_responses = [_card_response(c) for c in filtered]
     health_responses = {
@@ -117,6 +125,64 @@ async def get_board_by_program(
         if prog.upper() == program_upper
     }
     return PmoBoardResponse(cards=card_responses, health=health_responses)
+
+
+# ---------------------------------------------------------------------------
+# Card detail
+# ---------------------------------------------------------------------------
+
+
+@router.get("/pmo/cards/{card_id}", response_model=PmoCardDetailResponse)
+async def get_card(
+    card_id: str,
+    scanner: PmoScanner = Depends(get_pmo_scanner),
+) -> PmoCardDetailResponse:
+    """Return detailed information for a single card, including its plan.
+
+    GET /api/v1/pmo/cards/{card_id}
+
+    Scans all registered projects until a card whose ``card_id`` matches
+    ``task_id`` is found.  If the card's plan file is accessible on disk,
+    the full plan dict is included in the response.  Archived (deployed)
+    cards are also searchable.
+
+    Args:
+        card_id: The task ID of the card to look up (URL path parameter).
+        scanner: Injected ``PmoScanner`` singleton.
+
+    Returns:
+        A ``PmoCardDetailResponse`` with all card fields plus an optional
+        ``plan`` dict.
+
+    Raises:
+        HTTPException 404: If no card with ``card_id`` is found.
+    """
+    try:
+        card, plan_dict = scanner.find_card(card_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Card '{card_id}' not found.",
+        )
+    return PmoCardDetailResponse(
+        card_id=card.card_id,
+        project_id=card.project_id,
+        program=card.program,
+        title=card.title,
+        column=card.column,
+        risk_level=card.risk_level,
+        priority=card.priority,
+        agents=list(card.agents),
+        steps_completed=card.steps_completed,
+        steps_total=card.steps_total,
+        gates_passed=card.gates_passed,
+        current_phase=card.current_phase,
+        error=card.error,
+        created_at=card.created_at,
+        updated_at=card.updated_at,
+        external_id=card.external_id,
+        plan=plan_dict,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +314,104 @@ async def get_health(
     """
     health_map = scanner.program_health()
     return {prog: _health_response(h) for prog, h in health_map.items()}
+
+
+# ---------------------------------------------------------------------------
+# Real-time board updates via Server-Sent Events
+# ---------------------------------------------------------------------------
+
+# Topics that indicate a card's column or progress may have changed.
+_PMO_BOARD_TOPICS = frozenset(
+    [
+        "step.completed",
+        "step.failed",
+        "step.dispatched",
+        "gate.required",
+        "gate.passed",
+        "gate.failed",
+        "task.started",
+        "task.completed",
+        "task.failed",
+        "phase.started",
+        "phase.completed",
+        "approval.required",
+        "approval.resolved",
+    ]
+)
+
+
+@router.get(
+    "/pmo/events",
+    summary="Stream board-relevant events over SSE",
+    response_description="Server-Sent Event stream of card_update payloads.",
+    response_class=EventSourceResponse,
+    tags=["pmo"],
+)
+async def stream_pmo_events(
+    request: Request,
+    bus: EventBus = Depends(get_bus),
+) -> EventSourceResponse:
+    """Open a Server-Sent Events stream for PMO board changes.
+
+    GET /api/v1/pmo/events
+    Accept: text/event-stream
+
+    Subscribes to the shared ``EventBus`` and forwards every board-relevant
+    event as a ``card_update`` payload:
+
+    .. code-block:: json
+
+        { "type": "card_update", "card_id": "<task_id>", "topic": "<topic>" }
+
+    Only events whose ``topic`` maps to a visible board change are emitted
+    (step/gate/task/phase/approval transitions).  Events unrelated to the
+    board (e.g. usage tracking, webhook delivery) are silently dropped.
+
+    A keepalive comment is sent every 30 seconds when no board event arrives,
+    preventing proxies and browsers from closing idle connections.
+
+    Args:
+        request: Injected by FastAPI; used to detect client disconnection.
+        bus: The shared ``EventBus`` instance.
+
+    Returns:
+        A streaming ``EventSourceResponse`` yielding SSE frames with
+        ``event`` set to ``"card_update"`` and ``data`` as a JSON object.
+    """
+
+    async def event_generator():
+        queue: asyncio.Queue = asyncio.Queue()
+
+        def on_event(event) -> None:
+            if event.topic in _PMO_BOARD_TOPICS:
+                queue.put_nowait(event)
+
+        sub_id = bus.subscribe("*", on_event)
+
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=30.0)
+                    payload = {
+                        "type": "card_update",
+                        "card_id": event.task_id,
+                        "topic": event.topic,
+                    }
+                    yield {
+                        "event": "card_update",
+                        "id": event.event_id,
+                        "data": json.dumps(payload),
+                    }
+                except asyncio.TimeoutError:
+                    yield {"comment": "keepalive"}
+
+        finally:
+            bus.unsubscribe(sub_id)
+
+    return EventSourceResponse(event_generator())
 
 
 # ---------------------------------------------------------------------------
@@ -466,33 +630,83 @@ async def forge_regenerate(
 
 @router.get("/pmo/ado/search", response_model=AdoSearchResponse)
 async def ado_search(q: str = "") -> AdoSearchResponse:
-    """Search Azure DevOps work items (placeholder with mock data).
+    """Search Azure DevOps work items via the ADO adapter.
 
     GET /api/v1/pmo/ado/search
 
-    This endpoint returns hardcoded mock data simulating an ADO
-    integration.  The ``q`` query parameter filters items by
-    case-insensitive substring match against title, ID, and program.
+    When ``ADO_PAT`` is set (along with ``ADO_ORG`` and ``ADO_PROJECT``),
+    the endpoint queries Azure DevOps via the REST API.  When not
+    configured, it returns an empty list with a guidance message.
 
     Args:
         q: Optional search query string (query parameter).
 
     Returns:
-        An ``AdoSearchResponse`` with matching mock work items.
+        An ``AdoSearchResponse`` with matching work items.
     """
-    mock_items = [
-        AdoWorkItemResponse(id="F-4202", title="Phase 3 Flight Ops Optimization", type="Feature", program="NDS", owner="Kyle", priority="P0", description="Optimize flight operations through constraint-based scheduling."),
-        AdoWorkItemResponse(id="F-4203", title="FTE Migration — NDS Components", type="Feature", program="NDS", owner="Dave C", priority="P1", description="Migrate NDS analytical components from contractor codebase."),
-        AdoWorkItemResponse(id="F-4212", title="Root Cause Systems — Leadership Dashboards", type="Feature", program="ATL", owner="Mandy", priority="P1", description="Root cause analysis tooling for KPI drill-down."),
-        AdoWorkItemResponse(id="F-4230", title="Revenue Mgmt — Cargo Capacity", type="Feature", program="COM", owner="Pooja", priority="P0", description="Revenue management for cargo capacity optimization."),
-        AdoWorkItemResponse(id="B-901", title="R2 blocks missing on Off day", type="Bug", program="NDS", owner="Unassigned", priority="P0", description="Crew scheduling R2 blocks not appearing for off-day assignments."),
-    ]
+    import os
+
+    pat = os.environ.get("ADO_PAT", "")
+    if not pat:
+        return AdoSearchResponse(
+            items=[],
+            message="ADO not configured. Set ADO_PAT environment variable.",
+        )
+
+    org = os.environ.get("ADO_ORG", "")
+    project = os.environ.get("ADO_PROJECT", "")
+    if not org or not project:
+        return AdoSearchResponse(
+            items=[],
+            message="ADO not configured. Set ADO_ORG and ADO_PROJECT environment variables.",
+        )
+
+    from agent_baton.core.storage.adapters.ado import AdoAdapter
+
+    adapter = AdoAdapter()
+    try:
+        adapter.connect({
+            "organization": org,
+            "project": project,
+            "pat_env_var": "ADO_PAT",
+        })
+    except (ValueError, ImportError) as exc:
+        return AdoSearchResponse(
+            items=[],
+            message=f"ADO connection failed: {exc}",
+        )
+
+    try:
+        external_items = adapter.fetch_items()
+    except RuntimeError as exc:
+        return AdoSearchResponse(
+            items=[],
+            message=f"ADO query failed: {exc}",
+        )
+
+    # Convert ExternalItems to AdoWorkItemResponse and apply search filter
+    results: list[AdoWorkItemResponse] = []
     query_lower = q.lower()
-    if query_lower:
-        filtered = [item for item in mock_items if query_lower in item.title.lower() or query_lower in item.id.lower() or query_lower in item.program.lower()]
-    else:
-        filtered = mock_items
-    return AdoSearchResponse(items=filtered)
+    for ei in external_items:
+        item = AdoWorkItemResponse(
+            id=ei.external_id,
+            title=ei.title,
+            type=ei.item_type,
+            program=ei.tags[0] if ei.tags else "",
+            owner=ei.assigned_to,
+            priority=f"P{ei.priority}" if ei.priority else "",
+            description=ei.description,
+        )
+        if query_lower:
+            if not (
+                query_lower in item.title.lower()
+                or query_lower in item.id.lower()
+                or query_lower in item.type.lower()
+            ):
+                continue
+        results.append(item)
+
+    return AdoSearchResponse(items=results)
 
 
 # ---------------------------------------------------------------------------
@@ -566,6 +780,36 @@ async def create_signal(
             detail="Signal was written but could not be read back.",
         )
     return _signal_response(saved)
+
+
+@router.post("/pmo/signals/batch/resolve", response_model=dict)
+async def batch_resolve_signals(
+    req: BatchResolveRequest,
+    store: PmoStore = Depends(get_pmo_store),
+) -> dict:
+    """Resolve multiple signals in a single request.
+
+    POST /api/v1/pmo/signals/batch/resolve
+
+    Each signal ID in the list is marked as ``"resolved"``.  IDs that
+    do not match any known signal are collected in ``not_found`` and
+    silently skipped rather than causing an error.
+
+    Args:
+        req: Validated request body with a non-empty ``signal_ids`` list.
+        store: Injected PMO store singleton.
+
+    Returns:
+        A dict with ``resolved`` (list of IDs that were resolved),
+        ``not_found`` (list of IDs that had no matching signal), and
+        ``count`` (number of signals resolved).
+    """
+    resolved, not_found = store.resolve_signals(req.signal_ids)
+    return {
+        "resolved": resolved,
+        "not_found": not_found,
+        "count": len(resolved),
+    }
 
 
 @router.post("/pmo/signals/{signal_id}/resolve", response_model=dict)
@@ -688,6 +932,7 @@ def _project_response(p: object) -> PmoProjectResponse:
         color=p.color,  # type: ignore[attr-defined]
         description=p.description,  # type: ignore[attr-defined]
         registered_at=p.registered_at,  # type: ignore[attr-defined]
+        ado_project=p.ado_project,  # type: ignore[attr-defined]
     )
 
 
@@ -716,6 +961,7 @@ def _card_response(c: object) -> PmoCardResponse:
         error=c.error,  # type: ignore[attr-defined]
         created_at=c.created_at,  # type: ignore[attr-defined]
         updated_at=c.updated_at,  # type: ignore[attr-defined]
+        external_id=c.external_id,  # type: ignore[attr-defined]
     )
 
 

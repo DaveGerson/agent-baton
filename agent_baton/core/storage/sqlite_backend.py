@@ -144,8 +144,9 @@ class SqliteStorage:
                     INSERT INTO step_results
                         (task_id, step_id, agent_name, status, outcome,
                          files_changed, commit_hash, estimated_tokens,
-                         duration_seconds, retries, error, completed_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         duration_seconds, retries, error, completed_at,
+                         deviations)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         state.task_id,
@@ -160,6 +161,7 @@ class SqliteStorage:
                         sr.retries,
                         sr.error,
                         sr.completed_at,
+                        json.dumps(sr.deviations),
                     ),
                 )
                 # team step results cascade from step_results, delete via FK
@@ -326,6 +328,9 @@ class SqliteStorage:
                     error=sr["error"],
                     completed_at=sr["completed_at"],
                     member_results=member_results,
+                    deviations=json.loads(
+                        sr["deviations"] if "deviations" in sr.keys() else "[]"
+                    ),
                 )
             )
 
@@ -504,8 +509,9 @@ class SqliteStorage:
                 INSERT OR REPLACE INTO step_results
                     (task_id, step_id, agent_name, status, outcome,
                      files_changed, commit_hash, estimated_tokens,
-                     duration_seconds, retries, error, completed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     duration_seconds, retries, error, completed_at,
+                     deviations)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task_id,
@@ -520,6 +526,7 @@ class SqliteStorage:
                     result.retries,
                     result.error,
                     result.completed_at,
+                    json.dumps(result.deviations),
                 ),
             )
             # Replace team member results for this step

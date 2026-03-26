@@ -16,7 +16,6 @@ from dataclasses import dataclass, field, asdict
 
 PMO_COLUMNS = [
     "queued",
-    "planning",
     "executing",
     "awaiting_human",
     "validating",

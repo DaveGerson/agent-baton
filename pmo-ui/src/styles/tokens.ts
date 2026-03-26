@@ -25,7 +25,6 @@ export type TokenKey = keyof typeof T;
 
 export const COLUMNS = [
   { id: 'queued' as const, label: 'Queued', color: T.text2, desc: 'Plan ready, awaiting execution slot' },
-  { id: 'planning' as const, label: 'Planning', color: T.cyan, desc: 'Claude decomposing scope into steps' },
   { id: 'executing' as const, label: 'Executing', color: T.yellow, desc: 'Baton steps actively running' },
   { id: 'awaiting_human' as const, label: 'Awaiting Human', color: T.orange, desc: 'Interactive step paused for input' },
   { id: 'validating' as const, label: 'Validating', color: T.purple, desc: 'Test suites, baseline comparison' },

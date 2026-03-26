@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -58,6 +58,12 @@ ALTER TABLE plan_steps ADD COLUMN knowledge_attachments TEXT NOT NULL DEFAULT '[
 
 ALTER TABLE executions ADD COLUMN pending_gaps         TEXT NOT NULL DEFAULT '[]';
 ALTER TABLE executions ADD COLUMN resolved_decisions   TEXT NOT NULL DEFAULT '[]';
+""",
+    3: """
+-- v3: add deviations column to step_results.
+-- Active data loss fix: StepResult.deviations was not persisted to SQLite.
+
+ALTER TABLE step_results ADD COLUMN deviations TEXT NOT NULL DEFAULT '[]';
 """,
 }
 
@@ -170,6 +176,7 @@ CREATE TABLE IF NOT EXISTS step_results (
     retries           INTEGER NOT NULL DEFAULT 0,
     error             TEXT NOT NULL DEFAULT '',
     completed_at      TEXT NOT NULL DEFAULT '',
+    deviations        TEXT NOT NULL DEFAULT '[]',
     PRIMARY KEY (task_id, step_id),
     FOREIGN KEY (task_id) REFERENCES executions(task_id) ON DELETE CASCADE
 );

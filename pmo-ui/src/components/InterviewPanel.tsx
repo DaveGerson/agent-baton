@@ -113,16 +113,20 @@ export function InterviewPanel({ questions, onSubmit, onCancel, loading }: Inter
       <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
         <button
           onClick={handleSubmit}
-          disabled={loading || answeredCount === 0}
+          disabled={loading}
           style={{
             padding: '6px 16px', borderRadius: 4, border: 'none',
-            background: loading || answeredCount === 0 ? T.bg3 : `linear-gradient(135deg, ${T.yellow}, #d97706)`,
+            background: loading ? T.bg3 : `linear-gradient(135deg, ${T.yellow}, #d97706)`,
             color: '#fff', fontSize: 9, fontWeight: 700,
-            cursor: loading || answeredCount === 0 ? 'not-allowed' : 'pointer',
-            opacity: loading || answeredCount === 0 ? 0.6 : 1,
+            cursor: loading ? 'not-allowed' : 'pointer',
+            opacity: loading ? 0.6 : 1,
           }}
         >
-          {loading ? 'Re-generating...' : `Re-generate with ${answeredCount} answer${answeredCount !== 1 ? 's' : ''}`}
+          {loading
+            ? 'Re-generating...'
+            : answeredCount === 0
+              ? 'Re-generate with defaults'
+              : `Re-generate with ${answeredCount} answer${answeredCount !== 1 ? 's' : ''}`}
         </button>
         <button
           onClick={onCancel}

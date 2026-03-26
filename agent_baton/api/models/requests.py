@@ -12,7 +12,8 @@ The models are organized into groups:
 - **Decisions**: ``ResolveDecisionRequest``
 - **Webhooks**: ``RegisterWebhookRequest``
 - **PMO**: ``RegisterProjectRequest``, ``CreateForgeRequest``,
-  ``ApproveForgeRequest``, ``CreateSignalRequest``
+  ``ApproveForgeRequest``, ``CreateSignalRequest``,
+  ``BatchResolveRequest``
 - **Forge interview**: ``InterviewRequest``, ``InterviewAnswerPayload``,
   ``RegenerateRequest``
 """
@@ -322,6 +323,22 @@ class CreateSignalRequest(BaseModel):
         default="medium",
         pattern="^(low|medium|high|critical)$",
         description="Signal severity: low, medium, high, or critical.",
+    )
+
+
+class BatchResolveRequest(BaseModel):
+    """Request body for ``POST /api/v1/pmo/signals/batch/resolve``.
+
+    Resolves multiple signals in a single round-trip.  Each signal ID in
+    the list is marked as ``"resolved"``; IDs that do not match any known
+    signal are silently skipped (reported in the ``not_found`` list of the
+    response).
+    """
+
+    signal_ids: list[str] = Field(
+        ...,
+        min_length=1,
+        description="IDs of signals to resolve.",
     )
 
 
