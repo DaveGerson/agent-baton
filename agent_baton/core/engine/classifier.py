@@ -104,7 +104,7 @@ _CATEGORY_AFFINITY: dict[str, set[str]] = {
     "new-feature": {AgentCategory.ENGINEERING.value},
     "bug-fix": {AgentCategory.ENGINEERING.value},
     "refactor": {AgentCategory.ENGINEERING.value},
-    "documentation": {AgentCategory.META.value},
+    "documentation": {AgentCategory.ENGINEERING.value, AgentCategory.META.value},
     "test": {AgentCategory.ENGINEERING.value},
 }
 
@@ -349,9 +349,12 @@ class HaikuClassifier:
             cat = agent_def.category.value
             agent_lines.append(f"- {name}: {agent_def.description} [category: {cat}]")
         agent_list = "\n".join(agent_lines)
+        # Escape braces in summary/agent_list to prevent KeyError from .format()
+        safe_summary = summary.replace("{", "{{").replace("}", "}}")
+        safe_agent_list = agent_list.replace("{", "{{").replace("}", "}}")
         return _CLASSIFIER_PROMPT_TEMPLATE.format(
-            summary=summary,
-            agent_list=agent_list,
+            summary=safe_summary,
+            agent_list=safe_agent_list,
         )
 
     def _parse_response(

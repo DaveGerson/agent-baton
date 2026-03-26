@@ -455,14 +455,14 @@ class IntelligentPlanner:
         # match the explicit complexity rather than the classifier's guess.
         classified_phases: list[str] | None = None
         if task_type is None and agents is None and phases is None and complexity is None:
-            classification = self._task_classifier.classify(
+            task_cls = self._task_classifier.classify(
                 task_summary, self._registry, project_root
             )
-            self._last_task_classification = classification
-            inferred_type = classification.task_type
-            inferred_complexity = classification.complexity
-            resolved_agents = list(classification.agents)
-            classified_phases = list(classification.phases)
+            self._last_task_classification = task_cls
+            inferred_type = task_cls.task_type
+            inferred_complexity = task_cls.complexity
+            resolved_agents = list(task_cls.agents)
+            classified_phases = list(task_cls.phases)
         else:
             inferred_type = task_type or self._infer_task_type(task_summary)
             inferred_complexity = complexity or "medium"
@@ -731,7 +731,7 @@ class IntelligentPlanner:
             classification_source=(
                 self._last_task_classification.source
                 if self._last_task_classification
-                else "keyword-fallback"
+                else "cli-override"
             ),
         )
         shared_context = self._build_shared_context(tmp_plan)
