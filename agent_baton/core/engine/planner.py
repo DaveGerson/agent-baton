@@ -1234,19 +1234,14 @@ class IntelligentPlanner:
     def _default_gate(self, phase_name: str) -> PlanGate | None:
         """Return an appropriate QA gate for a phase name.
 
-        - 'Implement' or 'Fix' → build check (pytest)
+        Every code-producing phase gets a test gate. Only purely
+        investigative or review phases skip automated testing.
+
         - 'Test' → test gate (pytest with coverage)
-        - 'Review' → no automated gate (human review)
-        - All others → None
+        - 'Investigate', 'Research', 'Review' → no automated gate
+        - All others (Implement, Fix, etc.) → build check (pytest)
         """
         name_lower = phase_name.lower()
-        if name_lower in ("implement", "fix"):
-            return PlanGate(
-                gate_type="build",
-                command="pytest",
-                description="Run test suite to verify the implementation builds cleanly.",
-                fail_on=["test failure", "import error"],
-            )
         if name_lower == "test":
             return PlanGate(
                 gate_type="test",
@@ -1254,8 +1249,17 @@ class IntelligentPlanner:
                 description="Run full test suite with coverage report.",
                 fail_on=["test failure", "coverage below threshold"],
             )
-        # Review phases and everything else get no automated gate
-        return None
+        if name_lower in ("investigate", "research", "review"):
+            # No automated gate — these phases don't produce code
+            return None
+        # All other phases (implement, fix, migrate, refactor, etc.)
+        # get a mandatory test gate
+        return PlanGate(
+            gate_type="build",
+            command="pytest",
+            description="Run test suite to verify the implementation builds cleanly.",
+            fail_on=["test failure", "import error"],
+        )
 
     @staticmethod
     def _consolidate_team_step(phase: PlanPhase) -> PlanStep:
