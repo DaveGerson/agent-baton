@@ -191,6 +191,55 @@ Chain: "[Initiative Name]"
 └── Chain Review: code-reviewer (one pass, full diff)
 ```
 
+---
+
+## Engine Integration
+
+As of v0.2, the engagement level classification is implemented in the
+engine's planner via the `TaskClassifier` protocol. This means the
+engine itself right-sizes plans — it is no longer solely the
+orchestrator's responsibility to classify before calling `baton plan`.
+
+### How It Works
+
+When `baton plan "task description"` is called:
+
+1. The planner invokes a `TaskClassifier` (default: `FallbackClassifier`)
+2. `FallbackClassifier` tries `HaikuClassifier` first (Claude Haiku via
+   the Anthropic SDK, ~500 tokens, <1s)
+3. If Haiku is unavailable (no API key, network error, SDK not
+   installed), falls back to `KeywordClassifier` (deterministic
+   heuristics)
+4. The classifier returns: task type, complexity (light/medium/heavy),
+   recommended agents, and phase names
+5. The planner builds a plan using the classification result
+
+### Engagement Level to Complexity Mapping
+
+| Engagement Level | Engine Complexity | Plan Shape |
+|-----------------|-------------------|------------|
+| Level 1: Direct | `light` | 1 agent, 1 phase (Implement only) |
+| Level 2: Coordinated | `medium` | 2-3 agents, 2-3 phases (no Review) |
+| Level 3: Full Orchestration | `heavy` | 3-5 agents, 3-4 phases (full) |
+
+### Orchestrator Override
+
+The orchestrator can pass `--complexity light|medium|heavy` to `baton
+plan` to explicitly set the complexity level, bypassing the classifier.
+This is useful when the orchestrator has already classified the task and
+wants to ensure the engine uses that classification.
+
+### What the Orchestrator Still Does
+
+The engine handles plan sizing automatically, but the orchestrator still
+decides whether to use the engine at all:
+
+- **Level 1 tasks**: The orchestrator MAY skip `baton plan` entirely and
+  dispatch a single agent directly. Or it can call `baton plan
+  --complexity light` for traceability.
+- **Level 2+ tasks**: The orchestrator calls `baton plan` and the engine
+  handles the rest.
+
 ### Chain Setup Procedure
 
 1. **List all activities.** Extract individual tasks from the user's request
