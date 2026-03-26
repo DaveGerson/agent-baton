@@ -42,10 +42,23 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
   const [taskType, setTaskType] = usePersistedState('pmo:forge-task-type', '');
   const [priority, setPriority] = usePersistedState<number>('pmo:forge-priority', 1);
 
-  // When opened from a signal, override persisted draft with signal content.
+  // When initialSignal changes (card reforge, signal triage), reset the form.
   useEffect(() => {
-    if (signalDesc) setDescription(signalDesc);
-  }, [signalDesc]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (initialSignal) {
+      const desc = `Signal: ${initialSignal.title}\n\nSeverity: ${initialSignal.severity}\nType: ${initialSignal.signal_type}\n\n${initialSignal.description ?? ''}`;
+      setDescription(desc);
+      setPhase('intake');
+      setPlan(null);
+      setGenerateError(null);
+      setSaveError(null);
+      setSavePath(null);
+      setInterviewQuestions([]);
+      // Auto-select project if signal has source_project_id
+      if (initialSignal.source_project_id) {
+        setProjectId(initialSignal.source_project_id);
+      }
+    }
+  }, [initialSignal]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const [plan, setPlan] = useState<ForgePlanResponse | null>(null);
   const [interviewQuestions, setInterviewQuestions] = useState<InterviewQuestion[]>([]);
