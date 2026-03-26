@@ -22,6 +22,7 @@ Coverage:
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -46,6 +47,11 @@ from agent_baton.models.execution import (
 # Shared helpers
 # ---------------------------------------------------------------------------
 
+# Matches team-member step IDs like "2.1.a", "3.2.b" — the last segment is
+# a single lowercase letter assigned by _consolidate_team_step().
+_TEAM_MEMBER_RE = re.compile(r"^(.+)\.([a-z])$")
+
+
 def _make_planner(tmp_path: Path) -> IntelligentPlanner:
     """Return an IntelligentPlanner rooted at tmp_path."""
     return IntelligentPlanner(team_context_root=tmp_path)
@@ -56,13 +62,57 @@ def _make_engine(tmp_path: Path) -> ExecutionEngine:
     return ExecutionEngine(team_context_root=tmp_path)
 
 
+def _record_dispatch(
+    engine: ExecutionEngine,
+    step_id: str,
+    agent_name: str,
+    tokens_per_step: int = 8000,
+    duration_per_step: float = 45.0,
+) -> None:
+    """Record a DISPATCH result, routing to the team-member API when applicable.
+
+    Step IDs like "2.1.a" are team-member dispatches — the executor expects
+    ``record_team_member_result(step_id="2.1", member_id="2.1.a", ...)``
+    (parent step ID + full member ID) rather than ``record_step_result``.
+    """
+    m = _TEAM_MEMBER_RE.match(step_id)
+    if m:
+        parent_step_id = m.group(1)
+        engine.record_team_member_result(
+            step_id=parent_step_id,
+            member_id=step_id,  # full member ID, e.g. "2.1.a"
+            agent_name=agent_name,
+            status="complete",
+            outcome=f"Completed {agent_name} work successfully",
+        )
+    else:
+        engine.record_step_result(
+            step_id=step_id,
+            agent_name=agent_name,
+            status="complete",
+            outcome=f"Completed {agent_name} work successfully",
+            estimated_tokens=tokens_per_step,
+            duration_seconds=duration_per_step,
+        )
+
+
 def _run_full_loop(
     engine: ExecutionEngine,
     plan: MachinePlan,
     tokens_per_step: int = 8000,
     duration_per_step: float = 45.0,
 ) -> tuple[int, int]:
-    """Drive the engine loop to completion; return (steps_dispatched, gates_run)."""
+    """Drive the engine loop to completion; return (steps_dispatched, gates_run).
+
+    ``steps_dispatched`` counts completed *plan* steps (not individual team
+    members), so a team step with N members still counts as 1 once all members
+    are recorded.  This keeps ``steps_dispatched`` consistent with
+    ``state.completed_step_ids``.
+
+    Team steps: when the action carries ``parallel_actions``, all members are
+    recorded in one batch before advancing — matching the engine's expectation
+    that all members are dispatched concurrently before any results come back.
+    """
     action = engine.start(plan)
     steps_dispatched = 0
     gates_run = 0
@@ -72,20 +122,30 @@ def _run_full_loop(
         ActionType.COMPLETE,
         ActionType.FAILED,
     ):
-        if iteration > 50:
-            raise RuntimeError("Execution loop exceeded 50 iterations — likely stuck")
+        if iteration > 100:
+            raise RuntimeError("Execution loop exceeded 100 iterations — likely stuck")
         iteration += 1
 
         if action.action_type == ActionType.DISPATCH:
-            engine.record_step_result(
-                step_id=action.step_id,
-                agent_name=action.agent_name,
-                status="complete",
-                outcome=f"Completed {action.agent_name} work successfully",
-                estimated_tokens=tokens_per_step,
-                duration_seconds=duration_per_step,
-            )
-            steps_dispatched += 1
+            # Collect all member actions (primary + parallel siblings).
+            all_actions = [action] + list(action.parallel_actions)
+
+            state_before = engine._load_state()
+            completed_before = state_before.completed_step_ids if state_before else set()
+
+            for a in all_actions:
+                _record_dispatch(
+                    engine,
+                    step_id=a.step_id,
+                    agent_name=a.agent_name,
+                    tokens_per_step=tokens_per_step,
+                    duration_per_step=duration_per_step,
+                )
+
+            state_after = engine._load_state()
+            completed_after = state_after.completed_step_ids if state_after else set()
+            # Count the number of *plan* steps that newly completed.
+            steps_dispatched += len(completed_after - completed_before)
         elif action.action_type == ActionType.GATE:
             engine.record_gate_result(
                 phase_id=action.phase_id,
@@ -353,9 +413,7 @@ class TestExecuteLoop:
             iteration += 1
             if action.action_type == ActionType.DISPATCH:
                 dispatched_ids.append(action.step_id)
-                engine.record_step_result(
-                    action.step_id, action.agent_name, status="complete"
-                )
+                _record_dispatch(engine, action.step_id, action.agent_name)
             elif action.action_type == ActionType.GATE:
                 engine.record_gate_result(action.phase_id, passed=True)
             action = engine.next_action()
@@ -683,15 +741,13 @@ class TestCrashRecovery:
             ActionType.COMPLETE,
             ActionType.FAILED,
         ):
-            if iteration > 50:
+            if iteration > 100:
                 break
             iteration += 1
             if resumed_action.action_type == ActionType.DISPATCH:
-                engine2.record_step_result(
-                    resumed_action.step_id,
-                    resumed_action.agent_name,
-                    status="complete",
-                )
+                all_actions = [resumed_action] + list(resumed_action.parallel_actions)
+                for a in all_actions:
+                    _record_dispatch(engine2, a.step_id, a.agent_name)
             elif resumed_action.action_type == ActionType.GATE:
                 engine2.record_gate_result(resumed_action.phase_id, passed=True)
             resumed_action = engine2.next_action()

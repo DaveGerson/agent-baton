@@ -25,6 +25,7 @@ The models are organized into groups:
   ``ProgramHealthResponse``, ``PmoBoardResponse``
 - **Forge/ADO**: ``InterviewQuestionResponse``, ``InterviewResponse``,
   ``AdoWorkItemResponse``, ``AdoSearchResponse``
+- **Forge actions**: ``ForgeApproveResponse``, ``ExecuteCardResponse``
 """
 from __future__ import annotations
 
@@ -840,4 +841,40 @@ class AdoSearchResponse(BaseModel):
     message: str = Field(
         default="",
         description="Status message (e.g. configuration guidance when ADO is not connected).",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Forge action responses
+# ---------------------------------------------------------------------------
+
+
+class ForgeApproveResponse(BaseModel):
+    """Response from POST /pmo/forge/approve.
+
+    Confirms that an approved plan dict has been persisted to the
+    project's ``team-context`` directory.
+    """
+
+    saved: bool = Field(..., description="True when the plan was written successfully.")
+    path: str = Field(..., description="Absolute path to the saved plan.json file.")
+
+
+class ExecuteCardResponse(BaseModel):
+    """Response from POST /pmo/execute/{card_id}.
+
+    Returned immediately after a headless execution subprocess is
+    spawned.  The execution continues asynchronously in the background.
+    """
+
+    task_id: str = Field(..., description="Card/task ID that was launched.")
+    pid: int = Field(..., description="OS process ID of the spawned subprocess.")
+    status: str = Field(
+        default="launched",
+        description="Always 'launched' on success.",
+    )
+    model: str = Field(..., description="LLM model tier used for execution.")
+    dry_run: bool = Field(
+        default=False,
+        description="When True, the subprocess runs in dry-run mode without making changes.",
     )

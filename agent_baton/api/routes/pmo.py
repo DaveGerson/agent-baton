@@ -42,6 +42,8 @@ from agent_baton.api.models.requests import (
 from agent_baton.api.models.responses import (
     AdoSearchResponse,
     AdoWorkItemResponse,
+    ExecuteCardResponse,
+    ForgeApproveResponse,
     InterviewQuestionResponse,
     InterviewResponse,
     PmoBoardResponse,
@@ -476,12 +478,12 @@ async def forge_plan(
     return plan.to_dict()
 
 
-@router.post("/pmo/forge/approve", status_code=200)
+@router.post("/pmo/forge/approve", response_model=ForgeApproveResponse, status_code=200)
 async def forge_approve(
     req: ApproveForgeRequest,
     forge: ForgeSession = Depends(get_forge_session),
     store: PmoStore = Depends(get_pmo_store),
-) -> dict:
+) -> ForgeApproveResponse:
     """Save an approved plan to the project's team-context directory.
 
     POST /api/v1/pmo/forge/approve
@@ -527,7 +529,7 @@ async def forge_approve(
             detail=f"Failed to save plan: {exc}",
         ) from exc
 
-    return {"saved": True, "path": str(saved_path)}
+    return ForgeApproveResponse(saved=True, path=str(saved_path))
 
 
 @router.post("/pmo/forge/interview", response_model=InterviewResponse)
@@ -635,13 +637,13 @@ async def forge_regenerate(
 # ---------------------------------------------------------------------------
 
 
-@router.post("/pmo/execute/{card_id}", status_code=202)
+@router.post("/pmo/execute/{card_id}", response_model=ExecuteCardResponse, status_code=202)
 async def execute_card(
     card_id: str,
     req: ExecuteCardRequest,
     scanner: PmoScanner = Depends(get_pmo_scanner),
     store: PmoStore = Depends(get_pmo_store),
-) -> dict:
+) -> ExecuteCardResponse:
     """Launch headless execution for a queued card.
 
     POST /api/v1/pmo/execute/{card_id}
@@ -678,6 +680,15 @@ async def execute_card(
 
     if plan_dict is None:
         raise HTTPException(status_code=404, detail=f"No plan found for card '{card_id}'.")
+
+    if card.column != "queued":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Card '{card_id}' is in column '{card.column}' and cannot be launched. "
+                "Only cards in the 'queued' column may be executed."
+            ),
+        )
 
     project = store.get_project(card.project_id)
     if project is None:
@@ -727,13 +738,13 @@ async def execute_card(
             detail=f"Failed to start execution process: {exc}",
         )
 
-    return {
-        "task_id": card_id,
-        "pid": process.pid,
-        "status": "launched",
-        "model": req.model,
-        "dry_run": req.dry_run,
-    }
+    return ExecuteCardResponse(
+        task_id=card_id,
+        pid=process.pid,
+        status="launched",
+        model=req.model,
+        dry_run=req.dry_run,
+    )
 
 
 @router.get("/pmo/ado/search", response_model=AdoSearchResponse)
