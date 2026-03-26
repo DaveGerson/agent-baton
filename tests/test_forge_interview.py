@@ -1,6 +1,10 @@
 """Tests for interview question generation and plan regeneration."""
 from __future__ import annotations
 
+import pytest
+
+pydantic = pytest.importorskip("pydantic")
+
 from pathlib import Path
 from unittest.mock import MagicMock
 from agent_baton.core.pmo.forge import ForgeSession

@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import pytest
+
+fastapi = pytest.importorskip("fastapi")
+
 from unittest.mock import MagicMock
 from fastapi.testclient import TestClient
 
