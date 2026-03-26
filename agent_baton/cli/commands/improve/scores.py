@@ -9,6 +9,7 @@ Delegates to:
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 from agent_baton.core.improve.scoring import PerformanceScorer
 
@@ -29,7 +30,17 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
 
 
 def handler(args: argparse.Namespace) -> None:
-    scorer = PerformanceScorer()
+    # Wire storage backend so PerformanceScorer can read retrospectives
+    # from SQLite when the project uses SQLite storage mode.
+    storage = None
+    try:
+        from agent_baton.core.storage import detect_backend, get_project_storage
+        context_root = Path(".claude/team-context").resolve()
+        if detect_backend(context_root) == "sqlite":
+            storage = get_project_storage(context_root)
+    except Exception:
+        pass  # Fall back to filesystem mode
+    scorer = PerformanceScorer(storage=storage)
 
     if args.agent:
         sc = scorer.score_agent(args.agent)
