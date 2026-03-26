@@ -147,6 +147,10 @@ loop:
     break
 ```
 
+**Depth limit:** The orchestrator MUST run at the top level of a conversation,
+never as a dispatched subagent. It needs to spawn its own agents, and Claude
+Code limits agent nesting to depth 1.
+
 **For DISPATCH actions — you MUST use the Agent tool** to spawn the
 specified subagent with the delegation prompt. Do NOT do the work inline.
 Valid `--status` values: `complete` or `failed`.

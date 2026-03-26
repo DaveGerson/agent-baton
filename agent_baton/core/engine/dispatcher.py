@@ -18,6 +18,7 @@ disk only when the attachment delivery is ``inline``.
 """
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 
 from agent_baton.utils.frontmatter import parse_frontmatter
@@ -478,6 +479,14 @@ class PromptDispatcher:
             delegation_prompt.  path_enforcement is populated whenever the
             step declares allowed_paths or blocked_paths.
         """
+        if step.agent_name == "orchestrator":
+            warnings.warn(
+                "Dispatching 'orchestrator' as a subagent will fail — "
+                "it requires depth-2 nesting which Claude Code does not support. "
+                "Run orchestration at the top level instead.",
+                stacklevel=2,
+            )
+
         prompt = self.build_delegation_prompt(
             step,
             shared_context=shared_context,
