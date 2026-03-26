@@ -81,8 +81,8 @@ export const api = {
     return request('/forge/regenerate', { method: 'POST', body: JSON.stringify(body) });
   },
 
-  // Cards
-  getCardDetail(cardId: string): Promise<{ card: PmoCard; plan: ForgePlanResponse | null }> {
+  // Cards — response is a flat PmoCard with optional `plan` field (not nested { card, plan })
+  getCardDetail(cardId: string): Promise<PmoCard & { plan: ForgePlanResponse | null }> {
     return request(`/cards/${encodeURIComponent(cardId)}`);
   },
 

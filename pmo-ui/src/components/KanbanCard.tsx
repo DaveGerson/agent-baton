@@ -267,40 +267,22 @@ export function KanbanCard({ card, columnColor, onForge }: KanbanCardProps) {
               </button>
             )}
             {onForge && (
-              <>
-                <button
-                  onClick={e => { e.stopPropagation(); onForge(card); }}
-                  style={{
-                    padding: '3px 9px',
-                    borderRadius: 3,
-                    border: `1px solid ${T.accent}44`,
-                    background: T.accent + '12',
-                    color: T.accent,
-                    fontSize: 9,
-                    fontWeight: 600,
-                    cursor: 'pointer',
-                  }}
-                  title="Open Forge with this card's context"
-                >
-                  Re-forge
-                </button>
-                <button
-                  onClick={e => { e.stopPropagation(); onForge(card); }}
-                  style={{
-                    padding: '3px 9px',
-                    borderRadius: 3,
-                    border: `1px solid ${T.purple}44`,
-                    background: T.purple + '12',
-                    color: T.purple,
-                    fontSize: 9,
-                    fontWeight: 600,
-                    cursor: 'pointer',
-                  }}
-                  title="Edit this plan in Forge"
-                >
-                  Edit in Forge
-                </button>
-              </>
+              <button
+                onClick={e => { e.stopPropagation(); onForge(card); }}
+                style={{
+                  padding: '3px 9px',
+                  borderRadius: 3,
+                  border: `1px solid ${T.accent}44`,
+                  background: T.accent + '12',
+                  color: T.accent,
+                  fontSize: 9,
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                }}
+                title="Open this card in the Forge for editing or re-planning"
+              >
+                Re-forge
+              </button>
             )}
             <button
               onClick={handleViewPlan}

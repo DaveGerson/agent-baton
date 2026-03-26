@@ -406,10 +406,10 @@ function SavedPhase({
       {/* Execution launch */}
       <button
         onClick={handleExecute}
-        disabled={execLoading || !plan}
+        disabled={execLoading || !plan || execResult?.startsWith('Execution launched')}
         style={{
           padding: '7px 24px', borderRadius: 4, border: 'none',
-          background: execLoading ? T.bg3 : `linear-gradient(135deg, ${T.green}, #059669)`,
+          background: (execLoading || execResult?.startsWith('Execution launched')) ? T.bg3 : `linear-gradient(135deg, ${T.green}, #059669)`,
           color: '#fff', fontSize: 11, fontWeight: 700,
           cursor: execLoading ? 'not-allowed' : 'pointer',
           opacity: execLoading ? 0.6 : 1,

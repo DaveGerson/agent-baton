@@ -8,6 +8,7 @@ pydantic = pytest.importorskip("pydantic")
 from pathlib import Path
 from unittest.mock import MagicMock
 from agent_baton.core.pmo.forge import ForgeSession
+from agent_baton.core.runtime.headless import HeadlessClaude, HeadlessConfig
 from agent_baton.models.execution import MachinePlan, PlanPhase, PlanStep
 from agent_baton.models.pmo import InterviewQuestion, InterviewAnswer
 from agent_baton.api.models.requests import (
@@ -177,7 +178,7 @@ def _make_plan(
 def test_generate_interview_returns_questions():
     planner = MagicMock()
     store = MagicMock()
-    forge = ForgeSession(planner=planner, store=store)
+    forge = ForgeSession(planner=planner, store=store, headless=HeadlessClaude(HeadlessConfig(claude_path="/nonexistent/claude")))
     plan = _make_plan(phases=2, steps_per_phase=3)
     questions = forge.generate_interview(plan)
     assert isinstance(questions, list)
@@ -191,7 +192,7 @@ def test_generate_interview_returns_questions():
 def test_generate_interview_asks_about_missing_tests():
     planner = MagicMock()
     store = MagicMock()
-    forge = ForgeSession(planner=planner, store=store)
+    forge = ForgeSession(planner=planner, store=store, headless=HeadlessClaude(HeadlessConfig(claude_path="/nonexistent/claude")))
     plan = _make_plan(phases=1, steps_per_phase=2)
     questions = forge.generate_interview(plan)
     question_texts = [q.question.lower() for q in questions]
@@ -203,7 +204,7 @@ def test_regenerate_plan_calls_planner_with_enriched_context():
     planner.create_plan.return_value = _make_plan()
     store = MagicMock()
     store.get_project.return_value = MagicMock(path="/tmp/proj")
-    forge = ForgeSession(planner=planner, store=store)
+    forge = ForgeSession(planner=planner, store=store, headless=HeadlessClaude(HeadlessConfig(claude_path="/nonexistent/claude")))
     answers = [InterviewAnswer(question_id="q1", answer="unit tests")]
     forge.regenerate_plan(
         description="build a widget",
@@ -222,7 +223,7 @@ def test_regenerate_plan_calls_planner_with_enriched_context():
 
 def _forge() -> ForgeSession:
     """Return a ForgeSession with stub planner and store."""
-    return ForgeSession(planner=MagicMock(), store=MagicMock())
+    return ForgeSession(planner=MagicMock(), store=MagicMock(), headless=HeadlessClaude(HeadlessConfig(claude_path="/nonexistent/claude")))
 
 
 def test_generate_interview_asks_about_risk_for_high_risk_plan():
@@ -358,7 +359,7 @@ def test_save_plan_returns_path(tmp_path):
 
     planner = MagicMock()
     store = MagicMock()
-    forge = ForgeSession(planner=planner, store=store)
+    forge = ForgeSession(planner=planner, store=store, headless=HeadlessClaude(HeadlessConfig(claude_path="/nonexistent/claude")))
     plan = _make_plan(phases=1, steps_per_phase=1)
 
     result_path = forge.save_plan(plan, project)

@@ -9,6 +9,7 @@ import pytest
 
 from agent_baton.core.pmo.forge import ForgeSession
 from agent_baton.core.pmo.store import PmoStore
+from agent_baton.core.runtime.headless import HeadlessClaude, HeadlessConfig
 from agent_baton.models.execution import MachinePlan, PlanPhase, PlanStep
 from agent_baton.models.pmo import PmoProject, PmoSignal
 
@@ -76,7 +77,10 @@ def _mock_planner(returned_plan: MachinePlan | None = None) -> MagicMock:
 
 
 def _forge(planner: object, store: PmoStore) -> ForgeSession:
-    return ForgeSession(planner=planner, store=store)
+    # Use a headless instance with a non-existent binary so is_available=False,
+    # ensuring tests always route through the injected planner mock.
+    disabled_headless = HeadlessClaude(HeadlessConfig(claude_path="/nonexistent/claude"))
+    return ForgeSession(planner=planner, store=store, headless=disabled_headless)
 
 
 # ---------------------------------------------------------------------------
