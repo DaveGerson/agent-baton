@@ -82,6 +82,14 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         choices=["low", "medium", "high"],
         help="How aggressively agents escalate knowledge gaps (default: low)",
     )
+    p.add_argument(
+        "--complexity",
+        dest="complexity",
+        default=None,
+        choices=["light", "medium", "heavy"],
+        help="Override task complexity (light, medium, heavy). "
+             "Skips automatic classification when provided.",
+    )
     return p
 
 
@@ -106,6 +114,7 @@ def handler(args: argparse.Namespace) -> None:
     plan = planner.create_plan(
         args.summary,
         task_type=args.task_type,
+        complexity=args.complexity,
         project_root=project_root,
         agents=agents,
         explicit_knowledge_packs=args.knowledge_pack,

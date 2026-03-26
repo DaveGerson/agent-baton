@@ -557,6 +557,11 @@ class IntelligentPlanner:
         # 9. Build phases
         if phases is not None:
             plan_phases = self._phases_from_dicts(phases, resolved_agents, task_summary)
+        elif classified_phases is not None:
+            # Use classifier-provided phase names
+            plan_phases = self._build_phases_for_names(
+                classified_phases, resolved_agents, task_summary
+            )
         elif pattern is not None:
             plan_phases = self._apply_pattern(pattern, inferred_type, task_summary)
             # Apply routed agent names to pattern-derived phases
@@ -703,6 +708,12 @@ class IntelligentPlanner:
             explicit_knowledge_packs=list(explicit_knowledge_packs or []),
             explicit_knowledge_docs=list(explicit_knowledge_docs or []),
             intervention_level=intervention_level,
+            complexity=inferred_complexity,
+            classification_source=(
+                self._last_task_classification.source
+                if self._last_task_classification
+                else "keyword-fallback"
+            ),
         )
         shared_context = self._build_shared_context(tmp_plan)
         tmp_plan.shared_context = shared_context
@@ -798,6 +809,21 @@ class IntelligentPlanner:
                 "## Data Classification",
                 "",
                 "No classifier configured. Risk assessed via keyword signals only.",
+                "",
+            ]
+
+        # Task classification (complexity / agent selection)
+        if self._last_task_classification is not None:
+            tc = self._last_task_classification
+            lines += [
+                "## Task Classification",
+                "",
+                f"**Source:** {tc.source}",
+                f"**Task Type:** {tc.task_type}",
+                f"**Complexity:** {tc.complexity}",
+                f"**Reasoning:** {tc.reasoning}",
+                f"**Selected Agents:** {', '.join(tc.agents)}",
+                f"**Selected Phases:** {', '.join(tc.phases)}",
                 "",
             ]
 
