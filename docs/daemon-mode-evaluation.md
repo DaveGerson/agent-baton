@@ -9,267 +9,468 @@
 
 **Verdict: Yes — it is production-grade and all tests pass (67/67).**
 
-### What Was Tested
-
 | Test Suite | Tests | Status |
 |---|---|---|
 | `test_daemon.py` | 47 | All pass |
 | `test_daemon_task_id.py` | 19 | All pass |
 | `test_daemon_api_integration.py` | 1 | Skipped (requires uvicorn) |
 
-### Architecture Quality
-
-The daemon mode implementation is well-structured with clear separation of
-concerns:
-
-- **`WorkerSupervisor`** handles lifecycle (PID locking, logging, signals,
-  status snapshots) — never touches execution logic.
-- **`TaskWorker`** handles the async execution loop (dispatch, gates,
-  approvals, events) — never touches process management.
-- **`ExecutionEngine`** remains the single source of truth for plan state
-  — the same engine drives CLI mode, daemon mode, and tests.
-
-This separation means daemon mode doesn't add fragility to the execution
-path — it's a thin orchestration layer over proven components.
-
-### Robustness Features
-
-| Feature | Implementation | Quality |
-|---|---|---|
-| **Single-instance guard** | `flock(LOCK_EX \| LOCK_NB)` on PID file | Excellent — OS-level, race-free |
-| **Crash recovery** | All state persisted atomically (tmp+rename) | Excellent — `--resume` picks up from exact stopping point |
-| **Graceful shutdown** | SIGTERM/SIGINT handlers with 30s drain | Good — agents complete in-flight work |
-| **Concurrent daemons** | `--task-id` namespacing under `executions/<id>/` | Good — each daemon gets independent state/logs/PID |
-| **Parallel dispatch** | `StepScheduler` with `asyncio.Semaphore` | Good — bounded by `--max-parallel` (default 3) |
-| **Logging** | `RotatingFileHandler` (10MB, 3 backups) | Good — survives long-running execution |
-| **Status monitoring** | Reads from disk, works without running daemon | Good — `baton daemon status` always available |
-| **API co-hosting** | `--serve` runs uvicorn + worker in same event loop | Good — shared EventBus for real-time SSE |
-
-### Known Limitations (Minor)
-
-1. **POSIX only** — `daemonize()` uses double-fork and `fcntl.flock()`; raises
-   `RuntimeError` on Windows. Not a blocker for most use cases (CI/CD, Linux
-   servers, WSL).
-2. **Network filesystem caveat** — `flock()` may not enforce mutual exclusion
-   on NFS mounts. Documented in code comments.
-3. **API integration test skipped** — The `test_daemon_api_integration.py`
-   suite is skipped when uvicorn is not installed. Adding uvicorn to dev deps
-   would close this gap.
-
-### Previously Identified Issues — All Fixed
-
-All 8 items from `docs/internal/TODO-001-review-findings.md` have been
-resolved, including the TOCTOU race in the CLI handler, atomic state writes,
-API key redaction, session isolation for spawned agents, and `--resume`
-without requiring `--plan`.
+Architecture is clean: `WorkerSupervisor` (lifecycle) → `TaskWorker` (async
+dispatch) → `ExecutionEngine` (state machine). All previously identified
+issues (8/8) are fixed. See Section 1 of the prior version for robustness
+detail — nothing has regressed.
 
 ---
 
-## 2. Brainstorm: Ways to Use Daemon Mode More Extensively
+## 2. Can the Daemon Plan, or Only Execute?
 
-### A. CI/CD Pipeline Integration
+**Today: Execute only. Planning is a separate step.**
 
-**Current gap**: Most CI/CD pipelines run `baton execute run` (synchronous,
-sequential). Daemon mode's parallel dispatch is unused in this context.
+The current capability matrix:
 
-**Opportunity**: Replace `baton execute run` in CI with
-`baton daemon start --foreground --plan plan.json --max-parallel 5`. This
-gets parallel agent dispatch in CI without requiring background mode.
-Pair with `--serve` to expose a status endpoint that CI can poll.
+| Component | Plan | Execute | Self-Plan |
+|---|---|---|---|
+| `baton plan` CLI | Yes | No | — |
+| `IntelligentPlanner` | Yes (rule-based, 13-step pipeline) | No | — |
+| `ForgeSession` (PMO Forge) | Yes (HeadlessClaude + fallback) | No | — |
+| `baton daemon start` | **No** | Yes (parallel, async) | **No** |
+| `baton execute run` | **No** | Yes (sequential, foreground) | **No** |
 
-### B. PMO Board "Execute" Button
+### What "Plan" Accepts Today (Expressiveness)
 
-**Current state**: The PMO UI can trigger execution via the API endpoint.
-
-**Opportunity**: Wire the PMO board's execute action directly to
-`baton daemon start --serve --task-id <card-id>`. The `--serve` flag
-means the PMO frontend gets real-time SSE updates on step progress, and
-the `--task-id` matches the board card for correlation. Multiple cards
-could execute concurrently.
-
-### C. Scheduled / Cron-Based Execution
-
-**Opportunity**: Combine daemon mode with `baton plan` to create a cron-style
-workflow: generate a plan from a template, then launch it as a daemon. Example:
+`baton plan` is already quite rich:
 
 ```bash
-# Nightly code health check
-baton plan "Run full test suite, lint, type-check, update coverage report" \
-  --save --output /tmp/nightly-plan.json
-baton daemon start --plan /tmp/nightly-plan.json --task-id "nightly-$(date +%F)"
+baton plan "Full task description — as long as you want" \
+  --task-type bug-fix \                    # override auto-classification
+  --agents architect,backend-engineer \     # override auto-selection
+  --complexity heavy \                      # override auto-sizing
+  --knowledge docs/api-spec.md \           # attach arbitrary documents
+  --knowledge docs/schema.sql \            # (repeatable)
+  --knowledge-pack analytics \             # attach curated knowledge packs
+  --intervention high \                     # escalation threshold
+  --model opus \                            # override default model
+  --save --json                            # persist for daemon consumption
 ```
 
-This enables unattended, recurring multi-agent workflows without a Claude Code
-session.
+The `MachinePlan` model carries: phases with dependencies, per-step agent
+assignments, team members with roles, knowledge attachments, context files,
+allowed/blocked paths, deliverables, QA gates, approval checkpoints, risk
+levels, budget tiers, and git strategies.
 
-### D. Multi-Project Orchestration
+**ForgeSession** (used by PMO Forge API) is even more expressive — it uses
+HeadlessClaude to generate plans from natural language, then runs an
+interview loop to refine them based on user answers.
 
-**Opportunity**: Use `--task-id` + `--project-dir` to run daemons across
-multiple repositories from a single control point:
+### The Gap: Plan-Then-Execute as a Single Operation
+
+The daemon requires a pre-built `plan.json`. There is no
+`baton daemon start --from-description "fix the login bug"` that plans and
+then executes. This is a composable gap, not an architectural one.
+
+### Proposed: `baton daemon run`
+
+A new subcommand that combines planning + daemon execution:
 
 ```bash
-baton daemon start --plan frontend-plan.json --task-id frontend \
-  --project-dir ~/repos/frontend-app
-baton daemon start --plan backend-plan.json --task-id backend \
-  --project-dir ~/repos/backend-api
-baton daemon list  # see both
+baton daemon run "Fix the authentication timeout bug" \
+  --knowledge docs/auth.md \
+  --max-parallel 3 \
+  --serve
 ```
 
-A wrapper script or PMO endpoint could orchestrate cross-repo tasks (e.g.,
-"update the API contract in the backend, then regenerate the client SDK in
-the frontend").
-
-### E. Long-Running Refactoring Campaigns
-
-For large-scale refactors (e.g., migrating from one ORM to another, adding
-type annotations across a codebase), daemon mode enables fire-and-forget
-execution with crash recovery. If the daemon is interrupted (deployment,
-reboot), `--resume` picks up exactly where it left off — no re-work, no
-lost state.
-
-### F. Decision-Gated Workflows
-
-**Opportunity**: Pair daemon mode with `DecisionManager` for asynchronous
-human-in-the-loop workflows. The daemon runs autonomously until it hits a
-gate or approval point, writes a decision request to disk, then polls until
-a human resolves it (via CLI, API, or PMO UI). This enables workflows like:
-
-1. Agent generates a migration plan
-2. Daemon pauses at APPROVAL gate
-3. Tech lead reviews and approves via PMO UI
-4. Daemon continues with implementation
-5. Daemon pauses at code review GATE
-6. Reviewer approves
-7. Daemon completes and commits
-
-### G. Webhook-Triggered Execution
-
-**Opportunity**: Expose a webhook endpoint (via `--serve`) that accepts
-GitHub webhook payloads. On PR events, issue creation, or release tags, the
-API server could create a plan and launch a worker — fully event-driven
-agent orchestration.
+Internally: `IntelligentPlanner.create_plan()` → `supervisor.start(plan)`.
+One command, plan-to-completion. The PMO Forge API already does the
+plan-generation half of this.
 
 ---
 
-## 3. Agent-Team Execution via Daemon Mode
+## 3. Webhook-Triggered Execution (Bug → Diagnosis → Plan → Approval → Work)
 
-**Short answer: Yes, and the infrastructure is almost entirely in place.**
+### What Exists Today
 
-### What Already Works
+The API server (`--serve` on port 8741) already has:
 
-The daemon's `TaskWorker` already dispatches multiple agents in parallel per
-phase. A "team" in the execution engine sense is already supported:
+- **Outbound webhooks** — subscribe external URLs to internal events
+  (`step.*`, `gate.*`, `task.*`). HMAC-SHA256 signed, auto-retry, auto-disable.
+- **PMO Execute endpoint** — `POST /api/v1/pmo/execute/{card_id}` launches
+  headless execution for a queued card. Returns 202 with PID.
+- **PMO Signals** — `POST /api/v1/pmo/signals` creates an alert;
+  `POST /api/v1/pmo/signals/{id}/forge` triages it into a plan via
+  ForgeSession.
+- **External source adapters** — ADO adapter fetches work items (bugs,
+  features, epics) from Azure DevOps. Protocol is extensible to Jira,
+  GitHub Issues, Linear.
+- **Decision resolution** — `POST /api/v1/decisions/{id}/resolve` for
+  human-in-the-loop approvals.
+
+### What's Missing: Inbound Webhook Handler
+
+Webhooks are outbound-only today. There's no `POST /api/v1/triggers` that
+accepts an external event (e.g., GitHub issue created) and starts the
+plan-execute pipeline.
+
+### User Story: Bug-to-Fix Pipeline
+
+> **As a product team lead**, when a bug is filed in our issue tracker,
+> I want an agent to automatically research the root cause, propose a fix
+> plan, and present it to me for approval — so that I can kick off the
+> fix with one click instead of manually triaging, planning, and assigning.
+
+**Proposed flow:**
 
 ```
-Phase 1: Design
-  Step 1.1 → architect (parallel)
-  Step 1.2 → security-reviewer (parallel)
-
-Phase 2: Implementation
-  Step 2.1 → backend-engineer--python (parallel)
-  Step 2.2 → frontend-engineer--react (parallel)
-  Step 2.3 → test-engineer (parallel)
-
-Phase 3: Quality
-  Step 3.1 → code-reviewer
-  Gate: test suite passes
-  Gate: lint clean
-
-Phase 4: Release
-  Approval: tech lead sign-off
-  Step 4.1 → devops-engineer
+┌──────────────┐     webhook      ┌──────────────────────┐
+│ Issue Tracker │ ──────────────→ │ POST /api/v1/triggers │
+│ (GitHub/ADO)  │                 │ (new inbound endpoint)│
+└──────────────┘                  └──────────┬───────────┘
+                                             │
+                    ┌────────────────────────┘
+                    ▼
+            ┌───────────────┐
+            │ Signal Created │  (PMO signal with source metadata)
+            └───────┬───────┘
+                    ▼
+            ┌───────────────┐
+            │ Researcher     │  Agent diagnoses root cause:
+            │ Agent (daemon) │  reads logs, traces code, identifies
+            └───────┬───────┘  affected files
+                    ▼
+            ┌───────────────┐
+            │ ForgeSession   │  Generates fix plan from diagnosis
+            │ plan generation│  + interview questions
+            └───────┬───────┘
+                    ▼
+            ┌───────────────┐
+            │ PMO Board Card │  Card appears in "Proposed" column
+            │ (with plan)    │  with plan, diagnosis, and cost estimate
+            └───────┬───────┘
+                    ▼
+            ┌───────────────┐
+            │ Human Approval │  User reviews on PMO board,
+            │ (PMO UI)       │  approves / rejects / adjusts
+            └───────┬───────┘
+                    ▼
+            ┌───────────────┐
+            │ Daemon Start   │  Card moves to "In Progress",
+            │ (agent team)   │  daemon executes the approved plan
+            └───────┬───────┘
+                    ▼
+            ┌───────────────┐
+            │ Completion     │  Card moves to "Done",
+            │ + Notification │  outbound webhook notifies team
+            └───────────────┘
 ```
 
-When daemon mode processes Phase 2, it calls `engine.next_actions()` which
-returns all three steps, marks them dispatched, and launches them in parallel
-(bounded by `--max-parallel`). This IS agent-team execution.
+**Implementation path:**
+1. Add `POST /api/v1/triggers` — accepts GitHub/ADO webhook payloads,
+   creates a PMO signal (this is the missing inbound piece).
+2. Add a "auto-triage" flag on signals — when set, automatically calls
+   ForgeSession.signal_to_plan() to generate a plan.
+3. The rest (PMO board, approval, daemon execution) already exists.
 
-### What Would Make It More "Team-Like"
+### User Story: Diagnostic-First Workflow
 
-#### 3a. Team Definitions (Reusable Agent Rosters)
+> **As a developer**, when a production alert fires, I want an agent to
+> pull relevant logs, trace the error through the codebase, and present
+> a structured diagnostic — before any fix plan is created — so that I
+> can make an informed decision about severity and approach.
 
-Today you define the team implicitly via the plan. A team definition layer
-would let you declare named teams:
+This is a two-phase daemon execution:
+- **Phase 1**: Researcher agent (read-only, no code changes). Output:
+  diagnostic report with root cause hypothesis, affected files, severity.
+- **APPROVAL gate**: Human reviews diagnostic, decides whether to proceed.
+- **Phase 2**: Fix implementation by the appropriate agent team.
+
+This is already expressible in a `MachinePlan` with approval gates. The
+gap is triggering Phase 1 automatically from an external event.
+
+---
+
+## 4. PMO Board as the Coordination Hub
+
+### What Exists
+
+The PMO board already has:
+- Kanban columns (backlog → proposed → queued → in-progress → done)
+- Card detail with attached plans
+- Forge endpoint for AI-assisted plan generation + interview refinement
+- Execute endpoint (`POST /api/v1/pmo/execute/{card_id}`)
+- SSE event stream for real-time card updates
+- Signal management (create, triage, resolve)
+
+### User Story: Plan-and-Execute from the Board
+
+> **As a PMO user**, I want to describe a task on the board, have an
+> intelligent planner generate an execution plan, review and adjust it
+> through a guided interview, and then launch it as a daemon — all from
+> the PMO UI — so that the board is my single interface for both planning
+> and execution.
+
+**Current state:** The Forge API (`/api/v1/pmo/forge/plan` →
+`/forge/interview` → `/forge/regenerate` → `/forge/approve`) handles the
+planning loop. The execute endpoint launches it. The SSE stream shows
+progress. **This flow mostly works today.**
+
+**Gaps:**
+1. The execute endpoint spawns `baton execute run` (sequential). It should
+   optionally spawn `baton daemon start` (parallel) for team execution.
+2. No "one-click plan + execute" endpoint — today it's forge → approve →
+   execute as separate API calls. A `POST /api/v1/pmo/forge/plan-and-queue`
+   could collapse the happy path.
+3. The PMO UI needs to render daemon status (parallel agent progress,
+   per-step outcomes) — today it shows sequential step completion.
+
+### User Story: Planner Agent as First-Class Participant
+
+> **As a PMO user**, I want the planner to be an agent I can interact
+> with — not just an API I call — so that it can ask me clarifying
+> questions, propose alternatives, and explain trade-offs before
+> committing to a plan.
+
+This is the ForgeSession interview loop, but today it's synchronous
+(request-response). Making the planner a daemon-driven agent would mean:
+
+1. User creates a card with a description
+2. Planner agent (running as daemon step) generates plan + questions
+3. Card enters "needs-input" state with questions displayed
+4. User answers on the board
+5. Planner agent refines (another daemon step, or same agent re-invoked)
+6. Card shows final plan for approval
+
+This is a plan where the *planner itself is a step in a meta-plan*.
+
+---
+
+## 5. Dynamic Team Composition
+
+### What Exists
+
+The `IntelligentPlanner` already does dynamic team selection based on:
+- **Task classification** — bug-fix gets different agents than new-feature
+- **Stack detection** — Python project routes to `backend-engineer--python`
+- **Pattern learning** — prior executions inform agent selection
+  (PatternLearner, ≥70% confidence threshold)
+- **Retrospective feedback** — agents with poor track records are dropped
+- **Performance scoring** — low-health agents trigger warnings
+
+The planner consolidates multi-agent phases into "team steps" with roles
+(lead, implementer, reviewer) and member-level dependencies.
+
+### What's Missing: Runtime Team Adaptation
+
+Today team composition is fixed at plan creation time. Once the daemon
+starts executing, it cannot:
+- Add an agent mid-execution because the task turned out to be harder
+- Replace a failing agent with a different specialist
+- Bring in a reviewer early because the code is high-risk
+
+### Proposed: Adaptive Team Composition
+
+```
+Phase 2: Implement
+  Step 2.1 → backend-engineer--python
+  Step 2.2 → test-engineer
+  [ADAPTIVE SLOT] → resolved at runtime based on step 2.1 output
+```
+
+**How it would work:**
+1. Plan includes "adaptive slots" — steps with `agent_name: "auto"` and a
+   selection criteria (e.g., "if step 2.1 touches auth code, add
+   security-reviewer").
+2. When the daemon reaches an adaptive slot, it calls the `AgentRouter`
+   with the current execution context (completed step outcomes, files
+   changed, etc.).
+3. Router resolves to a concrete agent and the daemon dispatches it.
+4. This uses the existing `baton execute amend` capability — the daemon
+   amends the plan at runtime.
+
+**Implementation:** Medium complexity. The `AgentRouter` already does
+task → agent matching. The engine already supports `amend` (adding phases/
+steps mid-execution). The gap is wiring them together inside the
+`TaskWorker` loop.
+
+### Alternative: Agent Profiles as Team Templates
+
+Instead of static YAML rosters, define team *profiles* that describe
+capabilities needed rather than specific agents:
 
 ```yaml
-# teams/full-stack.yaml
+# profiles/full-stack.yaml
 name: full-stack
-agents:
-  - architect
-  - backend-engineer--python
-  - frontend-engineer--react
-  - test-engineer
-  - code-reviewer
-default_max_parallel: 4
-gate_policy: auto-pass-programmatic
+needs:
+  - capability: architecture-design
+    count: 1
+    model: opus
+  - capability: backend-implementation
+    language: auto-detect    # resolved from project stack
+    count: 1-2               # scaled by complexity
+  - capability: frontend-implementation
+    framework: auto-detect
+    count: 1
+  - capability: testing
+    count: 1
+  - capability: code-review
+    count: 1
+    phase: quality           # only in quality phase
 ```
 
-Then `baton plan "build feature X" --team full-stack` would auto-populate
-the plan with the team's agents and preferences.
+The planner resolves capabilities to concrete agents at plan time using the
+registry + router. This gives you dynamic composition without runtime
+complexity — the dynamism happens during planning, not execution.
 
-#### 3b. Shared Context Between Team Members
+---
 
-Today each dispatched agent gets its own prompt (the `delegation_prompt`
-from the plan step). There's no shared scratchpad between parallel agents.
+## 6. Shared Team Context — Is There a Better Path?
 
-A team context channel would let agents in the same phase read each other's
-in-progress decisions:
+### What Exists
 
-- Architect writes: "Using repository pattern, interface defined in `models/repo.py`"
-- Backend engineer reads that before implementing
-- Frontend engineer reads it to align on the API contract
+Agents already share context through three mechanisms:
 
-This could be implemented via the existing `ContextManager` + mission log,
-exposed as part of the delegation prompt.
+1. **Shared context document** (`context.md`) — stack info, conventions,
+   guardrails. Read by all agents.
+2. **Mission log** (`mission-log.md`) — timestamped record of each agent's
+   completion with decisions, issues, and handoff notes.
+3. **Knowledge attachments** — curated documents attached per-step via
+   knowledge packs (TF-IDF matching + agent binding + tag matching).
 
-#### 3c. Team-Level Coordination Steps
+### The Limitation
 
-Sometimes you need agents to coordinate mid-phase, not just at phase
-boundaries. Example: the architect and backend engineer need to agree on a
-schema before the frontend engineer starts.
+These are all *pre-execution* or *post-step* context. There's no mechanism
+for agents running *in parallel within the same phase* to share in-progress
+decisions. Each agent gets its delegation prompt and works in isolation.
 
-This could be modeled as:
-- **Checkpoint steps**: Lightweight steps that merge outputs from prior
-  agents and publish a summary to the team context.
-- **Fan-out/fan-in**: A coordination pattern where N agents run in parallel,
-  then a synthesizer agent merges their outputs before the next phase.
+### Proposed: Structured Decision Log (Better Than Scratchpad)
 
-The engine already supports this via `team-record` (individual team member
-completion recording). Extending it to include synthesis steps would make
-team coordination explicit in the plan.
+Instead of a free-form scratchpad, use a structured decision log that
+agents write to and read from:
 
-#### 3d. CLI Shortcut for Team Launch
-
-```bash
-# Generate plan with team and execute immediately via daemon
-baton team run "Implement user authentication" \
-  --team full-stack \
-  --max-parallel 4 \
-  --serve
-
-# Or with an existing plan
-baton daemon start --plan plan.json --team full-stack --task-id auth-sprint
+```json
+{
+  "task_id": "2026-03-27-auth-feature-abc123",
+  "phase_id": 2,
+  "decisions": [
+    {
+      "agent": "architect",
+      "step_id": "2.1",
+      "timestamp": "2026-03-27T14:30:00Z",
+      "type": "api-contract",
+      "summary": "Using JWT with refresh tokens, 15-min access / 7-day refresh",
+      "artifacts": ["src/models/auth.py", "docs/api-auth.md"],
+      "dependencies_created": ["auth middleware interface"]
+    },
+    {
+      "agent": "backend-engineer--python",
+      "step_id": "2.2",
+      "timestamp": "2026-03-27T14:32:00Z",
+      "type": "implementation-choice",
+      "summary": "Using PyJWT library, middleware in src/middleware/auth.py",
+      "artifacts": ["src/middleware/auth.py"],
+      "consumes": ["auth middleware interface"]
+    }
+  ]
+}
 ```
 
-This would combine `baton plan` + `baton daemon start` into a single
-command, using the team definition to populate the plan and configure the
-daemon.
+**How it would work with daemon mode:**
+1. When the daemon dispatches agents in parallel, it injects a
+   `--decision-log-path` into each agent's delegation prompt.
+2. Agents write structured decisions to the log as they make them.
+3. Agents with `depends_on` entries read the log before starting.
+4. The daemon's `TaskWorker` could optionally inject a "sync point" —
+   a brief pause between parallel dispatches where it reads completed
+   agents' decisions and appends them to pending agents' prompts.
 
-### Implementation Effort
+**Key insight:** This doesn't require agents to communicate in real-time.
+The daemon already dispatches in batches. A "decision injection" step
+between batches would give later agents awareness of earlier agents'
+choices without changing the execution model.
 
-| Enhancement | Complexity | Existing Foundation |
+### Alternative: Event-Driven Context Propagation
+
+Use the existing EventBus. When an agent completes, the worker publishes
+`step.completed` with the outcome. A new subscriber
+(`TeamContextPropagator`) could:
+
+1. Parse the outcome for structured decisions
+2. Append them to the shared context document
+3. Inject them into the delegation prompts of still-pending steps
+
+This is lightweight and uses existing infrastructure. The propagation
+happens inside the `TaskWorker` between dispatch batches.
+
+---
+
+## 7. PMO-Centric User Stories
+
+Consolidating the above into concrete PMO-board-centered user stories:
+
+### Story 1: Bug Triage Pipeline
+
+> A bug arrives from the issue tracker. An agent researches and diagnoses
+> it. The diagnosis appears on the PMO board as a proposed card with a
+> fix plan. The user approves and the daemon executes.
+
+**Requires:** Inbound trigger endpoint + auto-triage flag on signals.
+**Existing:** Signal → ForgeSession → Card → Execute → SSE updates.
+
+### Story 2: Feature Sprint from Board
+
+> A user writes a feature description on the PMO board. The planner agent
+> generates a multi-phase plan with team assignments. The user refines via
+> interview questions. On approval, a daemon launches the team. The board
+> shows parallel agent progress in real-time.
+
+**Requires:** Execute endpoint upgrade (daemon mode), parallel progress UI.
+**Existing:** Forge plan + interview + approve + execute + SSE.
+
+### Story 3: Cross-Project Coordination
+
+> A PMO user manages multiple projects. They create cards for related
+> work across repos (e.g., "update API" in backend, "regenerate client"
+> in frontend). The PMO launches both as concurrent daemons, each in its
+> own project directory, and shows combined progress.
+
+**Requires:** Multi-project daemon launch from PMO, combined status view.
+**Existing:** `--task-id` + `--project-dir` namespacing, `daemon list`.
+
+### Story 4: Adaptive Agent Team
+
+> During execution, the code-reviewer agent flags a security concern.
+> The daemon automatically brings in the security-reviewer agent as an
+> additional step, without stopping execution or requiring re-planning.
+
+**Requires:** Adaptive slots in plans + runtime amendment via AgentRouter.
+**Existing:** `baton execute amend`, AgentRouter, engine amendment support.
+
+### Story 5: Multi-Perspective Analysis
+
+> A business analyst agent and an engineer agent both analyze the same
+> problem independently. Their perspectives are synthesized by a third
+> agent before any implementation begins. This "diverse perspectives"
+> pattern is a reusable team template.
+
+**Requires:** Fan-out/fan-in pattern in plans, synthesis steps.
+**Existing:** Parallel dispatch + phase dependencies. The synthesis step
+is just another agent step that depends on the analysis steps.
+
+---
+
+## 8. Removed: CI/CD Angle
+
+*(Removed per feedback — not a primary use case for this evaluation.)*
+
+---
+
+## Summary: What to Build Next
+
+| Priority | Enhancement | Unlocks |
 |---|---|---|
-| Team definitions (YAML) | Low | Agent registry already loads `.md` definitions |
-| `--team` flag on `baton plan` | Low | Planner already accepts agent hints |
-| Shared team context | Medium | `ContextManager` + mission log exist |
-| Checkpoint/synthesis steps | Medium | `team-record` + step types exist |
-| `baton team run` shortcut | Low | Plan + daemon start are composable |
-| Cross-phase context passing | Medium | Event bus + persistence exist |
-
-### Conclusion
-
-Daemon mode is the natural execution layer for agent-team workflows. The
-parallel dispatch, crash recovery, and real-time monitoring via `--serve`
-provide everything needed for production team execution. The main gaps are
-UX-level (team definitions, shortcuts) and coordination-level (shared
-context, synthesis steps) — the runtime infrastructure is solid.
+| **P0** | `baton daemon run` (plan + execute in one command) | Stories 1, 2 |
+| **P0** | Inbound trigger endpoint (`POST /api/v1/triggers`) | Story 1 |
+| **P1** | Execute endpoint upgrade to daemon mode | Story 2 |
+| **P1** | Agent profiles / dynamic team composition at plan time | Stories 4, 5 |
+| **P1** | Decision log / context propagation between parallel agents | Stories 2, 5 |
+| **P2** | Adaptive slots (runtime team amendment) | Story 4 |
+| **P2** | Multi-project daemon coordination in PMO | Story 3 |
+| **P2** | Parallel progress rendering in PMO UI | Story 2 |
