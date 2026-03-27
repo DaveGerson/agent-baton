@@ -19,13 +19,18 @@ the calling process until the worker completes or a shutdown signal arrives.
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import json
 import logging
 import os
+import sys
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+
+if sys.platform != "win32":
+    import fcntl
+else:
+    fcntl = None  # type: ignore[assignment]
 
 from agent_baton.core.engine.executor import ExecutionEngine
 from agent_baton.core.engine.protocols import ExecutionDriver
@@ -339,12 +344,13 @@ class WorkerSupervisor:
         # FD is closed, which eliminates the stale-PID-file race condition.
         # Note: flock() on network filesystems may not enforce mutual exclusion.
         self._pid_fd = open(self.pid_path, "w")  # noqa: SIM115
-        try:
-            fcntl.flock(self._pid_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            self._pid_fd.close()
-            self._pid_fd = None
-            raise RuntimeError("Another daemon is already running.")
+        if fcntl is not None:
+            try:
+                fcntl.flock(self._pid_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                self._pid_fd.close()
+                self._pid_fd = None
+                raise RuntimeError("Another daemon is already running.")
         self._pid_fd.write(str(os.getpid()))
         self._pid_fd.flush()
         # Hold the FD open — lock is released when process exits or FD closes.
@@ -352,7 +358,8 @@ class WorkerSupervisor:
     def _remove_pid(self) -> None:
         if hasattr(self, "_pid_fd") and self._pid_fd is not None:
             try:
-                fcntl.flock(self._pid_fd, fcntl.LOCK_UN)
+                if fcntl is not None:
+                    fcntl.flock(self._pid_fd, fcntl.LOCK_UN)
                 self._pid_fd.close()
             except OSError:
                 pass
