@@ -21,9 +21,13 @@ This guide takes you from zero to your first orchestrated task. Allow
 
 ## Prerequisites
 
-- **Claude Code** installed and working in your terminal
+- **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** installed and working in your terminal
 - **Python 3.10+** (for the execution engine and CLI)
 - **Git** (the orchestrator creates branches and commits per agent)
+
+> **Which install scope should I choose?** Pick **user-level** (`~/.claude/`)
+> if you work on multiple projects -- agents will be available everywhere.
+> Pick **project-level** (`.claude/`) to keep agents scoped to one repo.
 
 ---
 
@@ -130,6 +134,18 @@ entry point is on your PATH:
 pip install -e ".[dev]"
 which baton
 ```
+
+### Verification Checklist
+
+Run through this to confirm everything is working:
+
+- [ ] `/agents` in Claude Code lists ~19 agents
+- [ ] `baton agents` works in the terminal
+- [ ] `baton plan --help` shows plan options
+- [ ] `CLAUDE.md` exists in your project root
+- [ ] `.claude/settings.json` exists with hook configuration
+- [ ] `.claude/agents/` contains agent markdown files
+- [ ] `.claude/references/` contains reference markdown files
 
 ---
 
