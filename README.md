@@ -478,4 +478,4 @@ and tested.
 
 ## License
 
-Apache 2.0 -- see [LICENSE](LICENSE) for details.
+License pending. Contact the maintainers for terms.
