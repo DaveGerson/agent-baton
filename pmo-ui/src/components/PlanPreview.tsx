@@ -1,5 +1,6 @@
 import type { ForgePlanResponse } from '../api/types';
 import { T } from '../styles/tokens';
+import { agentDisplayName } from '../utils/agent-names';
 
 interface PlanPreviewProps {
   plan: ForgePlanResponse;
@@ -128,7 +129,7 @@ export function PlanPreview({ plan }: PlanPreviewProps) {
                     whiteSpace: 'nowrap',
                     flexShrink: 0,
                   }}>
-                    {step.agent_name}
+                    {agentDisplayName(step.agent_name)}
                   </span>
                 )}
               </div>
@@ -159,17 +160,20 @@ function StatTile({
       <div style={{ fontSize: 9, color: T.text3, textTransform: 'uppercase', letterSpacing: 0.4 }}>
         {label}
       </div>
-      <div style={{
-        fontSize: 13,
-        fontWeight: 700,
-        color: color ?? T.text0,
-        fontFamily: mono ? 'monospace' : 'inherit',
-        marginTop: 1,
-        whiteSpace: 'nowrap',
-        overflow: 'hidden',
-        textOverflow: 'ellipsis',
-        maxWidth: 120,
-      }}>
+      <div
+        title={String(value)}
+        style={{
+          fontSize: 13,
+          fontWeight: 700,
+          color: color ?? T.text0,
+          fontFamily: mono ? 'monospace' : 'inherit',
+          marginTop: 1,
+          whiteSpace: 'nowrap',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          maxWidth: 120,
+        }}
+      >
         {value}
       </div>
     </div>

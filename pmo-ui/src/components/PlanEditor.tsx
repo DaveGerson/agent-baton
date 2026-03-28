@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { T } from '../styles/tokens';
 import type { ForgePlanResponse, ForgePlanPhase, ForgePlanStep } from '../api/types';
+import { agentDisplayName } from '../utils/agent-names';
 
 const AGENT_LIST = [
   'backend-engineer',
@@ -191,13 +192,13 @@ export function PlanEditor({ plan, onPlanChange }: PlanEditorProps) {
                       aria-label={`Move step ${si + 1} up`}
                       onClick={() => moveStep(pi, si, -1)}
                       disabled={si === 0}
-                      style={{ background: 'none', border: 'none', color: si === 0 ? T.bg3 : T.text3, fontSize: 8, cursor: si === 0 ? 'default' : 'pointer', padding: 0, lineHeight: 1 }}
+                      style={{ background: 'none', border: 'none', color: si === 0 ? T.bg3 : T.text3, fontSize: 8, cursor: si === 0 ? 'default' : 'pointer', padding: 0, lineHeight: 1, minWidth: 24, minHeight: 24, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
                     >{'\u25b2'}</button>
                     <button
                       aria-label={`Move step ${si + 1} down`}
                       onClick={() => moveStep(pi, si, 1)}
                       disabled={si === phase.steps.length - 1}
-                      style={{ background: 'none', border: 'none', color: si === phase.steps.length - 1 ? T.bg3 : T.text3, fontSize: 8, cursor: si === phase.steps.length - 1 ? 'default' : 'pointer', padding: 0, lineHeight: 1 }}
+                      style={{ background: 'none', border: 'none', color: si === phase.steps.length - 1 ? T.bg3 : T.text3, fontSize: 8, cursor: si === phase.steps.length - 1 ? 'default' : 'pointer', padding: 0, lineHeight: 1, minWidth: 24, minHeight: 24, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
                     >{'\u25bc'}</button>
                   </div>
 
@@ -246,11 +247,11 @@ export function PlanEditor({ plan, onPlanChange }: PlanEditorProps) {
                       }}
                     >
                       {AGENT_LIST.map(a => (
-                        <option key={a} value={a}>{a}</option>
+                        <option key={a} value={a}>{agentDisplayName(a)}</option>
                       ))}
                       {/* Preserve current value if it's not in the standard list */}
                       {!AGENT_LIST.includes(step.agent_name as typeof AGENT_LIST[number]) && (
-                        <option value={step.agent_name}>{step.agent_name}</option>
+                        <option value={step.agent_name}>{agentDisplayName(step.agent_name)}</option>
                       )}
                     </select>
                   ) : (
@@ -259,7 +260,7 @@ export function PlanEditor({ plan, onPlanChange }: PlanEditorProps) {
                       border: `1px solid ${T.cyan}22`, padding: '1px 5px',
                       borderRadius: 3, whiteSpace: 'nowrap', flexShrink: 0,
                     }}>
-                      {step.agent_name}
+                      {agentDisplayName(step.agent_name)}
                     </span>
                   )}
 
@@ -274,6 +275,13 @@ export function PlanEditor({ plan, onPlanChange }: PlanEditorProps) {
                   </button>
                 </div>
               ))}
+
+              {/* CJ-12: empty phase placeholder */}
+              {phase.steps.length === 0 && (
+                <div style={{ padding: '8px 12px', fontSize: 9, color: T.text3, fontStyle: 'italic' }}>
+                  No steps. Add a step or remove this phase.
+                </div>
+              )}
 
               {/* Add step button */}
               <div style={{ padding: '4px 10px' }}>

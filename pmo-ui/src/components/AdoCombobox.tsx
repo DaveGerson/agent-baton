@@ -14,19 +14,25 @@ export function AdoCombobox({ onSelect, inputId }: AdoComboboxProps) {
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [activeIndex, setActiveIndex] = useState(-1);
+  const [searchError, setSearchError] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const listboxId = 'ado-results-listbox';
 
   useEffect(() => {
-    if (!query.trim()) { setItems([]); setOpen(false); return; }
+    if (!query.trim()) { setItems([]); setOpen(false); setSearchError(false); return; }
+    setSearchError(false);
     const timer = setTimeout(async () => {
       setLoading(true);
       try {
         const resp = await api.searchAdo(query);
         setItems(resp.items);
-        setOpen(resp.items.length > 0);
+        setOpen(true);
         setActiveIndex(-1);
-      } catch { setItems([]); setOpen(false); }
+      } catch {
+        setItems([]);
+        setSearchError(true);
+        setOpen(true);
+      }
       setLoading(false);
     }, 300);
     return () => clearTimeout(timer);
@@ -97,7 +103,7 @@ export function AdoCombobox({ onSelect, inputId }: AdoComboboxProps) {
           Searching...
         </div>
       )}
-      {open && items.length > 0 && (
+      {open && (searchError || items.length > 0) && (
         <ul
           id={listboxId}
           role="listbox"
@@ -120,36 +126,47 @@ export function AdoCombobox({ onSelect, inputId }: AdoComboboxProps) {
             boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
           }}
         >
-          {items.map((item, idx) => (
+          {searchError ? (
             <li
-              key={item.id}
-              id={`ado-item-${item.id}`}
               role="option"
-              aria-selected={idx === activeIndex}
-              onClick={() => handleSelect(item)}
-              style={{
-                padding: '6px 8px',
-                cursor: 'pointer',
-                borderBottom: `1px solid ${T.border}`,
-                background: idx === activeIndex ? T.bg2 : 'transparent',
-              }}
-              onMouseEnter={() => setActiveIndex(idx)}
-              onMouseLeave={() => setActiveIndex(-1)}
+              aria-selected={false}
+              aria-disabled="true"
+              style={{ padding: '8px 10px', fontSize: 9, color: T.red }}
             >
-              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                <span style={{ fontSize: 9, color: T.text3, fontFamily: 'monospace' }}>{item.id}</span>
-                <span style={{ fontSize: 9, color: T.text0, fontWeight: 500 }}>{item.title}</span>
-                <span style={{
-                  fontSize: 9, color: T.accent, background: T.accent + '14',
-                  border: `1px solid ${T.accent}22`, padding: '0 4px',
-                  borderRadius: 2, marginLeft: 'auto',
-                }}>{item.type}</span>
-              </div>
-              <div style={{ fontSize: 9, color: T.text3, marginTop: 1 }}>
-                {item.program} · {item.owner} · {item.priority}
-              </div>
+              Search failed — try again
             </li>
-          ))}
+          ) : (
+            items.map((item, idx) => (
+              <li
+                key={item.id}
+                id={`ado-item-${item.id}`}
+                role="option"
+                aria-selected={idx === activeIndex}
+                onClick={() => handleSelect(item)}
+                style={{
+                  padding: '6px 8px',
+                  cursor: 'pointer',
+                  borderBottom: `1px solid ${T.border}`,
+                  background: idx === activeIndex ? T.bg2 : 'transparent',
+                }}
+                onMouseEnter={() => setActiveIndex(idx)}
+                onMouseLeave={() => setActiveIndex(-1)}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <span style={{ fontSize: 9, color: T.text3, fontFamily: 'monospace' }}>{item.id}</span>
+                  <span style={{ fontSize: 9, color: T.text0, fontWeight: 500 }}>{item.title}</span>
+                  <span style={{
+                    fontSize: 9, color: T.accent, background: T.accent + '14',
+                    border: `1px solid ${T.accent}22`, padding: '0 4px',
+                    borderRadius: 2, marginLeft: 'auto',
+                  }}>{item.type}</span>
+                </div>
+                <div style={{ fontSize: 9, color: T.text3, marginTop: 1 }}>
+                  {item.program} · {item.owner} · {item.priority}
+                </div>
+              </li>
+            ))
+          )}
         </ul>
       )}
     </div>

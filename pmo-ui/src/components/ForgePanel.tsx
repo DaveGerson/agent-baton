@@ -485,7 +485,9 @@ function SavedPhase({
       }}>{'\u2713'}</div>
       <div style={{ fontSize: 14, fontWeight: 700, color: T.green }}>Plan Saved & Queued</div>
       {savePath && (
-        <div style={{ fontSize: 9, color: T.text3, fontFamily: 'monospace' }}>{savePath}</div>
+        <div style={{ fontSize: 9, color: T.text3, fontFamily: 'monospace' }} title={savePath}>
+          {savePath.includes('/') ? savePath.split('/').pop() : savePath}
+        </div>
       )}
 
       {/* Execution launch */}

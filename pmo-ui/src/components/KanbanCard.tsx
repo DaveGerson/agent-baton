@@ -3,6 +3,7 @@ import type { PmoCard, ForgePlanResponse } from '../api/types';
 import { T, PRIORITY_COLOR } from '../styles/tokens';
 import { api } from '../api/client';
 import { PlanPreview } from './PlanPreview';
+import { agentDisplayName } from '../utils/agent-names';
 
 interface KanbanCardProps {
   card: PmoCard;
@@ -157,11 +158,40 @@ export function KanbanCard({ card, columnColor, onForge }: KanbanCardProps) {
           }}>
             {card.title}
           </div>
+          <span
+            aria-hidden="true"
+            style={{
+              fontSize: 10,
+              color: T.text3,
+              flexShrink: 0,
+              marginTop: 1,
+              transition: 'transform 0.15s',
+              transform: expanded ? 'rotate(180deg)' : 'rotate(0deg)',
+              display: 'inline-block',
+            }}
+          >
+            {'▾'}
+          </span>
         </div>
 
         {/* Meta row */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 3, flexWrap: 'wrap', marginBottom: 3 }}>
-          <span style={{ fontSize: 9, color: T.text4, fontFamily: 'monospace' }}>{card.card_id}</span>
+          {/* BO-01: show ADO external ID when available; fall back to abbreviated internal ID */}
+          {card.external_id ? (
+            <span
+              title={`ADO: ${card.external_id} — internal: ${card.card_id}`}
+              style={{ fontSize: 9, color: T.text2, fontFamily: 'monospace', fontWeight: 600 }}
+            >
+              {card.external_id}
+            </span>
+          ) : (
+            <span
+              title={card.card_id}
+              style={{ fontSize: 9, color: T.text4, fontFamily: 'monospace' }}
+            >
+              {card.card_id.slice(0, 8)}
+            </span>
+          )}
           {card.priority >= 1 && (
             <Chip color={priorityColor}>P{card.priority === 2 ? '0' : '1'}</Chip>
           )}
@@ -221,7 +251,7 @@ export function KanbanCard({ card, columnColor, onForge }: KanbanCardProps) {
             <>
               <span style={{ fontSize: 9, color: T.text4 }}>·</span>
               <span style={{ fontSize: 9, color: T.text3 }}>
-                {card.agents.slice(0, 2).join(', ')}
+                {card.agents.slice(0, 2).map(agentDisplayName).join(', ')}
                 {card.agents.length > 2 && ` +${card.agents.length - 2}`}
               </span>
             </>
@@ -251,7 +281,7 @@ export function KanbanCard({ card, columnColor, onForge }: KanbanCardProps) {
           {card.agents.length > 0 && (
             <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap', marginBottom: 6 }}>
               {card.agents.map(a => (
-                <Chip key={a} color={T.cyan}>{a}</Chip>
+                <Chip key={a} color={T.cyan}>{agentDisplayName(a)}</Chip>
               ))}
             </div>
           )}

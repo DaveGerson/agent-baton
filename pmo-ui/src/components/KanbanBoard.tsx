@@ -222,7 +222,7 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
             fontSize: 9,
             color: T.red,
           }}>
-            {error} — retrying every {connectionMode === 'sse' ? '15' : '5'}s
+            {error} — retrying every {connectionMode === 'sse' ? '15' : '5'}s. Check that the backend is running (baton pmo serve).
           </div>
         )}
       </div>
@@ -337,12 +337,12 @@ function ConnectionIndicator({ mode }: { mode: ConnectionMode }) {
   const isConnecting = mode === 'connecting';
 
   const dotColor = isLive ? T.green : isConnecting ? T.yellow : T.text3;
-  const label = isLive ? 'live' : isConnecting ? 'connecting' : 'polling';
+  const label = isLive ? 'Live' : isConnecting ? 'Connecting' : 'Reconnecting';
   const title = isLive
     ? 'Real-time updates via SSE'
     : isConnecting
     ? 'Establishing SSE connection…'
-    : 'SSE unavailable — polling fallback active';
+    : 'SSE unavailable — polling for updates';
 
   return (
     <div

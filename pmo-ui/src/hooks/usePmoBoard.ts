@@ -41,10 +41,14 @@ export function usePmoBoard(program?: string): UsePmoBoardResult {
 
   const fetchBoard = useCallback(async () => {
     try {
-      const data = program
+      const raw = program
         ? await api.getBoardByProgram(program)
         : await api.getBoard();
       if (!mountedRef.current) return;
+      // Guard against empty-object or malformed responses from the backend.
+      const data = (raw !== null && typeof raw === 'object' && Array.isArray((raw as { cards?: unknown }).cards))
+        ? raw as { cards: PmoCard[]; health: Record<string, ProgramHealth> }
+        : { cards: [] as PmoCard[], health: {} as Record<string, ProgramHealth> };
       setCards(data.cards);
       setHealth(data.health);
       setError(null);

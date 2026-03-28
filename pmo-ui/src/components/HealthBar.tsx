@@ -77,7 +77,7 @@ export function HealthBar({ health, onProgramClick, activeProgram }: HealthBarPr
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 3 }}>
               <span style={{ fontSize: 10, fontWeight: 700, color: isActive ? barColor : T.text0 }}>{pg.program}</span>
               <span style={{ fontSize: 9, fontWeight: 600, color: T.text1, fontFamily: 'monospace' }}>
-                {pct}%
+                {pct}% done
               </span>
             </div>
             <div style={{ width: '100%', height: 3, borderRadius: 2, background: T.bg3, overflow: 'hidden' }}>

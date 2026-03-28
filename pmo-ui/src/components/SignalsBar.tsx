@@ -5,6 +5,22 @@ import type { PmoSignal } from '../api/types';
 
 const SIGNALS_POLL_MS = 15000;
 
+const SIGNAL_TYPE_LABELS: Record<string, string> = {
+  'stale_plan': 'Stale Plan',
+  'missing_gate': 'Missing Gate',
+  'budget_exceeded': 'Budget Exceeded',
+  'execution_failed': 'Execution Failed',
+  'agent_error': 'Agent Error',
+  'manual': 'Manual',
+  'bug': 'Bug Report',
+  'escalation': 'Escalation',
+  'blocker': 'Blocker',
+};
+
+function signalTypeLabel(raw: string): string {
+  return SIGNAL_TYPE_LABELS[raw] ?? raw.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
 interface SignalsBarProps {
   onForge: (signal: PmoSignal) => void;
   onOpenCountChange?: (count: number) => void;
@@ -25,14 +41,20 @@ export function SignalsBar({ onForge, onOpenCountChange }: SignalsBarProps) {
   const [submitting, setSubmitting] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [batchResolving, setBatchResolving] = useState(false);
+  const [resolveError, setResolveError] = useState<string | null>(null);
   const mountedRef = useRef(true);
+  const resolveErrorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // FB-02: propagate open count via effect, not inside state updaters
+  const openCount = signals.filter(s => s.status !== 'resolved').length;
+  useEffect(() => {
+    onOpenCountChange?.(openCount);
+  }, [openCount, onOpenCountChange]);
 
   function applySignals(data: PmoSignal[]) {
     if (!mountedRef.current) return;
     setSignals(data);
-    const openCount = data.filter(s => s.status !== 'resolved').length;
-    onOpenCountChange?.(openCount);
   }
 
   useEffect(() => {
@@ -59,22 +81,25 @@ export function SignalsBar({ onForge, onOpenCountChange }: SignalsBarProps) {
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  function showResolveError(msg: string) {
+    if (resolveErrorTimerRef.current) clearTimeout(resolveErrorTimerRef.current);
+    setResolveError(msg);
+    resolveErrorTimerRef.current = setTimeout(() => {
+      if (mountedRef.current) setResolveError(null);
+    }, 5000);
+  }
+
   async function handleResolve(id: string) {
     try {
       const updated = await api.resolveSignal(id);
-      setSignals(prev => {
-        const next = prev.map(s => s.signal_id === id ? updated : s);
-        const openCount = next.filter(s => s.status !== 'resolved').length;
-        onOpenCountChange?.(openCount);
-        return next;
-      });
+      setSignals(prev => prev.map(s => s.signal_id === id ? updated : s));
       setSelected(prev => {
         const next = new Set(prev);
         next.delete(id);
         return next;
       });
     } catch {
-      // silent — not critical
+      showResolveError('Failed to resolve signal. Please try again.');
     }
   }
 
@@ -90,17 +115,14 @@ export function SignalsBar({ onForge, onOpenCountChange }: SignalsBarProps) {
       const ids = Array.from(selected);
       const result = await api.batchResolveSignals(ids);
       const resolvedSet = new Set(result.resolved);
-      setSignals(prev => {
-        const next = prev.map(s =>
+      setSignals(prev =>
+        prev.map(s =>
           resolvedSet.has(s.signal_id) ? { ...s, status: 'resolved' } : s
-        );
-        const openCount = next.filter(s => s.status !== 'resolved').length;
-        onOpenCountChange?.(openCount);
-        return next;
-      });
+        )
+      );
       setSelected(new Set());
     } catch {
-      // silent — not critical
+      showResolveError('Failed to resolve signals. Please try again.');
     } finally {
       if (mountedRef.current) setBatchResolving(false);
     }
@@ -117,12 +139,7 @@ export function SignalsBar({ onForge, onOpenCountChange }: SignalsBarProps) {
         severity: newSeverity,
         status: 'open',
       });
-      setSignals(prev => {
-        const next = [sig, ...prev];
-        const openCount = next.filter(s => s.status !== 'resolved').length;
-        onOpenCountChange?.(openCount);
-        return next;
-      });
+      setSignals(prev => [sig, ...prev]);
       setNewTitle('');
       setShowAdd(false);
     } catch {
@@ -163,6 +180,24 @@ export function SignalsBar({ onForge, onOpenCountChange }: SignalsBarProps) {
       maxHeight: 160,
       overflowY: 'auto',
     }}>
+      {/* Resolve error banner */}
+      {resolveError && (
+        <div
+          role="alert"
+          style={{
+            fontSize: 9,
+            color: T.red,
+            background: T.red + '14',
+            border: `1px solid ${T.red}33`,
+            borderRadius: 3,
+            padding: '4px 8px',
+            marginBottom: 5,
+          }}
+        >
+          {resolveError}
+        </div>
+      )}
+
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 5 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -311,9 +346,18 @@ export function SignalsBar({ onForge, onOpenCountChange }: SignalsBarProps) {
         <div style={{ fontSize: 8, color: T.red, padding: 4 }}>{error}</div>
       )}
 
+      {/* Resolve error banner */}
+      {resolveError && (
+        <div role="alert" style={{ fontSize: 9, color: T.red, padding: '4px 8px', background: T.red + '12', border: `1px solid ${T.red}33`, borderRadius: 3, marginBottom: 4 }}>
+          {resolveError}
+        </div>
+      )}
+
       {/* Signal rows */}
       <ul role="list" style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-        {open.map(sig => (
+        {open.map(sig => {
+          const sideBorderColor = selected.has(sig.signal_id) ? T.accent + '44' : T.border;
+          return (
           <li
             key={sig.signal_id}
             style={{
@@ -323,7 +367,10 @@ export function SignalsBar({ onForge, onOpenCountChange }: SignalsBarProps) {
               padding: '4px 8px',
               background: selected.has(sig.signal_id) ? T.accent + '0a' : T.bg1,
               borderRadius: 3,
-              border: `1px solid ${selected.has(sig.signal_id) ? T.accent + '44' : T.border}`,
+              // FB-03: avoid mixing border shorthand with borderLeft — use individual sides
+              borderTop: `1px solid ${sideBorderColor}`,
+              borderRight: `1px solid ${sideBorderColor}`,
+              borderBottom: `1px solid ${sideBorderColor}`,
               borderLeft: `3px solid ${severityColor(sig.severity)}`,
               marginBottom: 3,
             }}
@@ -346,6 +393,19 @@ export function SignalsBar({ onForge, onOpenCountChange }: SignalsBarProps) {
                 {sig.description}
               </span>
             )}
+            <span style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              padding: '1px 5px',
+              borderRadius: 3,
+              fontSize: 9,
+              fontWeight: 600,
+              color: T.text3,
+              background: T.bg3,
+              whiteSpace: 'nowrap',
+            }}>
+              {signalTypeLabel(sig.signal_type)}
+            </span>
             <span style={{
               display: 'inline-flex',
               alignItems: 'center',
@@ -390,7 +450,8 @@ export function SignalsBar({ onForge, onOpenCountChange }: SignalsBarProps) {
               Resolve
             </button>
           </li>
-        ))}
+          );
+        })}
       </ul>
 
       {!loading && open.length === 0 && (
