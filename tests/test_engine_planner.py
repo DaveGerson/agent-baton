@@ -99,6 +99,63 @@ def python_project(tmp_path: Path) -> Path:
     return project
 
 
+@pytest.fixture
+def ts_project(tmp_path: Path) -> Path:
+    """A fake TypeScript project root with tsconfig.json + package.json."""
+    project = tmp_path / "ts-project"
+    project.mkdir()
+    (project / "tsconfig.json").write_text('{}', encoding="utf-8")
+    (project / "package.json").write_text(
+        '{"name": "myapp", "scripts": {"test": "vitest run"}}',
+        encoding="utf-8",
+    )
+    return project
+
+
+@pytest.fixture
+def extended_agents_dir(tmp_path: Path) -> Path:
+    """Agents dir including frontend-engineer for cross-concern tests."""
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir(exist_ok=True)
+
+    agents = [
+        ("backend-engineer--python", "Python backend specialist.", "sonnet"),
+        ("backend-engineer--node", "Node.js backend specialist.", "sonnet"),
+        ("architect", "System design specialist.", "opus"),
+        ("test-engineer", "Testing specialist.", "sonnet"),
+        ("code-reviewer", "Code review specialist.", "opus"),
+        ("data-analyst", "Data analysis specialist.", "sonnet"),
+        ("auditor", "Audit and compliance specialist.", "opus"),
+        ("backend-engineer", "Generic backend engineer.", "sonnet"),
+        ("frontend-engineer", "Frontend UI specialist.", "sonnet"),
+        ("frontend-engineer--react", "React frontend specialist.", "sonnet"),
+    ]
+    for name, desc, model in agents:
+        content = (
+            f"---\nname: {name}\ndescription: {desc}\nmodel: {model}\n"
+            f"permissionMode: default\ntools: Read, Write\n---\n\n# {name}\n"
+        )
+        (agents_dir / f"{name}.md").write_text(content, encoding="utf-8")
+
+    return agents_dir
+
+
+@pytest.fixture
+def extended_planner(tmp_path: Path, extended_agents_dir: Path) -> IntelligentPlanner:
+    """Planner with extended agent registry including frontend-engineer."""
+    ctx = tmp_path / "team-context"
+    ctx.mkdir(exist_ok=True)
+    p = IntelligentPlanner(team_context_root=ctx)
+    from agent_baton.core.orchestration.registry import AgentRegistry
+    from agent_baton.core.orchestration.router import AgentRouter
+
+    reg = AgentRegistry()
+    reg.load_directory(extended_agents_dir)
+    p._registry = reg
+    p._router = AgentRouter(reg)
+    return p
+
+
 # ---------------------------------------------------------------------------
 # Task-ID generation
 # ---------------------------------------------------------------------------
@@ -318,9 +375,8 @@ class TestDefaultGate:
         assert gate.gate_type == expected_gate_type
         assert expected_cmd_fragment in gate.command
 
-    @pytest.mark.parametrize("phase_name", ["Review", "Design"])
-    def test_no_gate_phases(self, planner: IntelligentPlanner, phase_name: str):
-        assert planner._default_gate(phase_name) is None
+    def test_no_gate_for_review(self, planner: IntelligentPlanner):
+        assert planner._default_gate("Review") is None
 
 
 # ---------------------------------------------------------------------------
@@ -1322,3 +1378,319 @@ class TestComplexityCLIOverride:
         plan = planner.create_plan("Add a login page", complexity="heavy")
         assert plan.complexity == "heavy"
         assert len(plan.phases) >= 3
+
+
+# ---------------------------------------------------------------------------
+# Stack-aware gate commands
+# ---------------------------------------------------------------------------
+
+class TestStackAwareGates:
+    """Gates should use language-appropriate test/build commands."""
+
+    def test_python_project_gets_pytest_gates(
+        self, planner: IntelligentPlanner, python_project: Path
+    ):
+        plan = planner.create_plan(
+            "Add user authentication",
+            task_type="new-feature",
+            project_root=python_project,
+        )
+        gates = [p.gate for p in plan.phases if p.gate]
+        assert any("pytest" in g.command for g in gates)
+
+    def test_typescript_project_gets_npm_test_gates(
+        self, extended_planner: IntelligentPlanner, ts_project: Path
+    ):
+        plan = extended_planner.create_plan(
+            "Add user authentication",
+            task_type="new-feature",
+            project_root=ts_project,
+        )
+        gates = [p.gate for p in plan.phases if p.gate]
+        assert gates, "Expected at least one gated phase"
+        assert any("npm" in g.command for g in gates), (
+            f"Expected 'npm' in gate commands for TS project, "
+            f"got: {[g.command for g in gates]}"
+        )
+
+    def test_no_stack_defaults_to_pytest(self, planner: IntelligentPlanner):
+        gate = planner._default_gate("Implement")
+        assert gate is not None
+        assert "pytest" in gate.command
+
+    @pytest.mark.parametrize("phase_name", ["Review", "Investigate", "Research"])
+    def test_no_gate_for_non_code_phases(self, planner: IntelligentPlanner, phase_name: str):
+        gate = planner._default_gate(phase_name)
+        assert gate is None
+
+    def test_gate_type_matches_phase(self, planner: IntelligentPlanner):
+        from agent_baton.core.orchestration.router import StackProfile
+        ts_stack = StackProfile(language="typescript", framework=None)
+        gate = planner._default_gate("Test", stack=ts_stack)
+        assert gate is not None
+        assert gate.gate_type == "test"
+        assert "npm test" in gate.command
+
+    def test_gate_for_go_project(self, planner: IntelligentPlanner):
+        from agent_baton.core.orchestration.router import StackProfile
+        go_stack = StackProfile(language="go", framework=None)
+        gate = planner._default_gate("Implement", stack=go_stack)
+        assert gate is not None
+        assert "go" in gate.command
+
+
+# ---------------------------------------------------------------------------
+# Compound task decomposition
+# ---------------------------------------------------------------------------
+
+class TestParseSubtasks:
+    """_parse_subtasks should extract numbered items from descriptions."""
+
+    def test_parenthesized_numbers(self, planner: IntelligentPlanner):
+        summary = "Do everything: (1) Write tests (2) Fix bugs (3) Deploy"
+        subtasks = planner._parse_subtasks(summary)
+        assert len(subtasks) == 3
+        assert subtasks[0] == (1, "Write tests")
+        assert subtasks[1] == (2, "Fix bugs")
+        assert subtasks[2] == (3, "Deploy")
+
+    def test_dot_numbers(self, planner: IntelligentPlanner):
+        summary = "Tasks: 1. Write tests 2. Fix bugs 3. Deploy"
+        subtasks = planner._parse_subtasks(summary)
+        assert len(subtasks) == 3
+
+    def test_paren_numbers(self, planner: IntelligentPlanner):
+        summary = "Tasks: 1) Write tests 2) Fix bugs"
+        subtasks = planner._parse_subtasks(summary)
+        assert len(subtasks) == 2
+
+    def test_single_item_returns_empty(self, planner: IntelligentPlanner):
+        summary = "Do: (1) Just one thing"
+        subtasks = planner._parse_subtasks(summary)
+        assert subtasks == []
+
+    def test_no_numbers_returns_empty(self, planner: IntelligentPlanner):
+        summary = "Add a login feature with OAuth2"
+        subtasks = planner._parse_subtasks(summary)
+        assert subtasks == []
+
+
+class TestCompoundDecomposition:
+    """Compound tasks should produce independent phases per sub-task."""
+
+    def test_compound_task_creates_multiple_phases(
+        self, extended_planner: IntelligentPlanner
+    ):
+        plan = extended_planner.create_plan(
+            "UI work: (1) Develop comprehensive test suite (2) Fix functional gaps (3) UX evaluation using browser navigation"
+        )
+        assert len(plan.phases) == 3
+
+    def test_compound_phases_have_independent_agents(
+        self, extended_planner: IntelligentPlanner
+    ):
+        plan = extended_planner.create_plan(
+            "Full stack: (1) Write unit tests for API (2) Fix broken login page (3) Review code quality"
+        )
+        # Each phase should have at least one step
+        for phase in plan.phases:
+            assert len(phase.steps) >= 1
+        # The plan should involve more than just one agent type
+        # (include team members for consolidated phases)
+        all_agents: set[str] = set()
+        for phase in plan.phases:
+            for step in phase.steps:
+                all_agents.add(step.agent_name)
+                for member in step.team:
+                    all_agents.add(member.agent_name)
+        all_agents.discard("team")  # team is a wrapper, not an agent
+        assert len(all_agents) >= 2, (
+            f"Expected multiple agent types, got: {all_agents}"
+        )
+
+    def test_compound_task_routes_test_subtask_to_test_engineer(
+        self, extended_planner: IntelligentPlanner
+    ):
+        plan = extended_planner.create_plan(
+            "Work: (1) Write comprehensive test suite (2) Fix the bug in auth"
+        )
+        # First sub-task mentions "test" → should route to test-engineer
+        phase1_agents = [s.agent_name for s in plan.phases[0].steps]
+        assert any("test-engineer" in a for a in phase1_agents)
+
+    def test_compound_task_routes_fix_subtask_to_backend(
+        self, extended_planner: IntelligentPlanner
+    ):
+        plan = extended_planner.create_plan(
+            "Work: (1) Write comprehensive test suite (2) Fix the bug in auth"
+        )
+        # Second sub-task mentions "fix" → should include backend-engineer
+        # May be consolidated into a team step, so check all agent names
+        # including team members.
+        all_names: list[str] = []
+        for phase in plan.phases:
+            for step in phase.steps:
+                all_names.append(step.agent_name)
+                for member in step.team:
+                    all_names.append(member.agent_name)
+        assert any("backend-engineer" in a for a in all_names), (
+            f"Expected backend-engineer for 'fix' subtask, got: {all_names}"
+        )
+
+    def test_compound_task_phase_names_match_subtask_types(
+        self, extended_planner: IntelligentPlanner
+    ):
+        plan = extended_planner.create_plan(
+            "Work: (1) Write tests for coverage (2) Fix broken layout (3) Build new auth feature"
+        )
+        phase_names = [p.name for p in plan.phases]
+        # Sub-task 1 is "test" → "Test" phase name
+        assert phase_names[0] == "Test"
+        # Sub-task 2 is "bug-fix" → "Fix" phase name
+        assert phase_names[1] == "Fix"
+        # Sub-task 3 is "new-feature" → "Implement" phase name
+        assert phase_names[2] == "Implement"
+
+    def test_explicit_phases_override_still_works(
+        self, extended_planner: IntelligentPlanner
+    ):
+        """Explicit phases should NOT be decomposed even with numbered text."""
+        explicit = [{"name": "Custom", "agents": ["architect"]}]
+        plan = extended_planner.create_plan(
+            "Work: (1) Test (2) Fix",
+            phases=explicit,
+        )
+        assert len(plan.phases) == 1
+        assert plan.phases[0].name == "Custom"
+
+
+# ---------------------------------------------------------------------------
+# Cross-concern agent expansion
+# ---------------------------------------------------------------------------
+
+def _collect_all_agent_names(plan) -> list[str]:
+    """Collect all agent names including team members."""
+    names: list[str] = []
+    for phase in plan.phases:
+        for step in phase.steps:
+            if step.agent_name != "team":
+                names.append(step.agent_name)
+            for member in step.team:
+                names.append(member.agent_name)
+    return names
+
+
+class TestCrossConcernExpansion:
+    """Agent rosters should expand when description mentions cross-concern work."""
+
+    def test_task_type_test_with_fix_mention_adds_backend(
+        self, extended_planner: IntelligentPlanner
+    ):
+        plan = extended_planner.create_plan(
+            "Test everything and fix gaps found in the UI",
+            task_type="test",
+        )
+        all_names = _collect_all_agent_names(plan)
+        # "fix" should trigger addition of backend-engineer
+        assert any("backend-engineer" in a for a in all_names), (
+            f"Expected backend-engineer for 'fix' keyword, got: {all_names}"
+        )
+
+    def test_task_type_test_with_ux_mention_adds_frontend(
+        self, extended_planner: IntelligentPlanner
+    ):
+        plan = extended_planner.create_plan(
+            "Test suite and UX evaluation of the application",
+            task_type="test",
+        )
+        all_names = _collect_all_agent_names(plan)
+        assert any("frontend-engineer" in a for a in all_names), (
+            f"Expected frontend-engineer for 'ux' keyword, got: {all_names}"
+        )
+
+    def test_expand_does_not_duplicate_existing_agents(
+        self, extended_planner: IntelligentPlanner
+    ):
+        agents = ["test-engineer", "backend-engineer"]
+        expanded = extended_planner._expand_agents_for_concerns(
+            agents, "Fix the test suite"
+        )
+        # backend-engineer already present — should not be added again
+        backend_count = sum(1 for a in expanded if a.split("--")[0] == "backend-engineer")
+        assert backend_count == 1
+
+    def test_expand_preserves_original_roster(
+        self, extended_planner: IntelligentPlanner
+    ):
+        agents = ["test-engineer"]
+        expanded = extended_planner._expand_agents_for_concerns(
+            agents, "Just run the tests"
+        )
+        assert "test-engineer" in expanded
+
+    def test_no_expansion_for_clean_description(
+        self, extended_planner: IntelligentPlanner
+    ):
+        agents = ["test-engineer"]
+        expanded = extended_planner._expand_agents_for_concerns(
+            agents, "Verify correctness"
+        )
+        # No cross-concern keywords → no expansion
+        assert expanded == ["test-engineer"]
+
+
+# ---------------------------------------------------------------------------
+# Integration: the user's original problem scenario
+# ---------------------------------------------------------------------------
+
+class TestOriginalProblemScenario:
+    """Regression test for the reported plan generation gap."""
+
+    def test_multi_concern_task_decomposes_correctly(
+        self, extended_planner: IntelligentPlanner, ts_project: Path
+    ):
+        """The original problem: a 3-concern task should produce 3+ phases
+        with different agents and stack-appropriate gate commands."""
+        plan = extended_planner.create_plan(
+            "Exhaustive UI testing and UX evaluation: "
+            "(1) Develop comprehensive UI test suite "
+            "(2) Fix functional gaps found "
+            "(3) UX expert evaluation using browser navigation",
+            project_root=ts_project,
+        )
+        # Should have 3 phases (one per sub-task)
+        assert len(plan.phases) >= 3, (
+            f"Expected 3+ phases, got {len(plan.phases)}: "
+            f"{[p.name for p in plan.phases]}"
+        )
+
+        # Should involve more than just test-engineer
+        all_names = _collect_all_agent_names(plan)
+        agent_bases = {a.split("--")[0] for a in all_names}
+        assert len(agent_bases) >= 2, (
+            f"Expected multiple agent types, got: {agent_bases}"
+        )
+
+        # Gate commands should be npm-based (TypeScript project), not pytest
+        gates = [p.gate for p in plan.phases if p.gate]
+        gate_commands = [g.command for g in gates]
+        assert not any("pytest" in cmd for cmd in gate_commands), (
+            f"Expected no pytest gates for TS project, got: {gate_commands}"
+        )
+
+    def test_task_type_test_override_still_expands(
+        self, extended_planner: IntelligentPlanner, ts_project: Path
+    ):
+        """Even with --task-type test, cross-concerns should expand the roster."""
+        plan = extended_planner.create_plan(
+            "UI testing: (1) Write test suite (2) Fix broken components (3) Evaluate UX",
+            task_type="test",
+            project_root=ts_project,
+        )
+        all_names = _collect_all_agent_names(plan)
+        agent_bases = {a.split("--")[0] for a in all_names}
+        # Should have test-engineer + at least one more
+        assert "test-engineer" in agent_bases
+        assert len(agent_bases) >= 2, (
+            f"Expected multiple agent types with --task-type test, got: {agent_bases}"
+        )
