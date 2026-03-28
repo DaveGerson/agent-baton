@@ -27,7 +27,7 @@ export function PlanPreview({ plan }: PlanPreviewProps) {
           borderRadius: 4,
           borderLeft: `3px solid ${T.accent}`,
         }}>
-          <div style={{ fontSize: 7, color: T.text3, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 3 }}>
+          <div style={{ fontSize: 9, color: T.text3, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 3 }}>
             Summary
           </div>
           <div style={{ fontSize: 10, color: T.text1, lineHeight: 1.55 }}>
@@ -75,7 +75,7 @@ export function PlanPreview({ plan }: PlanPreviewProps) {
               </div>
               <span style={{
                 marginLeft: 'auto',
-                fontSize: 7,
+                fontSize: 9,
                 color: T.text3,
                 background: T.bg3,
                 padding: '1px 4px',
@@ -105,7 +105,7 @@ export function PlanPreview({ plan }: PlanPreviewProps) {
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
-                  fontSize: 7,
+                  fontSize: 9,
                   color: T.text3,
                   flexShrink: 0,
                   marginTop: 1,
@@ -119,7 +119,7 @@ export function PlanPreview({ plan }: PlanPreviewProps) {
                 </div>
                 {step.agent_name && (
                   <span style={{
-                    fontSize: 7,
+                    fontSize: 9,
                     color: T.cyan,
                     background: T.cyan + '14',
                     border: `1px solid ${T.cyan}22`,
@@ -152,8 +152,11 @@ function StatTile({
   color?: string;
 }) {
   return (
-    <div style={{ padding: '6px 10px', background: T.bg2, borderRadius: 4, minWidth: 60 }}>
-      <div style={{ fontSize: 7, color: T.text3, textTransform: 'uppercase', letterSpacing: 0.4 }}>
+    <div
+      aria-label={`${label}: ${value}`}
+      style={{ padding: '6px 10px', background: T.bg2, borderRadius: 4, minWidth: 60 }}
+    >
+      <div style={{ fontSize: 9, color: T.text3, textTransform: 'uppercase', letterSpacing: 0.4 }}>
         {label}
       </div>
       <div style={{

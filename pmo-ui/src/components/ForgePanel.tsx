@@ -4,7 +4,7 @@ import { PlanEditor } from './PlanEditor';
 import { InterviewPanel } from './InterviewPanel';
 import { AdoCombobox } from './AdoCombobox';
 import { usePersistedState } from '../hooks/usePersistedState';
-import { T } from '../styles/tokens';
+import { T, SR_ONLY } from '../styles/tokens';
 import type { PmoProject, PmoSignal, ForgePlanResponse, InterviewQuestion, InterviewAnswer } from '../api/types';
 
 interface ForgePanelProps {
@@ -68,7 +68,11 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
   const [regenLoading, setRegenLoading] = useState(false);
 
   const abortRef = useRef<AbortController | null>(null);
+  const panelBodyRef = useRef<HTMLDivElement>(null);
   const selectedProject = projects.find(p => p.project_id === projectId);
+
+  // Derived dirty flag: user has an unsaved plan in review
+  const isDirty = !!plan && phase === 'preview';
 
   useEffect(() => {
     api.getProjects()
@@ -83,6 +87,12 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
   useEffect(() => {
     return () => { abortRef.current?.abort(); };
   }, []);
+
+  // Shift focus to the panel body on every phase transition so keyboard
+  // users land at the top of the new phase content.
+  useEffect(() => {
+    panelBodyRef.current?.focus();
+  }, [phase]);
 
   async function handleGenerate() {
     if (!description.trim() || !projectId) return;
@@ -156,6 +166,16 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
     }
   }
 
+  function handleBack() {
+    if (isDirty) {
+      const confirmed = window.confirm(
+        'You have an unsaved plan. Leave anyway? Your task description is saved but the generated plan will be lost.'
+      );
+      if (!confirmed) return;
+    }
+    onBack();
+  }
+
   const phaseLabel: Record<Phase, string> = {
     intake: 'Describe the work to generate a plan',
     generating: 'Generating plan...',
@@ -172,13 +192,13 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
         padding: '7px 14px', borderBottom: `1px solid ${T.border}`,
         background: T.bg1, flexShrink: 0,
       }}>
-        <button onClick={onBack} style={{
+        <button onClick={handleBack} style={{
           padding: '3px 8px', borderRadius: 3, border: `1px solid ${T.border}`,
           background: 'transparent', color: T.text2, fontSize: 9, cursor: 'pointer',
         }}>{'\u2190'} Board</button>
         <div style={{ width: 1, height: 14, background: T.border }} />
         <span style={{ fontSize: 11, fontWeight: 700, color: T.text0 }}>The Forge</span>
-        <span style={{ fontSize: 8, color: T.text3 }}>{phaseLabel[phase]}</span>
+        <span style={{ fontSize: 9, color: T.text3 }}>{phaseLabel[phase]}</span>
         {initialSignal && (
           <span style={{
             padding: '1px 6px', borderRadius: 3, fontSize: 7, fontWeight: 600,
@@ -195,9 +215,34 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
       </div>
 
       {/* Body */}
-      <div style={{ flex: 1, overflow: 'auto', padding: 16 }}>
+      <div
+        ref={panelBodyRef}
+        tabIndex={-1}
+        style={{ flex: 1, overflow: 'auto', padding: 16, outline: 'none' }}
+      >
+        {/* Generation status — always in DOM for screen reader announcements */}
+        <div
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+          style={SR_ONLY}
+        >
+          {phase === 'generating' || phase === 'regenerating'
+            ? 'Generating plan, please wait\u2026'
+            : phase === 'preview'
+            ? 'Plan ready for review.'
+            : phase === 'saved'
+            ? 'Plan saved and queued successfully.'
+            : ''}
+        </div>
 
         {/* Global error banner — visible in any phase */}
+        <div
+          id="forge-generate-error"
+          role="alert"
+          aria-live="assertive"
+          aria-atomic="true"
+        >
         {generateError && (
           <div style={{
             fontSize: 9,
@@ -211,6 +256,7 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
             {generateError}
           </div>
         )}
+        </div>
 
         {/* Cancel button during generation phases */}
         {(phase === 'generating' || phase === 'regenerating') && (
@@ -243,22 +289,30 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
             </div>
 
             {/* ADO Import */}
-            <FormField label="Import from ADO">
-              <AdoCombobox onSelect={item => {
-                setDescription(item.description || item.title);
-              }} />
+            <FormField label="Import from ADO" htmlFor="forge-ado-search">
+              <AdoCombobox
+                inputId="forge-ado-search"
+                onSelect={item => {
+                  setDescription(item.description || item.title);
+                }}
+              />
             </FormField>
 
             {/* Project selector */}
-            <FormField label="Project *">
+            <FormField label="Project *" htmlFor="forge-project">
               {projectsLoading ? (
-                <div style={{ fontSize: 8, color: T.text3, padding: 4 }}>Loading projects...</div>
+                <div style={{ fontSize: 9, color: T.text3, padding: 4 }}>Loading projects...</div>
               ) : projects.length === 0 ? (
-                <div style={{ fontSize: 8, color: T.yellow, padding: 4 }}>
+                <div style={{ fontSize: 9, color: T.yellow, padding: 4 }}>
                   No projects registered. Use <code>baton pmo add</code> to register one.
                 </div>
               ) : (
-                <select value={projectId} onChange={e => setProjectId(e.target.value)} style={selectStyle}>
+                <select
+                  id="forge-project"
+                  value={projectId}
+                  onChange={e => setProjectId(e.target.value)}
+                  style={selectStyle}
+                >
                   {projects.map(p => (
                     <option key={p.project_id} value={p.project_id}>{p.name} ({p.program})</option>
                   ))}
@@ -267,20 +321,33 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
             </FormField>
 
             <div style={{ display: 'flex', gap: 8 }}>
-              <FormField label="Task Type" style={{ flex: 1 }}>
-                <select value={taskType} onChange={e => setTaskType(e.target.value)} style={selectStyle}>
+              <FormField label="Task Type" htmlFor="forge-task-type" style={{ flex: 1 }}>
+                <select
+                  id="forge-task-type"
+                  value={taskType}
+                  onChange={e => setTaskType(e.target.value)}
+                  style={selectStyle}
+                >
                   {TASK_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
                 </select>
               </FormField>
-              <FormField label="Priority" style={{ flex: 1 }}>
-                <select value={priority} onChange={e => setPriority(Number(e.target.value))} style={selectStyle}>
+              <FormField label="Priority" htmlFor="forge-priority" style={{ flex: 1 }}>
+                <select
+                  id="forge-priority"
+                  value={priority}
+                  onChange={e => setPriority(Number(e.target.value))}
+                  style={selectStyle}
+                >
                   {PRIORITIES.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
                 </select>
               </FormField>
             </div>
 
-            <FormField label="Task Description *">
+            <FormField label="Task Description *" htmlFor="forge-description">
               <textarea
+                id="forge-description"
+                aria-required="true"
+                aria-describedby="forge-description-hint"
                 value={description}
                 onChange={e => setDescription(e.target.value)}
                 placeholder="Describe the work: what needs to be built, fixed, or analyzed."
@@ -292,11 +359,18 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
                   outline: 'none', resize: 'vertical', fontFamily: 'inherit',
                 }}
               />
+              <div
+                id="forge-description-hint"
+                style={{ fontSize: 9, color: T.text3, marginTop: 3 }}
+              >
+                Required. Describe the task in detail. This is used to generate the plan.
+              </div>
             </FormField>
 
             <button
               onClick={handleGenerate}
               disabled={phase === 'generating' || !description.trim() || !projectId}
+              aria-describedby={generateError ? 'forge-generate-error' : undefined}
               style={{
                 alignSelf: 'flex-start', padding: '7px 20px', borderRadius: 4,
                 border: 'none',
@@ -317,11 +391,15 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
               <span style={{ fontSize: 12, fontWeight: 700, color: T.text0 }}>Plan Ready</span>
               <div style={{ display: 'flex', gap: 6 }}>
-                <button onClick={handleApprove} style={{
-                  padding: '5px 16px', borderRadius: 4, border: 'none',
-                  background: `linear-gradient(135deg, ${T.green}, #059669)`,
-                  color: '#fff', fontSize: 9, fontWeight: 700, cursor: 'pointer',
-                }}>Approve & Queue</button>
+                <button
+                  onClick={handleApprove}
+                  aria-describedby={saveError ? 'forge-save-error' : undefined}
+                  style={{
+                    padding: '5px 16px', borderRadius: 4, border: 'none',
+                    background: `linear-gradient(135deg, ${T.green}, #059669)`,
+                    color: '#fff', fontSize: 9, fontWeight: 700, cursor: 'pointer',
+                  }}
+                >Approve & Queue</button>
                 <button onClick={handleStartRegenerate} disabled={regenLoading} style={{
                   padding: '5px 14px', borderRadius: 4,
                   border: `1px solid ${T.yellow}44`, background: 'transparent',
@@ -332,11 +410,18 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
               </div>
             </div>
 
-            {saveError && (
-              <div style={{ fontSize: 9, color: T.red, padding: '5px 8px', background: T.red + '12', borderRadius: 4 }}>
-                {saveError}
-              </div>
-            )}
+            <div
+              id="forge-save-error"
+              role="alert"
+              aria-live="assertive"
+              aria-atomic="true"
+            >
+              {saveError && (
+                <div style={{ fontSize: 9, color: T.red, padding: '5px 8px', background: T.red + '12', borderRadius: 4 }}>
+                  {saveError}
+                </div>
+              )}
+            </div>
 
             <PlanEditor plan={plan} onPlanChange={setPlan} />
           </div>
@@ -418,17 +503,23 @@ function SavedPhase({
         {execLoading ? 'Launching...' : '\u25B6 Start Execution'}
       </button>
 
-      {execResult && (
-        <div style={{
-          fontSize: 9,
-          color: execResult.startsWith('Execution launched') ? T.green : T.red,
-          padding: '4px 10px',
-          background: execResult.startsWith('Execution launched') ? T.green + '12' : T.red + '12',
-          borderRadius: 4,
-        }}>
-          {execResult}
-        </div>
-      )}
+      <div
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+      >
+        {execResult && (
+          <div style={{
+            fontSize: 9,
+            color: execResult.startsWith('Execution launched') ? T.green : T.red,
+            padding: '4px 10px',
+            background: execResult.startsWith('Execution launched') ? T.green + '12' : T.red + '12',
+            borderRadius: 4,
+          }}>
+            {execResult}
+          </div>
+        )}
+      </div>
 
       <div style={{ display: 'flex', gap: 8 }}>
         <button onClick={onNewPlan} style={{
@@ -444,10 +535,25 @@ function SavedPhase({
   );
 }
 
-function FormField({ label, children, style }: { label: string; children: React.ReactNode; style?: React.CSSProperties }) {
+function FormField({
+  label,
+  children,
+  style,
+  htmlFor,
+}: {
+  label: string;
+  children: React.ReactNode;
+  style?: React.CSSProperties;
+  htmlFor?: string;
+}) {
   return (
     <div style={style}>
-      <label style={{ fontSize: 8, color: T.text2, display: 'block', marginBottom: 4 }}>{label}</label>
+      <label
+        htmlFor={htmlFor}
+        style={{ fontSize: 9, color: T.text2, display: 'block', marginBottom: 4 }}
+      >
+        {label}
+      </label>
       {children}
     </div>
   );

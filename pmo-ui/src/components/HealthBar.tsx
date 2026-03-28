@@ -20,7 +20,7 @@ export function HealthBar({ health, onProgramClick, activeProgram }: HealthBarPr
         padding: '8px 14px',
         borderBottom: `1px solid ${T.border}`,
         background: T.bg1,
-        fontSize: 8,
+        fontSize: 9,
         color: T.text3,
         fontStyle: 'italic',
       }}>
@@ -48,7 +48,19 @@ export function HealthBar({ health, onProgramClick, activeProgram }: HealthBarPr
         return (
           <div
             key={pg.program}
+            role={isClickable ? 'button' : undefined}
+            tabIndex={isClickable ? 0 : undefined}
+            aria-pressed={isClickable ? isActive : undefined}
+            aria-label={isClickable
+              ? `${pg.program}: ${pct}% complete. ${pg.total_plans} plans${pg.active > 0 ? `, ${pg.active} active` : ''}${pg.blocked > 0 ? `, ${pg.blocked} blocked` : ''}. ${isActive ? 'Currently filtered. Click to show all.' : 'Click to filter.'}`
+              : undefined}
             onClick={isClickable ? () => onProgramClick(pg.program) : undefined}
+            onKeyDown={isClickable ? (e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                onProgramClick(pg.program);
+              }
+            } : undefined}
             style={{
               flex: '1 1 140px',
               minWidth: 120,
@@ -64,7 +76,7 @@ export function HealthBar({ health, onProgramClick, activeProgram }: HealthBarPr
           >
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 3 }}>
               <span style={{ fontSize: 10, fontWeight: 700, color: isActive ? barColor : T.text0 }}>{pg.program}</span>
-              <span style={{ fontSize: 9, fontWeight: 600, color: barColor, fontFamily: 'monospace' }}>
+              <span style={{ fontSize: 9, fontWeight: 600, color: T.text1, fontFamily: 'monospace' }}>
                 {pct}%
               </span>
             </div>
@@ -77,7 +89,7 @@ export function HealthBar({ health, onProgramClick, activeProgram }: HealthBarPr
                 transition: 'width 0.5s',
               }} />
             </div>
-            <div style={{ fontSize: 9, color: T.text3, marginTop: 2 }}>
+            <div style={{ fontSize: 9, color: T.text2, marginTop: 2 }}>
               {pg.total_plans} plans
               {pg.active > 0 && ` · ${pg.active} active`}
               {pg.completed > 0 && ` · ${pg.completed} done`}
@@ -96,8 +108,8 @@ export function HealthBar({ health, onProgramClick, activeProgram }: HealthBarPr
 }
 
 const PROGRAM_PALETTE = [
-  '#1e40af', '#7c3aed', '#059669', '#dc2626',
-  '#0284c7', '#c2410c', '#0d9488', '#7e22ce',
+  '#3b82f6', '#a78bfa', '#34d399', '#f87171',
+  '#38bdf8', '#fb923c', '#2dd4bf', '#c084fc',
 ];
 
 function programColor(program: string): string {

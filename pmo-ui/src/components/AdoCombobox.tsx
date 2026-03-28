@@ -5,24 +5,28 @@ import type { AdoWorkItem } from '../api/types';
 
 interface AdoComboboxProps {
   onSelect: (item: AdoWorkItem) => void;
+  inputId?: string;
 }
 
-export function AdoCombobox({ onSelect }: AdoComboboxProps) {
+export function AdoCombobox({ onSelect, inputId }: AdoComboboxProps) {
   const [query, setQuery] = useState('');
   const [items, setItems] = useState<AdoWorkItem[]>([]);
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(-1);
   const ref = useRef<HTMLDivElement>(null);
+  const listboxId = 'ado-results-listbox';
 
   useEffect(() => {
-    if (!query.trim()) { setItems([]); return; }
+    if (!query.trim()) { setItems([]); setOpen(false); return; }
     const timer = setTimeout(async () => {
       setLoading(true);
       try {
         const resp = await api.searchAdo(query);
         setItems(resp.items);
-        setOpen(true);
-      } catch { setItems([]); }
+        setOpen(resp.items.length > 0);
+        setActiveIndex(-1);
+      } catch { setItems([]); setOpen(false); }
       setLoading(false);
     }, 300);
     return () => clearTimeout(timer);
@@ -30,7 +34,10 @@ export function AdoCombobox({ onSelect }: AdoComboboxProps) {
 
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+      if (ref.current && !ref.current.contains(e.target as Node)) {
+        setOpen(false);
+        setActiveIndex(-1);
+      }
     }
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
@@ -39,15 +46,42 @@ export function AdoCombobox({ onSelect }: AdoComboboxProps) {
   function handleSelect(item: AdoWorkItem) {
     setQuery(item.title);
     setOpen(false);
+    setActiveIndex(-1);
     onSelect(item);
+  }
+
+  function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (!open || items.length === 0) return;
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setActiveIndex(i => Math.min(i + 1, items.length - 1));
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setActiveIndex(i => Math.max(i - 1, 0));
+    } else if (e.key === 'Enter' && activeIndex >= 0) {
+      e.preventDefault();
+      handleSelect(items[activeIndex]);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      setOpen(false);
+      setActiveIndex(-1);
+    }
   }
 
   return (
     <div ref={ref} style={{ position: 'relative' }}>
       <input
+        id={inputId}
+        role="combobox"
+        aria-label="Search ADO work items"
+        aria-autocomplete="list"
+        aria-expanded={open}
+        aria-controls={listboxId}
+        aria-activedescendant={activeIndex >= 0 ? `ado-item-${items[activeIndex]?.id}` : undefined}
         value={query}
         onChange={e => setQuery(e.target.value)}
         onFocus={() => items.length > 0 && setOpen(true)}
+        onKeyDown={handleKeyDown}
         placeholder="Search ADO work items..."
         style={{
           width: '100%', padding: '6px 8px', borderRadius: 4,
@@ -56,41 +90,67 @@ export function AdoCombobox({ onSelect }: AdoComboboxProps) {
         }}
       />
       {loading && (
-        <div style={{ position: 'absolute', right: 8, top: 7, fontSize: 8, color: T.text3 }}>...</div>
+        <div
+          aria-live="polite"
+          style={{ position: 'absolute', right: 8, top: 7, fontSize: 9, color: T.text3 }}
+        >
+          Searching...
+        </div>
       )}
       {open && items.length > 0 && (
-        <div style={{
-          position: 'absolute', top: '100%', left: 0, right: 0,
-          marginTop: 2, background: T.bg1, border: `1px solid ${T.border}`,
-          borderRadius: 4, maxHeight: 200, overflow: 'auto', zIndex: 10,
-          boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
-        }}>
-          {items.map(item => (
-            <div
+        <ul
+          id={listboxId}
+          role="listbox"
+          aria-label="ADO work items"
+          style={{
+            listStyle: 'none',
+            padding: 0,
+            margin: 0,
+            position: 'absolute',
+            top: '100%',
+            left: 0,
+            right: 0,
+            marginTop: 2,
+            background: T.bg1,
+            border: `1px solid ${T.border}`,
+            borderRadius: 4,
+            maxHeight: 200,
+            overflow: 'auto',
+            zIndex: 10,
+            boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+          }}
+        >
+          {items.map((item, idx) => (
+            <li
               key={item.id}
+              id={`ado-item-${item.id}`}
+              role="option"
+              aria-selected={idx === activeIndex}
               onClick={() => handleSelect(item)}
               style={{
-                padding: '6px 8px', cursor: 'pointer',
+                padding: '6px 8px',
+                cursor: 'pointer',
                 borderBottom: `1px solid ${T.border}`,
+                background: idx === activeIndex ? T.bg2 : 'transparent',
               }}
-              onMouseEnter={e => (e.currentTarget.style.background = T.bg2)}
-              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+              onMouseEnter={() => setActiveIndex(idx)}
+              onMouseLeave={() => setActiveIndex(-1)}
             >
               <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                <span style={{ fontSize: 8, color: T.text3, fontFamily: 'monospace' }}>{item.id}</span>
+                <span style={{ fontSize: 9, color: T.text3, fontFamily: 'monospace' }}>{item.id}</span>
                 <span style={{ fontSize: 9, color: T.text0, fontWeight: 500 }}>{item.title}</span>
                 <span style={{
-                  fontSize: 7, color: T.accent, background: T.accent + '14',
+                  fontSize: 9, color: T.accent, background: T.accent + '14',
                   border: `1px solid ${T.accent}22`, padding: '0 4px',
                   borderRadius: 2, marginLeft: 'auto',
                 }}>{item.type}</span>
               </div>
-              <div style={{ fontSize: 7, color: T.text3, marginTop: 1 }}>
+              <div style={{ fontSize: 9, color: T.text3, marginTop: 1 }}>
                 {item.program} · {item.owner} · {item.priority}
               </div>
-            </div>
+            </li>
           ))}
-        </div>
+        </ul>
       )}
     </div>
   );

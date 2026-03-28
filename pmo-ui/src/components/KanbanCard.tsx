@@ -81,6 +81,8 @@ export function KanbanCard({ card, columnColor, onForge }: KanbanCardProps) {
       setExecResult(err instanceof Error ? err.message : 'Launch failed');
     } finally {
       setExecLoading(false);
+      // Auto-clear after 8 s; user can also dismiss manually
+      setTimeout(() => setExecResult(null), 8000);
     }
   }
 
@@ -107,7 +109,17 @@ export function KanbanCard({ card, columnColor, onForge }: KanbanCardProps) {
 
   return (
     <div
+      role="button"
+      tabIndex={0}
+      aria-expanded={expanded}
+      aria-label={`${card.title}. ${card.column.replace('_', ' ')}. ${card.steps_completed} of ${card.steps_total} steps complete. Press Enter to ${expanded ? 'collapse' : 'expand'} details.`}
       onClick={() => setExpanded(!expanded)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          setExpanded(!expanded);
+        }
+      }}
       style={{
         background: T.bg1,
         borderRadius: 4,
@@ -304,15 +316,38 @@ export function KanbanCard({ card, columnColor, onForge }: KanbanCardProps) {
 
           {/* Execution result */}
           {execResult && (
-            <div style={{
-              fontSize: 8,
-              color: execResult.startsWith('Launched') ? T.green : T.red,
-              padding: '3px 6px',
-              marginTop: 4,
-              background: T.bg1,
-              borderRadius: 3,
-            }}>
-              {execResult}
+            <div
+              role="status"
+              aria-live="polite"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 4,
+                fontSize: 9,
+                color: execResult.startsWith('Launched') ? T.green : T.red,
+                padding: '3px 6px',
+                marginTop: 4,
+                background: T.bg1,
+                borderRadius: 3,
+              }}
+            >
+              <span style={{ flex: 1 }}>{execResult}</span>
+              <button
+                aria-label="Dismiss execution result"
+                onClick={e => { e.stopPropagation(); setExecResult(null); }}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  color: T.text3,
+                  fontSize: 10,
+                  cursor: 'pointer',
+                  padding: '0 2px',
+                  lineHeight: 1,
+                  flexShrink: 0,
+                }}
+              >
+                {'\u00d7'}
+              </button>
             </div>
           )}
 
@@ -360,8 +395,8 @@ function fmtTime(iso: string): string {
 }
 
 const DOT_PALETTE = [
-  '#1e40af', '#7c3aed', '#059669', '#dc2626',
-  '#0284c7', '#c2410c', '#0d9488', '#7e22ce',
+  '#3b82f6', '#a78bfa', '#34d399', '#f87171',
+  '#38bdf8', '#fb923c', '#2dd4bf', '#c084fc',
 ];
 
 function programDotColor(program: string): string {

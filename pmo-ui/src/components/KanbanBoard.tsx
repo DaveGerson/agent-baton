@@ -5,7 +5,7 @@ import { SignalsBar } from './SignalsBar';
 import { usePmoBoard } from '../hooks/usePmoBoard';
 import type { ConnectionMode } from '../hooks/usePmoBoard';
 import { usePersistedState } from '../hooks/usePersistedState';
-import { T, COLUMNS } from '../styles/tokens';
+import { T, COLUMNS, SR_ONLY } from '../styles/tokens';
 import { api } from '../api/client';
 import type { PmoCard, PmoSignal } from '../api/types';
 
@@ -89,75 +89,98 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
         <div style={{ width: 1, height: 14, background: T.border }} />
 
         {/* Signals toggle */}
-        <button
-          onClick={onToggleSignals}
-          style={{
-            padding: '2px 7px',
-            borderRadius: 3,
-            border: `1px solid ${showSignals ? T.red + '66' : T.border}`,
-            background: showSignals ? T.red + '15' : 'transparent',
-            color: showSignals ? T.red : T.text3,
-            fontSize: 9,
-            fontWeight: 600,
-            cursor: 'pointer',
-            display: 'flex',
-            alignItems: 'center',
-            gap: 4,
-          }}
-        >
-          Signals
-          {openSignalCount > 0 && (
-            <span style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              minWidth: 14,
-              height: 14,
-              borderRadius: 7,
-              background: T.red,
-              color: '#fff',
+        <>
+          <button
+            onClick={onToggleSignals}
+            aria-pressed={showSignals}
+            style={{
+              padding: '2px 7px',
+              borderRadius: 3,
+              border: `1px solid ${showSignals ? T.red + '66' : T.border}`,
+              background: showSignals ? T.red + '15' : 'transparent',
+              color: showSignals ? T.red : T.text3,
               fontSize: 9,
-              fontWeight: 700,
-              padding: '0 3px',
-            }}>
-              {openSignalCount}
-            </span>
-          )}
-        </button>
+              fontWeight: 600,
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 4,
+            }}
+          >
+            Signals
+            {openSignalCount > 0 && (
+              <span
+                aria-hidden="true"
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  minWidth: 14,
+                  height: 14,
+                  borderRadius: 7,
+                  background: T.red,
+                  color: '#fff',
+                  fontSize: 9,
+                  fontWeight: 700,
+                  padding: '0 3px',
+                }}
+              >
+                {openSignalCount}
+              </span>
+            )}
+          </button>
+          <span aria-live="polite" aria-atomic="true" style={SR_ONLY}>
+            {openSignalCount > 0 ? `${openSignalCount} open signals` : 'No open signals'}
+          </span>
+        </>
 
         <div style={{ flex: 1 }} />
 
         {/* Status indicators */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 9 }}>
           {awaitingHuman > 0 && (
-            <div style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 3,
-              padding: '2px 6px',
-              borderRadius: 3,
-              background: T.orange + '15',
-              border: `1px solid ${T.orange}33`,
-            }}>
-              <div style={{
-                width: 5,
-                height: 5,
-                borderRadius: '50%',
-                background: T.orange,
-                animation: 'pulse 1.5s infinite',
-              }} />
-              <span style={{ color: T.orange, fontWeight: 600 }}>{awaitingHuman} awaiting</span>
+            <div
+              role="status"
+              aria-label={`${awaitingHuman} task${awaitingHuman !== 1 ? 's' : ''} awaiting human input`}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 3,
+                padding: '2px 6px',
+                borderRadius: 3,
+                background: T.orange + '15',
+                border: `1px solid ${T.orange}33`,
+              }}
+            >
+              <div
+                aria-hidden="true"
+                style={{
+                  width: 5,
+                  height: 5,
+                  borderRadius: '50%',
+                  background: T.orange,
+                  animation: 'pulse 1.5s infinite',
+                }}
+              />
+              <span aria-hidden="true" style={{ color: T.orange, fontWeight: 600 }}>{awaitingHuman} awaiting</span>
             </div>
           )}
           <span style={{ color: T.text3 }}>
             {executing > 0 && `${executing} executing · `}{filtered.length} plans
           </span>
           {lastUpdated && (
-            <span style={{ color: T.text4, fontSize: 7 }}>
+            <span style={{ color: T.text4, fontSize: 9 }}>
               {fmtTime(lastUpdated.toISOString())}
             </span>
           )}
-          {loading && <span style={{ color: T.text4, fontSize: 7 }}>refreshing…</span>}
+          <span
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+            style={{ color: T.text3, fontSize: 9 }}
+          >
+            {loading ? 'Refreshing board data…' : ''}
+          </span>
           <ConnectionIndicator mode={connectionMode} />
         </div>
 
@@ -190,25 +213,28 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
       )}
 
       {/* Error banner */}
-      {error && (
-        <div style={{
-          padding: '5px 14px',
-          background: T.red + '15',
-          borderBottom: `1px solid ${T.red}33`,
-          fontSize: 8,
-          color: T.red,
-        }}>
-          {error} — retrying every {connectionMode === 'sse' ? '15' : '5'}s
-        </div>
-      )}
+      <div role="alert" aria-live="assertive" aria-atomic="true">
+        {error && (
+          <div style={{
+            padding: '5px 14px',
+            background: T.red + '15',
+            borderBottom: `1px solid ${T.red}33`,
+            fontSize: 9,
+            color: T.red,
+          }}>
+            {error} — retrying every {connectionMode === 'sse' ? '15' : '5'}s
+          </div>
+        )}
+      </div>
 
       {/* Kanban columns */}
       <div style={{ flex: 1, display: 'flex', overflow: 'auto', padding: '10px 6px' }}>
         {COLUMNS.map(col => {
           const colCards = filtered.filter(c => c.column === col.id);
           return (
-            <div
+            <section
               key={col.id}
+              aria-labelledby={`col-${col.id}-heading`}
               style={{
                 flex: 1,
                 minWidth: 170,
@@ -228,10 +254,13 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
                 flexShrink: 0,
               }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                  <div style={{ width: 6, height: 6, borderRadius: 2, background: col.color }} />
-                  <span style={{ fontSize: 11, fontWeight: 700, color: T.text0, flex: 1 }}>
+                  <div aria-hidden="true" style={{ width: 6, height: 6, borderRadius: 2, background: col.color }} />
+                  <h2
+                    id={`col-${col.id}-heading`}
+                    style={{ fontSize: 11, fontWeight: 700, color: T.text0, flex: 1, margin: 0 }}
+                  >
                     {col.label}
-                  </span>
+                  </h2>
                   <span style={{
                     fontSize: 9,
                     fontWeight: 700,
@@ -243,7 +272,7 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
                     {colCards.length}
                   </span>
                 </div>
-                <div style={{ fontSize: 9, color: T.text4, marginTop: 1 }}>{col.desc}</div>
+                <div style={{ fontSize: 9, color: T.text3, marginTop: 1 }}>{col.desc}</div>
               </div>
 
               {/* Cards */}
@@ -265,7 +294,7 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
                   </div>
                 )}
               </div>
-            </div>
+            </section>
           );
         })}
       </div>
@@ -317,6 +346,9 @@ function ConnectionIndicator({ mode }: { mode: ConnectionMode }) {
 
   return (
     <div
+      role="status"
+      aria-live="polite"
+      aria-label={`Connection: ${title}`}
       title={title}
       style={{
         display: 'flex',
@@ -329,6 +361,7 @@ function ConnectionIndicator({ mode }: { mode: ConnectionMode }) {
       }}
     >
       <div
+        aria-hidden="true"
         style={{
           width: 5,
           height: 5,
@@ -338,7 +371,7 @@ function ConnectionIndicator({ mode }: { mode: ConnectionMode }) {
           flexShrink: 0,
         }}
       />
-      <span style={{ fontSize: 7, color: dotColor, fontWeight: 600 }}>{label}</span>
+      <span aria-hidden="true" style={{ fontSize: 9, color: dotColor, fontWeight: 600 }}>{label}</span>
     </div>
   );
 }

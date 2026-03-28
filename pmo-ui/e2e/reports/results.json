@@ -1,0 +1,205 @@
+{
+  "config": {
+    "configFile": "/home/djiv/PycharmProjects/orchestrator-v2/pmo-ui/playwright.config.ts",
+    "rootDir": "/home/djiv/PycharmProjects/orchestrator-v2/pmo-ui/e2e/tests",
+    "forbidOnly": false,
+    "fullyParallel": true,
+    "globalSetup": null,
+    "globalTeardown": null,
+    "globalTimeout": 0,
+    "grep": {},
+    "grepInvert": null,
+    "maxFailures": 0,
+    "metadata": {
+      "actualWorkers": 1
+    },
+    "preserveOutput": "always",
+    "projects": [
+      {
+        "outputDir": "/home/djiv/PycharmProjects/orchestrator-v2/pmo-ui/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "desktop",
+        "name": "desktop",
+        "testDir": "/home/djiv/PycharmProjects/orchestrator-v2/pmo-ui/e2e/tests",
+        "testIgnore": [],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 30000
+      },
+      {
+        "outputDir": "/home/djiv/PycharmProjects/orchestrator-v2/pmo-ui/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "tablet",
+        "name": "tablet",
+        "testDir": "/home/djiv/PycharmProjects/orchestrator-v2/pmo-ui/e2e/tests",
+        "testIgnore": [],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 30000
+      },
+      {
+        "outputDir": "/home/djiv/PycharmProjects/orchestrator-v2/pmo-ui/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "mobile",
+        "name": "mobile",
+        "testDir": "/home/djiv/PycharmProjects/orchestrator-v2/pmo-ui/e2e/tests",
+        "testIgnore": [],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 30000
+      }
+    ],
+    "quiet": false,
+    "reporter": [
+      [
+        "html",
+        {
+          "outputFolder": "e2e/reports/html",
+          "open": "never"
+        }
+      ],
+      [
+        "json",
+        {
+          "outputFile": "e2e/reports/results.json"
+        }
+      ],
+      [
+        "list",
+        null
+      ]
+    ],
+    "reportSlowTests": {
+      "max": 5,
+      "threshold": 300000
+    },
+    "runAgents": "none",
+    "shard": null,
+    "tags": [],
+    "updateSnapshots": "missing",
+    "updateSourceMethod": "patch",
+    "version": "1.58.2",
+    "workers": 8,
+    "webServer": {
+      "command": "npm run dev",
+      "url": "http://localhost:3000/pmo/",
+      "reuseExistingServer": true,
+      "timeout": 30000,
+      "env": {
+        "VITE_API_BASE": "/api/v1/pmo"
+      }
+    }
+  },
+  "suites": [
+    {
+      "title": "accessibility-audit.spec.ts",
+      "file": "accessibility-audit.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [],
+      "suites": [
+        {
+          "title": "Suite 1: Automated WCAG scan",
+          "file": "accessibility-audit.spec.ts",
+          "line": 72,
+          "column": 6,
+          "specs": [
+            {
+              "title": "axe: forge preview view has no critical WCAG A/AA violations",
+              "ok": false,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 30000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "desktop",
+                  "projectName": "desktop",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "failed",
+                      "duration": 2279,
+                      "error": {
+                        "message": "Error: Found 1 critical/serious violations:\n  - nested-interactive: Interactive controls must not be nested (3 nodes)\n\n\u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoHaveLength\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m\n\nExpected length: \u001b[32m0\u001b[39m\nReceived length: \u001b[31m1\u001b[39m\nReceived array:  \u001b[31m[{\"description\": \"Ensure interactive controls are not nested as they are not always announced by screen readers or can cause focus problems for assistive technologies\", \"help\": \"Interactive controls must not be nested\", \"helpUrl\": \"https://dequeuniversity.com/rules/axe/4.11/nested-interactive?application=playwright\", \"id\": \"nested-interactive\", \"impact\": \"serious\", \"nodes\": [{\"all\": [], \"any\": [{\"data\": null, \"id\": \"no-focusable-content\", \"impact\": \"serious\", \"message\": \"Element has focusable descendants\", \"relatedNodes\": [{\"html\": \"<button aria-label=\\\"Remove phase 1: Design &amp; Schema\\\" title=\\\"Remove phase\\\" style=\\\"background: none; border: none; color: rgb(139, 155, 181); font-size: 10px; cursor: pointer; padding: 0px 4px;\\\">×</button>\", \"target\": [\"#phase-header-0 > button[title=\\\"Remove phase\\\"]\"]}]}], \"failureSummary\": \"Fix any of the following:\u001b[39m\n\u001b[31m  Element has focusable descendants\", \"html\": \"<div role=\\\"button\\\" tabindex=\\\"0\\\" aria-expanded=\\\"true\\\" aria-controls=\\\"phase-content-0\\\" id=\\\"phase-header-0\\\" style=\\\"display: flex; align-items: center; gap: 6px; padding: 6px 10px; background: rgb(17, 24, 39); border-bottom: 1px solid rgb(30, 45, 74); cursor: pointer;\\\">\", \"impact\": \"serious\", \"none\": [], \"target\": [\"#phase-header-0\"]}, {\"all\": [], \"any\": [{\"data\": null, \"id\": \"no-focusable-content\", \"impact\": \"serious\", \"message\": \"Element has focusable descendants\", \"relatedNodes\": [{\"html\": \"<button aria-label=\\\"Remove phase 2: Implementation\\\" title=\\\"Remove phase\\\" style=\\\"background: none; border: none; color: rgb(139, 155, 181); font-size: 10px; cursor: pointer; padding: 0px 4px;\\\">×</button>\", \"target\": [\"button[aria-label=\\\"Remove phase 2: Implementation\\\"]\"]}]}], \"failureSummary\": \"Fix any of the following:\u001b[39m\n\u001b[31m  Element has focusable descendants\", \"html\": \"<div role=\\\"button\\\" tabindex=\\\"0\\\" aria-expanded=\\\"false\\\" aria-controls=\\\"phase-content-1\\\" id=\\\"phase-header-1\\\" style=\\\"display: flex; align-items: center; gap: 6px; padding: 6px 10px; background: rgb(17, 24, 39); border-bottom: none; cursor: pointer;\\\">\", \"impact\": \"serious\", \"none\": [], \"target\": [\"#phase-header-1\"]}, {\"all\": [], \"any\": [{\"data\": null, \"id\": \"no-focusable-content\", \"impact\": \"serious\", \"message\": \"Element has focusable descendants\", \"relatedNodes\": [{\"html\": \"<button aria-label=\\\"Remove phase 3: Test Coverage\\\" title=\\\"Remove phase\\\" style=\\\"background: none; border: none; color: rgb(139, 155, 181); font-size: 10px; cursor: pointer; padding: 0px 4px;\\\">×</button>\", \"target\": [\"button[aria-label=\\\"Remove phase 3: Test Coverage\\\"]\"]}]}], \"failureSummary\": \"Fix any of the following:\u001b[39m\n\u001b[31m  Element has focusable descendants\", \"html\": \"<div role=\\\"button\\\" tabindex=\\\"0\\\" aria-expanded=\\\"false\\\" aria-controls=\\\"phase-content-2\\\" id=\\\"phase-header-2\\\" style=\\\"display: flex; align-items: center; gap: 6px; padding: 6px 10px; background: rgb(17, 24, 39); border-bottom: none; cursor: pointer;\\\">\", \"impact\": \"serious\", \"none\": [], \"target\": [\"#phase-header-2\"]}], \"tags\": [\"cat.keyboard\", \"wcag2a\", \"wcag412\", \"TTv5\", \"TT6.a\", \"EN-301-549\", \"EN-9.4.1.2\", \"RGAAv4\", \"RGAA-7.1.1\"]}]\u001b[39m",
+                        "stack": "Error: Found 1 critical/serious violations:\n  - nested-interactive: Interactive controls must not be nested (3 nodes)\n\n\u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoHaveLength\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m\n\nExpected length: \u001b[32m0\u001b[39m\nReceived length: \u001b[31m1\u001b[39m\nReceived array:  \u001b[31m[{\"description\": \"Ensure interactive controls are not nested as they are not always announced by screen readers or can cause focus problems for assistive technologies\", \"help\": \"Interactive controls must not be nested\", \"helpUrl\": \"https://dequeuniversity.com/rules/axe/4.11/nested-interactive?application=playwright\", \"id\": \"nested-interactive\", \"impact\": \"serious\", \"nodes\": [{\"all\": [], \"any\": [{\"data\": null, \"id\": \"no-focusable-content\", \"impact\": \"serious\", \"message\": \"Element has focusable descendants\", \"relatedNodes\": [{\"html\": \"<button aria-label=\\\"Remove phase 1: Design &amp; Schema\\\" title=\\\"Remove phase\\\" style=\\\"background: none; border: none; color: rgb(139, 155, 181); font-size: 10px; cursor: pointer; padding: 0px 4px;\\\">×</button>\", \"target\": [\"#phase-header-0 > button[title=\\\"Remove phase\\\"]\"]}]}], \"failureSummary\": \"Fix any of the following:\u001b[39m\n\u001b[31m  Element has focusable descendants\", \"html\": \"<div role=\\\"button\\\" tabindex=\\\"0\\\" aria-expanded=\\\"true\\\" aria-controls=\\\"phase-content-0\\\" id=\\\"phase-header-0\\\" style=\\\"display: flex; align-items: center; gap: 6px; padding: 6px 10px; background: rgb(17, 24, 39); border-bottom: 1px solid rgb(30, 45, 74); cursor: pointer;\\\">\", \"impact\": \"serious\", \"none\": [], \"target\": [\"#phase-header-0\"]}, {\"all\": [], \"any\": [{\"data\": null, \"id\": \"no-focusable-content\", \"impact\": \"serious\", \"message\": \"Element has focusable descendants\", \"relatedNodes\": [{\"html\": \"<button aria-label=\\\"Remove phase 2: Implementation\\\" title=\\\"Remove phase\\\" style=\\\"background: none; border: none; color: rgb(139, 155, 181); font-size: 10px; cursor: pointer; padding: 0px 4px;\\\">×</button>\", \"target\": [\"button[aria-label=\\\"Remove phase 2: Implementation\\\"]\"]}]}], \"failureSummary\": \"Fix any of the following:\u001b[39m\n\u001b[31m  Element has focusable descendants\", \"html\": \"<div role=\\\"button\\\" tabindex=\\\"0\\\" aria-expanded=\\\"false\\\" aria-controls=\\\"phase-content-1\\\" id=\\\"phase-header-1\\\" style=\\\"display: flex; align-items: center; gap: 6px; padding: 6px 10px; background: rgb(17, 24, 39); border-bottom: none; cursor: pointer;\\\">\", \"impact\": \"serious\", \"none\": [], \"target\": [\"#phase-header-1\"]}, {\"all\": [], \"any\": [{\"data\": null, \"id\": \"no-focusable-content\", \"impact\": \"serious\", \"message\": \"Element has focusable descendants\", \"relatedNodes\": [{\"html\": \"<button aria-label=\\\"Remove phase 3: Test Coverage\\\" title=\\\"Remove phase\\\" style=\\\"background: none; border: none; color: rgb(139, 155, 181); font-size: 10px; cursor: pointer; padding: 0px 4px;\\\">×</button>\", \"target\": [\"button[aria-label=\\\"Remove phase 3: Test Coverage\\\"]\"]}]}], \"failureSummary\": \"Fix any of the following:\u001b[39m\n\u001b[31m  Element has focusable descendants\", \"html\": \"<div role=\\\"button\\\" tabindex=\\\"0\\\" aria-expanded=\\\"false\\\" aria-controls=\\\"phase-content-2\\\" id=\\\"phase-header-2\\\" style=\\\"display: flex; align-items: center; gap: 6px; padding: 6px 10px; background: rgb(17, 24, 39); border-bottom: none; cursor: pointer;\\\">\", \"impact\": \"serious\", \"none\": [], \"target\": [\"#phase-header-2\"]}], \"tags\": [\"cat.keyboard\", \"wcag2a\", \"wcag412\", \"TTv5\", \"TT6.a\", \"EN-301-549\", \"EN-9.4.1.2\", \"RGAAv4\", \"RGAA-7.1.1\"]}]\u001b[39m\n    at /home/djiv/PycharmProjects/orchestrator-v2/pmo-ui/e2e/tests/accessibility-audit.spec.ts:217:11\n    at auditTest (/home/djiv/PycharmProjects/orchestrator-v2/pmo-ui/e2e/tests/accessibility-audit.spec.ts:52:5)\n    at /home/djiv/PycharmProjects/orchestrator-v2/pmo-ui/e2e/tests/accessibility-audit.spec.ts:184:5",
+                        "location": {
+                          "file": "/home/djiv/PycharmProjects/orchestrator-v2/pmo-ui/e2e/tests/accessibility-audit.spec.ts",
+                          "column": 11,
+                          "line": 217
+                        },
+                        "snippet": "  215 |           `Found ${critical.length} critical/serious violations:\\n` +\n  216 |           critical.map((v: { id: string; help: string; nodes: unknown[] }) => `  - ${v.id}: ${v.help} (${v.nodes.length} nodes)`).join('\\n'),\n> 217 |         ).toHaveLength(0);\n      |           ^\n  218 |       },\n  219 |     );\n  220 |   });"
+                      },
+                      "errors": [
+                        {
+                          "location": {
+                            "file": "/home/djiv/PycharmProjects/orchestrator-v2/pmo-ui/e2e/tests/accessibility-audit.spec.ts",
+                            "column": 11,
+                            "line": 217
+                          },
+                          "message": "Error: Found 1 critical/serious violations:\n  - nested-interactive: Interactive controls must not be nested (3 nodes)\n\n\u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoHaveLength\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m\n\nExpected length: \u001b[32m0\u001b[39m\nReceived length: \u001b[31m1\u001b[39m\nReceived array:  \u001b[31m[{\"description\": \"Ensure interactive controls are not nested as they are not always announced by screen readers or can cause focus problems for assistive technologies\", \"help\": \"Interactive controls must not be nested\", \"helpUrl\": \"https://dequeuniversity.com/rules/axe/4.11/nested-interactive?application=playwright\", \"id\": \"nested-interactive\", \"impact\": \"serious\", \"nodes\": [{\"all\": [], \"any\": [{\"data\": null, \"id\": \"no-focusable-content\", \"impact\": \"serious\", \"message\": \"Element has focusable descendants\", \"relatedNodes\": [{\"html\": \"<button aria-label=\\\"Remove phase 1: Design &amp; Schema\\\" title=\\\"Remove phase\\\" style=\\\"background: none; border: none; color: rgb(139, 155, 181); font-size: 10px; cursor: pointer; padding: 0px 4px;\\\">×</button>\", \"target\": [\"#phase-header-0 > button[title=\\\"Remove phase\\\"]\"]}]}], \"failureSummary\": \"Fix any of the following:\u001b[39m\n\u001b[31m  Element has focusable descendants\", \"html\": \"<div role=\\\"button\\\" tabindex=\\\"0\\\" aria-expanded=\\\"true\\\" aria-controls=\\\"phase-content-0\\\" id=\\\"phase-header-0\\\" style=\\\"display: flex; align-items: center; gap: 6px; padding: 6px 10px; background: rgb(17, 24, 39); border-bottom: 1px solid rgb(30, 45, 74); cursor: pointer;\\\">\", \"impact\": \"serious\", \"none\": [], \"target\": [\"#phase-header-0\"]}, {\"all\": [], \"any\": [{\"data\": null, \"id\": \"no-focusable-content\", \"impact\": \"serious\", \"message\": \"Element has focusable descendants\", \"relatedNodes\": [{\"html\": \"<button aria-label=\\\"Remove phase 2: Implementation\\\" title=\\\"Remove phase\\\" style=\\\"background: none; border: none; color: rgb(139, 155, 181); font-size: 10px; cursor: pointer; padding: 0px 4px;\\\">×</button>\", \"target\": [\"button[aria-label=\\\"Remove phase 2: Implementation\\\"]\"]}]}], \"failureSummary\": \"Fix any of the following:\u001b[39m\n\u001b[31m  Element has focusable descendants\", \"html\": \"<div role=\\\"button\\\" tabindex=\\\"0\\\" aria-expanded=\\\"false\\\" aria-controls=\\\"phase-content-1\\\" id=\\\"phase-header-1\\\" style=\\\"display: flex; align-items: center; gap: 6px; padding: 6px 10px; background: rgb(17, 24, 39); border-bottom: none; cursor: pointer;\\\">\", \"impact\": \"serious\", \"none\": [], \"target\": [\"#phase-header-1\"]}, {\"all\": [], \"any\": [{\"data\": null, \"id\": \"no-focusable-content\", \"impact\": \"serious\", \"message\": \"Element has focusable descendants\", \"relatedNodes\": [{\"html\": \"<button aria-label=\\\"Remove phase 3: Test Coverage\\\" title=\\\"Remove phase\\\" style=\\\"background: none; border: none; color: rgb(139, 155, 181); font-size: 10px; cursor: pointer; padding: 0px 4px;\\\">×</button>\", \"target\": [\"button[aria-label=\\\"Remove phase 3: Test Coverage\\\"]\"]}]}], \"failureSummary\": \"Fix any of the following:\u001b[39m\n\u001b[31m  Element has focusable descendants\", \"html\": \"<div role=\\\"button\\\" tabindex=\\\"0\\\" aria-expanded=\\\"false\\\" aria-controls=\\\"phase-content-2\\\" id=\\\"phase-header-2\\\" style=\\\"display: flex; align-items: center; gap: 6px; padding: 6px 10px; background: rgb(17, 24, 39); border-bottom: none; cursor: pointer;\\\">\", \"impact\": \"serious\", \"none\": [], \"target\": [\"#phase-header-2\"]}], \"tags\": [\"cat.keyboard\", \"wcag2a\", \"wcag412\", \"TTv5\", \"TT6.a\", \"EN-301-549\", \"EN-9.4.1.2\", \"RGAAv4\", \"RGAA-7.1.1\"]}]\u001b[39m\n\n  215 |           `Found ${critical.length} critical/serious violations:\\n` +\n  216 |           critical.map((v: { id: string; help: string; nodes: unknown[] }) => `  - ${v.id}: ${v.help} (${v.nodes.length} nodes)`).join('\\n'),\n> 217 |         ).toHaveLength(0);\n      |           ^\n  218 |       },\n  219 |     );\n  220 |   });\n    at /home/djiv/PycharmProjects/orchestrator-v2/pmo-ui/e2e/tests/accessibility-audit.spec.ts:217:11\n    at auditTest (/home/djiv/PycharmProjects/orchestrator-v2/pmo-ui/e2e/tests/accessibility-audit.spec.ts:52:5)\n    at /home/djiv/PycharmProjects/orchestrator-v2/pmo-ui/e2e/tests/accessibility-audit.spec.ts:184:5"
+                        }
+                      ],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-03-28T06:49:26.338Z",
+                      "annotations": [],
+                      "attachments": [
+                        {
+                          "name": "screenshot",
+                          "contentType": "image/png",
+                          "path": "/home/djiv/PycharmProjects/orchestrator-v2/pmo-ui/test-results/accessibility-audit-Suite--e2ab6-itical-WCAG-A-AA-violations-desktop/test-failed-1.png"
+                        },
+                        {
+                          "name": "error-context",
+                          "contentType": "text/markdown",
+                          "path": "/home/djiv/PycharmProjects/orchestrator-v2/pmo-ui/test-results/accessibility-audit-Suite--e2ab6-itical-WCAG-A-AA-violations-desktop/error-context.md"
+                        }
+                      ],
+                      "errorLocation": {
+                        "file": "/home/djiv/PycharmProjects/orchestrator-v2/pmo-ui/e2e/tests/accessibility-audit.spec.ts",
+                        "column": 11,
+                        "line": 217
+                      }
+                    }
+                  ],
+                  "status": "unexpected"
+                }
+              ],
+              "id": "133fb274c06e7193ffc5-98f4552ddfdb02d3295a",
+              "file": "accessibility-audit.spec.ts",
+              "line": 166,
+              "column": 3
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "stats": {
+    "startTime": "2026-03-28T06:49:24.868Z",
+    "duration": 3861.156,
+    "expected": 0,
+    "skipped": 0,
+    "unexpected": 1,
+    "flaky": 0
+  }
+}

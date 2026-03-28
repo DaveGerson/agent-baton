@@ -1,3 +1,5 @@
+import type { CSSProperties } from 'react';
+
 export const T = {
   bg0: '#060a11',
   bg1: '#0b1120',
@@ -9,9 +11,9 @@ export const T = {
   borderActive: '#3b82f6',
   text0: '#f1f5f9',
   text1: '#cbd5e1',
-  text2: '#64748b',
-  text3: '#475569',
-  text4: '#334155',
+  text2: '#94a3b8',
+  text3: '#8b9bb5',
+  text4: '#8b9bb5',
   accent: '#3b82f6',
   green: '#10b981',
   yellow: '#f59e0b',
@@ -44,6 +46,18 @@ export const PRIORITY_COLOR: Record<number, string> = {
   2: T.red,      // P0 — critical
   1: T.orange,   // P1 — high
   0: T.text2,    // P2 — normal (no chip needed)
+};
+
+export const SR_ONLY: CSSProperties = {
+  position: 'absolute',
+  width: 1,
+  height: 1,
+  padding: 0,
+  margin: -1,
+  overflow: 'hidden',
+  clip: 'rect(0, 0, 0, 0)',
+  whiteSpace: 'nowrap',
+  border: 0,
 };
 
 export const FONT_SIZES = {

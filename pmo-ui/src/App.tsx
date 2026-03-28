@@ -57,15 +57,18 @@ export default function App() {
       overflow: 'hidden',
     }}>
       {/* Top nav bar */}
-      <div style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 10,
-        padding: '6px 14px',
-        borderBottom: `1px solid ${T.border}`,
-        background: T.bg1,
-        flexShrink: 0,
-      }}>
+      <nav
+        aria-label="Main"
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
+          padding: '6px 14px',
+          borderBottom: `1px solid ${T.border}`,
+          background: T.bg1,
+          flexShrink: 0,
+        }}
+      >
         {/* Brand */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <div style={{
@@ -83,7 +86,7 @@ export default function App() {
             B
           </div>
           <div>
-            <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: -0.3 }}>Baton PMO</div>
+            <h1 style={{ fontSize: 10, fontWeight: 700, letterSpacing: -0.3, margin: 0 }}>Baton PMO</h1>
             <div style={{ fontSize: 9, color: T.text3, letterSpacing: 0.5, textTransform: 'uppercase' }}>
               Orchestration Board
             </div>
@@ -91,13 +94,21 @@ export default function App() {
         </div>
 
         {/* Nav tabs */}
-        <div style={{ display: 'flex', gap: 2, marginLeft: 10 }}>
+        <div
+          role="tablist"
+          aria-label="Views"
+          style={{ display: 'flex', gap: 2, marginLeft: 10 }}
+        >
           {([
             { id: 'kanban' as const, label: 'AI Kanban', icon: '\u25AB' },
             { id: 'forge' as const, label: 'The Forge', icon: '\u2692' },
           ]).map(tab => (
             <button
               key={tab.id}
+              role="tab"
+              aria-selected={view === tab.id}
+              aria-controls={`panel-${tab.id}`}
+              id={`tab-${tab.id}`}
               onClick={() => {
                 if (tab.id === 'kanban') backToBoard();
                 else openForge();
@@ -130,11 +141,17 @@ export default function App() {
         <span style={{ fontSize: 9, color: T.text4, fontFamily: 'monospace' }}>
           agent-baton pmo
         </span>
-      </div>
+      </nav>
 
       {/* Main content — both views rendered simultaneously; CSS hides inactive one */}
       <div style={{ flex: 1, overflow: 'hidden', position: 'relative' }}>
-        <div style={{ display: view === 'kanban' ? 'block' : 'none', height: '100%' }}>
+        <div
+          id="panel-kanban"
+          role="tabpanel"
+          aria-labelledby="tab-kanban"
+          aria-hidden={view !== 'kanban'}
+          style={{ display: view === 'kanban' ? 'block' : 'none', height: '100%' }}
+        >
           <KanbanBoard
             onNewPlan={() => openForge()}
             onSignalToForge={(sig) => openForge(sig)}
@@ -143,7 +160,13 @@ export default function App() {
             onToggleSignals={toggleSignals}
           />
         </div>
-        <div style={{ display: view === 'forge' ? 'block' : 'none', height: '100%' }}>
+        <div
+          id="panel-forge"
+          role="tabpanel"
+          aria-labelledby="tab-forge"
+          aria-hidden={view !== 'forge'}
+          style={{ display: view === 'forge' ? 'block' : 'none', height: '100%' }}
+        >
           <ForgePanel
             onBack={backToBoard}
             initialSignal={forgeSignal}

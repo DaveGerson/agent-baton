@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { T } from '../styles/tokens';
+import { T, SR_ONLY } from '../styles/tokens';
 import type { InterviewQuestion, InterviewAnswer } from '../api/types';
 
 interface InterviewPanelProps {
@@ -36,7 +36,7 @@ export function InterviewPanel({ questions, onSubmit, onCancel, loading }: Inter
       }}>
         Refinement Questions
       </div>
-      <div style={{ fontSize: 8, color: T.text3 }}>
+      <div style={{ fontSize: 9, color: T.text3 }}>
         Answer what you can — unanswered questions use sensible defaults.
       </div>
 
@@ -59,42 +59,63 @@ export function InterviewPanel({ questions, onSubmit, onCancel, loading }: Inter
             <span style={{ fontSize: 9, fontWeight: 600, color: T.text0 }}>{q.question}</span>
           </div>
           {q.context && (
-            <div style={{ fontSize: 8, color: T.text3, marginBottom: 6, marginLeft: 20 }}>
+            <div style={{ fontSize: 9, color: T.text3, marginBottom: 6, marginLeft: 20 }}>
               {q.context}
             </div>
           )}
 
           {q.answer_type === 'choice' && q.choices ? (
-            <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginLeft: 20 }}>
-              {q.choices.map(choice => (
+            <fieldset style={{ border: 'none', padding: 0, margin: '0 0 0 20px' }}>
+              <legend style={{
+                fontSize: 9,
+                fontWeight: 600,
+                color: T.text3,
+                marginBottom: 4,
+                padding: 0,
+              }}>
+                Select an answer for: {q.question}
+              </legend>
+              <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                {q.choices.map(choice => (
+                  <button
+                    key={choice}
+                    role="radio"
+                    aria-checked={answers[q.id] === choice}
+                    onClick={() => setAnswer(q.id, choice)}
+                    style={{
+                      padding: '3px 8px', borderRadius: 3,
+                      border: `1px solid ${answers[q.id] === choice ? T.accent + '66' : T.border}`,
+                      background: answers[q.id] === choice ? T.accent + '15' : 'transparent',
+                      color: answers[q.id] === choice ? T.accent : T.text2,
+                      fontSize: 9, fontWeight: 600, cursor: 'pointer',
+                    }}
+                  >
+                    {choice}
+                  </button>
+                ))}
                 <button
-                  key={choice}
-                  onClick={() => setAnswer(q.id, choice)}
+                  onClick={() => setAnswer(q.id, '')}
+                  aria-label="Skip this question"
                   style={{
                     padding: '3px 8px', borderRadius: 3,
-                    border: `1px solid ${answers[q.id] === choice ? T.accent + '66' : T.border}`,
-                    background: answers[q.id] === choice ? T.accent + '15' : 'transparent',
-                    color: answers[q.id] === choice ? T.accent : T.text2,
-                    fontSize: 8, fontWeight: 600, cursor: 'pointer',
+                    border: `1px solid ${T.border}`, background: 'transparent',
+                    color: T.text3, fontSize: 9, cursor: 'pointer',
                   }}
                 >
-                  {choice}
+                  skip
                 </button>
-              ))}
-              <button
-                onClick={() => setAnswer(q.id, '')}
-                style={{
-                  padding: '3px 8px', borderRadius: 3,
-                  border: `1px solid ${T.border}`, background: 'transparent',
-                  color: T.text3, fontSize: 8, cursor: 'pointer',
-                }}
-              >
-                skip
-              </button>
-            </div>
+              </div>
+            </fieldset>
           ) : (
             <div style={{ marginLeft: 20 }}>
+              <label
+                htmlFor={`interview-answer-${q.id}`}
+                style={SR_ONLY}
+              >
+                {q.question}
+              </label>
               <input
+                id={`interview-answer-${q.id}`}
                 type="text"
                 value={answers[q.id] ?? ''}
                 onChange={e => setAnswer(q.id, e.target.value)}
