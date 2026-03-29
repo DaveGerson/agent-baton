@@ -4,6 +4,7 @@ import { ForgePanel } from './components/ForgePanel';
 import { useHotkeys } from './hooks/useHotkeys';
 import { usePersistedState } from './hooks/usePersistedState';
 import { T } from './styles/tokens';
+import { ToastProvider } from './contexts/ToastContext';
 import type { PmoCard, PmoSignal } from './api/types';
 
 type View = 'kanban' | 'forge';
@@ -50,6 +51,7 @@ export default function App() {
   useHotkeys(hotkeyBindings);
 
   return (
+    <ToastProvider>
     <div style={{
       height: '100vh',
       display: 'flex',
@@ -177,5 +179,6 @@ export default function App() {
         </div>
       </div>
     </div>
+    </ToastProvider>
   );
 }

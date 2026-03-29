@@ -10,6 +10,7 @@ interface UsePmoBoardResult {
   loading: boolean;
   error: string | null;
   refresh: () => void;
+  mutateCard: (cardId: string, updater: (card: PmoCard) => PmoCard) => void;
   lastUpdated: Date | null;
   connectionMode: ConnectionMode;
 }
@@ -39,6 +40,10 @@ export function usePmoBoard(program?: string): UsePmoBoardResult {
   const backoffRef = useRef(SSE_BACKOFF_INITIAL_MS);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fetchIdRef = useRef(0);
+
+  const mutateCard = useCallback((cardId: string, updater: (card: PmoCard) => PmoCard) => {
+    setCards(prev => prev.map(c => c.card_id === cardId ? updater(c) : c));
+  }, []);
 
   const fetchBoard = useCallback(async () => {
     const myId = ++fetchIdRef.current;
@@ -151,6 +156,7 @@ export function usePmoBoard(program?: string): UsePmoBoardResult {
     loading,
     error,
     refresh: fetchBoard,
+    mutateCard,
     lastUpdated,
     connectionMode,
   };

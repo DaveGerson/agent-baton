@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { api } from '../api/client';
 import { T, SEVERITY_COLOR } from '../styles/tokens';
+import { useToast } from '../contexts/ToastContext';
 import type { PmoSignal } from '../api/types';
 
 const SIGNALS_POLL_MS = 15000;
@@ -31,6 +32,7 @@ function severityColor(sev: string): string {
 }
 
 export function SignalsBar({ onForge, onOpenCountChange }: SignalsBarProps) {
+  const toast = useToast();
   const [signals, setSignals] = useState<PmoSignal[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -143,7 +145,7 @@ export function SignalsBar({ onForge, onOpenCountChange }: SignalsBarProps) {
       setNewTitle('');
       setShowAdd(false);
     } catch {
-      // silent
+      toast.error('Failed to add signal');
     } finally {
       setSubmitting(false);
     }

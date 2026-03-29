@@ -3,12 +3,14 @@ import type { PmoCard, ForgePlanResponse } from '../api/types';
 import { T, PRIORITY_COLOR } from '../styles/tokens';
 import { api } from '../api/client';
 import { agentDisplayName } from '../utils/agent-names';
+import { useToast } from '../contexts/ToastContext';
 
 interface KanbanCardProps {
   card: PmoCard;
   columnColor: string;
   onForge?: (card: PmoCard) => void;
   onEditPlan?: (card: PmoCard) => void;
+  onMutateCard?: (cardId: string, updater: (card: PmoCard) => PmoCard) => void;
 }
 
 function Chip({ children, color = T.text2 }: { children: React.ReactNode; color?: string }) {
@@ -60,7 +62,8 @@ function ProgramDot({ program, size = 7 }: { program: string; size?: number }) {
   );
 }
 
-export function KanbanCard({ card, columnColor, onForge, onEditPlan }: KanbanCardProps) {
+export function KanbanCard({ card, columnColor, onForge, onEditPlan, onMutateCard }: KanbanCardProps) {
+  const toast = useToast();
   const [expanded, setExpanded] = useState(false);
   const [showPlan, setShowPlan] = useState(false);
   const [planData, setPlanData] = useState<ForgePlanResponse | null>(null);
@@ -86,8 +89,11 @@ export function KanbanCard({ card, columnColor, onForge, onEditPlan }: KanbanCar
     try {
       const resp = await api.executeCard(card.card_id);
       setExecResult(`Launched (PID ${resp.pid})`);
+      onMutateCard?.(card.card_id, c => ({ ...c, column: 'executing' }));
+      toast.success('Execution launched');
     } catch (err) {
       setExecResult(err instanceof Error ? err.message : 'Launch failed');
+      toast.error('Execution launch failed');
     } finally {
       setExecLoading(false);
       execTimerRef.current = setTimeout(() => setExecResult(null), 8000);

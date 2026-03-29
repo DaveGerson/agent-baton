@@ -5,6 +5,7 @@ import { InterviewPanel } from './InterviewPanel';
 import { AdoCombobox } from './AdoCombobox';
 import { usePersistedState } from '../hooks/usePersistedState';
 import { T, SR_ONLY } from '../styles/tokens';
+import { useToast } from '../contexts/ToastContext';
 import type { PmoProject, PmoSignal, ForgePlanResponse, InterviewQuestion, InterviewAnswer } from '../api/types';
 
 interface ForgePanelProps {
@@ -30,6 +31,7 @@ const PRIORITIES = [
 ];
 
 export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
+  const toast = useToast();
   const [phase, setPhase] = useState<Phase>('intake');
   const [projects, setProjects] = useState<PmoProject[]>([]);
   const [projectsLoading, setProjectsLoading] = useState(true);
@@ -210,6 +212,7 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
       try { localStorage.removeItem('pmo:plan-draft'); } catch { /* ignore */ }
       setSavePath(result.path);
       setPhase('saved');
+      toast.success('Plan approved & queued');
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : 'Save failed');
     } finally {
