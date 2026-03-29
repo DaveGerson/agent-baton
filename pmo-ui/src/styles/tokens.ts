@@ -60,12 +60,14 @@ export const SR_ONLY: CSSProperties = {
   border: 0,
 };
 
+// Numeric values are React inline-style compatible (px assumed).
+// Adopt gradually — prefer these tokens over bare fontSize literals.
 export const FONT_SIZES = {
-  xs: '9px',    // minimum — only for tertiary metadata
-  sm: '11px',   // scannable content floor
-  md: '12px',   // card titles, form labels
-  lg: '14px',   // section headers
-  xl: '16px',   // page titles
+  xs: 9,    // minimum — only for tertiary metadata
+  sm: 11,   // scannable content floor
+  md: 12,   // card titles, form labels
+  lg: 14,   // section headers
+  xl: 16,   // page titles
 } as const;
 
 const PROGRAM_PALETTE = [

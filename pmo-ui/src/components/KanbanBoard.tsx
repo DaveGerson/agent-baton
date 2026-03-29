@@ -145,7 +145,7 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
           <option value="progress">Progress</option>
         </select>
 
-        <div style={{ width: 1, height: 14, background: T.border }} />
+        <div role="separator" aria-orientation="vertical" style={{ width: 1, height: 14, background: T.border }} />
 
         {/* Signals toggle */}
         <>

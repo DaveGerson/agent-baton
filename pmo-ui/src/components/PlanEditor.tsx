@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
-import { T } from '../styles/tokens';
+import { T, FONT_SIZES } from '../styles/tokens';
 import type { ForgePlanResponse, ForgePlanPhase, ForgePlanStep } from '../api/types';
 import { agentDisplayName } from '../utils/agent-names';
 
@@ -34,6 +34,7 @@ export function PlanEditor({ plan, onPlanChange, onDraftSave, projectId }: PlanE
   const [expandedPhase, setExpandedPhase] = useState<number | null>(0);
   const [editingStep, setEditingStep] = useState<string | null>(null);
   const [draftSaved, setDraftSaved] = useState(false);
+  const [lastSaveTime, setLastSaveTime] = useState<string | null>(null);
   const [dragState, setDragState] = useState<{ phaseIdx: number; stepIdx: number } | null>(null);
   const [dropTarget, setDropTarget] = useState<{ phaseIdx: number; stepIdx: number } | null>(null);
   const originalPlanRef = useRef<string>(JSON.stringify(plan));
@@ -54,6 +55,7 @@ export function PlanEditor({ plan, onPlanChange, onDraftSave, projectId }: PlanE
     } catch {
       // Storage unavailable — silently ignore.
     }
+    setLastSaveTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
     setDraftSaved(true);
     onDraftSave?.();
     setTimeout(() => setDraftSaved(false), 2000);
@@ -189,7 +191,7 @@ export function PlanEditor({ plan, onPlanChange, onDraftSave, projectId }: PlanE
             background: T.green + '15',
             color: T.green,
             border: `1px solid ${T.green}33`,
-            fontSize: 9, fontWeight: 600, cursor: 'pointer',
+            fontSize: FONT_SIZES.xs, fontWeight: 600, cursor: 'pointer',
           }}
         >
           {isDirty && (
@@ -204,6 +206,11 @@ export function PlanEditor({ plan, onPlanChange, onDraftSave, projectId }: PlanE
           )}
           {draftSaved ? 'Saved \u2713' : 'Save Draft'}
         </button>
+        {lastSaveTime && (
+          <span style={{ fontSize: FONT_SIZES.xs, color: T.text3, fontStyle: 'italic' }}>
+            Draft saved at {lastSaveTime}
+          </span>
+        )}
       </div>
 
       {/* Summary */}
@@ -463,7 +470,7 @@ function Stat({ label, value, color }: { label: string; value: string; color?: s
   return (
     <div style={{ padding: '4px 8px', background: T.bg2, borderRadius: 4 }}>
       <div style={{ fontSize: 9, color: T.text3, textTransform: 'uppercase' }}>{label}</div>
-      <div style={{ fontSize: 12, fontWeight: 700, color: color ?? T.text0, fontFamily: 'monospace' }}>{value}</div>
+      <div style={{ fontSize: FONT_SIZES.md, fontWeight: 700, color: color ?? T.text0, fontFamily: 'monospace' }}>{value}</div>
     </div>
   );
 }

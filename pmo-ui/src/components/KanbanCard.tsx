@@ -238,7 +238,9 @@ export function KanbanCard({ card, columnColor, onForge, onEditPlan, onMutateCar
         {/* Step progress pips */}
         {card.steps_total > 0 && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 3 }}>
-            <Pips done={card.steps_completed} total={card.steps_total} color={columnColor} />
+            {card.steps_total <= 12 && (
+              <Pips done={card.steps_completed} total={card.steps_total} color={columnColor} />
+            )}
             <span style={{ fontSize: 9, color: T.text3 }}>
               {card.steps_completed}/{card.steps_total}
             </span>

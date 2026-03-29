@@ -254,10 +254,16 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
         <span style={{ fontSize: 11, fontWeight: 700, color: T.text0 }}>The Forge</span>
         <span style={{ fontSize: 9, color: T.text3 }}>{phaseLabel[phase]}</span>
         {initialSignal && (
-          <span style={{
-            padding: '1px 6px', borderRadius: 3, fontSize: 7, fontWeight: 600,
-            color: T.red, background: T.red + '14', border: `1px solid ${T.red}22`,
-          }}>from signal: {initialSignal.signal_id}</span>
+          <span
+            title={`Signal: ${initialSignal.title} (${initialSignal.signal_id})`}
+            style={{
+              padding: '1px 6px', borderRadius: 3, fontSize: 7, fontWeight: 600,
+              color: T.red, background: T.red + '14', border: `1px solid ${T.red}22`,
+              maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            }}
+          >
+            from signal: {initialSignal.title.length > 40 ? initialSignal.title.slice(0, 40) + '\u2026' : initialSignal.title}
+          </span>
         )}
         <div style={{ flex: 1 }} />
         {phase === 'preview' && (

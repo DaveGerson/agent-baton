@@ -56,6 +56,7 @@ export default function App() {
 
   return (
     <ToastProvider>
+    <style>{`@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }`}</style>
     <div style={{
       height: '100vh',
       display: 'flex',
@@ -143,7 +144,7 @@ export default function App() {
         <span style={{ fontSize: 9, color: T.text4, fontFamily: 'monospace' }}>
           n=new&nbsp;&nbsp;s=signals&nbsp;&nbsp;esc=board&nbsp;&nbsp;?=help
         </span>
-        <div style={{ width: 1, height: 14, background: T.border }} />
+        <div role="separator" aria-orientation="vertical" style={{ width: 1, height: 14, background: T.border }} />
 
         {/* Version / status */}
         <span style={{ fontSize: 9, color: T.text4, fontFamily: 'monospace' }}>
