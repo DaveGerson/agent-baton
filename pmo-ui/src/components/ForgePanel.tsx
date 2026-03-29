@@ -3,6 +3,7 @@ import { api } from '../api/client';
 import { PlanEditor } from './PlanEditor';
 import { InterviewPanel } from './InterviewPanel';
 import { AdoCombobox } from './AdoCombobox';
+import { ConfirmDialog } from './ConfirmDialog';
 import { usePersistedState } from '../hooks/usePersistedState';
 import { T, SR_ONLY } from '../styles/tokens';
 import { useToast } from '../contexts/ToastContext';
@@ -70,6 +71,7 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
   const [savePath, setSavePath] = useState<string | null>(null);
   const [regenLoading, setRegenLoading] = useState(false);
   const [showDraftBanner, setShowDraftBanner] = useState(false);
+  const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
 
   const abortRef = useRef<AbortController | null>(null);
   const panelBodyRef = useRef<HTMLDivElement>(null);
@@ -222,10 +224,8 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
 
   function handleBack() {
     if (isDirty) {
-      const confirmed = window.confirm(
-        'You have an unsaved plan. Leave anyway? Your task description is saved but the generated plan will be lost.'
-      );
-      if (!confirmed) return;
+      setShowLeaveConfirm(true);
+      return;
     }
     onBack();
   }
@@ -557,6 +557,16 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
           />
         )}
       </div>
+
+      {showLeaveConfirm && (
+        <ConfirmDialog
+          message="You have an unsaved plan. Leave anyway? Your task description is saved but the generated plan will be lost."
+          confirmLabel="Leave"
+          cancelLabel="Stay"
+          onConfirm={() => { setShowLeaveConfirm(false); onBack(); }}
+          onCancel={() => setShowLeaveConfirm(false)}
+        />
+      )}
     </div>
   );
 }

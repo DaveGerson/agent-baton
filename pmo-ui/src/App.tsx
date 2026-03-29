@@ -1,6 +1,7 @@
 import { useState, useCallback, useMemo } from 'react';
 import { KanbanBoard } from './components/KanbanBoard';
 import { ForgePanel } from './components/ForgePanel';
+import { KeyboardShortcutsDialog } from './components/KeyboardShortcutsDialog';
 import { useHotkeys } from './hooks/useHotkeys';
 import { usePersistedState } from './hooks/usePersistedState';
 import { T } from './styles/tokens';
@@ -13,6 +14,7 @@ export default function App() {
   const [view, setView] = usePersistedState<View>('pmo:active-view', 'kanban');
   const [forgeSignal, setForgeSignal] = useState<PmoSignal | null>(null);
   const [showSignals, setShowSignals] = usePersistedState('pmo:show-signals', false);
+  const [showShortcuts, setShowShortcuts] = useState(false);
 
   function openForge(signal?: PmoSignal) {
     setForgeSignal(signal ?? null);
@@ -41,12 +43,14 @@ export default function App() {
   const toggleSignals = useCallback(() => setShowSignals(s => !s), []);
   const goForge = useCallback(() => openForge(), []); // eslint-disable-line react-hooks/exhaustive-deps
   const goKanban = useCallback(() => backToBoard(), []); // eslint-disable-line react-hooks/exhaustive-deps
+  const toggleShortcuts = useCallback(() => setShowShortcuts(s => !s), []);
 
   const hotkeyBindings = useMemo(() => ({
     n: goForge,
     s: toggleSignals,
     escape: goKanban,
-  }), [goForge, toggleSignals, goKanban]);
+    '?': toggleShortcuts,
+  }), [goForge, toggleSignals, goKanban, toggleShortcuts]);
 
   useHotkeys(hotkeyBindings);
 
@@ -137,7 +141,7 @@ export default function App() {
 
         {/* Keyboard hint */}
         <span style={{ fontSize: 9, color: T.text4, fontFamily: 'monospace' }}>
-          n=new&nbsp;&nbsp;s=signals&nbsp;&nbsp;esc=board
+          n=new&nbsp;&nbsp;s=signals&nbsp;&nbsp;esc=board&nbsp;&nbsp;?=help
         </span>
         <div style={{ width: 1, height: 14, background: T.border }} />
 
@@ -179,6 +183,8 @@ export default function App() {
         </div>
       </div>
     </div>
+
+    {showShortcuts && <KeyboardShortcutsDialog onClose={() => setShowShortcuts(false)} />}
     </ToastProvider>
   );
 }

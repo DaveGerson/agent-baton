@@ -75,7 +75,7 @@ export function InterviewPanel({ questions, onSubmit, onCancel, loading }: Inter
               }}>
                 Select an answer for: {q.question}
               </legend>
-              <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+              <div role="radiogroup" style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
                 {q.choices.map(choice => (
                   <button
                     key={choice}

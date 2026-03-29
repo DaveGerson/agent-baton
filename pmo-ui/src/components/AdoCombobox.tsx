@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useId } from 'react';
 import { api } from '../api/client';
 import { T } from '../styles/tokens';
 import type { AdoWorkItem } from '../api/types';
@@ -16,7 +16,7 @@ export function AdoCombobox({ onSelect, inputId }: AdoComboboxProps) {
   const [activeIndex, setActiveIndex] = useState(-1);
   const [searchError, setSearchError] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
-  const listboxId = 'ado-results-listbox';
+  const listboxId = useId() + '-ado-results';
 
   useEffect(() => {
     if (!query.trim()) { setItems([]); setOpen(false); setSearchError(false); return; }

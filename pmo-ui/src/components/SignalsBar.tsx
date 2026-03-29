@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { api } from '../api/client';
+import { ConfirmDialog } from './ConfirmDialog';
 import { T, SEVERITY_COLOR } from '../styles/tokens';
 import { useToast } from '../contexts/ToastContext';
 import type { PmoSignal } from '../api/types';
@@ -43,6 +44,7 @@ export function SignalsBar({ onForge, onOpenCountChange }: SignalsBarProps) {
   const [submitting, setSubmitting] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [batchResolving, setBatchResolving] = useState(false);
+  const [showBatchConfirm, setShowBatchConfirm] = useState(false);
   const [resolveError, setResolveError] = useState<string | null>(null);
   const mountedRef = useRef(true);
   const resolveErrorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -105,13 +107,13 @@ export function SignalsBar({ onForge, onOpenCountChange }: SignalsBarProps) {
     }
   }
 
-  async function handleBatchResolve() {
+  function requestBatchResolve() {
     if (selected.size === 0) return;
-    const count = selected.size;
-    const confirmed = window.confirm(
-      `Resolve ${count} signal${count !== 1 ? 's' : ''}? This cannot be undone.`
-    );
-    if (!confirmed) return;
+    setShowBatchConfirm(true);
+  }
+
+  async function doBatchResolve() {
+    setShowBatchConfirm(false);
     setBatchResolving(true);
     try {
       const ids = Array.from(selected);
@@ -226,7 +228,7 @@ export function SignalsBar({ onForge, onOpenCountChange }: SignalsBarProps) {
         <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
           {selected.size > 0 && (
             <button
-              onClick={handleBatchResolve}
+              onClick={requestBatchResolve}
               disabled={batchResolving}
               style={{
                 padding: '2px 7px',
@@ -459,6 +461,15 @@ export function SignalsBar({ onForge, onOpenCountChange }: SignalsBarProps) {
         <div style={{ fontSize: 8, color: T.text3, fontStyle: 'italic', padding: 6 }}>
           No open signals.
         </div>
+      )}
+
+      {showBatchConfirm && (
+        <ConfirmDialog
+          message={`Resolve ${selected.size} signal${selected.size !== 1 ? 's' : ''}? This cannot be undone.`}
+          confirmLabel="Resolve"
+          onConfirm={doBatchResolve}
+          onCancel={() => setShowBatchConfirm(false)}
+        />
       )}
     </div>
   );
