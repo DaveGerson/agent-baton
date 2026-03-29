@@ -543,7 +543,7 @@ test.describe('Suite 3: Interactive Behaviour — Forge', () => {
       await forge.waitForAppReady();
       await forge.switchToForge();
 
-      await forge.taskDescriptionTextarea.fill('Test cancel flow');
+      await forge.taskDescriptionTextarea.fill('Test cancel flow for the forge generation pipeline');
 
       // Intercept the forge plan request with a 5-second delay so we can cancel.
       await forge.page.route('**/api/v1/pmo/forge/plan', async (route) => {
@@ -1107,12 +1107,11 @@ test.describe('Suite 7: Content Handling', () => {
       await kanban.waitForAppReady();
       await page.waitForTimeout(400);
 
-      // With an empty board, all 5 columns should show the "Empty" italic placeholder.
-      // The Empty placeholders are dashed-border italic divs — we count them.
-      // Per KanbanBoard.tsx: rendered when colCards.length === 0.
-      const emptyEls = page.getByText('Empty');
+      // With an empty board, all 5 columns should show guidance placeholder text.
+      // R2-24: each column has its own guidance text (e.g., "No plans ready to execute").
+      const emptyEls = page.locator('[style*="dashed"]');
       const count = await emptyEls.count();
-      // All 5 columns should have the empty placeholder.
+      // All 5 columns should have a dashed-border placeholder.
       expect(count).toBe(5);
 
       // Verify at least the first one is visible.

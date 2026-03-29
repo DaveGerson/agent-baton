@@ -636,7 +636,7 @@ test.describe('Suite 3: Form accessibility', () => {
     await forge.assertIntakePhase();
     await page.waitForTimeout(300);
 
-    await forge.taskDescriptionTextarea.fill('Trigger an error');
+    await forge.taskDescriptionTextarea.fill('Trigger an error in the forge generation pipeline');
     await forge.generateButton.click();
 
     // Wait for the error to appear

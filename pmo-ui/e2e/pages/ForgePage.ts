@@ -62,8 +62,7 @@ export class ForgePage extends BasePage {
   }
 
   get projectSelect(): Locator {
-    // The first <select> in the form (project selector)
-    return this.page.locator('select').first();
+    return this.page.locator('#forge-project');
   }
 
   get taskTypeSelect(): Locator {

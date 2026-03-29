@@ -1472,7 +1472,7 @@ test.describe('Category 3: Interactive Element Breaks', () => {
 
       await loadForge(forge, async () => {});
 
-      await forge.taskDescriptionTextarea.fill('My task description');
+      await forge.taskDescriptionTextarea.fill('My task description for testing the forge generation flow');
       await forge.generateButton.click();
 
       // While generating, the intake phase is still shown (ForgePanel renders both
