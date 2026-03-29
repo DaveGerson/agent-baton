@@ -37,8 +37,8 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
   const signalDesc = initialSignal
     ? `Signal: ${initialSignal.title}\n\nSeverity: ${initialSignal.severity}\nType: ${initialSignal.signal_type}\n\n${initialSignal.description ?? ''}`
     : null;
-  const [description, setDescription] = usePersistedState('pmo:forge-description', signalDesc ?? '');
-  const [projectId, setProjectId] = useState('');
+  const [description, setDescription] = usePersistedState('pmo:forge-description', signalDesc ?? '', localStorage);
+  const [projectId, setProjectId] = usePersistedState('pmo:forge-project-id', '');
   const [taskType, setTaskType] = usePersistedState('pmo:forge-task-type', '');
   const [priority, setPriority] = usePersistedState<number>('pmo:forge-priority', 1);
 
@@ -96,19 +96,25 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
     panelBodyRef.current?.focus();
   }, [phase]);
 
-  // Show the draft restore banner when entering preview if a draft exists.
+  // Show the draft restore banner when entering preview if a draft exists for this project.
   useEffect(() => {
     if (phase === 'preview') {
       try {
-        const hasDraft = localStorage.getItem('pmo:plan-draft') !== null;
-        setShowDraftBanner(hasDraft);
+        const raw = localStorage.getItem('pmo:plan-draft');
+        if (raw) {
+          const parsed = JSON.parse(raw) as { plan: ForgePlanResponse; project_id: string };
+          setShowDraftBanner(parsed.project_id === projectId);
+        } else {
+          setShowDraftBanner(false);
+        }
       } catch {
-        // localStorage unavailable — ignore.
+        // localStorage unavailable or corrupt — ignore.
+        setShowDraftBanner(false);
       }
     } else {
       setShowDraftBanner(false);
     }
-  }, [phase]);
+  }, [phase, projectId]);
 
   async function handleGenerate() {
     if (!description.trim() || !projectId) return;
@@ -174,7 +180,10 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
     try {
       const raw = localStorage.getItem('pmo:plan-draft');
       if (raw) {
-        setPlan(JSON.parse(raw) as ForgePlanResponse);
+        const parsed = JSON.parse(raw) as { plan: ForgePlanResponse; project_id: string };
+        if (parsed.project_id === projectId) {
+          setPlan(parsed.plan);
+        }
       }
     } catch {
       // Corrupt draft — ignore.
@@ -505,6 +514,7 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
               plan={plan}
               onPlanChange={setPlan}
               onDraftSave={() => setShowDraftBanner(false)}
+              projectId={projectId}
             />
           </div>
         )}

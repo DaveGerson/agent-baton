@@ -27,9 +27,10 @@ interface PlanEditorProps {
   plan: ForgePlanResponse;
   onPlanChange: (plan: ForgePlanResponse) => void;
   onDraftSave?: () => void;
+  projectId: string;
 }
 
-export function PlanEditor({ plan, onPlanChange, onDraftSave }: PlanEditorProps) {
+export function PlanEditor({ plan, onPlanChange, onDraftSave, projectId }: PlanEditorProps) {
   const [expandedPhase, setExpandedPhase] = useState<number | null>(0);
   const [editingStep, setEditingStep] = useState<string | null>(null);
   const [draftSaved, setDraftSaved] = useState(false);
@@ -49,7 +50,7 @@ export function PlanEditor({ plan, onPlanChange, onDraftSave }: PlanEditorProps)
 
   function handleSaveDraft() {
     try {
-      localStorage.setItem('pmo:plan-draft', JSON.stringify(plan));
+      localStorage.setItem('pmo:plan-draft', JSON.stringify({ plan, project_id: projectId }));
     } catch {
       // Storage unavailable — silently ignore.
     }
