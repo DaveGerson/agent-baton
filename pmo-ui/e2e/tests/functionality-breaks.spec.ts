@@ -1431,11 +1431,14 @@ test.describe('Category 3: Interactive Element Breaks', () => {
 
       await loadPlanEditor(forge, async () => {});
 
-      // Click Approve & Queue twice rapidly
+      // Click Approve & Queue — button should disable during flight
       await forge.approveAndQueueButton.click();
       await page.waitForTimeout(50);
-      // The button has no disabled state during save — click again
-      await forge.approveAndQueueButton.click({ force: true });
+
+      // R2-05 fix: button should now be disabled with "Queuing…" text
+      const queuingBtn = page.getByRole('button', { name: /Queuing/i });
+      const isDisabled = await queuingBtn.isDisabled().catch(() => false);
+      expect(isDisabled).toBe(true);
 
       // Wait for save to complete
       await page.waitForTimeout(700);
@@ -1443,8 +1446,8 @@ test.describe('Category 3: Interactive Element Breaks', () => {
       // App should be in saved phase
       await forge.assertSavedPhase();
 
-      // Ideally approve is called only once — but if twice the UI must not crash
-      expect(approveCallCount).toBeGreaterThanOrEqual(1);
+      // With the fix, approve should be called exactly once
+      expect(approveCallCount).toBe(1);
     } catch (err) {
       await captureFullPage(page, 'fail-approve-double-click');
       throw err;

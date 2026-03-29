@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useMemo } from 'react';
 import { KanbanBoard } from './components/KanbanBoard';
 import { ForgePanel } from './components/ForgePanel';
 import { useHotkeys } from './hooks/useHotkeys';
@@ -41,11 +41,13 @@ export default function App() {
   const goForge = useCallback(() => openForge(), []); // eslint-disable-line react-hooks/exhaustive-deps
   const goKanban = useCallback(() => backToBoard(), []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  useHotkeys({
+  const hotkeyBindings = useMemo(() => ({
     n: goForge,
     s: toggleSignals,
     escape: goKanban,
-  });
+  }), [goForge, toggleSignals, goKanban]);
+
+  useHotkeys(hotkeyBindings);
 
   return (
     <div style={{

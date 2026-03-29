@@ -346,13 +346,6 @@ export function SignalsBar({ onForge, onOpenCountChange }: SignalsBarProps) {
         <div style={{ fontSize: 8, color: T.red, padding: 4 }}>{error}</div>
       )}
 
-      {/* Resolve error banner */}
-      {resolveError && (
-        <div role="alert" style={{ fontSize: 9, color: T.red, padding: '4px 8px', background: T.red + '12', border: `1px solid ${T.red}33`, borderRadius: 3, marginBottom: 4 }}>
-          {resolveError}
-        </div>
-      )}
-
       {/* Signal rows */}
       <ul role="list" style={{ listStyle: 'none', padding: 0, margin: 0 }}>
         {open.map((sig, index) => {

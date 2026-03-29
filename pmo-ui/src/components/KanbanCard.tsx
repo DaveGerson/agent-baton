@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import type { PmoCard, ForgePlanResponse } from '../api/types';
 import { T, PRIORITY_COLOR } from '../styles/tokens';
 import { api } from '../api/client';
@@ -67,12 +67,20 @@ export function KanbanCard({ card, columnColor, onForge, onEditPlan }: KanbanCar
   const [planLoading, setPlanLoading] = useState(false);
   const [execLoading, setExecLoading] = useState(false);
   const [execResult, setExecResult] = useState<string | null>(null);
+  const execTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isHuman = card.column === 'awaiting_human';
   const isQueued = card.column === 'queued';
   const priorityColor = PRIORITY_COLOR[card.priority] ?? T.text2;
 
+  useEffect(() => {
+    return () => {
+      if (execTimerRef.current) clearTimeout(execTimerRef.current);
+    };
+  }, []);
+
   async function handleExecute(e: React.MouseEvent) {
     e.stopPropagation();
+    if (execTimerRef.current) clearTimeout(execTimerRef.current);
     setExecLoading(true);
     setExecResult(null);
     try {
@@ -82,8 +90,7 @@ export function KanbanCard({ card, columnColor, onForge, onEditPlan }: KanbanCar
       setExecResult(err instanceof Error ? err.message : 'Launch failed');
     } finally {
       setExecLoading(false);
-      // Auto-clear after 8 s; user can also dismiss manually
-      setTimeout(() => setExecResult(null), 8000);
+      execTimerRef.current = setTimeout(() => setExecResult(null), 8000);
     }
   }
 

@@ -64,6 +64,7 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
   const [interviewQuestions, setInterviewQuestions] = useState<InterviewQuestion[]>([]);
   const [generateError, setGenerateError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
   const [savePath, setSavePath] = useState<string | null>(null);
   const [regenLoading, setRegenLoading] = useState(false);
   const [showDraftBanner, setShowDraftBanner] = useState(false);
@@ -192,6 +193,7 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
 
   async function handleApprove() {
     if (!plan) return;
+    setSaving(true);
     setSaveError(null);
     try {
       const result = await api.forgeApprove({ plan, project_id: projectId });
@@ -201,6 +203,8 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
       setPhase('saved');
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : 'Save failed');
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -431,13 +435,16 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
               <div style={{ display: 'flex', gap: 6 }}>
                 <button
                   onClick={handleApprove}
+                  disabled={saving}
                   aria-describedby={saveError ? 'forge-save-error' : undefined}
                   style={{
                     padding: '5px 16px', borderRadius: 4, border: 'none',
                     background: `linear-gradient(135deg, ${T.green}, #059669)`,
-                    color: '#fff', fontSize: 9, fontWeight: 700, cursor: 'pointer',
+                    color: '#fff', fontSize: 9, fontWeight: 700,
+                    cursor: saving ? 'not-allowed' : 'pointer',
+                    opacity: saving ? 0.6 : 1,
                   }}
-                >Approve & Queue</button>
+                >{saving ? 'Queuing\u2026' : 'Approve & Queue'}</button>
                 <button onClick={handleStartRegenerate} disabled={regenLoading} style={{
                   padding: '5px 14px', borderRadius: 4,
                   border: `1px solid ${T.yellow}44`, background: 'transparent',

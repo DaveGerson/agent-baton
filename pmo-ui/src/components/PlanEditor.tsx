@@ -96,7 +96,7 @@ export function PlanEditor({ plan, onPlanChange, onDraftSave }: PlanEditorProps)
         const num = parseInt(s.step_id.split('.').pop() || '0', 10);
         return num > max ? num : max;
       }, 0);
-      const newStepId = `${phase.phase_id + 1}.${maxStepNum + 1}`;
+      const newStepId = `${phaseIdx + 1}.${maxStepNum + 1}`;
       return {
         ...phase,
         steps: [...phase.steps, {
