@@ -13,6 +13,16 @@ const AGENT_LIST = [
   'data-engineer',
 ] as const;
 
+const AGENT_DESCRIPTIONS: Record<string, string> = {
+  'backend-engineer': 'Server-side implementation, APIs, business logic',
+  'frontend-engineer': 'Client-side UI, components, styling',
+  'test-engineer': 'Test suites, coverage, quality assurance',
+  'architect': 'System design, module boundaries, tech decisions',
+  'security-reviewer': 'Security audit, OWASP, auth, secrets',
+  'devops-engineer': 'Infrastructure, CI/CD, Docker, deployment',
+  'data-engineer': 'Database schema, migrations, ETL pipelines',
+};
+
 interface PlanEditorProps {
   plan: ForgePlanResponse;
   onPlanChange: (plan: ForgePlanResponse) => void;
@@ -23,6 +33,8 @@ export function PlanEditor({ plan, onPlanChange, onDraftSave }: PlanEditorProps)
   const [expandedPhase, setExpandedPhase] = useState<number | null>(0);
   const [editingStep, setEditingStep] = useState<string | null>(null);
   const [draftSaved, setDraftSaved] = useState(false);
+  const [dragState, setDragState] = useState<{ phaseIdx: number; stepIdx: number } | null>(null);
+  const [dropTarget, setDropTarget] = useState<{ phaseIdx: number; stepIdx: number } | null>(null);
   const originalPlanRef = useRef<string>(JSON.stringify(plan));
 
   const isDirty = JSON.stringify(plan) !== originalPlanRef.current;
@@ -104,6 +116,44 @@ export function PlanEditor({ plan, onPlanChange, onDraftSave }: PlanEditorProps)
 
   function removePhase(phaseIdx: number) {
     onPlanChange({ ...plan, phases: plan.phases.filter((_, i) => i !== phaseIdx) });
+  }
+
+  function handleDragStart(phaseIdx: number, stepIdx: number) {
+    setDragState({ phaseIdx, stepIdx });
+    setDropTarget(null);
+  }
+
+  function handleDragOver(e: React.DragEvent, phaseIdx: number, stepIdx: number) {
+    e.preventDefault();
+    if (!dragState || dragState.phaseIdx !== phaseIdx) return;
+    if (dropTarget?.phaseIdx !== phaseIdx || dropTarget?.stepIdx !== stepIdx) {
+      setDropTarget({ phaseIdx, stepIdx });
+    }
+  }
+
+  function handleDrop(e: React.DragEvent, phaseIdx: number, targetIdx: number) {
+    e.preventDefault();
+    if (!dragState || dragState.phaseIdx !== phaseIdx) {
+      setDragState(null);
+      setDropTarget(null);
+      return;
+    }
+    const fromIdx = dragState.stepIdx;
+    if (fromIdx !== targetIdx) {
+      updatePhase(phaseIdx, phase => {
+        const steps = [...phase.steps];
+        const [moved] = steps.splice(fromIdx, 1);
+        steps.splice(targetIdx, 0, moved);
+        return { ...phase, steps };
+      });
+    }
+    setDragState(null);
+    setDropTarget(null);
+  }
+
+  function handleDragEnd() {
+    setDragState(null);
+    setDropTarget(null);
   }
 
   return (
@@ -230,12 +280,35 @@ export function PlanEditor({ plan, onPlanChange, onDraftSave }: PlanEditorProps)
               aria-labelledby={`phase-header-${pi}`}
               hidden={!isExpanded}
             >
-              {phase.steps.map((step, si) => (
-                <div key={step.step_id} style={{
-                  display: 'flex', alignItems: 'flex-start', gap: 6, padding: '5px 10px',
-                  borderBottom: si < phase.steps.length - 1 ? `1px solid ${T.border}` : 'none',
-                }}>
-                  {/* Reorder buttons */}
+              {phase.steps.map((step, si) => {
+                const isDragging = dragState?.phaseIdx === pi && dragState?.stepIdx === si;
+                const isDropTarget = dropTarget?.phaseIdx === pi && dropTarget?.stepIdx === si && !isDragging;
+                return (
+                <div
+                  key={step.step_id}
+                  draggable
+                  onDragStart={() => handleDragStart(pi, si)}
+                  onDragOver={e => handleDragOver(e, pi, si)}
+                  onDrop={e => handleDrop(e, pi, si)}
+                  onDragEnd={handleDragEnd}
+                  style={{
+                    display: 'flex', alignItems: 'flex-start', gap: 6, padding: '5px 10px',
+                    borderBottom: si < phase.steps.length - 1 ? `1px solid ${T.border}` : 'none',
+                    borderTop: isDropTarget ? `2px solid ${T.accent}` : undefined,
+                    opacity: isDragging ? 0.45 : 1,
+                    transition: 'opacity 0.1s',
+                  }}
+                >
+                  {/* Drag handle */}
+                  <span
+                    aria-hidden="true"
+                    style={{ cursor: 'grab', color: T.text3, fontSize: 11, flexShrink: 0, lineHeight: 1, paddingTop: 4, userSelect: 'none' }}
+                    title="Drag to reorder"
+                  >
+                    {'⠿'}
+                  </span>
+
+                  {/* Reorder buttons (keyboard fallback) */}
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 1, flexShrink: 0 }}>
                     <button
                       aria-label={`Move step ${si + 1} up`}
@@ -269,10 +342,12 @@ export function PlanEditor({ plan, onPlanChange, onDraftSave }: PlanEditorProps)
                     ) : (
                       <div
                         onClick={() => setEditingStep(step.step_id)}
-                        style={{ fontSize: 9, color: T.text0, fontWeight: 500, cursor: 'text' }}
+                        style={{ fontSize: 9, color: T.text0, fontWeight: 500, cursor: 'text', minHeight: 16 }}
                         title="Click to edit"
                       >
-                        {step.task_description}
+                        {step.task_description || (
+                          <span style={{ color: T.text3, fontStyle: 'italic' }}>Click to add description</span>
+                        )}
                       </div>
                     )}
                   </div>
@@ -296,11 +371,11 @@ export function PlanEditor({ plan, onPlanChange, onDraftSave }: PlanEditorProps)
                       }}
                     >
                       {AGENT_LIST.map(a => (
-                        <option key={a} value={a}>{agentDisplayName(a)}</option>
+                        <option key={a} value={a} title={AGENT_DESCRIPTIONS[a] || ''}>{agentDisplayName(a)}</option>
                       ))}
                       {/* Preserve current value if it's not in the standard list */}
                       {!AGENT_LIST.includes(step.agent_name as typeof AGENT_LIST[number]) && (
-                        <option value={step.agent_name}>{agentDisplayName(step.agent_name)}</option>
+                        <option value={step.agent_name} title={AGENT_DESCRIPTIONS[step.agent_name] || ''}>{agentDisplayName(step.agent_name)}</option>
                       )}
                     </select>
                   ) : (
@@ -323,7 +398,8 @@ export function PlanEditor({ plan, onPlanChange, onDraftSave }: PlanEditorProps)
                     {'\u00d7'}
                   </button>
                 </div>
-              ))}
+                );
+              })}
 
               {/* CJ-12: empty phase placeholder */}
               {phase.steps.length === 0 && (

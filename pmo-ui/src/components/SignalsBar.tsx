@@ -355,7 +355,7 @@ export function SignalsBar({ onForge, onOpenCountChange }: SignalsBarProps) {
 
       {/* Signal rows */}
       <ul role="list" style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-        {open.map(sig => {
+        {open.map((sig, index) => {
           const sideBorderColor = selected.has(sig.signal_id) ? T.accent + '44' : T.border;
           return (
           <li
@@ -384,12 +384,18 @@ export function SignalsBar({ onForge, onOpenCountChange }: SignalsBarProps) {
               onClick={e => e.stopPropagation()}
               style={{ cursor: 'pointer', width: 11, height: 11, accentColor: T.accent, flexShrink: 0 }}
             />
-            <span style={{ fontSize: 9, color: T.text3, fontFamily: 'monospace' }}>
-              {sig.signal_id.slice(0, 12)}
+            <span
+              title={sig.signal_id}
+              style={{ fontSize: 9, color: T.text3, fontFamily: 'monospace' }}
+            >
+              #{index + 1}
             </span>
             <span style={{ fontSize: 9, color: T.text0, flex: 1 }}>{sig.title}</span>
             {sig.description && (
-              <span style={{ fontSize: 9, color: T.text3, maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              <span
+                title={sig.description}
+                style={{ fontSize: 9, color: T.text3, maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+              >
                 {sig.description}
               </span>
             )}

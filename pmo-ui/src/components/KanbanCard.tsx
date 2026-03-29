@@ -2,7 +2,6 @@ import { useState } from 'react';
 import type { PmoCard, ForgePlanResponse } from '../api/types';
 import { T, PRIORITY_COLOR } from '../styles/tokens';
 import { api } from '../api/client';
-import { PlanPreview } from './PlanPreview';
 import { agentDisplayName } from '../utils/agent-names';
 
 interface KanbanCardProps {
@@ -40,8 +39,8 @@ function Pips({ done, total, color }: { done: number; total: number; color: stri
         <div
           key={i}
           style={{
-            width: 4,
-            height: 4,
+            width: 6,
+            height: 6,
             borderRadius: 1,
             background: i < done ? color : T.bg3,
           }}
@@ -400,7 +399,7 @@ export function KanbanCard({ card, columnColor, onForge, onEditPlan }: KanbanCar
             </div>
           )}
 
-          {/* Plan preview */}
+          {/* Plan preview — inline expandable list */}
           {showPlan && (
             <div
               onClick={e => e.stopPropagation()}
@@ -420,7 +419,7 @@ export function KanbanCard({ card, columnColor, onForge, onEditPlan }: KanbanCar
                 </div>
               )}
               {!planLoading && planData && (
-                <PlanPreview plan={planData} />
+                <InlinePlanView plan={planData} />
               )}
               {!planLoading && !planData && (
                 <div style={{ fontSize: 8, color: T.text3, fontStyle: 'italic', padding: 8 }}>
@@ -431,6 +430,114 @@ export function KanbanCard({ card, columnColor, onForge, onEditPlan }: KanbanCar
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+function InlinePlanView({ plan }: { plan: ForgePlanResponse }) {
+  const [expandedPhase, setExpandedPhase] = useState<number | null>(0);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+      {plan.task_summary && (
+        <div style={{
+          fontSize: 9,
+          color: T.text2,
+          padding: '4px 8px',
+          background: T.bg2,
+          borderRadius: 3,
+          borderLeft: `2px solid ${T.accent}`,
+          marginBottom: 2,
+        }}>
+          {plan.task_summary}
+        </div>
+      )}
+      {plan.phases.map((phase, pi) => {
+        const isOpen = expandedPhase === pi;
+        return (
+          <div key={String(phase.phase_id)} style={{
+            border: `1px solid ${T.border}`,
+            borderRadius: 3,
+            overflow: 'hidden',
+          }}>
+            <div
+              role="button"
+              tabIndex={0}
+              onClick={() => setExpandedPhase(isOpen ? null : pi)}
+              onKeyDown={e => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  setExpandedPhase(isOpen ? null : pi);
+                }
+              }}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 5,
+                padding: '4px 8px',
+                background: T.bg2,
+                cursor: 'pointer',
+                borderBottom: isOpen ? `1px solid ${T.border}` : 'none',
+              }}
+            >
+              <span style={{ fontSize: 8, color: T.text3, minWidth: 10 }}>
+                {isOpen ? '▾' : '▸'}
+              </span>
+              <span style={{ fontSize: 9, fontWeight: 600, color: T.text0, flex: 1 }}>
+                {pi + 1}. {phase.name}
+              </span>
+              <span style={{ fontSize: 8, color: T.text3 }}>
+                {phase.steps.length} steps
+              </span>
+              {phase.gate && (
+                <span style={{ fontSize: 8, color: T.yellow }}>gate</span>
+              )}
+            </div>
+            {isOpen && (
+              <div>
+                {phase.steps.map((step, si) => (
+                  <div
+                    key={step.step_id}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'flex-start',
+                      gap: 6,
+                      padding: '4px 8px',
+                      borderBottom: si < phase.steps.length - 1 ? `1px solid ${T.border}` : 'none',
+                    }}
+                  >
+                    <span style={{ fontSize: 8, color: T.text4, minWidth: 14, flexShrink: 0 }}>
+                      {si + 1}.
+                    </span>
+                    <span style={{ fontSize: 9, color: T.text1, flex: 1, lineHeight: 1.4 }}>
+                      {step.task_description}
+                    </span>
+                    {step.agent_name && (
+                      <span style={{
+                        fontSize: 8,
+                        color: T.cyan,
+                        background: T.cyan + '14',
+                        border: `1px solid ${T.cyan}22`,
+                        padding: '1px 4px',
+                        borderRadius: 3,
+                        whiteSpace: 'nowrap',
+                        flexShrink: 0,
+                      }}>
+                        {agentDisplayName(step.agent_name)}
+                      </span>
+                    )}
+                  </div>
+                ))}
+                {phase.steps.length === 0 && (
+                  <div style={{ fontSize: 8, color: T.text3, fontStyle: 'italic', padding: '4px 8px' }}>
+                    No steps.
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }

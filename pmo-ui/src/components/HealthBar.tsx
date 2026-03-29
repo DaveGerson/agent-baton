@@ -44,6 +44,8 @@ export function HealthBar({ health, onProgramClick, activeProgram }: HealthBarPr
         const barColor = programColor(pg.program);
         const isActive = activeProgram === pg.program;
         const isClickable = !!onProgramClick;
+        const computedTotal = (pg.active || 0) + (pg.completed || 0) + (pg.blocked || 0) + (pg.failed || 0);
+        const totalMismatch = pg.total_plans > 0 && computedTotal !== pg.total_plans;
 
         return (
           <div
@@ -91,6 +93,14 @@ export function HealthBar({ health, onProgramClick, activeProgram }: HealthBarPr
             </div>
             <div style={{ fontSize: 9, color: T.text2, marginTop: 2 }}>
               {pg.total_plans} plans
+              {totalMismatch && (
+                <span
+                  title="Data inconsistency: counts don't sum to total"
+                  style={{ marginLeft: 3, color: T.yellow, cursor: 'help' }}
+                >
+                  {'⚠'}
+                </span>
+              )}
               {pg.active > 0 && ` · ${pg.active} active`}
               {pg.completed > 0 && ` · ${pg.completed} done`}
               {pg.blocked > 0 && (
