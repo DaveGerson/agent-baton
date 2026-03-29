@@ -45,6 +45,7 @@ export function SignalsBar({ onForge, onOpenCountChange }: SignalsBarProps) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [batchResolving, setBatchResolving] = useState(false);
   const [showBatchConfirm, setShowBatchConfirm] = useState(false);
+  const [showResolved, setShowResolved] = useState(false);
   const [resolveError, setResolveError] = useState<string | null>(null);
   const mountedRef = useRef(true);
   const resolveErrorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -245,6 +246,21 @@ export function SignalsBar({ onForge, onOpenCountChange }: SignalsBarProps) {
               {batchResolving ? 'Resolving…' : `Resolve Selected (${selected.size})`}
             </button>
           )}
+          <button
+            onClick={() => setShowResolved(s => !s)}
+            style={{
+              padding: '2px 6px',
+              borderRadius: 3,
+              border: `1px solid ${T.text3}44`,
+              background: showResolved ? T.text3 + '15' : 'transparent',
+              color: T.text3,
+              fontSize: 9,
+              fontWeight: 600,
+              cursor: 'pointer',
+            }}
+          >
+            {showResolved ? 'Hide Resolved' : 'Show Resolved'}
+          </button>
           <button
             onClick={() => setShowAdd(!showAdd)}
             style={{
@@ -456,6 +472,35 @@ export function SignalsBar({ onForge, onOpenCountChange }: SignalsBarProps) {
           );
         })}
       </ul>
+
+      {showResolved && (
+        <ul role="list" style={{ listStyle: 'none', padding: 0, margin: 0, opacity: 0.6 }}>
+          {signals.filter(s => s.status === 'resolved').map((sig, index) => (
+            <li key={sig.signal_id} style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              padding: '4px 8px',
+              background: T.bg1,
+              borderRadius: 3,
+              borderTop: `1px solid ${T.border}`,
+              borderRight: `1px solid ${T.border}`,
+              borderBottom: `1px solid ${T.border}`,
+              borderLeft: `3px solid ${T.text3}`,
+              marginBottom: 3,
+              textDecoration: 'line-through',
+            }}>
+              <span style={{ fontSize: 9, color: T.text4, fontFamily: 'monospace' }}>#{index + 1}</span>
+              <span style={{ fontSize: 9, color: T.text3, flex: 1 }}>{sig.title}</span>
+              <span style={{
+                display: 'inline-flex', alignItems: 'center', padding: '1px 5px',
+                borderRadius: 3, fontSize: 9, fontWeight: 600,
+                color: T.green, background: T.green + '14',
+              }}>resolved</span>
+            </li>
+          ))}
+        </ul>
+      )}
 
       {!loading && open.length === 0 && (
         <div style={{ fontSize: 8, color: T.text3, fontStyle: 'italic', padding: 6 }}>

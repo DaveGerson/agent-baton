@@ -415,23 +415,29 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
               />
               <div
                 id="forge-description-hint"
-                style={{ fontSize: 9, color: T.text3, marginTop: 3 }}
+                style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9, color: T.text3, marginTop: 3 }}
               >
-                Required. Describe the task in detail. This is used to generate the plan.
+                <span>Required. Describe the task in detail.</span>
+                <span style={{
+                  color: description.length > 4000 ? T.red : description.length > 3000 ? T.yellow : T.text3,
+                  fontFamily: 'monospace',
+                }}>
+                  {description.length} / 4000
+                </span>
               </div>
             </FormField>
 
             <button
               onClick={handleGenerate}
-              disabled={phase === 'generating' || !description.trim() || !projectId}
+              disabled={phase === 'generating' || !description.trim() || description.trim().length < 20 || !projectId}
               aria-describedby={generateError ? 'forge-generate-error' : undefined}
               style={{
                 alignSelf: 'flex-start', padding: '7px 20px', borderRadius: 4,
                 border: 'none',
-                background: phase === 'generating' || !description.trim() || !projectId ? T.bg3 : `linear-gradient(135deg, ${T.accent}, #2563eb)`,
+                background: phase === 'generating' || !description.trim() || description.trim().length < 20 || !projectId ? T.bg3 : `linear-gradient(135deg, ${T.accent}, #2563eb)`,
                 color: '#fff', fontSize: 10, fontWeight: 700,
-                cursor: phase === 'generating' || !description.trim() || !projectId ? 'not-allowed' : 'pointer',
-                opacity: phase === 'generating' || !description.trim() || !projectId ? 0.6 : 1,
+                cursor: phase === 'generating' || !description.trim() || description.trim().length < 20 || !projectId ? 'not-allowed' : 'pointer',
+                opacity: phase === 'generating' || !description.trim() || description.trim().length < 20 || !projectId ? 0.6 : 1,
               }}
             >
               {phase === 'generating' ? 'Generating...' : 'Generate Plan \u2192'}

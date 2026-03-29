@@ -119,6 +119,20 @@ export function PlanEditor({ plan, onPlanChange, onDraftSave, projectId }: PlanE
     onPlanChange({ ...plan, phases: plan.phases.filter((_, i) => i !== phaseIdx) });
   }
 
+  function addPhase() {
+    const newPhaseId = plan.phases.length;
+    onPlanChange({
+      ...plan,
+      phases: [...plan.phases, {
+        phase_id: newPhaseId,
+        name: `Phase ${newPhaseId + 1}`,
+        steps: [],
+        gate: undefined,
+      } as ForgePlanPhase],
+    });
+    setExpandedPhase(newPhaseId);
+  }
+
   function handleDragStart(phaseIdx: number, stepIdx: number) {
     setDragState({ phaseIdx, stepIdx });
     setDropTarget(null);
@@ -426,6 +440,21 @@ export function PlanEditor({ plan, onPlanChange, onDraftSave, projectId }: PlanE
           </div>
         );
       })}
+      <button
+        onClick={addPhase}
+        style={{
+          padding: '4px 12px',
+          borderRadius: 4,
+          border: `1px dashed ${T.border}`,
+          background: 'transparent',
+          color: T.text3,
+          fontSize: 9,
+          cursor: 'pointer',
+          width: '100%',
+        }}
+      >
+        + Add Phase
+      </button>
     </div>
   );
 }

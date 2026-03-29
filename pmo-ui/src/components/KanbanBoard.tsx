@@ -20,6 +20,8 @@ interface KanbanBoardProps {
 export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSignals, onToggleSignals }: KanbanBoardProps) {
   const { cards, health, loading, error, lastUpdated, connectionMode, mutateCard } = usePmoBoard();
   const [filter, setFilter] = usePersistedState<string>('pmo:board-filter', 'all');
+  const [search, setSearch] = usePersistedState<string>('pmo:board-search', '');
+  const [sortBy, setSortBy] = usePersistedState<string>('pmo:board-sort', 'priority');
   const [openSignalCount, setOpenSignalCount] = useState(0);
 
   // Keep signal badge current regardless of whether SignalsBar is mounted.
@@ -36,9 +38,29 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
 
   const programs = Array.from(new Set(cards.map(c => c.program))).sort();
 
-  const filtered = filter === 'all'
-    ? cards
-    : cards.filter(c => c.program.toUpperCase() === filter.toUpperCase());
+  const filtered = cards
+    .filter(c => filter === 'all' || c.program.toUpperCase() === filter.toUpperCase())
+    .filter(c => {
+      if (!search.trim()) return true;
+      const q = search.toLowerCase();
+      return c.title.toLowerCase().includes(q)
+        || c.project_id.toLowerCase().includes(q)
+        || (c.external_id ?? '').toLowerCase().includes(q)
+        || (c.current_phase ?? '').toLowerCase().includes(q);
+    });
+
+  const sorted = [...filtered].sort((a, b) => {
+    switch (sortBy) {
+      case 'priority': return b.priority - a.priority;
+      case 'updated': return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
+      case 'risk': {
+        const riskOrder: Record<string, number> = { high: 3, medium: 2, low: 1 };
+        return (riskOrder[b.risk_level ?? 'low'] ?? 0) - (riskOrder[a.risk_level ?? 'low'] ?? 0);
+      }
+      case 'progress': return (b.steps_completed / Math.max(b.steps_total, 1)) - (a.steps_completed / Math.max(a.steps_total, 1));
+      default: return 0;
+    }
+  });
 
   const awaitingHuman = cards.filter(c => c.column === 'awaiting_human').length;
   const executing = cards.filter(c => c.column === 'executing').length;
@@ -85,6 +107,43 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
             </FilterBtn>
           ))}
         </div>
+
+        <input
+          type="search"
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+          placeholder="Search cards..."
+          aria-label="Search cards"
+          style={{
+            fontSize: 9,
+            padding: '3px 8px',
+            borderRadius: 3,
+            border: `1px solid ${T.border}`,
+            background: T.bg1,
+            color: T.text0,
+            outline: 'none',
+            width: 140,
+          }}
+        />
+
+        <select
+          value={sortBy}
+          onChange={e => setSortBy(e.target.value)}
+          aria-label="Sort cards"
+          style={{
+            fontSize: 9,
+            padding: '3px 6px',
+            borderRadius: 3,
+            border: `1px solid ${T.border}`,
+            background: T.bg1,
+            color: T.text0,
+          }}
+        >
+          <option value="priority">Priority</option>
+          <option value="updated">Last Updated</option>
+          <option value="risk">Risk</option>
+          <option value="progress">Progress</option>
+        </select>
 
         <div style={{ width: 1, height: 14, background: T.border }} />
 
@@ -230,7 +289,7 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
       {/* Kanban columns */}
       <div style={{ flex: 1, display: 'flex', overflow: 'auto', padding: '10px 6px' }}>
         {COLUMNS.map(col => {
-          const colCards = filtered.filter(c => c.column === col.id);
+          const colCards = sorted.filter(c => c.column === col.id);
           return (
             <section
               key={col.id}
@@ -284,13 +343,14 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
                   <div style={{
                     padding: '14px 8px',
                     textAlign: 'center',
-                    fontSize: 7,
+                    fontSize: 9,
                     color: T.text4,
                     fontStyle: 'italic',
                     border: `1px dashed ${T.border}`,
                     borderRadius: 4,
+                    lineHeight: 1.4,
                   }}>
-                    Empty
+                    {columnEmptyText(col.id)}
                   </div>
                 )}
               </div>
@@ -300,6 +360,17 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
       </div>
     </div>
   );
+}
+
+function columnEmptyText(colId: string): string {
+  switch (colId) {
+    case 'queued': return 'No plans ready to execute. Create one in The Forge.';
+    case 'executing': return 'No active executions.';
+    case 'awaiting_human': return 'No decisions required.';
+    case 'validating': return 'No plans under validation.';
+    case 'deployed': return 'No completed plans yet.';
+    default: return 'Empty';
+  }
 }
 
 function FilterBtn({
