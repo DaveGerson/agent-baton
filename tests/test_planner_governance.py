@@ -730,6 +730,8 @@ class TestPolicyEngineCalledDuringPlan:
             knowledge=[],
             knowledge_pack=[],
             intervention="low",
+            complexity=None,
+            model=None,
         )
 
         captured: list[PolicyEngine] = []

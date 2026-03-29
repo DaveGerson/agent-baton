@@ -235,15 +235,16 @@ class TestRealPacksLoad:
         reg.load_directory(REAL_KNOWLEDGE_DIR)
         return reg
 
-    def test_loads_three_packs(self, real_registry: KnowledgeRegistry) -> None:
+    def test_loads_four_packs(self, real_registry: KnowledgeRegistry) -> None:
         packs = real_registry.all_packs
-        assert len(packs) == 3
+        assert len(packs) == 4
 
     def test_expected_pack_names_present(self, real_registry: KnowledgeRegistry) -> None:
         names = set(real_registry.all_packs.keys())
         assert "agent-baton" in names
         assert "ai-orchestration" in names
         assert "case-studies" in names
+        assert "planning-taxonomy" in names
 
     def test_agent_baton_pack_has_docs(self, real_registry: KnowledgeRegistry) -> None:
         pack = real_registry.get_pack("agent-baton")

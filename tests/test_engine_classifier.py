@@ -567,7 +567,7 @@ class TestEndToEndClassification:
         mock_call.return_value = json.dumps({
             "task_type": "bug-fix",
             "complexity": "light",
-            "agents": ["backend-engineer"],
+            "agents": ["backend-engineer--python"],
             "phases": ["Implement"],
             "reasoning": "Simple fix",
         })
