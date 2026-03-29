@@ -1,9 +1,10 @@
 import { useState, useEffect, useRef } from 'react';
 import type { PmoCard, ForgePlanResponse } from '../api/types';
-import { T, PRIORITY_COLOR } from '../styles/tokens';
+import { T, PRIORITY_COLOR, programColor } from '../styles/tokens';
 import { api } from '../api/client';
 import { agentDisplayName } from '../utils/agent-names';
 import { useToast } from '../contexts/ToastContext';
+import { PlanPreview } from './PlanPreview';
 
 interface KanbanCardProps {
   card: PmoCard;
@@ -53,7 +54,7 @@ function Pips({ done, total, color }: { done: number; total: number; color: stri
 }
 
 function ProgramDot({ program, size = 7 }: { program: string; size?: number }) {
-  const color = programDotColor(program);
+  const color = programColor(program);
   return (
     <div
       title={program}
@@ -62,23 +63,44 @@ function ProgramDot({ program, size = 7 }: { program: string; size?: number }) {
   );
 }
 
-export function KanbanCard({ card, columnColor, onForge, onEditPlan, onMutateCard }: KanbanCardProps) {
-  const toast = useToast();
-  const [expanded, setExpanded] = useState(false);
+function usePlanPreview(cardId: string) {
   const [showPlan, setShowPlan] = useState(false);
   const [planData, setPlanData] = useState<ForgePlanResponse | null>(null);
   const [planLoading, setPlanLoading] = useState(false);
+
+  async function handleViewPlan(e: React.MouseEvent) {
+    e.stopPropagation();
+    if (showPlan) {
+      setShowPlan(false);
+      return;
+    }
+    setShowPlan(true);
+    if (planData) return;
+    setPlanLoading(true);
+    try {
+      const result = await api.getCardDetail(cardId);
+      setPlanData(result.plan);
+    } catch {
+      // silent
+    } finally {
+      setPlanLoading(false);
+    }
+  }
+
+  return { showPlan, planData, planLoading, handleViewPlan };
+}
+
+function useExecuteCard(
+  cardId: string,
+  toast: ReturnType<typeof useToast>,
+  onMutateCard?: (cardId: string, updater: (card: PmoCard) => PmoCard) => void,
+) {
   const [execLoading, setExecLoading] = useState(false);
   const [execResult, setExecResult] = useState<string | null>(null);
   const execTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const isHuman = card.column === 'awaiting_human';
-  const isQueued = card.column === 'queued';
-  const priorityColor = PRIORITY_COLOR[card.priority] ?? T.text2;
 
   useEffect(() => {
-    return () => {
-      if (execTimerRef.current) clearTimeout(execTimerRef.current);
-    };
+    return () => { if (execTimerRef.current) clearTimeout(execTimerRef.current); };
   }, []);
 
   async function handleExecute(e: React.MouseEvent) {
@@ -87,9 +109,9 @@ export function KanbanCard({ card, columnColor, onForge, onEditPlan, onMutateCar
     setExecLoading(true);
     setExecResult(null);
     try {
-      const resp = await api.executeCard(card.card_id);
+      const resp = await api.executeCard(cardId);
       setExecResult(`Launched (PID ${resp.pid})`);
-      onMutateCard?.(card.card_id, c => ({ ...c, column: 'executing' }));
+      onMutateCard?.(cardId, c => ({ ...c, column: 'executing' }));
       toast.success('Execution launched');
     } catch (err) {
       setExecResult(err instanceof Error ? err.message : 'Launch failed');
@@ -100,24 +122,22 @@ export function KanbanCard({ card, columnColor, onForge, onEditPlan, onMutateCar
     }
   }
 
-  async function handleViewPlan(e: React.MouseEvent) {
+  function dismissExecResult(e: React.MouseEvent) {
     e.stopPropagation();
-    if (showPlan) {
-      setShowPlan(false);
-      return;
-    }
-    setShowPlan(true);
-    if (planData) return; // already fetched — use cache
-    setPlanLoading(true);
-    try {
-      const result = await api.getCardDetail(card.card_id);
-      setPlanData(result.plan);
-    } catch {
-      // silent — plan unavailable
-    } finally {
-      setPlanLoading(false);
-    }
+    setExecResult(null);
   }
+
+  return { execLoading, execResult, handleExecute, dismissExecResult };
+}
+
+export function KanbanCard({ card, columnColor, onForge, onEditPlan, onMutateCard }: KanbanCardProps) {
+  const [expanded, setExpanded] = useState(false);
+  const toast = useToast();
+  const { showPlan, planData, planLoading, handleViewPlan } = usePlanPreview(card.card_id);
+  const { execLoading, execResult, handleExecute, dismissExecResult } = useExecuteCard(card.card_id, toast, onMutateCard);
+  const isHuman = card.column === 'awaiting_human';
+  const isQueued = card.column === 'queued';
+  const priorityColor = PRIORITY_COLOR[card.priority] ?? T.text2;
 
   const borderColor = isHuman ? T.orange + '55' : expanded ? columnColor + '55' : T.border;
 
@@ -395,7 +415,7 @@ export function KanbanCard({ card, columnColor, onForge, onEditPlan, onMutateCar
               <span style={{ flex: 1 }}>{execResult}</span>
               <button
                 aria-label="Dismiss execution result"
-                onClick={e => { e.stopPropagation(); setExecResult(null); }}
+                onClick={dismissExecResult}
                 style={{
                   background: 'none',
                   border: 'none',
@@ -432,7 +452,7 @@ export function KanbanCard({ card, columnColor, onForge, onEditPlan, onMutateCar
                 </div>
               )}
               {!planLoading && planData && (
-                <InlinePlanView plan={planData} />
+                <PlanPreview plan={planData} collapsible />
               )}
               {!planLoading && !planData && (
                 <div style={{ fontSize: 8, color: T.text3, fontStyle: 'italic', padding: 8 }}>
@@ -447,131 +467,10 @@ export function KanbanCard({ card, columnColor, onForge, onEditPlan, onMutateCar
   );
 }
 
-function InlinePlanView({ plan }: { plan: ForgePlanResponse }) {
-  const [expandedPhase, setExpandedPhase] = useState<number | null>(0);
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-      {plan.task_summary && (
-        <div style={{
-          fontSize: 9,
-          color: T.text2,
-          padding: '4px 8px',
-          background: T.bg2,
-          borderRadius: 3,
-          borderLeft: `2px solid ${T.accent}`,
-          marginBottom: 2,
-        }}>
-          {plan.task_summary}
-        </div>
-      )}
-      {plan.phases.map((phase, pi) => {
-        const isOpen = expandedPhase === pi;
-        return (
-          <div key={String(phase.phase_id)} style={{
-            border: `1px solid ${T.border}`,
-            borderRadius: 3,
-            overflow: 'hidden',
-          }}>
-            <div
-              role="button"
-              tabIndex={0}
-              onClick={() => setExpandedPhase(isOpen ? null : pi)}
-              onKeyDown={e => {
-                if (e.key === 'Enter' || e.key === ' ') {
-                  e.preventDefault();
-                  setExpandedPhase(isOpen ? null : pi);
-                }
-              }}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 5,
-                padding: '4px 8px',
-                background: T.bg2,
-                cursor: 'pointer',
-                borderBottom: isOpen ? `1px solid ${T.border}` : 'none',
-              }}
-            >
-              <span style={{ fontSize: 8, color: T.text3, minWidth: 10 }}>
-                {isOpen ? '▾' : '▸'}
-              </span>
-              <span style={{ fontSize: 9, fontWeight: 600, color: T.text0, flex: 1 }}>
-                {pi + 1}. {phase.name}
-              </span>
-              <span style={{ fontSize: 8, color: T.text3 }}>
-                {phase.steps.length} steps
-              </span>
-              {phase.gate && (
-                <span style={{ fontSize: 8, color: T.yellow }}>gate</span>
-              )}
-            </div>
-            {isOpen && (
-              <div>
-                {phase.steps.map((step, si) => (
-                  <div
-                    key={step.step_id}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'flex-start',
-                      gap: 6,
-                      padding: '4px 8px',
-                      borderBottom: si < phase.steps.length - 1 ? `1px solid ${T.border}` : 'none',
-                    }}
-                  >
-                    <span style={{ fontSize: 8, color: T.text4, minWidth: 14, flexShrink: 0 }}>
-                      {si + 1}.
-                    </span>
-                    <span style={{ fontSize: 9, color: T.text1, flex: 1, lineHeight: 1.4 }}>
-                      {step.task_description}
-                    </span>
-                    {step.agent_name && (
-                      <span style={{
-                        fontSize: 8,
-                        color: T.cyan,
-                        background: T.cyan + '14',
-                        border: `1px solid ${T.cyan}22`,
-                        padding: '1px 4px',
-                        borderRadius: 3,
-                        whiteSpace: 'nowrap',
-                        flexShrink: 0,
-                      }}>
-                        {agentDisplayName(step.agent_name)}
-                      </span>
-                    )}
-                  </div>
-                ))}
-                {phase.steps.length === 0 && (
-                  <div style={{ fontSize: 8, color: T.text3, fontStyle: 'italic', padding: '4px 8px' }}>
-                    No steps.
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
 function fmtTime(iso: string): string {
   try {
     return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   } catch {
     return '—';
   }
-}
-
-const DOT_PALETTE = [
-  '#3b82f6', '#a78bfa', '#34d399', '#f87171',
-  '#38bdf8', '#fb923c', '#2dd4bf', '#c084fc',
-];
-
-function programDotColor(program: string): string {
-  let hash = 0;
-  for (let i = 0; i < program.length; i++) {
-    hash = (hash * 31 + program.charCodeAt(i)) >>> 0;
-  }
-  return DOT_PALETTE[hash % DOT_PALETTE.length];
 }

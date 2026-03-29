@@ -1,5 +1,5 @@
 import type { ProgramHealth } from '../api/types';
-import { T } from '../styles/tokens';
+import { T, programColor } from '../styles/tokens';
 
 interface HealthBarProps {
   health: Record<string, ProgramHealth>;
@@ -117,15 +117,3 @@ export function HealthBar({ health, onProgramClick, activeProgram }: HealthBarPr
   );
 }
 
-const PROGRAM_PALETTE = [
-  '#3b82f6', '#a78bfa', '#34d399', '#f87171',
-  '#38bdf8', '#fb923c', '#2dd4bf', '#c084fc',
-];
-
-function programColor(program: string): string {
-  let hash = 0;
-  for (let i = 0; i < program.length; i++) {
-    hash = (hash * 31 + program.charCodeAt(i)) >>> 0;
-  }
-  return PROGRAM_PALETTE[hash % PROGRAM_PALETTE.length];
-}

@@ -1,13 +1,122 @@
+import { useState } from 'react';
 import type { ForgePlanResponse } from '../api/types';
 import { T } from '../styles/tokens';
 import { agentDisplayName } from '../utils/agent-names';
 
 interface PlanPreviewProps {
   plan: ForgePlanResponse;
+  collapsible?: boolean;
 }
 
-export function PlanPreview({ plan }: PlanPreviewProps) {
+export function PlanPreview({ plan, collapsible = false }: PlanPreviewProps) {
+  const [expandedPhase, setExpandedPhase] = useState<number | null>(0);
   const totalSteps = plan.phases.reduce((acc, ph) => acc + ph.steps.length, 0);
+
+  if (collapsible) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        {plan.task_summary && (
+          <div style={{
+            fontSize: 9,
+            color: T.text2,
+            padding: '4px 8px',
+            background: T.bg2,
+            borderRadius: 3,
+            borderLeft: `2px solid ${T.accent}`,
+            marginBottom: 2,
+          }}>
+            {plan.task_summary}
+          </div>
+        )}
+        {plan.phases.map((phase, pi) => {
+          const isOpen = expandedPhase === pi;
+          return (
+            <div key={String(phase.phase_id)} style={{
+              border: `1px solid ${T.border}`,
+              borderRadius: 3,
+              overflow: 'hidden',
+            }}>
+              <div
+                role="button"
+                tabIndex={0}
+                onClick={() => setExpandedPhase(isOpen ? null : pi)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    setExpandedPhase(isOpen ? null : pi);
+                  }
+                }}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 5,
+                  padding: '4px 8px',
+                  background: T.bg2,
+                  cursor: 'pointer',
+                  borderBottom: isOpen ? `1px solid ${T.border}` : 'none',
+                }}
+              >
+                <span style={{ fontSize: 8, color: T.text3, minWidth: 10 }}>
+                  {isOpen ? '▾' : '▸'}
+                </span>
+                <span style={{ fontSize: 9, fontWeight: 600, color: T.text0, flex: 1 }}>
+                  {pi + 1}. {phase.name}
+                </span>
+                <span style={{ fontSize: 8, color: T.text3 }}>
+                  {phase.steps.length} steps
+                </span>
+                {phase.gate && (
+                  <span style={{ fontSize: 8, color: T.yellow }}>gate</span>
+                )}
+              </div>
+              {isOpen && (
+                <div>
+                  {phase.steps.map((step, si) => (
+                    <div
+                      key={step.step_id}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'flex-start',
+                        gap: 6,
+                        padding: '4px 8px',
+                        borderBottom: si < phase.steps.length - 1 ? `1px solid ${T.border}` : 'none',
+                      }}
+                    >
+                      <span style={{ fontSize: 8, color: T.text4, minWidth: 14, flexShrink: 0 }}>
+                        {si + 1}.
+                      </span>
+                      <span style={{ fontSize: 9, color: T.text1, flex: 1, lineHeight: 1.4 }}>
+                        {step.task_description}
+                      </span>
+                      {step.agent_name && (
+                        <span style={{
+                          fontSize: 8,
+                          color: T.cyan,
+                          background: T.cyan + '14',
+                          border: `1px solid ${T.cyan}22`,
+                          padding: '1px 4px',
+                          borderRadius: 3,
+                          whiteSpace: 'nowrap',
+                          flexShrink: 0,
+                        }}>
+                          {agentDisplayName(step.agent_name)}
+                        </span>
+                      )}
+                    </div>
+                  ))}
+                  {phase.steps.length === 0 && (
+                    <div style={{ fontSize: 8, color: T.text3, fontStyle: 'italic', padding: '4px 8px' }}>
+                      No steps.
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>

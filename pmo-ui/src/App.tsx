@@ -164,7 +164,6 @@ export default function App() {
             onNewPlan={() => openForge()}
             onSignalToForge={(sig) => openForge(sig)}
             onCardForge={handleCardForge}
-            onEditPlan={handleCardForge}
             showSignals={showSignals}
             onToggleSignals={toggleSignals}
           />

@@ -67,3 +67,16 @@ export const FONT_SIZES = {
   lg: '14px',   // section headers
   xl: '16px',   // page titles
 } as const;
+
+const PROGRAM_PALETTE = [
+  '#3b82f6', '#a78bfa', '#34d399', '#f87171',
+  '#38bdf8', '#fb923c', '#2dd4bf', '#c084fc',
+];
+
+export function programColor(program: string): string {
+  let hash = 0;
+  for (let i = 0; i < program.length; i++) {
+    hash = (hash * 31 + program.charCodeAt(i)) >>> 0;
+  }
+  return PROGRAM_PALETTE[hash % PROGRAM_PALETTE.length];
+}

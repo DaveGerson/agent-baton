@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
 import { T } from '../styles/tokens';
 import type { ForgePlanResponse, ForgePlanPhase, ForgePlanStep } from '../api/types';
 import { agentDisplayName } from '../utils/agent-names';
@@ -38,7 +38,7 @@ export function PlanEditor({ plan, onPlanChange, onDraftSave, projectId }: PlanE
   const [dropTarget, setDropTarget] = useState<{ phaseIdx: number; stepIdx: number } | null>(null);
   const originalPlanRef = useRef<string>(JSON.stringify(plan));
 
-  const isDirty = JSON.stringify(plan) !== originalPlanRef.current;
+  const isDirty = useMemo(() => JSON.stringify(plan) !== originalPlanRef.current, [plan]);
 
   // Reset the original snapshot when the plan prop is replaced wholesale
   // (e.g. after regeneration ForgePanel sets a brand-new plan).
