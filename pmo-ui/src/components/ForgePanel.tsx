@@ -66,6 +66,7 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [savePath, setSavePath] = useState<string | null>(null);
   const [regenLoading, setRegenLoading] = useState(false);
+  const [showDraftBanner, setShowDraftBanner] = useState(false);
 
   const abortRef = useRef<AbortController | null>(null);
   const panelBodyRef = useRef<HTMLDivElement>(null);
@@ -92,6 +93,20 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
   // users land at the top of the new phase content.
   useEffect(() => {
     panelBodyRef.current?.focus();
+  }, [phase]);
+
+  // Show the draft restore banner when entering preview if a draft exists.
+  useEffect(() => {
+    if (phase === 'preview') {
+      try {
+        const hasDraft = localStorage.getItem('pmo:plan-draft') !== null;
+        setShowDraftBanner(hasDraft);
+      } catch {
+        // localStorage unavailable — ignore.
+      }
+    } else {
+      setShowDraftBanner(false);
+    }
   }, [phase]);
 
   async function handleGenerate() {
@@ -154,11 +169,34 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
     }
   }
 
+  function handleRestoreDraft() {
+    try {
+      const raw = localStorage.getItem('pmo:plan-draft');
+      if (raw) {
+        setPlan(JSON.parse(raw) as ForgePlanResponse);
+      }
+    } catch {
+      // Corrupt draft — ignore.
+    }
+    setShowDraftBanner(false);
+  }
+
+  function handleDismissDraft() {
+    try {
+      localStorage.removeItem('pmo:plan-draft');
+    } catch {
+      // ignore.
+    }
+    setShowDraftBanner(false);
+  }
+
   async function handleApprove() {
     if (!plan) return;
     setSaveError(null);
     try {
       const result = await api.forgeApprove({ plan, project_id: projectId });
+      // Clear any saved draft once the plan is officially queued.
+      try { localStorage.removeItem('pmo:plan-draft'); } catch { /* ignore */ }
       setSavePath(result.path);
       setPhase('saved');
     } catch (err) {
@@ -410,6 +448,39 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
               </div>
             </div>
 
+            {/* Draft restore banner */}
+            {showDraftBanner && (
+              <div
+                role="status"
+                aria-label="Draft available"
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 8,
+                  padding: '6px 10px', borderRadius: 4,
+                  background: T.accent + '12',
+                  border: `1px solid ${T.accent}33`,
+                  fontSize: 9,
+                }}
+              >
+                <span style={{ color: T.text1, flex: 1 }}>Draft available from a previous session.</span>
+                <button
+                  onClick={handleRestoreDraft}
+                  style={{
+                    padding: '2px 8px', borderRadius: 3, border: `1px solid ${T.accent}55`,
+                    background: T.accent + '20', color: T.accent,
+                    fontSize: 9, fontWeight: 600, cursor: 'pointer',
+                  }}
+                >Restore</button>
+                <button
+                  onClick={handleDismissDraft}
+                  style={{
+                    padding: '2px 8px', borderRadius: 3, border: `1px solid ${T.border}`,
+                    background: 'transparent', color: T.text3,
+                    fontSize: 9, cursor: 'pointer',
+                  }}
+                >Dismiss</button>
+              </div>
+            )}
+
             <div
               id="forge-save-error"
               role="alert"
@@ -423,17 +494,37 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
               )}
             </div>
 
-            <PlanEditor plan={plan} onPlanChange={setPlan} />
+            <PlanEditor
+              plan={plan}
+              onPlanChange={setPlan}
+              onDraftSave={() => setShowDraftBanner(false)}
+            />
           </div>
         )}
 
         {/* REGENERATING */}
         {phase === 'regenerating' && (
-          <InterviewPanel
-            questions={interviewQuestions}
-            onSubmit={handleRegenerate}
-            onCancel={() => setPhase('preview')}
-          />
+          <div>
+            <button
+              onClick={() => setPhase('preview')}
+              style={{
+                background: 'none',
+                border: 'none',
+                color: T.text2,
+                fontSize: 9,
+                cursor: 'pointer',
+                padding: '4px 0',
+                marginBottom: 6,
+              }}
+            >
+              {'\u2190'} Back to Plan
+            </button>
+            <InterviewPanel
+              questions={interviewQuestions}
+              onSubmit={handleRegenerate}
+              onCancel={() => setPhase('preview')}
+            />
+          </div>
         )}
 
         {/* SAVED */}

@@ -13,11 +13,12 @@ interface KanbanBoardProps {
   onNewPlan: () => void;
   onSignalToForge: (signal: PmoSignal) => void;
   onCardForge: (card: PmoCard) => void;
+  onEditPlan?: (card: PmoCard) => void;
   showSignals: boolean;
   onToggleSignals: () => void;
 }
 
-export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSignals, onToggleSignals }: KanbanBoardProps) {
+export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, onEditPlan, showSignals, onToggleSignals }: KanbanBoardProps) {
   const { cards, health, loading, error, lastUpdated, connectionMode } = usePmoBoard();
   const [filter, setFilter] = usePersistedState<string>('pmo:board-filter', 'all');
   const [openSignalCount, setOpenSignalCount] = useState(0);
@@ -278,7 +279,7 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
               {/* Cards */}
               <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 4, overflowY: 'auto', paddingBottom: 16 }}>
                 {colCards.map(card => (
-                  <KanbanCard key={card.card_id} card={card} columnColor={col.color} onForge={onCardForge} />
+                  <KanbanCard key={card.card_id} card={card} columnColor={col.color} onForge={onCardForge} onEditPlan={onEditPlan} />
                 ))}
                 {colCards.length === 0 && (
                   <div style={{

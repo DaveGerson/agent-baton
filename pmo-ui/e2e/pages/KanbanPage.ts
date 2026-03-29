@@ -202,6 +202,14 @@ export class KanbanPage extends BasePage {
   }
 
   /**
+   * "Edit Plan" shortcut button inside an expanded card that has a plan
+   * (steps_total > 0).  Clicking it navigates directly to the Forge editor.
+   */
+  get editPlanButton(): Locator {
+    return this.page.getByRole('button', { name: /Edit Plan/ });
+  }
+
+  /**
    * The plan preview container that appears after clicking View Plan.
    * Identified by the "No plan available" fallback or phase content.
    */

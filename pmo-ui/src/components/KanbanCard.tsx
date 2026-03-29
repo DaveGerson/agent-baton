@@ -9,6 +9,7 @@ interface KanbanCardProps {
   card: PmoCard;
   columnColor: string;
   onForge?: (card: PmoCard) => void;
+  onEditPlan?: (card: PmoCard) => void;
 }
 
 function Chip({ children, color = T.text2 }: { children: React.ReactNode; color?: string }) {
@@ -60,7 +61,7 @@ function ProgramDot({ program, size = 7 }: { program: string; size?: number }) {
   );
 }
 
-export function KanbanCard({ card, columnColor, onForge }: KanbanCardProps) {
+export function KanbanCard({ card, columnColor, onForge, onEditPlan }: KanbanCardProps) {
   const [expanded, setExpanded] = useState(false);
   const [showPlan, setShowPlan] = useState(false);
   const [planData, setPlanData] = useState<ForgePlanResponse | null>(null);
@@ -324,6 +325,24 @@ export function KanbanCard({ card, columnColor, onForge }: KanbanCardProps) {
                 title="Open this card in the Forge for editing or re-planning"
               >
                 Re-forge
+              </button>
+            )}
+            {card.steps_total > 0 && onEditPlan && (
+              <button
+                onClick={e => { e.stopPropagation(); onEditPlan(card); }}
+                style={{
+                  padding: '3px 9px',
+                  borderRadius: 3,
+                  border: `1px solid ${T.accent}33`,
+                  background: T.accent + '15',
+                  color: T.accent,
+                  fontSize: 9,
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                }}
+                title="Jump directly to the Forge plan editor for this card"
+              >
+                {'\u270e'} Edit Plan
               </button>
             )}
             <button

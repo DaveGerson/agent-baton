@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { T } from '../styles/tokens';
 import type { ForgePlanResponse, ForgePlanPhase, ForgePlanStep } from '../api/types';
 import { agentDisplayName } from '../utils/agent-names';
@@ -16,11 +16,35 @@ const AGENT_LIST = [
 interface PlanEditorProps {
   plan: ForgePlanResponse;
   onPlanChange: (plan: ForgePlanResponse) => void;
+  onDraftSave?: () => void;
 }
 
-export function PlanEditor({ plan, onPlanChange }: PlanEditorProps) {
+export function PlanEditor({ plan, onPlanChange, onDraftSave }: PlanEditorProps) {
   const [expandedPhase, setExpandedPhase] = useState<number | null>(0);
   const [editingStep, setEditingStep] = useState<string | null>(null);
+  const [draftSaved, setDraftSaved] = useState(false);
+  const originalPlanRef = useRef<string>(JSON.stringify(plan));
+
+  const isDirty = JSON.stringify(plan) !== originalPlanRef.current;
+
+  // Reset the original snapshot when the plan prop is replaced wholesale
+  // (e.g. after regeneration ForgePanel sets a brand-new plan).
+  useEffect(() => {
+    originalPlanRef.current = JSON.stringify(plan);
+  // We intentionally only reset on task_id change — not on every edit.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [plan.task_id]);
+
+  function handleSaveDraft() {
+    try {
+      localStorage.setItem('pmo:plan-draft', JSON.stringify(plan));
+    } catch {
+      // Storage unavailable — silently ignore.
+    }
+    setDraftSaved(true);
+    onDraftSave?.();
+    setTimeout(() => setDraftSaved(false), 2000);
+  }
 
   const totalSteps = plan.phases.reduce((acc, ph) => acc + ph.steps.length, 0);
   const gateCount = plan.phases.filter(p => p.gate).length;
@@ -85,11 +109,36 @@ export function PlanEditor({ plan, onPlanChange }: PlanEditorProps) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
       {/* Stats bar */}
-      <div style={{ display: 'flex', gap: 6 }}>
+      <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
         <Stat label="Phases" value={String(plan.phases.length)} />
         <Stat label="Steps" value={String(totalSteps)} />
         <Stat label="Gates" value={String(gateCount)} color={T.yellow} />
         <Stat label="Risk" value={plan.risk_level} color={plan.risk_level === 'LOW' ? T.green : T.red} />
+        <div style={{ flex: 1 }} />
+        <button
+          onClick={handleSaveDraft}
+          aria-label="Save draft to local storage"
+          style={{
+            display: 'flex', alignItems: 'center', gap: 4,
+            padding: '3px 10px', borderRadius: 4,
+            background: T.green + '15',
+            color: T.green,
+            border: `1px solid ${T.green}33`,
+            fontSize: 9, fontWeight: 600, cursor: 'pointer',
+          }}
+        >
+          {isDirty && (
+            <span
+              aria-label="unsaved changes"
+              style={{
+                width: 4, height: 4, borderRadius: '50%',
+                background: '#f97316', flexShrink: 0,
+                display: 'inline-block',
+              }}
+            />
+          )}
+          {draftSaved ? 'Saved \u2713' : 'Save Draft'}
+        </button>
       </div>
 
       {/* Summary */}
