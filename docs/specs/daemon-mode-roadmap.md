@@ -2,7 +2,7 @@
 
 **Date**: 2026-03-27
 **Status**: Proposal
-**Scope**: 5 phases, from foundational wiring through event-driven autonomy
+**Scope**: 7 phases, from foundational wiring through maturation
 
 ---
 
@@ -515,4 +515,282 @@ supervisor reads events from daemon A's JSONL log to detect completion.
 | **5: Cross-Project Coordination** | Meta-plans, multi-daemon orchestration | Unified multi-repo view | Phase 1-3 |
 
 Phases 2, 3, and 4 can be developed in parallel after Phase 1. Phase 5
-depends on the patterns established in Phases 1-3.
+depends on the patterns established in Phases 1-3. Phases 6-7 are
+maturation phases that make the daemon smarter and more capable over time.
+
+---
+
+## Phase 6: Iterative Execution and Human-as-Participant
+
+**Goal**: The daemon supports multi-turn interactive sessions where the
+human is a participant, not just an approver. Steps can loop through
+multiple human-agent exchanges before completing.
+
+### Problem
+
+Every daemon spec so far treats the human as a gatekeeper at phase
+boundaries. But many valuable workflows are conversational: a UX review
+where a mock user and developer iterate on a design, an analytical deep
+dive where an executive steers data exploration, or a cost estimation
+session where a financial analyst refines assumptions with a cloud expert.
+These cannot be pre-planned — each step's outcome shapes the next question.
+
+### Deliverables
+
+**6.1 — Iterative step execution (`ActionType.INTERACT`)**
+
+A new step mode where the step stays open for multiple human-agent
+exchanges:
+
+```
+PENDING -> RUNNING -> AWAITING_INPUT -> RUNNING -> AWAITING_INPUT -> ... -> COMPLETE
+```
+
+New fields on `PlanStep`:
+- `mode: "batch" | "iterative"` (default: "batch", backward-compatible)
+- `max_iterations: int` (cost guard, default: 10)
+
+New fields on `StepResult`:
+- `interaction_history: list[InteractionTurn]`
+
+```python
+@dataclass
+class InteractionTurn:
+    role: str       # "agent" | "human"
+    content: str
+    timestamp: str  # ISO 8601
+    turn_number: int
+```
+
+When the engine encounters an iterative step:
+1. First dispatch: normal agent dispatch. Agent produces intermediate output.
+2. Engine returns `ActionType.INTERACT` with the agent's output.
+3. Human provides input via CLI (`baton execute interact --step-id X
+   --input "dig deeper into Q3"`) or API (`POST /executions/{id}/interact`).
+4. Engine calls `provide_input(step_id, input)` which re-dispatches the
+   agent with full `interaction_history` context.
+5. Repeat until human sends "done" signal or `max_iterations` reached.
+6. Step transitions to COMPLETE. Final turn's output becomes the outcome.
+
+**6.2 — Human-as-team-member**
+
+The human can be modeled as a `TeamMember` with `role: "director"`:
+
+```json
+{
+  "member_id": "1.1.h",
+  "agent_name": "human",
+  "role": "director",
+  "task_description": "Provide business direction and approve approach"
+}
+```
+
+When the `TaskWorker` encounters a member with `agent_name: "human"`, it
+publishes a `human.decision_needed` event and waits for input via the
+`DecisionManager` (or the new `INTERACT` mechanism). The human's input is
+recorded as a `TeamStepResult` alongside agent outputs.
+
+This enables patterns like:
+- Wave 0: Human describes what they want (director input)
+- Wave 1: Agents analyze/implement based on human direction
+- Wave 2: Human reviews and redirects
+- Wave 3: Agents revise
+
+**6.3 — Exploration sessions**
+
+A lightweight wrapper for conversational work that lives outside the
+execution engine:
+
+```bash
+baton explore "Why did revenue drop in Q3?" \
+  --agents data-analyst,data-scientist,subject-matter-expert \
+  --output findings.md
+```
+
+Internally: launches agents interactively in a conversation loop. Each
+agent dispatch accumulates context. When the human is satisfied, the
+session produces a `findings.md` artifact that can feed into a standard
+`baton plan --knowledge findings.md`.
+
+This bridges the gap between exploratory work (non-plannable) and
+structured execution (plan-driven), without modifying the core engine.
+
+### User Stories Addressed
+
+> *"I'm reviewing a UX design with agents. The mock user says 'the
+> checkout flow feels clunky.' I tell the frontend engineer to try a
+> single-page layout. We iterate three times until the flow feels right."*
+
+> *"I launch an analytical exploration. The data analyst shows me revenue
+> trends. I ask 'break that down by region.' We drill into APAC, discover
+> a pricing issue, and the session produces a findings doc that becomes
+> the plan for a fix."*
+
+> *"Our executive works with agents to prepare a board presentation.
+> Agents draft content, the exec refines messaging, agents update
+> visualizations. The human's voice drives the creative process."*
+
+### Key Files
+
+| File | Change |
+|---|---|
+| `models/execution.py` | `InteractionTurn`, `mode` on PlanStep |
+| `core/engine/executor.py` | `ActionType.INTERACT`, `provide_input()` |
+| `core/engine/dispatcher.py` | `build_continuation_prompt()` with history |
+| `core/runtime/worker.py` | Iterative step handling, human-member dispatch |
+| `cli/commands/execution/` | `baton execute interact`, `baton explore` |
+| `api/routes/executions.py` | `POST /executions/{id}/interact` |
+
+---
+
+## Phase 7: Cost Intelligence and Operational Maturity
+
+**Goal**: The daemon operates within budgets, learns from execution
+history, and provides operational tooling for MCP integration and
+async sessions.
+
+### Problem
+
+As daemon usage scales — more triggers, more teams, more concurrent
+executions — three operational gaps emerge: no cost visibility (team
+patterns cost 4x solo dispatch but there's no prediction or budgeting),
+no tool integration for daemon-spawned agents (MCP servers may not be
+available), and no support for work that spans days rather than minutes.
+
+### Deliverables
+
+**7.1 — Team cost prediction and budget-aware pattern selection**
+
+The `BudgetTuner` gains pattern-aware cost modeling:
+
+```python
+class TeamCostPredictor:
+    def predict(self, pattern: TeamPattern, task_type: str) -> CostEstimate:
+        """Predict token cost for a team pattern based on historical data.
+
+        Returns:
+            CostEstimate with: estimated_tokens, estimated_cost_usd,
+            confidence (low/medium/high), comparison_vs_solo
+        """
+```
+
+The planner uses this during pattern selection:
+- If remaining budget < predicted cost, fall back to solo dispatch
+- If cost > 2x solo and task is LOW risk, skip the pattern
+- Display cost comparison on PMO board: "Panel pattern: ~$2.50 (3 agents
+  + synthesis). Solo: ~$0.60. Recommended for HIGH severity bugs."
+
+**7.2 — MCP server access for daemon-spawned agents**
+
+Daemon agents are spawned via `claude --print`. MCP server configurations
+from the project's `.claude/settings.json` may not be inherited.
+
+Deliverables:
+- Verify MCP tool availability in `ClaudeCodeLauncher._build_command()`
+- Pass `--mcp-config` flag when spawning agents (if supported by CLI)
+- Fallback: inject MCP tool descriptions into the agent's system prompt
+  as structured instructions
+- Test matrix: which MCP servers work in headless mode (database, browser,
+  GitHub, etc.)
+
+This unlocks: database-backed data analysis (Journey 2), browser
+automation for UX testing (Journey 1), cloud pricing API access (Journey 3).
+
+**7.3 — Async multi-day sessions**
+
+Work that spans days with agents and humans contributing at their own pace:
+
+```python
+@dataclass
+class SessionState:
+    session_id: str
+    task_id: str
+    status: str              # "active" | "paused" | "complete"
+    participants: list[str]  # agent names + "human"
+    contributions: list[Contribution]
+    created_at: str
+    last_activity: str
+    deadline: str | None = None
+```
+
+Sessions differ from executions:
+- No fixed plan — contributions arrive in any order
+- Multiple humans can participate (each identified by name)
+- Sessions can be paused and resumed across days
+- A facilitator agent can synthesize when all inputs arrive (or deadline
+  hits)
+
+Use cases:
+- Multi-day design review (architect proposes Monday, reviewers respond
+  over 2 days, architect revises Thursday)
+- Cross-timezone collaboration (US PM describes requirements in morning,
+  agent team works "overnight," PM reviews next morning)
+- Stakeholder collection (5 inputs needed, agents and humans contribute
+  asynchronously over a week)
+
+**7.4 — Conflict escalation protocol**
+
+When agents genuinely disagree and synthesis cannot resolve it:
+
+1. Synthesis agent marks conflict as `unresolvable` with evidence from
+   each side
+2. Engine emits `ActionType.CONFLICT_ESCALATION` (distinct from APPROVAL)
+3. The PMO board renders a structured conflict view:
+   - Position A (agent + evidence + recommendation)
+   - Position B (agent + evidence + recommendation)
+   - Human makes a binding decision
+4. Decision recorded in the decision log as `type: "conflict-resolution"`
+   with the human's rationale
+5. All subsequent agents receive the resolution as an authoritative
+   constraint
+
+This is critical for: security vs. engineering trade-offs, regulatory
+compliance disagreements, architectural philosophy differences.
+
+### User Stories Addressed
+
+> *"Before launching a team pattern, I see the estimated cost on the PMO
+> board: '$2.50 for bug-triage-panel vs. $0.60 for solo engineer.' For a
+> low-severity UI bug, I choose solo. For a security incident, I choose
+> the panel."*
+
+> *"The data analyst agent connects to our production database via MCP
+> and runs queries during a daemon-driven analytical session."*
+
+> *"Our architect proposed microservices. Our engineer said monolith.
+> The synthesis agent couldn't resolve it, so it escalated with both
+> positions and evidence. I made the call (monolith) and the decision
+> became binding for all downstream agents."*
+
+> *"I kicked off a design review Monday. Three reviewers (2 agents, 1
+> human colleague) contributed feedback over 2 days. Thursday, the
+> architect agent synthesized all feedback and produced the final design."*
+
+### Key Files
+
+| File | Change |
+|---|---|
+| `core/learn/budget_tuner.py` | `TeamCostPredictor`, pattern cost modeling |
+| `core/runtime/claude_launcher.py` | MCP config passthrough |
+| `models/session.py` | New: `SessionState`, `Contribution` |
+| `core/runtime/session_manager.py` | New: async session lifecycle |
+| `models/execution.py` | `ActionType.CONFLICT_ESCALATION` |
+| `core/engine/executor.py` | Conflict escalation handling |
+| `api/routes/sessions.py` | Session CRUD + contribution endpoints |
+
+---
+
+## Phase Summary
+
+| Phase | Delivers | PMO Impact | Depends On |
+|---|---|---|---|
+| **1: Plan-Then-Execute** | `daemon run`, PMO quick-launch | "Describe and go" from board | — |
+| **2: Inbound Triggers** | Webhook intake, auto-triage, GitHub adapter | Bugs auto-appear as cards | Phase 1 |
+| **3: Decision-Gated Workflows** | Board-based approvals, diagnostic-first plans | Board becomes decision hub | Phase 1 |
+| **4: Adaptive Execution** | Runtime amendments, auto agent slots | Daemons self-correct | Phase 1 |
+| **5: Cross-Project Coordination** | Meta-plans, multi-daemon orchestration | Unified multi-repo view | Phase 1-3 |
+| **6: Iterative Execution** | `INTERACT` action, human-as-member, explore sessions | Conversational workflows on board | Phase 3, 5 |
+| **7: Operational Maturity** | Cost prediction, MCP tools, async sessions, conflict protocol | Budget-aware, production-grade | Phase 4, 6 |
+
+Phases 2-4 can be developed in parallel after Phase 1. Phases 6-7 are
+maturation phases that build on the foundation of 1-5.

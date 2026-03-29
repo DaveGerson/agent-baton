@@ -2,7 +2,7 @@
 
 **Date**: 2026-03-28
 **Status**: Proposal
-**Scope**: 4 phases, from team execution model through daemon-native orchestration
+**Scope**: 6 phases, from team execution model through maturation
 
 ---
 
@@ -1093,4 +1093,324 @@ A production bug arrives via PagerDuty webhook (daemon roadmap Phase 2).
 | **4: Daemon Integration** | Team-aware worker, crash recovery, monitoring, PMO visualization | Phase 1-3 |
 
 Phases 2 and 3 can be developed in parallel after Phase 1. Phase 4
-integrates everything into the production runtime.
+integrates everything into the production runtime. Phases 5-6 are
+maturation phases that make teams smarter and more capable over time.
+
+---
+
+### Phase 5: Team Learning and Adaptation
+
+#### 5.1 Problem Statement
+
+Every team execution is stateless. The system doesn't learn that certain
+agent combinations produce better results, that a particular pattern is
+overkill for low-severity bugs, or that a specific synthesis agent
+consistently loses signal. The `RetroEngine` and `PatternLearner` exist
+but operate at the individual agent and task-type level — they don't
+track team-level effectiveness.
+
+#### 5.2 Team-Level Retrospectives
+
+After a team step completes, the `RetroEngine` gains a
+`record_team_retrospective()` method that captures:
+
+```python
+@dataclass
+class TeamRetrospective:
+    task_id: str
+    step_id: str
+    pattern_id: str | None          # which pattern was used
+    team_composition: list[str]     # agent names in order
+    flow_type: str                  # diverge-converge, panel, etc.
+
+    # Quality metrics
+    synthesis_quality: float        # 0-1, based on how much of the
+                                    # synthesis was used vs. overridden
+    conflict_count: int             # number of disagreements surfaced
+    conflict_resolution_rate: float # how many were resolved vs. escalated
+    human_override_count: int       # how many agent decisions the human changed
+
+    # Efficiency metrics
+    total_tokens: int
+    total_duration_seconds: float
+    tokens_per_member: dict[str, int]
+    wave_count: int
+    redundancy_score: float         # 0-1, how much output overlapped
+                                    # between parallel members
+
+    # Outcome metrics
+    task_type: str
+    task_complexity: str
+    final_status: str               # complete, failed
+    files_changed: int
+    downstream_issues: int          # bugs found in code this team wrote
+                                    # (populated by later retrospectives)
+```
+
+**Where data comes from:**
+- `synthesis_quality`: When a human overrides a synthesis output (via
+  `approve-with-feedback`), the override rate across executions measures
+  synthesis reliability.
+- `redundancy_score`: Text similarity between parallel members' outputs.
+  High redundancy means the team is too homogeneous — the pattern isn't
+  adding diverse perspectives.
+- `downstream_issues`: Populated retroactively. When a bug-fix execution
+  traces to code written by a prior team execution, the prior team's
+  retrospective gets an `issues_found` increment.
+
+#### 5.3 Team Composition Optimization
+
+The `PatternLearner` gains team-aware pattern matching:
+
+```python
+class TeamPatternLearner:
+    def recommend_pattern(
+        self, task_type: str, complexity: str, agents_available: list[str],
+    ) -> PatternRecommendation:
+        """Recommend a pattern based on historical team retrospectives.
+
+        Returns:
+            PatternRecommendation with: pattern_id, confidence,
+            recommended_agents (ordered), reasoning, historical_stats
+        """
+```
+
+Recommendations are based on:
+- **Success rate by pattern**: "Bug-triage-panel resolves 85% of HIGH
+  severity bugs in one pass. Solo dispatch resolves 60%."
+- **Agent pairing effectiveness**: "When architect + security-reviewer
+  are paired, security issues found per execution is 2.3x higher than
+  security-reviewer alone."
+- **Redundancy avoidance**: "backend-engineer + backend-engineer--python
+  on the same team produces 70% output overlap. Drop one."
+- **Synthesis agent ranking**: "architect as synthesizer retains 90% of
+  panelist insights. orchestrator retains 75%."
+
+#### 5.4 Team Calibration for New Agents
+
+When a new agent is created via `talent-builder`, the system has no
+performance data for it. Team calibration addresses this:
+
+1. **Shadow mode**: The new agent runs alongside an established agent
+   on the same task. Both produce output, but only the established
+   agent's output is used. The new agent's output is compared for
+   quality.
+2. **Graduated integration**: After N shadow runs with acceptable quality,
+   the agent is promoted to active team participation.
+3. **A/B team patterns**: For the same task type, alternate between
+   teams with and without the new agent. Compare outcomes over time.
+
+#### 5.5 User Stories
+
+> *"The system recommends the bug-triage-panel for this P0 bug because
+> historically, panels catch security issues 2.3x more often than solo
+> dispatch for this task type."*
+
+> *"I created a new cloud-cost-expert agent. The system runs it in shadow
+> mode alongside the existing SME for 5 executions. Once it proves
+> reliable, it replaces the SME in cost estimation teams."*
+
+> *"The retrospective shows our security-reviewer + architect pairing
+> has 90% synthesis quality but backend-engineer + architect drops to
+> 65%. The planner stops pairing backend-engineer as synthesizer."*
+
+#### 5.6 Key Files
+
+| File | Change |
+|---|---|
+| `models/retrospective.py` | `TeamRetrospective` model |
+| `core/improve/scoring.py` | Team-level scoring, redundancy detection |
+| `core/learn/pattern_learner.py` | `TeamPatternLearner`, pairing effectiveness |
+| `core/learn/team_calibration.py` | New: shadow mode, graduated integration |
+| `core/engine/planner.py` | Consume team pattern recommendations |
+
+---
+
+### Phase 6: Advanced Team Journeys
+
+#### 6.1 Problem Statement
+
+Phases 1-5 build the machinery for team execution, context sharing,
+patterns, runtime integration, and learning. Phase 6 addresses the
+specific interactive workflows that require capabilities beyond
+plan-then-execute: co-collaborative design, real-time analytical deep
+dives, and multi-specialist estimation sessions.
+
+These journeys share a characteristic: **the human does not know the full
+plan upfront.** Each step's outcome shapes the next question. The system
+needs to support conversational, iterative co-creation — not just
+structured plan execution.
+
+#### 6.2 Journey Support: Co-Collaborative Design
+
+> A mock user and a developer walk through a browser-based UX test,
+> discussing functionalities and feasibility in real time.
+
+**Pattern**: Iterative Challenge (new pattern type)
+
+```yaml
+pattern_id: iterative-ux-review
+name: Iterative UX Review
+flow_type: challenge  # extended with iteration
+tags: [ux, design, review]
+iteration:
+  max_cycles: 5
+  continue_condition: "human signals 'done'"
+slots:
+  - slot_id: mock-user
+    capability: business-analysis
+    description: Evaluate UI from user persona perspective
+  - slot_id: implementer
+    capability: frontend-implementation
+    description: Apply design changes
+  - slot_id: advisor
+    capability: architecture
+    description: Flag feasibility concerns
+    optional: true
+waves_per_cycle:
+  - wave_id: 0, slot_ids: [mock-user]       # evaluate current state
+  - wave_id: 1, slot_ids: [human]           # human reviews + redirects
+  - wave_id: 2, slot_ids: [implementer]     # apply changes
+```
+
+Each cycle produces a mini-retrospective: what changed, what the mock
+user thought, what the human adjusted. After N cycles, the accumulated
+decision log serves as the design specification.
+
+**Requires**: `ActionType.INTERACT` from daemon Phase 6, human-as-member
+from the same phase.
+
+#### 6.3 Journey Support: Real-Time Analytical Deep Dive
+
+> A business executive works with a data analyst and consultant live
+> to explore data and build a dashboard.
+
+**Two-mode execution**: The daemon supports a plan with an exploratory
+phase followed by a build phase:
+
+```
+Phase 1: Exploration (iterative step, mode: iterative)
+  Step 1.1 → data-analyst (iterative, human steers)
+  Step 1.2 → data-scientist (iterative, joins when needed)
+  Output: findings.md artifact
+
+Phase 2: Dashboard Build (standard plan execution)
+  Step 2.1 → visualization-expert (design)
+  Step 2.2 → frontend-engineer (implement)
+  Step 2.3 → data-analyst (backing queries)
+  Gate: test
+```
+
+Phase 1 uses iterative steps — the human asks questions, agents
+investigate, the human asks follow-ups. When the human signals "done,"
+Phase 1 produces `findings.md` which becomes a knowledge attachment for
+Phase 2.
+
+**Requires**: Iterative step execution, MCP database access for agents
+(daemon Phase 7).
+
+#### 6.4 Journey Support: Multi-Specialist Estimation
+
+> A financial analyst estimates TCO alongside a cloud hosting expert.
+
+**Pattern**: Structured Relay with shared artifact
+
+```yaml
+pattern_id: collaborative-estimation
+name: Collaborative Estimation
+flow_type: relay
+tags: [estimation, analysis, cost]
+shared_artifact: tco-model.md
+slots:
+  - slot_id: architect
+    capability: architecture
+    description: Identify required cloud resources
+  - slot_id: cost-expert
+    capability: cloud-cost-analysis
+    description: Price each resource, model alternatives
+  - slot_id: financial-analyst
+    capability: financial-modeling
+    description: TCO framework, sensitivity analysis
+waves:
+  - wave_id: 0, slot_ids: [architect]
+  - wave_id: 1, slot_ids: [cost-expert, financial-analyst]  # parallel
+  - wave_id: 2, slot_ids: [financial-analyst]  # sensitivity analysis
+```
+
+The `shared_artifact` field means all agents read and write the same
+file. Phase 2's decision log captures structural choices
+("UUID primary keys," "3-year time horizon") and Phase 1's wave
+dispatch ensures each wave builds on the prior one.
+
+Iteration happens via `approve-with-feedback` at the end:
+"Also model a GCP migration path" → amend adds another relay cycle.
+
+**Requires**: Purpose-built agents via `talent-builder`
+(`financial-analyst`, `cloud-cost-expert`). Shared artifact protocol
+(new `context_files` write coordination).
+
+#### 6.5 Additional Journeys Identified
+
+**Incident response**: An on-call engineer works with agents during a
+production outage. Agents pull logs, test hypotheses, and execute
+diagnostics concurrently while the human steers investigation. This is
+a real-time diverge-converge with sub-minute iteration cycles.
+
+**Executive briefing preparation**: A chief of staff works with agents
+to prepare a board presentation. Agents draft slides, the exec refines
+messaging, agents update visualizations. Highly iterative, human-voice-
+driven creative work.
+
+**Adversarial security review**: Red-team agents try to break what
+blue-team agents built. The conflict is the point — synthesis should
+surface attack vectors, not resolve disagreements. Requires the conflict
+escalation protocol from daemon Phase 7.
+
+**Regulatory compliance review**: Legal agent and engineering agent
+disagree about data handling. Resolution requires human judgment with
+regulatory citations from both sides. Requires conflict escalation.
+
+#### 6.6 Shared Artifact Protocol
+
+Multiple agents writing to the same file need coordination. New protocol:
+
+1. Each agent reads the artifact at dispatch time (via `context_files`)
+2. Agent writes changes to the artifact (via normal file operations)
+3. After dispatch, the worker diffs the artifact and records changes
+   in the decision log as `type: "artifact-update"`
+4. Next wave's agents receive the updated artifact automatically
+   (they read it fresh on dispatch)
+5. Merge conflicts: if two parallel agents modify the same file, the
+   worker detects the conflict and either auto-merges (if changes are
+   to different sections) or escalates to human via `CONFLICT_ESCALATION`
+
+This is lighter than a full shared scratchpad — it uses the filesystem
+as the coordination medium, which agents already interact with naturally.
+
+#### 6.7 Key Files
+
+| File | Change |
+|---|---|
+| `agents/patterns/iterative-ux-review.yaml` | New pattern |
+| `agents/patterns/collaborative-estimation.yaml` | New pattern |
+| `core/runtime/worker.py` | Shared artifact diff/merge, iterative cycles |
+| `core/engine/dispatcher.py` | Artifact-aware prompt building |
+| `cli/commands/execution/explore.py` | New: `baton explore` command |
+
+---
+
+## Phase Summary
+
+| Phase | Delivers | Depends On |
+|---|---|---|
+| **1: Team Execution Model** | Team profiles, dynamic composition, wave dispatch, synthesis steps | — |
+| **2: Inter-Agent Context** | Decision log, context injection, cross-phase accumulation | Phase 1 |
+| **3: Multi-Perspective Patterns** | 4 collaboration shapes, pattern library, planner integration | Phase 1 |
+| **4: Daemon Integration** | Team-aware worker, crash recovery, monitoring, PMO visualization | Phase 1-3 |
+| **5: Team Learning** | Team retrospectives, composition optimization, agent calibration | Phase 4 |
+| **6: Advanced Journeys** | Iterative patterns, analytical sessions, shared artifacts, journey support | Phase 4-5, Daemon Phase 6-7 |
+
+Phases 2 and 3 can be developed in parallel after Phase 1. Phase 4
+integrates everything. Phase 5 makes teams learn from experience.
+Phase 6 builds on daemon Phase 6-7's iterative execution to support
+the interactive journeys.
