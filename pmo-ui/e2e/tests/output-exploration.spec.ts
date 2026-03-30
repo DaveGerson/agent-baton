@@ -1196,7 +1196,7 @@ test.describe('Category 3: Forge Output Quality', () => {
       await forge.goto('/');
       await forge.waitForAppReady();
       await forge.switchToForge();
-      await forge.fillAndGenerate('Do some vague work');
+      await forge.fillAndGenerate('Do some vague work on the service layer');
       await expect(forge.approveAndQueueButton).toBeVisible({ timeout: 15_000 });
       await forge.page.waitForTimeout(300);
 
@@ -1230,7 +1230,7 @@ test.describe('Category 3: Forge Output Quality', () => {
       await forge.goto('/');
       await forge.waitForAppReady();
       await forge.switchToForge();
-      await forge.fillAndGenerate('Some work to plan');
+      await forge.fillAndGenerate('Some work to plan for the API layer');
       await expect(forge.approveAndQueueButton).toBeVisible({ timeout: 15_000 });
       await forge.page.waitForTimeout(300);
 
@@ -1260,7 +1260,7 @@ test.describe('Category 3: Forge Output Quality', () => {
       await forge.goto('/');
       await forge.waitForAppReady();
       await forge.switchToForge();
-      await forge.fillAndGenerate('Work with gates');
+      await forge.fillAndGenerate('Work with gates and validation checks');
       await expect(forge.approveAndQueueButton).toBeVisible({ timeout: 15_000 });
       await forge.page.waitForTimeout(300);
 
@@ -1288,7 +1288,7 @@ test.describe('Category 3: Forge Output Quality', () => {
       await forge.goto('/');
       await forge.waitForAppReady();
       await forge.switchToForge();
-      await forge.fillAndGenerate('High-risk plan');
+      await forge.fillAndGenerate('High-risk plan for production deployment');
       await expect(forge.approveAndQueueButton).toBeVisible({ timeout: 15_000 });
       await forge.page.waitForTimeout(300);
 
@@ -1332,7 +1332,7 @@ test.describe('Category 3: Forge Output Quality', () => {
       await forge.goto('/');
       await forge.waitForAppReady();
       await forge.switchToForge();
-      await forge.fillAndGenerate('Implement something');
+      await forge.fillAndGenerate('Implement something for the auth service');
       await expect(forge.approveAndQueueButton).toBeVisible({ timeout: 15_000 });
 
       await forge.approveAndQueueButton.click();
@@ -1397,7 +1397,7 @@ test.describe('Category 3: Forge Output Quality', () => {
       await forge.goto('/');
       await forge.waitForAppReady();
       await forge.switchToForge();
-      await forge.fillAndGenerate('This will fail');
+      await forge.fillAndGenerate('This will fail during plan generation');
       // After failure, we should still be on intake and see an error.
       await forge.page.waitForTimeout(1_000);
 
