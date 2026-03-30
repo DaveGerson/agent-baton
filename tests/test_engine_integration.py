@@ -486,9 +486,9 @@ class TestStatusMidExecution:
 
         # Dispatch steps until we hit the first gate
         while action.action_type == ActionType.DISPATCH:
-            engine.record_step_result(
-                action.step_id, action.agent_name, status="complete"
-            )
+            all_actions = [action] + list(action.parallel_actions)
+            for a in all_actions:
+                _record_dispatch(engine, a.step_id, a.agent_name)
             action = engine.next_action()
 
         if action.action_type == ActionType.GATE:
@@ -781,9 +781,9 @@ class TestGateFailure:
             if iteration > 50:
                 raise RuntimeError("No gate found after 50 steps")
             iteration += 1
-            engine.record_step_result(
-                action.step_id, action.agent_name, status="complete"
-            )
+            all_actions = [action] + list(action.parallel_actions)
+            for a in all_actions:
+                _record_dispatch(engine, a.step_id, a.agent_name)
             action = engine.next_action()
         # action should now be GATE
         if action.action_type != ActionType.GATE:

@@ -40,7 +40,9 @@ from agent_baton.models.pattern import LearnedPattern
 from agent_baton.models.budget import BudgetRecommendation
 from agent_baton.models.feedback import RetrospectiveFeedback
 from agent_baton.models.context_profile import AgentContextProfile, TaskContextProfile
+from agent_baton.models.decision import ContributionRequest, DecisionRequest, DecisionResolution
 from agent_baton.models.registry import RegistryEntry, RegistryIndex
+from agent_baton.models.session import SessionCheckpoint, SessionParticipant, SessionState
 from agent_baton.models.execution import (
     MachinePlan,
     PlanPhase,
@@ -88,8 +90,14 @@ __all__ = [
     "RetrospectiveFeedback",
     "AgentContextProfile",
     "TaskContextProfile",
+    "ContributionRequest",
+    "DecisionRequest",
+    "DecisionResolution",
     "RegistryEntry",
     "RegistryIndex",
+    "SessionCheckpoint",
+    "SessionParticipant",
+    "SessionState",
     "MachinePlan",
     "PlanPhase",
     "PlanStep",

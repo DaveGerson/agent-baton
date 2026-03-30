@@ -19,6 +19,7 @@ from agent_baton.models.knowledge import (
     KnowledgeGapSignal,
     ResolvedDecision,
 )
+from agent_baton.models.parallel import ResourceLimits
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +113,58 @@ class TeamMember:
 
 
 @dataclass
+@dataclass
+class SynthesisSpec:
+    """Configuration for how team member outputs are combined.
+
+    Attached to a :class:`PlanStep` to control how the engine merges
+    results when all team members complete.
+
+    Attributes:
+        strategy: How outputs are combined:
+            - ``"concatenate"`` — join outcomes with ``"; "`` (default,
+              backward-compatible).
+            - ``"merge_files"`` — collect all ``files_changed`` and
+              deduplicate; outcomes concatenated.
+            - ``"agent_synthesis"`` — dispatch a synthesis agent to
+              merge outputs into a coherent whole.
+        synthesis_agent: Agent name for ``agent_synthesis`` strategy.
+            Defaults to ``"code-reviewer"`` if unset.
+        synthesis_prompt: Optional custom prompt template for the
+            synthesis agent.  ``{member_outcomes}`` is replaced with
+            the formatted member results.
+        conflict_handling: How to handle detected conflicts between
+            member outputs:
+            - ``"auto_merge"`` — attempt automatic merge (default).
+            - ``"escalate"`` — surface conflict to human via APPROVAL
+              action with both positions.
+            - ``"fail"`` — fail the team step if conflicts detected.
+    """
+
+    strategy: str = "concatenate"           # concatenate | merge_files | agent_synthesis
+    synthesis_agent: str = "code-reviewer"
+    synthesis_prompt: str = ""
+    conflict_handling: str = "auto_merge"   # auto_merge | escalate | fail
+
+    def to_dict(self) -> dict:
+        return {
+            "strategy": self.strategy,
+            "synthesis_agent": self.synthesis_agent,
+            "synthesis_prompt": self.synthesis_prompt,
+            "conflict_handling": self.conflict_handling,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> SynthesisSpec:
+        return cls(
+            strategy=data.get("strategy", "concatenate"),
+            synthesis_agent=data.get("synthesis_agent", "code-reviewer"),
+            synthesis_prompt=data.get("synthesis_prompt", ""),
+            conflict_handling=data.get("conflict_handling", "auto_merge"),
+        )
+
+
+@dataclass
 class PlanStep:
     """A single agent assignment within a plan phase.
 
@@ -131,6 +184,8 @@ class PlanStep:
         context_files: Files the agent should read before starting.
         team: If non-empty, this is a team step with multiple members.
         knowledge: Knowledge documents attached by the planner.
+        synthesis: How to merge team member outputs.  Only meaningful
+            when ``team`` is non-empty.
     """
 
     step_id: str                          # e.g. "1.1"
@@ -144,6 +199,8 @@ class PlanStep:
     context_files: list[str] = field(default_factory=list)  # files agent should read
     team: list[TeamMember] = field(default_factory=list)    # non-empty = team step
     knowledge: list[KnowledgeAttachment] = field(default_factory=list)  # resolved knowledge
+    synthesis: SynthesisSpec | None = None  # team output merge strategy
+    mcp_servers: list[str] = field(default_factory=list)  # MCP server names for this step
 
     def to_dict(self) -> dict:
         d = {
@@ -161,10 +218,15 @@ class PlanStep:
             d["team"] = [m.to_dict() for m in self.team]
         if self.knowledge:
             d["knowledge"] = [k.to_dict() for k in self.knowledge]
+        if self.synthesis is not None:
+            d["synthesis"] = self.synthesis.to_dict()
+        if self.mcp_servers:
+            d["mcp_servers"] = self.mcp_servers
         return d
 
     @classmethod
     def from_dict(cls, data: dict) -> PlanStep:
+        synthesis_data = data.get("synthesis")
         return cls(
             step_id=data["step_id"],
             agent_name=data["agent_name"],
@@ -177,6 +239,8 @@ class PlanStep:
             context_files=data.get("context_files", []),
             team=[TeamMember.from_dict(m) for m in data.get("team", [])],
             knowledge=[KnowledgeAttachment.from_dict(k) for k in data.get("knowledge", [])],
+            synthesis=SynthesisSpec.from_dict(synthesis_data) if synthesis_data else None,
+            mcp_servers=data.get("mcp_servers", []),
         )
 
 
@@ -328,6 +392,7 @@ class MachinePlan:
     intervention_level: str = "low"     # low | medium | high
     complexity: str = "medium"          # light | medium | heavy
     classification_source: str = "keyword-fallback"  # haiku | keyword-fallback
+    resource_limits: ResourceLimits | None = None  # optional concurrency constraints
 
     def __post_init__(self) -> None:
         if not self.created_at:
@@ -346,7 +411,7 @@ class MachinePlan:
         return len(self.all_steps)
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "task_id": self.task_id,
             "task_summary": self.task_summary,
             "risk_level": self.risk_level,
@@ -364,9 +429,13 @@ class MachinePlan:
             "complexity": self.complexity,
             "classification_source": self.classification_source,
         }
+        if self.resource_limits is not None:
+            d["resource_limits"] = self.resource_limits.to_dict()
+        return d
 
     @classmethod
     def from_dict(cls, data: dict) -> MachinePlan:
+        rl_data = data.get("resource_limits")
         return cls(
             task_id=data["task_id"],
             task_summary=data["task_summary"],
@@ -384,6 +453,7 @@ class MachinePlan:
             intervention_level=data.get("intervention_level", "low"),
             complexity=data.get("complexity", "medium"),
             classification_source=data.get("classification_source", "keyword-fallback"),
+            resource_limits=ResourceLimits.from_dict(rl_data) if rl_data else None,
         )
 
     def to_markdown(self) -> str:
@@ -882,6 +952,8 @@ class ExecutionAction:
     step_id: str = ""
     # Path enforcement hook command (for PreToolUse):
     path_enforcement: str = ""
+    # MCP server names to pass through to this dispatch:
+    mcp_servers: list[str] = field(default_factory=list)
 
     # For GATE actions:
     gate_type: str = ""
@@ -910,6 +982,8 @@ class ExecutionAction:
                 "step_id": self.step_id,
                 "path_enforcement": self.path_enforcement,
             })
+            if self.mcp_servers:
+                d["mcp_servers"] = self.mcp_servers
         elif self.action_type == ActionType.GATE:
             d.update({
                 "gate_type": self.gate_type,

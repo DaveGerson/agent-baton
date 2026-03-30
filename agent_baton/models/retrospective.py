@@ -153,6 +153,115 @@ class SequencingNote:
         )
 
 
+@dataclass
+class TeamCompositionRecord:
+    """Record of a team composition used during a task execution.
+
+    Captures which agents collaborated as a team within a single step,
+    their roles, and the outcome.  Aggregated across retrospectives,
+    these records enable team-level learning: identifying which agent
+    combinations produce the best results for specific task types.
+
+    Attributes:
+        step_id: Plan step where the team was used.
+        agents: Sorted list of agent names in the team.
+        roles: Mapping of agent name to role (lead/implementer/reviewer).
+        outcome: ``"success"`` or ``"failure"`` based on team step result.
+        task_type: Inferred task category for cross-task analysis.
+        token_cost: Estimated total tokens consumed by the team step.
+    """
+
+    step_id: str
+    agents: list[str]                           # sorted agent names
+    roles: dict[str, str] = field(default_factory=dict)  # agent → role
+    outcome: str = "success"                    # "success" | "failure"
+    task_type: str | None = None
+    token_cost: int = 0
+
+    def to_dict(self) -> dict:
+        return {
+            "step_id": self.step_id,
+            "agents": self.agents,
+            "roles": self.roles,
+            "outcome": self.outcome,
+            "task_type": self.task_type,
+            "token_cost": self.token_cost,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> TeamCompositionRecord:
+        return cls(
+            step_id=data.get("step_id", ""),
+            agents=data.get("agents", []),
+            roles=data.get("roles", {}),
+            outcome=data.get("outcome", "success"),
+            task_type=data.get("task_type"),
+            token_cost=data.get("token_cost", 0),
+        )
+
+
+@dataclass
+class ConflictRecord:
+    """Structured record of a disagreement between agents during execution.
+
+    When agents produce conflicting outputs (e.g. a security reviewer
+    flags an issue that an engineer dismisses), the conflict should be
+    captured here rather than smoothed over by synthesis.  Conflicts
+    are surfaced to the human for judgment and the resolution is
+    recorded as a binding decision.
+
+    Attributes:
+        conflict_id: Unique identifier for this conflict.
+        step_id: Plan step where the conflict occurred.
+        agents: Agent names involved in the disagreement.
+        positions: Mapping of agent name to their position/recommendation.
+        evidence: Mapping of agent name to supporting evidence or citations.
+        severity: ``"low"``, ``"medium"``, or ``"high"`` based on impact.
+        resolution: How it was resolved — ``"human_decision"``,
+            ``"auto_merged"``, or ``"unresolved"``.
+        resolution_detail: The chosen resolution and rationale.
+        resolved_by: Who resolved it — ``"human"``, ``"synthesis_agent"``,
+            or ``"unresolved"``.
+    """
+
+    conflict_id: str
+    step_id: str
+    agents: list[str]
+    positions: dict[str, str] = field(default_factory=dict)   # agent → position
+    evidence: dict[str, str] = field(default_factory=dict)    # agent → evidence
+    severity: str = "medium"                     # low | medium | high
+    resolution: str = "unresolved"               # human_decision | auto_merged | unresolved
+    resolution_detail: str = ""
+    resolved_by: str = "unresolved"              # human | synthesis_agent | unresolved
+
+    def to_dict(self) -> dict:
+        return {
+            "conflict_id": self.conflict_id,
+            "step_id": self.step_id,
+            "agents": self.agents,
+            "positions": self.positions,
+            "evidence": self.evidence,
+            "severity": self.severity,
+            "resolution": self.resolution,
+            "resolution_detail": self.resolution_detail,
+            "resolved_by": self.resolved_by,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> ConflictRecord:
+        return cls(
+            conflict_id=data.get("conflict_id", ""),
+            step_id=data.get("step_id", ""),
+            agents=data.get("agents", []),
+            positions=data.get("positions", {}),
+            evidence=data.get("evidence", {}),
+            severity=data.get("severity", "medium"),
+            resolution=data.get("resolution", "unresolved"),
+            resolution_detail=data.get("resolution_detail", ""),
+            resolved_by=data.get("resolved_by", "unresolved"),
+        )
+
+
 def _knowledge_gap_from_dict(data: dict) -> KnowledgeGapRecord:
     """Deserialize a knowledge gap entry with backward compatibility.
 
@@ -205,6 +314,10 @@ class Retrospective:
         knowledge_gaps: Missing knowledge identified during execution.
         roster_recommendations: Suggestions for roster changes.
         sequencing_notes: Observations about phase ordering effectiveness.
+        team_compositions: Team compositions used during execution,
+            enabling team-level learning across retrospectives.
+        conflicts: Structured disagreements between agents, captured
+            for escalation and decision tracking.
     """
 
     task_id: str
@@ -227,6 +340,10 @@ class Retrospective:
     roster_recommendations: list[RosterRecommendation] = field(default_factory=list)
     sequencing_notes: list[SequencingNote] = field(default_factory=list)
 
+    # Team collaboration tracking
+    team_compositions: list[TeamCompositionRecord] = field(default_factory=list)
+    conflicts: list[ConflictRecord] = field(default_factory=list)
+
     def to_dict(self) -> dict:
         """Serialise to a plain dict suitable for JSON persistence."""
         return {
@@ -245,6 +362,8 @@ class Retrospective:
             "knowledge_gaps": [g.to_dict() for g in self.knowledge_gaps],
             "roster_recommendations": [r.to_dict() for r in self.roster_recommendations],
             "sequencing_notes": [n.to_dict() for n in self.sequencing_notes],
+            "team_compositions": [t.to_dict() for t in self.team_compositions],
+            "conflicts": [c.to_dict() for c in self.conflicts],
         }
 
     @classmethod
@@ -272,6 +391,12 @@ class Retrospective:
             ],
             sequencing_notes=[
                 SequencingNote.from_dict(n) for n in data.get("sequencing_notes", [])
+            ],
+            team_compositions=[
+                TeamCompositionRecord.from_dict(t) for t in data.get("team_compositions", [])
+            ],
+            conflicts=[
+                ConflictRecord.from_dict(c) for c in data.get("conflicts", [])
             ],
         )
 
@@ -335,6 +460,32 @@ class Retrospective:
             for note in self.sequencing_notes:
                 keep_tag = "keep" if note.keep else "consider removing"
                 lines.append(f"- Phase {note.phase}: {note.observation} ({keep_tag})")
+            lines.append("")
+
+        if self.team_compositions:
+            lines.append("## Team Compositions")
+            for team in self.team_compositions:
+                agents_str = ", ".join(team.agents)
+                lines.append(f"- Step {team.step_id}: [{agents_str}] — {team.outcome}")
+                if team.roles:
+                    role_parts = [f"{a}: {r}" for a, r in team.roles.items()]
+                    lines.append(f"  Roles: {', '.join(role_parts)}")
+                if team.token_cost:
+                    lines.append(f"  Tokens: {team.token_cost:,}")
+            lines.append("")
+
+        if self.conflicts:
+            lines.append("## Conflicts")
+            for conflict in self.conflicts:
+                agents_str = " vs ".join(conflict.agents)
+                lines.append(
+                    f"- [{conflict.severity.upper()}] {agents_str} "
+                    f"(step {conflict.step_id}) — {conflict.resolution}"
+                )
+                for agent, position in conflict.positions.items():
+                    lines.append(f"  - **{agent}**: {position}")
+                if conflict.resolution_detail:
+                    lines.append(f"  Resolution: {conflict.resolution_detail}")
             lines.append("")
 
         return "\n".join(lines)

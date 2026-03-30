@@ -505,4 +505,5 @@ class PromptDispatcher:
             delegation_prompt=prompt,
             step_id=step.step_id,
             path_enforcement=enforcement or "",
+            mcp_servers=step.mcp_servers,
         )

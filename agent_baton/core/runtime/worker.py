@@ -175,6 +175,7 @@ class TaskWorker:
                         "model": a.agent_model,
                         "prompt": a.delegation_prompt,
                         "step_id": a.step_id,
+                        "mcp_servers": a.mcp_servers,
                     }
                     for a in actions
                 ]

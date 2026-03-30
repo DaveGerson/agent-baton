@@ -226,6 +226,7 @@ class ClaudeCodeLauncher:
         model: str,
         prompt: str,
         step_id: str = "",
+        mcp_servers: list[str] | None = None,
     ) -> LaunchResult:
         """Launch a Claude Code agent and return its result.
 
@@ -237,7 +238,7 @@ class ClaudeCodeLauncher:
         agent: AgentDefinition | None = None
         if self._registry is not None:
             agent = self._registry.get(agent_name)
-        cmd = self._build_command(model, agent)
+        cmd = self._build_command(model, agent, mcp_servers=mcp_servers)
         env = self._build_env()
         timeout = self._resolve_timeout(model)
         use_stdin = len(prompt.encode()) > self._config.prompt_file_threshold
@@ -292,7 +293,10 @@ class ClaudeCodeLauncher:
     # ── Private helpers ──────────────────────────────────────────────────────
 
     def _build_command(
-        self, model: str, agent: AgentDefinition | None = None
+        self,
+        model: str,
+        agent: AgentDefinition | None = None,
+        mcp_servers: list[str] | None = None,
     ) -> list[str]:
         """Return the base ``claude`` command list (without the prompt).
 
@@ -304,6 +308,9 @@ class ClaudeCodeLauncher:
         - ``--system-prompt`` when the agent has non-empty instructions.
         - ``--permission-mode`` when set to something other than ``"default"``.
         - ``--allowedTools`` when the agent declares a non-empty tool list.
+
+        When *mcp_servers* is non-empty, ``--mcp-config`` is appended with
+        the server names joined by commas.
         """
         cmd: list[str] = [
             self._claude_bin,
@@ -318,6 +325,8 @@ class ClaudeCodeLauncher:
                 cmd.extend(["--permission-mode", agent.permission_mode])
             if agent.tools:
                 cmd.extend(["--allowedTools", ",".join(agent.tools)])
+        if mcp_servers:
+            cmd.extend(["--mcp-config", ",".join(mcp_servers)])
         return cmd
 
     def _build_env(self) -> dict[str, str]:

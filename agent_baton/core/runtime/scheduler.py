@@ -70,12 +70,15 @@ class StepScheduler:
         prompt: str,
         step_id: str,
         launcher: AgentLauncher,
+        mcp_servers: list[str] | None = None,
     ) -> LaunchResult:
         """Dispatch a single step, respecting the concurrency limit."""
         async with self._semaphore:
             self._active += 1
             try:
-                return await launcher.launch(agent_name, model, prompt, step_id)
+                return await launcher.launch(
+                    agent_name, model, prompt, step_id, mcp_servers=mcp_servers
+                )
             finally:
                 self._active -= 1
 
@@ -87,7 +90,9 @@ class StepScheduler:
         """Dispatch multiple steps in parallel, bounded by *max_concurrent*.
 
         Each step dict must contain: ``agent_name``, ``model``, ``prompt``,
-        ``step_id``.  Returns results in the same order as *steps*.
+        ``step_id``.  An optional ``mcp_servers`` key (list of strings) may
+        be included to enable selective MCP pass-through for that step.
+        Returns results in the same order as *steps*.
         """
         tasks = [
             self.dispatch(
@@ -96,6 +101,7 @@ class StepScheduler:
                 prompt=s["prompt"],
                 step_id=s["step_id"],
                 launcher=launcher,
+                mcp_servers=s.get("mcp_servers") or None,
             )
             for s in steps
         ]

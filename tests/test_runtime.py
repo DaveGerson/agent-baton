@@ -142,7 +142,7 @@ class TestStepScheduler:
         active = 0
 
         class TrackingLauncher:
-            async def launch(self, agent_name, model, prompt, step_id=""):
+            async def launch(self, agent_name, model, prompt, step_id="", mcp_servers=None):
                 nonlocal active, max_seen
                 active += 1
                 max_seen = max(max_seen, active)

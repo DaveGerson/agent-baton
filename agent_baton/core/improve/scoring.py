@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING
 
 from agent_baton.core.observe.usage import UsageLogger
 from agent_baton.core.observe.retrospective import RetrospectiveEngine
+from agent_baton.models.retrospective import TeamCompositionRecord
 
 if TYPE_CHECKING:
     from agent_baton.core.storage.protocol import StorageBackend
@@ -130,6 +131,53 @@ class AgentScorecard:
             )
         if self.knowledge_gaps_cited:
             lines.append(f"- **Knowledge gaps cited:** {self.knowledge_gaps_cited}")
+        lines.append("")
+        return "\n".join(lines)
+
+
+@dataclass
+class TeamScorecard:
+    """Performance scorecard for a team composition.
+
+    Aggregates effectiveness metrics across all retrospectives where
+    a specific team composition was used.
+
+    Attributes:
+        agents: Canonical sorted list of agent names in the team.
+        times_used: Number of times this composition appeared.
+        success_rate: Fraction of usages with outcome ``"success"``.
+        avg_token_cost: Mean estimated token cost per team step.
+        task_types: Task types where this team was deployed.
+        health: Categorical rating derived from success_rate.
+    """
+
+    agents: list[str]
+    times_used: int = 0
+    success_rate: float = 0.0
+    avg_token_cost: int = 0
+    task_types: list[str] = field(default_factory=list)
+
+    @property
+    def health(self) -> str:
+        if self.times_used == 0:
+            return "unused"
+        if self.success_rate >= 0.8:
+            return "strong"
+        if self.success_rate >= 0.5:
+            return "adequate"
+        return "needs-improvement"
+
+    def to_markdown(self) -> str:
+        agents_str = " + ".join(self.agents)
+        lines = [
+            f"### {agents_str}",
+            f"- **Health:** {self.health}",
+            f"- **Uses:** {self.times_used}",
+            f"- **Success rate:** {self.success_rate:.0%}",
+            f"- **Avg tokens/use:** {self.avg_token_cost:,}",
+        ]
+        if self.task_types:
+            lines.append(f"- **Task types:** {', '.join(self.task_types)}")
         lines.append("")
         return "\n".join(lines)
 
@@ -392,3 +440,110 @@ class PerformanceScorer:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(self.generate_report(), encoding="utf-8")
         return out_path
+
+    # ── Team-level scoring ─────────────────────────────────────────────────
+
+    def score_teams(self) -> list[TeamScorecard]:
+        """Compute scorecards for all team compositions found in retrospectives.
+
+        Aggregates :class:`TeamCompositionRecord` entries across all
+        retrospectives to identify recurring team compositions and
+        their effectiveness.
+
+        Returns:
+            List of team scorecards sorted by times_used (descending).
+        """
+        compositions = self._collect_team_compositions()
+
+        # Group by canonical agent combo (sorted tuple).
+        groups: dict[tuple[str, ...], list[TeamCompositionRecord]] = {}
+        for comp in compositions:
+            key = tuple(sorted(comp.agents))
+            groups.setdefault(key, []).append(comp)
+
+        scorecards: list[TeamScorecard] = []
+        for combo, records in groups.items():
+            successes = [r for r in records if r.outcome == "success"]
+            success_rate = len(successes) / len(records) if records else 0.0
+
+            token_source = [r for r in records if r.token_cost > 0]
+            avg_tokens = (
+                sum(r.token_cost for r in token_source) // len(token_source)
+                if token_source
+                else 0
+            )
+
+            task_types = sorted({
+                r.task_type for r in records
+                if r.task_type
+            })
+
+            scorecards.append(TeamScorecard(
+                agents=list(combo),
+                times_used=len(records),
+                success_rate=round(success_rate, 4),
+                avg_token_cost=avg_tokens,
+                task_types=task_types,
+            ))
+
+        scorecards.sort(key=lambda s: s.times_used, reverse=True)
+        return scorecards
+
+    def generate_team_report(self) -> str:
+        """Generate a Markdown team composition effectiveness report.
+
+        Groups team compositions by health rating and renders each
+        team scorecard.
+
+        Returns:
+            A complete Markdown document.
+        """
+        scorecards = self.score_teams()
+        if not scorecards:
+            return (
+                "# Team Composition Scorecards\n\n"
+                "No team composition data available.\n"
+            )
+
+        lines = [
+            "# Team Composition Scorecards",
+            "",
+            f"Based on {sum(sc.times_used for sc in scorecards)} total team steps.",
+            "",
+        ]
+
+        for health in ("strong", "adequate", "needs-improvement"):
+            group = [sc for sc in scorecards if sc.health == health]
+            if group:
+                lines.append(f"## {health.replace('-', ' ').title()}")
+                lines.append("")
+                for sc in group:
+                    lines.append(sc.to_markdown())
+
+        return "\n".join(lines)
+
+    def _collect_team_compositions(self) -> list[TeamCompositionRecord]:
+        """Collect all team composition records from retrospectives.
+
+        Reads retrospective JSON sidecars via the ``RetrospectiveEngine``.
+        Each sidecar may contain a ``team_compositions`` list (added in
+        Phase 1 of the daemon mode spec).  Older sidecars without the
+        field are silently skipped.
+        """
+        import json
+        from agent_baton.models.retrospective import Retrospective
+
+        compositions: list[TeamCompositionRecord] = []
+
+        for retro_path in self._retro.list_retrospectives():
+            json_path = retro_path.with_suffix(".json")
+            if not json_path.exists():
+                continue
+            try:
+                data = json.loads(json_path.read_text(encoding="utf-8"))
+                retro = Retrospective.from_dict(data)
+                compositions.extend(retro.team_compositions)
+            except (json.JSONDecodeError, KeyError, TypeError, OSError):
+                continue
+
+        return compositions

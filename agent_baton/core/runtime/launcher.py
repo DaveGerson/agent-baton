@@ -70,6 +70,7 @@ class AgentLauncher(Protocol):
         model: str,
         prompt: str,
         step_id: str = "",
+        mcp_servers: list[str] | None = None,
     ) -> LaunchResult:
         """Launch an agent and return its result.
 
@@ -79,6 +80,9 @@ class AgentLauncher(Protocol):
             model: Model identifier (e.g., ``"sonnet"``, ``"opus"``).
             prompt: The complete delegation prompt for the agent.
             step_id: Plan step identifier for tracking.
+            mcp_servers: Optional list of MCP server names to enable for
+                this dispatch.  When non-empty, the launcher passes them
+                to the ``claude`` CLI via ``--mcp-config``.
 
         Returns:
             A ``LaunchResult`` with status, outcome, and metadata.
@@ -114,6 +118,7 @@ class DryRunLauncher:
         model: str,
         prompt: str,
         step_id: str = "",
+        mcp_servers: list[str] | None = None,
     ) -> LaunchResult:
         """Record the launch and return the pre-configured or default result."""
         self.launches.append(

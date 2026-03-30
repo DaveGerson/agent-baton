@@ -819,6 +819,7 @@ CREATE TABLE IF NOT EXISTS step_results (
     retries           INTEGER NOT NULL DEFAULT 0,
     error             TEXT NOT NULL DEFAULT '',
     completed_at      TEXT NOT NULL DEFAULT '',
+    deviations        TEXT NOT NULL DEFAULT '[]',
     PRIMARY KEY (project_id, task_id, step_id)
 );
 CREATE INDEX IF NOT EXISTS idx_central_step_results_status ON step_results(status);

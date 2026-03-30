@@ -734,6 +734,16 @@ class IntelligentPlanner:
                 else "cli-override"
             ),
         )
+        # 16. Team cost estimation — look up historical cost data for team steps.
+        self._last_team_cost_estimates: dict[str, int] = {}
+        for phase in tmp_plan.phases:
+            for step in phase.steps:
+                if step.team and len(step.team) >= 2:
+                    agents = [m.agent_name for m in step.team]
+                    estimate = self._pattern_learner.get_team_cost_estimate(agents)
+                    if estimate is not None:
+                        self._last_team_cost_estimates[step.step_id] = estimate
+
         shared_context = self._build_shared_context(tmp_plan)
         tmp_plan.shared_context = shared_context
 
@@ -861,14 +871,29 @@ class IntelligentPlanner:
                 "",
             ]
 
+        # Team cost estimates
+        if hasattr(self, '_last_team_cost_estimates') and self._last_team_cost_estimates:
+            lines += ["## Team Cost Estimates", ""]
+            for step_id, estimate in sorted(self._last_team_cost_estimates.items()):
+                lines.append(f"- Step {step_id}: ~{estimate:,} tokens (historical average)")
+            total_team = sum(self._last_team_cost_estimates.values())
+            lines.append(f"- **Total team cost estimate:** ~{total_team:,} tokens")
+            lines.append("")
+
         # Phase summary
         lines += ["## Phase Summary", ""]
         for phase in plan.phases:
             agent_names = [s.agent_name for s in phase.steps]
             gate_label = f" → gate: {phase.gate.gate_type}" if phase.gate else ""
+            cost_label = ""
+            for step in phase.steps:
+                if hasattr(self, '_last_team_cost_estimates'):
+                    est = self._last_team_cost_estimates.get(step.step_id)
+                    if est:
+                        cost_label = f" (~{est:,} tokens)"
             lines.append(
                 f"- **Phase {phase.phase_id} — {phase.name}**: "
-                f"{', '.join(agent_names) or '(no agents)'}{gate_label}"
+                f"{', '.join(agent_names) or '(no agents)'}{gate_label}{cost_label}"
             )
         lines.append("")
 
@@ -1319,7 +1344,7 @@ class IntelligentPlanner:
                 description="Run full test suite with coverage report.",
                 fail_on=["test failure", "coverage below threshold"],
             )
-        if name_lower in ("investigate", "research", "review"):
+        if name_lower in ("investigate", "research", "review", "design"):
             # No automated gate — these phases don't produce code
             return None
         # All other phases (implement, fix, migrate, refactor, etc.)
@@ -1714,6 +1739,17 @@ class IntelligentPlanner:
             ]
             lines.append(
                 "Knowledge Gaps (from recent retrospectives):\n" + "\n".join(gap_lines)
+            )
+
+        # Team cost estimates — budget awareness for agents
+        if hasattr(self, '_last_team_cost_estimates') and self._last_team_cost_estimates:
+            budget_thresholds = {"lean": 50_000, "standard": 500_000, "full": 2_000_000}
+            budget_limit = budget_thresholds.get(plan.budget_tier, 500_000)
+            total_team_cost = sum(self._last_team_cost_estimates.values())
+            budget_pct = (total_team_cost / budget_limit * 100) if budget_limit > 0 else 0
+            lines.append(
+                f"Team Cost Estimate: ~{total_team_cost:,} tokens "
+                f"({budget_pct:.0f}% of {plan.budget_tier} budget)"
             )
 
         return "\n".join(lines)

@@ -39,10 +39,11 @@ from pathlib import Path
 
 from agent_baton.core.observe.usage import UsageLogger
 from agent_baton.models.knowledge import KnowledgeGapRecord
-from agent_baton.models.pattern import LearnedPattern
+from agent_baton.models.pattern import LearnedPattern, TeamPattern
 from agent_baton.models.usage import TaskUsageRecord
 
 _PATTERNS_FILE = "learned-patterns.json"
+_TEAM_PATTERNS_FILE = "team-patterns.json"
 _DEFAULT_TEAM_CONTEXT = Path(".claude/team-context")
 
 
@@ -432,6 +433,165 @@ class PatternLearner:
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
+    # Team pattern analysis
+    # ------------------------------------------------------------------
+
+    def analyze_team_patterns(
+        self,
+        min_sample_size: int = 3,
+        min_confidence: float = 0.5,
+    ) -> list[TeamPattern]:
+        """Analyse usage records grouped by team composition.
+
+        Groups records by canonical agent combination (sorted tuple of
+        agent names) rather than sequencing_mode.  This identifies which
+        agent *teams* are most effective, enabling team-level cost
+        prediction and composition recommendations.
+
+        Uses the same confidence formula as solo pattern analysis::
+
+            confidence = min(1.0, (sample_size / 15) * success_rate)
+
+        Args:
+            min_sample_size: Groups with fewer records are excluded.
+            min_confidence: Patterns below this threshold are excluded.
+
+        Returns:
+            List of :class:`TeamPattern` sorted by confidence descending.
+        """
+        logger = UsageLogger(self._log_path)
+        records = logger.read_all()
+
+        if not records:
+            return []
+
+        # Group records by canonical agent combination
+        groups: dict[tuple[str, ...], list[TaskUsageRecord]] = {}
+        for rec in records:
+            combo = _agent_combo_key(rec)
+            if len(combo) < 2:
+                # Solo agent — not a team pattern
+                continue
+            groups.setdefault(combo, []).append(rec)
+
+        now = _now_iso()
+        patterns: list[TeamPattern] = []
+        counter = 0
+
+        for combo, group in groups.items():
+            if len(group) < min_sample_size:
+                continue
+
+            success_tasks = [r for r in group if r.outcome == "SHIP"]
+            success_rate = len(success_tasks) / len(group)
+
+            confidence = min(
+                1.0,
+                (len(group) / self._CONFIDENCE_CALIBRATION) * success_rate,
+            )
+
+            if confidence < min_confidence:
+                continue
+
+            # Collect task types where this team was used
+            task_types = sorted({
+                r.sequencing_mode or "unknown"
+                for r in group
+            })
+
+            # Avg tokens from successful tasks, falling back to all
+            token_source = success_tasks if success_tasks else group
+            avg_tokens = (
+                sum(_total_tokens(r) for r in token_source) // len(token_source)
+                if token_source
+                else 0
+            )
+
+            counter += 1
+            combo_slug = "-".join(combo)[:40]
+            pattern_id = f"team-{combo_slug}-{counter:03d}"
+
+            patterns.append(
+                TeamPattern(
+                    pattern_id=pattern_id,
+                    agents=list(combo),
+                    task_types=task_types,
+                    success_rate=round(success_rate, 4),
+                    sample_size=len(group),
+                    avg_token_cost=avg_tokens,
+                    confidence=round(confidence, 4),
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+
+        patterns.sort(key=lambda p: p.confidence, reverse=True)
+        return patterns
+
+    def refresh_team_patterns(
+        self,
+        min_sample_size: int = 3,
+        min_confidence: float = 0.5,
+    ) -> list[TeamPattern]:
+        """Re-analyse usage log and write team patterns to ``team-patterns.json``.
+
+        Returns the freshly computed list of team patterns.
+        """
+        patterns = self.analyze_team_patterns(
+            min_sample_size=min_sample_size,
+            min_confidence=min_confidence,
+        )
+        self._write_team_patterns(patterns)
+        return patterns
+
+    def load_team_patterns(self) -> list[TeamPattern]:
+        """Read team patterns from ``team-patterns.json``."""
+        path = self._root / _TEAM_PATTERNS_FILE
+        if not path.exists():
+            return []
+
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return []
+
+        if not isinstance(raw, list):
+            return []
+
+        results: list[TeamPattern] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            try:
+                results.append(TeamPattern.from_dict(item))
+            except (KeyError, TypeError, ValueError):
+                continue
+        return results
+
+    def get_team_cost_estimate(
+        self,
+        agents: list[str],
+    ) -> int | None:
+        """Return estimated token cost for a given team composition.
+
+        Looks up stored team patterns matching the canonical agent
+        combination.  Returns the ``avg_token_cost`` from the
+        highest-confidence matching pattern, or ``None`` if no match.
+
+        Args:
+            agents: List of agent names (order doesn't matter).
+
+        Returns:
+            Estimated token cost, or ``None`` if no data available.
+        """
+        combo = tuple(sorted(agents))
+        patterns = self.load_team_patterns()
+        for p in patterns:  # already sorted by confidence desc
+            if tuple(sorted(p.agents)) == combo:
+                return p.avg_token_cost
+        return None
+
+    # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
 
@@ -443,6 +603,16 @@ class PatternLearner:
             ensure_ascii=False,
         )
         self._patterns_path.write_text(payload + "\n", encoding="utf-8")
+
+    def _write_team_patterns(self, patterns: list[TeamPattern]) -> None:
+        path = self._root / _TEAM_PATTERNS_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(
+            [p.to_dict() for p in patterns],
+            indent=2,
+            ensure_ascii=False,
+        )
+        path.write_text(payload + "\n", encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------

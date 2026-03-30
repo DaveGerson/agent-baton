@@ -26,6 +26,9 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     group.add_argument(
         "--trends", action="store_true", help="Show performance trends for all agents",
     )
+    group.add_argument(
+        "--teams", action="store_true", help="Show team composition effectiveness",
+    )
     return p
 
 
@@ -66,6 +69,11 @@ def handler(args: argparse.Namespace) -> None:
             trend = scorer.detect_trends(sc.agent_name)
             trend_indicator = {"improving": "+", "degrading": "-", "stable": "="}.get(trend, "?")
             print(f"  [{trend_indicator}] {sc.agent_name}: {trend} (health={sc.health})")
+        return
+
+    if args.teams:
+        report = scorer.generate_team_report()
+        print(report)
         return
 
     report = scorer.generate_report()

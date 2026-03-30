@@ -45,10 +45,12 @@ from agent_baton.models.execution import (
     PlanPhase,
     PlanStep,
     StepResult,
+    SynthesisSpec,
     TeamStepResult,
 )
 from agent_baton.models.events import Event
 from agent_baton.models.knowledge import KnowledgeGapSignal, ResolvedDecision
+from agent_baton.models.retrospective import ConflictRecord, TeamCompositionRecord
 from agent_baton.models.usage import AgentUsageRecord, TaskUsageRecord
 from agent_baton.core.engine.dispatcher import PromptDispatcher
 from agent_baton.core.engine.knowledge_gap import determine_escalation, parse_knowledge_gap
@@ -785,6 +787,12 @@ class ExecutionEngine:
             ),
         ))
 
+        # Check token budget and warn when exceeded.
+        warning = self._check_token_budget(state)
+        if warning:
+            _log.warning("Budget warning: %s", warning)
+            result.deviations.append(f"TOKEN_BUDGET_WARNING: {warning}")
+
         self._save_execution(state)
 
     def mark_dispatched(self, step_id: str, agent_name: str) -> None:
@@ -938,6 +946,8 @@ class ExecutionEngine:
             knowledge_gaps=retro_data.get("knowledge_gaps"),
             roster_recommendations=retro_data.get("roster_recommendations"),
             sequencing_notes=retro_data.get("sequencing_notes"),
+            team_compositions=retro_data.get("team_compositions"),
+            conflicts=retro_data.get("conflicts"),
         )
         retro_path = self._save_retro(retro)
 
@@ -1328,20 +1338,188 @@ class ExecutionEngine:
             }
 
             if failed_ids:
+                # Check conflict_handling strategy before failing.
+                spec = plan_step.synthesis
+                if spec and spec.conflict_handling == "fail":
+                    conflict = self._detect_team_conflict(
+                        plan_step, parent.member_results
+                    )
+                    if conflict:
+                        parent.error = (
+                            f"Conflict detected: {conflict.resolution_detail}"
+                        )
                 parent.status = "failed"
-                parent.error = f"Team member(s) failed: {', '.join(sorted(failed_ids))}"
+                parent.error = parent.error or (
+                    f"Team member(s) failed: {', '.join(sorted(failed_ids))}"
+                )
                 parent.completed_at = _utcnow()
             elif completed_ids >= all_member_ids:
-                parent.status = "complete"
-                parent.outcome = "; ".join(
-                    m.outcome for m in parent.member_results if m.outcome
+                spec = plan_step.synthesis
+                conflict = self._detect_team_conflict(
+                    plan_step, parent.member_results
                 )
-                parent.files_changed = [
-                    f for m in parent.member_results for f in m.files_changed
-                ]
+
+                # If conflict detected and escalation requested, pause
+                # for human review instead of auto-completing.
+                if conflict and spec and spec.conflict_handling == "escalate":
+                    state.status = "approval_pending"
+                    parent.status = "dispatched"  # keep step open
+                    parent.deviations.append(
+                        f"Conflict escalated: {conflict.conflict_id}"
+                    )
+                    self._save_execution(state)
+                    return
+
+                # Apply synthesis strategy.
+                self._apply_synthesis(plan_step, parent)
                 parent.completed_at = _utcnow()
 
+        # Check token budget and warn when exceeded.
+        warning = self._check_token_budget(state)
+        if warning:
+            _log.warning("Budget warning: %s", warning)
+            parent.deviations.append(f"TOKEN_BUDGET_WARNING: {warning}")
+
         self._save_execution(state)
+
+    # ── Team synthesis and conflict detection ────────────────────────────────
+
+    def _apply_synthesis(
+        self, plan_step: PlanStep, parent: StepResult
+    ) -> None:
+        """Apply the configured synthesis strategy to team member results.
+
+        Updates ``parent.outcome`` and ``parent.files_changed`` in place.
+
+        Strategies:
+        - ``concatenate`` (default): Join outcomes with ``"; "``, collect
+          all files_changed.
+        - ``merge_files``: Same as concatenate but deduplicate files_changed.
+        - ``agent_synthesis``: Same as concatenate for now — the synthesis
+          agent dispatch is deferred to Phase 3.3 (INTERACT action type)
+          which requires invariant changes.  This branch sets a marker in
+          ``parent.deviations`` indicating synthesis was requested.
+        """
+        spec = plan_step.synthesis
+        strategy = spec.strategy if spec else "concatenate"
+
+        # Build base outcome and files from members.
+        outcomes = [
+            m.outcome for m in parent.member_results if m.outcome
+        ]
+        all_files = [
+            f for m in parent.member_results for f in m.files_changed
+        ]
+
+        if strategy == "merge_files":
+            # Deduplicate files while preserving order.
+            seen: set[str] = set()
+            deduped: list[str] = []
+            for f in all_files:
+                if f not in seen:
+                    seen.add(f)
+                    deduped.append(f)
+            parent.files_changed = deduped
+        elif strategy == "agent_synthesis":
+            # Mark for future synthesis agent dispatch.
+            parent.deviations.append(
+                f"synthesis_requested: agent={spec.synthesis_agent if spec else 'code-reviewer'}"
+            )
+            parent.files_changed = all_files
+        else:
+            # concatenate (default)
+            parent.files_changed = all_files
+
+        parent.outcome = "; ".join(outcomes)
+        parent.status = "complete"
+
+    def _detect_team_conflict(
+        self,
+        plan_step: PlanStep,
+        member_results: list[TeamStepResult],
+    ) -> ConflictRecord | None:
+        """Detect conflicts between team member outputs.
+
+        A conflict is detected when two or more members modified the same
+        file.  This is a heuristic — overlapping files suggest potentially
+        conflicting changes that may need human review.
+
+        Returns a :class:`ConflictRecord` if conflict found, else ``None``.
+        """
+        if len(member_results) < 2:
+            return None
+
+        # Build file → list of members who touched it.
+        file_owners: dict[str, list[str]] = {}
+        for m in member_results:
+            for f in m.files_changed:
+                file_owners.setdefault(f, []).append(m.agent_name)
+
+        # Find files touched by multiple members.
+        conflicting_files = {
+            f: agents for f, agents in file_owners.items()
+            if len(agents) > 1
+        }
+
+        if not conflicting_files:
+            return None
+
+        # Build positions from outcomes.
+        positions = {
+            m.agent_name: m.outcome
+            for m in member_results
+            if m.agent_name in {a for agents in conflicting_files.values() for a in agents}
+        }
+
+        # Build evidence from file overlap.
+        evidence = {
+            agent: ", ".join(
+                f for f, agents in conflicting_files.items()
+                if agent in agents
+            )
+            for agent in positions
+        }
+
+        import hashlib
+        conflict_id = hashlib.sha256(
+            f"{plan_step.step_id}:{sorted(positions.keys())}".encode()
+        ).hexdigest()[:12]
+
+        return ConflictRecord(
+            conflict_id=f"conflict-{conflict_id}",
+            step_id=plan_step.step_id,
+            agents=sorted(positions.keys()),
+            positions=positions,
+            evidence=evidence,
+            severity="medium",
+            resolution="unresolved",
+        )
+
+    def _check_token_budget(self, state: ExecutionState) -> str | None:
+        """Return a warning string if cumulative tokens exceed the plan's budget tier threshold.
+
+        Compares the sum of ``estimated_tokens`` across all completed step
+        results against the threshold for the plan's ``budget_tier``.  Returns
+        ``None`` when within budget.
+
+        Thresholds by tier:
+        - ``lean``: 50,000 tokens
+        - ``standard``: 500,000 tokens
+        - ``full``: 2,000,000 tokens
+        """
+        total = sum(r.estimated_tokens for r in state.step_results)
+        thresholds: dict[str, int] = {
+            "lean": 50_000,
+            "standard": 500_000,
+            "full": 2_000_000,
+        }
+        limit = thresholds.get(state.plan.budget_tier, 500_000)
+        if total > limit:
+            return (
+                f"Token budget exceeded: {total:,} tokens used, "
+                f"{state.plan.budget_tier} tier limit is {limit:,}"
+            )
+        return None
 
     # ── Internal helpers ────────────────────────────────────────────────────
 
@@ -1695,6 +1873,43 @@ class ExecutionEngine:
                 task_summary=state.plan.task_summary,
             ))
 
+        # ── Team composition tracking ─────────────────────────────────────
+        team_compositions: list[TeamCompositionRecord] = []
+        conflicts: list[ConflictRecord] = []
+
+        for phase in state.plan.phases:
+            for step in phase.steps:
+                if not step.team:
+                    continue
+                result = state.get_step_result(step.step_id)
+                if result is None:
+                    continue
+
+                agents = sorted(m.agent_name for m in step.team)
+                roles = {m.agent_name: m.role for m in step.team}
+                outcome = "success" if result.status == "complete" else "failure"
+
+                team_compositions.append(TeamCompositionRecord(
+                    step_id=step.step_id,
+                    agents=agents,
+                    roles=roles,
+                    outcome=outcome,
+                    task_type=state.plan.task_type,
+                    token_cost=result.estimated_tokens,
+                ))
+
+                # Detect and record conflicts from team results.
+                if result.member_results and len(result.member_results) >= 2:
+                    conflict = self._detect_team_conflict(
+                        step, result.member_results
+                    )
+                    if conflict:
+                        # Mark as auto_merged if step completed successfully.
+                        if result.status == "complete":
+                            conflict.resolution = "auto_merged"
+                            conflict.resolved_by = "synthesis_agent"
+                        conflicts.append(conflict)
+
         gates_passed = len([g for g in state.gate_results if g.passed])
         gates_failed = len([g for g in state.gate_results if not g.passed])
         agent_count = len({r.agent_name for r in state.step_results})
@@ -1711,6 +1926,8 @@ class ExecutionEngine:
             "knowledge_gaps": knowledge_gaps,
             "roster_recommendations": roster_recs,
             "sequencing_notes": sequencing_notes,
+            "team_compositions": team_compositions,
+            "conflicts": conflicts,
         }
 
     # ── State machine logic ─────────────────────────────────────────────────

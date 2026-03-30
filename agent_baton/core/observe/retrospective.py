@@ -37,10 +37,12 @@ from agent_baton.models.feedback import RetrospectiveFeedback
 from agent_baton.models.knowledge import KnowledgeGapRecord
 from agent_baton.models.retrospective import (
     AgentOutcome,
+    ConflictRecord,
     KnowledgeGap,
     Retrospective,
     RosterRecommendation,
     SequencingNote,
+    TeamCompositionRecord,
 )
 from agent_baton.models.usage import TaskUsageRecord
 
@@ -83,6 +85,8 @@ class RetrospectiveEngine:
         sequencing_notes: list[SequencingNote] | None = None,
         task_type: str | None = None,
         task_summary: str = "",
+        team_compositions: list[TeamCompositionRecord] | None = None,
+        conflicts: list[ConflictRecord] | None = None,
     ) -> Retrospective:
         """Generate a retrospective from a usage record plus qualitative input.
 
@@ -142,6 +146,8 @@ class RetrospectiveEngine:
             knowledge_gaps=merged_gaps,
             roster_recommendations=roster_recommendations or [],
             sequencing_notes=sequencing_notes or [],
+            team_compositions=team_compositions or [],
+            conflicts=conflicts or [],
         )
 
     # ------------------------------------------------------------------

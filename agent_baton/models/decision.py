@@ -135,3 +135,85 @@ class DecisionResolution:
             resolved_by=data.get("resolved_by", "human"),
             resolved_at=data.get("resolved_at", ""),
         )
+
+
+@dataclass
+class ContributionRequest:
+    """Open-ended request for input from multiple participants.
+
+    Unlike DecisionRequest (binary choice), ContributionRequest stays
+    open until all named contributors respond or a deadline expires.
+    A facilitator agent synthesizes when all inputs arrive.
+
+    Attributes:
+        request_id: Unique identifier.
+        task_id: Execution this contribution belongs to.
+        topic: What input is being requested.
+        description: Detailed context for contributors.
+        contributors: Named participants expected to contribute.
+        responses: Mapping of contributor name to their input.
+        facilitator_agent: Agent that synthesizes when all inputs arrive.
+        deadline: ISO 8601 deadline (optional).
+        created_at: ISO 8601 creation time.
+        status: "collecting", "ready", "synthesized", "expired".
+    """
+
+    request_id: str
+    task_id: str
+    topic: str
+    description: str = ""
+    contributors: list[str] = field(default_factory=list)
+    responses: dict[str, str] = field(default_factory=dict)
+    facilitator_agent: str = "architect"
+    deadline: str | None = None
+    created_at: str = ""
+    status: str = "collecting"  # collecting | ready | synthesized | expired
+
+    def __post_init__(self) -> None:
+        if not self.created_at:
+            self.created_at = datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
+
+    @property
+    def is_complete(self) -> bool:
+        """True when all expected contributors have responded."""
+        return all(c in self.responses for c in self.contributors)
+
+    @property
+    def pending_contributors(self) -> list[str]:
+        """Contributors who haven't responded yet."""
+        return [c for c in self.contributors if c not in self.responses]
+
+    def respond(self, contributor: str, response: str) -> None:
+        """Record a contributor's response. Updates status to 'ready' when all have responded."""
+        self.responses[contributor] = response
+        if self.is_complete:
+            self.status = "ready"
+
+    def to_dict(self) -> dict:
+        return {
+            "request_id": self.request_id,
+            "task_id": self.task_id,
+            "topic": self.topic,
+            "description": self.description,
+            "contributors": self.contributors,
+            "responses": self.responses,
+            "facilitator_agent": self.facilitator_agent,
+            "deadline": self.deadline,
+            "created_at": self.created_at,
+            "status": self.status,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> ContributionRequest:
+        return cls(
+            request_id=data.get("request_id", ""),
+            task_id=data.get("task_id", ""),
+            topic=data.get("topic", ""),
+            description=data.get("description", ""),
+            contributors=data.get("contributors", []),
+            responses=data.get("responses", {}),
+            facilitator_agent=data.get("facilitator_agent", "architect"),
+            deadline=data.get("deadline"),
+            created_at=data.get("created_at", ""),
+            status=data.get("status", "collecting"),
+        )

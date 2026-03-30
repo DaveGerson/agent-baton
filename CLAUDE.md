@@ -111,7 +111,7 @@ pmo-ui/            ← React/Vite PMO frontend (served at /pmo/)
 
 ```bash
 pip install -e ".[dev]"    # Install in editable mode
-pytest                     # Run tests (~3745 tests)
+pytest                     # Run tests (~4280 tests)
 scripts/install.sh         # Re-install globally after editing agents/references
 ```
 
@@ -178,6 +178,56 @@ and should involve the auditor when substantial.
 
 Changes to `core/engine/` affect the execution runtime and should have
 corresponding test coverage.
+
+## Cross-Layer Linkage Rules
+
+Schema and model changes touch multiple layers that must stay in sync.
+These linkage rules prevent the category of bugs where a change in one
+layer silently breaks another.
+
+### Schema Linkage (storage/)
+
+When adding or removing a column in `schema.py`:
+
+1. **Project-level schema** (`PROJECT_SCHEMA_DDL`) — the CREATE TABLE
+   for `baton.db`.
+2. **Central schema** (`CENTRAL_SCHEMA_DDL`) — the CREATE TABLE for
+   `central.db`.  The central table mirrors the project table with an
+   additional `project_id` prefix column.
+3. **Migration script** (`MIGRATIONS` dict) — ALTER TABLE for existing
+   project databases.  Central does not have its own migration dict;
+   it uses `CREATE TABLE IF NOT EXISTS` on first access.
+4. **SQLite backend** (`sqlite_backend.py`) — INSERT and SELECT
+   statements that reference the column.
+5. **Sync engine** (`sync.py`) — uses `SELECT *` so column presence is
+   sufficient, but verify the central DDL includes the column.
+
+**Rule:** Every column in `PROJECT_SCHEMA_DDL` must also exist in
+`CENTRAL_SCHEMA_DDL` (with the `project_id` prefix added to the key).
+The sync engine copies all columns via `SELECT *`; a missing column in
+the central schema causes a silent sync failure.
+
+### Model ↔ Test Linkage
+
+When the planner produces new step types (e.g. team steps with
+member IDs like `"2.1.a"`):
+
+1. **Integration tests** that drive the engine through
+   `record_step_result` must use the `_record_dispatch` helper (in
+   `test_engine_integration.py`) which routes team member IDs to
+   `record_team_member_result`.  Direct calls to
+   `engine.record_step_result` will fail for team member IDs.
+2. **CLI handler tests** (e.g. `test_planner_governance.py`) that
+   construct `argparse.Namespace` fixtures must include all attributes
+   that `plan_cmd.handler` reads.  When a new CLI flag is added to the
+   plan command, update the test namespace.
+
+### Planner ↔ Gate Linkage
+
+When adding new phase names to `_PHASE_NAMES` or `_STEP_TEMPLATES`
+in `planner.py`, check `_default_gate()` to ensure non-code-producing
+phases (design, investigate, research, review) are excluded from
+automated test gates.
 
 ## Documentation Maintenance
 

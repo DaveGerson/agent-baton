@@ -5,6 +5,65 @@ from dataclasses import dataclass, field
 
 
 @dataclass
+class TeamPattern:
+    """A recurring team composition pattern derived from usage logs.
+
+    Tracks which agent combinations work well together as teams,
+    enabling team-level learning separate from solo-agent patterns.
+    The ``PatternLearner`` groups ``TaskUsageRecord`` entries by
+    canonical agent tuple and computes effectiveness metrics.
+
+    Attributes:
+        pattern_id: Unique identifier, e.g. ``"team-arch-sec-001"``.
+        agents: Canonical sorted list of agent names in the team.
+        task_types: Task types where this team was used.
+        success_rate: Fraction of tasks with outcome ``"SHIP"``.
+        sample_size: Number of tasks where this team composition appeared.
+        avg_token_cost: Mean estimated tokens per task for this team.
+        confidence: Calibrated confidence score in ``[0.0, 1.0]``.
+        created_at: ISO 8601 creation timestamp.
+        updated_at: ISO 8601 last refresh timestamp.
+    """
+
+    pattern_id: str
+    agents: list[str]
+    task_types: list[str] = field(default_factory=list)
+    success_rate: float = 0.0
+    sample_size: int = 0
+    avg_token_cost: int = 0
+    confidence: float = 0.0
+    created_at: str = ""
+    updated_at: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "pattern_id": self.pattern_id,
+            "agents": self.agents,
+            "task_types": self.task_types,
+            "success_rate": self.success_rate,
+            "sample_size": self.sample_size,
+            "avg_token_cost": self.avg_token_cost,
+            "confidence": self.confidence,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> TeamPattern:
+        return cls(
+            pattern_id=data.get("pattern_id", ""),
+            agents=data.get("agents", []),
+            task_types=data.get("task_types", []),
+            success_rate=float(data.get("success_rate", 0.0)),
+            sample_size=int(data.get("sample_size", 0)),
+            avg_token_cost=int(data.get("avg_token_cost", 0)),
+            confidence=float(data.get("confidence", 0.0)),
+            created_at=data.get("created_at", ""),
+            updated_at=data.get("updated_at", ""),
+        )
+
+
+@dataclass
 class LearnedPattern:
     """A recurring pattern distilled from completed task usage logs.
 

@@ -142,11 +142,17 @@ class WorkerSupervisor:
             logger.info("Daemon starting: task=%s", plan.task_id)
             engine.start(plan)
 
+        # Use resource_limits.max_concurrent_agents from the plan when set,
+        # falling back to the caller-supplied max_parallel.
+        effective_parallel = max_parallel
+        if plan.resource_limits is not None:
+            effective_parallel = plan.resource_limits.max_concurrent_agents
+
         worker = TaskWorker(
             engine=engine,
             launcher=launcher,
             bus=ctx.bus,
-            max_parallel=max_parallel,
+            max_parallel=effective_parallel,
         )
 
         summary = ""
