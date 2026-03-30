@@ -117,7 +117,16 @@ tasks:
 - **Concurrent execution** -- run multiple plans in parallel, each bound
   by `BATON_TASK_ID`
 - **Plan amendments** -- add phases or steps mid-execution
-- **Team steps** -- dispatch multiple agents to a single step
+- **Team steps** -- dispatch multiple agents to a single step with
+  configurable synthesis strategies and conflict detection/escalation
+- **Selective MCP pass-through** -- per-step MCP server declarations
+  prevent input token bloat from unused tool schemas
+- **Resource governance** -- concurrent agent caps and token budget
+  warnings across budget tiers
+- **Team intelligence** -- composition tracking, cost prediction per
+  team, and `baton scores --teams` effectiveness reporting
+- **Async sessions** -- multi-day workflow support with checkpoints,
+  participant tracking, and multi-party contribution protocol
 
 ### Risk-Tiered Safety
 

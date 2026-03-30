@@ -1320,6 +1320,127 @@ Gaps are handled without blocking execution when possible:
 
 ---
 
+## 13. Team Collaboration
+
+Agent Baton supports structured multi-agent collaboration within plan
+steps via **team steps**.  A team step assigns multiple agents to a
+single plan step, each with a defined role and dependency ordering.
+
+### Team Step Structure
+
+A `PlanStep` with a non-empty `team` list is a team step.  Each
+`TeamMember` has a `member_id` (e.g. `"1.1.a"`), `role` (lead,
+implementer, reviewer), and optional `depends_on` list for intra-step
+sequencing.
+
+### Synthesis Strategies
+
+When all team members complete, their outputs are merged via the
+step's `SynthesisSpec`:
+
+| Strategy | Behavior |
+|----------|----------|
+| `concatenate` (default) | Join outcomes with `"; "`, collect all files |
+| `merge_files` | Same as concatenate but deduplicate `files_changed` |
+| `agent_synthesis` | Mark for synthesis agent dispatch (future) |
+
+### Conflict Detection and Escalation
+
+The engine detects conflicts when two or more team members modify the
+same file.  The `conflict_handling` field on `SynthesisSpec` controls
+the response:
+
+| Mode | Behavior |
+|------|----------|
+| `auto_merge` (default) | Complete the step; record conflict in retrospective |
+| `escalate` | Pause step, set state to `approval_pending`, surface both positions to human |
+| `fail` | Fail the step if conflict detected |
+
+Conflicts are recorded as `ConflictRecord` instances in the
+retrospective, preserving each agent's position and evidence.
+
+### Team Composition Tracking
+
+After execution, `TeamCompositionRecord` entries are collected from
+team steps and written to retrospective JSON sidecars.  These feed:
+
+- `PatternLearner.analyze_team_patterns()` -- identifies effective
+  team compositions across projects
+- `PerformanceScorer.score_teams()` -- aggregates team scorecards
+- `baton scores --teams` -- CLI report of team effectiveness
+- `PatternLearner.get_team_cost_estimate()` -- historical token cost
+  by team composition
+
+### Selective MCP Pass-through
+
+Team steps (and solo steps) can declare MCP server dependencies via
+the `mcp_servers` field on `PlanStep`.  Only declared servers are
+passed to the agent subprocess via `--mcp-config`, avoiding input
+token bloat from unused MCP tool schemas.
+
+Default: no MCP servers inherited.  This is a deliberate design choice
+to prevent context window waste from tool schemas agents don't need.
+
+## 14. Async Sessions and Resource Management
+
+### Session Persistence
+
+`SessionState` wraps `ExecutionState` with multi-day workflow metadata:
+
+- **Participants** -- agents and humans who contributed, with
+  contribution counts
+- **Checkpoints** -- snapshot points for safe resumption after daemon
+  restart or manual pause
+- **Lifecycle** -- active → paused → resumed → completed
+
+### Multi-party Async Contributions
+
+`ContributionRequest` extends the decision protocol for open-ended
+multi-party input.  Unlike `DecisionRequest` (binary choice), a
+contribution stays open until all named contributors respond.
+
+API: `DecisionManager.request_contribution()`, `.contribute()`,
+`.get_contribution()`, `.pending_contributions()`.
+
+Events: `contribution.requested` and `contribution.ready` are
+published via `EventBus` when all inputs arrive.
+
+### Resource Constraints
+
+`ResourceLimits` on `MachinePlan` governs execution resource usage:
+
+| Limit | Default | Enforced By |
+|-------|---------|-------------|
+| `max_concurrent_agents` | 8 | `StepScheduler` semaphore |
+| `max_concurrent_executions` | 3 | `WorkerSupervisor` |
+| `max_tokens_per_minute` | 0 (unlimited) | Not yet enforced |
+
+Token budget warnings: `_check_token_budget()` compares cumulative
+`estimated_tokens` against tier thresholds (lean=50k, standard=500k,
+full=2M).  Warnings are logged and appended to step `deviations` for
+retrospective tracking.
+
+## 15. Intelligence and Cost Prediction
+
+### Team Cost Estimation
+
+The planner consults `PatternLearner.get_team_cost_estimate()` for
+team steps, surfacing historical token costs:
+
+- In `explain_plan()` -- "Team Cost Estimates" section with per-step
+  and total estimates
+- In `shared_context` -- budget percentage so agents are aware of
+  resource constraints
+
+### Budget-Aware Planning
+
+Team cost estimates are compared against the plan's `budget_tier`
+threshold.  The shared context includes the cost as a percentage of
+budget (e.g. "~45,000 tokens (90% of lean budget)") so dispatched
+agents can self-regulate scope.
+
+---
+
 ## Appendix: Data Models
 
 ### Key Models (agent_baton/models/execution.py)
@@ -1339,6 +1460,21 @@ Gaps are handled without blocking execution when possible:
 | `ApprovalResult` | Outcome of a human approval |
 | `ExecutionAction` | Instruction from engine to driving session |
 | `ActionType` | Enum: DISPATCH, GATE, COMPLETE, FAILED, WAIT, APPROVAL |
+| `SynthesisSpec` | Team output merge strategy (concatenate/merge_files/agent_synthesis) |
+
+### Team and Collaboration Models
+
+| Class | Module | Purpose |
+|-------|--------|---------|
+| `TeamCompositionRecord` | `models/retrospective.py` | Records which agents worked as a team and outcome |
+| `ConflictRecord` | `models/retrospective.py` | Structured disagreement between agents |
+| `TeamPattern` | `models/pattern.py` | Recurring team composition pattern from usage logs |
+| `TeamScorecard` | `core/improve/scoring.py` | Performance scorecard for a team composition |
+| `SessionState` | `models/session.py` | Multi-day session wrapper with checkpoints |
+| `SessionCheckpoint` | `models/session.py` | Snapshot point for safe resumption |
+| `SessionParticipant` | `models/session.py` | Agent or human participant in a session |
+| `ContributionRequest` | `models/decision.py` | Multi-party async input collection |
+| `ResourceLimits` | `models/parallel.py` | Concurrency and token budget constraints |
 
 ### Key Enums (agent_baton/models/enums.py)
 
@@ -1356,3 +1492,4 @@ Gaps are handled without blocking execution when possible:
 |-------|---------|
 | `DecisionRequest` | Human decision request (pending/resolved/expired) |
 | `DecisionResolution` | Resolution of a decision (option + rationale) |
+| `ContributionRequest` | Multi-party async input with contributor tracking |
