@@ -62,6 +62,18 @@ def discover_commands() -> dict[str, types.ModuleType]:
 
 
 def main(argv: list[str] | None = None) -> None:
+    # On Windows the default console encoding is often cp1252, which cannot
+    # represent Unicode characters (em dashes, arrows, etc.) used throughout
+    # the CLI output and logging.  Reconfigure stdout/stderr to UTF-8 with
+    # replacement fallback so these characters are printed instead of raising
+    # UnicodeEncodeError.
+    import sys
+    if sys.platform == "win32":
+        for stream_name in ("stdout", "stderr"):
+            stream = getattr(sys, stream_name, None)
+            if stream is not None and hasattr(stream, "reconfigure"):
+                stream.reconfigure(encoding="utf-8", errors="replace")
+
     from importlib.metadata import version, PackageNotFoundError
     try:
         _version = version("agent-baton")
