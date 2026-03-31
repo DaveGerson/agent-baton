@@ -199,7 +199,7 @@ class RegistryClient:
                 shutil.copytree(src_knowledge, dst_knowledge)
 
         # Build the registry entry — path points to the versioned directory.
-        relative_path = str(Path("packages") / manifest.name / manifest.version)
+        relative_path = f"packages/{manifest.name}/{manifest.version}"
         entry = RegistryEntry(
             name=manifest.name,
             version=manifest.version,

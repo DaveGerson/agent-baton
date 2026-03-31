@@ -135,7 +135,7 @@ class ClaudeCodeConfig:
         """Serialise to a plain dict (JSON-safe)."""
         return {
             "claude_path": self.claude_path,
-            "working_directory": str(self.working_directory) if self.working_directory else None,
+            "working_directory": self.working_directory.as_posix() if self.working_directory else None,
             "default_timeout_seconds": self.default_timeout_seconds,
             "model_timeouts": dict(self.model_timeouts),
             "max_retries": self.max_retries,

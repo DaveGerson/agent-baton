@@ -92,7 +92,7 @@ class PmoStore:
             json.dumps(config.to_dict(), indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
-        tmp_path.rename(self._config_path)
+        tmp_path.replace(self._config_path)
 
     # ── Project registration ───────────────────────────────────────────────
 

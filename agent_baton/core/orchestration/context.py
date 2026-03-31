@@ -127,7 +127,7 @@ class ContextManager:
             json.dumps(plan.to_dict(), indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
-        tmp.rename(self.plan_json_path)
+        tmp.replace(self.plan_json_path)
         return self.plan_path
 
     def read_plan(self) -> str | None:

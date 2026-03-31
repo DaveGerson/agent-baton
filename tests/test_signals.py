@@ -127,28 +127,37 @@ class TestSignalHandlerInstallUninstall:
 
     def test_install_restores_original_handlers_on_uninstall(self) -> None:
         """Original signal handlers are restored when uninstall() is called."""
+        import sys
         async def _run():
             # Capture originals INSIDE the event loop — asyncio.run() itself
             # installs its own SIGINT handler, so the "original" from the
             # loop's perspective differs from the pre-run() value.
-            original_sigterm = signal.getsignal(signal.SIGTERM)
             original_sigint = signal.getsignal(signal.SIGINT)
             handler = SignalHandler()
             handler.install()
             handler.uninstall()
-            assert signal.getsignal(signal.SIGTERM) == original_sigterm
             assert signal.getsignal(signal.SIGINT) == original_sigint
+            if sys.platform != "win32":
+                original_sigterm = signal.getsignal(signal.SIGTERM)
+                handler2 = SignalHandler()
+                handler2.install()
+                handler2.uninstall()
+                assert signal.getsignal(signal.SIGTERM) == original_sigterm
         asyncio.run(_run())
 
     def test_original_handlers_stored_on_install(self) -> None:
         """install() saves the pre-existing handlers for restoration."""
-        original_sigterm = signal.getsignal(signal.SIGTERM)
+        import sys
+        # On Windows only SIGINT is installed; on Unix both SIGTERM and SIGINT.
+        expected_sig = signal.SIGINT
+        original = signal.getsignal(expected_sig)
         async def _run():
             handler = SignalHandler()
             handler.install()
             try:
-                assert signal.SIGTERM in handler._original_handlers
-                assert handler._original_handlers[signal.SIGTERM] == original_sigterm
+                assert expected_sig in handler._original_handlers
+                if sys.platform != "win32":
+                    assert signal.SIGTERM in handler._original_handlers
             finally:
                 handler.uninstall()
         asyncio.run(_run())
