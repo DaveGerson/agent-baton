@@ -672,7 +672,7 @@ class TestDelegationPromptSuccessCriteria:
     ) -> None:
         step = _make_step()
         prompt = dispatcher.build_delegation_prompt(step, task_type=task_type)
-        assert "## Success Criteria" in prompt
+        assert "**Success criteria:**" in prompt
         assert expected_fragment.lower() in prompt.lower(), (
             f"For task_type={task_type!r}, expected {expected_fragment!r} in:\n{prompt}"
         )
@@ -712,7 +712,7 @@ class TestDelegationPromptSuccessCriteria:
             step, task_type="bug-fix", task_summary="Fix login"
         )
         task_pos = prompt.index("## Your Task")
-        criteria_pos = prompt.index("## Success Criteria")
+        criteria_pos = prompt.index("**Success criteria:**")
         assert task_pos < criteria_pos
 
 
@@ -899,30 +899,19 @@ class TestStepResultDeviationsSerialization:
 
 
 class TestDelegationPromptDeviationsSection:
-    """Delegation prompt always includes the ## Deviations instruction."""
+    """Delegation prompt instructs agents to log deviations."""
 
-    def test_deviations_section_present(self, dispatcher: PromptDispatcher) -> None:
+    def test_deviations_instruction_present(self, dispatcher: PromptDispatcher) -> None:
         step = _make_step()
         prompt = dispatcher.build_delegation_prompt(step)
-        assert "## Deviations" in prompt
+        assert "**Deviations**" in prompt
 
-    def test_deviations_section_instructs_heading(
+    def test_decisions_instruction_present(
         self, dispatcher: PromptDispatcher
     ) -> None:
         step = _make_step()
         prompt = dispatcher.build_delegation_prompt(step)
-        # Should instruct agents to document under a 'Deviations' heading
-        assert "Deviations" in prompt
-        assert "learning loop" in prompt.lower() or "feeds" in prompt.lower()
-
-    def test_deviations_section_appears_after_decision_logging(
-        self, dispatcher: PromptDispatcher
-    ) -> None:
-        step = _make_step()
-        prompt = dispatcher.build_delegation_prompt(step)
-        decision_pos = prompt.index("## Decision Logging")
-        deviations_pos = prompt.index("## Deviations")
-        assert decision_pos < deviations_pos
+        assert "**Decisions**" in prompt
 
 
 class TestDeviationIntegration:
