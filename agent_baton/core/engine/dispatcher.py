@@ -31,16 +31,10 @@ from agent_baton.models.execution import (
 )
 from agent_baton.models.knowledge import KnowledgeAttachment
 
-_KNOWLEDGE_GAPS_BLOCK = """\
-## Knowledge Gaps
-
-If you lack sufficient context to complete this task correctly:
-- Output `KNOWLEDGE_GAP: <description>` with what you need
-- Include `CONFIDENCE: none | low | partial` and `TYPE: factual | contextual`
-- Stop and report your partial progress
-
-Do not guess through gaps on HIGH/CRITICAL risk tasks.
-Resolved decisions (provided above) are final — do not revisit them."""
+_KNOWLEDGE_GAPS_LINE = (
+    "If you lack context, output `KNOWLEDGE_GAP: <description>` with "
+    "`CONFIDENCE: none|low|partial` and stop. Do not guess on HIGH/CRITICAL risk tasks."
+)
 
 # Success criteria by task type — shown in the delegation prompt to make the
 # definition of done concrete.  Selected by the caller via the task_type arg.
@@ -233,39 +227,55 @@ class PromptDispatcher:
             "",
         ]
 
-        # Success Criteria section — derived from task type
+        # Success Criteria — inline when present
         success_criteria = _SUCCESS_CRITERIA.get(task_type, "")
         if success_criteria:
             parts += [
-                "## Success Criteria",
-                success_criteria,
+                f"**Success criteria:** {success_criteria}",
                 "",
             ]
 
+        # Files to Read — only when files are specified
+        if step.context_files:
+            parts += [
+                "## Files to Read",
+                context_files_text,
+                "",
+            ]
+
+        # Deliverables — only when explicitly listed
+        if step.deliverables:
+            parts += [
+                "## Deliverables",
+                deliverables_text,
+                "",
+            ]
+
+        # Boundaries — only when restrictions are set
+        has_boundaries = step.allowed_paths or step.blocked_paths
+        if has_boundaries:
+            parts += [
+                "## Boundaries",
+                f"- Write to: {allowed}",
+                f"- Do NOT write to: {blocked}",
+                "",
+            ]
+
+        parts.append(_KNOWLEDGE_GAPS_LINE)
+        parts.append("")
+
+        # Previous Step Output — only when there is actual handoff content
+        if handoff_from.strip():
+            parts += [
+                "## Previous Step Output",
+                previous_output,
+                "",
+            ]
+
+        # Decision & deviation logging — compact
         parts += [
-            "## Files to Read",
-            context_files_text,
-            "",
-            "## Deliverables",
-            deliverables_text,
-            "",
-            "## Boundaries",
-            f"- Write to: {allowed}",
-            f"- Do NOT write to: {blocked}",
-            "",
-            _KNOWLEDGE_GAPS_BLOCK,
-            "",
-            "## Previous Step Output",
-            previous_output,
-            "",
-            "## Decision Logging",
-            "When you make a non-obvious decision, document it in your output",
-            "under a 'Decisions' heading explaining why you chose this approach.",
-            "",
-            "## Deviations",
-            "If the plan's approach doesn't fit the actual situation, document what",
-            "you changed and why under a 'Deviations' heading. This feeds the",
-            "learning loop — deviations improve future plans.",
+            "Log non-obvious decisions under a **Decisions** heading. "
+            "If you deviate from the plan, explain under a **Deviations** heading.",
         ]
 
         return "\n".join(parts)
@@ -339,14 +349,12 @@ class PromptDispatcher:
             parts.append(deps_text)
         parts.extend([
             "",
-            "## Boundaries",
-            "- Coordinate with your team members on shared resources.",
+            "Coordinate with your team members on shared resources.",
             "",
-            _KNOWLEDGE_GAPS_BLOCK,
+            _KNOWLEDGE_GAPS_LINE,
             "",
-            "## Decision Logging",
-            "When you make a non-obvious decision, document it in your output",
-            "under a 'Decisions' heading explaining why you chose this approach.",
+            "Log non-obvious decisions under a **Decisions** heading. "
+            "If you deviate from the plan, explain under a **Deviations** heading.",
         ])
         return "\n".join(parts)
 

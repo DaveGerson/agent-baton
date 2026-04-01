@@ -712,10 +712,8 @@ class TestDispatcherKnowledgeSections:
             task_description="Do some work",
         )
         prompt = dispatcher.build_delegation_prompt(step)
-        assert "## Knowledge Gaps" in prompt
         assert "KNOWLEDGE_GAP:" in prompt
         assert "CONFIDENCE:" in prompt
-        assert "TYPE:" in prompt
 
     def test_retrieval_hint_for_file_delivery(
         self, dispatcher: PromptDispatcher

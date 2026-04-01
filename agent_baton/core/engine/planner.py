@@ -1718,16 +1718,10 @@ class IntelligentPlanner:
         agent_list = ", ".join(dict.fromkeys(plan.all_agents))  # deduplicated, ordered
         lines: list[str] = [
             f"Task: {plan.task_summary}",
-            f"Task ID: {plan.task_id}",
-            f"Risk Level: {plan.risk_level}",
-            f"Budget Tier: {plan.budget_tier}",
-            f"Execution Mode: {plan.execution_mode}",
-            f"Git Strategy: {plan.git_strategy}",
+            f"Risk: {plan.risk_level} | Budget: {plan.budget_tier}",
         ]
         if agent_list:
             lines.append(f"Team: {agent_list}")
-        if plan.pattern_source:
-            lines.append(f"Pattern: {plan.pattern_source}")
 
         # Governance — classification
         if self._last_classification is not None:

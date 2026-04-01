@@ -333,7 +333,6 @@ class TestDelegationPrompt:
         )
         assert "## Shared Context" in prompt
         assert "## Your Task" in prompt
-        assert "## Deliverables" in prompt
         assert "CLAUDE.md" in prompt
 
 

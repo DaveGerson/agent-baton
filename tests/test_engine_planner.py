@@ -743,13 +743,12 @@ class TestBudgetTier:
 
 class TestBuildSharedContext:
     def test_shared_context_content(self, planner: IntelligentPlanner):
-        """Shared context must include the task summary,
-        task ID, and risk level so every dispatched agent has full context.
+        """Shared context must include the task summary and risk level
+        so every dispatched agent has full context.
         Note: context.md instruction moved to PromptDispatcher delegation prompt."""
         plan = planner.create_plan("Build search feature")
         ctx = plan.shared_context
         assert "Build search feature" in ctx
-        assert plan.task_id in ctx
         assert plan.risk_level in ctx
 
 

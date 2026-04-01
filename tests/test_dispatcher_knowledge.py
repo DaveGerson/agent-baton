@@ -371,49 +371,31 @@ class TestBuildDelegationPromptKnowledge:
     ) -> None:
         step = _make_step(knowledge=[])
         prompt = dispatcher.build_delegation_prompt(step)
-        assert "## Knowledge Gaps" in prompt
+        assert "KNOWLEDGE_GAP:" in prompt
 
-    def test_knowledge_gaps_block_contains_signal_format(
+    def test_knowledge_gaps_line_contains_signal_format(
         self, dispatcher: PromptDispatcher
     ) -> None:
         step = _make_step(knowledge=[])
         prompt = dispatcher.build_delegation_prompt(step)
         assert "KNOWLEDGE_GAP:" in prompt
         assert "CONFIDENCE:" in prompt
-        assert "TYPE:" in prompt
 
-    def test_knowledge_gaps_block_contains_high_risk_warning(
+    def test_knowledge_gaps_line_contains_high_risk_warning(
         self, dispatcher: PromptDispatcher
     ) -> None:
         step = _make_step(knowledge=[])
         prompt = dispatcher.build_delegation_prompt(step)
         assert "HIGH/CRITICAL" in prompt
 
-    def test_knowledge_gaps_block_contains_decision_finality_instruction(
+    def test_knowledge_gaps_line_position_after_task(
         self, dispatcher: PromptDispatcher
     ) -> None:
         step = _make_step(knowledge=[])
         prompt = dispatcher.build_delegation_prompt(step)
-        assert "Resolved decisions" in prompt
-        assert "final" in prompt
-
-    def test_knowledge_gaps_block_position_after_boundaries(
-        self, dispatcher: PromptDispatcher
-    ) -> None:
-        step = _make_step(knowledge=[])
-        prompt = dispatcher.build_delegation_prompt(step)
-        boundaries_pos = prompt.index("## Boundaries")
-        gaps_pos = prompt.index("## Knowledge Gaps")
-        assert boundaries_pos < gaps_pos
-
-    def test_knowledge_gaps_block_position_before_previous_step_output(
-        self, dispatcher: PromptDispatcher
-    ) -> None:
-        step = _make_step(knowledge=[])
-        prompt = dispatcher.build_delegation_prompt(step)
-        gaps_pos = prompt.index("## Knowledge Gaps")
-        prev_pos = prompt.index("## Previous Step Output")
-        assert gaps_pos < prev_pos
+        task_pos = prompt.index("## Your Task")
+        gaps_pos = prompt.index("KNOWLEDGE_GAP:")
+        assert task_pos < gaps_pos
 
 
 # ---------------------------------------------------------------------------
@@ -464,7 +446,7 @@ class TestBuildTeamDelegationPromptKnowledge:
         step = _make_step(knowledge=[])
         member = _make_team_member()
         prompt = dispatcher.build_team_delegation_prompt(step, member)
-        assert "## Knowledge Gaps" in prompt
+        assert "KNOWLEDGE_GAP:" in prompt
 
     def test_knowledge_gaps_signal_format_in_team_prompt(
         self, dispatcher: PromptDispatcher
@@ -474,7 +456,6 @@ class TestBuildTeamDelegationPromptKnowledge:
         prompt = dispatcher.build_team_delegation_prompt(step, member)
         assert "KNOWLEDGE_GAP:" in prompt
         assert "CONFIDENCE:" in prompt
-        assert "TYPE:" in prompt
 
     def test_reference_knowledge_in_team_prompt(
         self, dispatcher: PromptDispatcher

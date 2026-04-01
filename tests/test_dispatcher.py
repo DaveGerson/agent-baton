@@ -108,8 +108,7 @@ class TestBuildDelegationPromptFullFields:
     def test_contains_decision_logging_section(self, dispatcher: PromptDispatcher) -> None:
         step = _make_step()
         prompt = dispatcher.build_delegation_prompt(step)
-        assert "## Decision Logging" in prompt
-        assert "Decisions" in prompt
+        assert "**Decisions**" in prompt
 
     def test_contains_handoff(self, dispatcher: PromptDispatcher) -> None:
         step = _make_step()
@@ -118,11 +117,11 @@ class TestBuildDelegationPromptFullFields:
         assert handoff in prompt
         assert "## Previous Step Output" in prompt
 
-    def test_handoff_first_step_fallback(self, dispatcher: PromptDispatcher) -> None:
-        """When handoff_from is empty the prompt says 'first step'."""
+    def test_handoff_omitted_when_empty(self, dispatcher: PromptDispatcher) -> None:
+        """When handoff_from is empty the Previous Step Output section is omitted."""
         step = _make_step()
         prompt = dispatcher.build_delegation_prompt(step, handoff_from="")
-        assert "first step" in prompt.lower()
+        assert "## Previous Step Output" not in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -134,21 +133,22 @@ class TestBuildDelegationPromptFullFields:
 
 
 class TestBuildDelegationPromptMinimalFields:
-    @pytest.mark.parametrize("step_kwargs,expected_substring", [
-        ({"allowed_paths": []}, "any"),
-        ({"blocked_paths": []}, "none"),
+    @pytest.mark.parametrize("step_kwargs,absent_section", [
+        ({"allowed_paths": []}, "## Boundaries"),
+        ({"blocked_paths": []}, "## Boundaries"),
         ({"context_files": []}, "## Files to Read"),
         ({"deliverables": []}, "## Deliverables"),
     ])
-    def test_minimal_fallback(
+    def test_empty_sections_omitted(
         self,
         dispatcher: PromptDispatcher,
         step_kwargs: dict,
-        expected_substring: str,
+        absent_section: str,
     ) -> None:
+        """Empty optional sections are omitted to keep prompts concise."""
         step = _make_step(**step_kwargs)
         prompt = dispatcher.build_delegation_prompt(step)
-        assert expected_substring in prompt
+        assert absent_section not in prompt
 
     def test_task_summary_used_when_no_project_description(self, dispatcher: PromptDispatcher) -> None:
         step = _make_step()
