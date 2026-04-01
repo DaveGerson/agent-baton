@@ -502,7 +502,46 @@ class TestComplexitySignalBoundaries:
 # ---------------------------------------------------------------------------
 
 class TestEndToEndClassification:
-    """Integration tests — classifier -> planner -> plan."""
+    """Integration tests — classifier -> planner -> plan.
+
+    These tests create an IntelligentPlanner which builds a real
+    AgentRegistry via load_default_paths(). To make the tests
+    deterministic regardless of which .claude/agents/ files are
+    present, we patch load_default_paths to populate a known set
+    of agents.
+    """
+
+    _TEST_AGENTS = [
+        ("architect", "System design, technical decisions, module boundaries"),
+        ("backend-engineer", "Server-side implementation, API endpoints, business logic"),
+        ("backend-engineer--python", "Python backend specialist. FastAPI, Django, SQLAlchemy"),
+        ("frontend-engineer--react", "React UI components, state management"),
+        ("test-engineer", "Write and organize tests"),
+        ("code-reviewer", "Quality review before commits"),
+        ("auditor", "Safety review for guardrail changes"),
+        ("data-engineer", "Database schema, migrations, ETL pipelines"),
+        ("data-engineer--databricks", "Databricks pipelines, Delta Lake, Spark"),
+    ]
+
+    def setup_method(self):
+        """Patch AgentRegistry.load_default_paths to use a fixed agent set."""
+        original_load = AgentRegistry.load_default_paths
+
+        def _load_test_agents(registry_self):
+            for name, desc in self._TEST_AGENTS:
+                agent = AgentDefinition(name=name, description=desc)
+                registry_self._agents[name] = agent
+            return len(registry_self._agents)
+
+        self._registry_patcher = patch.object(
+            AgentRegistry,
+            "load_default_paths",
+            _load_test_agents,
+        )
+        self._registry_patcher.start()
+
+    def teardown_method(self):
+        self._registry_patcher.stop()
 
     def test_simple_task_produces_light_plan(self):
         from agent_baton.core.engine.planner import IntelligentPlanner
