@@ -240,6 +240,60 @@ class TestDefaultPhases:
 
 
 # ---------------------------------------------------------------------------
+# Agent assignment — Pass 4 overflow
+# ---------------------------------------------------------------------------
+
+class TestAgentOverflowToWorkPhases:
+    """Leftover agents from Pass 4 must only go to work phases (Implement/Fix/Draft),
+    not to Design/Research/Review, to prevent bloated plans."""
+
+    def test_leftover_agents_land_in_implement_not_design(self, planner: IntelligentPlanner):
+        """When there are more agents than phases, extras should go to Implement."""
+        agents = [
+            "architect", "backend-engineer", "test-engineer",
+            "code-reviewer", "data-engineer", "frontend-engineer--react",
+        ]
+        phases = planner._default_phases("new-feature", agents)
+        design_phase = next(p for p in phases if p.name == "Design")
+        implement_phase = next(p for p in phases if p.name == "Implement")
+        # Design should have at most 1 agent (the primary from Pass 1)
+        assert len(design_phase.steps) <= 1, (
+            f"Design phase has {len(design_phase.steps)} steps — "
+            f"leftover agents are leaking into Design"
+        )
+        # Implement should absorb the overflow
+        assert len(implement_phase.steps) >= 2
+
+    def test_review_phase_not_bloated(self, planner: IntelligentPlanner):
+        """Review phase should not accumulate extra agents from overflow."""
+        agents = [
+            "architect", "backend-engineer", "test-engineer",
+            "code-reviewer", "auditor", "security-reviewer",
+        ]
+        phases = planner._default_phases("new-feature", agents)
+        review_phase = next(p for p in phases if p.name == "Review")
+        # Review should have at most 1 agent from Passes 1-3
+        assert len(review_phase.steps) <= 1, (
+            f"Review phase has {len(review_phase.steps)} steps — "
+            f"extra agents should go to Implement instead"
+        )
+
+    def test_many_agents_produce_bounded_total_steps(self, planner: IntelligentPlanner):
+        """Even with many agents, total step count should stay reasonable."""
+        agents = [
+            "architect", "backend-engineer", "test-engineer",
+            "code-reviewer", "data-engineer", "frontend-engineer--react",
+            "auditor", "security-reviewer",
+        ]
+        phases = planner._default_phases("new-feature", agents)
+        total_steps = sum(len(p.steps) for p in phases)
+        # 8 agents across 4 phases — each agent should appear once
+        assert total_steps == len(agents), (
+            f"Expected {len(agents)} total steps, got {total_steps}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Default gates
 # DECISION: 7 individual tests consolidated into 2 parametrized tests:
 # one for phases that get gates (with gate_type + command checks),
