@@ -7,13 +7,17 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import fcntl
 import json
 import logging
 import subprocess
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+
+if sys.platform != "win32":
+    import fcntl
+else:
+    import msvcrt
 
 import pytest
 
@@ -169,7 +173,10 @@ class TestSupervisorPIDLocking:
         tmp_path.mkdir(parents=True, exist_ok=True)
         s._write_pid()
         try:
-            content = s.pid_path.read_text().strip()
+            # On Windows, msvcrt lock blocks other handles from reading
+            # the locked byte range, so read via the same FD.
+            s._pid_fd.seek(0)
+            content = s._pid_fd.read().strip()
             assert content == str(os.getpid())
         finally:
             s._remove_pid()
@@ -201,7 +208,9 @@ class TestSupervisorPIDLocking:
         # content is gone and the lock is now ours.
         s._write_pid()
         try:
-            content = s.pid_path.read_text().strip()
+            # Read via the held FD to avoid lock conflicts on Windows.
+            s._pid_fd.seek(0)
+            content = s._pid_fd.read().strip()
             assert content != "999999999"
         finally:
             s._remove_pid()
@@ -579,6 +588,7 @@ class TestWorkerShutdownEvent:
 # ===========================================================================
 
 class TestDaemonizeFunction:
+    # test_windows_raises_runtime_error runs on all platforms (it monkeypatches sys.platform).
     def test_windows_raises_runtime_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """On Windows, daemonize() raises RuntimeError immediately."""
         from agent_baton.core.runtime import daemon
@@ -591,6 +601,7 @@ class TestDaemonizeFunction:
     # syscalls with a single monkeypatched daemonize() invocation. Each was
     # patching the same functions and running the same setup; splitting them
     # produced three identical mock setups with one different assertion each.
+    @pytest.mark.skipif(sys.platform == "win32", reason="os.fork/os.setsid not available on Windows")
     def test_daemonize_calls_fork_twice_setsid_once_and_dup2(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -625,6 +636,7 @@ class TestDaemonizeFunction:
             f"dup2 must redirect fd 1 and fd 2; got targets: {redirected_fds}"
         )
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="os.fork not available on Windows")
     def test_first_fork_failure_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """If the first os.fork() raises OSError, daemonize() re-raises as RuntimeError."""
         import agent_baton.core.runtime.daemon as daemon_mod
@@ -642,6 +654,7 @@ class TestDaemonizeFunction:
         with pytest.raises(RuntimeError, match="First fork failed"):
             daemon_mod.daemonize()
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="os.fork not available on Windows")
     def test_second_fork_failure_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """If the second os.fork() raises OSError, daemonize() re-raises as RuntimeError."""
         import agent_baton.core.runtime.daemon as daemon_mod

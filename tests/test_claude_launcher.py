@@ -172,9 +172,9 @@ class TestClaudeCodeConfig:
         from pathlib import Path
         cfg = ClaudeCodeConfig(working_directory=tmp_path)
         d = cfg.to_dict()
-        assert d["working_directory"] == str(tmp_path)
+        assert d["working_directory"] == tmp_path.as_posix()
         restored = ClaudeCodeConfig.from_dict(d)
-        assert restored.working_directory == Path(str(tmp_path))
+        assert restored.working_directory == Path(tmp_path.as_posix())
 
 
 # ===========================================================================

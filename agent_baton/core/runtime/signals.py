@@ -46,23 +46,42 @@ class SignalHandler:
         return self._shutdown.is_set()
 
     def install(self) -> None:
-        """Install signal handlers for SIGTERM and SIGINT."""
+        """Install signal handlers for SIGTERM and SIGINT.
+
+        On Unix, uses ``loop.add_signal_handler()`` for both SIGTERM and
+        SIGINT.  On Windows, ``add_signal_handler`` is not supported so
+        we fall back to ``signal.signal(SIGINT, ...)`` for Ctrl+C.
+        SIGTERM is not catchable on Windows (maps to TerminateProcess)
+        and is skipped.
+        """
         if self._installed:
             return
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGTERM, signal.SIGINT):
+        import sys
+        if sys.platform != "win32":
+            loop = asyncio.get_running_loop()
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                self._original_handlers[sig] = signal.getsignal(sig)
+                loop.add_signal_handler(sig, self._on_signal, sig)
+        else:
+            # Windows: only SIGINT (Ctrl+C) is catchable.
+            sig = signal.SIGINT
             self._original_handlers[sig] = signal.getsignal(sig)
-            loop.add_signal_handler(sig, self._on_signal, sig)
+            signal.signal(sig, lambda s, f: self._on_signal(s))
         self._installed = True
 
     def uninstall(self) -> None:
         """Restore original signal handlers."""
         if not self._installed:
             return
-        loop = asyncio.get_running_loop()
-        for sig, original in self._original_handlers.items():
-            loop.remove_signal_handler(sig)
-            signal.signal(sig, original)
+        import sys
+        if sys.platform != "win32":
+            loop = asyncio.get_running_loop()
+            for sig, original in self._original_handlers.items():
+                loop.remove_signal_handler(sig)
+                signal.signal(sig, original)
+        else:
+            for sig, original in self._original_handlers.items():
+                signal.signal(sig, original)
         self._original_handlers.clear()
         self._installed = False
 

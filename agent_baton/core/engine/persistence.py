@@ -65,14 +65,31 @@ class StatePersistence:
         return self._task_id
 
     def save(self, state: ExecutionState) -> None:
-        """Atomically write state to disk (tmp + rename)."""
+        """Atomically write state to disk (tmp + rename).
+
+        On Windows, retries ``Path.replace()`` up to 5 times with 50 ms
+        backoff because antivirus, search indexer, or concurrent readers
+        can momentarily hold the target file open.
+        """
         self._state_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = self._state_path.with_suffix(".json.tmp")
         tmp_path.write_text(
             json.dumps(state.to_dict(), indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
-        tmp_path.replace(self._state_path)
+        import sys
+        if sys.platform == "win32":
+            import time
+            for attempt in range(5):
+                try:
+                    tmp_path.replace(self._state_path)
+                    break
+                except PermissionError:
+                    if attempt == 4:
+                        raise
+                    time.sleep(0.05)
+        else:
+            tmp_path.replace(self._state_path)
 
     def load(self) -> ExecutionState | None:
         """Load state from disk. Returns None if no state or parse error."""

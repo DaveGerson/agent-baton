@@ -19,13 +19,19 @@ the calling process until the worker completes or a shutdown signal arrives.
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import json
 import logging
 import os
+import signal
+import sys
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+
+if sys.platform != "win32":
+    import fcntl
+else:
+    import msvcrt
 
 from agent_baton.core.engine.executor import ExecutionEngine
 from agent_baton.core.engine.protocols import ExecutionDriver
@@ -254,7 +260,7 @@ class WorkerSupervisor:
             return False
         try:
             pid = int(self.pid_path.read_text().strip())
-            os.kill(pid, 15)  # SIGTERM
+            os.kill(pid, signal.SIGTERM)
         except (ValueError, OSError):
             return False
 
@@ -343,10 +349,14 @@ class WorkerSupervisor:
         # Open the PID file and acquire an exclusive lock BEFORE writing.
         # The OS releases the lock automatically when the process exits or the
         # FD is closed, which eliminates the stale-PID-file race condition.
-        # Note: flock() on network filesystems may not enforce mutual exclusion.
-        self._pid_fd = open(self.pid_path, "w")  # noqa: SIM115
+        # Use "w+" so the holding process can read back through the same FD
+        # (required on Windows where msvcrt.locking blocks other handles).
+        self._pid_fd = open(self.pid_path, "w+")  # noqa: SIM115
         try:
-            fcntl.flock(self._pid_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if sys.platform != "win32":
+                fcntl.flock(self._pid_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            else:
+                msvcrt.locking(self._pid_fd.fileno(), msvcrt.LK_NBLCK, 1)
         except OSError:
             self._pid_fd.close()
             self._pid_fd = None
@@ -358,7 +368,11 @@ class WorkerSupervisor:
     def _remove_pid(self) -> None:
         if hasattr(self, "_pid_fd") and self._pid_fd is not None:
             try:
-                fcntl.flock(self._pid_fd, fcntl.LOCK_UN)
+                if sys.platform != "win32":
+                    fcntl.flock(self._pid_fd, fcntl.LOCK_UN)
+                else:
+                    self._pid_fd.seek(0)
+                    msvcrt.locking(self._pid_fd.fileno(), msvcrt.LK_UNLCK, 1)
                 self._pid_fd.close()
             except OSError:
                 pass
@@ -404,4 +418,4 @@ class WorkerSupervisor:
             json.dumps(status, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
-        os.rename(str(tmp_path), str(self.status_path))
+        os.replace(str(tmp_path), str(self.status_path))

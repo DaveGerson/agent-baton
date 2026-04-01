@@ -281,7 +281,7 @@ class TestHandlerDaemonList:
 
         called_root = mock_lw.call_args[0][0]
         # The path must end in .claude/team-context
-        assert str(called_root).endswith(".claude/team-context")
+        assert str(called_root).replace("\\", "/").endswith(".claude/team-context")
 
 
 # ---------------------------------------------------------------------------

@@ -46,7 +46,7 @@ class KnowledgeDocument:
         return {
             "name": self.name,
             "description": self.description,
-            "source_path": str(self.source_path) if self.source_path else None,
+            "source_path": self.source_path.as_posix() if self.source_path else None,
             "content": self.content,
             "tags": self.tags,
             "grounding": self.grounding,
@@ -102,7 +102,7 @@ class KnowledgePack:
         return {
             "name": self.name,
             "description": self.description,
-            "source_path": str(self.source_path) if self.source_path else None,
+            "source_path": self.source_path.as_posix() if self.source_path else None,
             "tags": self.tags,
             "target_agents": self.target_agents,
             "default_delivery": self.default_delivery,

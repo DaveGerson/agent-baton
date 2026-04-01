@@ -72,7 +72,7 @@ class HeadlessConfig:
             "timeout_seconds": self.timeout_seconds,
             "max_retries": self.max_retries,
             "base_retry_delay": self.base_retry_delay,
-            "working_directory": str(self.working_directory) if self.working_directory else None,
+            "working_directory": self.working_directory.as_posix() if self.working_directory else None,
             "env_passthrough": list(self.env_passthrough),
         }
 
