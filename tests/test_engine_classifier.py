@@ -626,3 +626,67 @@ class TestEndToEndClassification:
             complexity="heavy",
         )
         assert plan.complexity == "heavy"
+
+
+# ---------------------------------------------------------------------------
+# Haiku agent cap by complexity
+# ---------------------------------------------------------------------------
+
+class TestHaikuClassifierAgentCap:
+    """Haiku must cap agents based on complexity tier to prevent bloated plans."""
+
+    def setup_method(self):
+        self.classifier = HaikuClassifier()
+        self.registry = _make_registry()
+
+    def test_light_complexity_caps_at_one_agent(self):
+        response_json = json.dumps({
+            "task_type": "new-feature",
+            "complexity": "light",
+            "agents": ["backend-engineer", "architect", "test-engineer"],
+            "phases": ["Implement"],
+            "reasoning": "test",
+        })
+        result = self.classifier._parse_response(response_json, self.registry)
+        assert len(result.agents) == 1
+        assert result.agents == ["backend-engineer"]
+
+    def test_medium_complexity_caps_at_three_agents(self):
+        response_json = json.dumps({
+            "task_type": "new-feature",
+            "complexity": "medium",
+            "agents": [
+                "backend-engineer", "architect", "test-engineer",
+                "code-reviewer", "auditor",
+            ],
+            "phases": ["Design", "Implement", "Test"],
+            "reasoning": "test",
+        })
+        result = self.classifier._parse_response(response_json, self.registry)
+        assert len(result.agents) == 3
+
+    def test_heavy_complexity_caps_at_five_agents(self):
+        response_json = json.dumps({
+            "task_type": "new-feature",
+            "complexity": "heavy",
+            "agents": [
+                "backend-engineer", "architect", "test-engineer",
+                "code-reviewer", "auditor", "data-engineer",
+                "frontend-engineer--react",
+            ],
+            "phases": ["Design", "Implement", "Test", "Review"],
+            "reasoning": "test",
+        })
+        result = self.classifier._parse_response(response_json, self.registry)
+        assert len(result.agents) == 5
+
+    def test_agents_under_cap_are_not_trimmed(self):
+        response_json = json.dumps({
+            "task_type": "new-feature",
+            "complexity": "medium",
+            "agents": ["backend-engineer", "test-engineer"],
+            "phases": ["Implement", "Test"],
+            "reasoning": "test",
+        })
+        result = self.classifier._parse_response(response_json, self.registry)
+        assert len(result.agents) == 2

@@ -26,6 +26,13 @@ logger = logging.getLogger(__name__)
 
 _VALID_COMPLEXITIES = ("light", "medium", "heavy")
 
+# Maximum agents per complexity tier — prevents bloated plans
+_MAX_AGENTS_BY_COMPLEXITY: dict[str, int] = {
+    "light": 1,
+    "medium": 3,
+    "heavy": 5,
+}
+
 _VALID_TASK_TYPES = (
     "new-feature", "bug-fix", "refactor", "data-analysis",
     "documentation", "migration", "test",
@@ -293,17 +300,20 @@ Classify this task and return JSON only (no markdown, no commentary):
 
 Complexity guide:
 - light: 1-3 files, single domain, simple mechanical action, no \
-architectural decisions. 1 agent, 1 phase.
+architectural decisions. Exactly 1 agent, 1 phase.
 - medium: 3-6 files, may cross domains, moderate effort, some design \
-needed. 2-3 agents, 2-3 phases.
+needed. 2-3 agents (MAX 3), 2-3 phases.
 - heavy: 6+ files, multi-domain, new patterns, high risk, needs review \
-gates. 3-5 agents, 3-4 phases.
+gates. 3-5 agents (MAX 5), 3-4 phases.
 
 Rules:
 - Select ONLY agents from the available list above.
 - Fewer agents is better. Only add agents that have distinct work to do.
-- For light tasks, prefer a single implementer agent.
-- Include review/audit agents only for medium+ complexity.
+- NEVER exceed the agent count limit for the complexity tier.
+- For light tasks, use exactly 1 implementer agent. No design or review.
+- Include review/audit agents only for heavy complexity.
+- Each agent should have a DIFFERENT job. Do not assign multiple agents \
+to the same phase unless they do genuinely different work.
 - Phase count should match complexity."""
 
 
@@ -395,6 +405,10 @@ class HaikuClassifier:
         phases = data.get("phases", ["Implement"])
         if not phases:
             phases = ["Implement"]
+
+        # Cap agents to prevent bloated plans — respect complexity tier limits
+        max_agents = _MAX_AGENTS_BY_COMPLEXITY.get(complexity, 5)
+        filtered_agents = filtered_agents[:max_agents]
 
         return TaskClassification(
             task_type=task_type,

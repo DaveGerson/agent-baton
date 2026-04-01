@@ -1222,11 +1222,18 @@ class IntelligentPlanner:
                 best = agents[0]
             assigned.append((phase, best))
 
-        # Pass 4: leftover agents — add to the phase where they fit best
+        # Pass 4: leftover agents — add to work phases only.
+        # Non-work phases (design, research, investigate, review, test) should
+        # have at most one agent from Passes 1-3.  Leftover agents are placed
+        # only into implementation-like phases (implement, fix, draft) to avoid
+        # bloated plans where every agent gets a redundant design/review step.
+        _WORK_PHASES = {"implement", "fix", "draft"}
         for agent in remaining_agents:
             base = agent.split("--")[0]
             best_phase = None
             for phase_name, roles in self._PHASE_IDEAL_ROLES.items():
+                if phase_name not in _WORK_PHASES:
+                    continue
                 if base in roles:
                     best_phase = next(
                         (p for p in phases if p.name.lower() == phase_name), None
@@ -1234,7 +1241,11 @@ class IntelligentPlanner:
                     if best_phase:
                         break
             if best_phase is None:
-                best_phase = phases[0]
+                # Fall back to the first work phase, or first phase if none
+                best_phase = next(
+                    (p for p in phases if p.name.lower() in _WORK_PHASES),
+                    phases[0],
+                )
             assigned.append((best_phase, agent))
 
         # Build PlanStep objects from assignments
@@ -1366,6 +1377,8 @@ class IntelligentPlanner:
         """
         members: list[TeamMember] = []
         all_deliverables: list[str] = []
+        all_knowledge: list = []
+        seen_knowledge_paths: set[str] = set()
         for i, step in enumerate(phase.steps):
             role = "lead" if i == 0 else "implementer"
             member_id = f"{phase.phase_id}.1.{chr(97 + i)}"
@@ -1378,6 +1391,12 @@ class IntelligentPlanner:
                 deliverables=step.deliverables,
             ))
             all_deliverables.extend(step.deliverables)
+            # Merge knowledge from constituent steps (deduplicated by path)
+            for k in step.knowledge:
+                key = k.path if k.path else id(k)
+                if key not in seen_knowledge_paths:
+                    all_knowledge.append(k)
+                    seen_knowledge_paths.add(key)
 
         combined_desc = "; ".join(s.task_description for s in phase.steps)
         return PlanStep(
@@ -1386,6 +1405,7 @@ class IntelligentPlanner:
             task_description=f"Team implementation: {combined_desc}",
             team=members,
             deliverables=all_deliverables,
+            knowledge=all_knowledge,
         )
 
     # ------------------------------------------------------------------
