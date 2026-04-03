@@ -823,7 +823,7 @@ class ExecutionState:
     plan: MachinePlan
     current_phase: int = 0              # index into plan.phases
     current_step_index: int = 0         # index into current phase's steps
-    status: str = "running"             # running, gate_pending, approval_pending, complete, failed
+    status: str = "running"             # running, gate_pending, approval_pending, complete, failed, cancelled
     step_results: list[StepResult] = field(default_factory=list)
     gate_results: list[GateResult] = field(default_factory=list)
     approval_results: list[ApprovalResult] = field(default_factory=list)

@@ -23,6 +23,7 @@ import logging
 import os
 import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from agent_baton.cli.colors import success, error as color_error, warning, info as color_info
@@ -34,6 +35,7 @@ from agent_baton.core.storage import get_project_storage
 from agent_baton.core.orchestration.context import ContextManager
 from agent_baton.core.runtime.supervisor import WorkerSupervisor
 from agent_baton.core.storage import detect_backend, get_project_storage
+from agent_baton.models.events import Event
 from agent_baton.models.execution import MachinePlan, ActionType, PlanPhase, PlanStep
 from agent_baton.models.parallel import ExecutionRecord
 from agent_baton.models.plan import MissionLogEntry
@@ -157,6 +159,11 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     sub.add_parser("resume", parents=[_task_id_parent],
                    help="Resume execution after a crash")
 
+    # baton execute cancel [--task-id ID] [--reason TEXT]
+    p_cancel = sub.add_parser("cancel", parents=[_task_id_parent],
+                              help="Cancel a running execution")
+    p_cancel.add_argument("--reason", default="", help="Reason for cancellation")
+
     # baton execute list
     sub.add_parser("list", help="List all executions (active and completed)")
 
@@ -226,6 +233,12 @@ def _print_action(action: dict) -> None:
         ACTION: FAILED
           <failure summary>
 
+    Note:
+        ``CANCELLED`` is **not** an action type emitted by ``next``.  It is a
+        status transition applied directly to :class:`ExecutionState` by the
+        ``baton execute cancel`` subcommand and is never produced by
+        :meth:`ExecutionEngine.next_action`.
+
     Args:
         action: Dictionary from ``ExecutionAction.to_dict()``.  Must contain
             at least an ``action_type`` key whose value is a string matching
@@ -286,7 +299,7 @@ def _print_action(action: dict) -> None:
 
 def handler(args: argparse.Namespace) -> None:
     if args.subcommand is None:
-        validation_error("supply a subcommand: start, next, record, dispatched, gate, approve, amend, team-record, complete, status, resume, list, switch, run")
+        validation_error("supply a subcommand: start, next, record, dispatched, gate, approve, amend, team-record, complete, status, resume, list, switch, cancel, run")
 
     if args.subcommand == "list":
         _handle_list()
@@ -608,6 +621,39 @@ def handler(args: argparse.Namespace) -> None:
             print(json.dumps(result, indent=2))
         else:
             _print_action(action.to_dict())
+
+    elif args.subcommand == "cancel":
+        state = engine._load_execution()
+        if state is None:
+            user_error("no active execution found", hint="Nothing to cancel.")
+        if state.status in ("complete", "failed", "cancelled"):
+            user_error(
+                f"execution {state.task_id} already {state.status}",
+                hint="Only running executions can be cancelled.",
+            )
+        reason = getattr(args, "reason", "")
+        state.status = "cancelled"
+        state.completed_at = datetime.now(timezone.utc).isoformat()
+        engine._save_execution(state)
+        bus.publish(Event.create(
+            topic="execution.cancelled",
+            task_id=state.task_id,
+            payload={
+                "task_id": state.task_id,
+                "reason": reason,
+                "cancelled_at": state.completed_at,
+            },
+        ))
+        if args.output == "json":
+            print(json.dumps({
+                "cancelled": True,
+                "task_id": state.task_id,
+                "reason": reason,
+            }))
+        else:
+            print(f"Execution {state.task_id} cancelled.")
+            if reason:
+                print(f"  Reason: {reason}")
 
 
 # ---------------------------------------------------------------------------

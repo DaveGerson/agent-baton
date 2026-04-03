@@ -1322,3 +1322,219 @@ class TestComplexityCLIOverride:
         plan = planner.create_plan("Add a login page", complexity="heavy")
         assert plan.complexity == "heavy"
         assert len(plan.phases) >= 3
+
+
+# ---------------------------------------------------------------------------
+# Structured description parser (_parse_structured_description)
+# ---------------------------------------------------------------------------
+
+class TestStructuredDescriptionParser:
+    """Tests for the Phase N: / numbered-list / semicolon parser."""
+
+    def test_phase_labeled_description_produces_phases(self, planner: IntelligentPlanner):
+        """Phase N: labels with agent hints are parsed into phase dicts."""
+        summary = (
+            "Phase 1: architect designs the API. "
+            "Phase 2: backend-engineer implements endpoints."
+        )
+        phases, agents = planner._parse_structured_description(summary)
+        assert phases is not None
+        assert len(phases) >= 2
+
+    def test_phase_labeled_description_extracts_agents(self, planner: IntelligentPlanner):
+        """Agent names embedded in Phase N: labels are returned in the agents list."""
+        summary = (
+            "Phase 1: architect designs the API. "
+            "Phase 2: backend-engineer implements endpoints."
+        )
+        phases, agents = planner._parse_structured_description(summary)
+        assert agents is not None
+        assert "architect" in agents
+        assert "backend-engineer" in agents
+
+    def test_numbered_list_description_returns_phases(self, planner: IntelligentPlanner):
+        """Numbered lists (1. … 2. …) are parsed and produce phase dicts."""
+        summary = (
+            "1. Design the schema with architect. "
+            "2. Implement with backend-engineer. "
+            "3. Test with test-engineer."
+        )
+        phases, agents = planner._parse_structured_description(summary)
+        assert phases is not None
+        assert len(phases) >= 2
+
+    def test_numbered_list_description_extracts_multiple_agents(self, planner: IntelligentPlanner):
+        """At least two agent names are detected from a numbered list."""
+        summary = (
+            "1. Design the schema with architect. "
+            "2. Implement with backend-engineer. "
+            "3. Test with test-engineer."
+        )
+        phases, agents = planner._parse_structured_description(summary)
+        assert agents is not None
+        assert len(agents) >= 2
+
+    def test_agent_alias_viz_resolves(self):
+        """Alias 'viz' maps to 'visualization-expert' in _AGENT_ALIASES."""
+        from agent_baton.core.engine.planner import _AGENT_ALIASES
+        assert _AGENT_ALIASES.get("viz") == "visualization-expert"
+
+    def test_agent_alias_sme_resolves(self):
+        """Alias 'sme' maps to 'subject-matter-expert' in _AGENT_ALIASES."""
+        from agent_baton.core.engine.planner import _AGENT_ALIASES
+        assert _AGENT_ALIASES.get("sme") == "subject-matter-expert"
+
+    def test_agent_alias_backend_resolves(self):
+        """Alias 'backend' maps to 'backend-engineer' in _AGENT_ALIASES."""
+        from agent_baton.core.engine.planner import _AGENT_ALIASES
+        assert _AGENT_ALIASES.get("backend") == "backend-engineer"
+
+    def test_unstructured_returns_none_phases(self, planner: IntelligentPlanner):
+        """Plain text without structure returns None for phases."""
+        summary = "Fix the login bug that crashes on invalid passwords"
+        phases, agents = planner._parse_structured_description(summary)
+        assert phases is None
+
+    def test_unstructured_returns_none_agents(self, planner: IntelligentPlanner):
+        """Plain text without structure returns None for agents."""
+        summary = "Fix the login bug that crashes on invalid passwords"
+        phases, agents = planner._parse_structured_description(summary)
+        assert agents is None
+
+    def test_structured_creates_plan_with_at_least_two_phases(self, planner: IntelligentPlanner):
+        """Structured descriptions feed into create_plan and produce ≥2 phases."""
+        plan = planner.create_plan(
+            "Phase 1: architect designs data model. "
+            "Phase 2: backend-engineer implements API.",
+            task_type="new-feature",
+        )
+        assert len(plan.phases) >= 2
+
+    def test_single_clause_not_treated_as_structured(self, planner: IntelligentPlanner):
+        """A single-clause description without numbering should not be parsed as structured."""
+        summary = "architect builds the whole system"
+        phases, agents = planner._parse_structured_description(summary)
+        # Single clause — not enough structure to split into phases
+        assert phases is None
+
+
+# ---------------------------------------------------------------------------
+# Audit/assessment/scorecard/evaluate keyword mapping
+# ---------------------------------------------------------------------------
+
+class TestTaskTypeKeywords:
+    """Verify that audit/assessment/scorecard/evaluate map to data-analysis."""
+
+    def test_audit_maps_to_data_analysis(self, planner: IntelligentPlanner):
+        assert planner._infer_task_type("Audit the dashboard metrics") == "data-analysis"
+
+    def test_assessment_maps_to_data_analysis(self, planner: IntelligentPlanner):
+        assert planner._infer_task_type("Assessment of data quality") == "data-analysis"
+
+    def test_scorecard_maps_to_data_analysis(self, planner: IntelligentPlanner):
+        assert planner._infer_task_type("Build executive scorecard") == "data-analysis"
+
+    def test_evaluate_maps_to_data_analysis(self, planner: IntelligentPlanner):
+        assert planner._infer_task_type("Evaluate system performance") == "data-analysis"
+
+    def test_bug_fix_still_works(self, planner: IntelligentPlanner):
+        """Existing bug-fix keyword matching is unaffected by the new keywords."""
+        assert planner._infer_task_type("Fix the login crash") == "bug-fix"
+
+    def test_audit_keyword_in_task_type_keywords_constant(self):
+        """The 'audit' keyword must be present in _TASK_TYPE_KEYWORDS for data-analysis."""
+        data_analysis_keywords = next(
+            (kws for tt, kws in _TASK_TYPE_KEYWORDS if tt == "data-analysis"), []
+        )
+        assert "audit" in data_analysis_keywords
+
+    def test_assessment_keyword_in_task_type_keywords_constant(self):
+        """The 'assessment' keyword must be present in _TASK_TYPE_KEYWORDS for data-analysis."""
+        data_analysis_keywords = next(
+            (kws for tt, kws in _TASK_TYPE_KEYWORDS if tt == "data-analysis"), []
+        )
+        assert "assessment" in data_analysis_keywords
+
+
+# ---------------------------------------------------------------------------
+# Team phase detection (_is_team_phase)
+# ---------------------------------------------------------------------------
+
+class TestIsTeamPhase:
+    """Tests for the static _is_team_phase helper."""
+
+    def test_implement_with_multiple_steps_is_team(self, planner: IntelligentPlanner):
+        """Implement phase with 2+ steps always qualifies as a team phase."""
+        phase = PlanPhase(
+            phase_id=1,
+            name="Implement",
+            steps=[
+                PlanStep(step_id="1.1", agent_name="backend-engineer", task_description="a"),
+                PlanStep(step_id="1.2", agent_name="test-engineer", task_description="b"),
+            ],
+        )
+        assert planner._is_team_phase(phase, "implement the feature") is True
+
+    def test_fix_with_multiple_steps_is_team(self, planner: IntelligentPlanner):
+        """Fix phase with 2+ steps qualifies as a team phase (same rule as Implement)."""
+        phase = PlanPhase(
+            phase_id=1,
+            name="Fix",
+            steps=[
+                PlanStep(step_id="1.1", agent_name="backend-engineer", task_description="a"),
+                PlanStep(step_id="1.2", agent_name="auditor", task_description="b"),
+            ],
+        )
+        assert planner._is_team_phase(phase, "fix the bug") is True
+
+    def test_single_step_implement_not_team(self, planner: IntelligentPlanner):
+        """Implement phase with only one step is not a team phase."""
+        phase = PlanPhase(
+            phase_id=1,
+            name="Implement",
+            steps=[
+                PlanStep(step_id="1.1", agent_name="backend-engineer", task_description="a"),
+            ],
+        )
+        assert planner._is_team_phase(phase, "implement the feature") is False
+
+    def test_pairing_signal_triggers_team_on_review(self, planner: IntelligentPlanner):
+        """'joint' in task_summary causes a multi-step Review phase to become a team phase."""
+        phase = PlanPhase(
+            phase_id=1,
+            name="Review",
+            steps=[
+                PlanStep(step_id="1.1", agent_name="code-reviewer", task_description="a"),
+                PlanStep(step_id="1.2", agent_name="auditor", task_description="b"),
+            ],
+        )
+        assert planner._is_team_phase(phase, "joint review of security changes") is True
+
+    def test_no_signal_review_with_multiple_steps_not_team(self, planner: IntelligentPlanner):
+        """Review phase with 2+ steps but no pairing signal is NOT a team phase."""
+        phase = PlanPhase(
+            phase_id=1,
+            name="Review",
+            steps=[
+                PlanStep(step_id="1.1", agent_name="code-reviewer", task_description="a"),
+                PlanStep(step_id="1.2", agent_name="auditor", task_description="b"),
+            ],
+        )
+        assert planner._is_team_phase(phase, "review the changes") is False
+
+    def test_team_signal_in_summary_triggers_team(self, planner: IntelligentPlanner):
+        """'team' keyword in summary triggers consolidation for any multi-step phase."""
+        phase = PlanPhase(
+            phase_id=2,
+            name="Design",
+            steps=[
+                PlanStep(step_id="2.1", agent_name="architect", task_description="a"),
+                PlanStep(step_id="2.2", agent_name="backend-engineer", task_description="b"),
+            ],
+        )
+        assert planner._is_team_phase(phase, "team effort to redesign the system") is True
+
+    def test_empty_steps_not_team(self, planner: IntelligentPlanner):
+        """A phase with no steps is not a team phase."""
+        phase = PlanPhase(phase_id=1, name="Implement", steps=[])
+        assert planner._is_team_phase(phase, "implement something together") is False

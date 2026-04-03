@@ -342,6 +342,101 @@ became O(N) filesystem reads per PMO status request.
   (threshold: 2s), it logs a warning and returns; the user can run
   `baton sync` manually.
 
+---
+
+## ADR-13: PAIR_DISPATCH — Sequential Two-Agent Adversarial Assessment
+
+**Decision**: Add a `PAIR_DISPATCH` action type that runs two agents
+sequentially on the same step, where the second agent receives the first
+agent's output as input context for adversarial review or validation.
+
+**Status**: Proposed (2026-04-03) — not yet implemented.
+
+**Context**: During a multi-domain audit, an agent needed to pair a
+visualization-expert with a subject-matter-expert per domain — one to assess
+dashboard quality, the other to validate domain accuracy. Claude Code
+dispatches single agents, and TEAM_DISPATCH (which runs members in parallel)
+does not support one agent reviewing another's output. The workaround was a
+single agent wearing both hats, which produced consensus rather than the
+desired creative tension.
+
+**Proposed design**:
+
+1. **Action type**: `PAIR_DISPATCH` emitted by `baton execute next` when a
+   step has exactly two team members and the step's `mode` field is `"pair"`.
+2. **Wire format** (extends `_print_action` protocol):
+   ```
+   ACTION: PAIR_DISPATCH
+     Primary Agent: <agent_a>
+     Review Agent:  <agent_b>
+     Step: <step_id>
+     Mode: adversarial | validating | complementary
+     Message: <description>
+
+   --- Primary Prompt ---
+   <prompt for agent_a>
+   --- End Primary Prompt ---
+
+   --- Review Prompt ---
+   <prompt for agent_b, includes placeholder {primary_output}>
+   --- End Review Prompt ---
+   ```
+3. **Orchestrator behavior**: The orchestrator spawns agent A, captures its
+   full output, then spawns agent B with the review prompt where
+   `{primary_output}` is replaced by agent A's actual output. Agent B's
+   prompt includes the instruction: "Review and challenge the following
+   assessment from {agent_a}. Identify disagreements, gaps, and risks."
+4. **Recording**: The orchestrator calls `baton execute team-record` twice
+   (once per member). The step is complete when both members finish.
+5. **Planner integration**: `_consolidate_team_step` gains a `mode` parameter.
+   When the task description contains adversarial/validation signals
+   ("review", "validate", "challenge", "audit", "cross-check"), the mode is
+   set to `"pair"` and the executor emits `PAIR_DISPATCH` instead of parallel
+   `DISPATCH` actions.
+
+**Alternatives considered**:
+
+- **Sequential DISPATCH with manual context threading**: The orchestrator
+  already captures agent output for `--outcome`. The second agent could be
+  dispatched with the first agent's outcome pasted into its prompt. This
+  works today with no engine changes but requires the orchestrator agent to
+  implement the threading logic, which is fragile and not discoverable.
+  PAIR_DISPATCH makes the pattern explicit and engine-driven.
+
+- **Parallel DISPATCH with shared artifact**: Both agents run simultaneously
+  and write to a shared file. Rejected because the review agent needs the
+  primary agent's complete output before it can assess — parallel execution
+  defeats the purpose of adversarial review.
+
+- **Three-agent pattern (primary + reviewer + synthesizer)**: Adds a third
+  agent to reconcile disagreements. Deferred as over-engineering for the
+  initial implementation; can be added later as `PANEL_DISPATCH`.
+
+**Key trade-offs**:
+
+- **New action type vs. reusing DISPATCH**: Adding a new action type is a
+  breaking change to the `_print_action` protocol (see `docs/invariants.md`).
+  All orchestrator agent definitions must be updated to handle it.  The
+  benefit is that the pairing semantics are explicit in the wire format rather
+  than buried in prompt engineering.
+
+- **Engine-driven vs. orchestrator-driven**: Making the engine emit
+  PAIR_DISPATCH centralizes the pattern and makes it available to headless
+  execution (`baton execute run`). The alternative — teaching the orchestrator
+  agent to manually chain two dispatches — only works in interactive Claude
+  Code sessions.
+
+**Implementation order**:
+
+1. Add `mode` field to `TeamMember` and `PlanStep` models.
+2. Add `PAIR_DISPATCH` to `ActionType` enum in `models/execution.py`.
+3. Implement `_pair_dispatch_action` in `executor.py`.
+4. Update `_print_action` in `execute.py` with the new wire format.
+5. Update `_consolidate_team_step` in `planner.py` to set mode.
+6. Update orchestrator agent definition to handle `PAIR_DISPATCH`.
+7. Update `docs/invariants.md` with the new protocol contract.
+8. Add integration tests covering the full pair-dispatch loop.
+
 - **ExternalSourceAdapter as a Protocol**: External integrations (ADO, Jira,
   GitHub, Linear) have heterogeneous APIs but a uniform normalized output
   (`ExternalItem`). The `typing.Protocol` approach means new adapters can be

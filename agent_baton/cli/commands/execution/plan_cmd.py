@@ -5,6 +5,10 @@ project stack, classifying risk, and routing to appropriate agents. The
 plan can be output as markdown or JSON, and optionally saved to
 .claude/team-context/plan.json for consumption by ``baton execute start``.
 
+Additional flags:
+    --template   Print a skeleton plan.json to stdout for hand-editing.
+    --import     Import a hand-crafted plan.json instead of auto-generating.
+
 Delegates to:
     agent_baton.core.engine.planner.IntelligentPlanner
 """
@@ -12,7 +16,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from agent_baton.core.engine.planner import IntelligentPlanner
@@ -20,6 +27,7 @@ from agent_baton.core.govern.classifier import DataClassifier
 from agent_baton.core.govern.policy import PolicyEngine
 from agent_baton.core.observe.retrospective import RetrospectiveEngine
 from agent_baton.core.orchestration.knowledge_registry import KnowledgeRegistry
+from agent_baton.models.execution import MachinePlan
 
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
@@ -97,10 +105,139 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         help="Override task complexity (light, medium, heavy). "
              "Skips automatic classification when provided.",
     )
+    p.add_argument(
+        "--import", "--import-plan",
+        dest="import_path",
+        default=None,
+        metavar="FILE",
+        help="Import a hand-crafted plan.json file instead of auto-generating",
+    )
+    p.add_argument(
+        "--template",
+        action="store_true",
+        help="Output a skeleton plan.json template for hand-editing",
+    )
     return p
 
 
+def _make_task_id(summary: str) -> str:
+    """Generate a collision-free task ID without instantiating IntelligentPlanner."""
+    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    slug = re.sub(r"[^a-z0-9]+", "-", summary.lower()).strip("-")
+    slug = slug[:50].rstrip("-")
+    uid = uuid.uuid4().hex[:8]
+    base = f"{date_str}-{slug}" if slug else date_str
+    return f"{base}-{uid}"
+
+
 def handler(args: argparse.Namespace) -> None:
+    # --template: emit a skeleton plan.json and exit
+    if getattr(args, "template", False):
+        template: dict = {
+            "task_summary": "Describe the task here",
+            "task_type": "new-feature",
+            "risk_level": "medium",
+            "budget_tier": "standard",
+            "git_strategy": "feature-branch",
+            "complexity": "medium",
+            "phases": [
+                {
+                    "phase_id": 1,
+                    "name": "Design",
+                    "steps": [
+                        {
+                            "step_id": "1.1",
+                            "agent_name": "architect",
+                            "task_description": "Describe what this agent should do",
+                            "context_files": ["CLAUDE.md"],
+                            "deliverables": [],
+                        }
+                    ],
+                    "gate": {
+                        "gate_type": "build",
+                        "command": "echo 'gate check'",
+                        "description": "Verify phase output",
+                    },
+                },
+                {
+                    "phase_id": 2,
+                    "name": "Implement",
+                    "steps": [
+                        {
+                            "step_id": "2.1",
+                            "agent_name": "backend-engineer",
+                            "task_description": "Implement the changes",
+                            "context_files": ["CLAUDE.md"],
+                            "deliverables": [],
+                        }
+                    ],
+                    "gate": {
+                        "gate_type": "test",
+                        "command": "pytest",
+                        "description": "Run test suite",
+                    },
+                },
+            ],
+        }
+        print(json.dumps(template, indent=2))
+        return
+
+    # --import / --import-plan: load a hand-crafted plan.json and skip generation
+    import_path = getattr(args, "import_path", None)
+    if import_path is not None:
+        plan_path = Path(import_path)
+        if not plan_path.exists():
+            print(f"Error: file not found: {plan_path}", file=sys.stderr)
+            sys.exit(1)
+        try:
+            data = json.loads(plan_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            print(f"Error: invalid JSON: {exc}", file=sys.stderr)
+            sys.exit(1)
+
+        # Assign a task_id if the hand-crafted file omitted it
+        if not data.get("task_id"):
+            summary = data.get("task_summary", "imported-plan")
+            data["task_id"] = _make_task_id(summary)
+
+        # Validate by round-tripping through MachinePlan
+        try:
+            plan = MachinePlan.from_dict(data)
+        except Exception as exc:
+            print(f"Error: plan validation failed: {exc}", file=sys.stderr)
+            print(
+                "Hint: Use 'baton plan --template' to see the expected schema.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        if args.save:
+            from agent_baton.core.orchestration.context import ContextManager
+
+            ctx_dir = Path(".claude/team-context").resolve()
+            ctx_dir.mkdir(parents=True, exist_ok=True)
+
+            ctx = ContextManager(team_context_dir=ctx_dir, task_id=plan.task_id)
+            ctx.write_plan(plan)
+
+            json_path = ctx_dir / "plan.json"
+            md_path = ctx_dir / "plan.md"
+            json_path.write_text(
+                json.dumps(plan.to_dict(), indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            md_path.write_text(plan.to_markdown(), encoding="utf-8")
+            print(f"Imported plan saved: {ctx.plan_json_path} and {ctx.plan_path}")
+            print(f"  (also copied to {json_path} for backward compat)")
+            print()
+            print("Next: baton execute start")
+        else:
+            if getattr(args, "json", False):
+                print(json.dumps(plan.to_dict(), indent=2, ensure_ascii=False))
+            else:
+                print(plan.to_markdown())
+        return
+
     project_root = Path(args.project) if args.project else Path.cwd()
     agents = [a.strip() for a in args.agents.split(",") if a.strip()] if args.agents else None
 
