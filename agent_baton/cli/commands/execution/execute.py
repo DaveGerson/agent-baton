@@ -112,6 +112,15 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
                            help="Approval decision")
     p_approve.add_argument("--feedback", default="", help="Feedback text (for approve-with-feedback)")
 
+    # baton execute feedback --phase-id N --question-id ID --chosen-index N
+    p_feedback = sub.add_parser("feedback", parents=[_task_id_parent],
+                                help="Record a feedback question answer (dispatches based on choice)")
+    p_feedback.add_argument("--phase-id", type=int, required=True, help="Phase ID with feedback questions")
+    p_feedback.add_argument("--question-id", required=True, dest="question_id",
+                            help="Feedback question ID to answer")
+    p_feedback.add_argument("--chosen-index", type=int, required=True, dest="chosen_index",
+                            help="Zero-based index of the chosen option")
+
     # baton execute amend --description TEXT [--add-phase NAME:AGENT] [--after-phase N] [--add-step PHASE_ID:AGENT:DESC]
     p_amend = sub.add_parser("amend", parents=[_task_id_parent],
                              help="Amend the running plan")
@@ -271,6 +280,30 @@ def _print_action(action: dict) -> None:
         options = action.get("approval_options", ["approve", "reject", "approve-with-feedback"])
         print(f"Options: {', '.join(options)}")
 
+    elif atype == ActionType.FEEDBACK.value:
+        print(f"ACTION: FEEDBACK")
+        print(f"  Phase:   {action.get('phase_id', '')}")
+        print(f"  Message: {msg}")
+        print()
+        fb_context = action.get("feedback_context", "")
+        if fb_context:
+            print("--- Feedback Context ---")
+            print(fb_context)
+            print("--- End Context ---")
+            print()
+        questions = action.get("feedback_questions", [])
+        for q in questions:
+            print(f"--- Question: {q.get('question_id', '')} ---")
+            print(f"  {q.get('question', '')}")
+            if q.get("context"):
+                print(f"  Context: {q['context']}")
+            opts = q.get("options", [])
+            for idx, opt in enumerate(opts):
+                print(f"  [{idx}] {opt}")
+            print(f"--- End Question ---")
+            print()
+        print("Respond with: baton execute feedback --phase-id <N> --question-id <ID> --chosen-index <N>")
+
     elif atype == ActionType.COMPLETE.value:
         print(f"ACTION: COMPLETE")
         print(f"  {action.get('summary', msg)}")
@@ -286,7 +319,7 @@ def _print_action(action: dict) -> None:
 
 def handler(args: argparse.Namespace) -> None:
     if args.subcommand is None:
-        validation_error("supply a subcommand: start, next, record, dispatched, gate, approve, amend, team-record, complete, status, resume, list, switch, run")
+        validation_error("supply a subcommand: start, next, record, dispatched, gate, approve, feedback, amend, team-record, complete, status, resume, list, switch, run")
 
     if args.subcommand == "list":
         _handle_list()
@@ -473,6 +506,22 @@ def handler(args: argparse.Namespace) -> None:
             print(json.dumps({"status": "recorded", "phase_id": args.phase_id, "result": args.result}))
         else:
             print(f"Approval recorded: phase {args.phase_id} — {args.result}")
+
+    elif args.subcommand == "feedback":
+        engine.record_feedback_result(
+            phase_id=args.phase_id,
+            question_id=args.question_id,
+            chosen_index=args.chosen_index,
+        )
+        if getattr(args, "output", "text") == "json":
+            print(json.dumps({
+                "status": "recorded",
+                "phase_id": args.phase_id,
+                "question_id": args.question_id,
+                "chosen_index": args.chosen_index,
+            }))
+        else:
+            print(f"Feedback recorded: phase {args.phase_id}, question {args.question_id} — option {args.chosen_index}")
 
     elif args.subcommand == "amend":
         new_phases = _parse_add_phases(args.add_phase) or None

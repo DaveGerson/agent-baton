@@ -1355,7 +1355,7 @@ class IntelligentPlanner:
                 description="Run full test suite with coverage report.",
                 fail_on=["test failure", "coverage below threshold"],
             )
-        if name_lower in ("investigate", "research", "review", "design"):
+        if name_lower in ("investigate", "research", "review", "design", "feedback"):
             # No automated gate — these phases don't produce code
             return None
         # All other phases (implement, fix, migrate, refactor, etc.)

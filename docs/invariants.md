@@ -24,6 +24,7 @@ control API between Claude and the engine.
 | `baton execute gate --phase-id ... --result pass/fail` | Record a gate result |
 | `baton execute complete` | Finalize execution |
 | `baton execute approve --phase-id ... --result ...` | Record a human approval decision |
+| `baton execute feedback --phase-id ... --question-id ... --chosen-index ...` | Record a feedback question answer |
 | `baton execute amend --description ... [--add-phase ...]` | Amend the running plan |
 | `baton execute team-record --step-id ... --member-id ...` | Record a team member completion |
 | `baton execute status` | Check current execution state |
@@ -115,6 +116,28 @@ ACTION: APPROVAL
 Options: approve, reject, approve-with-feedback
 ```
 
+For FEEDBACK actions (high-throughput multiple-choice steering):
+
+```
+ACTION: FEEDBACK
+  Phase:   <phase-id>
+  Message: <one-line summary>
+
+--- Feedback Context ---
+<summary of prior work for context>
+--- End Context ---
+
+--- Question: <question-id> ---
+  <question text>
+  Context: <background>
+  [0] <option A>
+  [1] <option B>
+  ...
+--- End Question ---
+
+Respond with: baton execute feedback --phase-id <N> --question-id <ID> --chosen-index <N>
+```
+
 For terminal actions (COMPLETE, WAIT, GATE_FAILED):
 
 ```
@@ -128,6 +151,7 @@ ACTION: COMPLETE
 |-------|---------|
 | `ACTION: DISPATCH` | Claude should invoke the named agent with the delegation prompt |
 | `ACTION: APPROVAL` | Execution paused for human review; respond with `baton execute approve` |
+| `ACTION: FEEDBACK` | Execution paused for user steering; respond with `baton execute feedback` |
 | `ACTION: COMPLETE` | All phases done; execution is finished |
 | `ACTION: WAIT` | All pending steps are dispatched; wait for results |
 | `ACTION: GATE_FAILED` | A phase gate failed; Claude should not proceed |
@@ -140,11 +164,15 @@ ACTION: COMPLETE
    the wrong action is taken.
 3. Section delimiters (`--- Delegation Prompt ---`, `--- End Prompt ---`) must
    remain verbatim.
-4. The `ActionType` enum `.value` strings (`DISPATCH`, `APPROVAL`, `COMPLETE`,
-   `WAIT`, `GATE_FAILED`) must match the uppercase labels above. If `ActionType`
-   values change, `_print_action()` must be updated simultaneously.
+4. The `ActionType` enum `.value` strings (`DISPATCH`, `APPROVAL`, `FEEDBACK`,
+   `COMPLETE`, `WAIT`, `GATE_FAILED`) must match the uppercase labels above.
+   If `ActionType` values change, `_print_action()` must be updated
+   simultaneously.
 5. Section delimiters for APPROVAL (`--- Approval Context ---`,
    `--- End Context ---`) must remain verbatim.
+6. Section delimiters for FEEDBACK (`--- Feedback Context ---`,
+   `--- End Context ---`, `--- Question: <id> ---`,
+   `--- End Question ---`) must remain verbatim.
 
 **Safeguard**: A regression test asserts that `_print_action()` produces
 exactly the expected text for each `ActionType` value. The test uses fixture
@@ -174,6 +202,7 @@ machine-readable JSON (designed for programmatic consumption).
 | `record` | Plain text confirmation | Human-readable |
 | `gate` | Plain text confirmation | Human-readable |
 | `approve` | Plain text confirmation | Human-readable |
+| `feedback` | Plain text confirmation | Human-readable |
 | `amend` | Plain text confirmation | Human-readable |
 | `team-record` | Plain text confirmation | Human-readable |
 | `complete` | Engine summary text | Human-readable |
@@ -197,6 +226,7 @@ accept `--output` (they use separate parsers with no shared parent).
 | `record` | `{"status": "recorded", "step_id": "...", "agent": "...", "result": "..."}` |
 | `gate` | `{"status": "recorded", "phase_id": N, "result": "pass\|fail"}` |
 | `approve` | `{"status": "recorded", "phase_id": N, "result": "..."}` |
+| `feedback` | `{"status": "recorded", "phase_id": N, "question_id": "...", "chosen_index": N}` |
 | `amend` | `{"status": "amended", "amendment_id": "...", "description": "..."}` |
 | `team-record` | `{"status": "recorded", "step_id": "...", "member_id": "...", "agent": "...", "result": "..."}` |
 | `complete` | `{"status": "complete", "summary": "..."}` |

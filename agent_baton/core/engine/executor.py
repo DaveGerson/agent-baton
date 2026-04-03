@@ -38,6 +38,8 @@ from agent_baton.models.execution import (
     ApprovalResult,
     ExecutionAction,
     ExecutionState,
+    FeedbackQuestion,
+    FeedbackResult,
     GateResult,
     MachinePlan,
     PlanAmendment,
@@ -1973,6 +1975,12 @@ class ExecutionEngine:
             if phase_obj and phase_obj.approval_required:
                 return self._approval_action(state, phase_obj)
 
+        # feedback_pending — waiting for user answers to feedback questions.
+        if state.status == "feedback_pending":
+            phase_obj = state.current_phase_obj
+            if phase_obj and phase_obj.feedback_questions:
+                return self._feedback_action(state, phase_obj)
+
         # gate_pending — a gate was requested but result not yet recorded.
         if state.status == "gate_pending":
             phase_obj = state.current_phase_obj
@@ -2086,11 +2094,17 @@ class ExecutionEngine:
             )
 
         # All steps in this phase are complete.
-        # Check approval requirement BEFORE gate.
+        # Check approval requirement BEFORE feedback and gate.
         if (phase_obj.approval_required
                 and not self._approval_passed_for_phase(state, phase_obj.phase_id)):
             state.status = "approval_pending"
             return self._approval_action(state, phase_obj)
+
+        # Check feedback questions AFTER approval but BEFORE gate.
+        if (phase_obj.feedback_questions
+                and not self._feedback_resolved_for_phase(state, phase_obj.phase_id)):
+            state.status = "feedback_pending"
+            return self._feedback_action(state, phase_obj)
 
         if phase_obj.gate and not self._gate_passed_for_phase(state, phase_obj.phase_id):
             state.status = "gate_pending"
@@ -2230,6 +2244,209 @@ class ExecutionEngine:
 
         return "\n".join(lines)
 
+    @staticmethod
+    def _feedback_resolved_for_phase(state: ExecutionState, phase_id: int) -> bool:
+        """Return True if all feedback questions for *phase_id* have been answered."""
+        phase_obj = state.current_phase_obj
+        if phase_obj is None:
+            return True
+        question_ids = {q.question_id for q in phase_obj.feedback_questions}
+        answered_ids = {
+            r.question_id for r in state.feedback_results
+            if r.phase_id == phase_id
+        }
+        return question_ids <= answered_ids
+
+    def _feedback_action(
+        self, state: ExecutionState, phase_obj: PlanPhase,
+    ) -> ExecutionAction:
+        """Build a FEEDBACK action presenting multiple-choice questions."""
+        # Filter to only unanswered questions.
+        answered_ids = {
+            r.question_id for r in state.feedback_results
+            if r.phase_id == phase_obj.phase_id
+        }
+        unanswered = [
+            q for q in phase_obj.feedback_questions
+            if q.question_id not in answered_ids
+        ]
+        context = self._build_feedback_context(state, phase_obj)
+        return ExecutionAction(
+            action_type=ActionType.FEEDBACK,
+            message=(
+                f"Phase {phase_obj.phase_id} ({phase_obj.name}) "
+                f"has {len(unanswered)} feedback question(s) requiring your input."
+            ),
+            phase_id=phase_obj.phase_id,
+            feedback_questions=unanswered,
+            feedback_context=context,
+        )
+
+    @staticmethod
+    def _build_feedback_context(
+        state: ExecutionState, phase_obj: PlanPhase,
+    ) -> str:
+        """Build a markdown summary of prior work for the feedback reviewer."""
+        lines = [
+            f"## Phase {phase_obj.phase_id}: {phase_obj.name} — Feedback",
+            "",
+            "The following work has been completed. Please answer the "
+            "questions below to steer the next set of changes.",
+            "",
+        ]
+        phase_step_ids = {s.step_id for s in phase_obj.steps}
+        for result in state.step_results:
+            if result.step_id in phase_step_ids and result.status == "complete":
+                lines.append(f"### Step {result.step_id}: {result.agent_name}")
+                if result.outcome:
+                    lines.append(result.outcome)
+                if result.files_changed:
+                    lines.append(f"**Files changed**: {', '.join(result.files_changed)}")
+                lines.append("")
+        return "\n".join(lines)
+
+    def record_feedback_result(
+        self,
+        phase_id: int,
+        question_id: str,
+        chosen_index: int,
+    ) -> None:
+        """Record a user's answer to a feedback question and amend the plan.
+
+        Looks up the chosen option's mapped agent and prompt template,
+        inserts a new step into the *next* phase (or creates a new phase)
+        that will be dispatched on the next ``next_action()`` call.
+
+        Args:
+            phase_id: The phase presenting the feedback gate.
+            question_id: Which question was answered.
+            chosen_index: Zero-based index into the question's options list.
+        """
+        state = self._load_execution()
+        if state is None:
+            raise RuntimeError(
+                "record_feedback_result() called with no active execution state."
+            )
+
+        # Find the question definition on the phase.
+        phase_obj = None
+        for p in state.plan.phases:
+            if p.phase_id == phase_id:
+                phase_obj = p
+                break
+        if phase_obj is None:
+            raise ValueError(f"Phase {phase_id} not found in plan.")
+
+        question: FeedbackQuestion | None = None
+        for q in phase_obj.feedback_questions:
+            if q.question_id == question_id:
+                question = q
+                break
+        if question is None:
+            raise ValueError(
+                f"Feedback question '{question_id}' not found on phase {phase_id}."
+            )
+
+        if chosen_index < 0 or chosen_index >= len(question.options):
+            raise ValueError(
+                f"chosen_index {chosen_index} out of range for question "
+                f"'{question_id}' with {len(question.options)} options."
+            )
+
+        chosen_option = question.options[chosen_index]
+        agent_name = (
+            question.option_agents[chosen_index]
+            if chosen_index < len(question.option_agents)
+            else "backend-engineer"
+        )
+        prompt_template = (
+            question.option_prompts[chosen_index]
+            if chosen_index < len(question.option_prompts)
+            else chosen_option
+        )
+        # Expand {task} placeholder with plan task summary.
+        prompt = prompt_template.replace("{task}", state.plan.task_summary)
+
+        # Create a dispatch step via plan amendment.
+        new_step = PlanStep(
+            step_id="0.1",  # placeholder — renumbered by amend_plan
+            agent_name=agent_name,
+            task_description=prompt,
+        )
+        # Use a unique negative placeholder phase_id to avoid collision
+        # with existing phase_ids during renumbering.
+        new_phase = PlanPhase(
+            phase_id=-9999,  # placeholder — renumbered by amend_plan
+            name=f"Feedback-Dispatch ({question_id})",
+            steps=[new_step],
+        )
+        # Save the feedback result first so amend_plan sees it.
+        fb_result = FeedbackResult(
+            phase_id=phase_id,
+            question_id=question_id,
+            chosen_option=chosen_option,
+            chosen_index=chosen_index,
+        )
+        state.feedback_results.append(fb_result)
+        self._save_execution(state)
+
+        amendment = self.amend_plan(
+            description=(
+                f"Feedback dispatch for question '{question_id}' on phase {phase_id}: "
+                f"user chose '{chosen_option}'"
+            ),
+            new_phases=[new_phase],
+            trigger="feedback",
+            trigger_phase_id=phase_id,
+            feedback=chosen_option,
+        )
+
+        # Reload to pick up the amendment's renumbered state (including
+        # updated phase_ids on feedback_results).
+        state = self._load_execution() or state
+
+        # Find the feedback result in the reloaded state (in-memory
+        # fb_result reference is stale after amend_plan reload + save).
+        reloaded_fb = next(
+            (r for r in state.feedback_results
+             if r.question_id == question_id),
+            None,
+        )
+        if reloaded_fb is not None:
+            # Record the dispatched step_id.
+            if amendment.phases_added:
+                for p in state.plan.phases:
+                    if p.phase_id in amendment.phases_added and p.steps:
+                        reloaded_fb.dispatched_step_id = p.steps[0].step_id
+                        break
+            elif amendment.steps_added:
+                reloaded_fb.dispatched_step_id = amendment.steps_added[0]
+
+        # Find the current phase_id (after renumbering) for the phase
+        # that holds the feedback questions.
+        current_phase_obj = state.current_phase_obj
+        current_pid = current_phase_obj.phase_id if current_phase_obj else phase_id
+
+        # Check if all feedback questions are now resolved.
+        if self._feedback_resolved_for_phase(state, current_pid):
+            state.status = "running"
+        self._save_execution(state)
+
+        if self._trace is not None:
+            self._tracer.record_event(
+                self._trace,
+                "feedback_result",
+                agent_name=None,
+                phase=phase_id,
+                step=0,
+                details={
+                    "question_id": question_id,
+                    "chosen_option": chosen_option,
+                    "chosen_index": chosen_index,
+                    "dispatched_step_id": fb_result.dispatched_step_id,
+                },
+            )
+
     def _team_dispatch_action(
         self, step: PlanStep, state: ExecutionState,
     ) -> ExecutionAction:
@@ -2351,11 +2568,13 @@ class ExecutionEngine:
                 for mi, member in enumerate(step.team):
                     member.member_id = f"{new_id}.{si + 1}.{chr(97 + mi)}"
 
-        # Update phase_id references in gate and approval results.
+        # Update phase_id references in gate, approval, and feedback results.
         for gr in state.gate_results:
             gr.phase_id = old_to_new.get(gr.phase_id, gr.phase_id)
         for ar in state.approval_results:
             ar.phase_id = old_to_new.get(ar.phase_id, ar.phase_id)
+        for fr in state.feedback_results:
+            fr.phase_id = old_to_new.get(fr.phase_id, fr.phase_id)
 
     @staticmethod
     def _locate_step(state: ExecutionState, step_id: str) -> tuple[int, int]:
