@@ -133,11 +133,22 @@ def init_dependencies(
     _retro_engine = RetrospectiveEngine(
         retrospectives_dir=team_context_root / "retrospectives"
     )
+    # Wire bead store so planning decisions are captured (F4) and
+    # BeadAnalyzer can enrich plans from prior execution beads (F7).
+    _bead_store_for_planner = None
+    try:
+        from agent_baton.core.engine.bead_store import BeadStore
+        _db = team_context_root / "baton.db"
+        if _db.exists():
+            _bead_store_for_planner = BeadStore(_db)
+    except Exception:
+        pass
     _planner = IntelligentPlanner(
         team_context_root=team_context_root,
         retro_engine=_retro_engine,
         classifier=_classifier,
         policy_engine=_policy_engine,
+        bead_store=_bead_store_for_planner,
     )
 
     # Registry — load agents eagerly so the first /agents request is fast.

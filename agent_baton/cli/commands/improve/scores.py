@@ -45,8 +45,18 @@ def handler(args: argparse.Namespace) -> None:
         pass  # Fall back to filesystem mode
     scorer = PerformanceScorer(storage=storage)
 
+    # Wire bead store for F12 quality metrics in scorecards
+    bead_store = None
+    try:
+        from agent_baton.core.engine.bead_store import BeadStore
+        db_path = Path(".claude/team-context/baton.db")
+        if db_path.exists():
+            bead_store = BeadStore(db_path)
+    except Exception:
+        pass
+
     if args.agent:
-        sc = scorer.score_agent(args.agent)
+        sc = scorer.score_agent(args.agent, bead_store=bead_store)
         if sc.times_used == 0:
             print(f"No usage data for agent '{args.agent}'.")
             return

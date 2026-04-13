@@ -201,14 +201,14 @@ Record the result of a QA gate check.
 baton execute gate \
     --phase-id N \
     --result pass|fail \
-    [--output TEXT]
+    [--gate-output TEXT]
 ```
 
 | Argument | Required | Description |
 |----------|----------|-------------|
 | `--phase-id N` | Yes | Integer phase ID (matches `phase_id` in the plan, 1-based) |
 | `--result pass\|fail` | Yes | Gate outcome |
-| `--output TEXT` | No | Command output or reviewer notes |
+| `--gate-output TEXT` | No | Command output or reviewer notes. Note: use `--gate-output`, not `--output` (which is reserved for the output format selector). |
 
 **Output:** `Gate recorded: phase 1 — PASS`
 
@@ -408,6 +408,89 @@ status when the session crashed will be re-dispatched.
 **When to use:** At the start of a recovery session after a timeout or
 crash.  If `execution-state.json` does not exist, returns a FAILED action
 with the message "No execution state found on disk. Cannot resume."
+
+---
+
+### `baton execute run`
+
+Autonomous execution loop that drives the full plan without a Claude Code
+session.  Spawns `claude --print` subprocesses for each DISPATCH action.
+
+```
+baton execute run \
+    [--plan PATH] \
+    [--model MODEL] \
+    [--max-steps N] \
+    [--dry-run]
+```
+
+| Argument | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `--plan PATH` | No | `.claude/team-context/plan.json` | Path to plan.json |
+| `--model MODEL` | No | `sonnet` | Default model for dispatched agents |
+| `--max-steps N` | No | `50` | Safety limit: maximum steps before aborting |
+| `--dry-run` | No | — | Print actions without executing them |
+
+**When to use:** For headless execution without an interactive Claude Code
+session.  The PMO UI can also launch execution via this path.
+
+---
+
+### `baton execute list`
+
+List all executions (active and completed) in the repository.
+
+```
+baton execute list
+```
+
+**Output:** A table of all task IDs with their status, start time, and
+step progress.
+
+**When to use:** To see which executions exist in the current repository,
+especially when managing concurrent executions.
+
+---
+
+### `baton execute switch`
+
+Switch the repository-wide active execution marker to a different task ID.
+
+```
+baton execute switch TASK_ID
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `TASK_ID` | Yes | The task ID to make active |
+
+**Side effects:** Writes the task ID to `active-task-id.txt`.  Subsequent
+`baton execute` calls that do not specify `--task-id` or `BATON_TASK_ID`
+will resolve to this execution.
+
+**When to use:** When working with multiple executions in the same
+repository and you want to change which one is the default target without
+setting an environment variable.
+
+---
+
+### Global `--output` flag (all execute subcommands)
+
+Every `baton execute` subcommand accepts an `--output` flag that controls
+the output format.
+
+```
+baton execute <subcommand> [--output text|json]
+```
+
+| Value | Description |
+|-------|-------------|
+| `text` (default) | Human-readable output (the format documented throughout this reference) |
+| `json` | Machine-readable JSON output (useful for programmatic consumers) |
+
+**Note:** This flag is distinct from `--gate-output` on the `gate`
+subcommand.  `--output` controls the format; `--gate-output` provides
+the gate's command output text.
 
 ---
 
@@ -649,7 +732,7 @@ loop:
         baton execute gate \
             --phase-id {phase_id} \
             --result {"pass" if passed else "fail"} \
-            --output "{output}"
+            --gate-output "{output}"
 
         action = baton execute next
 
@@ -771,7 +854,7 @@ ACTION: GATE
 | `message` | Human-readable description |
 
 Run `gate_command` with Bash.  Pass `--result pass` if the command exits
-0, `--result fail` otherwise.  Include the command output in `--output`.
+0, `--result fail` otherwise.  Include the command output in `--gate-output`.
 
 ### COMPLETE
 

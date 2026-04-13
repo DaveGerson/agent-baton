@@ -1856,7 +1856,9 @@ class IntelligentPlanner:
         """Populate score warnings for any low-health agents."""
         for agent in agents:
             try:
-                card: AgentScorecard = self._scorer.score_agent(agent)
+                card: AgentScorecard = self._scorer.score_agent(
+                    agent, bead_store=self._bead_store,
+                )
             except Exception:
                 continue
             if card.health in _LOW_HEALTH_RATINGS:

@@ -93,6 +93,9 @@ class AgentScorecard:
     positive_mentions: int = 0
     negative_mentions: int = 0
     knowledge_gaps_cited: int = 0
+    # Bead quality metrics (F12, populated when bead_store is available)
+    avg_bead_quality: float = 0.0
+    bead_count: int = 0
 
     @property
     def health(self) -> str:
@@ -203,7 +206,7 @@ class PerformanceScorer:
         self._retro = retro_engine or RetrospectiveEngine()
         self._storage = storage
 
-    def score_agent(self, agent_name: str) -> AgentScorecard:
+    def score_agent(self, agent_name: str, *, bead_store=None) -> AgentScorecard:
         """Compute a full scorecard for a single agent.
 
         Data sources:
@@ -311,6 +314,24 @@ class PerformanceScorer:
                         elif in_gaps:
                             gaps_cited += 1
 
+        # Bead quality metrics (F12): average quality_score of beads this
+        # agent produced, and total bead count.  Only populated when a
+        # bead_store is provided — gracefully defaults to 0 otherwise.
+        avg_bead_quality = 0.0
+        bead_count = 0
+        if bead_store is not None:
+            try:
+                agent_beads = bead_store.query(agent_name=agent_name, limit=500)
+                bead_count = len(agent_beads)
+                if agent_beads:
+                    scores = [b.quality_score for b in agent_beads
+                              if b.quality_score != 0.0]
+                    avg_bead_quality = (
+                        sum(scores) / len(scores) if scores else 0.0
+                    )
+            except Exception:
+                pass
+
         return AgentScorecard(
             agent_name=agent_name,
             times_used=times_used,
@@ -323,6 +344,8 @@ class PerformanceScorer:
             positive_mentions=positive,
             negative_mentions=negative,
             knowledge_gaps_cited=gaps_cited,
+            avg_bead_quality=avg_bead_quality,
+            bead_count=bead_count,
         )
 
     def score_all(self) -> list[AgentScorecard]:
