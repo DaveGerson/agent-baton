@@ -781,8 +781,8 @@ class TestSourceCmdIntegration:
         assert len(mappings) == 1
         assert mappings[0]["project_id"] == "proj-alpha"
 
-    def test_add_rejects_unimplemented_types(self, tmp_path, monkeypatch, capsys):
-        """_add() rejects jira/github/linear with a clear error and implementation hint."""
+    def test_add_accepts_implemented_types(self, tmp_path, monkeypatch, capsys):
+        """_add() accepts jira/github/linear now that adapters are implemented."""
         import argparse
         from agent_baton.cli.commands.source_cmd import _add
 
@@ -801,16 +801,12 @@ class TestSourceCmdIntegration:
                 pat_env="TOKEN",
                 url="",
             )
-            with pytest.raises(SystemExit) as exc_info:
-                _add(add_args)
-            assert exc_info.value.code == 1
-
+            _add(add_args)
             out = capsys.readouterr().out
-            assert "no adapter implemented" in out
-            assert source_type in out
+            assert "Registered source" in out
 
     def test_sync_no_adapter(self, tmp_path, monkeypatch, capsys):
-        """_sync() with a registered source whose type has no adapter prints informative message."""
+        """_sync() with a source whose type has no adapter prints informative message."""
         import argparse
         import json
         from agent_baton.cli.commands.source_cmd import _sync
@@ -821,30 +817,22 @@ class TestSourceCmdIntegration:
             central_db,
         )
 
-        # Insert a 'jira' source row directly (bypassing _add validation) to
-        # exercise the sync code path when no adapter is registered.
+        # Insert a source with a completely unknown type to exercise the
+        # "no adapter" code path.
         store = CentralStore(central_db)
         store.execute(
             "INSERT INTO external_sources "
             "(source_id, source_type, display_name, config, enabled) "
             "VALUES (?, ?, ?, ?, 1)",
-            ("jira-org-proj", "jira", "Jira", json.dumps({})),
+            ("unknown-src", "unknown_platform", "Unknown", json.dumps({})),
         )
         store.close()
 
         sync_args = argparse.Namespace(
-            source_id="jira-org-proj",
+            source_id="unknown-src",
             sync_all=False,
         )
-
-        # Temporarily clear AdapterRegistry so jira is not found.
-        original_adapters = dict(AdapterRegistry._adapters)
-        AdapterRegistry._adapters = {}
-        try:
-            _sync(sync_args)
-        finally:
-            AdapterRegistry._adapters = original_adapters
-
+        _sync(sync_args)
         out = capsys.readouterr().out
         assert "No adapter available" in out or "not available" in out.lower()
 
