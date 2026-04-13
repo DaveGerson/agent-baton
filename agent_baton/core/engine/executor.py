@@ -1015,6 +1015,15 @@ class ExecutionEngine:
         except Exception as exc:
             _log.debug("Post-completion improvement cycle skipped: %s", exc)
 
+        # Detect learning signals from the completed execution (best-effort).
+        # Writes/updates LearningIssue records in baton.db; auto-applies safe
+        # fixes that have crossed their occurrence threshold.
+        try:
+            from agent_baton.core.learn.engine import LearningEngine
+            LearningEngine(team_context_root=self._root).detect(state)
+        except Exception as exc:
+            _log.debug("Post-completion learning detection skipped: %s", exc)
+
         # Compute context efficiency profile (best-effort, non-blocking).
         # Saved to <team_context_root>/context-profiles/<task_id>.json.
         context_profile_path: Path | None = None

@@ -849,7 +849,8 @@ class TestSchemaMigration:
         assert result == "bd-migrated"
 
     def test_v3_to_v4_migration_schema_version_updated(self, tmp_path: Path) -> None:
-        """After migration the _schema_version table must record version 4."""
+        """After migration the _schema_version table must record current version."""
+        from agent_baton.core.storage.schema import SCHEMA_VERSION
         db_path = tmp_path / "v3_ver.db"
         self._create_v3_db(db_path)
 
@@ -860,7 +861,7 @@ class TestSchemaMigration:
         conn = sqlite3.connect(str(db_path))
         row = conn.execute("SELECT version FROM _schema_version").fetchone()
         conn.close()
-        assert row[0] == 4
+        assert row[0] == SCHEMA_VERSION
 
 
 # ---------------------------------------------------------------------------
