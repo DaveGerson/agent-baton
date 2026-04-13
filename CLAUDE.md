@@ -32,7 +32,8 @@ agent_baton/       ← Python package (orchestration engine)
   cli/             ← CLI interface (50 commands via `baton`)
     commands/
       execution/   ← execute, plan, status, daemon, async, decide
-      observe/     ← dashboard, trace, usage, telemetry, context_profile, retro
+      observe/     ← dashboard, trace, usage, telemetry, context_profile, retro,
+      |              context, cleanup, migrate_storage, query
       govern/      ← classify, compliance, policy, escalations, validate, spec_check, detect
       improve/     ← scores, evolve, patterns, budget, changelog, learn,
       |              anomalies, experiment, improve

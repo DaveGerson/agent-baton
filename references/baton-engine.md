@@ -44,6 +44,7 @@ baton plan "description" --save --explain \
 | `--knowledge PATH` | No | Attach a knowledge document globally to all steps (repeatable) |
 | `--knowledge-pack NAME` | No | Attach a knowledge pack globally to all steps (repeatable) |
 | `--intervention LEVEL` | No | Escalation threshold: `low` (default), `medium`, `high` |
+| `--complexity LEVEL` | No | Override task complexity: `light`, `medium`, `heavy`. Skips automatic classification when provided. |
 
 **Typical usage:**
 
@@ -147,8 +148,9 @@ baton execute dispatched --step-id ID --agent NAME
 matters for parallel execution — the engine will not dispatch a second
 step that depends on a `dispatched` step.
 
-**Note:** `baton execute record` also accepts `--status dispatched` but
-`baton execute dispatched` is the idiomatic shorthand.
+**Note:** Use `baton execute dispatched` to mark a step as in-flight.
+The `record` subcommand only accepts `--status complete` or `--status
+failed` -- it does not accept `dispatched`.
 
 ---
 

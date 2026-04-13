@@ -448,7 +448,7 @@ agent_baton/       <- Python package
     runtime/       <- Async worker, supervisor, headless Claude
   api/             <- FastAPI REST API server
   cli/             <- CLI interface (50+ commands)
-tests/             <- Test suite (~4665 tests, pytest)
+tests/             <- Test suite (~5010 tests, pytest)
 pmo-ui/            <- React/Vite PMO frontend
 ```
 
@@ -461,7 +461,7 @@ git clone https://github.com/DaveGerson/agent-baton.git
 cd agent-baton
 pip install -e ".[dev]"        # Core + test deps
 pip install -e ".[dev,api]"    # Everything including REST API
-pytest                         # ~4665 tests
+pytest                         # ~5010 tests
 ```
 
 Requires Python 3.10+. The only runtime dependency is PyYAML.
@@ -490,7 +490,7 @@ and tested.
 - **Python**: 3.10+
 - **Runtime dependency**: PyYAML only
 - **Optional**: FastAPI + uvicorn (REST API), Anthropic SDK (AI classification)
-- **Test suite**: ~4665 tests (pytest)
+- **Test suite**: ~5010 tests (pytest)
 - **External adapters**: Azure DevOps implemented; Jira, GitHub, Linear
   protocols defined
 
