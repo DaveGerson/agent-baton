@@ -40,3 +40,4 @@ RESUME_*.md
 
 # PMO UI local config
 pmo-ui/.claude/
+/pmo-ui/e2e/reports/*
