@@ -26,7 +26,7 @@ from agent_baton.core.improve.scoring import AgentScorecard, PerformanceScorer
 from agent_baton.core.learn.budget_tuner import BudgetTuner
 from agent_baton.core.learn.pattern_learner import PatternLearner
 from agent_baton.core.orchestration.registry import AgentRegistry
-from agent_baton.core.orchestration.router import AgentRouter
+from agent_baton.core.orchestration.router import AgentRouter, StackProfile
 from agent_baton.models.enums import GitStrategy, RiskLevel
 from agent_baton.models.execution import MachinePlan, PlanGate, PlanPhase, PlanStep, TeamMember
 from agent_baton.models.feedback import RetrospectiveFeedback
@@ -117,6 +117,70 @@ _PHASE_NAMES: dict[str, list[str]] = {
 }
 
 _DEFAULT_PHASE_NAMES: list[str] = ["Design", "Implement", "Test", "Review"]
+
+
+# ---------------------------------------------------------------------------
+# Stack-aware gate commands — keyed by language
+# ---------------------------------------------------------------------------
+
+_STACK_GATE_COMMANDS: dict[str | None, dict[str, str]] = {
+    "python": {"test": "pytest --cov", "build": "pytest"},
+    "typescript": {"test": "npm test", "build": "npx tsc --noEmit"},
+    "javascript": {"test": "npm test", "build": "npm test"},
+    "go": {"test": "go test ./...", "build": "go build ./..."},
+    "rust": {"test": "cargo test", "build": "cargo build"},
+    "java": {"test": "mvn test", "build": "mvn compile"},
+    "ruby": {"test": "bundle exec rake test", "build": "bundle exec rake"},
+    "kotlin": {"test": "gradle test", "build": "gradle build"},
+    "csharp": {"test": "dotnet test", "build": "dotnet build"},
+}
+
+# Fallback used when no stack is detected
+_DEFAULT_GATE_COMMANDS: dict[str, str] = {"test": "pytest --cov", "build": "pytest"}
+
+
+# ---------------------------------------------------------------------------
+# Cross-concern agent signals — keywords that indicate an agent is needed
+# beyond what the primary task_type would suggest.
+# ---------------------------------------------------------------------------
+
+_CROSS_CONCERN_SIGNALS: dict[str, list[str]] = {
+    "frontend-engineer": [
+        "ux", "ui", "navigate", "browser", "visual", "layout",
+        "css", "component", "react", "frontend",
+    ],
+    "backend-engineer": [
+        "api", "endpoint", "server", "database", "migration", "backend",
+        "fix", "bug", "broken", "error", "remediate", "patch",
+    ],
+    "test-engineer": [
+        "test suite", "e2e", "playwright", "coverage", "vitest",
+        "jest", "unit test", "integration test",
+    ],
+    "code-reviewer": [
+        "review", "code quality", "audit",
+    ],
+}
+
+
+# ---------------------------------------------------------------------------
+# Compound task decomposition — sub-task phase name mapping
+# ---------------------------------------------------------------------------
+
+_SUBTASK_PHASE_NAMES: dict[str, str] = {
+    "test": "Test",
+    "bug-fix": "Fix",
+    "new-feature": "Implement",
+    "refactor": "Refactor",
+    "migration": "Migrate",
+    "data-analysis": "Analyze",
+    "documentation": "Document",
+}
+
+# Regex to split numbered sub-tasks: (1), 1., or 1)
+_SUBTASK_SPLIT = re.compile(
+    r"(?:^|(?<=\s))(?:\((\d+)\)|(\d+)[.\)])\s+",
+)
 
 # Maps phase names (lower-cased) to human-readable action verbs for step descriptions
 _PHASE_VERBS: dict[str, str] = {
@@ -510,8 +574,47 @@ class IntelligentPlanner:
         if retro_feedback is not None and retro_feedback.has_feedback():
             resolved_agents = self._apply_retro_feedback(resolved_agents, retro_feedback)
 
+        # 5c. Compound task decomposition — detect numbered sub-tasks and
+        # build independent per-subtask agent rosters.  Only activates when
+        # no explicit phases were provided and ≥2 numbered items are found.
+        _subtask_data: list[dict] | None = None
+        if phases is None:
+            subtasks = self._parse_subtasks(task_summary)
+            if len(subtasks) >= 2:
+                _subtask_data = []
+                for sub_idx, sub_text in subtasks:
+                    st_type = self._infer_task_type(sub_text)
+                    st_agents = list(_DEFAULT_AGENTS.get(st_type, ["backend-engineer"]))
+                    st_agents = self._expand_agents_for_concerns(st_agents, sub_text)
+                    _subtask_data.append({
+                        "index": sub_idx,
+                        "text": sub_text,
+                        "task_type": st_type,
+                        "agents": st_agents,
+                    })
+                # Override resolved_agents with the union of all sub-task agents
+                union_agents: list[str] = []
+                for st in _subtask_data:
+                    for a in st["agents"]:
+                        if a not in union_agents:
+                            union_agents.append(a)
+                resolved_agents = union_agents
+
+        # 5d. Cross-concern agent expansion — when no compound decomposition
+        # occurred, still expand the roster based on description keywords.
+        if _subtask_data is None:
+            resolved_agents = self._expand_agents_for_concerns(
+                resolved_agents, task_summary,
+            )
+
+        # 5e. Store pre-routing names for compound phase building
+        _pre_routing_agents = list(resolved_agents)
+
         # 6. Route agents
         resolved_agents = self._route_agents(resolved_agents, project_root)
+
+        # 6a. Build route map (base name → routed name) for compound phases
+        _agent_route_map = dict(zip(_pre_routing_agents, resolved_agents))
 
         # 6.5. Resolve knowledge attachments per step (KnowledgeRegistry if available).
         # This runs after routing so step.agent_name reflects the routed variant.
@@ -559,7 +662,12 @@ class IntelligentPlanner:
         git_strategy = _select_git_strategy(risk_level_enum).value
 
         # 9. Build phases
-        if phases is not None:
+        if _subtask_data is not None:
+            # Compound task — each sub-task becomes its own phase
+            plan_phases = self._build_compound_phases(
+                _subtask_data, _agent_route_map,
+            )
+        elif phases is not None:
             plan_phases = self._phases_from_dicts(phases, resolved_agents, task_summary)
         elif classified_phases is not None:
             # Use classifier-provided phase names
@@ -657,10 +765,10 @@ class IntelligentPlanner:
             except Exception:
                 pass
 
-        # 12. Add QA gates
+        # 12. Add QA gates (stack-aware)
         for phase in plan_phases:
             if phase.gate is None:
-                phase.gate = self._default_gate(phase.name)
+                phase.gate = self._default_gate(phase.name, stack=stack_profile)
 
         # 12b. Set approval gates on critical phases for HIGH+ risk
         if risk_level_enum in (RiskLevel.HIGH, RiskLevel.CRITICAL):
@@ -956,6 +1064,94 @@ class IntelligentPlanner:
                 if kw in lower:
                     return task_type
         return "new-feature"
+
+    # ------------------------------------------------------------------
+    # Private helpers — compound task decomposition
+    # ------------------------------------------------------------------
+
+    def _parse_subtasks(self, summary: str) -> list[tuple[int, str]]:
+        """Parse numbered sub-tasks from a compound task description.
+
+        Detects patterns like ``(1) ...``, ``1. ...``, ``1) ...`` and returns
+        a list of ``(index, text)`` pairs.  Returns empty list if fewer than
+        2 sub-tasks are found.
+        """
+        parts = _SUBTASK_SPLIT.split(summary)
+        # split() interleaves: [prefix, group1, group2, text, group1, group2, text, ...]
+        subtasks: list[tuple[int, str]] = []
+        i = 1
+        while i + 2 < len(parts):
+            index = int(parts[i] or parts[i + 1])
+            text = parts[i + 2].strip()
+            if text:
+                subtasks.append((index, text))
+            i += 3
+        return subtasks if len(subtasks) >= 2 else []
+
+    def _expand_agents_for_concerns(
+        self,
+        agents: list[str],
+        text: str,
+    ) -> list[str]:
+        """Expand agent roster based on cross-concern signals in the description.
+
+        When the description mentions keywords associated with agents not in
+        the current roster, those agents are added.  This handles cases like
+        ``--task-type test`` where the description also mentions "fix" and "UX".
+        """
+        text_lower = text.lower()
+        text_words = set(re.findall(r"\b\w+\b", text_lower))
+        expanded = list(agents)
+
+        for agent_base, keywords in _CROSS_CONCERN_SIGNALS.items():
+            # Skip if this agent (or a flavored variant) is already present
+            if any(a.split("--")[0] == agent_base for a in expanded):
+                continue
+            for kw in keywords:
+                # Multi-word keywords: use substring matching (specific enough)
+                # Single-word keywords: use word-boundary matching to avoid
+                # false positives like "ui" matching inside "suite".
+                if " " in kw:
+                    matched = kw in text_lower
+                else:
+                    matched = kw in text_words
+                if matched:
+                    expanded.append(agent_base)
+                    break
+
+        return expanded
+
+    def _build_compound_phases(
+        self,
+        subtask_data: list[dict],
+        agent_route_map: dict[str, str],
+    ) -> list[PlanPhase]:
+        """Build phases from compound sub-task data with routed agents.
+
+        Each sub-task becomes its own phase with independently selected
+        agents.  The *agent_route_map* translates base names to their
+        stack-flavored variants (e.g. ``backend-engineer`` → ``backend-engineer--python``).
+        """
+        phases: list[PlanPhase] = []
+        for idx, st in enumerate(subtask_data, start=1):
+            phase_name = _SUBTASK_PHASE_NAMES.get(st["task_type"], "Implement")
+
+            steps: list[PlanStep] = []
+            for step_idx, agent_base in enumerate(st["agents"], start=1):
+                routed_name: str = agent_route_map.get(agent_base) or agent_base
+                steps.append(
+                    PlanStep(
+                        step_id=f"{idx}.{step_idx}",
+                        agent_name=routed_name,
+                        task_description=self._step_description(
+                            phase_name, routed_name, st["text"],
+                        ),
+                    )
+                )
+
+            phases.append(PlanPhase(phase_id=idx, name=phase_name, steps=steps))
+
+        return phases
 
     # ------------------------------------------------------------------
     # Private helpers — phase building
@@ -1337,32 +1533,38 @@ class IntelligentPlanner:
     # Private helpers — gates
     # ------------------------------------------------------------------
 
-    def _default_gate(self, phase_name: str) -> PlanGate | None:
+    def _default_gate(
+        self, phase_name: str, stack: StackProfile | None = None,
+    ) -> PlanGate | None:
         """Return an appropriate QA gate for a phase name.
 
-        Every code-producing phase gets a test gate. Only purely
-        investigative or review phases skip automated testing.
+        Gate commands are matched to the detected project stack so that
+        TypeScript projects get ``npm test`` instead of ``pytest``, etc.
 
-        - 'Test' → test gate (pytest with coverage)
-        - 'Investigate', 'Research', 'Review' → no automated gate
-        - All others (Implement, Fix, etc.) → build check (pytest)
+        - 'Test' → test gate (language-appropriate test runner)
+        - 'Investigate', 'Research', 'Review', 'Design' → no automated gate
+        - All others (Implement, Fix, etc.) → build check (language-appropriate)
         """
         name_lower = phase_name.lower()
-        if name_lower == "test":
-            return PlanGate(
-                gate_type="test",
-                command="pytest --cov",
-                description="Run full test suite with coverage report.",
-                fail_on=["test failure", "coverage below threshold"],
-            )
         if name_lower in ("investigate", "research", "review", "design"):
             # No automated gate — these phases don't produce code
             return None
-        # All other phases (implement, fix, migrate, refactor, etc.)
-        # get a mandatory test gate
+
+        # Pick gate commands from detected stack, falling back to defaults
+        language = stack.language if stack else None
+        commands = _STACK_GATE_COMMANDS.get(language, _DEFAULT_GATE_COMMANDS)
+
+        if name_lower == "test":
+            return PlanGate(
+                gate_type="test",
+                command=commands["test"],
+                description="Run full test suite with coverage report.",
+                fail_on=["test failure", "coverage below threshold"],
+            )
+        # All other code-producing phases (implement, fix, migrate, etc.)
         return PlanGate(
             gate_type="build",
-            command="pytest",
+            command=commands["build"],
             description="Run test suite to verify the implementation builds cleanly.",
             fail_on=["test failure", "import error"],
         )
