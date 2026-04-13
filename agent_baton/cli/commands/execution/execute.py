@@ -328,7 +328,15 @@ def handler(args: argparse.Namespace) -> None:
     engine = ExecutionEngine(bus=bus, task_id=task_id, storage=storage)
 
     if args.subcommand == "start":
+        # Resolve plan path: if task_id is known (from --task-id or
+        # BATON_TASK_ID), prefer the task-scoped plan file over the
+        # global backward-compat plan.json.  This prevents a later
+        # `baton plan --save` from silently hijacking an earlier task.
         plan_path = Path(args.plan)
+        if task_id and plan_path == Path(".claude/team-context/plan.json"):
+            scoped = context_root / "executions" / task_id / "plan.json"
+            if scoped.exists():
+                plan_path = scoped
         if not plan_path.exists():
             user_error(f"plan file not found: {plan_path}", hint="Run 'baton plan --save \"task description\"' first.")
         try:
@@ -339,8 +347,10 @@ def handler(args: argparse.Namespace) -> None:
             plan = MachinePlan.from_dict(data)
         except (KeyError, ValueError, TypeError) as exc:
             validation_error(f"plan.json has invalid structure: {exc}", hint="Re-create with: baton plan --save \"task description\"")
-        # Use namespaced execution directory for the new plan
-        task_id = plan.task_id
+        # Use task_id from env/flag if provided; fall back to plan's task_id
+        # only when no explicit binding exists.
+        if task_id is None:
+            task_id = plan.task_id
 
         # Build a KnowledgeResolver from the plan's knowledge configuration so
         # runtime KNOWLEDGE_GAP signals can be auto-resolved without human gates.
