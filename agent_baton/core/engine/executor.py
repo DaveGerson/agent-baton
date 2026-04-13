@@ -2430,12 +2430,23 @@ class ExecutionEngine:
             ):
                 continue
 
+            # F3 Forward Relay: inject prior beads into team member prompts
+            _team_beads: list = []
+            if self._bead_store:
+                try:
+                    from agent_baton.core.engine.bead_selector import BeadSelector as _TBS
+                    _team_beads = _TBS.select(
+                        self._bead_store, step, state.plan,
+                    )
+                except Exception:
+                    pass
             prompt = dispatcher.build_team_delegation_prompt(
                 step=step,
                 member=member,
                 shared_context=state.plan.shared_context,
                 task_summary=state.plan.task_summary,
                 team_overview=team_overview,
+                prior_beads=_team_beads or None,
             )
             member_actions.append(ExecutionAction(
                 action_type=ActionType.DISPATCH,
