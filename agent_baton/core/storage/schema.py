@@ -70,6 +70,13 @@ ALTER TABLE step_results ADD COLUMN deviations TEXT NOT NULL DEFAULT '[]';
 -- Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
 -- Beads are discrete units of structured memory (discoveries, decisions,
 -- warnings, outcomes, planning notes) produced by agents during execution.
+--
+-- NOTE: FK constraints are intentionally omitted from this migration
+-- because it is applied to BOTH project and central databases via
+-- ConnectionManager._run_migrations().  The central executions table has
+-- a composite PK (project_id, task_id) which is incompatible with a
+-- single-column FK reference.  Fresh project databases get the FK via
+-- PROJECT_SCHEMA_DDL; central databases get no FK (by design).
 CREATE TABLE IF NOT EXISTS beads (
     bead_id          TEXT PRIMARY KEY,
     task_id          TEXT NOT NULL,
@@ -87,8 +94,7 @@ CREATE TABLE IF NOT EXISTS beads (
     summary          TEXT NOT NULL DEFAULT '',
     links            TEXT NOT NULL DEFAULT '[]',
     source           TEXT NOT NULL DEFAULT 'agent-signal',
-    token_estimate   INTEGER NOT NULL DEFAULT 0,
-    FOREIGN KEY (task_id) REFERENCES executions(task_id) ON DELETE CASCADE
+    token_estimate   INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_beads_task ON beads(task_id);
 CREATE INDEX IF NOT EXISTS idx_beads_agent ON beads(agent_name);
@@ -97,8 +103,7 @@ CREATE INDEX IF NOT EXISTS idx_beads_status ON beads(status);
 CREATE TABLE IF NOT EXISTS bead_tags (
     bead_id  TEXT NOT NULL,
     tag      TEXT NOT NULL,
-    PRIMARY KEY (bead_id, tag),
-    FOREIGN KEY (bead_id) REFERENCES beads(bead_id) ON DELETE CASCADE
+    PRIMARY KEY (bead_id, tag)
 );
 CREATE INDEX IF NOT EXISTS idx_bead_tags_tag ON bead_tags(tag);
 """,
