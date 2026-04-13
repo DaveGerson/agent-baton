@@ -211,15 +211,36 @@ class KeywordClassifier:
         registry: AgentRegistry,
         default_agents: dict[str, list[str]],
     ) -> list[str]:
-        # Start with the default roster for this task type
-        base_agents = list(default_agents.get(task_type, ["backend-engineer"]))
+        # Start with the default roster for this task type, but only keep
+        # agents that are actually in the registry (or whose base name has
+        # a registry entry).  Unregistered defaults are dead weight that
+        # would consume cap slots without being routable.
+        registry_names = set(registry.agents.keys())
+        registry_bases = {n.split("--")[0] for n in registry_names}
+        raw_defaults = default_agents.get(task_type, ["backend-engineer"])
+        base_agents = [
+            a for a in raw_defaults
+            if a in registry_names or a in registry_bases
+        ]
+        # If every default was pruned (empty registry), keep the original
+        # list so downstream still gets valid agent names.
+        if not base_agents:
+            base_agents = list(raw_defaults)
 
         # Score registered agents not in the default list by keyword
-        # overlap with the task summary
+        # overlap with the task summary.  Require meaningful overlap:
+        # category affinity alone (+2.0) is not enough — the agent must
+        # also share ≥2 keywords with the summary to prove relevance.
         summary_words = set(summary.lower().split())
         scored_extras: list[tuple[float, str]] = []
+        base_agent_bases = {a.split("--")[0] for a in base_agents}
         for name, agent_def in registry.agents.items():
             if name in base_agents:
+                continue
+            # Skip flavoured variants whose base is already present —
+            # routing (step 6) picks the right flavour later.
+            base_name = name.split("--")[0]
+            if base_name in base_agent_bases:
                 continue
             desc_words = set(agent_def.description.lower().split())
             overlap = len(summary_words & desc_words)
@@ -227,12 +248,18 @@ class KeywordClassifier:
                 agent_def.category.value
                 in _CATEGORY_AFFINITY.get(task_type, set())
             )
+            # Require at least 2 keyword hits; category match is a bonus,
+            # not a free pass.
+            if overlap < 2:
+                continue
             score = overlap + (2.0 if category_match else 0.0)
-            if score > 2.0:
-                scored_extras.append((score, name))
+            scored_extras.append((score, name))
 
         scored_extras.sort(reverse=True)
         all_candidates = base_agents + [name for _, name in scored_extras]
+
+        # Cap to complexity tier — matches HaikuClassifier behaviour
+        max_agents = _MAX_AGENTS_BY_COMPLEXITY.get(complexity, 5)
 
         # Scale by complexity
         if complexity == "light":
@@ -250,9 +277,9 @@ class KeywordClassifier:
             # Drop review-only agents, keep implementers
             review_agents = {"code-reviewer", "auditor", "security-reviewer"}
             filtered = [a for a in all_candidates if a not in review_agents]
-            return filtered or all_candidates[:3]
+            return (filtered or all_candidates)[:max_agents]
         else:  # heavy
-            return all_candidates
+            return all_candidates[:max_agents]
 
     def _select_phases(
         self,

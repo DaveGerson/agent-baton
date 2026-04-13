@@ -19,6 +19,7 @@ from agent_baton.core.engine.classifier import (
     FallbackClassifier,
     TaskClassification,
     TaskClassifier,
+    _MAX_AGENTS_BY_COMPLEXITY,
 )
 from agent_baton.core.govern.classifier import ClassificationResult, DataClassifier
 from agent_baton.core.govern.policy import PolicyEngine, PolicySet, PolicyViolation
@@ -606,6 +607,16 @@ class IntelligentPlanner:
             resolved_agents = self._expand_agents_for_concerns(
                 resolved_agents, task_summary,
             )
+
+        # 5d-cap. Enforce complexity-tier agent cap so that cross-concern
+        # expansion (or a generous classifier) cannot produce unbounded
+        # rosters.  The cap matches HaikuClassifier's _MAX_AGENTS_BY_COMPLEXITY.
+        # Only applies to automatically-resolved agents — explicit user-
+        # provided agent lists are not capped.
+        if agents is None:
+            _agent_cap = _MAX_AGENTS_BY_COMPLEXITY.get(inferred_complexity, 5)
+            if len(resolved_agents) > _agent_cap:
+                resolved_agents = resolved_agents[:_agent_cap]
 
         # 5e. Store pre-routing names for compound phase building
         _pre_routing_agents = list(resolved_agents)

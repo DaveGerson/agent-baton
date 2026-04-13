@@ -690,3 +690,94 @@ class TestHaikuClassifierAgentCap:
         })
         result = self.classifier._parse_response(response_json, self.registry)
         assert len(result.agents) == 2
+
+
+# ---------------------------------------------------------------------------
+# KeywordClassifier agent cap — mirrors HaikuClassifier caps
+# ---------------------------------------------------------------------------
+
+class TestKeywordClassifierAgentCap:
+    """KeywordClassifier must cap agents by complexity tier like HaikuClassifier."""
+
+    def _large_registry(self) -> AgentRegistry:
+        """Build a registry with many agents that share common description words."""
+        agents = [
+            ("architect", "System design technical decisions module boundaries"),
+            ("backend-engineer", "Server-side implementation API endpoints business logic"),
+            ("backend-engineer--python", "Python backend specialist FastAPI Django SQLAlchemy"),
+            ("frontend-engineer", "Client-side UI components state management"),
+            ("frontend-engineer--react", "React UI components state management hooks"),
+            ("test-engineer", "Write and organize tests coverage suites"),
+            ("code-reviewer", "Quality review before commits code style"),
+            ("auditor", "Safety review for guardrail changes compliance"),
+            ("security-reviewer", "Security audit OWASP auth secrets vulnerabilities"),
+            ("data-engineer", "Database schema migrations ETL pipelines data"),
+            ("data-analyst", "Business intelligence reporting data queries KPIs"),
+            ("data-scientist", "Statistical analysis machine learning modeling data"),
+            ("devops-engineer", "Infrastructure CI/CD Docker deployment configuration"),
+            ("visualization-expert", "Charts dashboards visual data storytelling"),
+            ("talent-builder", "Create new agent definitions knowledge packs"),
+            ("subject-matter-expert", "Domain-specific business operations compliance"),
+        ]
+        reg = AgentRegistry()
+        for name, desc in agents:
+            agent = AgentDefinition(name=name, description=desc)
+            reg._agents[name] = agent
+        return reg
+
+    def test_heavy_keyword_capped_at_five(self):
+        """A broad heavy task against a large registry must not exceed 5 agents."""
+        registry = self._large_registry()
+        classifier = KeywordClassifier()
+        result = classifier.classify(
+            "Redesign the entire authentication system across frontend and backend "
+            "with new database schema, API endpoints, and comprehensive test coverage",
+            registry,
+        )
+        assert result.complexity == "heavy"
+        assert len(result.agents) <= 5
+
+    def test_medium_keyword_capped_at_three(self):
+        """A medium task must not exceed 3 agents even with many registry matches."""
+        registry = self._large_registry()
+        classifier = KeywordClassifier()
+        result = classifier.classify(
+            "Implement user profile endpoint with database migration",
+            registry,
+        )
+        assert result.complexity == "medium"
+        assert len(result.agents) <= 3
+
+    def test_light_keyword_returns_single_agent(self):
+        registry = self._large_registry()
+        classifier = KeywordClassifier()
+        result = classifier.classify("Move 2 files to a new folder", registry)
+        assert result.complexity == "light"
+        assert len(result.agents) == 1
+
+    def test_irrelevant_agents_excluded_from_pure_backend_task(self):
+        """A pure Python backend task should not include visualization, talent, etc."""
+        registry = self._large_registry()
+        classifier = KeywordClassifier()
+        result = classifier.classify(
+            "Fix the broken API endpoint that returns 500 errors on user login",
+            registry,
+        )
+        irrelevant = {"visualization-expert", "talent-builder", "data-scientist", "data-analyst"}
+        assert not irrelevant.intersection(result.agents), (
+            f"Irrelevant agents in roster: {irrelevant.intersection(result.agents)}"
+        )
+
+    def test_flavoured_variant_not_duplicated_with_base(self):
+        """If base agent (e.g. backend-engineer) is a default, its --python variant
+        should not also appear as a scored extra."""
+        registry = self._large_registry()
+        classifier = KeywordClassifier()
+        result = classifier.classify(
+            "Add a new API endpoint for user management",
+            registry,
+        )
+        backend_agents = [a for a in result.agents if a.startswith("backend-engineer")]
+        assert len(backend_agents) <= 1, (
+            f"Multiple backend-engineer variants in roster: {backend_agents}"
+        )
