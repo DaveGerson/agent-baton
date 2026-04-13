@@ -519,6 +519,81 @@ are loaded, run `scripts/install.sh` to deploy the agent definitions to
 
 ---
 
+### `baton learn`
+
+Learning automation — track, diagnose, and fix recurring issues.
+
+#### `baton learn status`
+
+Dashboard showing open issues by type, proposed fixes, and auto-apply
+statistics.
+
+#### `baton learn issues`
+
+```
+baton learn issues [--type TYPE] [--severity SEVERITY] [--status STATUS]
+```
+
+List learning issues with optional filters.
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--type` | No | Filter by issue type (routing_mismatch, agent_degradation, knowledge_gap, roster_bloat, gate_mismatch, pattern_drift, prompt_evolution) |
+| `--severity` | No | Filter by severity (low, medium, high, critical) |
+| `--status` | No | Filter by status (open, investigating, proposed, applied, resolved, wontfix) |
+
+#### `baton learn analyze`
+
+Run analysis cycle: detect patterns across open issues, compute
+confidence scores, mark issues as "proposed" when they cross auto-apply
+thresholds.
+
+#### `baton learn apply`
+
+```
+baton learn apply [--issue ID] [--all-safe]
+```
+
+Apply a specific fix or all auto-applicable fixes.  Each application
+writes corrections to `learned-overrides.json`, which the router and
+planner consume on the next plan.
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--issue` | No | Apply fix for a specific issue ID (supports prefix matching) |
+| `--all-safe` | No | Apply all issues that meet auto-apply thresholds |
+
+#### `baton learn interview`
+
+```
+baton learn interview [--type TYPE] [--severity SEVERITY]
+```
+
+Interactive structured dialogue for human-directed learning decisions.
+Presents issues one at a time with evidence summaries and multiple-choice
+options (evolve prompt, add knowledge pack, reduce priority, drop agent,
+investigate, won't fix, skip).
+
+#### `baton learn history`
+
+```
+baton learn history [--limit N]
+```
+
+Show resolution history — resolved/applied issues with outcomes.
+
+#### `baton learn reset`
+
+```
+baton learn reset --issue ID
+```
+
+Reopen a resolved or applied issue.  If an override was auto-applied,
+the user should also remove the corresponding entry from
+`learned-overrides.json`.
+
+---
+
 ## Execution Loop
 
 The orchestrator drives the engine through a deterministic loop.  The

@@ -441,7 +441,8 @@ agent_baton/       <- Python package
     govern/        <- Classification, compliance, policy
     observe/       <- Tracing, usage, dashboard, telemetry
     improve/       <- Scoring, evolution, experiments
-    learn/         <- Pattern learner, budget tuner
+    learn/         <- Pattern learner, budget tuner, learning engine,
+    |                ledger, overrides, resolvers, interviewer
     distribute/    <- Packaging, sharing, registry
     events/        <- Event bus, domain events, projections
     runtime/       <- Async worker, supervisor, headless Claude

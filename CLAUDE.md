@@ -7,8 +7,9 @@ system for Claude Code.
 
 ```
 agent_baton/       ← Python package (orchestration engine)
-  models/          ← Data models (19 modules, incl. pmo.py, knowledge.py, bead.py)
-  core/            ← Business logic (10 sub-packages, no shim files)
+  models/          ← Data models (23 modules, incl. pmo.py, knowledge.py, bead.py,
+  |                  learning.py, decision.py, events.py, session.py, parallel.py)
+  core/            ← Business logic (11 sub-packages, no shim files)
     engine/        ← Execution core: planner, executor, dispatcher, gates,
     │                persistence, protocols (ExecutionDriver),
     │                knowledge_resolver, knowledge_gap,
@@ -21,18 +22,20 @@ agent_baton/       ← Python package (orchestration engine)
     govern/        ← Policy enforcement, compliance, validation
     observe/       ← Tracing, usage, dashboard, retrospective, telemetry
     improve/       ← Scoring, evolution, VCS
-    learn/         ← Pattern learner, budget tuner
+    learn/         ← Pattern learner, budget tuner, learning engine,
+    │                ledger, overrides, resolvers, interviewer, recommender
     distribute/    ← Packaging, sharing, registry client
     │  experimental/ ← Incident, async dispatch, transfer (not production)
     events/        ← Event bus, domain events, persistence, projections
     runtime/       ← Async worker, supervisor, launcher, headless Claude,
                      decisions, ExecutionContext factory
-  cli/             ← CLI interface (39 commands via `baton`)
+  cli/             ← CLI interface (50 commands via `baton`)
     commands/
       execution/   ← execute, plan, status, daemon, async, decide
       observe/     ← dashboard, trace, usage, telemetry, context_profile, retro
       govern/      ← classify, compliance, policy, escalations, validate, spec_check, detect
-      improve/     ← scores, evolve, patterns, budget, changelog
+      improve/     ← scores, evolve, patterns, budget, changelog, learn,
+      |              anomalies, experiment, improve
       distribute/  ← package, publish, pull, verify_package, install, transfer
       agents/      ← agents, route, events, incident
       pmo_cmd      ← pmo serve, pmo status, pmo add, pmo health
@@ -42,10 +45,10 @@ agent_baton/       ← Python package (orchestration engine)
       bead_cmd     ← baton beads list/show/ready/close/link (structured memory)
 docs/              ← Architecture documentation (architecture.md, design-decisions.md, invariants.md)
 agents/            ← Distributable agent definitions (19 .md files)
-references/        ← Distributable reference docs (13 .md files)
+references/        ← Distributable reference docs (15 .md files)
 templates/         ← CLAUDE.md + settings.json installed to target projects
 scripts/           ← Install scripts (Linux + Windows)
-tests/             ← Test suite (~4665 tests, pytest)
+tests/             ← Test suite (~5010 tests, pytest)
 pmo-ui/            ← React/Vite PMO frontend (served at /pmo/)
 .claude/           ← Project-specific orchestration setup:
   agents/          ← 19 packaged agents (mirrored from agents/) +
@@ -113,7 +116,7 @@ pmo-ui/            ← React/Vite PMO frontend (served at /pmo/)
 
 ```bash
 pip install -e ".[dev]"    # Install in editable mode
-pytest                     # Run tests (~4665 tests)
+pytest                     # Run tests (~5010 tests)
 scripts/install.sh         # Re-install globally after editing agents/references
 ```
 
