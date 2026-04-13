@@ -25,6 +25,15 @@ execution engine:
    and phase sequencing. It writes `plan.json` and `plan.md` to
    `.claude/team-context/`.
 
+   Optional flags:
+   - `--knowledge path/to/doc.md` — attach knowledge documents to all steps (repeatable)
+   - `--knowledge-pack pack-name` — attach a knowledge pack by name (repeatable)
+   - `--intervention low|medium|high` — escalation threshold (default: `low`)
+   - `--model opus|sonnet` — default model for dispatched agents (agent definitions take priority)
+   - `--complexity light|medium|heavy` — override automatic complexity classification
+   - `--task-type TYPE` — override auto-detected type (`new-feature`, `bug-fix`, `refactor`, etc.)
+   - `--agents "agent1,agent2"` — override agent auto-selection
+
 2. **Review the plan** — read `.claude/team-context/plan.md` and present
    a brief summary to the user: phases, agents, and step descriptions.
    If the plan looks wrong (wrong agents for the task, too many phases,
@@ -64,7 +73,7 @@ execution engine:
    - Run the command shown in `Command:` using Bash
    - Record the result with:
      ```
-     baton execute gate --phase-id N --result pass|fail --output "output"
+     baton execute gate --phase-id N --result pass|fail --gate-output "output"
      ```
    - Then call `baton execute next`
 
@@ -84,6 +93,10 @@ execution engine:
    **For COMPLETE actions:**
    - Call `baton execute complete` to finalize the run
 
+   **For WAIT actions (parallel dispatch):**
+   - Parallel steps are still running; not all results have been recorded yet
+   - Continue recording outstanding step results, then call `baton execute next` again
+
    **For FAILED actions:**
    - Do not call `baton execute complete`
    - Report the failure details to the user
@@ -98,10 +111,25 @@ execution engine:
 7. **Session recovery**: if a session crashes, `baton execute resume`
    picks up where it left off using the saved execution state.
 
+**Headless execution:** For autonomous execution without a Claude Code
+session, use `baton execute run`. This drives the full loop (start ->
+dispatch -> gate -> complete) by spawning `claude --print` subprocesses.
+
+**Depth limit:** The orchestrator MUST run at the top level of a
+conversation, never as a dispatched subagent. It needs to spawn its own
+agents, and Claude Code limits agent nesting to depth 1.
+
+**Multi-execution:** Use `--task-id ID` on any execute subcommand to
+target a specific execution. Use `baton execute list` to see all
+executions and `baton execute switch TASK_ID` to change the active one.
+
 ## Execution Loop Reference
 
 ```
-baton plan "task" --save --explain
+baton plan "task" --save --explain \
+    [--knowledge path/to/doc.md] \       # attach knowledge documents (repeatable)
+    [--knowledge-pack pack-name] \       # attach knowledge packs (repeatable)
+    [--intervention low|medium|high]     # escalation threshold (default: low)
 # Review plan.md — present summary to user, adjust if needed
 git checkout -b feat/task-name
 action = baton execute start
@@ -118,7 +146,7 @@ loop:
     elif action.type == GATE:
         output = bash(gate_command)
         baton execute gate --phase-id N \
-            --result pass|fail --output "output"
+            --result pass|fail --gate-output "output"
         action = baton execute next
 
     elif action.type == APPROVAL:
@@ -131,6 +159,11 @@ loop:
     elif action.type == COMPLETE:
         baton execute complete
         break
+
+    elif action.type == WAIT:
+        # parallel steps still running — record remaining steps,
+        # then call baton execute next again
+        action = baton execute next
 
     elif action.type == FAILED:
         # report failure, stop

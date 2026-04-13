@@ -50,6 +50,11 @@ scripts/install.sh          # Linux/macOS
 # or: scripts/install.ps1   # Windows (no admin required)
 ```
 
+The installer prompts for scope (user-level `~/.claude/` for all projects,
+or project-level `.claude/` for the current project only) and copies agent
+definitions, reference procedures, a template `CLAUDE.md`, and
+`settings.json` hooks.
+
 ### 2. Install the Python engine
 
 ```bash
@@ -94,6 +99,7 @@ First time on a Go project? The `talent-builder` creates
 
 | Category | Agents |
 |----------|--------|
+| Orchestration | `orchestrator` |
 | Backend | `backend-engineer`, `--python`, `--node` |
 | Frontend | `frontend-engineer`, `--react`, `--dotnet` |
 | Architecture | `architect` |
@@ -111,7 +117,9 @@ A deterministic state machine that plans, sequences, and tracks multi-agent
 tasks:
 
 - **Intelligent planning** -- auto-detects your stack, classifies risk,
-  assigns budget tiers, sequences phases with dependency awareness
+  assigns budget tiers, sequences phases with dependency awareness. Supports
+  complexity override (`--complexity light|medium|heavy`) and AI-driven
+  classification.
 - **Execution loop** -- DISPATCH / GATE / APPROVAL / COMPLETE with full
   state persistence and crash recovery
 - **Concurrent execution** -- run multiple plans in parallel, each bound
@@ -140,8 +148,27 @@ Every task is classified by risk level:
 ### 15 Reference Procedures
 
 Shared knowledge documents encoding planning strategy, guardrail rules,
-communication protocols, failure handling, and cost models. Agents get the
-knowledge they need without duplicating it across context windows.
+communication protocols, failure handling, cost models, design patterns,
+and more. Agents get the knowledge they need without duplicating it across
+context windows.
+
+| Reference | Topic |
+|-----------|-------|
+| `baton-engine.md` | Full CLI reference and engine protocol |
+| `task-sequencing.md` | Phase ordering and dependency logic |
+| `agent-routing.md` | How the router selects agent flavors |
+| `guardrail-presets.md` | Safety policies by risk tier |
+| `cost-budget.md` | Token budget tiers and cost models |
+| `comms-protocols.md` | Inter-agent communication contracts |
+| `failure-handling.md` | Retry, escalation, and recovery |
+| `git-strategy.md` | Branch and commit conventions |
+| `hooks-enforcement.md` | Pre-commit and CI hook rules |
+| `decision-framework.md` | Human-in-the-loop decision protocol |
+| `adaptive-execution.md` | Runtime plan adaptation |
+| `research-procedures.md` | Investigation and discovery protocols |
+| `doc-generation.md` | Documentation generation standards |
+| `baton-patterns.md` | Reusable orchestration patterns |
+| `knowledge-architecture.md` | Knowledge pack design and delivery |
 
 ### Knowledge Delivery
 
@@ -149,15 +176,34 @@ Curated knowledge packs resolved at plan time and injected into each
 agent's delegation prompt. A feedback loop learns which agents need what
 knowledge for which task types.
 
-### Structured Agent Memory
+Three knowledge packs ship with the project:
+
+| Pack | Contents |
+|------|----------|
+| `agent-baton` | Architecture, conventions, and development workflow (3 docs) |
+| `ai-orchestration` | Multi-agent patterns, evaluation, prompt engineering, context economics (4 docs) |
+| `case-studies` | Real-world failure modes, framework comparisons, scaling patterns (3 docs) |
+
+Attach knowledge at plan time with `--knowledge` (individual files) or
+`--knowledge-pack` (named packs).
+
+### Structured Agent Memory (Beads)
 
 Inspired by Steve Yegge's [Beads](https://github.com/beads-ai/beads-cli)
-agent memory system. Agents emit `BEAD_DISCOVERY`, `BEAD_DECISION`, and
-`BEAD_WARNING` signals during execution that are automatically parsed and
-persisted to SQLite. Beads form a typed dependency graph with status
-tracking (`open` → `closed` → `archived`), tag-based retrieval, and
-decay for long-lived projects. Query with `baton beads list`, surface
-unblocked work with `baton beads ready`.
+agent memory system. Agents emit `BEAD_DISCOVERY`, `BEAD_DECISION`,
+`BEAD_WARNING`, `BEAD_OUTCOME`, and `BEAD_PLANNING` signals during
+execution that are automatically parsed and persisted to SQLite. Beads form
+a typed dependency graph with status tracking (`open` -> `closed` ->
+`archived`), tag-based retrieval, time-based decay, and promotion to
+persistent knowledge documents.
+
+```bash
+baton beads list --type decision --status open
+baton beads ready                               # Unblocked open beads
+baton beads graph TASK_ID                       # Dependency graph
+baton beads promote bd-a1b2 --pack my-pack      # Promote to knowledge doc
+baton beads cleanup --ttl 168 --dry-run         # Memory decay preview
+```
 
 ### Smart Forge
 
@@ -174,7 +220,22 @@ baton execute run --plan .claude/team-context/plan.json
 ```
 
 Dispatches agents via `claude --print`, runs gates as subprocesses, loops
-until complete. The PMO UI can also launch executions from its Kanban board.
+until complete. Supports `--model`, `--max-steps`, and `--dry-run` flags.
+The PMO UI can also launch executions from its Kanban board.
+
+### Daemon Mode
+
+Background execution with parallel agent dispatch:
+
+```bash
+baton daemon start --plan plan.json --max-parallel 3
+baton daemon status
+baton daemon stop
+```
+
+Supports `--foreground`, `--resume`, `--dry-run`, and `--serve` (co-hosts
+the HTTP API in the same process). Human decision requests raised during
+daemon execution are managed via `baton decide`.
 
 ### Cross-Project Intelligence
 
@@ -182,27 +243,113 @@ Execution data syncs to `~/.baton/central.db`. Query agent reliability,
 token costs, and failure rates across projects:
 
 ```bash
-baton sync --all
+baton sync                   # Sync current project
+baton sync --all             # Sync all registered projects
+baton sync status            # Show sync watermarks
 baton cquery agents          # Agent reliability across projects
 baton cquery costs           # Token costs by task type
+baton cquery gaps            # Recurring knowledge gaps
+baton cquery failures        # Project failure rates
+baton cquery mapping         # External item -> plan mapping
+```
+
+### Local Project Queries
+
+Query the current project's execution history with predefined views or
+ad-hoc SQL:
+
+```bash
+baton query agent-reliability       # Agent success rates
+baton query tasks                   # Recent task list
+baton query task-detail TASK_ID     # Full breakdown for one task
+baton query gate-stats              # Gate pass rates
+baton query cost-by-agent           # Token costs by agent
+baton query patterns                # Learned patterns
+baton query stalled --hours 4       # Stalled executions
+baton query --sql "SELECT ..."      # Ad-hoc SQL
 ```
 
 ### Pattern Learning
 
 The engine learns from past executions -- identifies recurring agent
 combinations, recommends budget adjustments, proposes prompt improvements,
-and surfaces anomalies.
+and surfaces anomalies. The learning pipeline includes:
+
+- **Pattern detection** -- `baton patterns` surfaces recurring
+  orchestration patterns with confidence scores
+- **Budget tuning** -- `baton budget` recommends tier adjustments
+  based on historical cost data
+- **Prompt evolution** -- `baton evolve` proposes prompt improvements
+  backed by performance data
+- **Anomaly detection** -- `baton anomalies` flags statistical deviations
+  in agent behavior
+- **Experiments** -- `baton experiment` manages controlled trials to
+  validate improvement recommendations
+- **Full-cycle improvement** -- `baton improve --run` executes the complete
+  loop: detect anomalies, generate recommendations, auto-apply safe
+  changes, escalate risky ones, start experiments
+
+### Learning Automation
+
+A closed-loop system that detects operational issues and auto-corrects them
+with confidence thresholds:
+
+- **Detection** -- after each execution, the engine scans for routing
+  mismatches, agent degradations, knowledge gaps, gate errors, roster
+  bloat, and pattern drift
+- **Issue ledger** -- structured SQLite-backed ledger with occurrence
+  tracking, severity classification, and status lifecycle
+  (`open` -> `proposed` -> `applied` -> `resolved`)
+- **Auto-correction** -- issues that recur above a confidence threshold
+  (e.g., 3 routing mismatches) are automatically proposed and can be
+  applied to `learned-overrides.json`, which the router and planner
+  consume at plan time
+- **Structured interview** -- `baton learn interview` walks through
+  open issues interactively, collecting human decisions for cases that
+  require judgment (pattern drift, prompt evolution)
+- **Rollback** -- any applied fix can be reset with `baton learn reset`,
+  reopening the issue and removing the override
 
 ### REST API and PMO UI
 
-A FastAPI server exposes the full engine over HTTP. A React/Vite PMO
-frontend provides Kanban boards, the Forge plan builder, one-click
-execution, and program health dashboards.
+A FastAPI server exposes the full engine over HTTP with 9 route modules:
+
+| Route | Purpose |
+|-------|---------|
+| `/api/v1/health` | Liveness and readiness probes |
+| `/api/v1/plans` | Plan creation and retrieval |
+| `/api/v1/executions` | Execution lifecycle (start, record, gate, complete) |
+| `/api/v1/agents` | Agent registry queries |
+| `/api/v1/observe` | Dashboard, traces, usage records |
+| `/api/v1/decisions` | Human-in-the-loop decision management |
+| `/api/v1/events` | SSE event streaming |
+| `/api/v1/webhooks` | Outbound webhook subscription CRUD |
+| `/api/v1/pmo` | Portfolio management (board, projects, forge, signals) |
+
+The API supports Bearer token authentication, CORS configuration, and
+outbound webhooks with HMAC-SHA256 signing and Slack Block Kit payloads.
+
+A React/Vite **PMO frontend** provides Kanban boards, the Forge plan
+builder, one-click execution launch, and program health dashboards.
+
+```bash
+baton serve --port 8741              # API only
+baton pmo serve --port 8741          # API + PMO UI
+```
 
 ### External Source Adapters
 
 Connect Azure DevOps, Jira, GitHub, or Linear as work-item sources.
-Items sync to `central.db` and link to baton plans.
+Items sync to `central.db` and link to baton plans. The Azure DevOps
+adapter is fully implemented; Jira, GitHub, and Linear adapters can be
+added by implementing the `ExternalSourceAdapter` protocol.
+
+```bash
+baton source add ado --name "My ADO" --org myorg --project myproj --pat-env ADO_PAT
+baton source list
+baton source sync --all
+baton source map EXTERNAL_ID --project PROJECT_ID --task TASK_ID
+```
 
 ---
 
@@ -241,6 +388,7 @@ contract between Claude and the engine.
     |  Pattern Learner --> Budget Tuner --> Prompt Evolution              |
     |  Federated Sync --> Central DB --> Cross-Project Queries            |
     |  PMO Store --> Smart Forge --> REST API --> PMO UI                  |
+    |  Bead Store --> Knowledge Resolver --> Learning Automation          |
     +--------------------------------------------------------------------+
 ```
 
@@ -291,10 +439,10 @@ baton execute run               # Full loop: plan -> dispatch -> gate -> complet
 
 ## CLI Reference
 
-The `baton` CLI provides 50+ commands organized into eight groups:
+The `baton` CLI provides 50+ commands organized into ten groups:
 
 <details>
-<summary><strong>Execution</strong> -- plan, execute, recover</summary>
+<summary><strong>Core Workflow</strong> -- plan, execute, recover</summary>
 
 | Command | Description |
 |---------|-------------|
@@ -314,14 +462,22 @@ The `baton` CLI provides 50+ commands organized into eight groups:
 | `baton execute list` | List all executions |
 | `baton execute switch` | Switch active execution |
 | `baton status` | Show team-context file status |
-| `baton daemon start/stop` | Background execution management |
-| `baton async` | Dispatch and track asynchronous tasks |
-| `baton decide` | Manage human decision requests |
 
 </details>
 
 <details>
-<summary><strong>Observability</strong> -- traces, dashboards, usage</summary>
+<summary><strong>Execution (Advanced)</strong> -- daemon, async, decisions</summary>
+
+| Command | Description |
+|---------|-------------|
+| `baton daemon start/stop/status/list` | Background execution management |
+| `baton async --dispatch/--pending/--show` | Dispatch and track asynchronous tasks |
+| `baton decide --list/--show/--resolve` | Manage human decision requests |
+
+</details>
+
+<details>
+<summary><strong>Observability</strong> -- traces, dashboards, usage, queries</summary>
 
 | Command | Description |
 |---------|-------------|
@@ -331,8 +487,8 @@ The `baton` CLI provides 50+ commands organized into eight groups:
 | `baton retro` | Task retrospectives |
 | `baton telemetry` | Agent telemetry events |
 | `baton context-profile` | Context efficiency profiles |
-| `baton context` | Situational awareness |
-| `baton query` | SQL queries against baton.db |
+| `baton context current/briefing/gaps` | Situational awareness for agents |
+| `baton query <subcommand>` | SQL queries against this project's baton.db |
 | `baton cleanup` | Archive old execution artifacts |
 | `baton migrate-storage` | Migrate JSON flat files to SQLite |
 
@@ -358,27 +514,35 @@ The `baton` CLI provides 50+ commands organized into eight groups:
 
 | Command | Description |
 |---------|-------------|
-| `baton scores` | Agent performance scorecards |
+| `baton scores [--agent/--trends/--teams]` | Agent performance scorecards |
 | `baton evolve` | Propose prompt improvements |
 | `baton patterns` | Learned orchestration patterns |
 | `baton budget` | Budget tier recommendations |
 | `baton changelog` | Agent changelog and backup management |
-| `baton anomalies` | Detect system anomalies |
-| `baton experiment` | Manage improvement experiments |
-| `baton improve` | Run the full improvement loop |
+| `baton anomalies [--watch]` | Detect system anomalies |
+| `baton experiment list/show/conclude/rollback` | Manage improvement experiments |
+| `baton improve --run/--force/--report` | Run the full improvement loop |
+| `baton learn status` | Dashboard of open learning issues |
+| `baton learn issues` | List issues with filters (`--type`, `--severity`, `--status`) |
+| `baton learn analyze` | Detect patterns across issues, propose fixes |
+| `baton learn apply` | Apply a specific fix or all auto-applicable fixes |
+| `baton learn interview` | Structured dialogue for human-directed decisions |
+| `baton learn history` | Resolution history with outcomes |
+| `baton learn reset` | Reopen an issue or rollback an applied fix |
 
 </details>
 
 <details>
-<summary><strong>Distribution</strong> -- packaging, sharing</summary>
+<summary><strong>Distribution</strong> -- packaging, sharing, install</summary>
 
 | Command | Description |
 |---------|-------------|
+| `baton install` | Install agents and references to a project |
+| `baton uninstall` | Remove agent-baton files (project or user scope) |
 | `baton package` | Create or install package archives |
 | `baton publish` | Publish to a local registry |
 | `baton pull` | Pull from a registry |
 | `baton verify-package` | Verify a package archive |
-| `baton install` | Install agents and references |
 | `baton transfer` | Transfer between projects |
 
 </details>
@@ -396,7 +560,7 @@ The `baton` CLI provides 50+ commands organized into eight groups:
 </details>
 
 <details>
-<summary><strong>Memory</strong></summary>
+<summary><strong>Memory (Beads)</strong></summary>
 
 | Command | Description |
 |---------|-------------|
@@ -404,20 +568,35 @@ The `baton` CLI provides 50+ commands organized into eight groups:
 | `baton beads show <id>` | Show a single bead in detail (JSON) |
 | `baton beads ready` | Show unblocked open beads |
 | `baton beads close <id>` | Close a bead with optional `--summary` |
-| `baton beads link <src> --relates-to\|--contradicts\|--extends <tgt>` | Link two beads |
+| `baton beads link <src> --relates-to\|--contradicts\|--extends\|--blocks\|--validates <tgt>` | Link two beads |
+| `baton beads cleanup` | Archive old closed beads (memory decay) |
+| `baton beads promote <id> --pack NAME` | Promote a bead to a knowledge document |
+| `baton beads graph <task-id>` | Show the dependency graph for a task's beads |
 
 </details>
 
 <details>
-<summary><strong>Cross-Project</strong> -- sync, PMO, API</summary>
+<summary><strong>Storage and Sync</strong></summary>
 
 | Command | Description |
 |---------|-------------|
 | `baton sync [--all]` | Sync to `~/.baton/central.db` |
-| `baton cquery` | Cross-project SQL queries |
+| `baton sync status` | Show sync watermarks |
+| `baton cquery` | Cross-project SQL queries against central.db |
 | `baton source add/list/sync/remove/map` | External source connections |
-| `baton pmo serve/status/add/health` | Portfolio management |
-| `baton serve` | Start the HTTP API server |
+
+</details>
+
+<details>
+<summary><strong>Portfolio and API</strong></summary>
+
+| Command | Description |
+|---------|-------------|
+| `baton pmo serve` | Start the PMO HTTP server with UI |
+| `baton pmo status` | Terminal Kanban board summary |
+| `baton pmo add` | Register a project with the PMO |
+| `baton pmo health` | Program health bar summary |
+| `baton serve` | Start the HTTP API server (API only) |
 
 </details>
 
@@ -428,29 +607,66 @@ The `baton` CLI provides 50+ commands organized into eight groups:
 ```
 agents/            <- 19 agent definitions (markdown + YAML frontmatter)
 references/        <- 15 reference procedures (shared knowledge)
-templates/         <- CLAUDE.md + settings.json for target projects
+templates/         <- CLAUDE.md + settings.json + skills for target projects
 scripts/           <- Install scripts (Linux + Windows)
-docs/              <- Architecture docs, ADRs, invariants
+docs/              <- Architecture docs, ADRs, invariants, troubleshooting
 agent_baton/       <- Python package
-  models/          <- Data models (18 modules)
-  core/            <- Business logic (10 sub-packages)
-    engine/        <- Planner, executor, dispatcher, gates, persistence
-    orchestration/ <- Agent registry, router, context manager
+  models/          <- Data models (24 modules)
+  core/            <- Business logic (11 sub-packages)
+    engine/        <- Planner, executor, dispatcher, gates, persistence,
+    |                 knowledge resolver, bead store, bead signals
+    orchestration/ <- Agent registry, router, context manager,
+    |                 knowledge registry
     pmo/           <- PMO store, scanner, Smart Forge
     storage/       <- Central DB, federated sync, external adapters
     govern/        <- Classification, compliance, policy
     observe/       <- Tracing, usage, dashboard, telemetry
-    improve/       <- Scoring, evolution, experiments
-    learn/         <- Pattern learner, budget tuner, learning engine,
-    |                ledger, overrides, resolvers, interviewer
-    distribute/    <- Packaging, sharing, registry
+    improve/       <- Scoring, evolution, experiments, proposals, rollback
+    learn/         <- Pattern learner, budget tuner, learning automation
+    distribute/    <- Packaging, sharing, registry (+ experimental)
     events/        <- Event bus, domain events, projections
-    runtime/       <- Async worker, supervisor, headless Claude
-  api/             <- FastAPI REST API server
+    runtime/       <- Async worker, supervisor, headless Claude, decisions
+  api/             <- FastAPI REST API (9 route modules, webhooks, middleware)
   cli/             <- CLI interface (50+ commands)
 tests/             <- Test suite (~5010 tests, pytest)
 pmo-ui/            <- React/Vite PMO frontend
 ```
+
+---
+
+## Configuration
+
+### Environment Variables
+
+| Variable | Purpose |
+|----------|---------|
+| `BATON_TASK_ID` | Target a specific execution in multi-task scenarios |
+| `BATON_API_TOKEN` | Bearer token for API authentication |
+| `ANTHROPIC_API_KEY` | Required for AI classification (`pip install agent-baton[classify]`) |
+
+### Plan Command Flags
+
+| Flag | Description |
+|------|-------------|
+| `--save` | Write `plan.json` and `plan.md` to `.claude/team-context/` |
+| `--explain` | Show reasoning behind plan decisions |
+| `--json` | Output plan as JSON instead of markdown |
+| `--task-type TYPE` | Override task type (new-feature, bug-fix, refactor, etc.) |
+| `--agents NAMES` | Override auto-selected agents (comma-separated) |
+| `--knowledge PATH` | Attach a knowledge document (repeatable) |
+| `--knowledge-pack NAME` | Attach a knowledge pack (repeatable) |
+| `--intervention LEVEL` | Escalation threshold: low, medium, high |
+| `--model MODEL` | Default model for dispatched agents (opus, sonnet) |
+| `--complexity LEVEL` | Override complexity: light, medium, heavy |
+
+### Files Installed to Target Projects
+
+| File | Purpose |
+|------|---------|
+| `.claude/agents/*.md` | Agent definitions (19 files) |
+| `.claude/references/*.md` | Reference procedures (15 files) |
+| `.claude/CLAUDE.md` | Project development guide (from template) |
+| `.claude/settings.json` | Hook configuration |
 
 ---
 
@@ -466,6 +682,14 @@ pytest                         # ~5010 tests
 
 Requires Python 3.10+. The only runtime dependency is PyYAML.
 
+### Optional Dependencies
+
+| Extra | Packages | Purpose |
+|-------|----------|---------|
+| `dev` | pytest, pytest-cov | Test suite |
+| `api` | FastAPI, uvicorn, httpx, sse-starlette, pydantic | REST API and PMO server |
+| `classify` | anthropic | AI-powered risk classification |
+
 ### Key Documentation
 
 | Document | Contents |
@@ -473,8 +697,9 @@ Requires Python 3.10+. The only runtime dependency is PyYAML.
 | [CLAUDE.md](CLAUDE.md) | Development guide and conventions |
 | [QUICKSTART.md](QUICKSTART.md) | Getting started for new users |
 | [docs/architecture.md](docs/architecture.md) | Package layout and dependency graph |
-| [docs/design-decisions.md](docs/design-decisions.md) | ADR log (13 decisions documented) |
+| [docs/design-decisions.md](docs/design-decisions.md) | ADR log |
 | [docs/invariants.md](docs/invariants.md) | Interface boundaries (CLI output contract) |
+| [docs/troubleshooting.md](docs/troubleshooting.md) | Common issues and solutions |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute |
 | [SECURITY.md](SECURITY.md) | Vulnerability reporting |
 
@@ -483,9 +708,10 @@ Requires Python 3.10+. The only runtime dependency is PyYAML.
 ## Project Status
 
 Agent Baton is in active development (v0.1.0). The orchestration engine,
-all 19 agents, 15 references, knowledge delivery, PMO subsystem, REST API,
-federated sync, event system, and the improvement pipeline are implemented
-and tested.
+all 19 agents, 15 references, knowledge delivery, bead memory system,
+PMO subsystem, REST API with webhooks, federated sync, event system,
+learning automation, and the improvement pipeline are implemented and
+tested.
 
 - **Python**: 3.10+
 - **Runtime dependency**: PyYAML only
@@ -506,6 +732,10 @@ and tested.
   `baton execute resume`.
 - **Run tasks in parallel.** Each `baton execute start` prints
   `export BATON_TASK_ID=...`. Run that in each terminal.
+- **Use `baton query` for local data, `baton cquery` for cross-project.**
+  They target different databases.
+- **Beads are automatic.** Agents emit bead signals during execution.
+  Use `baton beads ready` to surface unblocked work items.
 
 ---
 

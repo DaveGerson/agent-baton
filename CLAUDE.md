@@ -11,40 +11,52 @@ agent_baton/       ← Python package (orchestration engine)
   |                  learning.py, decision.py, events.py, session.py, parallel.py)
   core/            ← Business logic (11 sub-packages, no shim files)
     engine/        ← Execution core: planner, executor, dispatcher, gates,
-    │                persistence, protocols (ExecutionDriver),
+    │                persistence, protocols (ExecutionDriver), classifier,
     │                knowledge_resolver, knowledge_gap,
-    │                bead_store, bead_signal
+    │                bead_store, bead_signal, bead_decay, bead_selector
     orchestration/ ← Agent discovery: registry, router, context manager,
     │                knowledge_registry
     pmo/           ← PMO subsystem: store, scanner, forge
     storage/       ← Central DB: sync.py (SyncEngine), central.py (CentralStore),
+    │                connection, schema, migrate, queries, protocol,
+    │                sqlite_backend, file_backend, pmo_sqlite,
     │                adapters/ (ExternalSourceAdapter protocol, AdoAdapter)
-    govern/        ← Policy enforcement, compliance, validation
-    observe/       ← Tracing, usage, dashboard, retrospective, telemetry
-    improve/       ← Scoring, evolution, VCS
-    learn/         ← Pattern learner, budget tuner, learning engine,
-    │                ledger, overrides, resolvers, interviewer, recommender
+    govern/        ← Policy enforcement, compliance, escalation,
+    │                spec_validator, validator
+    observe/       ← Tracing, usage, dashboard, retrospective, telemetry,
+    │                context_profiler, archiver
+    improve/       ← Scoring, evolution, VCS, experiments, loop, proposals,
+    │                rollback, triggers
+    learn/         ← Pattern learner, budget tuner, bead_analyzer, engine,
+    │                interviewer, ledger, overrides, recommender, resolvers
     distribute/    ← Packaging, sharing, registry client
     │  experimental/ ← Incident, async dispatch, transfer (not production)
     events/        ← Event bus, domain events, persistence, projections
-    runtime/       ← Async worker, supervisor, launcher, headless Claude,
-                     decisions, ExecutionContext factory
-  cli/             ← CLI interface (50 commands via `baton`)
+    runtime/       ← Worker, supervisor, launcher, claude_launcher, headless,
+    │                daemon, scheduler, signals, decisions, context (factory)
+  cli/             ← CLI interface (49 commands via `baton`)
     commands/
       execution/   ← execute, plan, status, daemon, async, decide
       observe/     ← dashboard, trace, usage, telemetry, context_profile, retro,
-      |              context, cleanup, migrate_storage, query
-      govern/      ← classify, compliance, policy, escalations, validate, spec_check, detect
+      |              context, query, cleanup, migrate_storage
+      govern/      ← classify, compliance, policy, escalations, validate,
+      |              spec_check, detect
       improve/     ← scores, evolve, patterns, budget, changelog, learn,
       |              anomalies, experiment, improve
       distribute/  ← package, publish, pull, verify_package, install, transfer
       agents/      ← agents, route, events, incident
       pmo_cmd      ← pmo serve, pmo status, pmo add, pmo health
       sync_cmd     ← baton sync, baton sync --all, baton sync status
-      query_cmd    ← baton query (cross-project SQL against central.db)
+      query_cmd    ← baton cquery (cross-project SQL against central.db)
       source_cmd   ← baton source add/list/sync/remove/map (external adapters)
       bead_cmd     ← baton beads list/show/ready/close/link (structured memory)
-docs/              ← Architecture documentation (architecture.md, design-decisions.md, invariants.md)
+      serve        ← baton serve (API server)
+      uninstall    ← baton uninstall (remove from target project)
+docs/              ← Architecture documentation (13 .md files incl. architecture.md,
+|                    design-decisions.md, invariants.md, cli-reference.md,
+|                    api-reference.md, engine-and-runtime.md, storage-sync-and-pmo.md,
+|                    governance-knowledge-and-events.md, observe-learn-and-improve.md,
+|                    terminology.md, troubleshooting.md)
 agents/            ← Distributable agent definitions (19 .md files)
 references/        ← Distributable reference docs (15 .md files)
 templates/         ← CLAUDE.md + settings.json installed to target projects
@@ -53,7 +65,7 @@ tests/             ← Test suite (~5010 tests, pytest)
 pmo-ui/            ← React/Vite PMO frontend (served at /pmo/)
 .claude/           ← Project-specific orchestration setup:
   agents/          ← 19 packaged agents (mirrored from agents/) +
-  |                  5 meta agents for baton development +
+  |                  6 meta agents for baton development +
   |                  18 GSD framework agents
   references/      ← Symlink → ../references/ (canonical source)
   knowledge/       ← Knowledge packs (3 packs, 10 docs)
@@ -76,9 +88,9 @@ pmo-ui/            ← React/Vite PMO frontend (served at /pmo/)
 - All imports use canonical sub-package paths (e.g.,
   `from agent_baton.core.govern.classifier import DataClassifier`).
   There are no backward-compatibility shims.
-- `cli/commands/execute.py` contains `_print_action()` — the output format
-  Claude reads to drive orchestration. Treat it as a public API. See
-  `docs/invariants.md` for the full contract.
+- `cli/commands/execution/execute.py` contains `_print_action()` — the
+  output format Claude reads to drive orchestration. Treat it as a public
+  API. See `docs/invariants.md` for the full contract.
 - Before changing CLI command names, `_print_action()` output format, or
   execution state schema, read `docs/invariants.md` — these are the protocol
   contract between Claude and the engine.
@@ -103,7 +115,7 @@ pmo-ui/            ← React/Vite PMO frontend (served at /pmo/)
 | `visualization-expert` | Charts, dashboards |
 | `subject-matter-expert` | Domain-specific business operations |
 
-**Meta agents** (5 — project-specific, for developing agent-baton):
+**Meta agents** (6 — project-specific, for developing agent-baton):
 
 | Agent | Role |
 |-------|------|
@@ -112,6 +124,7 @@ pmo-ui/            ← React/Vite PMO frontend (served at /pmo/)
 | `prompt-engineer` | Agent prompt optimization |
 | `ai-product-strategist` | Product decisions, value/cost analysis |
 | `spec-document-reviewer` | Review and validate specification documents |
+| `documentation-architect` | Deep-dive codebase documentation |
 
 ## Development
 
@@ -252,6 +265,12 @@ commands, or data models, update the relevant documentation:
 - **`docs/invariants.md`** — Critical interface boundaries. Update when
   changing CLI command names, `_print_action()` output format, or
   `execution-state.json` schema.
+- **`docs/cli-reference.md`** — Full CLI command reference. Update when
+  adding, removing, or changing CLI commands or flags.
+- **`docs/engine-and-runtime.md`** — Engine internals and runtime
+  subsystem. Update when changing executor, planner, or runtime behavior.
+- **`docs/storage-sync-and-pmo.md`** — Storage layer, sync engine, and
+  PMO subsystem. Update when changing schema, sync, or PMO behavior.
 - **`README.md`** — User-facing overview. Update when adding agents,
   references, or CLI commands.
 - **This file (`CLAUDE.md`)** — Developer guide. Update when the repo

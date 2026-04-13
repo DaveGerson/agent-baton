@@ -1,9 +1,10 @@
 # Architecture Decision Records
 
-These records document the rationale behind the ten structural decisions made
-during the 2026-03-23 re-architecture of the `agent_baton` package. Future
-contributors can consult this document to understand why the code looks the
-way it does before proposing changes that would reverse these decisions.
+These records document the rationale behind significant structural and
+architectural decisions in the `agent_baton` package. ADRs 01-10 originate
+from the 2026-03-23 re-architecture. Later ADRs document decisions made as
+the system matured. Future contributors should consult this document before
+proposing changes that would reverse these decisions.
 
 ---
 
@@ -12,11 +13,11 @@ way it does before proposing changes that would reverse these decisions.
 **Decision**: Delete `ExecutionPlan`, `Phase`, `AgentAssignment`, `QAGate`,
 and `PlanBuilder`; make `MachinePlan` the sole plan type.
 
-**Context**: Two parallel plan hierarchies existed — `models/plan.py`
+**Context**: Two parallel plan hierarchies existed -- `models/plan.py`
 (`ExecutionPlan`) from Epic 1 and `models/execution.py` (`MachinePlan`) from
 Epic 2. The engine, runtime, and CLI all used `MachinePlan` exclusively.
 `ExecutionPlan` was constructed only by `PlanBuilder` and consumed only by
-`ContextManager.write_plan()`, which called `plan.to_markdown()` — a method
+`ContextManager.write_plan()`, which called `plan.to_markdown()` -- a method
 `MachinePlan` already implements. The dual hierarchy caused contributor
 confusion because the structurally similar names (`Phase` vs `PlanPhase`,
 `ExecutionPlan` vs `MachinePlan`) gave no signal about which was active.
@@ -39,8 +40,8 @@ imported from these paths. Internal core code migrated to canonical paths
 immediately. The shims imposed a cognitive cost: browsing `agent_baton/core/`
 showed 22 flat files before the actual sub-packages, every class had two valid
 import paths, and `core/__init__.py` re-exported 48 symbols with no documented
-rationale. The migration was entirely mechanical — find-and-replace of import
-strings — with Python's import errors providing an immediate safety net.
+rationale. The migration was entirely mechanical -- find-and-replace of import
+strings -- with Python's import errors providing an immediate safety net.
 
 **Status**: Implemented (2026-03-23)
 
@@ -111,11 +112,11 @@ canonical paths.
 
 **Context**: All 9 sub-packages sat at the same directory level with no
 indication of which formed the primary execution path. `agent_baton/__init__.py`
-exposed only `PlanBuilder` and `ContextManager` — not `ExecutionEngine` or
-`TaskWorker` — inverting the package's actual usage pattern. The package-level
+exposed only `PlanBuilder` and `ContextManager` -- not `ExecutionEngine` or
+`TaskWorker` -- inverting the package's actual usage pattern. The package-level
 exports now reflect what users actually need: `ExecutionEngine`, `TaskWorker`,
 `MachinePlan`, `AgentLauncher`, and the orchestration types. The dependency
-hierarchy (models → events/observe/govern → engine → runtime → CLI) is
+hierarchy (models -> events/observe/govern -> engine -> runtime -> CLI) is
 documented in `core/__init__.py`.
 
 **Status**: Implemented (2026-03-23)
@@ -151,7 +152,7 @@ of subdirectories.
 it difficult to locate related commands or understand which domain a new command
 should live in. The `cli/main.py` auto-discovery pattern
 (`pkgutil.iter_modules`) already registered commands by their internal
-`register()` call, not by filename — so moving files into subdirectories
+`register()` call, not by filename -- so moving files into subdirectories
 preserves all registered subcommand strings. The extended discovery scans both
 the flat `commands/` directory and any non-underscore subdirectory one level
 deep.
@@ -200,7 +201,7 @@ continue to work unchanged.
 
 ---
 
-## ADR-11: Knowledge Delivery via Layered Pipeline (Registry → Resolver → Dispatcher)
+## ADR-11: Knowledge Delivery via Layered Pipeline (Registry -> Resolver -> Dispatcher)
 
 **Decision**: Implement knowledge delivery as a three-component pipeline:
 `KnowledgeRegistry` (in `core/orchestration/`) for loading and indexing
@@ -213,7 +214,7 @@ and `core/learn/pattern_learner.py` subsystems.
 **Context**: Knowledge packs existed on disk but were never consumed by the
 execution engine. Agents received generic shared context with no targeted
 domain knowledge, wasting the value of specialist agents. Additionally,
-agents had no mechanism to recognize or signal knowledge gaps — they guessed
+agents had no mechanism to recognize or signal knowledge gaps -- they guessed
 rather than requesting help.
 
 **Alternatives considered**:
@@ -226,12 +227,12 @@ rather than requesting help.
 
 - **Event-driven delivery**: Agents request knowledge via events during
   execution rather than receiving it at dispatch time. Rejected because
-  it adds asynchronous complexity without benefit — the agent's knowledge
+  it adds asynchronous complexity without benefit -- the agent's knowledge
   needs are largely predictable from the task description, and the plan
   review gate lets users correct mistakes before execution starts.
 
 - **Global knowledge injection**: Attach all relevant packs to every step.
-  Rejected because it causes context rot — agents receive irrelevant
+  Rejected because it causes context rot -- agents receive irrelevant
   information that dilutes their focus and wastes context window budget.
 
 **Key trade-offs**:
@@ -244,7 +245,7 @@ rather than requesting help.
 
 - **Runtime self-interruption**: Agents self-interrupt via a `KNOWLEDGE_GAP`
   signal rather than the executor polling for gaps between steps. This fits
-  the stateless agent model — agents terminate cleanly, the executor handles
+  the stateless agent model -- agents terminate cleanly, the executor handles
   escalation, and re-dispatch is a standard plan amendment. The alternative
   (streaming gap detection mid-execution) would require stateful agent
   connections that the current architecture does not support.
@@ -291,7 +292,7 @@ became O(N) filesystem reads per PMO status request.
 **Alternatives considered**:
 
 - **Central-write-through** (all projects write directly to `central.db`):
-  Rejected because it creates a single point of failure — if `central.db` is
+  Rejected because it creates a single point of failure -- if `central.db` is
   corrupted or on a slow filesystem, every execution in every project blocks.
   It also causes SQLite write-lock contention when multiple Claude sessions run
   simultaneously across projects. The replica approach means projects always
@@ -316,7 +317,7 @@ became O(N) filesystem reads per PMO status request.
   naturally deduplicates on concurrent syncs.
 
 - **Event-sourcing sync** (replay the `events` table to build central
-  projections): Rejected because not all data is event-sourced — telemetry,
+  projections): Rejected because not all data is event-sourced -- telemetry,
   retrospectives, learned patterns, and budget recommendations are direct
   writes that have no corresponding events. Row-level sync covers all tables
   uniformly with the same algorithm.
@@ -330,7 +331,7 @@ became O(N) filesystem reads per PMO status request.
 
 - **Merging pmo.db into central.db**: The PMO tables (`projects`, `programs`,
   `signals`, `archived_cards`, `forge_sessions`, `pmo_metrics`) are already
-  global — they describe all projects, not any one. Keeping them in a
+  global -- they describe all projects, not any one. Keeping them in a
   separate file requires cross-file joins for every PMO query. Merging them
   eliminates the join and reduces the filesystem footprint to one central
   file. The cost is a one-time migration and a slightly richer schema.
@@ -345,14 +346,14 @@ became O(N) filesystem reads per PMO status request.
 - **ExternalSourceAdapter as a Protocol**: External integrations (ADO, Jira,
   GitHub, Linear) have heterogeneous APIs but a uniform normalized output
   (`ExternalItem`). The `typing.Protocol` approach means new adapters can be
-  added without modifying any central code — they self-register via
+  added without modifying any central code -- they self-register via
   `AdapterRegistry.register()` on import. This also allows third-party
   adapters without subclassing.
 
 - **PAT not stored in DB**: The ADO adapter reads the Personal Access Token
   from an environment variable whose name is stored in the `config` JSON
   column of `external_sources`. This means PAT rotation only requires
-  updating the environment variable — no database writes, no migration.
+  updating the environment variable -- no database writes, no migration.
 
 **Status**: Implemented (2026-03-24)
 
@@ -368,7 +369,7 @@ memory system (beads-ai/beads-cli) but not the Go binary, Dolt backend, or
 executor, following the same pattern as the existing knowledge gap protocol.
 
 **Context**: Beads (18.7k GitHub stars) introduced a compelling model for
-agent memory — hash-based IDs, typed dependency graphs, memory decay, and
+agent memory -- hash-based IDs, typed dependency graphs, memory decay, and
 a `bd ready` command for surfacing unblocked work items. Gastown (built on
 Beads for 20-160+ concurrent agents) demonstrated that shared context reduces
 token burn 60-80% and that design decisions become the execution bottleneck.
@@ -380,13 +381,13 @@ concurrent-write contention that Agent Baton doesn't have (serialized executor).
 
 - **Adopt Beads Go CLI as runtime dependency**: Rejected. Requires Go
   toolchain or prebuilt binaries, breaks the "pip install and go" developer
-  experience. Beads had 3 storage backend migrations in 4 months (flatfile →
-  sqlite → Dolt), indicating an unstable storage layer.
+  experience. Beads had 3 storage backend migrations in 4 months (flatfile ->
+  sqlite -> Dolt), indicating an unstable storage layer.
 
 - **Adopt Dolt as storage backend**: Rejected. Dolt adds a 200MB+ binary
   dependency, requires a running server process, and is designed for
   concurrent multi-writer scenarios. Agent Baton's serialized executor
-  has no concurrent-write problem — SQLite WAL mode is sufficient.
+  has no concurrent-write problem -- SQLite WAL mode is sufficient.
 
 - **Import Beads as a Python library (wrap the Go CLI)**: Rejected. FFI
   wrappers add brittleness, version coupling, and complicate debugging.
@@ -407,7 +408,7 @@ concurrent-write contention that Agent Baton doesn't have (serialized executor).
 
 - **Signal protocol vs. structured API**: Agents emit signals as free-text
   markers (like `KNOWLEDGE_GAP`), not via a structured API. This works
-  because agents write to stdout — there is no function-call interface.
+  because agents write to stdout -- there is no function-call interface.
   Regex parsing is fragile in theory but robust in practice (the knowledge
   gap protocol has been running reliably since v2).
 
@@ -422,4 +423,499 @@ concurrent-write contention that Agent Baton doesn't have (serialized executor).
   Beads ecosystem later without changing the core engine. If Beads
   stabilizes its storage layer, a `BeadsAdapter` could bridge the gap.
 
-**Status**: Implemented — Tier 1 (2026-04-13). Tiers 2-4 deferred per spec.
+- **Tiers 2-4 extensions**: Tiers 2-4 added `BeadSelector` (forward relay
+  into delegation prompts, ranked by dependency chain > same-phase >
+  cross-phase), `BeadAnalyzer` (warning frequency, file clustering,
+  decision reversal detection for plan enrichment), memory decay
+  (auto-archive old closed beads), knowledge gap auto-resolution from
+  high-confidence beads, bead-to-knowledge promotion (`baton beads promote`),
+  cross-project analytics views in `central.db`, conflict detection on
+  `contradicts`/`supersedes` links, and quality scoring with `BEAD_FEEDBACK`
+  signals (schema v6 adds `quality_score` and `retrieval_count` columns).
+
+**Status**: Implemented -- all four tiers (2026-04-13)
+
+---
+
+## ADR-14: Learning Automation System (Hybrid Ledger + Improvement Pipeline)
+
+**Decision**: Build a closed-loop learning system using a new
+`LearningLedger` (SQLite-backed issue tracker) that feeds into the
+existing improvement pipeline (proposals, experiments, rollback).
+
+**Context**: The system collected rich execution data (retrospectives,
+scores, patterns, recommendations) but had three gaps: no structured
+issue tracking, no systematized workflow, and no auto-application path.
+Routing mismatches, agent degradations, and knowledge gaps required
+manual discovery across scattered files.
+
+**Alternatives considered**:
+
+- **(A) Ledger-only**: New `LearningLedger` as single source of truth,
+  replacing the improvement pipeline. Rejected -- duplicates existing
+  safety mechanisms (experiments, rollback, circuit breaker).
+- **(B) Pipeline extension**: Extend `ImprovementLoop` -> `Recommender`
+  -> `ProposalManager` without a new storage layer. Rejected -- proposals
+  lack lifecycle tracking, evidence accumulation, and cross-issue
+  correlation.
+- **(C) Hybrid** (chosen): New `LearningLedger` for structured issue
+  tracking and evidence accumulation, feeding `Recommendation` objects
+  into the existing proposal/experiment/rollback machinery.
+
+**Key trade-offs**:
+
+- **Auto-application via overrides file**: Corrections are persisted to
+  `learned-overrides.json` rather than modifying Python source. This is
+  reversible (delete the file), portable (per-project), and doesn't
+  require code changes. Consumed by `AgentRouter.route()` and
+  `IntelligentPlanner` at call time.
+- **Graduated auto-apply thresholds**: Each issue type has its own
+  occurrence threshold (routing=3, degradation=5, gate=2). Interview-
+  only types (`pattern_drift`, `prompt_evolution`) never auto-apply.
+- **Federation**: `learning_issues` table mirrors to `central.db` via
+  `SyncEngine`, enabling cross-project pattern detection.
+- **Structured interviews**: `LearningInterviewer` presents issues as
+  multiple-choice dialogues, recording decisions back to the ledger.
+  This replaces ad-hoc retrospective reading with a directed workflow.
+
+**Status**: Implemented (2026-04-13)
+
+---
+
+## ADR-15: SQLite as Primary Store (Replacing JSON Flat Files)
+
+**Decision**: Make SQLite (`baton.db`) the primary persistence layer for all
+execution data, replacing the original JSON/JSONL flat-file storage. Implement
+a `StorageBackend` protocol with two implementations: `SqliteStorage` (default
+for all new projects) and `FileStorage` (retained for backward compatibility).
+Auto-detection at startup selects the backend based on filesystem state.
+
+**Context**: The original storage was a collection of JSON and JSONL files --
+`execution-state.json`, `usage.jsonl`, `retrospectives.jsonl`,
+`learned-patterns.json`, and others -- each managed by the component that owned
+it. This approach worked for single-session development but became problematic
+at scale: (1) concurrent reads during CLI queries and daemon execution caused
+partial-read corruption, (2) JSONL append-only files grew without bound and
+required full sequential scans for any query, (3) cross-entity queries (e.g.,
+"show all step results for task X with their gate outcomes") required loading
+and joining multiple files in Python, and (4) the flat-file approach consumed
+context window budget when Claude sessions tried to read execution state.
+
+**Alternatives considered**:
+
+- **Keep JSON files with file-level locking**: Rejected. File locking in
+  Python (`fcntl.flock`) is not portable to Windows, does not protect against
+  partial writes on crash, and still requires full-file reads for any query.
+
+- **Use a document database (TinyDB, MongoDB)**: Rejected. TinyDB uses JSON
+  files internally (same problems) and MongoDB adds a server process
+  dependency that contradicts the "pip install and go" philosophy.
+
+- **PostgreSQL / MySQL**: Rejected. Requires a running server, configuration,
+  connection strings. SQLite is zero-config, file-based, and embeds in the
+  Python process.
+
+**Key trade-offs**:
+
+- **Transactional writes**: `SqliteStorage` wraps every public write method
+  in an implicit transaction (`with conn:`). Multi-table upserts (e.g.,
+  saving a plan with its phases, steps, and team members) are atomic --
+  partial writes from crashes are eliminated.
+
+- **DELETE-then-INSERT for child collections**: Step results, gate results,
+  and retrospective outcomes use DELETE-then-INSERT rather than UPDATE to
+  avoid stale rows when list items are removed. This is a deliberate
+  trade-off: slightly more I/O per write, but simpler code with no stale
+  data.
+
+- **WAL mode for concurrent access**: All connections use WAL journal mode
+  so that CLI queries (`baton query`) do not block the execution engine.
+  `ConnectionManager` uses one connection per thread via `threading.local`
+  storage.
+
+- **Dual-write transition period**: During migration, the engine writes to
+  both SQLite and JSON files so that older CLI versions can still read state.
+  The dual-write is marked `TODO:T4` for removal once the flat-file code
+  paths are fully deprecated.
+
+- **Auto-detection**: `detect_backend()` in `core/storage/__init__.py` checks
+  for `baton.db` (SQLite), then `execution-state.json` (file), defaulting to
+  SQLite for new projects. This means zero configuration for users -- existing
+  projects keep working, new projects get SQLite automatically.
+
+**Status**: Implemented (2026-03-26). JSON flat-file dual-writes remain as
+transitional. Full deprecation pending (tracked as T4).
+
+---
+
+## ADR-16: Synchronous In-Process Event Bus (Not Message Queue)
+
+**Decision**: Implement the event system as a synchronous, in-process pub/sub
+bus (`EventBus` in `core/events/bus.py`) with `fnmatch`-style glob topic
+routing. Handlers execute inline during `publish()`. Persistence is handled
+by an `EventPersistence` subscriber that writes append-only JSONL. No threads,
+no queues, no external message broker.
+
+**Context**: The execution engine needed an event backbone for four purposes:
+(1) decoupling the engine from observability (traces, usage, dashboards),
+(2) enabling webhook delivery to external systems, (3) supporting SSE
+streaming to the PMO UI, and (4) providing crash-recovery replay via persisted
+event logs. A traditional message queue (Redis, RabbitMQ, Kafka) would satisfy
+all four, but Agent Baton runs in a single Python process per project with no
+server infrastructure requirement.
+
+**Alternatives considered**:
+
+- **Redis pub/sub or RabbitMQ**: Rejected. Adds an external server dependency,
+  configuration, and failure modes. Agent Baton's deployment model is "install
+  a pip package and run CLI commands" -- requiring a message broker would be a
+  non-starter for most users.
+
+- **asyncio.Queue-based bus**: Rejected for the core bus because the engine is
+  synchronous. An async bus would require `await publish()` in the engine's
+  hot path, threading async through the entire state machine. The SSE endpoint
+  bridges the sync bus to async via an `asyncio.Queue` adapter at the API
+  boundary -- this isolates the complexity to one adapter.
+
+- **Threading + queue**: Rejected. Concurrent handler execution introduces
+  non-determinism and makes debugging harder. The execution engine is
+  deterministic by design -- events should be too.
+
+**Key trade-offs**:
+
+- **Synchronous dispatch**: Handlers run inline during `publish()`. If a
+  handler raises, the exception propagates to the publisher. This keeps
+  execution deterministic and debuggable, but means a slow handler blocks
+  the engine. In practice, handlers are fast (write a JSONL line, enqueue
+  a webhook delivery, append to in-memory history).
+
+- **Monotonic sequencing**: Each task gets an auto-incrementing sequence
+  counter. Events arrive with `sequence == 0` and the bus assigns the next
+  number, providing a total order per task without external coordination.
+
+- **In-memory history + file persistence**: The bus retains all published
+  events in memory for replay queries. `EventPersistence` subscribes to
+  `*` and writes each event to a JSONL file. This gives both fast in-memory
+  access for projections and durable storage for post-hoc analysis.
+
+- **Projections as fold functions**: `project_task_view()` folds an event
+  stream into materialized `TaskView`/`PhaseView`/`StepView` dataclasses.
+  This is a pure function over the event log -- no state stored in a database,
+  no ORM, just a sequential scan of events. Simple to test, simple to debug.
+
+**Status**: Implemented (2026-03-23, with ADR-04 and ADR-10 refining ownership
+and wiring)
+
+---
+
+## ADR-17: FastAPI Service Layer as Optional API (Not Required Infrastructure)
+
+**Decision**: Add a FastAPI HTTP API (`agent_baton/api/`) as an optional
+`[api]` dependency group. The API wraps the same core classes the CLI uses
+(via `api/deps.py` singleton injection) and adds SSE event streaming, webhook
+delivery with HMAC signing, and REST endpoints for plans, executions, agents,
+decisions, and the PMO board. The CLI remains the primary interface and works
+without the API installed.
+
+**Context**: The PMO UI needed a backend, daemon mode needed a way to expose
+decision requests to external operators, and external tools (CI systems,
+Slack bots, monitoring dashboards) needed programmatic access to execution
+state. Building a separate microservice would duplicate all business logic.
+Embedding the API in the same package ensures it always uses the same engine
+version and data models.
+
+**Alternatives considered**:
+
+- **MCP server only** (Model Context Protocol): Rejected as the sole
+  interface because MCP is designed for LLM tool use, not for human-facing
+  UIs or webhook delivery. The PMO React app needs standard REST + SSE.
+
+- **Separate FastAPI microservice**: Rejected because it would duplicate
+  models, engine logic, and storage access code. It would also require a
+  deployment story (Docker, port configuration, process management) that
+  contradicts the "pip install and go" philosophy.
+
+- **Flask or Django**: Rejected. FastAPI provides native async support
+  (needed for SSE streaming), automatic OpenAPI docs, Pydantic request/
+  response validation, and dependency injection -- all of which reduce
+  boilerplate compared to Flask.
+
+**Key trade-offs**:
+
+- **Optional dependency group**: `pip install agent-baton[api]` installs
+  FastAPI, Uvicorn, and SSE-starlette. The base package has no web framework
+  dependency. Route modules are imported lazily inside `create_app()` so that
+  a missing optional dependency raises `ImportError` only if the route is
+  actually used.
+
+- **Singleton DI via module-level variables**: `api/deps.py` stores
+  singletons as `_private` module-level variables initialized by
+  `init_dependencies()`. This avoids a DI container while keeping FastAPI's
+  `Depends()` declarations readable in route files.
+
+- **Single shared EventBus**: All API components share one `EventBus`
+  instance. SSE streaming and webhook delivery observe all engine events
+  regardless of which component emitted them. The SSE adapter bridges the
+  synchronous bus to async consumers via an `asyncio.Queue`.
+
+- **`baton serve` + `baton daemon start --serve`**: The API can run
+  standalone (`baton serve`) or combined with daemon execution
+  (`baton daemon start --serve`). Combined mode starts both the worker
+  loop and the API server in the same process, sharing the event bus.
+
+**Status**: Implemented (2026-03-23)
+
+---
+
+## ADR-18: PMO as Kanban Board with Forge Plan Generation
+
+**Decision**: Build the Portfolio Management Office (PMO) as a three-component
+subsystem: `PmoScanner` (reads execution state across projects and produces
+Kanban cards), `PmoStore`/`PmoSqliteStore` (persists projects, programs,
+signals, and archived cards), and `ForgeSession` (consultative plan creation
+via headless Claude). The PMO UI is a React/Vite SPA served at `/pmo/` by the
+FastAPI server.
+
+**Context**: Managing multiple concurrent agent executions across projects
+required a unified view of what was queued, in progress, awaiting human input,
+and completed. Without this, the operator had to run `baton status` in each
+project directory individually. The PMO also needed to bridge the gap between
+"I have a signal (bug report, feature request, incident)" and "I have an
+execution plan" -- this is the Forge.
+
+**Alternatives considered**:
+
+- **CLI-only portfolio view** (`baton pmo status` as a table): Implemented
+  as a baseline, but insufficient for at-a-glance triage of 10+ concurrent
+  plans. A Kanban board provides spatial organization (columns = workflow
+  state) that a text table cannot.
+
+- **External tool integration only** (pipe to Jira/ADO, view there):
+  Rejected as the primary view because it adds a hard dependency on an
+  external system and introduces sync lag. External sources are supported
+  via the `ExternalSourceAdapter` protocol (ADR-12) as supplementary data,
+  not as the primary management surface.
+
+- **Server-rendered HTML**: Rejected in favor of a React SPA because the
+  Forge's interactive plan editing, drag-and-drop priority management, and
+  real-time SSE updates require rich client-side state management.
+
+**Key trade-offs**:
+
+- **PmoScanner auto-detects storage backend**: For each registered project,
+  the scanner calls `detect_backend()` and reads execution state from either
+  SQLite or legacy JSON files. This means the PMO works across projects at
+  different migration stages without configuration.
+
+- **ForgeSession uses headless Claude**: Plan generation calls `claude
+  --print` via `HeadlessClaude` to produce LLM-quality plans. When the
+  Claude CLI is unavailable, it falls back to the rule-based
+  `IntelligentPlanner`. This gives the best available quality without
+  requiring an API key -- it uses the same authentication as the user's
+  Claude Code session.
+
+- **Interview-driven refinement**: After generating an initial plan, the
+  Forge produces 3-5 structured questions about ambiguities (missing tests,
+  no gates, high risk, multi-agent coordination). The user's answers are
+  fed back to regenerate an improved plan. This catches planning errors
+  before execution starts rather than during.
+
+- **Signal triage flow**: PMO signals (production incidents, bug reports,
+  feature requests) can be triaged directly into execution plans via
+  `ForgeSession.triage_signal()`. This connects the "something happened"
+  observation to the "here is what we will do about it" plan in a single
+  workflow.
+
+**Status**: Implemented (2026-03-26, with ongoing UX improvements)
+
+---
+
+## ADR-19: Headless Claude Execution via `claude --print` Subprocess
+
+**Decision**: Implement autonomous execution via `HeadlessClaude`, a
+subprocess wrapper around `claude --print` that enables plan generation and
+agent dispatch without an active Claude Code interactive session. Used by
+`ForgeSession` for LLM plan generation, `baton execute run` for autonomous
+execution loops, and the PMO execute endpoint for UI-driven launches.
+
+**Context**: Two capabilities required Claude interaction without a human
+session: (1) the Forge needed LLM-quality plan generation from the PMO UI,
+and (2) full autonomous execution needed to run a plan end-to-end without
+an orchestrator agent driving the loop interactively. Both cases required
+programmatic access to Claude in a non-interactive mode.
+
+**Alternatives considered**:
+
+- **Anthropic API SDK directly**: Rejected because it requires an API key
+  separate from the user's Claude Code subscription, introduces billing
+  complexity, and loses the environment context (CLAUDE.md, project files,
+  agent definitions) that `claude --print` inherits from the project
+  directory.
+
+- **MCP tool call**: Rejected because MCP is designed for Claude calling
+  tools, not for tools calling Claude. The control flow is inverted.
+
+- **Persistent Claude Code session via stdin/stdout**: Rejected because
+  Claude Code's interactive mode is designed for human conversation, not
+  programmatic use. Its output format is not stable for machine parsing.
+  `--print` mode with `--output-format json` provides a stable JSON
+  response contract.
+
+**Key trade-offs**:
+
+- **Subprocess isolation**: Each headless invocation is a fresh subprocess
+  with a sanitized environment (only allowlisted env vars pass through:
+  `ANTHROPIC_API_KEY`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`,
+  `AWS_PROFILE`, `AWS_REGION`). API keys are scrubbed from error logs via
+  regex. This provides security isolation but adds per-invocation overhead
+  (~2-5s startup).
+
+- **Retry with exponential backoff**: `max_retries=2` with
+  `base_retry_delay=5.0s`. Rate-limited or transient failures are handled
+  automatically. The caller receives a `HeadlessResult` with
+  `success=False` after exhausting retries rather than an exception.
+
+- **Large prompt handling**: Prompts exceeding 128KB are sent via stdin
+  rather than the `-p` flag to avoid shell argument-length limits.
+
+- **`baton execute run` full loop**: Combines `HeadlessClaude` with the
+  execution engine to drive the complete start -> dispatch -> gate ->
+  complete cycle. Each agent dispatch spawns a fresh `claude --print`
+  subprocess with the delegation prompt. No Claude Code session required.
+
+**Status**: Implemented (2026-03-26)
+
+---
+
+## ADR-20: Haiku Classifier for Adaptive Plan Sizing
+
+**Decision**: Introduce a `TaskClassifier` protocol with two implementations:
+`HaikuClassifier` (calls Claude Haiku via `claude --print` for intelligent
+classification) and `KeywordClassifier` (deterministic fallback using keyword
+heuristics and registry-aware agent scoring). The planner uses
+`FallbackClassifier` which tries Haiku first and degrades to keywords.
+Classification output (`TaskClassification`) determines task type, complexity
+tier, agent roster, and phase sequence.
+
+**Context**: The planner originally used hardcoded heuristics to determine
+plan structure -- every task got a similar number of phases and agents regardless
+of actual complexity. Simple bug fixes received the same multi-phase plan as
+complex cross-cutting refactors, wasting tokens and human review time. A "fix
+a typo" task should not generate a 5-phase plan with 4 agents.
+
+**Alternatives considered**:
+
+- **Always use LLM classification**: Rejected because it adds latency and
+  cost to every `baton plan` invocation. The keyword classifier handles
+  the common case (obvious task types like "fix bug X" or "add feature Y")
+  without any API call. LLM classification activates only for ambiguous
+  or complex descriptions.
+
+- **User-specified complexity**: Rejected as the primary mechanism because
+  users consistently underestimate complexity. Auto-classification with
+  user override (via `--complexity light|medium|heavy`) is the chosen
+  pattern.
+
+- **Single classifier, no protocol**: Rejected because it prevents testing
+  the planner independently of the LLM. The protocol allows injecting a
+  deterministic classifier in tests.
+
+**Key trade-offs**:
+
+- **Three complexity tiers**: `light` (1 agent, 1-2 phases), `medium`
+  (up to 3 agents, 2-4 phases), `heavy` (up to 5 agents, 4+ phases).
+  Agent roster caps (`_MAX_AGENTS_BY_COMPLEXITY`) prevent bloated plans
+  regardless of how many agents the classifier suggests.
+
+- **Registry-aware scoring**: The `KeywordClassifier` scores agents from
+  the `AgentRegistry` by keyword overlap with the task summary, category
+  affinity, and preferred-primary-implementer rules. This means
+  classification adapts to the available agents -- a project with custom
+  agents gets appropriate routing.
+
+- **Word-boundary matching**: Keyword scoring uses `\b` regex boundaries
+  rather than substring matching. This prevents false positives like "fix"
+  matching inside "prefix" or "test" inside "latest". Multi-word keywords
+  use substring matching since they are specific enough.
+
+- **Haiku model choice**: Claude Haiku was chosen for classification because
+  it is fast (~1-2s), cheap, and sufficient for structured classification
+  tasks. Using Sonnet or Opus for classification would add unnecessary
+  latency and cost. The `--model` flag on `HaikuClassifier` allows
+  overriding if needed.
+
+**Status**: Implemented (2026-03-26)
+
+---
+
+## ADR-21: Daemon Mode with Team Collaboration and Async Decisions
+
+**Decision**: Implement daemon-mode execution via `WorkerSupervisor` (PID
+file management, structured logging, signal handling) wrapping `TaskWorker`
+(async execution loop). Add team collaboration infrastructure: `SynthesisSpec`
+on `PlanStep` for team output coordination, conflict detection via file-overlap
+heuristics, `DecisionManager` for file-based async human decisions, and
+`ContributionRequest` for multi-party input collection. MCP server pass-through
+is selective per step.
+
+**Context**: Interactive orchestration via the Claude Code session works well
+for attended development, but two scenarios required unattended execution:
+(1) long-running plans (30+ minutes) where the developer wants to step away,
+and (2) multi-developer workflows where different team members handle different
+steps asynchronously. The daemon needs to run the full execution loop, handle
+gates and approvals without a human present, and allow out-of-band interaction
+when human input is required.
+
+**Alternatives considered**:
+
+- **Background shell process** (`nohup baton execute run &`): Rejected
+  because it provides no PID management, no structured logging, no graceful
+  shutdown, and no status querying. The developer has no way to check
+  progress or intervene without parsing raw stdout.
+
+- **Systemd service**: Rejected because it requires root access for
+  installation, is Linux-only, and is too heavy for per-project
+  per-execution lifecycle management. The supervisor handles the same
+  concerns in user-space.
+
+- **Central daemon managing all projects**: Rejected because it creates a
+  single point of failure across projects. Per-project supervisors are
+  independent -- one project's daemon crash does not affect others.
+
+**Key trade-offs**:
+
+- **PID file with flock**: `WorkerSupervisor` uses `flock()` on the PID file
+  to prevent duplicate daemons. The OS releases the lock automatically when
+  the process exits, eliminating the stale-PID-file race condition common
+  with naive PID file approaches. On Windows, `msvcrt.locking` provides
+  equivalent behavior.
+
+- **File-based decision protocol**: `DecisionManager` writes decision
+  requests as JSON files + companion `.md` summaries. Operators resolve
+  decisions from a separate CLI session (`baton decide --resolve`). This
+  avoids requiring a running server or shared database for human
+  interaction -- files are the universal interface.
+
+- **Team synthesis strategies**: `PlanStep.synthesis_spec` supports three
+  strategies: `concatenate` (append outputs), `merge_files` (git-merge
+  file changes), and `agent_synthesis` (dispatch a synthesis agent to
+  combine outputs). The strategy is selected at plan time based on step
+  type and team size.
+
+- **Conflict escalation**: When team members modify overlapping files,
+  `_detect_team_conflict()` produces a `ConflictRecord`. The default
+  resolution is escalation to an APPROVAL gate; `auto_merge` is available
+  for low-risk conflicts. Conflicts flow through to retrospectives for
+  learning.
+
+- **Selective MCP pass-through**: `PlanStep.mcp_servers` allows specific
+  MCP servers to be forwarded to specific agents. This prevents agents
+  from accessing tools they do not need while enabling those that do
+  (e.g., a data-engineer step with database MCP access).
+
+- **Namespaced execution directories**: When `task_id` is provided, all
+  daemon files (`worker.pid`, `worker.log`, `worker-status.json`) are
+  stored under `executions/<task_id>/`, enabling concurrent daemon
+  executions within the same project.
+
+**Status**: Implemented (2026-03-29, Phases 1-5)

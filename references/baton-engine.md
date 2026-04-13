@@ -679,6 +679,970 @@ the user should also remove the corresponding entry from
 
 ---
 
+### `baton context`
+
+Situational awareness for agents: current task state, performance briefings,
+and knowledge gap analysis.
+
+#### `baton context current`
+
+Show what task, phase, step, and agent are currently active.
+
+```
+baton context current [--db PATH] [--central] [--json]
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--db PATH` | No | Explicit path to baton.db |
+| `--central` | No | Query the central database at `~/.baton/central.db` |
+| `--json` | No | Machine-readable JSON output |
+
+**When to use:** Quick check of the active execution state without the
+full output of `baton execute status`.
+
+#### `baton context briefing`
+
+Print a performance briefing for an agent about to be dispatched.
+
+```
+baton context briefing AGENT [--db PATH] [--central] [--json]
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `AGENT` | Yes | Name of the agent to brief (e.g. `backend-engineer--python`) |
+| `--db PATH` | No | Explicit path to baton.db |
+| `--central` | No | Query the central database |
+| `--json` | No | Machine-readable JSON output |
+
+**When to use:** Before dispatching an agent, to review its recent success
+rate, common failure modes, and relevant patterns from past executions.
+
+#### `baton context gaps`
+
+Show knowledge gaps identified across recent retrospectives.
+
+```
+baton context gaps [--min-frequency N] [--agent NAME] [--db PATH] [--central] [--json]
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--min-frequency N` | No | Minimum occurrence count to include a gap (default: 1) |
+| `--agent NAME` | No | Filter gaps to a specific agent |
+| `--db PATH` | No | Explicit path to baton.db |
+| `--central` | No | Query the central database |
+| `--json` | No | Machine-readable JSON output |
+
+**When to use:** Identify recurring knowledge gaps that could be addressed
+by creating knowledge packs or improving agent definitions.
+
+---
+
+### `baton beads`
+
+Inspect and manage Bead memory -- structured agent discoveries, decisions,
+and warnings that persist across steps within and across tasks.
+
+#### `baton beads list`
+
+List beads with optional filters.
+
+```
+baton beads list [--type TYPE] [--status STATUS] [--task TASK_ID] [--tag TAG] [--limit N]
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--type TYPE` | No | Filter by type: `discovery`, `decision`, `warning`, `outcome`, `planning` |
+| `--status STATUS` | No | Filter by status: `open`, `closed`, `archived` |
+| `--task TASK_ID` | No | Filter by task ID |
+| `--tag TAG` | No | Filter by tag (AND semantics when repeated) |
+| `--limit N` | No | Maximum number of results (default: 20) |
+
+#### `baton beads show`
+
+Show a single bead as JSON.
+
+```
+baton beads show BEAD_ID
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `BEAD_ID` | Yes | Bead ID (e.g. `bd-a1b2`) |
+
+#### `baton beads ready`
+
+List open beads whose `blocked_by` dependencies are satisfied.
+
+```
+baton beads ready [--task TASK_ID]
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--task TASK_ID` | No | Task ID to scope the query (defaults to active task) |
+
+**When to use:** Before dispatching a step, check which beads are actionable.
+
+#### `baton beads close`
+
+Close a bead with a summary.
+
+```
+baton beads close BEAD_ID [--summary TEXT]
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `BEAD_ID` | Yes | Bead ID to close |
+| `--summary TEXT` | No | Compacted summary of the bead's outcome |
+
+#### `baton beads link`
+
+Add a typed link between two beads.
+
+```
+baton beads link SOURCE_ID \
+    (--relates-to TARGET_ID | --contradicts TARGET_ID | --extends TARGET_ID | --blocks TARGET_ID | --validates TARGET_ID)
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `SOURCE_ID` | Yes | Source bead ID |
+| `--relates-to TARGET_ID` | No | Add a `relates_to` link |
+| `--contradicts TARGET_ID` | No | Add a `contradicts` link |
+| `--extends TARGET_ID` | No | Add an `extends` link |
+| `--blocks TARGET_ID` | No | Add a `blocks` link |
+| `--validates TARGET_ID` | No | Add a `validates` link |
+
+Exactly one link type flag is required.
+
+#### `baton beads cleanup`
+
+Archive old closed beads (memory decay).
+
+```
+baton beads cleanup [--ttl HOURS] [--task TASK_ID] [--dry-run]
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--ttl HOURS` | No | Archive beads closed more than HOURS ago (default: 168 = 7 days) |
+| `--task TASK_ID` | No | Limit decay to beads from this task ID |
+| `--dry-run` | No | Show how many beads would be archived without modifying anything |
+
+#### `baton beads promote`
+
+Promote a bead to a persistent knowledge document.
+
+```
+baton beads promote BEAD_ID --pack PACK_NAME
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `BEAD_ID` | Yes | Bead ID to promote (e.g. `bd-a1b2`) |
+| `--pack PACK_NAME` | Yes | Knowledge pack to add the document to (e.g. `project-context`) |
+
+**When to use:** When a bead contains a high-value discovery or decision
+that should become permanent project knowledge, not subject to memory decay.
+
+#### `baton beads graph`
+
+Show the dependency graph for a task's beads.
+
+```
+baton beads graph TASK_ID
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `TASK_ID` | Yes | Task ID whose bead graph to display |
+
+**When to use:** Visualise the relationships between beads in a task to
+understand the decision and discovery chain.
+
+---
+
+### `baton query`
+
+Query this project's execution history and agent performance from the local
+`baton.db` database.
+
+```
+baton query [SUBCOMMAND] [ARG] \
+    [--sql SQL] [--format FORMAT] [--days N] [--limit N] \
+    [--status STATUS] [--min-frequency N] [--hours N] \
+    [--db PATH] [--central]
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `SUBCOMMAND` | No | Predefined query (see table below) |
+| `ARG` | No | Subcommand argument (e.g. agent name for `agent-history`, task ID for `task-detail`) |
+| `--sql SQL` | No | Run arbitrary read-only SQL (SELECT only) |
+| `--format FORMAT` | No | Output format: `table` (default), `json`, `csv` |
+| `--days N` | No | Days window for time-bounded queries (default: 30) |
+| `--limit N` | No | Maximum rows to return (default: 20) |
+| `--status STATUS` | No | Filter tasks by status (for the `tasks` subcommand) |
+| `--min-frequency N` | No | Minimum occurrence frequency for `knowledge-gaps` (default: 1) |
+| `--hours N` | No | Staleness threshold in hours for `stalled` (default: 24) |
+| `--db PATH` | No | Explicit path to baton.db |
+| `--central` | No | Query the central database at `~/.baton/central.db` |
+
+**Predefined queries:**
+
+| Subcommand | Description |
+|------------|-------------|
+| `agent-reliability` | Agent success rates and reliability metrics |
+| `agent-history AGENT` | Execution history for a specific agent |
+| `tasks` | List recent tasks with status |
+| `task-detail TASK_ID` | Detailed breakdown of a specific task |
+| `knowledge-gaps` | Knowledge gaps identified across executions |
+| `roster-recommendations` | Agent roster optimisation suggestions |
+| `gate-stats` | QA gate pass/fail statistics |
+| `cost-by-type` | Cost breakdown by task type |
+| `cost-by-agent` | Cost breakdown by agent |
+| `current` | Current execution state |
+| `patterns` | Learned orchestration patterns |
+| `plans` | Recent plans |
+| `phase-status` | Phase completion status across tasks |
+| `forge-sessions` | PMO forge (plan generation) sessions |
+| `stalled` | Executions stalled beyond threshold |
+| `portfolio` | Portfolio-level summary across projects |
+
+**Examples:**
+
+```bash
+# Show agent reliability over the last 30 days
+baton query agent-reliability
+
+# Show all tasks with status 'failed'
+baton query tasks --status failed
+
+# Run a custom SQL query
+baton query --sql "SELECT agent_name, COUNT(*) FROM step_results GROUP BY agent_name"
+
+# Export as CSV
+baton query tasks --format csv
+```
+
+---
+
+### `baton cquery`
+
+Cross-project SQL queries against the central database (`~/.baton/central.db`).
+For per-project queries, use `baton query` instead.
+
+```
+baton cquery [QUERY] [--format FORMAT] [--tables] [--table TABLE] [--db PATH]
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `QUERY` | No | SQL statement or shortcut name |
+| `--format FORMAT` | No | Output format: `table` (default), `json`, `csv` |
+| `--tables` | No | List all tables (and views) in central.db |
+| `--table TABLE` | No | Describe a specific table: show column names and types |
+| `--db PATH` | No | Override path to central.db (default: `~/.baton/central.db`) |
+
+**Shortcuts:**
+
+| Shortcut | Description |
+|----------|-------------|
+| `agents` | Agent performance across all projects |
+| `costs` | Cost summary across all projects |
+| `gaps` | Knowledge gaps across all projects |
+| `failures` | Failed executions across all projects |
+| `mapping` | External source mappings |
+
+**Examples:**
+
+```bash
+# List all tables in central.db
+baton cquery --tables
+
+# Use a shortcut
+baton cquery agents
+
+# Run a custom cross-project query
+baton cquery "SELECT project_id, COUNT(*) FROM executions GROUP BY project_id"
+```
+
+---
+
+### `baton sync`
+
+Sync project data to the central database (`~/.baton/central.db`).
+
+```
+baton sync [SUBCOMMAND] [--all] [--project ID] [--rebuild]
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `SUBCOMMAND` | No | Optional subcommand: `status` |
+| `--all` | No | Sync all registered projects |
+| `--project ID` | No | Sync a specific project by ID |
+| `--rebuild` | No | Full rebuild (delete all central rows then re-sync) |
+
+**`baton sync`** (no flags) syncs the current project.
+
+**`baton sync --all`** syncs all projects registered with the PMO.
+
+**`baton sync status`** shows the current sync state (last sync time,
+row counts).
+
+**`baton sync --rebuild`** performs a destructive rebuild: deletes all
+central rows for the target project(s) and re-imports from the project
+database.  Use this after schema changes or to fix sync corruption.
+
+---
+
+### `baton source`
+
+Manage external work-item source connections (Azure DevOps, GitHub Issues,
+Jira, Linear).
+
+#### `baton source add`
+
+Register an external source connection.
+
+```
+baton source add TYPE --name NAME [--org ORG] [--project PROJECT] [--pat-env ENV_VAR] [--url URL]
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `TYPE` | Yes | Source type: `ado`, `github`, `jira`, `linear` |
+| `--name NAME` | Yes | Display name for this source |
+| `--org ORG` | No | Organisation or account name (ADO/GitHub) |
+| `--project PROJECT` | No | Project name within the source (ADO/Jira) |
+| `--pat-env ENV_VAR` | No | Name of environment variable holding the PAT/token |
+| `--url URL` | No | Base URL for self-hosted instances (Jira Server, GitHub Enterprise) |
+
+#### `baton source list`
+
+List all registered external sources.
+
+```
+baton source list
+```
+
+#### `baton source sync`
+
+Pull work items from an external source.
+
+```
+baton source sync [SOURCE_ID] [--all]
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `SOURCE_ID` | No | Source ID to sync (see `baton source list`) |
+| `--all` | No | Sync all registered sources |
+
+#### `baton source remove`
+
+Remove a registered external source.
+
+```
+baton source remove SOURCE_ID
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `SOURCE_ID` | Yes | Source ID to remove |
+
+#### `baton source map`
+
+Map an external work item to a baton project/task.
+
+```
+baton source map SOURCE_ID EXTERNAL_ID PROJECT_ID TASK_ID [--type TYPE]
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `SOURCE_ID` | Yes | Source ID |
+| `EXTERNAL_ID` | Yes | External item ID (e.g. ADO work item number) |
+| `PROJECT_ID` | Yes | Baton project ID |
+| `TASK_ID` | Yes | Baton task/execution ID |
+| `--type TYPE` | No | Relationship type: `implements` (default), `blocks`, `related` |
+
+---
+
+### `baton pmo`
+
+Portfolio management overlay -- board, projects, and program health.
+
+#### `baton pmo serve`
+
+Start the PMO HTTP server.
+
+```
+baton pmo serve [--port PORT] [--host HOST]
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--port PORT` | No | Port to listen on (default: 8741) |
+| `--host HOST` | No | Host to bind to (default: `127.0.0.1`) |
+
+**Note:** Requires the API extras: `pip install agent-baton[api]`.
+
+#### `baton pmo status`
+
+Print a Kanban board summary of all registered projects.
+
+```
+baton pmo status
+```
+
+#### `baton pmo add`
+
+Register a project with the PMO.
+
+```
+baton pmo add --id ID --name NAME --path PATH --program PROGRAM [--color COLOR]
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--id ID` | Yes | Project slug identifier (e.g. `nds`) |
+| `--name NAME` | Yes | Human-readable project name |
+| `--path PATH` | Yes | Absolute filesystem path to the project root |
+| `--program PROGRAM` | Yes | Program this project belongs to (e.g. `NDS`, `ATL`) |
+| `--color COLOR` | No | Optional display colour for the project |
+
+#### `baton pmo health`
+
+Print program health bar summary.
+
+```
+baton pmo health
+```
+
+---
+
+### `baton serve`
+
+Start the HTTP API server.
+
+```
+baton serve [--port PORT] [--host HOST] [--token TOKEN] [--team-context DIR]
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--port PORT` | No | Port to listen on (default: 8741) |
+| `--host HOST` | No | Host to bind to (default: `127.0.0.1`) |
+| `--token TOKEN` | No | API token for authentication.  Also reads `BATON_API_TOKEN` env var (CLI flag takes precedence). |
+| `--team-context DIR` | No | Path to the team-context root directory (default: `.claude/team-context`) |
+
+**Note:** Requires the API extras: `pip install agent-baton[api]`.
+
+**When to use:** To expose the baton engine as an HTTP API for external
+integrations or the PMO UI frontend.  `baton pmo serve` is a convenience
+wrapper around this command.
+
+---
+
+### `baton cleanup`
+
+Remove old execution artifacts (traces, events, retrospectives).
+
+```
+baton cleanup [--retention-days N] [--dry-run] [--team-context PATH]
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--retention-days N` | No | Keep files newer than this many days (default: 90) |
+| `--dry-run` | No | Show what would be removed without deleting |
+| `--team-context PATH` | No | Path to team-context directory |
+
+**When to use:** Periodically to reclaim disk space from accumulated
+execution traces and retrospectives.  Always run with `--dry-run` first
+to review what will be removed.
+
+---
+
+### `baton migrate-storage`
+
+Migrate JSON/JSONL flat files to the SQLite database (`baton.db`).
+
+```
+baton migrate-storage [--dry-run] [--keep-files | --remove-files] [--team-context PATH] [--verify]
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--dry-run` | No | Show what would be migrated without writing to the database |
+| `--keep-files` | No | Keep original files after migration (default) |
+| `--remove-files` | No | Move original files to `pre-sqlite-backup/` after successful import |
+| `--team-context PATH` | No | Path to team-context directory (default: `.claude/team-context`) |
+| `--verify` | No | After migrating, compare source file counts against DB row counts |
+
+Safe to run multiple times -- all inserts use `INSERT OR IGNORE` so
+duplicate records are skipped.
+
+**When to use:** When upgrading from a pre-SQLite version of agent-baton.
+Run once to import historical data, then use `--verify` to confirm parity.
+
+---
+
+### `baton status`
+
+Show team-context file status -- a quick overview of what files exist in
+`.claude/team-context/`.
+
+```
+baton status
+```
+
+**When to use:** Quick check that the team-context directory is properly
+set up before starting execution.
+
+---
+
+### `baton dashboard`
+
+Generate a usage dashboard summarising agent performance, cost, and
+execution history.
+
+```
+baton dashboard [--write]
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--write` | No | Write dashboard to disk |
+
+---
+
+### `baton trace`
+
+List and inspect structured task execution traces.
+
+```
+baton trace [TASK_ID] [--last] [--summary TASK_ID] [--count N]
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `TASK_ID` | No | Show timeline for a specific task |
+| `--last` | No | Show timeline for the most recent task |
+| `--summary TASK_ID` | No | Show compact summary for a specific task |
+| `--count N` | No | Number of recent traces to list (default: 10) |
+
+---
+
+### `baton retro`
+
+Show retrospectives generated at execution completion.
+
+```
+baton retro [TASK_ID]
+```
+
+---
+
+### `baton usage`
+
+Show usage statistics (token counts, cost, durations).
+
+```
+baton usage
+```
+
+---
+
+### `baton telemetry`
+
+Show or clear agent telemetry events.
+
+```
+baton telemetry
+```
+
+---
+
+### `baton context-profile`
+
+List and inspect agent context efficiency profiles.
+
+```
+baton context-profile
+```
+
+---
+
+### `baton scores`
+
+Show agent performance scorecards.
+
+```
+baton scores [--agent NAME] [--write] [--trends] [--teams]
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--agent NAME` | No | Show scorecard for a specific agent |
+| `--write` | No | Write scorecard report to disk |
+| `--trends` | No | Show performance trends for all agents |
+| `--teams` | No | Show team composition effectiveness |
+
+---
+
+### `baton evolve`
+
+Propose prompt improvements for underperforming agents.
+
+```
+baton evolve [--agent NAME] [--save] [--write]
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--agent NAME` | No | Show proposal for a specific agent |
+| `--save` | No | Write proposals to `.claude/team-context/evolution-proposals/` |
+| `--write` | No | Write summary report to disk |
+
+---
+
+### `baton patterns`
+
+Show or refresh learned orchestration patterns.
+
+```
+baton patterns [--refresh] [--task-type TYPE] [--min-confidence N] [--recommendations]
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--refresh` | No | Re-analyse the usage log and update `learned-patterns.json` |
+| `--task-type TYPE` | No | Show patterns for a specific task type |
+| `--min-confidence N` | No | Filter patterns by minimum confidence (0.0-1.0) |
+| `--recommendations` | No | Show sequencing recommendations for each task type |
+
+---
+
+### `baton budget`
+
+Show or refresh budget tier recommendations based on usage history.
+
+```
+baton budget [--recommend] [--save] [--auto-apply]
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--recommend` | No | Re-analyse the usage log and display fresh recommendations |
+| `--save` | No | Save recommendations to `budget-recommendations.json` |
+| `--auto-apply` | No | Show only auto-applicable (downgrade) recommendations above 80% confidence |
+
+---
+
+### `baton anomalies`
+
+Detect and display system anomalies.
+
+```
+baton anomalies [--watch]
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--watch` | No | Show anomaly detection status and trigger readiness |
+
+---
+
+### `baton experiment`
+
+Manage improvement experiments.
+
+#### `baton experiment list`
+
+List all experiments.
+
+```
+baton experiment list
+```
+
+#### `baton experiment show`
+
+Show details of an experiment.
+
+```
+baton experiment show
+```
+
+#### `baton experiment conclude`
+
+Manually conclude an experiment.
+
+```
+baton experiment conclude
+```
+
+#### `baton experiment rollback`
+
+Roll back an experiment.
+
+```
+baton experiment rollback
+```
+
+---
+
+### `baton improve`
+
+Run the improvement loop or view reports.
+
+```
+baton improve [--run] [--force] [--report] [--experiments] [--history]
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--run` | No | Run a full improvement cycle |
+| `--force` | No | Force-run a cycle even if triggers have not fired |
+| `--report` | No | Show the latest improvement report |
+| `--experiments` | No | Show active experiments |
+| `--history` | No | Show all improvement reports |
+
+---
+
+### `baton daemon`
+
+Background execution management -- run the engine as a persistent daemon
+process.
+
+#### `baton daemon start`
+
+Start daemon execution.
+
+```
+baton daemon start
+```
+
+#### `baton daemon status`
+
+Show daemon status.
+
+```
+baton daemon status
+```
+
+#### `baton daemon stop`
+
+Stop the running daemon.
+
+```
+baton daemon stop
+```
+
+#### `baton daemon list`
+
+List all daemon workers.
+
+```
+baton daemon list
+```
+
+---
+
+### `baton async`
+
+Dispatch and track asynchronous tasks.
+
+```
+baton async [--pending] [--show ID] [--dispatch COMMAND] [--task-id ID] [--type TYPE]
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--pending` | No | List only pending tasks |
+| `--show ID` | No | Show a specific task's status |
+| `--dispatch COMMAND` | No | Dispatch a new task |
+| `--task-id ID` | No | Task ID for `--dispatch` (auto-generated if omitted) |
+| `--type TYPE` | No | Dispatch type: `shell`, `script`, or `manual` (default: `shell`) |
+
+---
+
+### `baton decide`
+
+Manage human decision requests.
+
+```
+baton decide [--list] [--all] [--show ID] [--resolve ID] [--option OPTION] [--rationale TEXT]
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--list` | No | List pending decision requests (default action) |
+| `--all` | No | List all decision requests regardless of status |
+| `--show ID` | No | Show full details of a single decision request |
+| `--resolve ID` | No | Resolve a pending decision request |
+| `--option OPTION` | No | Chosen option when using `--resolve` |
+| `--rationale TEXT` | No | Optional rationale for the decision |
+
+---
+
+### `baton install`
+
+Install agents and references to user or project scope.
+
+```
+baton install --scope {user,project} [--source SOURCE] [--force] [--upgrade] [--verify]
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--scope` | Yes | Install to `user` (`~/.claude/`) or `project` (`.claude/`) scope |
+| `--source SOURCE` | No | Path to the agent-baton repo root (default: current directory) |
+| `--force` | No | Overwrite ALL existing files without prompting |
+| `--upgrade` | No | Upgrade: overwrite agents + references but preserve settings, CLAUDE.md, knowledge packs, and team-context |
+| `--verify` | No | Run post-install verification: check agents load, references readable, dirs writable |
+
+---
+
+### `baton uninstall`
+
+Remove agent-baton files (agents, references, team-context).
+
+```
+baton uninstall --scope {project,user} [--yes] [--keep-data]
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--scope` | Yes | Scope to uninstall from: `project` (`.claude/`) or `user` (`~/.claude/`) |
+| `--yes`, `-y` | No | Skip confirmation prompt |
+| `--keep-data` | No | Keep execution data (`team-context/`) -- only remove agents and references |
+
+---
+
+### Other Governance Commands
+
+#### `baton compliance`
+
+Show compliance reports.
+
+```
+baton compliance
+```
+
+#### `baton policy`
+
+List or evaluate guardrail policy presets.
+
+```
+baton policy
+```
+
+#### `baton escalations`
+
+Show or resolve agent escalations.
+
+```
+baton escalations
+```
+
+#### `baton validate`
+
+Validate agent `.md` files.
+
+```
+baton validate
+```
+
+#### `baton spec-check`
+
+Validate agent output against a spec.
+
+```
+baton spec-check
+```
+
+---
+
+### Distribution Commands
+
+#### `baton package`
+
+Create or install agent-baton packages.
+
+```
+baton package
+```
+
+#### `baton publish`
+
+Publish a package archive to a local registry, or initialise a new registry.
+
+```
+baton publish
+```
+
+#### `baton pull`
+
+Install a package from a local registry directory.
+
+```
+baton pull
+```
+
+#### `baton transfer`
+
+Transfer agents/knowledge/references between projects.
+
+```
+baton transfer
+```
+
+#### `baton verify-package`
+
+Validate a `.tar.gz` agent-baton package before distribution.
+
+```
+baton verify-package
+```
+
+---
+
+### Other Commands
+
+#### `baton changelog`
+
+Show agent changelog or list backups.
+
+```
+baton changelog
+```
+
+#### `baton events`
+
+Query the event log for a task.
+
+```
+baton events
+```
+
+#### `baton incident`
+
+Manage incident response workflows.
+
+```
+baton incident
+```
+
+---
+
 ## Execution Loop
 
 The orchestrator drives the engine through a deterministic loop.  The
@@ -932,10 +1896,10 @@ approval decision has been recorded.
 
 ## Common Errors and Fixes
 
-### "status must be one of: complete, failed, dispatched"
+### "status must be one of: complete, failed"
 
 **Cause:** `baton execute record --status pass` (or `done`, `success`,
-`ok`, etc.).
+`ok`, `dispatched`, etc.).
 
 **Fix:** Use only `complete` or `failed` as `--status` values.
 

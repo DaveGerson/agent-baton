@@ -20,14 +20,18 @@ control API between Claude and the engine.
 | `baton plan "..." --save --explain` | Generate and persist an execution plan |
 | `baton execute start` | Begin execution of the current plan |
 | `baton execute next` | Get the next action to perform |
+| `baton execute dispatched --step ID --agent NAME` | Mark a step as dispatched (in-flight) |
 | `baton execute record --step-id ... --agent ... --status ...` | Record a completed step result |
 | `baton execute gate --phase-id ... --result pass/fail` | Record a gate result |
-| `baton execute complete` | Finalize execution |
 | `baton execute approve --phase-id ... --result ...` | Record a human approval decision |
 | `baton execute amend --description ... [--add-phase ...]` | Amend the running plan |
 | `baton execute team-record --step-id ... --member-id ...` | Record a team member completion |
+| `baton execute complete` | Finalize execution |
 | `baton execute status` | Check current execution state |
 | `baton execute resume` | Recover execution after a session crash |
+| `baton execute run` | Autonomous execution loop (headless, no Claude Code session) |
+| `baton execute list` | List all executions (active and completed) |
+| `baton execute switch TASK_ID` | Switch the active execution to a different task |
 
 **Rule**: Every command string in this table must continue to work identically
 after any internal refactoring. Subcommand names are registered inside each
@@ -38,29 +42,31 @@ renaming the registered subcommand does.
 ### Task-ID Resolution Order
 
 Every `baton execute` subcommand (except `list` and `switch`) resolves a
-target task ID through a three-level priority chain:
+target task ID through a five-level priority chain:
 
 ```
---task-id flag  →  BATON_TASK_ID env var  →  active-task-id.txt  →  None
+--task-id flag  →  BATON_TASK_ID env var  →  SQLite active_task  →  active-task-id.txt  →  None
 ```
 
 | Source | Scope | When to use |
 |--------|-------|-------------|
 | `--task-id FLAG` | Per-invocation | Inspect or drive a specific execution for a single command |
 | `BATON_TASK_ID` | Per shell session | Bind a terminal session to one execution when multiple are running concurrently |
-| `active-task-id.txt` | Per repository | Single-execution workflow fallback; updated by `baton execute switch` |
+| SQLite `active_task` | Per repository | Preferred persistent lookup from `baton.db`; set by `start` and `switch` |
+| `active-task-id.txt` | Per repository | File-based fallback; updated by `baton execute switch` |
 | `None` | Legacy | Reads the flat `execution-state.json` without a task-scoped directory |
 
 **Rules that must not change**:
 
-1. `--task-id` always beats the env var. The env var always beats the file
-   marker. This order matches the CLI convention where the most explicit
-   signal wins.
+1. `--task-id` always beats the env var. The env var always beats SQLite.
+   SQLite always beats the file marker. This order matches the CLI
+   convention where the most explicit signal wins.
 2. On `start`, the resolved `task_id` is immediately overwritten by
    `plan.task_id`. The env var check is harmless on `start`.
-3. The `BATON_TASK_ID` check is a two-line insertion in `handler()`
-   (`execute.py`) between the `--task-id` guard and the `get_active_task_id`
-   call. Reordering these checks breaks the priority contract.
+3. The resolution chain in `handler()` (`execute.py`) is:
+   `--task-id` guard, then `BATON_TASK_ID` env var, then SQLite
+   `get_active_task()`, then `StatePersistence.get_active_task_id()`.
+   Reordering these checks breaks the priority contract.
 
 ### Export Hint on `baton execute start`
 
@@ -84,24 +90,37 @@ accidentally dropped during auto-discovery changes.
 
 ## Invariant 2: CLI Output Format (_print_action Protocol)
 
-`_print_action()` in `cli/commands/execute.py` produces the structured text
-that Claude parses after every `baton execute next` call to determine what
-action to take.
+`_print_action()` in `cli/commands/execution/execute.py` produces the
+structured text that Claude parses after every `baton execute next` call to
+determine what action to take.
 
 ### Format Specification
 
+**DISPATCH** (spawn a subagent):
+
 ```
-ACTION: <TYPE>
+ACTION: DISPATCH
   Agent: <agent-name>
   Model: <model-id>
   Step:  <phase.step>
   Message: <one-line summary>
+
 --- Delegation Prompt ---
 <full delegation prompt text>
 --- End Prompt ---
 ```
 
-For APPROVAL actions (human-in-the-loop checkpoint):
+**GATE** (run a QA check):
+
+```
+ACTION: GATE
+  Type:    <gate-type>
+  Phase:   <phase-id>
+  Command: <shell command to run>
+  Message: <description>
+```
+
+**APPROVAL** (human-in-the-loop checkpoint):
 
 ```
 ACTION: APPROVAL
@@ -115,34 +134,54 @@ ACTION: APPROVAL
 Options: approve, reject, approve-with-feedback
 ```
 
-For terminal actions (COMPLETE, WAIT, GATE_FAILED):
+**COMPLETE** / **FAILED** (terminal actions):
 
 ```
 ACTION: COMPLETE
-  Summary: <completion summary>
+  <completion summary>
+```
+
+```
+ACTION: FAILED
+  <failure summary>
+```
+
+**Other** (fallback for WAIT and any future types):
+
+```
+ACTION: <type>
+  <message>
 ```
 
 ### Action Types
 
-| Value | Meaning |
-|-------|---------|
-| `ACTION: DISPATCH` | Claude should invoke the named agent with the delegation prompt |
-| `ACTION: APPROVAL` | Execution paused for human review; respond with `baton execute approve` |
-| `ACTION: COMPLETE` | All phases done; execution is finished |
-| `ACTION: WAIT` | All pending steps are dispatched; wait for results |
-| `ACTION: GATE_FAILED` | A phase gate failed; Claude should not proceed |
+| Printed value | Enum value (lowercase) | Meaning |
+|---------------|----------------------|---------|
+| `ACTION: DISPATCH` | `dispatch` | Claude should invoke the named agent with the delegation prompt |
+| `ACTION: GATE` | `gate` | Claude should run the QA gate command and record the result |
+| `ACTION: APPROVAL` | `approval` | Execution paused for human review; respond with `baton execute approve` |
+| `ACTION: COMPLETE` | `complete` | All phases done; execution is finished |
+| `ACTION: FAILED` | `failed` | Execution cannot continue due to failure |
+| `ACTION: wait` | `wait` | All pending steps are dispatched; wait for results (uses fallback format) |
 
 **Rules that must not change**:
 
-1. `ACTION:` must be uppercase. Claude pattern-matches on this prefix.
-2. Field labels (`Agent:`, `Model:`, `Step:`, `Message:`) must remain as
-   shown. A label change breaks Claude's parser silently — no error is thrown;
-   the wrong action is taken.
+1. `ACTION:` prefix must be present on the first line. Claude pattern-matches
+   on this prefix. The type keyword after `ACTION:` is printed as uppercase
+   for DISPATCH, GATE, APPROVAL, COMPLETE, and FAILED (hardcoded in
+   `_print_action()`). WAIT uses the lowercase enum value via the fallback
+   branch.
+2. Field labels (`Agent:`, `Model:`, `Step:`, `Message:` for DISPATCH;
+   `Type:`, `Phase:`, `Command:`, `Message:` for GATE; `Phase:`, `Message:`
+   for APPROVAL) must remain as shown. A label change breaks Claude's parser
+   silently — no error is thrown; the wrong action is taken.
 3. Section delimiters (`--- Delegation Prompt ---`, `--- End Prompt ---`) must
    remain verbatim.
-4. The `ActionType` enum `.value` strings (`DISPATCH`, `APPROVAL`, `COMPLETE`,
-   `WAIT`, `GATE_FAILED`) must match the uppercase labels above. If `ActionType`
-   values change, `_print_action()` must be updated simultaneously.
+4. The `ActionType` enum `.value` strings are **lowercase** (`dispatch`,
+   `gate`, `complete`, `failed`, `wait`, `approval`). The `_print_action()`
+   function compares against these values but prints **uppercase** labels.
+   If `ActionType` values change, `_print_action()` comparisons must be
+   updated simultaneously.
 5. Section delimiters for APPROVAL (`--- Approval Context ---`,
    `--- End Context ---`) must remain verbatim.
 
@@ -223,14 +262,21 @@ Claude Code session is interrupted mid-execution.
 |-------|------|-------------|
 | `task_id` | str | Unique identifier for the current task |
 | `plan` | dict | `MachinePlan.to_dict()` output |
-| `current_phase_id` | int | Index of the active phase |
-| `current_step_id` | str | ID of the active step |
-| `completed_step_ids` | list[str] | Steps already recorded as complete |
-| `dispatched_step_ids` | list[str] | Steps sent to agents not yet complete |
-| `gate_results` | dict | Phase gate outcomes keyed by phase ID |
-| `approval_results` | list[dict] | Phase approval outcomes |
-| `amendments` | list[dict] | Plan amendment audit trail |
-| `status` | str | One of: `running`, `complete`, `failed`, `gate_failed`, `approval_pending` |
+| `current_phase` | int | Index into `plan.phases` (the active phase) |
+| `current_step_index` | int | Index into the current phase's steps |
+| `status` | str | One of: `running`, `gate_pending`, `approval_pending`, `complete`, `failed` |
+| `step_results` | list[dict] | `StepResult.to_dict()` for each recorded step |
+| `gate_results` | list[dict] | `GateResult.to_dict()` for each gate check |
+| `approval_results` | list[dict] | `ApprovalResult.to_dict()` for each approval |
+| `amendments` | list[dict] | `PlanAmendment.to_dict()` audit trail |
+| `started_at` | str | ISO 8601 execution start time |
+| `completed_at` | str | ISO 8601 completion time (empty if still running) |
+| `pending_gaps` | list[dict] | Unresolved `KnowledgeGapSignal` objects |
+| `resolved_decisions` | list[dict] | Resolved gaps injected on re-dispatch |
+
+Note: `completed_step_ids`, `dispatched_step_ids`, `failed_step_ids`, and
+`interrupted_step_ids` are **computed properties** on `ExecutionState` derived
+from `step_results` — they are not serialized to disk.
 
 ### Companion files
 
