@@ -27,8 +27,6 @@ retrospective JSON sidecars to surface per-agent knowledge gaps --
 enabling the planner to attach relevant knowledge packs before dispatching
 agents that have historically lacked context.
 
-**Status: Experimental** -- built and tested but not yet validated with
-real usage data.
 """
 from __future__ import annotations
 

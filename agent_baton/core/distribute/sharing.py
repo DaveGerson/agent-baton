@@ -21,8 +21,6 @@ The ``PackageBuilder`` class provides the full build/extract/install cycle:
 Archive extraction uses ``_safe_extractall`` to prevent path-traversal
 attacks (CVE-2007-4559 class).
 
-**Status: Experimental** -- built and tested but not yet validated with real
-usage data.
 """
 from __future__ import annotations
 

@@ -18,8 +18,6 @@ Typical usage in the execution engine:
    the report and ``save()`` writes it to disk.
 4. The auditor agent reviews the report and sets ``auditor_verdict``.
 
-**Status: Experimental** -- built and tested but not yet validated with real
-usage data.
 """
 from __future__ import annotations
 

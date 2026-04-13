@@ -113,7 +113,6 @@ class TeamMember:
 
 
 @dataclass
-@dataclass
 class SynthesisSpec:
     """Configuration for how team member outputs are combined.
 

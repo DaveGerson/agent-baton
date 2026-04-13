@@ -25,8 +25,6 @@ Escalations are serialized as markdown blocks in a single file at
 Blocks are separated by horizontal rules (``---``). Resolved escalations
 remain in the file for audit purposes until ``clear_resolved()`` is called.
 
-**Status: Experimental** -- built and tested but not yet validated with real
-usage data.
 """
 from __future__ import annotations
 

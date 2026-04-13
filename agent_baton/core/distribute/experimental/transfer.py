@@ -17,8 +17,6 @@ The transfer workflow:
 
 Existing files in the target are never overwritten unless ``force=True``.
 
-**Status: Experimental** -- built and tested but not yet validated with
-real usage data.
 """
 from __future__ import annotations
 
