@@ -46,6 +46,7 @@ from agent_baton.core.pmo.scanner import PmoScanner
 from agent_baton.core.pmo.store import PmoStore
 from agent_baton.core.storage.pmo_sqlite import PmoSqliteStore
 from agent_baton.core.runtime.decisions import DecisionManager
+from agent_baton.core.storage.central import CentralStore
 
 # ---------------------------------------------------------------------------
 # Module-level singletons (None until init_dependencies() is called)
@@ -67,6 +68,7 @@ _pmo_scanner: PmoScanner | None = None
 _forge_session: ForgeSession | None = None
 _classifier: DataClassifier | None = None
 _policy_engine: PolicyEngine | None = None
+_central_store: CentralStore | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -104,6 +106,7 @@ def init_dependencies(
     global _forge_session
     global _classifier
     global _policy_engine
+    global _central_store
 
     _team_context_root = team_context_root
 
@@ -170,10 +173,16 @@ def init_dependencies(
     )
 
     # PMO singletons — backed by central.db (auto-migrates from pmo.db on first use).
-    from agent_baton.core.storage import get_pmo_central_store
+    from agent_baton.core.storage import get_pmo_central_store, get_central_storage
     _pmo_store = get_pmo_central_store()
     _pmo_scanner = PmoScanner(store=_pmo_store)
     _forge_session = ForgeSession(planner=_planner, store=_pmo_store)
+
+    # CentralStore — read-only query interface for cross-project analytics and
+    # external-source tables.  Initialised lazily here so the PMO external-items
+    # endpoints work without additional configuration.  central.db may not exist
+    # yet on a fresh install; CentralStore creates it on first access.
+    _central_store = get_central_storage()
 
 
 # ---------------------------------------------------------------------------
@@ -364,3 +373,19 @@ def get_policy_engine() -> PolicyEngine:
             "PolicyEngine not initialised. Call init_dependencies() before serving requests."
         )
     return _policy_engine
+
+
+def get_central_store() -> CentralStore:
+    """Return the shared :class:`~agent_baton.core.storage.central.CentralStore`.
+
+    Provides read access to cross-project analytics and external-source tables
+    (external_items, external_mappings, external_sources) in central.db.
+
+    Raises:
+        RuntimeError: If :func:`init_dependencies` has not been called.
+    """
+    if _central_store is None:
+        raise RuntimeError(
+            "CentralStore not initialised. Call init_dependencies() before serving requests."
+        )
+    return _central_store

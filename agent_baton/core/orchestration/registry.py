@@ -21,11 +21,14 @@ routing) and by the planner (for agent validation).
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from agent_baton.models.agent import AgentDefinition
 from agent_baton.models.enums import AgentCategory
 from agent_baton.utils.frontmatter import parse_frontmatter
+
+logger = logging.getLogger(__name__)
 
 
 class AgentRegistry:
@@ -168,6 +171,11 @@ class AgentRegistry:
         try:
             content = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
+            logger.warning(
+                "Failed to read agent definition file %s — agent will not be available",
+                path,
+                exc_info=True,
+            )
             return None
 
         metadata, body = parse_frontmatter(content)

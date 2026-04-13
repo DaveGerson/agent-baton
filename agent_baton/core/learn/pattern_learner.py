@@ -589,6 +589,74 @@ class PatternLearner:
                 return p.avg_token_cost
         return None
 
+    def merge_cross_project_signals(
+        self,
+        reliability_rows: list[dict],
+    ) -> list[LearnedPattern]:
+        """Merge cross-project agent reliability signals into ``learned-patterns.json``.
+
+        Reads the current on-disk patterns, removes any previously-written
+        ``source="central"`` entries (so stale central data does not accumulate),
+        appends new entries derived from *reliability_rows*, and writes the
+        merged list back to disk.
+
+        Each row in *reliability_rows* is expected to come from
+        :meth:`~agent_baton.core.storage.central.CentralStore.agent_reliability`
+        and must contain at least ``agent_name`` and ``success_rate``.
+        Only rows whose ``success_rate`` is 0.7 or above are promoted to patterns
+        (same threshold as the local learner's ``min_confidence``).
+
+        Args:
+            reliability_rows: List of dicts returned by
+                ``CentralStore.agent_reliability()``.
+
+        Returns:
+            The full merged list (local + central) that was written to disk.
+        """
+        now = _now_iso()
+
+        # Load existing local patterns, stripping any stale central entries.
+        existing = [p for p in self.load_patterns() if p.source != "central"]
+
+        central_patterns: list[LearnedPattern] = []
+        for row in reliability_rows:
+            agent_name: str = str(row.get("agent_name", ""))
+            success_rate: float = float(row.get("success_rate", 0.0))
+            total_steps: int = int(row.get("total_steps", 0))
+            avg_tokens: int = int(row.get("avg_tokens", 0))
+
+            if not agent_name or success_rate < 0.7:
+                continue
+
+            # Confidence mirrors the local formula but is capped by data volume.
+            confidence = round(min(1.0, (total_steps / self._CONFIDENCE_CALIBRATION) * success_rate), 4)
+
+            pattern_id = f"central-agent-{agent_name}"
+            central_patterns.append(
+                LearnedPattern(
+                    pattern_id=pattern_id,
+                    task_type="agent_reliability",
+                    stack=None,
+                    recommended_template=(
+                        f"Cross-project signal: {agent_name} has "
+                        f"{success_rate:.0%} success rate across {total_steps} steps"
+                    ),
+                    recommended_agents=[agent_name],
+                    confidence=confidence,
+                    sample_size=total_steps,
+                    success_rate=round(success_rate, 4),
+                    avg_token_cost=avg_tokens,
+                    evidence=[],
+                    created_at=now,
+                    updated_at=now,
+                    source="central",
+                )
+            )
+
+        merged = existing + central_patterns
+        self._write_patterns(merged)
+        return merged
+
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------

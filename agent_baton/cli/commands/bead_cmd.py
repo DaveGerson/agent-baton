@@ -469,7 +469,11 @@ def _handle_promote(args: argparse.Namespace) -> None:
     if bead.affected_files:
         doc_content += f"**Affected files:** {', '.join(bead.affected_files)}\n"
 
-    doc_path.write_text(doc_content, encoding="utf-8")
+    try:
+        doc_path.write_text(doc_content, encoding="utf-8")
+    except OSError as exc:
+        print(f"error: could not write knowledge document {doc_path}: {exc}", file=sys.stderr)
+        sys.exit(1)
 
     # Update pack.yaml index if it exists.
     pack_yaml = knowledge_dir / "pack.yaml"

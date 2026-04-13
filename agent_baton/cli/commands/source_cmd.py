@@ -416,8 +416,9 @@ def _sync(args: argparse.Namespace) -> None:
                     ),
                 )
                 persisted += 1
-            except Exception:
-                pass  # Don't abort the whole sync for one bad row
+            except Exception as e:
+                print(f"Warning: skipping item due to persistence error: {e}", file=sys.stderr)
+                continue  # Don't abort the whole sync for one bad row
 
         # Update last_synced timestamp
         try:
@@ -425,8 +426,8 @@ def _sync(args: argparse.Namespace) -> None:
                 "UPDATE external_sources SET last_synced = ? WHERE source_id = ?",
                 (now, source_id),
             )
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Warning: could not update last_synced for source '{source_id}': {e}", file=sys.stderr)
 
         print(f"  {source_id}: Synced {persisted} item(s).")
 

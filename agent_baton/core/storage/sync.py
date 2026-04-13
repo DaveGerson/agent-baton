@@ -224,7 +224,13 @@ class SyncEngine:
     # Public API
     # ------------------------------------------------------------------
 
-    def push(self, project_id: str, project_db_path: Path) -> SyncResult:
+    def push(
+        self,
+        project_id: str,
+        project_db_path: Path,
+        *,
+        trigger: str = "manual",
+    ) -> SyncResult:
         """Incrementally sync all syncable tables from *project_db_path*.
 
         Only rows whose rowid exceeds the stored watermark are copied.
@@ -232,6 +238,9 @@ class SyncEngine:
         Args:
             project_id: Stable identifier for the project (used as PK).
             project_db_path: Absolute path to the project's baton.db.
+            trigger: How the sync was initiated (``'manual'``, ``'auto'``,
+                or ``'rebuild'``).  Recorded in sync_history for
+                observability.
 
         Returns:
             SyncResult summarising the run.
@@ -282,6 +291,7 @@ class SyncEngine:
                 rows_synced=result.rows_synced,
                 tables_synced=result.tables_synced,
                 error="; ".join(result.errors),
+                trigger=trigger,
             )
         finally:
             src_conn.close()
@@ -323,7 +333,7 @@ class SyncEngine:
             "DELETE FROM sync_watermarks WHERE project_id = ?", (project_id,)
         )
         dst_conn.commit()
-        return self.push(project_id, project_db_path)
+        return self.push(project_id, project_db_path, trigger="rebuild")
 
     # ------------------------------------------------------------------
     # Core sync algorithm
@@ -609,4 +619,4 @@ def auto_sync_current_project() -> SyncResult | None:
         "auto_sync_current_project: syncing project %s from %s",
         best_project_id, db_path,
     )
-    return engine.push(best_project_id, db_path)
+    return engine.push(best_project_id, db_path, trigger="auto")

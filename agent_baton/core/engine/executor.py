@@ -16,9 +16,11 @@ Key design decisions:
 
 - The engine is synchronous and stateless between calls.  The async runtime
   layer (``TaskWorker``) wraps it for concurrent dispatch.
-- Event ownership is split: the engine publishes task-level and phase-level
-  events; step-level events are published by ``TaskWorker`` to avoid
-  duplication.
+- Event ownership: the engine publishes task-level, phase-level, and
+  step-level events.  ``TaskWorker`` also publishes step-level events via
+  its own path (headless/async execution); both paths call ``_publish``,
+  which is a no-op when no bus is configured, so there is no double-emit
+  risk — each path owns its own engine instance.
 - Knowledge gap detection (``KNOWLEDGE_GAP:`` signals in agent output) is
   handled inline during ``record_step_result()``, with escalation routed
   through the escalation matrix in ``knowledge_gap.py``.
@@ -97,6 +99,13 @@ def _elapsed_seconds(started_at: str) -> float:
 
 # ---------------------------------------------------------------------------
 # TaskViewSubscriber — materialized view maintained as events fire
+# ---------------------------------------------------------------------------
+# NOTE: As of 2026-04-13 the task-view.json file written by this subscriber
+# is not consumed by any production subsystem (CLI commands, API routes, or
+# the PMO UI all read from different sources).  The subscriber is kept because
+# it is exercised by tests (test_executor.py TestTaskViewSubscriber and
+# test_events.py TestTaskViewSubscriber) and the file may be useful for
+# external tooling or future dashboards.
 # ---------------------------------------------------------------------------
 
 _HIGH_RISK_LEVELS: frozenset[str] = frozenset({"HIGH", "CRITICAL"})
@@ -237,6 +246,7 @@ class ExecutionEngine:
         task_id: str | None = None,
         storage=None,  # SqliteStorage | FileStorage | None
         knowledge_resolver=None,  # KnowledgeResolver | None
+        policy_engine=None,  # PolicyEngine | None
     ) -> None:
         self._root = (team_context_root or self._DEFAULT_CONTEXT_ROOT).resolve()
         self._task_id = task_id
@@ -247,6 +257,19 @@ class ExecutionEngine:
         # tests) set this at construction time.  When None, gaps fall through to
         # best-effort / queue-for-gate.
         self._knowledge_resolver = knowledge_resolver
+
+        # PolicyEngine for pre-dispatch enforcement.  When set, block-severity
+        # violations inject an APPROVAL action instead of proceeding.
+        self._policy_engine = policy_engine
+
+        # Session-level set of step IDs that received human unblock for a
+        # policy violation.  Populated by record_policy_approval(); checked
+        # in _dispatch_action() to skip the policy gate on re-dispatch.
+        self._policy_approved_steps: set[str] = set()
+
+        # Compliance audit log — JSONL file written best-effort.  Path is
+        # resolved after _root is known; initialized to None until first write.
+        self._compliance_log_path: Path | None = None
 
         if storage is not None:
             # StorageBackend mode — primary I/O goes through the storage
@@ -308,6 +331,9 @@ class ExecutionEngine:
 
         # TaskViewSubscriber — wired lazily in start() once task_id is known.
         self._task_view_subscriber: TaskViewSubscriber | None = None
+
+        # Resolve compliance log path now that _root is known.
+        self._compliance_log_path = self._root / "compliance-audit.jsonl"
 
         # ── Bead memory store (schema v4, Inspired by beads-ai/beads-cli) ───
         # Initialised from the same db_path as _storage.  Silently None when
@@ -465,6 +491,243 @@ class ExecutionEngine:
                 return self._retro_engine.save(retro)
             return None
 
+    # ── Compliance audit helpers ─────────────────────────────────────────────
+
+    def _write_compliance_entry(self, entry: dict) -> None:
+        """Append a compliance audit entry as a JSONL line.
+
+        This is best-effort: any I/O failure is logged and silently swallowed
+        so that compliance write failures never block execution.
+
+        ``entry`` should include at minimum: ``timestamp``, ``event_type``,
+        ``task_id``, ``plan_id``, ``step_id``, and ``agent_name``.
+        """
+        if self._compliance_log_path is None:
+            return
+        try:
+            self._compliance_log_path.parent.mkdir(parents=True, exist_ok=True)
+            line = json.dumps(entry, ensure_ascii=False) + "\n"
+            with self._compliance_log_path.open("a", encoding="utf-8") as fh:
+                fh.write(line)
+        except Exception as exc:
+            _log.warning("Compliance audit write failed (non-fatal): %s", exc)
+
+    def _compliance_dispatch(
+        self,
+        state: "ExecutionState",
+        step_id: str,
+        agent_name: str,
+        policy_context: str = "",
+    ) -> None:
+        """Write a compliance entry for an agent dispatch event."""
+        self._write_compliance_entry({
+            "timestamp": _utcnow(),
+            "event_type": "agent_dispatch",
+            "task_id": state.task_id,
+            "plan_id": state.plan.task_id,
+            "step_id": step_id,
+            "agent_name": agent_name,
+            "risk_level": state.plan.risk_level,
+            "policy_context": policy_context,
+        })
+
+    def _compliance_policy_event(
+        self,
+        state: "ExecutionState",
+        step_id: str,
+        agent_name: str,
+        violations: list,
+        action_taken: str,
+    ) -> None:
+        """Write a compliance entry for a policy violation event."""
+        self._write_compliance_entry({
+            "timestamp": _utcnow(),
+            "event_type": "policy_violation",
+            "task_id": state.task_id,
+            "plan_id": state.plan.task_id,
+            "step_id": step_id,
+            "agent_name": agent_name,
+            "risk_level": state.plan.risk_level,
+            "violations": [
+                {
+                    "rule_name": v.rule.name,
+                    "severity": v.rule.severity,
+                    "rule_type": v.rule.rule_type,
+                    "details": v.details,
+                }
+                for v in violations
+            ],
+            "action_taken": action_taken,
+        })
+
+    def _compliance_gate(
+        self,
+        state: "ExecutionState",
+        phase_id: int,
+        gate_type: str,
+        passed: bool,
+        output: str = "",
+    ) -> None:
+        """Write a compliance entry for a gate evaluation result."""
+        self._write_compliance_entry({
+            "timestamp": _utcnow(),
+            "event_type": "gate_result",
+            "task_id": state.task_id,
+            "plan_id": state.plan.task_id,
+            "step_id": "",
+            "agent_name": "engine",
+            "risk_level": state.plan.risk_level,
+            "phase_id": phase_id,
+            "gate_type": gate_type,
+            "passed": passed,
+            "output_snippet": output[:500] if output else "",
+        })
+
+    # ── Policy enforcement helpers ───────────────────────────────────────────
+
+    def _check_policy_block(
+        self,
+        state: "ExecutionState",
+        step: "PlanStep",
+    ) -> "ExecutionAction | None":
+        """Check *step* against the active policy preset.
+
+        Returns an APPROVAL action if any ``severity='block'`` rule is
+        violated, or ``None`` when the step is clear to dispatch.
+
+        The check is lightweight: it uses the plan's ``risk_level`` to
+        derive the preset key (matching the planner's mapping) and evaluates
+        only ``path_block`` and ``tool_restrict`` rules against the step's
+        ``allowed_paths``.  ``require_agent`` / ``require_gate`` are
+        structural plan-level concerns already handled by the planner.
+
+        Compliance entries are written for all violations (block + warn) so
+        the audit trail is complete.
+        """
+        if self._policy_engine is None:
+            return None
+        if step.step_id in self._policy_approved_steps:
+            # Human already unblocked this step.
+            return None
+
+        try:
+            preset_name = _risk_level_to_preset(state.plan.risk_level)
+            policy_set = self._policy_engine.load_preset(preset_name)
+            if policy_set is None:
+                return None
+
+            violations = self._policy_engine.evaluate(
+                policy_set,
+                step.agent_name,
+                list(step.allowed_paths or []),
+                [],  # tools not tracked at dispatch time
+            )
+
+            # Filter to per-step rule types only; require_* are plan-level.
+            violations = [
+                v for v in violations
+                if v.rule.rule_type in ("path_block", "tool_restrict")
+            ]
+
+            if not violations:
+                return None
+
+            block_violations = [v for v in violations if v.rule.severity == "block"]
+            warn_violations = [v for v in violations if v.rule.severity != "block"]
+
+            # Always write compliance entries for every violation.
+            all_violations = block_violations + warn_violations
+            if all_violations:
+                action_taken = "block_approval" if block_violations else "warn"
+                self._compliance_policy_event(
+                    state, step.step_id, step.agent_name,
+                    all_violations, action_taken,
+                )
+
+            if not block_violations:
+                # Warn-only violations: log and continue.
+                for v in warn_violations:
+                    _log.warning(
+                        "Policy warn [%s] for step %s / agent %s: %s",
+                        v.rule.name, step.step_id, step.agent_name, v.details,
+                    )
+                return None
+
+            # Hard block — inject APPROVAL for human unblock.
+            context = _build_policy_approval_context(
+                step, block_violations, warn_violations, policy_set.name,
+            )
+            _log.info(
+                "Policy block on step %s / agent %s — injecting APPROVAL "
+                "(%d block violation(s)): %s",
+                step.step_id,
+                step.agent_name,
+                len(block_violations),
+                "; ".join(v.rule.name for v in block_violations),
+            )
+            return ExecutionAction(
+                action_type=ActionType.APPROVAL,
+                message=(
+                    f"Policy block: step {step.step_id} ({step.agent_name}) "
+                    f"violates {len(block_violations)} block-severity rule(s). "
+                    "Approve to override and proceed, or reject to fail the step."
+                ),
+                # phase_id is not meaningful here; use sentinel -1 so CLI can
+                # distinguish policy approvals from phase-level approvals.
+                phase_id=-1,
+                approval_context=context,
+                approval_options=["approve", "reject"],
+                # Embed step_id in summary so record_policy_approval() can
+                # route correctly without a schema change.
+                summary=step.step_id,
+            )
+        except Exception as exc:
+            _log.warning(
+                "Policy check for step %s failed (non-fatal): %s",
+                step.step_id, exc,
+            )
+            return None
+
+    def record_policy_approval(
+        self,
+        step_id: str,
+        result: str,
+    ) -> None:
+        """Record a human decision on a policy-block APPROVAL for *step_id*.
+
+        Call this when the orchestrator receives an APPROVAL action with
+        ``phase_id == -1`` (the policy-block sentinel) and the human
+        makes a decision.
+
+        Args:
+            step_id: The step ID that was blocked.
+            result: ``"approve"`` to unblock the step, ``"reject"`` to fail it.
+        """
+        if result == "approve":
+            self._policy_approved_steps.add(step_id)
+            _log.info("Policy unblock recorded for step %s.", step_id)
+            state = self._load_execution()
+            if state is not None:
+                self._compliance_policy_event(
+                    state, step_id, "",
+                    [], "human_unblock",
+                )
+        elif result == "reject":
+            state = self._load_execution()
+            if state is not None:
+                state.failed_step_ids.add(step_id)
+                state.status = "failed"
+                self._save_execution(state)
+                self._compliance_policy_event(
+                    state, step_id, "",
+                    [], "human_reject",
+                )
+            _log.info("Policy rejection recorded for step %s — step failed.", step_id)
+        else:
+            raise ValueError(
+                f"Invalid policy approval result '{result}'. Must be 'approve' or 'reject'."
+            )
+
     # ── Public API ──────────────────────────────────────────────────────────
 
     def start(self, plan: MachinePlan) -> ExecutionAction:
@@ -496,7 +759,11 @@ class ExecutionEngine:
                 self._persistence._task_id = plan.task_id
                 self._persistence.set_active()
             except Exception:
-                pass
+                _log.warning(
+                    "Failed to write active-task-id.txt for task %s — default task resolution may be affected",
+                    plan.task_id,
+                    exc_info=True,
+                )
 
         # Wire the materialized-view subscriber now that we know the task_id.
         # One subscriber per engine instance; replace any previous one.
@@ -864,6 +1131,39 @@ class ExecutionEngine:
 
         self._save_execution(state)
 
+        # ── Domain event publication ──────────────────────────────────────────
+        # Publish step-level domain events to the event bus so that CLI-driven
+        # execution (which does not go through TaskWorker) still emits these
+        # events to projections, EventPersistence, and the PMO dashboard.
+        # TaskWorker publishes the same events in its own path; this call is
+        # only reached via the CLI path (mark_dispatched / record_step_result
+        # directly), so there is no duplication.
+        if status == "dispatched":
+            self._publish(evt.step_dispatched(
+                task_id=state.task_id,
+                step_id=step_id,
+                agent_name=agent_name,
+            ))
+        elif status == "complete":
+            self._publish(evt.step_completed(
+                task_id=state.task_id,
+                step_id=step_id,
+                agent_name=agent_name,
+                outcome=outcome,
+                files_changed=files_changed or [],
+                commit_hash=commit_hash,
+                duration_seconds=duration_seconds,
+                estimated_tokens=estimated_tokens,
+            ))
+        elif status == "failed":
+            self._publish(evt.step_failed(
+                task_id=state.task_id,
+                step_id=step_id,
+                agent_name=agent_name,
+                error=error,
+                duration_seconds=duration_seconds,
+            ))
+
     def mark_dispatched(self, step_id: str, agent_name: str) -> None:
         """Record that a step has been dispatched (in-flight, not yet complete).
 
@@ -931,6 +1231,9 @@ class ExecutionEngine:
             event_type="gate.passed" if passed else "gate.failed",
             details=f"phase_id={phase_id} gate_type={gate_type}",
         ))
+
+        # ── Compliance audit: record gate result ─────────────────────────────
+        self._compliance_gate(state, phase_id, gate_type, passed, output)
 
         if not passed:
             self._publish(evt.gate_failed(
@@ -1619,9 +1922,11 @@ class ExecutionEngine:
 
     # ── Internal helpers ────────────────────────────────────────────────────
 
-    # Event ownership: Engine publishes task-level and phase-level events.
-    # Step-level events (step.dispatched, step.completed, step.failed) are
-    # published by the runtime layer (TaskWorker) to avoid duplication.
+    # Event ownership: Engine publishes task-level, phase-level, and
+    # step-level events (step.dispatched, step.completed, step.failed).
+    # TaskWorker also emits step-level events via its own engine instance;
+    # because each path holds a separate engine object, there is no
+    # double-publish risk.
 
     def _persist_event(self, event: Event) -> None:
         """EventBus subscriber that appends *event* to all active persistence stores.
@@ -2270,7 +2575,22 @@ class ExecutionEngine:
         return self._determine_action(state)
 
     def _dispatch_action(self, step: PlanStep, state: ExecutionState) -> ExecutionAction:
-        """Build a DISPATCH action for *step*."""
+        """Build a DISPATCH action for *step*.
+
+        Before building the prompt, runs a policy check against the active
+        guardrail preset.  If any ``severity='block'`` rule is violated and
+        the step has not already been human-approved, an APPROVAL action is
+        returned instead of DISPATCH so the orchestrator can surface the
+        violation to the human.
+
+        On a clean policy check (or after human unblock), a compliance audit
+        entry is written recording the dispatch event.
+        """
+        # ── Policy pre-dispatch check ────────────────────────────────────────
+        policy_action = self._check_policy_block(state, step)
+        if policy_action is not None:
+            return policy_action
+
         dispatcher = PromptDispatcher()
 
         # Find the most recent completed step (different step_id) for handoff.
@@ -2314,6 +2634,16 @@ class ExecutionEngine:
             prior_beads=prior_beads or None,
         )
         enforcement = PromptDispatcher.build_path_enforcement(step)
+
+        # ── Compliance audit: record dispatch event ──────────────────────────
+        preset_name = _risk_level_to_preset(state.plan.risk_level)
+        self._compliance_dispatch(
+            state,
+            step_id=step.step_id,
+            agent_name=step.agent_name,
+            policy_context=preset_name,
+        )
+
         return ExecutionAction(
             action_type=ActionType.DISPATCH,
             message=f"Dispatch agent '{step.agent_name}' for step {step.step_id}.",
@@ -2849,3 +3179,68 @@ def _agents_in_phase(plan: MachinePlan, phase_id: int) -> list[str]:
                     result.append(step.agent_name)
                     seen.add(step.agent_name)
     return result
+
+
+# ---------------------------------------------------------------------------
+# Module-level helpers for policy enforcement
+# ---------------------------------------------------------------------------
+
+_RISK_TO_PRESET: dict[str, str] = {
+    "LOW": "standard_dev",
+    "MEDIUM": "standard_dev",
+    "HIGH": "regulated",
+    "CRITICAL": "regulated",
+}
+
+
+def _risk_level_to_preset(risk_level: str) -> str:
+    """Map a plan's risk_level string to a PolicyEngine preset key.
+
+    This is a coarse mapping used at dispatch time so the executor does
+    not need to re-run the classifier.  The planner's guardrail_preset
+    is not stored on ``MachinePlan``, so risk_level is the best proxy
+    available without a schema change.
+
+    Falls back to ``"standard_dev"`` for unknown values.
+    """
+    return _RISK_TO_PRESET.get(risk_level.upper(), "standard_dev")
+
+
+def _build_policy_approval_context(
+    step: "PlanStep",
+    block_violations: list,
+    warn_violations: list,
+    preset_name: str,
+) -> str:
+    """Build the approval_context string for a policy-block APPROVAL action.
+
+    The text is shown to the human reviewer so they can make an informed
+    decision about whether to override the policy block.
+    """
+    lines = [
+        f"## Policy Block — Step {step.step_id}: {step.agent_name}",
+        "",
+        f"**Guardrail preset**: `{preset_name}`",
+        f"**Agent**: `{step.agent_name}`",
+        f"**Task**: {step.task_description}",
+        "",
+        "### Block-severity violations",
+        "",
+    ]
+    for v in block_violations:
+        lines.append(
+            f"- **{v.rule.name}** (`{v.rule.rule_type}`): {v.details}"
+        )
+    if warn_violations:
+        lines += ["", "### Warn-severity violations (advisory)", ""]
+        for v in warn_violations:
+            lines.append(
+                f"- **{v.rule.name}** (`{v.rule.rule_type}`): {v.details}"
+            )
+    lines += [
+        "",
+        "---",
+        "**Approve** to override the block and dispatch the agent.",
+        "**Reject** to mark this step as failed.",
+    ]
+    return "\n".join(lines)

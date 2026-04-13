@@ -3,6 +3,13 @@
 Sessions wrap ExecutionState with metadata for long-running workflows
 that span hours or days.  They enable checkpoint/resume across daemon
 restarts and track all participants (agents and humans).
+
+NOTE: As of 2026-04-13 these three classes (SessionCheckpoint,
+SessionParticipant, SessionState) have no callers in production code
+(core/ or cli/).  They are exported from models/__init__.py and
+exercised by tests/test_phase4_5_async_intelligence.py but are not
+wired into the execution engine or any CLI command.  They are kept
+here for future use but are effectively dormant in production.
 """
 from __future__ import annotations
 

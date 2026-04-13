@@ -154,7 +154,26 @@ def main(argv: list[str] | None = None) -> None:
         parser.print_help()
         return
 
-    dispatch[args.command].handler(args)
+    import os
+    import traceback
+
+    try:
+        dispatch[args.command].handler(args)
+    except (SystemExit, KeyboardInterrupt):
+        raise
+    except Exception as exc:
+        if os.environ.get("BATON_DEBUG"):
+            traceback.print_exc(file=sys.stderr)
+        else:
+            print(
+                f"error: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            print(
+                "  Run with BATON_DEBUG=1 for full traceback.",
+                file=sys.stderr,
+            )
+        sys.exit(1)
 
 
 if __name__ == "__main__":

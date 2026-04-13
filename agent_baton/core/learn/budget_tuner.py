@@ -321,6 +321,96 @@ class BudgetTuner:
 
         return eligible
 
+    def merge_cross_project_cost_signals(
+        self,
+        cost_rows: list[dict],
+    ) -> list[BudgetRecommendation]:
+        """Merge cross-project cost signals into ``budget-recommendations.json``.
+
+        Reads the current on-disk recommendations, removes any previously-written
+        ``source="central"`` entries, appends new entries derived from *cost_rows*,
+        and writes the merged list back to disk.
+
+        Each row in *cost_rows* is expected to come from
+        :meth:`~agent_baton.core.storage.central.CentralStore.cost_by_task_type`
+        and must contain at least ``task_type_hint`` and ``avg_tokens_per_agent``.
+        Only rows that suggest a different tier than the current average warrant a
+        new entry; rows that map to the same tier are skipped to avoid noise.
+
+        Args:
+            cost_rows: List of dicts returned by
+                ``CentralStore.cost_by_task_type()``.
+
+        Returns:
+            The full merged list (local + central) that was written to disk.
+        """
+        # Load existing local recommendations, stripping stale central entries.
+        existing_or_none = self.load_recommendations()
+        existing: list[BudgetRecommendation] = [
+            r for r in (existing_or_none or []) if r.source != "central"
+        ]
+
+        # Build a set of task_types already covered by local recommendations so
+        # central signals only add genuinely new information.
+        local_task_types: set[str] = {r.task_type for r in existing}
+
+        central_recs: list[BudgetRecommendation] = []
+        for row in cost_rows:
+            task_type: str = str(row.get("task_type_hint") or row.get("task_type", ""))
+            avg_tokens: int = int(row.get("avg_tokens_per_agent", 0))
+            task_count: int = int(row.get("task_count", 0))
+
+            if not task_type or avg_tokens <= 0:
+                continue
+
+            # Skip task types where a local recommendation already exists —
+            # local data is more precise.
+            if task_type in local_task_types:
+                continue
+
+            if task_count < _MIN_SAMPLE:
+                continue
+
+            recommended_tier = _tier_for_tokens(avg_tokens)
+            # Central signals don't carry a "previous" tier — we treat lean as
+            # the default baseline and only emit an entry when the data suggests
+            # a non-lean tier is needed.
+            current_tier = _TIER_LEAN
+            if recommended_tier == current_tier:
+                continue
+
+            confidence = round(min(1.0, task_count / 10), 4)
+            reason = (
+                f"Cross-project signal: {task_count} tasks of type '{task_type}' "
+                f"average {avg_tokens:,} tokens, suggesting {recommended_tier} tier."
+            )
+
+            central_recs.append(
+                BudgetRecommendation(
+                    task_type=task_type,
+                    current_tier=current_tier,
+                    recommended_tier=recommended_tier,
+                    reason=reason,
+                    avg_tokens_used=avg_tokens,
+                    median_tokens_used=avg_tokens,
+                    p95_tokens_used=avg_tokens,
+                    sample_size=task_count,
+                    confidence=confidence,
+                    potential_savings=0,
+                    source="central",
+                )
+            )
+
+        merged = existing + central_recs
+        self._recs_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(
+            [r.to_dict() for r in merged],
+            indent=2,
+            ensure_ascii=False,
+        )
+        self._recs_path.write_text(payload + "\n", encoding="utf-8")
+        return merged
+
     def load_recommendations(self) -> list[BudgetRecommendation] | None:
         """Read previously saved recommendations from disk.
 

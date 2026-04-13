@@ -61,6 +61,13 @@ class EnhancedManifest:
 
     Backward-compatible with the existing PackageManifest: ``from_dict`` accepts
     old manifests that lack the ``checksums`` and ``dependencies`` fields.
+
+    NOTE: This class overlaps with ``PackageManifest`` from ``sharing.py``.
+    The two extra fields (``checksums``, ``dependencies``) are never populated
+    by the current ``PackageBuilder``, but ``PackageVerifier.validate_package``
+    does read ``checksums`` at runtime when they are present in a manifest
+    written by external tooling.  EnhancedManifest cannot safely be replaced
+    with PackageManifest without also updating PackageVerifier.
     """
 
     name: str

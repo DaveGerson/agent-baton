@@ -171,6 +171,37 @@ export interface RegenerateBody {
 }
 
 // ---------------------------------------------------------------------------
+// External items types
+// ---------------------------------------------------------------------------
+
+export interface ExternalItem {
+  id: number;
+  source_id: string;
+  external_id: string;
+  item_type: string;
+  title: string;
+  description: string;
+  state: string;
+  assigned_to: string;
+  priority: string;
+  tags: string[];
+  url: string;
+  updated_at: string;
+  source_type: string;
+}
+
+export interface ExternalMapping {
+  id: number;
+  source_id: string;
+  external_id: string;
+  project_id: string;
+  task_id: string;
+  mapping_type: string;
+  created_at: string;
+  item?: ExternalItem;
+}
+
+// ---------------------------------------------------------------------------
 // ADO types
 // ---------------------------------------------------------------------------
 
@@ -205,4 +236,36 @@ export interface ExecuteCardResponse {
   status: 'launched';
   model: string;
   dry_run: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Gate approval types
+// ---------------------------------------------------------------------------
+
+export interface PendingGate {
+  task_id: string;
+  project_id: string;
+  phase_id: number;
+  phase_name: string;
+  approval_context: string;
+  approval_options: string[];
+  task_summary: string;
+  current_phase_name: string;
+}
+
+export interface GateApproveBody {
+  phase_id: number;
+  notes?: string;
+}
+
+export interface GateRejectBody {
+  phase_id: number;
+  reason: string;
+}
+
+export interface GateActionResponse {
+  task_id: string;
+  phase_id: number;
+  result: 'approve' | 'reject' | 'approve-with-feedback';
+  recorded: boolean;
 }

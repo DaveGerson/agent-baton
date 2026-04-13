@@ -4,6 +4,7 @@ import { HealthBar } from './HealthBar';
 import { SignalsBar } from './SignalsBar';
 import { AnalyticsDashboard } from './AnalyticsDashboard';
 import { DataExport } from './DataExport';
+import { ExternalItemsPanel } from './ExternalItemsPanel';
 import { usePmoBoard } from '../hooks/usePmoBoard';
 import type { ConnectionMode } from '../hooks/usePmoBoard';
 import { usePersistedState } from '../hooks/usePersistedState';
@@ -27,6 +28,7 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
   const [openSignalCount, setOpenSignalCount] = useState(0);
   const [showAnalytics, setShowAnalytics] = useState(false);
   const [showExport, setShowExport] = useState(false);
+  const [showExternalItems, setShowExternalItems] = useState(false);
 
   // Keep signal badge current regardless of whether SignalsBar is mounted.
   useEffect(() => {
@@ -228,6 +230,22 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
         >
           Export
         </button>
+        <button
+          onClick={() => setShowExternalItems(true)}
+          style={{
+            padding: '2px 7px',
+            borderRadius: 3,
+            border: `1px solid ${T.border}`,
+            background: 'transparent',
+            color: T.text3,
+            fontSize: 9,
+            fontWeight: 600,
+            cursor: 'pointer',
+          }}
+          title="View linked ADO, GitHub, Jira, and Linear items"
+        >
+          Linked Items
+        </button>
 
         <div style={{ flex: 1 }} />
 
@@ -401,6 +419,9 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
       )}
       {showExport && (
         <DataExport cards={cards} health={health} filteredCards={filtered} onClose={() => setShowExport(false)} />
+      )}
+      {showExternalItems && (
+        <ExternalItemsPanel onClose={() => setShowExternalItems(false)} />
       )}
     </div>
   );

@@ -15,6 +15,7 @@ subsystems flag them.
 """
 from __future__ import annotations
 
+import logging
 from collections import Counter
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -22,6 +23,8 @@ from typing import TYPE_CHECKING
 from agent_baton.core.observe.telemetry import AgentTelemetry
 from agent_baton.core.observe.usage import UsageLogger
 from agent_baton.models.usage import TaskUsageRecord
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from agent_baton.core.storage.protocol import StorageBackend
@@ -63,6 +66,10 @@ class DashboardGenerator:
             try:
                 storage_records = self._storage.read_usage()
             except Exception:
+                logger.warning(
+                    "Failed to read usage records from storage backend — falling back to JSONL only",
+                    exc_info=True,
+                )
                 storage_records = []
 
         jsonl_records = self._usage.read_all()
@@ -228,6 +235,10 @@ class DashboardGenerator:
         try:
             tel_summary = self._telemetry.summary()
         except Exception:
+            logger.warning(
+                "Failed to retrieve telemetry summary — telemetry section omitted from dashboard",
+                exc_info=True,
+            )
             tel_summary = None
 
         if tel_summary and tel_summary.get("total_events", 0) > 0:

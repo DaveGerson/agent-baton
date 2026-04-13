@@ -418,3 +418,37 @@ class RegenerateRequest(BaseModel):
         ...,
         description="Answered interview questions.",
     )
+
+
+# ---------------------------------------------------------------------------
+# Gate approval requests
+# ---------------------------------------------------------------------------
+
+
+class GateApproveRequest(BaseModel):
+    """Request body for ``POST /api/v1/pmo/gates/{task_id}/approve``.
+
+    Approves a pending gate so execution can advance to the next phase.
+    The ``phase_id`` must match the phase currently awaiting approval.
+    """
+
+    phase_id: int = Field(..., description="Phase ID that requires approval.")
+    notes: Optional[str] = Field(
+        default=None,
+        description="Optional reviewer notes captured alongside the approval.",
+    )
+
+
+class GateRejectRequest(BaseModel):
+    """Request body for ``POST /api/v1/pmo/gates/{task_id}/reject``.
+
+    Rejects a pending gate, terminating the execution with a failed status.
+    A non-empty ``reason`` is required so the rejection is self-documenting.
+    """
+
+    phase_id: int = Field(..., description="Phase ID that requires approval.")
+    reason: str = Field(
+        ...,
+        min_length=1,
+        description="Mandatory explanation for the rejection.",
+    )

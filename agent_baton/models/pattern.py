@@ -133,6 +133,9 @@ class LearnedPattern:
         evidence: task_ids that contributed to this pattern.
         created_at: ISO timestamp when the pattern was first generated.
         updated_at: ISO timestamp of the most recent refresh.
+        source: Origin of the pattern — ``None`` (or ``"local"``) for patterns
+            derived from the local usage log; ``"central"`` for patterns
+            injected from the cross-project CentralStore analytics.
     """
 
     pattern_id: str
@@ -147,13 +150,14 @@ class LearnedPattern:
     evidence: list[str] = field(default_factory=list)
     created_at: str = ""
     updated_at: str = ""
+    source: str | None = None
 
     # ------------------------------------------------------------------
     # Serialisation
     # ------------------------------------------------------------------
 
     def to_dict(self) -> dict:
-        return {
+        d: dict = {
             "pattern_id": self.pattern_id,
             "task_type": self.task_type,
             "stack": self.stack,
@@ -167,6 +171,9 @@ class LearnedPattern:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
+        if self.source is not None:
+            d["source"] = self.source
+        return d
 
     @classmethod
     def from_dict(cls, data: dict) -> LearnedPattern:
@@ -183,4 +190,5 @@ class LearnedPattern:
             evidence=list(data.get("evidence", [])),
             created_at=data.get("created_at", ""),
             updated_at=data.get("updated_at", ""),
+            source=data.get("source"),
         )

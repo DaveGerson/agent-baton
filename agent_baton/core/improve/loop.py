@@ -35,8 +35,11 @@ Reports are stored at ``.claude/team-context/improvements/reports/<id>.json``.
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from pathlib import Path
+
+_log = logging.getLogger(__name__)
 
 from agent_baton.core.improve.experiments import ExperimentManager
 from agent_baton.core.improve.proposals import ProposalManager
@@ -83,6 +86,7 @@ class ImprovementLoop:
         config: ImprovementConfig | None = None,
         improvements_dir: Path | None = None,
         bead_store=None,
+        maintainer_spawner=None,
     ) -> None:
         self._dir = (improvements_dir or _DEFAULT_DIR).resolve()
         self._reports_dir = self._dir / "reports"
@@ -95,6 +99,7 @@ class ImprovementLoop:
         self._scorer = scorer or PerformanceScorer()
         self._config = config or ImprovementConfig()
         self._bead_store = bead_store  # F12: passed to scorer for bead quality metrics
+        self._maintainer_spawner = maintainer_spawner  # Injected for tests; None = default
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -152,6 +157,33 @@ class ImprovementLoop:
         # Generate recommendations
         recommendations = self._recommender.analyze()
 
+        # Persist fresh patterns so the planner reads up-to-date data on the
+        # next execution.  Best-effort: a failure here must never block the
+        # execution completion flow.
+        try:
+            learner = getattr(self._recommender, "_learner", None)
+            if learner is not None:
+                learner.refresh()
+                _log.debug("Pattern learner refreshed learned-patterns.json")
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("Pattern learner refresh failed (non-fatal): %s", exc)
+
+        # Persist budget recommendations so the planner reads up-to-date tiers
+        # on the next execution.  Best-effort: same reasoning as above.
+        try:
+            tuner = getattr(self._recommender, "_tuner", None)
+            if tuner is not None:
+                tuner.save_recommendations()
+                _log.debug("Budget tuner saved budget-recommendations.json")
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("Budget tuner save_recommendations failed (non-fatal): %s", exc)
+
+        # Enrich local pattern and budget files with cross-project signals from
+        # CentralStore.  This is strictly best-effort: CentralStore may not
+        # exist on all installs (no central.db), so every step is wrapped in
+        # its own try/except and failures are only logged at DEBUG level.
+        self._apply_central_signals()
+
         # Persist all recommendations
         self._proposals.record_many(recommendations)
 
@@ -190,7 +222,13 @@ class ImprovementLoop:
             escalated=escalated,
             active_experiments=active_experiments,
         )
-        self._save_report(report)
+        report_path = self._save_report(report)
+
+        # Spawn the system-maintainer agent to act on escalated recommendations
+        # and validate auto-applied changes.  Best-effort: errors are caught
+        # inside maybe_spawn and must never block the completion flow.
+        self._spawn_maintainer(report, report_path)
+
         return report
 
     # ------------------------------------------------------------------
@@ -330,6 +368,132 @@ class ImprovementLoop:
             encoding="utf-8",
         )
         return path
+
+    # ------------------------------------------------------------------
+    # Maintainer spawn (best-effort)
+    # ------------------------------------------------------------------
+
+    def _spawn_maintainer(self, report: ImprovementReport, report_path: Path) -> None:
+        """Spawn the system-maintainer agent if the report warrants it.
+
+        Best-effort: all errors are caught and logged so that a failure here
+        never prevents the completion of the improvement cycle.
+
+        The circuit breaker count is passed as context to the agent so it can
+        calibrate its risk assessment.  The spawner itself enforces the
+        "skip when circuit breaker is tripped" rule — because
+        :meth:`run_cycle` already returns early when the breaker is tripped,
+        this method is only called for genuine non-skipped cycles.
+
+        Args:
+            report: The completed improvement report.
+            report_path: Absolute path to the persisted report JSON file.
+        """
+        try:
+            from agent_baton.core.improve.maintainer import MaintainerSpawner
+
+            spawner = self._maintainer_spawner
+            if spawner is None:
+                spawner = MaintainerSpawner(improvements_dir=self._dir)
+
+            recent_rollback_count = len(
+                self._rollbacks.recent_rollbacks(days=7)
+            )
+            spawner.maybe_spawn(
+                report=report,
+                recent_rollback_count=recent_rollback_count,
+                report_path=report_path,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _log.warning(
+                "ImprovementLoop._spawn_maintainer failed (non-fatal): %s", exc
+            )
+
+    # ------------------------------------------------------------------
+    # Central Store enrichment (best-effort)
+    # ------------------------------------------------------------------
+
+    def _apply_central_signals(self) -> None:
+        """Query CentralStore and fold cross-project signals into local files.
+
+        Calls four CentralStore analytics methods and routes the results to
+        the pattern learner and budget tuner.  Every query is wrapped in its
+        own try/except so that a failure in one signal source never prevents
+        the others from running.
+
+        This method is a no-op if CentralStore cannot be imported, the
+        central.db file does not exist, or any query fails.  All failures
+        are logged at DEBUG level so they remain silent in normal operation.
+        """
+        try:
+            from agent_baton.core.storage.central import CentralStore
+        except ImportError:
+            _log.debug("_apply_central_signals: CentralStore not importable — skipping")
+            return
+
+        try:
+            central = CentralStore()
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("_apply_central_signals: CentralStore init failed — skipping: %s", exc)
+            return
+
+        try:
+            # ---- agent reliability → pattern learner ----
+            learner = getattr(self._recommender, "_learner", None)
+            if learner is not None:
+                try:
+                    reliability_rows = central.agent_reliability()
+                    learner.merge_cross_project_signals(reliability_rows)
+                    _log.debug(
+                        "_apply_central_signals: merged %d agent_reliability rows into patterns",
+                        len(reliability_rows),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    _log.debug("_apply_central_signals: agent_reliability failed: %s", exc)
+
+            # ---- cost by task type → budget tuner ----
+            tuner = getattr(self._recommender, "_tuner", None)
+            if tuner is not None:
+                try:
+                    cost_rows = central.cost_by_task_type()
+                    tuner.merge_cross_project_cost_signals(cost_rows)
+                    _log.debug(
+                        "_apply_central_signals: merged %d cost_by_task_type rows into budget",
+                        len(cost_rows),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    _log.debug("_apply_central_signals: cost_by_task_type failed: %s", exc)
+
+            # ---- recurring knowledge gaps ---- (informational; logged only)
+            try:
+                gap_rows = central.recurring_knowledge_gaps()
+                if gap_rows:
+                    _log.info(
+                        "_apply_central_signals: %d recurring knowledge gap(s) detected "
+                        "across projects — consider attaching knowledge packs",
+                        len(gap_rows),
+                    )
+            except Exception as exc:  # noqa: BLE001
+                _log.debug("_apply_central_signals: recurring_knowledge_gaps failed: %s", exc)
+
+            # ---- project failure rates ---- (informational; logged only)
+            try:
+                failure_rows = central.project_failure_rates()
+                if failure_rows:
+                    worst = failure_rows[0]
+                    _log.debug(
+                        "_apply_central_signals: highest project failure rate: %s (%.0f%%)",
+                        worst.get("project_id", "?"),
+                        float(worst.get("failure_rate", 0)) * 100,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                _log.debug("_apply_central_signals: project_failure_rates failed: %s", exc)
+
+        finally:
+            try:
+                central.close()
+            except Exception:  # noqa: BLE001
+                pass
 
     def _skipped_report(self, report_id: str, reason: str) -> ImprovementReport:
         report = ImprovementReport(

@@ -26,6 +26,9 @@ class BudgetRecommendation:
         confidence: Score in [0.0, 1.0].  Formula: min(1.0, sample_size / 10).
         potential_savings: Estimated tokens saved per task for downgrade
             recommendations.  Zero for upgrade recommendations.
+        source: Origin of the recommendation — ``None`` (or ``"local"``) for
+            recommendations derived from the local usage log; ``"central"``
+            for entries injected from cross-project CentralStore analytics.
     """
 
     task_type: str
@@ -38,13 +41,14 @@ class BudgetRecommendation:
     sample_size: int
     confidence: float
     potential_savings: int
+    source: str | None = None
 
     # ------------------------------------------------------------------
     # Serialisation
     # ------------------------------------------------------------------
 
     def to_dict(self) -> dict:
-        return {
+        d: dict = {
             "task_type": self.task_type,
             "current_tier": self.current_tier,
             "recommended_tier": self.recommended_tier,
@@ -56,6 +60,9 @@ class BudgetRecommendation:
             "confidence": self.confidence,
             "potential_savings": self.potential_savings,
         }
+        if self.source is not None:
+            d["source"] = self.source
+        return d
 
     @classmethod
     def from_dict(cls, data: dict) -> BudgetRecommendation:
@@ -70,4 +77,5 @@ class BudgetRecommendation:
             sample_size=int(data.get("sample_size", 0)),
             confidence=float(data.get("confidence", 0.0)),
             potential_savings=int(data.get("potential_savings", 0)),
+            source=data.get("source"),
         )
