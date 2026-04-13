@@ -309,6 +309,20 @@ class ExecutionEngine:
         # TaskViewSubscriber — wired lazily in start() once task_id is known.
         self._task_view_subscriber: TaskViewSubscriber | None = None
 
+        # ── Bead memory store (schema v4, Inspired by beads-ai/beads-cli) ───
+        # Initialised from the same db_path as _storage.  Silently None when
+        # the storage backend is unavailable or uses an older schema — all
+        # bead operations degrade gracefully.
+        self._bead_store = None
+        if storage is not None:
+            try:
+                from agent_baton.core.engine.bead_store import BeadStore
+                self._bead_store = BeadStore(storage.db_path)
+            except Exception as _bead_init_exc:
+                _log.debug(
+                    "BeadStore init skipped (non-fatal): %s", _bead_init_exc
+                )
+
     # ── Storage routing helpers ──────────────────────────────────────────────
 
     def _save_execution(self, state: ExecutionState) -> None:
@@ -737,6 +751,35 @@ class ExecutionEngine:
                 agent_name=agent_name,
                 state=state,
             )
+
+        # ── Bead signal protocol ──────────────────────────────────────────────
+        # Extract BEAD_DISCOVERY / BEAD_DECISION / BEAD_WARNING signals from
+        # the agent outcome and persist them to the bead store.  Guarded by
+        # self._bead_store so this block is a strict no-op when beads are
+        # unavailable (older schema, no storage backend, init failure).
+        # Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
+        if status in ("complete", "interrupted") and outcome and self._bead_store:
+            try:
+                from agent_baton.core.engine.bead_signal import parse_bead_signals
+                _bead_count = len(
+                    self._bead_store.query(task_id=state.task_id, limit=10000)
+                )
+                beads = parse_bead_signals(
+                    outcome,
+                    step_id=step_id,
+                    agent_name=agent_name,
+                    task_id=state.task_id,
+                    bead_count=_bead_count,
+                )
+                for bead in beads:
+                    self._bead_store.write(bead)
+                if beads:
+                    _log.debug(
+                        "Bead store: wrote %d bead(s) from step %s (%s)",
+                        len(beads), step_id, agent_name,
+                    )
+            except Exception as _bead_exc:
+                _log.debug("Bead signal extraction failed (non-fatal): %s", _bead_exc)
 
         # Determine phase + step index for trace context.
         phase_idx, step_idx = self._locate_step(state, step_id)
@@ -1909,6 +1952,40 @@ class ExecutionEngine:
                             conflict.resolution = "auto_merged"
                             conflict.resolved_by = "synthesis_agent"
                         conflicts.append(conflict)
+
+        # ── Routing mismatch detection ─────────────────────────────────
+        # When the plan records a detected_stack, check whether any flavored
+        # agent disagrees with it.  E.g. backend-engineer--node on a Python
+        # project signals a router misroute that should feed back into
+        # the learning pipeline.
+        _FLAVOR_LANGUAGE: dict[str, str] = {
+            "python": "python",
+            "node": "javascript",
+            "react": "javascript",
+            "dotnet": "csharp",
+        }
+        detected_stack = state.plan.detected_stack
+        if detected_stack:
+            primary_lang = detected_stack.split("/")[0]
+            for result in state.step_results:
+                if "--" not in result.agent_name:
+                    continue
+                _, flavor = result.agent_name.split("--", 1)
+                flavor_lang = _FLAVOR_LANGUAGE.get(flavor)
+                if flavor_lang and flavor_lang != primary_lang:
+                    correct_flavor = {v: k for k, v in _FLAVOR_LANGUAGE.items()}.get(
+                        primary_lang, primary_lang
+                    )
+                    base_name = result.agent_name.split("--")[0]
+                    roster_recs.append(RosterRecommendation(
+                        action="prefer",
+                        target=f"{base_name}--{correct_flavor}",
+                        reason=(
+                            f"Routing mismatch: {result.agent_name} was used "
+                            f"but project stack is {detected_stack}; "
+                            f"prefer {base_name}--{correct_flavor}"
+                        ),
+                    ))
 
         gates_passed = len([g for g in state.gate_results if g.passed])
         gates_failed = len([g for g in state.gate_results if not g.passed])

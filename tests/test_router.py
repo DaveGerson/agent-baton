@@ -303,6 +303,53 @@ def test_vite_react_routes_to_react_flavor(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Mixed stack: Python root + Vite/React subdirectory
+# ---------------------------------------------------------------------------
+
+
+def test_python_root_with_vite_react_subdir_stays_python(tmp_path: Path) -> None:
+    """Root pyproject.toml must not be overridden by subdirectory Vite+React."""
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='app'\n", encoding="utf-8")
+    frontend = tmp_path / "pmo-ui"
+    frontend.mkdir()
+    (frontend / "vite.config.ts").write_text("export default {}\n", encoding="utf-8")
+    _write_package_json(frontend, {"react": "^18.0.0"})
+    profile = AgentRouter(AgentRegistry()).detect_stack(tmp_path)
+    assert profile.language == "python", (
+        f"Root pyproject.toml must win over subdir Vite+React; got {profile.language}"
+    )
+    assert profile.framework == "react"
+
+
+def test_python_root_with_vite_react_subdir_routes_backend_to_python(tmp_path: Path) -> None:
+    """In Python+React mixed stack, backend-engineer must route to --python, not --node."""
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='app'\n", encoding="utf-8")
+    frontend = tmp_path / "pmo-ui"
+    frontend.mkdir()
+    (frontend / "vite.config.ts").write_text("export default {}\n", encoding="utf-8")
+    _write_package_json(frontend, {"react": "^18.0.0"})
+    registry = _make_registry_with(
+        "backend-engineer", "backend-engineer--python", "backend-engineer--node",
+    )
+    router = AgentRouter(registry)
+    assert router.route("backend-engineer", project_root=tmp_path) == "backend-engineer--python"
+
+
+def test_python_root_with_vite_react_subdir_routes_frontend_to_react(tmp_path: Path) -> None:
+    """In Python+React mixed stack, frontend-engineer should still route to --react."""
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='app'\n", encoding="utf-8")
+    frontend = tmp_path / "pmo-ui"
+    frontend.mkdir()
+    (frontend / "vite.config.ts").write_text("export default {}\n", encoding="utf-8")
+    _write_package_json(frontend, {"react": "^18.0.0"})
+    registry = _make_registry_with(
+        "frontend-engineer", "frontend-engineer--react",
+    )
+    router = AgentRouter(registry)
+    assert router.route("frontend-engineer", project_root=tmp_path) == "frontend-engineer--react"
+
+
+# ---------------------------------------------------------------------------
 # Fix 2: references/baton-engine.md exists and is distributed by install.sh
 # ---------------------------------------------------------------------------
 

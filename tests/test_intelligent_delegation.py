@@ -1169,3 +1169,128 @@ class TestMachinePlanTaskType:
         }
         plan = MachinePlan.from_dict(data)
         assert plan.task_type is None
+
+
+# ---------------------------------------------------------------------------
+# Routing mismatch detection in retrospective builder
+# ---------------------------------------------------------------------------
+
+
+class TestRoutingMismatchRetrospective:
+    """Executor detects agent flavor / stack mismatches and emits roster recs."""
+
+    @pytest.fixture
+    def engine(self, tmp_path: Path) -> ExecutionEngine:
+        ctx = tmp_path / "team-context"
+        ctx.mkdir()
+        return ExecutionEngine(team_context_root=ctx)
+
+    def test_node_agent_on_python_stack_generates_prefer_rec(
+        self, engine: ExecutionEngine
+    ) -> None:
+        from agent_baton.models.execution import ExecutionState
+
+        step = PlanStep(
+            step_id="1.1",
+            agent_name="backend-engineer--node",
+            task_description="Fix the API",
+        )
+        plan = MachinePlan(
+            task_id="routing-test-001",
+            task_summary="Fix the API",
+            risk_level="LOW",
+            phases=[PlanPhase(phase_id=1, name="Fix", steps=[step])],
+            detected_stack="python",
+        )
+        step_result = StepResult(
+            step_id="1.1",
+            agent_name="backend-engineer--node",
+            status="complete",
+        )
+        state = ExecutionState(
+            task_id=plan.task_id,
+            plan=plan,
+            step_results=[step_result],
+            gate_results=[],
+        )
+
+        retro_data = engine._build_retrospective_data(state)
+        roster_recs = retro_data.get("roster_recommendations", [])
+        prefer_recs = [
+            r for r in roster_recs
+            if r.action == "prefer" and "backend-engineer--python" in r.target
+        ]
+        assert prefer_recs, (
+            f"Expected 'prefer backend-engineer--python' recommendation, "
+            f"got: {roster_recs}"
+        )
+
+    def test_correct_flavor_generates_no_mismatch_rec(
+        self, engine: ExecutionEngine
+    ) -> None:
+        from agent_baton.models.execution import ExecutionState
+
+        step = PlanStep(
+            step_id="1.1",
+            agent_name="backend-engineer--python",
+            task_description="Fix the API",
+        )
+        plan = MachinePlan(
+            task_id="routing-test-002",
+            task_summary="Fix the API",
+            risk_level="LOW",
+            phases=[PlanPhase(phase_id=1, name="Fix", steps=[step])],
+            detected_stack="python",
+        )
+        step_result = StepResult(
+            step_id="1.1",
+            agent_name="backend-engineer--python",
+            status="complete",
+        )
+        state = ExecutionState(
+            task_id=plan.task_id,
+            plan=plan,
+            step_results=[step_result],
+            gate_results=[],
+        )
+
+        retro_data = engine._build_retrospective_data(state)
+        roster_recs = retro_data.get("roster_recommendations", [])
+        mismatch_recs = [r for r in roster_recs if "mismatch" in r.reason.lower()]
+        assert not mismatch_recs, (
+            f"No mismatch expected for correct flavor, got: {mismatch_recs}"
+        )
+
+    def test_no_detected_stack_skips_mismatch_check(
+        self, engine: ExecutionEngine
+    ) -> None:
+        from agent_baton.models.execution import ExecutionState
+
+        step = PlanStep(
+            step_id="1.1",
+            agent_name="backend-engineer--node",
+            task_description="Fix the API",
+        )
+        plan = MachinePlan(
+            task_id="routing-test-003",
+            task_summary="Fix the API",
+            risk_level="LOW",
+            phases=[PlanPhase(phase_id=1, name="Fix", steps=[step])],
+            # No detected_stack
+        )
+        step_result = StepResult(
+            step_id="1.1",
+            agent_name="backend-engineer--node",
+            status="complete",
+        )
+        state = ExecutionState(
+            task_id=plan.task_id,
+            plan=plan,
+            step_results=[step_result],
+            gate_results=[],
+        )
+
+        retro_data = engine._build_retrospective_data(state)
+        roster_recs = retro_data.get("roster_recommendations", [])
+        mismatch_recs = [r for r in roster_recs if "mismatch" in r.reason.lower()]
+        assert not mismatch_recs

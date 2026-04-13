@@ -45,6 +45,8 @@ FLAVOR_MAP: dict[tuple[str, str | None], dict[str, str]] = {
     ("python", None): {"backend-engineer": "python"},
     ("python", "django"): {"backend-engineer": "python"},
     ("python", "fastapi"): {"backend-engineer": "python"},
+    # Mixed stack: Python backend with React frontend subfolder
+    ("python", "react"): {"backend-engineer": "python", "frontend-engineer": "react"},
     ("javascript", "react"): {"frontend-engineer": "react", "backend-engineer": "node"},
     ("javascript", None): {"backend-engineer": "node"},
     ("typescript", "react"): {"frontend-engineer": "react", "backend-engineer": "node"},
@@ -180,7 +182,10 @@ class AgentRouter:
                             **pkg.get("devDependencies", {}),
                         }
                         if "react" in deps:
-                            profile.language = "javascript"
+                            # Only set language if root-level detection
+                            # didn't already establish one (e.g. Python).
+                            if profile.language is None:
+                                profile.language = "javascript"
                             profile.framework = "react"
                             rel = str(vite_file.relative_to(root))
                             if rel not in profile.detected_files:

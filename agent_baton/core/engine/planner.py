@@ -852,6 +852,11 @@ class IntelligentPlanner:
                 if self._last_task_classification
                 else "cli-override"
             ),
+            detected_stack=(
+                f"{stack_profile.language}/{stack_profile.framework}"
+                if stack_profile and stack_profile.framework
+                else (stack_profile.language if stack_profile else None)
+            ),
         )
         # 16. Team cost estimation — look up historical cost data for team steps.
         self._last_team_cost_estimates: dict[str, int] = {}

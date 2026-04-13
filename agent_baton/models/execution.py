@@ -393,6 +393,7 @@ class MachinePlan:
     complexity: str = "medium"          # light | medium | heavy
     classification_source: str = "keyword-fallback"  # haiku | keyword-fallback
     resource_limits: ResourceLimits | None = None  # optional concurrency constraints
+    detected_stack: str | None = None  # e.g. "python", "python/react", "typescript/react"
 
     def __post_init__(self) -> None:
         if not self.created_at:
@@ -428,6 +429,7 @@ class MachinePlan:
             "intervention_level": self.intervention_level,
             "complexity": self.complexity,
             "classification_source": self.classification_source,
+            "detected_stack": self.detected_stack,
         }
         if self.resource_limits is not None:
             d["resource_limits"] = self.resource_limits.to_dict()
@@ -454,6 +456,7 @@ class MachinePlan:
             complexity=data.get("complexity", "medium"),
             classification_source=data.get("classification_source", "keyword-fallback"),
             resource_limits=ResourceLimits.from_dict(rl_data) if rl_data else None,
+            detected_stack=data.get("detected_stack"),
         )
 
     def to_markdown(self) -> str:
