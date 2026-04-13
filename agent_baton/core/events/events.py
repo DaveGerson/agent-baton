@@ -134,6 +134,52 @@ def step_failed(
     )
 
 
+# ── Bead memory ─────────────────────────────────────────────────────────────
+# Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
+
+def bead_created(
+    task_id: str,
+    bead_id: str,
+    bead_type: str,
+    agent_name: str,
+    step_id: str = "",
+    source: str = "agent-signal",
+    sequence: int = 0,
+) -> Event:
+    """Create an event indicating a new bead has been written to the store.
+
+    Published by the executor after ``BeadStore.write()`` succeeds during
+    ``record_step_result()``.  Consumed by projections and observability
+    tooling that want to track memory growth without querying SQLite directly.
+
+    Args:
+        task_id: The execution task identifier.
+        bead_id: The short hash ID of the new bead (e.g. ``"bd-a1b2"``).
+        bead_type: Type of bead — ``"discovery"``, ``"decision"``, ``"warning"``,
+            ``"outcome"``, or ``"planning"``.
+        agent_name: The agent that produced the bead.
+        step_id: The plan step where the bead was created.
+        source: How the bead was created — ``"agent-signal"``,
+            ``"planning-capture"``, ``"retrospective"``, or ``"manual"``.
+        sequence: Event sequence number (0 = auto-assign).
+
+    Returns:
+        An :class:`Event` with topic ``"bead.created"``.
+    """
+    return Event.create(
+        topic="bead.created",
+        task_id=task_id,
+        sequence=sequence,
+        payload={
+            "bead_id": bead_id,
+            "bead_type": bead_type,
+            "agent_name": agent_name,
+            "step_id": step_id,
+            "source": source,
+        },
+    )
+
+
 # ── Gates ───────────────────────────────────────────────────────────────────
 
 def gate_required(

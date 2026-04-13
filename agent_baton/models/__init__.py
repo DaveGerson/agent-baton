@@ -35,6 +35,7 @@ from agent_baton.models.knowledge import (
     KnowledgeGapRecord,
     ResolvedDecision,
 )
+from agent_baton.models.bead import Bead, BeadLink
 from agent_baton.models.trace import TraceEvent, TaskTrace
 from agent_baton.models.pattern import LearnedPattern
 from agent_baton.models.budget import BudgetRecommendation
@@ -58,6 +59,8 @@ from agent_baton.models.execution import (
 )
 
 __all__ = [
+    "Bead",
+    "BeadLink",
     "AgentDefinition",
     "AgentCategory",
     "KnowledgeDocument",

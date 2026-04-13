@@ -36,6 +36,16 @@ _KNOWLEDGE_GAPS_LINE = (
     "`CONFIDENCE: none|low|partial` and stop. Do not guess on HIGH/CRITICAL risk tasks."
 )
 
+# Bead signal protocol — agents append these lines to their outcome text to
+# record structured memory for downstream agents.
+# Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
+_BEAD_SIGNALS_LINE = (
+    "Report discoveries and decisions using structured signals:\n"
+    "  BEAD_DISCOVERY: <what you found>\n"
+    "  BEAD_DECISION: <what you decided> CHOSE: <choice> BECAUSE: <rationale>\n"
+    "  BEAD_WARNING: <what might cause problems>"
+)
+
 # Success criteria by task type — shown in the delegation prompt to make the
 # definition of done concrete.  Selected by the caller via the task_type arg.
 _SUCCESS_CRITERIA: dict[str, str] = {
@@ -263,6 +273,8 @@ class PromptDispatcher:
 
         parts.append(_KNOWLEDGE_GAPS_LINE)
         parts.append("")
+        parts.append(_BEAD_SIGNALS_LINE)
+        parts.append("")
 
         # Previous Step Output — only when there is actual handoff content
         if handoff_from.strip():
@@ -352,6 +364,8 @@ class PromptDispatcher:
             "Coordinate with your team members on shared resources.",
             "",
             _KNOWLEDGE_GAPS_LINE,
+            "",
+            _BEAD_SIGNALS_LINE,
             "",
             "Log non-obvious decisions under a **Decisions** heading. "
             "If you deviate from the plan, explain under a **Deviations** heading.",

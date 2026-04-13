@@ -130,6 +130,10 @@ SYNCABLE_TABLES: list[SyncTableSpec] = [
         has_autoincrement_pk=True,
     ),
     SyncTableSpec("shared_context", ["task_id"]),
+    # -- Bead memory tables (schema v4, Inspired by beads-ai/beads-cli) ------
+    # beads must come before bead_tags (FK dependency order).
+    SyncTableSpec("beads", ["bead_id"]),
+    SyncTableSpec("bead_tags", ["bead_id", "tag"]),
 ]
 
 # Fast lookup by name

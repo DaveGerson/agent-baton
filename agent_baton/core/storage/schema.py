@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -64,6 +64,43 @@ ALTER TABLE executions ADD COLUMN resolved_decisions   TEXT NOT NULL DEFAULT '[]
 -- Active data loss fix: StepResult.deviations was not persisted to SQLite.
 
 ALTER TABLE step_results ADD COLUMN deviations TEXT NOT NULL DEFAULT '[]';
+""",
+    4: """
+-- v4: add bead memory tables.
+-- Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
+-- Beads are discrete units of structured memory (discoveries, decisions,
+-- warnings, outcomes, planning notes) produced by agents during execution.
+CREATE TABLE IF NOT EXISTS beads (
+    bead_id          TEXT PRIMARY KEY,
+    task_id          TEXT NOT NULL,
+    step_id          TEXT NOT NULL,
+    agent_name       TEXT NOT NULL,
+    bead_type        TEXT NOT NULL,
+    content          TEXT NOT NULL DEFAULT '',
+    confidence       TEXT NOT NULL DEFAULT 'medium',
+    scope            TEXT NOT NULL DEFAULT 'step',
+    tags             TEXT NOT NULL DEFAULT '[]',
+    affected_files   TEXT NOT NULL DEFAULT '[]',
+    status           TEXT NOT NULL DEFAULT 'open',
+    created_at       TEXT NOT NULL,
+    closed_at        TEXT NOT NULL DEFAULT '',
+    summary          TEXT NOT NULL DEFAULT '',
+    links            TEXT NOT NULL DEFAULT '[]',
+    source           TEXT NOT NULL DEFAULT 'agent-signal',
+    token_estimate   INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (task_id) REFERENCES executions(task_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_beads_task ON beads(task_id);
+CREATE INDEX IF NOT EXISTS idx_beads_agent ON beads(agent_name);
+CREATE INDEX IF NOT EXISTS idx_beads_type ON beads(bead_type);
+CREATE INDEX IF NOT EXISTS idx_beads_status ON beads(status);
+CREATE TABLE IF NOT EXISTS bead_tags (
+    bead_id  TEXT NOT NULL,
+    tag      TEXT NOT NULL,
+    PRIMARY KEY (bead_id, tag),
+    FOREIGN KEY (bead_id) REFERENCES beads(bead_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_bead_tags_tag ON bead_tags(tag);
 """,
 }
 
@@ -455,6 +492,42 @@ CREATE TABLE IF NOT EXISTS active_task (
     id       INTEGER PRIMARY KEY CHECK (id = 1),
     task_id  TEXT NOT NULL
 );
+
+-- BEADS (Inspired by Steve Yegge's Beads agent memory system, beads-ai/beads-cli)
+-- Discrete units of structured memory produced by agents during execution.
+CREATE TABLE IF NOT EXISTS beads (
+    bead_id          TEXT PRIMARY KEY,
+    task_id          TEXT NOT NULL,
+    step_id          TEXT NOT NULL,
+    agent_name       TEXT NOT NULL,
+    bead_type        TEXT NOT NULL,
+    content          TEXT NOT NULL DEFAULT '',
+    confidence       TEXT NOT NULL DEFAULT 'medium',
+    scope            TEXT NOT NULL DEFAULT 'step',
+    tags             TEXT NOT NULL DEFAULT '[]',
+    affected_files   TEXT NOT NULL DEFAULT '[]',
+    status           TEXT NOT NULL DEFAULT 'open',
+    created_at       TEXT NOT NULL,
+    closed_at        TEXT NOT NULL DEFAULT '',
+    summary          TEXT NOT NULL DEFAULT '',
+    links            TEXT NOT NULL DEFAULT '[]',
+    source           TEXT NOT NULL DEFAULT 'agent-signal',
+    token_estimate   INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (task_id) REFERENCES executions(task_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_beads_task ON beads(task_id);
+CREATE INDEX IF NOT EXISTS idx_beads_agent ON beads(agent_name);
+CREATE INDEX IF NOT EXISTS idx_beads_type ON beads(bead_type);
+CREATE INDEX IF NOT EXISTS idx_beads_status ON beads(status);
+
+-- BEAD_TAGS (normalised for efficient tag-based retrieval)
+CREATE TABLE IF NOT EXISTS bead_tags (
+    bead_id  TEXT NOT NULL,
+    tag      TEXT NOT NULL,
+    PRIMARY KEY (bead_id, tag),
+    FOREIGN KEY (bead_id) REFERENCES beads(bead_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_bead_tags_tag ON bead_tags(tag);
 """
 
 # =====================================================================
@@ -1084,6 +1157,42 @@ CREATE TABLE IF NOT EXISTS shared_context (
     updated_at        TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (project_id, task_id)
 );
+
+-- BEADS (mirror — Inspired by Steve Yegge's Beads agent memory system, beads-ai/beads-cli)
+CREATE TABLE IF NOT EXISTS beads (
+    project_id       TEXT NOT NULL,
+    bead_id          TEXT NOT NULL,
+    task_id          TEXT NOT NULL,
+    step_id          TEXT NOT NULL,
+    agent_name       TEXT NOT NULL,
+    bead_type        TEXT NOT NULL,
+    content          TEXT NOT NULL DEFAULT '',
+    confidence       TEXT NOT NULL DEFAULT 'medium',
+    scope            TEXT NOT NULL DEFAULT 'step',
+    tags             TEXT NOT NULL DEFAULT '[]',
+    affected_files   TEXT NOT NULL DEFAULT '[]',
+    status           TEXT NOT NULL DEFAULT 'open',
+    created_at       TEXT NOT NULL,
+    closed_at        TEXT NOT NULL DEFAULT '',
+    summary          TEXT NOT NULL DEFAULT '',
+    links            TEXT NOT NULL DEFAULT '[]',
+    source           TEXT NOT NULL DEFAULT 'agent-signal',
+    token_estimate   INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (project_id, bead_id)
+);
+CREATE INDEX IF NOT EXISTS idx_central_beads_task ON beads(project_id, task_id);
+CREATE INDEX IF NOT EXISTS idx_central_beads_agent ON beads(agent_name);
+CREATE INDEX IF NOT EXISTS idx_central_beads_type ON beads(bead_type);
+CREATE INDEX IF NOT EXISTS idx_central_beads_status ON beads(status);
+
+-- BEAD_TAGS (mirror — normalised for efficient tag-based retrieval)
+CREATE TABLE IF NOT EXISTS bead_tags (
+    project_id  TEXT NOT NULL,
+    bead_id     TEXT NOT NULL,
+    tag         TEXT NOT NULL,
+    PRIMARY KEY (project_id, bead_id, tag)
+);
+CREATE INDEX IF NOT EXISTS idx_central_bead_tags_tag ON bead_tags(tag);
 
 -- ================================================================
 -- Cross-project analytics views
