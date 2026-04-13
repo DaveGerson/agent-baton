@@ -773,6 +773,17 @@ class ExecutionEngine:
                 )
                 for bead in beads:
                     self._bead_store.write(bead)
+                    # Publish to event bus so EventPersistence captures
+                    # bead creation in the learn pipeline's event log.
+                    if self._bus is not None:
+                        from agent_baton.core.events.events import bead_created
+                        self._bus.publish(bead_created(
+                            task_id=state.task_id,
+                            bead_id=bead.bead_id,
+                            bead_type=bead.bead_type,
+                            agent_name=agent_name,
+                            step_id=step_id,
+                        ))
                 if beads:
                     _log.debug(
                         "Bead store: wrote %d bead(s) from step %s (%s)",
