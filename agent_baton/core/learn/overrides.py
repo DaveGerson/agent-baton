@@ -23,6 +23,7 @@ File layout::
 """
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -72,13 +73,15 @@ class LearnedOverrides:
             if self._path.exists():
                 raw = self._path.read_text(encoding="utf-8")
                 data = json.loads(raw)
-                # Ensure all expected top-level keys are present
-                merged = dict(_EMPTY_OVERRIDES)
+                # Ensure all expected top-level keys are present.
+                # Use deepcopy so callers cannot accidentally mutate the
+                # module-level _EMPTY_OVERRIDES sentinel through nested dicts.
+                merged = copy.deepcopy(_EMPTY_OVERRIDES)
                 merged.update(data)
                 return merged
         except Exception as exc:
             _log.debug("LearnedOverrides.load failed (%s): %s", self._path, exc)
-        return dict(_EMPTY_OVERRIDES)
+        return copy.deepcopy(_EMPTY_OVERRIDES)
 
     def save(self, data: dict) -> None:
         """Write *data* atomically to the overrides file."""
