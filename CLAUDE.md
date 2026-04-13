@@ -7,11 +7,12 @@ system for Claude Code.
 
 ```
 agent_baton/       ← Python package (orchestration engine)
-  models/          ← Data models (18 modules, incl. pmo.py, knowledge.py)
+  models/          ← Data models (19 modules, incl. pmo.py, knowledge.py, bead.py)
   core/            ← Business logic (10 sub-packages, no shim files)
     engine/        ← Execution core: planner, executor, dispatcher, gates,
     │                persistence, protocols (ExecutionDriver),
-    │                knowledge_resolver, knowledge_gap
+    │                knowledge_resolver, knowledge_gap,
+    │                bead_store, bead_signal
     orchestration/ ← Agent discovery: registry, router, context manager,
     │                knowledge_registry
     pmo/           ← PMO subsystem: store, scanner, forge
@@ -26,7 +27,7 @@ agent_baton/       ← Python package (orchestration engine)
     events/        ← Event bus, domain events, persistence, projections
     runtime/       ← Async worker, supervisor, launcher, headless Claude,
                      decisions, ExecutionContext factory
-  cli/             ← CLI interface (38 commands via `baton`)
+  cli/             ← CLI interface (39 commands via `baton`)
     commands/
       execution/   ← execute, plan, status, daemon, async, decide
       observe/     ← dashboard, trace, usage, telemetry, context_profile, retro
@@ -38,12 +39,13 @@ agent_baton/       ← Python package (orchestration engine)
       sync_cmd     ← baton sync, baton sync --all, baton sync status
       query_cmd    ← baton query (cross-project SQL against central.db)
       source_cmd   ← baton source add/list/sync/remove/map (external adapters)
+      bead_cmd     ← baton beads list/show/ready/close/link (structured memory)
 docs/              ← Architecture documentation (architecture.md, design-decisions.md, invariants.md)
 agents/            ← Distributable agent definitions (19 .md files)
 references/        ← Distributable reference docs (13 .md files)
 templates/         ← CLAUDE.md + settings.json installed to target projects
 scripts/           ← Install scripts (Linux + Windows)
-tests/             ← Test suite (~3907 tests, pytest)
+tests/             ← Test suite (~4665 tests, pytest)
 pmo-ui/            ← React/Vite PMO frontend (served at /pmo/)
 .claude/           ← Project-specific orchestration setup:
   agents/          ← 19 packaged agents (mirrored from agents/) +
@@ -111,7 +113,7 @@ pmo-ui/            ← React/Vite PMO frontend (served at /pmo/)
 
 ```bash
 pip install -e ".[dev]"    # Install in editable mode
-pytest                     # Run tests (~4280 tests)
+pytest                     # Run tests (~4665 tests)
 scripts/install.sh         # Re-install globally after editing agents/references
 ```
 
@@ -196,7 +198,11 @@ When adding or removing a column in `schema.py`:
    additional `project_id` prefix column.
 3. **Migration script** (`MIGRATIONS` dict) — ALTER TABLE for existing
    project databases.  Central does not have its own migration dict;
-   it uses `CREATE TABLE IF NOT EXISTS` on first access.
+   it uses `CREATE TABLE IF NOT EXISTS` on first access.  **Important:**
+   migrations are applied to both project and central databases, so
+   FK constraints referencing single-column PKs must be omitted from
+   `MIGRATIONS` (central tables use composite PKs).  Fresh project DBs
+   get FKs from `PROJECT_SCHEMA_DDL` directly.
 4. **SQLite backend** (`sqlite_backend.py`) — INSERT and SELECT
    statements that reference the column.
 5. **Sync engine** (`sync.py`) — uses `SELECT *` so column presence is

@@ -149,6 +149,16 @@ Curated knowledge packs resolved at plan time and injected into each
 agent's delegation prompt. A feedback loop learns which agents need what
 knowledge for which task types.
 
+### Structured Agent Memory
+
+Inspired by Steve Yegge's [Beads](https://github.com/beads-ai/beads-cli)
+agent memory system. Agents emit `BEAD_DISCOVERY`, `BEAD_DECISION`, and
+`BEAD_WARNING` signals during execution that are automatically parsed and
+persisted to SQLite. Beads form a typed dependency graph with status
+tracking (`open` → `closed` → `archived`), tag-based retrieval, and
+decay for long-lived projects. Query with `baton beads list`, surface
+unblocked work with `baton beads ready`.
+
 ### Smart Forge
 
 AI-driven task planning via headless Claude Code subprocess. Generates
@@ -281,7 +291,7 @@ baton execute run               # Full loop: plan -> dispatch -> gate -> complet
 
 ## CLI Reference
 
-The `baton` CLI provides 45+ commands organized into seven groups:
+The `baton` CLI provides 50+ commands organized into eight groups:
 
 <details>
 <summary><strong>Execution</strong> -- plan, execute, recover</summary>
@@ -386,6 +396,19 @@ The `baton` CLI provides 45+ commands organized into seven groups:
 </details>
 
 <details>
+<summary><strong>Memory</strong></summary>
+
+| Command | Description |
+|---------|-------------|
+| `baton beads list` | List beads with filters (`--type`, `--status`, `--task`, `--tag`) |
+| `baton beads show <id>` | Show a single bead in detail (JSON) |
+| `baton beads ready` | Show unblocked open beads |
+| `baton beads close <id>` | Close a bead with optional `--summary` |
+| `baton beads link <src> --relates-to\|--contradicts\|--extends <tgt>` | Link two beads |
+
+</details>
+
+<details>
 <summary><strong>Cross-Project</strong> -- sync, PMO, API</summary>
 
 | Command | Description |
@@ -423,8 +446,8 @@ agent_baton/       <- Python package
     events/        <- Event bus, domain events, projections
     runtime/       <- Async worker, supervisor, headless Claude
   api/             <- FastAPI REST API server
-  cli/             <- CLI interface (45+ commands)
-tests/             <- Test suite (~3900 tests, pytest)
+  cli/             <- CLI interface (50+ commands)
+tests/             <- Test suite (~4665 tests, pytest)
 pmo-ui/            <- React/Vite PMO frontend
 ```
 
@@ -437,7 +460,7 @@ git clone https://github.com/DaveGerson/agent-baton.git
 cd agent-baton
 pip install -e ".[dev]"        # Core + test deps
 pip install -e ".[dev,api]"    # Everything including REST API
-pytest                         # ~3900 tests
+pytest                         # ~4665 tests
 ```
 
 Requires Python 3.10+. The only runtime dependency is PyYAML.
@@ -449,7 +472,7 @@ Requires Python 3.10+. The only runtime dependency is PyYAML.
 | [CLAUDE.md](CLAUDE.md) | Development guide and conventions |
 | [QUICKSTART.md](QUICKSTART.md) | Getting started for new users |
 | [docs/architecture.md](docs/architecture.md) | Package layout and dependency graph |
-| [docs/design-decisions.md](docs/design-decisions.md) | ADR log (12 decisions documented) |
+| [docs/design-decisions.md](docs/design-decisions.md) | ADR log (13 decisions documented) |
 | [docs/invariants.md](docs/invariants.md) | Interface boundaries (CLI output contract) |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute |
 | [SECURITY.md](SECURITY.md) | Vulnerability reporting |
@@ -466,7 +489,7 @@ and tested.
 - **Python**: 3.10+
 - **Runtime dependency**: PyYAML only
 - **Optional**: FastAPI + uvicorn (REST API), Anthropic SDK (AI classification)
-- **Test suite**: ~3900 tests (pytest)
+- **Test suite**: ~4665 tests (pytest)
 - **External adapters**: Azure DevOps implemented; Jira, GitHub, Linear
   protocols defined
 
