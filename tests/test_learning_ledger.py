@@ -128,19 +128,24 @@ class TestRecordIssueDedup:
         # last_seen should be >= first_seen (may be equal in fast test runs)
         assert issue2.last_seen >= issue1.first_seen
 
-    def test_dedup_severity_update_uses_sql_string_comparison(self, ledger: LearningLedger):
-        """The UPDATE uses SQL string comparison (CASE WHEN ? > severity).
-        Alphabetically: critical < high < low < medium, so "medium" > "low" > "high".
-        This means "low" beats "high" in the SQL CASE — the implementation uses
-        lexicographic ordering, not the intuitive severity ordering.
-        This test documents the actual runtime behavior; see the CASE expression in
-        LearningLedger._CREATE_TABLE for the exact SQL used.
-        """
-        # "low" is lexicographically greater than "high" (l > h), so it "wins"
+    def test_dedup_severity_escalates_semantically(self, ledger: LearningLedger):
+        """Severity escalates using semantic ordering (low < medium < high < critical),
+        not lexicographic ordering."""
+        ledger.record_issue("routing_mismatch", "python:be", "low", "First")
+        issue = ledger.record_issue("routing_mismatch", "python:be", "high", "Second")
+        assert issue.severity == "high"
+
+    def test_dedup_severity_not_downgraded(self, ledger: LearningLedger):
+        """A lower-severity signal must not downgrade an existing high-severity issue."""
         ledger.record_issue("routing_mismatch", "python:be", "high", "First")
         issue = ledger.record_issue("routing_mismatch", "python:be", "low", "Second")
-        # SQL CASE picks "low" because "low" > "high" lexicographically
-        assert issue.severity == "low"
+        assert issue.severity == "high"
+
+    def test_dedup_severity_critical_wins(self, ledger: LearningLedger):
+        """Critical severity must always win over any lower severity."""
+        ledger.record_issue("routing_mismatch", "python:be", "medium", "First")
+        issue = ledger.record_issue("routing_mismatch", "python:be", "critical", "Second")
+        assert issue.severity == "critical"
 
     def test_dedup_same_severity_unchanged(self, ledger: LearningLedger):
         """Deduplication with the same severity must not change severity."""

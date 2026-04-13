@@ -90,13 +90,16 @@ class LearningLedger:
         a bare SQLite file created directly (e.g. in tests).  The
         ``CREATE TABLE IF NOT EXISTS`` guard makes this idempotent.
         """
+        conn = None
         try:
             conn = self._connect()
             conn.executescript(self._CREATE_TABLE)
             conn.commit()
-            conn.close()
         except Exception as exc:
             _log.debug("LearningLedger._ensure_table failed: %s", exc)
+        finally:
+            if conn is not None:
+                conn.close()
 
     # ------------------------------------------------------------------
     # Write operations
@@ -151,6 +154,10 @@ class LearningLedger:
                 if evidence is not None:
                     existing_evidence.append(evidence.to_dict())
                 new_count = existing_row["occurrence_count"] + 1
+                # Semantic severity ordering: escalate only if the new
+                # severity is higher than the existing one.  SQLite string
+                # comparison is lexicographic which doesn't match semantic
+                # order, so we use a CASE expression with explicit ranking.
                 conn.execute(
                     """
                     UPDATE learning_issues
@@ -158,7 +165,19 @@ class LearningLedger:
                         last_seen = ?,
                         evidence = ?,
                         severity = CASE
-                            WHEN ? > severity THEN ?
+                            WHEN (CASE ?
+                                    WHEN 'critical' THEN 4
+                                    WHEN 'high' THEN 3
+                                    WHEN 'medium' THEN 2
+                                    WHEN 'low' THEN 1
+                                    ELSE 0 END)
+                                 > (CASE severity
+                                    WHEN 'critical' THEN 4
+                                    WHEN 'high' THEN 3
+                                    WHEN 'medium' THEN 2
+                                    WHEN 'low' THEN 1
+                                    ELSE 0 END)
+                            THEN ?
                             ELSE severity
                         END
                     WHERE issue_id = ?
