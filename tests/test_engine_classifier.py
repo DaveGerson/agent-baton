@@ -12,6 +12,7 @@ from agent_baton.core.engine.classifier import (
     HaikuClassifier,
     KeywordClassifier,
     TaskClassification,
+    _score_task_type,
 )
 from agent_baton.core.orchestration.registry import AgentRegistry
 from agent_baton.models.agent import AgentDefinition
@@ -781,3 +782,106 @@ class TestKeywordClassifierAgentCap:
         assert len(backend_agents) <= 1, (
             f"Multiple backend-engineer variants in roster: {backend_agents}"
         )
+
+
+# ---------------------------------------------------------------------------
+# _score_task_type — word-boundary scoring regression tests
+# ---------------------------------------------------------------------------
+
+class TestScoreTaskType:
+    """Regression tests for the shared task-type scoring function.
+
+    Uses the production keyword list from planner._TASK_TYPE_KEYWORDS
+    to verify scoring behaves correctly against real-world task summaries.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _load_keywords(self):
+        from agent_baton.core.engine.planner import _TASK_TYPE_KEYWORDS
+        self.keywords = _TASK_TYPE_KEYWORDS
+
+    # -- Correct primary classifications --
+
+    @pytest.mark.parametrize("summary,expected", [
+        ("Implement Tiers 2, 3, and 4 of the bead memory system", "new-feature"),
+        ("Add OAuth2 login support", "new-feature"),
+        ("Build and integrate the event bus pipeline", "new-feature"),
+        ("Create a REST API for user management", "new-feature"),
+        ("Develop the notification subsystem", "new-feature"),
+        ("Fix the broken login endpoint", "bug-fix"),
+        ("Fix bug where error crashes the report generator", "bug-fix"),
+        ("The auth token is broken and crashes on refresh", "bug-fix"),
+        ("Migrate the database to PostgreSQL", "migration"),
+        ("Move 3 files to docs/historical", "migration"),
+        ("Refactor the auth module for readability", "refactor"),
+        ("Simplify the payment service logic", "refactor"),
+        ("Analyze user retention data", "data-analysis"),
+        ("Build a query to compute monthly KPI metrics", "data-analysis"),
+        ("Write unit tests for the parser module", "test"),
+        ("Add integration tests for the API layer", "test"),
+        ("Document the API endpoints in the wiki", "documentation"),
+        ("Update the readme with new instructions", "documentation"),
+    ])
+    def test_correct_classification(self, summary: str, expected: str):
+        assert _score_task_type(summary, self.keywords) == expected
+
+    # -- False positive regression tests --
+
+    @pytest.mark.parametrize("summary", [
+        "Remove the deprecated method and improve the API",
+        "Deploy the latest version to staging",
+        "Add a prefix to all logger output lines",
+        "Renew the SSL certificates",
+        "Build a cleaner interface for the dashboard",
+        "Add error report generation to the logging pipeline",
+        "Implement the memory system per docs/plans/execution.md",
+    ])
+    def test_no_false_positive_away_from_new_feature(self, summary: str):
+        """These summaries should NOT be misclassified as non-feature types."""
+        result = _score_task_type(summary, self.keywords)
+        assert result == "new-feature", (
+            f"{summary!r} classified as {result!r}, expected 'new-feature'"
+        )
+
+    @pytest.mark.parametrize("summary", [
+        "Deploy the latest prefix configuration",
+        "Contest the billing statement format",
+        "The greatest improvement to date",
+    ])
+    def test_no_substring_false_positives(self, summary: str):
+        """Words containing keywords as substrings must not trigger matches."""
+        result = _score_task_type(summary, self.keywords)
+        assert result == "new-feature", (
+            f"{summary!r} should default to new-feature, got {result!r}"
+        )
+
+    # -- Scoring tie-break and dominance --
+
+    def test_higher_score_wins_over_list_order(self):
+        # "fix" (1 bug-fix hit) vs "add" + "feature" (2 new-feature hits)
+        result = _score_task_type("fix something and add a feature", self.keywords)
+        assert result == "new-feature"
+
+    def test_equal_score_prefers_earlier_list_entry(self):
+        # new-feature is first in list, so wins ties
+        result = _score_task_type("fix something and add something", self.keywords)
+        assert result == "new-feature"
+
+    def test_dominant_type_wins(self):
+        # Multiple bug-fix signals beat a single new-feature signal
+        result = _score_task_type("fix the broken crash in signup", self.keywords)
+        assert result == "bug-fix"
+
+    # -- Edge cases --
+
+    def test_empty_summary_defaults(self):
+        assert _score_task_type("", self.keywords) == "new-feature"
+
+    def test_single_char_defaults(self):
+        assert _score_task_type("x", self.keywords) == "new-feature"
+
+    def test_no_keywords_defaults(self):
+        assert _score_task_type("do something", self.keywords) == "new-feature"
+
+    def test_case_insensitive(self):
+        assert _score_task_type("FIX THE BUG", self.keywords) == "bug-fix"

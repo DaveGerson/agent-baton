@@ -203,18 +203,22 @@ class TestGenerateTaskId:
 # ---------------------------------------------------------------------------
 
 class TestInferTaskType:
+    """Task type inference uses word-boundary scoring: all types are scored
+    by keyword hit count; highest scorer wins; ties broken by list order
+    (new-feature first = safest default)."""
+
     @pytest.mark.parametrize("summary,expected", [
         ("fix the login bug", "bug-fix"),
         ("broken auth endpoint", "bug-fix"),
         ("there is an error in signup", "bug-fix"),
         ("add OAuth2 login", "new-feature"),
-        ("build a new dashboard", "data-analysis"),
+        ("build a new dashboard", "new-feature"),
         ("create the user API", "new-feature"),
         ("refactor the payment service", "refactor"),
         ("clean up helper utilities", "refactor"),
         ("reorganize the models directory", "refactor"),
         ("analyze user retention data", "data-analysis"),
-        ("generate a monthly report", "data-analysis"),
+        ("generate a monthly analytics report", "data-analysis"),
         ("write the API readme", "documentation"),
         ("update the spec document", "documentation"),
         ("migrate the database to Postgres", "migration"),
@@ -229,9 +233,20 @@ class TestInferTaskType:
     def test_case_insensitive(self, planner: IntelligentPlanner):
         assert planner._infer_task_type("FIX THE BUG") == "bug-fix"
 
-    def test_bug_fix_beats_new_feature_ordering(self, planner: IntelligentPlanner):
-        # "fix" matches bug-fix which comes before new-feature in the keyword list
+    def test_higher_score_wins_over_list_order(self, planner: IntelligentPlanner):
+        # "fix" (1 hit) vs "add" + "feature" (2 hits) — new-feature wins by score
         result = planner._infer_task_type("fix and add new feature")
+        assert result == "new-feature"
+
+    def test_equal_score_uses_list_order(self, planner: IntelligentPlanner):
+        # "fix" (1 hit, bug-fix) vs "add" (1 hit, new-feature) — new-feature
+        # wins because it's first in list order
+        result = planner._infer_task_type("fix something and add something")
+        assert result == "new-feature"
+
+    def test_bug_fix_wins_when_dominant(self, planner: IntelligentPlanner):
+        # Multiple bug-fix keywords should beat a single new-feature keyword
+        result = planner._infer_task_type("fix the broken crash in signup")
         assert result == "bug-fix"
 
     def test_new_feature_beats_documentation_when_build_verb(self, planner: IntelligentPlanner):
@@ -239,10 +254,18 @@ class TestInferTaskType:
         result = planner._infer_task_type("Build a health check API with tests and documentation")
         assert result == "new-feature"
 
-    def test_review_still_classifies_as_documentation(self, planner: IntelligentPlanner):
-        """'review the codebase' should still classify as documentation."""
-        result = planner._infer_task_type("review the codebase architecture")
-        assert result == "documentation"
+    def test_no_false_positive_from_substrings(self, planner: IntelligentPlanner):
+        """Substrings should not trigger false matches."""
+        # "prefix" should NOT match "fix", "latest" should NOT match "test"
+        result = planner._infer_task_type("Deploy the latest prefix configuration")
+        assert result == "new-feature"
+
+    def test_file_paths_dont_trigger_documentation(self, planner: IntelligentPlanner):
+        """File paths like 'docs/plans/...' should not trigger documentation type."""
+        result = planner._infer_task_type(
+            "Implement the memory system per docs/plans/execution.md"
+        )
+        assert result == "new-feature"
 
 
 # ---------------------------------------------------------------------------

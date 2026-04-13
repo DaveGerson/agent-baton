@@ -20,6 +20,7 @@ from agent_baton.core.engine.classifier import (
     TaskClassification,
     TaskClassifier,
     _MAX_AGENTS_BY_COMPLEXITY,
+    _score_task_type,
 )
 from agent_baton.core.govern.classifier import ClassificationResult, DataClassifier
 from agent_baton.core.govern.policy import PolicyEngine, PolicySet, PolicyViolation
@@ -322,20 +323,36 @@ _AGENT_DELIVERABLES: dict[str, list[str]] = {
     "subject-matter-expert": ["Domain context document"],
 }
 
-# Keyword sets for task type inference (checked in order — first match wins).
-# Priority: specific intents (bug-fix, migration, refactor) first, then
-# domain-specific (data-analysis), then new-feature (action verbs like "build"),
-# then test and documentation last (to avoid false positives from incidental
-# keywords like "tests" or "documentation" in feature descriptions).
+# Keyword sets for task type inference.
+#
+# Matching uses _score_task_type() which counts word-boundary keyword hits
+# per type and picks the highest scorer.  Ties are broken by list order
+# (earlier = higher priority).
+#
+# Ordering strategy: new-feature first (safest default when scores are
+# tied), then specific intents, then domain-specific types, then test
+# and documentation last (most prone to false positives from incidental
+# keywords in feature descriptions).
+#
+# Each keyword should be distinctive enough that a word-boundary match
+# is a genuine signal for the task type.  Avoid overly generic words
+# (e.g. "error" alone is not a strong bug-fix signal — "error handling"
+# is often a feature; "dashboard" alone is not analysis — it could be
+# a UI feature).
 _TASK_TYPE_KEYWORDS: list[tuple[str, list[str]]] = [
-    ("bug-fix", ["fix", "bug", "broken", "error", "crash", "traceback", "exception", "patch"]),
+    ("new-feature", ["add", "build", "create", "implement", "feature", "develop",
+                      "introduce", "wire", "integrate", "extend"]),
+    ("bug-fix", ["fix", "bug", "broken", "error", "crash", "traceback", "exception",
+                  "patch", "regression", "fails", "failing"]),
     ("migration", ["migrate", "migration", "upgrade", "move"]),
-    ("refactor", ["refactor", "clean", "reorganize", "restructure", "rename", "cleanup"]),
-    ("data-analysis", ["analyze", "analyse", "report", "dashboard", "query", "insight", "metric"]),
-    ("new-feature", ["add", "build", "create", "implement", "new", "feature", "develop"]),
-    ("test", ["test", "tests", "testing", "coverage", "e2e", "unit", "integration"]),
-    ("documentation", ["doc", "docs", "readme", "spec", "adr", "document", "wiki",
-                        "review", "summarize", "explore", "architecture", "overview"]),
+    ("refactor", ["refactor", "clean up", "reorganize", "restructure", "rename",
+                   "cleanup", "simplify", "decouple", "extract"]),
+    ("data-analysis", ["analyze", "analyse", "analytics", "report", "dashboard",
+                        "query", "insight", "metric", "kpi", "data exploration"]),
+    ("test", ["test suite", "tests for", "testing", "test coverage", "e2e test",
+              "unit test", "integration test", "playwright", "pytest"]),
+    ("documentation", ["document", "documentation", "readme", "adr", "spec",
+                        "wiki", "summarize", "write docs"]),
 ]
 
 
@@ -1073,13 +1090,11 @@ class IntelligentPlanner:
         Returns one of: 'new-feature', 'bug-fix', 'refactor', 'data-analysis',
         'documentation', 'migration', 'test'.  Falls back to 'new-feature' when
         no keywords match.
+
+        Delegates to :func:`_score_task_type` which uses word-boundary
+        matching and multi-match scoring.
         """
-        lower = summary.lower()
-        for task_type, keywords in _TASK_TYPE_KEYWORDS:
-            for kw in keywords:
-                if kw in lower:
-                    return task_type
-        return "new-feature"
+        return _score_task_type(summary, _TASK_TYPE_KEYWORDS)
 
     # ------------------------------------------------------------------
     # Private helpers — compound task decomposition

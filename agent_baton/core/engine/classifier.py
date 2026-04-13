@@ -128,6 +128,44 @@ _PRIMARY_IMPLEMENTER: dict[str, str] = {
 
 
 # ---------------------------------------------------------------------------
+# Shared task-type inference — word-boundary scoring
+# ---------------------------------------------------------------------------
+
+def _score_task_type(
+    summary: str,
+    task_type_keywords: list[tuple[str, list[str]]],
+) -> str:
+    """Infer task type by scoring word-boundary keyword matches.
+
+    Each task type is scored by how many of its keywords appear as whole
+    words in *summary*.  The type with the most hits wins; ties are broken
+    by list order (earlier = higher priority).  Returns ``"new-feature"``
+    when no keyword matches at all.
+
+    Word-boundary matching prevents false positives like "fix" matching
+    inside "prefix" or "test" inside "latest".
+    """
+    lower = summary.lower()
+    best_type = "new-feature"
+    best_score = 0
+    for task_type, keywords in task_type_keywords:
+        score = 0
+        for kw in keywords:
+            # Multi-word keywords use substring matching (specific enough).
+            # Single-word keywords require word boundaries.
+            if " " in kw:
+                if kw in lower:
+                    score += 1
+            else:
+                if re.search(r"\b" + re.escape(kw) + r"\b", lower):
+                    score += 1
+        if score > best_score:
+            best_score = score
+            best_type = task_type
+    return best_type
+
+
+# ---------------------------------------------------------------------------
 # KeywordClassifier
 # ---------------------------------------------------------------------------
 
@@ -167,17 +205,12 @@ class KeywordClassifier:
             source="keyword-fallback",
         )
 
+    @staticmethod
     def _infer_task_type(
-        self,
         summary: str,
         task_type_keywords: list[tuple[str, list[str]]],
     ) -> str:
-        lower = summary.lower()
-        for task_type, keywords in task_type_keywords:
-            for kw in keywords:
-                if kw in lower:
-                    return task_type
-        return "new-feature"
+        return _score_task_type(summary, task_type_keywords)
 
     def _infer_complexity(self, summary: str) -> str:
         heavy_signals = 0
