@@ -138,6 +138,15 @@ class ImprovementLoop:
         # Detect anomalies
         anomalies = self._triggers.detect_anomalies()
 
+        # Run learning engine analysis (best-effort, non-blocking).
+        # Reads open LearningIssues, marks proposed candidates, feeds into
+        # the recommendation pipeline via confidence scoring.
+        try:
+            from agent_baton.core.learn.engine import LearningEngine
+            LearningEngine().analyze()
+        except Exception as exc:
+            _log.debug("Learning engine analysis skipped: %s", exc)
+
         # Generate recommendations
         recommendations = self._recommender.analyze()
 

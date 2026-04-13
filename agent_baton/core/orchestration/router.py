@@ -229,6 +229,28 @@ class AgentRouter:
             key = (stack.language, None)
             flavors = FLAVOR_MAP.get(key, {})
 
+        # Check LearnedOverrides for project-specific flavor corrections that
+        # should take precedence over the hardcoded FLAVOR_MAP.
+        try:
+            from agent_baton.core.learn.overrides import LearnedOverrides
+            _overrides = LearnedOverrides()
+            _flavor_overrides = _overrides.get_flavor_overrides()
+            if _flavor_overrides:
+                # Build composite stack key the same way the engine does
+                _stack_key = (
+                    f"{stack.language}/{stack.framework}"
+                    if stack.framework
+                    else stack.language
+                )
+                _stack_entry = _flavor_overrides.get(_stack_key, {})
+                if base_name in _stack_entry:
+                    _learned_flavor = _stack_entry[base_name]
+                    _candidate = f"{base_name}--{_learned_flavor}"
+                    if self._registry.get(_candidate):
+                        return _candidate
+        except Exception:
+            pass  # Never block routing on a learning failure
+
         suggested_flavor = flavors.get(base_name)
         if suggested_flavor:
             candidate = f"{base_name}--{suggested_flavor}"

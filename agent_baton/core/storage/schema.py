@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -64,6 +64,37 @@ ALTER TABLE executions ADD COLUMN resolved_decisions   TEXT NOT NULL DEFAULT '[]
 -- Active data loss fix: StepResult.deviations was not persisted to SQLite.
 
 ALTER TABLE step_results ADD COLUMN deviations TEXT NOT NULL DEFAULT '[]';
+""",
+    5: """
+-- v5: add learning_issues table for the learning automation system.
+-- Applied to both project and central databases via ConnectionManager._run_migrations().
+-- Central version adds project_id prefix column.
+
+CREATE TABLE IF NOT EXISTS learning_issues (
+    issue_id          TEXT PRIMARY KEY,
+    issue_type        TEXT NOT NULL,
+    severity          TEXT NOT NULL DEFAULT 'medium',
+    status            TEXT NOT NULL DEFAULT 'open',
+    title             TEXT NOT NULL,
+    target            TEXT NOT NULL,
+    evidence          TEXT NOT NULL DEFAULT '[]',
+    first_seen        TEXT NOT NULL,
+    last_seen         TEXT NOT NULL,
+    occurrence_count  INTEGER NOT NULL DEFAULT 1,
+    proposed_fix      TEXT,
+    resolution        TEXT,
+    resolution_type   TEXT,
+    experiment_id     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_learning_issues_type
+    ON learning_issues(issue_type);
+CREATE INDEX IF NOT EXISTS idx_learning_issues_status
+    ON learning_issues(status);
+CREATE INDEX IF NOT EXISTS idx_learning_issues_target
+    ON learning_issues(target);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_learning_issues_type_target_open
+    ON learning_issues(issue_type, target)
+    WHERE status NOT IN ('resolved', 'wontfix');
 """,
     4: """
 -- v4: add bead memory tables.
@@ -497,6 +528,33 @@ CREATE TABLE IF NOT EXISTS active_task (
     id       INTEGER PRIMARY KEY CHECK (id = 1),
     task_id  TEXT NOT NULL
 );
+
+-- LEARNING_ISSUES (learning automation system)
+CREATE TABLE IF NOT EXISTS learning_issues (
+    issue_id          TEXT PRIMARY KEY,
+    issue_type        TEXT NOT NULL,
+    severity          TEXT NOT NULL DEFAULT 'medium',
+    status            TEXT NOT NULL DEFAULT 'open',
+    title             TEXT NOT NULL,
+    target            TEXT NOT NULL,
+    evidence          TEXT NOT NULL DEFAULT '[]',
+    first_seen        TEXT NOT NULL,
+    last_seen         TEXT NOT NULL,
+    occurrence_count  INTEGER NOT NULL DEFAULT 1,
+    proposed_fix      TEXT,
+    resolution        TEXT,
+    resolution_type   TEXT,
+    experiment_id     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_learning_issues_type
+    ON learning_issues(issue_type);
+CREATE INDEX IF NOT EXISTS idx_learning_issues_status
+    ON learning_issues(status);
+CREATE INDEX IF NOT EXISTS idx_learning_issues_target
+    ON learning_issues(target);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_learning_issues_type_target_open
+    ON learning_issues(issue_type, target)
+    WHERE status NOT IN ('resolved', 'wontfix');
 
 -- BEADS (Inspired by Steve Yegge's Beads agent memory system, beads-ai/beads-cli)
 -- Discrete units of structured memory produced by agents during execution.
@@ -1198,6 +1256,32 @@ CREATE TABLE IF NOT EXISTS bead_tags (
     PRIMARY KEY (project_id, bead_id, tag)
 );
 CREATE INDEX IF NOT EXISTS idx_central_bead_tags_tag ON bead_tags(tag);
+
+-- LEARNING_ISSUES (mirror — learning automation system)
+CREATE TABLE IF NOT EXISTS learning_issues (
+    project_id        TEXT NOT NULL,
+    issue_id          TEXT NOT NULL,
+    issue_type        TEXT NOT NULL,
+    severity          TEXT NOT NULL DEFAULT 'medium',
+    status            TEXT NOT NULL DEFAULT 'open',
+    title             TEXT NOT NULL,
+    target            TEXT NOT NULL,
+    evidence          TEXT NOT NULL DEFAULT '[]',
+    first_seen        TEXT NOT NULL,
+    last_seen         TEXT NOT NULL,
+    occurrence_count  INTEGER NOT NULL DEFAULT 1,
+    proposed_fix      TEXT,
+    resolution        TEXT,
+    resolution_type   TEXT,
+    experiment_id     TEXT,
+    PRIMARY KEY (project_id, issue_id)
+);
+CREATE INDEX IF NOT EXISTS idx_central_learning_issues_type
+    ON learning_issues(issue_type);
+CREATE INDEX IF NOT EXISTS idx_central_learning_issues_status
+    ON learning_issues(status);
+CREATE INDEX IF NOT EXISTS idx_central_learning_issues_project
+    ON learning_issues(project_id);
 
 -- ================================================================
 -- Cross-project analytics views

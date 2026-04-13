@@ -134,6 +134,8 @@ SYNCABLE_TABLES: list[SyncTableSpec] = [
     # beads must come before bead_tags (FK dependency order).
     SyncTableSpec("beads", ["bead_id"]),
     SyncTableSpec("bead_tags", ["bead_id", "tag"]),
+    # -- Learning automation tables (schema v5) ----------------------------
+    SyncTableSpec("learning_issues", ["issue_id"]),
 ]
 
 # Fast lookup by name

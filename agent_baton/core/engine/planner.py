@@ -1570,6 +1570,19 @@ class IntelligentPlanner:
         language = stack.language if stack else None
         commands = _STACK_GATE_COMMANDS.get(language, _DEFAULT_GATE_COMMANDS)
 
+        # Merge LearnedOverrides gate command corrections (best-effort).
+        # Overrides take precedence over the stack-based defaults when present.
+        if language:
+            try:
+                from agent_baton.core.learn.overrides import LearnedOverrides
+                _gate_overrides = LearnedOverrides().get_gate_overrides()
+                _lang_gates = _gate_overrides.get(language, {})
+                if _lang_gates:
+                    commands = dict(commands)  # copy so we don't mutate the module-level dict
+                    commands.update(_lang_gates)
+            except Exception:
+                pass  # Never block planning on a learning failure
+
         if name_lower == "test":
             return PlanGate(
                 gate_type="test",
@@ -1694,7 +1707,16 @@ class IntelligentPlanner:
         Returns:
             Filtered agent list (same order, routing notes updated).
         """
-        to_drop = feedback.agents_to_drop()
+        to_drop = set(feedback.agents_to_drop())
+
+        # Merge learned agent drops from LearnedOverrides (best-effort).
+        try:
+            from agent_baton.core.learn.overrides import LearnedOverrides
+            _learned_drops = LearnedOverrides().get_agent_drops()
+            to_drop.update(_learned_drops)
+        except Exception:
+            pass  # Never block planning on a learning failure
+
         to_prefer = feedback.agents_to_prefer()
 
         if to_drop:
