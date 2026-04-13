@@ -82,6 +82,7 @@ class ImprovementLoop:
         scorer: PerformanceScorer | None = None,
         config: ImprovementConfig | None = None,
         improvements_dir: Path | None = None,
+        bead_store=None,
     ) -> None:
         self._dir = (improvements_dir or _DEFAULT_DIR).resolve()
         self._reports_dir = self._dir / "reports"
@@ -93,6 +94,7 @@ class ImprovementLoop:
         self._rollbacks = rollback_manager or RollbackManager(improvements_dir=self._dir)
         self._scorer = scorer or PerformanceScorer()
         self._config = config or ImprovementConfig()
+        self._bead_store = bead_store  # F12: passed to scorer for bead quality metrics
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -311,7 +313,7 @@ class ImprovementLoop:
     def _current_metric_value(self, target: str, metric: str) -> float:
         """Read the current value of a metric for a target."""
         try:
-            sc = self._scorer.score_agent(target)
+            sc = self._scorer.score_agent(target, bead_store=self._bead_store)
             return float(getattr(sc, metric, 0.0) or 0.0)
         except Exception:
             return 0.0
