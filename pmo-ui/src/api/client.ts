@@ -14,6 +14,12 @@ import type {
   AdoSearchResponse,
   ExecuteCardBody,
   ExecuteCardResponse,
+  ExternalItem,
+  ExternalMapping,
+  PendingGate,
+  GateApproveBody,
+  GateRejectBody,
+  GateActionResponse,
 } from './types';
 
 const BASE = '/api/v1/pmo';
@@ -105,7 +111,37 @@ export const api = {
   searchAdo(q: string): Promise<AdoSearchResponse> {
     return request(`/ado/search?q=${encodeURIComponent(q)}`);
   },
+
+  // External items (adapter data surfaced in PMO dashboard)
+  getExternalItems(source?: string, projectId?: string, status?: string): Promise<ExternalItem[]> {
+    const params = new URLSearchParams();
+    if (source)    params.set('source', source);
+    if (projectId) params.set('project_id', projectId);
+    if (status)    params.set('status', status);
+    const qs = params.toString();
+    return request(`/external-items${qs ? `?${qs}` : ''}`);
+  },
+  getExternalItemMappings(itemId: number): Promise<ExternalMapping[]> {
+    return request(`/external-items/${itemId}/mappings`);
+  },
+
+  // Gate approval
+  listPendingGates(): Promise<PendingGate[]> {
+    return request('/gates/pending');
+  },
+  approveGate(taskId: string, body: GateApproveBody): Promise<GateActionResponse> {
+    return request(`/gates/${encodeURIComponent(taskId)}/approve`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  },
+  rejectGate(taskId: string, body: GateRejectBody): Promise<GateActionResponse> {
+    return request(`/gates/${encodeURIComponent(taskId)}/reject`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  },
 };
 
 // Re-export types for convenience
-export type { PmoCard, PmoProject, ProgramHealth, PmoSignal, BoardResponse, PlanResponse, ForgePlanBody, ForgePlanResponse, ForgeApproveBody, ForgeApproveResponse, InterviewResponse, RegenerateBody, AdoSearchResponse, ExecuteCardBody, ExecuteCardResponse };
+export type { PmoCard, PmoProject, ProgramHealth, PmoSignal, BoardResponse, PlanResponse, ForgePlanBody, ForgePlanResponse, ForgeApproveBody, ForgeApproveResponse, InterviewResponse, RegenerateBody, AdoSearchResponse, ExecuteCardBody, ExecuteCardResponse, ExternalItem, ExternalMapping, PendingGate, GateApproveBody, GateRejectBody, GateActionResponse };

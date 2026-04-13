@@ -6,6 +6,7 @@ import { agentDisplayName } from '../utils/agent-names';
 import { useToast } from '../contexts/ToastContext';
 import { PlanPreview } from './PlanPreview';
 import { ExecutionProgress } from './ExecutionProgress';
+import { GateApprovalPanel } from './GateApprovalPanel';
 
 interface KanbanCardProps {
   card: PmoCard;
@@ -137,9 +138,21 @@ export function KanbanCard({ card, columnColor, onForge, onEditPlan, onMutateCar
   const { showPlan, planData, planLoading, handleViewPlan } = usePlanPreview(card.card_id);
   const { execLoading, execResult, handleExecute, dismissExecResult } = useExecuteCard(card.card_id, toast, onMutateCard);
   const [showProgress, setShowProgress] = useState(false);
+  const [gateResolved, setGateResolved] = useState(false);
   const isHuman = card.column === 'awaiting_human';
   const isQueued = card.column === 'queued';
   const isActive = card.column === 'executing' || card.column === 'validating' || card.column === 'awaiting_human';
+
+  function handleGateResolved(result: 'approve' | 'reject') {
+    setGateResolved(true);
+    // Optimistically update the column so the card moves off awaiting_human.
+    if (onMutateCard) {
+      onMutateCard(card.card_id, c => ({
+        ...c,
+        column: result === 'approve' ? 'executing' : 'executing',
+      }));
+    }
+  }
   const priorityColor = PRIORITY_COLOR[card.priority] ?? T.text2;
 
   const borderColor = isHuman ? T.orange + '55' : expanded ? columnColor + '55' : T.border;
@@ -417,6 +430,11 @@ export function KanbanCard({ card, columnColor, onForge, onEditPlan, onMutateCar
               {showPlan ? 'Hide Plan' : 'View Plan'}
             </button>
           </div>
+
+          {/* Gate approval panel — only visible when card is awaiting human input */}
+          {isHuman && !gateResolved && (
+            <GateApprovalPanel card={card} onResolved={handleGateResolved} />
+          )}
 
           {/* Execution result */}
           {execResult && (

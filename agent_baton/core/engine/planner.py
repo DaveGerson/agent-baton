@@ -2222,4 +2222,69 @@ class IntelligentPlanner:
                 f"({budget_pct:.0f}% of {plan.budget_tier} budget)"
             )
 
+        # External items — only when adapters are connected (central.db present
+        # and external_mappings has rows for this project).  Silently skipped
+        # when central.db is absent or has no relevant rows.
+        ext_annotations = self._fetch_external_annotations(plan.task_summary)
+        if ext_annotations:
+            lines.append("Relates to: " + ", ".join(ext_annotations))
+
         return "\n".join(lines)
+
+    def _fetch_external_annotations(self, task_summary: str) -> list[str]:
+        """Return a short list of matching external item references for the plan.
+
+        Checks ``~/.baton/central.db`` for external items whose title or
+        external_id contains any word from *task_summary* (case-insensitive,
+        words of 4+ characters only).  Returns at most 5 annotations in the
+        form ``"SOURCE-ID (title)"`` so the shared_context stays compact.
+
+        Returns an empty list whenever central.db is absent, the
+        external_mappings table is empty, or no items match.  Never raises.
+        """
+        try:
+            from pathlib import Path
+            central_db = Path.home() / ".baton" / "central.db"
+            if not central_db.exists():
+                return []
+
+            from agent_baton.core.storage.central import CentralStore
+            store = CentralStore(central_db)
+            try:
+                # Quick guard: skip if no mappings exist at all.
+                guard = store.query(
+                    "SELECT COUNT(*) AS n FROM external_mappings"
+                )
+                if not guard or guard[0].get("n", 0) == 0:
+                    return []
+
+                # Simple keyword match — words of 4+ chars from the task summary.
+                words = [
+                    w.lower()
+                    for w in task_summary.split()
+                    if len(w) >= 4
+                ]
+                if not words:
+                    return []
+
+                rows = store.query(
+                    "SELECT external_id, title FROM external_items LIMIT 200"
+                )
+                matches: list[str] = []
+                for row in rows:
+                    combined = (
+                        (row.get("title") or "") + " " +
+                        (row.get("external_id") or "")
+                    ).lower()
+                    if any(w in combined for w in words):
+                        title = (row.get("title") or "").strip()
+                        ext_id = row.get("external_id", "")
+                        label = f"{ext_id} ({title})" if title else ext_id
+                        matches.append(label)
+                        if len(matches) >= 5:
+                            break
+                return matches
+            finally:
+                store.close()
+        except Exception:
+            return []

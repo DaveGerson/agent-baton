@@ -12,6 +12,9 @@ GET  /pmo/events                        — SSE stream of board-relevant events
 POST /pmo/forge/plan                    — Create a plan via headless Claude
 POST /pmo/forge/approve                 — Save an approved plan to a project
 POST /pmo/execute/{card_id}             — Launch headless execution for a card
+GET  /pmo/gates/pending                 — List executions awaiting gate approval
+POST /pmo/gates/{task_id}/approve       — Approve a pending gate
+POST /pmo/gates/{task_id}/reject        — Reject a pending gate
 GET  /pmo/signals                       — List all open signals
 POST /pmo/signals                       — Create a signal
 POST /pmo/signals/batch/resolve         — Resolve multiple signals in one call
@@ -27,7 +30,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
-from agent_baton.api.deps import get_bus, get_forge_session, get_pmo_scanner, get_pmo_store
+from agent_baton.api.deps import get_bus, get_central_store, get_forge_session, get_pmo_scanner, get_pmo_store
 from agent_baton.core.events.bus import EventBus
 from agent_baton.api.models.requests import (
     ApproveForgeRequest,
@@ -36,6 +39,8 @@ from agent_baton.api.models.requests import (
     CreateSignalRequest,
     ExecuteCardRequest,
     ForgeSignalRequest,
+    GateApproveRequest,
+    GateRejectRequest,
     InterviewRequest,
     RegenerateRequest,
     RegisterProjectRequest,
@@ -44,9 +49,13 @@ from agent_baton.api.models.responses import (
     AdoSearchResponse,
     AdoWorkItemResponse,
     ExecuteCardResponse,
+    ExternalItemResponse,
+    ExternalMappingResponse,
     ForgeApproveResponse,
+    GateActionResponse,
     InterviewQuestionResponse,
     InterviewResponse,
+    PendingGateResponse,
     PmoBoardResponse,
     PmoCardDetailResponse,
     PmoCardResponse,
@@ -431,6 +440,8 @@ _PMO_BOARD_TOPICS = frozenset(
         "phase.completed",
         "approval.required",
         "approval.resolved",
+        "gate.approved",
+        "gate.rejected",
     ]
 )
 
@@ -920,6 +931,337 @@ async def ado_search(q: str = "") -> AdoSearchResponse:
 
 
 # ---------------------------------------------------------------------------
+# Gate approval (human-in-the-loop)
+# ---------------------------------------------------------------------------
+
+
+def _resolve_project_path(card: "PmoCard", store: PmoStore) -> "Path | None":  # type: ignore[name-defined]
+    """Return the absolute project root path for *card*, or None."""
+    from pathlib import Path
+
+    project = store.get_project(card.project_id)
+    if project is None:
+        # card.project_id might already be an absolute path (file-backend projects).
+        candidate = Path(card.project_id)
+        return candidate if candidate.is_dir() else None
+    return Path(project.path)
+
+
+def _locate_awaiting_card(
+    task_id: str,
+    scanner: PmoScanner,
+    store: PmoStore,
+) -> tuple:
+    """Shared guard: find a card that is in ``awaiting_human`` state.
+
+    Returns ``(card, project_root_path)``.
+
+    Raises:
+        HTTPException 404: Card not found.
+        HTTPException 409: Card found but not in ``awaiting_human`` column.
+        HTTPException 404: Project path cannot be resolved.
+    """
+    from pathlib import Path
+
+    try:
+        card, _ = scanner.find_card(task_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Task '{task_id}' not found.",
+        )
+
+    if card.column != "awaiting_human":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Task '{task_id}' is in column '{card.column}' and is not awaiting approval. "
+                "Only tasks in 'awaiting_human' can be approved or rejected."
+            ),
+        )
+
+    project_root = _resolve_project_path(card, store)
+    if project_root is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Project path for task '{task_id}' could not be resolved.",
+        )
+
+    return card, project_root
+
+
+@router.get(
+    "/pmo/gates/pending",
+    response_model=list[PendingGateResponse],
+    summary="List executions awaiting gate approval",
+    tags=["pmo"],
+)
+async def list_pending_gates(
+    scanner: PmoScanner = Depends(get_pmo_scanner),
+    store: PmoStore = Depends(get_pmo_store),
+) -> list[PendingGateResponse]:
+    """Return all executions currently paused and waiting for gate approval.
+
+    GET /api/v1/pmo/gates/pending
+
+    Scans all registered projects for cards in the ``awaiting_human``
+    column and loads their execution state to extract the phase context,
+    approval options, and review summary.  The ``approval_context`` field
+    contains the markdown summary built by the engine during the
+    ``APPROVAL`` action so the reviewer can make an informed decision
+    from the PMO UI.
+
+    Args:
+        scanner: Injected ``PmoScanner`` singleton.
+        store: Injected PMO store singleton (used to resolve project paths).
+
+    Returns:
+        A list of ``PendingGateResponse`` objects, one per paused execution.
+    """
+    from agent_baton.core.storage import detect_backend, get_project_storage
+    from agent_baton.core.engine.executor import ExecutionEngine
+    from agent_baton.core.events.bus import EventBus as _LocalBus
+
+    all_cards = scanner.scan_all()
+    pending = [c for c in all_cards if c.column == "awaiting_human"]
+
+    results: list[PendingGateResponse] = []
+
+    for card in pending:
+        project_root = _resolve_project_path(card, store)
+        if project_root is None:
+            results.append(
+                PendingGateResponse(
+                    task_id=card.card_id,
+                    project_id=card.project_id,
+                    phase_id=0,
+                    phase_name=card.current_phase,
+                    task_summary=card.title,
+                    current_phase_name=card.current_phase,
+                )
+            )
+            continue
+
+        context_root = project_root / ".claude" / "team-context"
+        storage = None
+        try:
+            backend = detect_backend(context_root)
+            storage = get_project_storage(context_root, backend=backend)
+            state = storage.load_execution(card.card_id)
+        except Exception:
+            state = None
+
+        if state is None:
+            results.append(
+                PendingGateResponse(
+                    task_id=card.card_id,
+                    project_id=card.project_id,
+                    phase_id=0,
+                    phase_name=card.current_phase,
+                    task_summary=card.title,
+                    current_phase_name=card.current_phase,
+                )
+            )
+            continue
+
+        # Use the engine to produce the same APPROVAL action the CLI would emit.
+        try:
+            engine = ExecutionEngine(
+                team_context_root=context_root,
+                bus=_LocalBus(),
+                task_id=card.card_id,
+                storage=storage,
+            )
+            action = engine.next_action()
+            action_dict = action.to_dict()
+        except Exception:
+            action_dict = {}
+
+        phase_obj = (
+            state.plan.phases[state.current_phase]
+            if state.current_phase < len(state.plan.phases)
+            else None
+        )
+        phase_id = phase_obj.phase_id if phase_obj else 0
+        phase_name = phase_obj.name if phase_obj else card.current_phase
+
+        results.append(
+            PendingGateResponse(
+                task_id=card.card_id,
+                project_id=card.project_id,
+                phase_id=action_dict.get("phase_id", phase_id),
+                phase_name=phase_name,
+                approval_context=action_dict.get("approval_context", ""),
+                approval_options=action_dict.get(
+                    "approval_options",
+                    ["approve", "reject", "approve-with-feedback"],
+                ),
+                task_summary=card.title,
+                current_phase_name=phase_name,
+            )
+        )
+
+    return results
+
+
+@router.post(
+    "/pmo/gates/{task_id}/approve",
+    response_model=GateActionResponse,
+    summary="Approve a pending gate",
+    tags=["pmo"],
+)
+async def approve_gate(
+    task_id: str,
+    req: GateApproveRequest,
+    scanner: PmoScanner = Depends(get_pmo_scanner),
+    store: PmoStore = Depends(get_pmo_store),
+    bus: EventBus = Depends(get_bus),
+) -> GateActionResponse:
+    """Record a human approval decision for a paused execution.
+
+    POST /api/v1/pmo/gates/{task_id}/approve
+
+    Equivalent to running ``baton execute approve --phase-id N --result approve``
+    from the CLI.  After recording the decision the execution engine advances
+    to the next phase and an SSE ``gate.approved`` event is published so the
+    PMO board updates in real time.
+
+    Args:
+        task_id: The task ID of the paused execution (URL path parameter).
+        req: Validated request body with ``phase_id`` and optional ``notes``.
+        scanner: Injected ``PmoScanner`` singleton.
+        store: Injected PMO store singleton (used to resolve the project path).
+        bus: The shared ``EventBus`` (for SSE event emission).
+
+    Returns:
+        ``GateActionResponse`` confirming the approval was recorded.
+
+    Raises:
+        HTTPException 404: If the task cannot be found.
+        HTTPException 409: If the task is not in ``awaiting_human`` state.
+        HTTPException 500: If the engine fails to record the approval.
+    """
+    from agent_baton.core.storage import detect_backend, get_project_storage
+    from agent_baton.core.engine.executor import ExecutionEngine
+    from agent_baton.models.events import Event
+
+    card, project_root = _locate_awaiting_card(task_id, scanner, store)
+
+    context_root = project_root / ".claude" / "team-context"
+    try:
+        backend = detect_backend(context_root)
+        storage = get_project_storage(context_root, backend=backend)
+        engine = ExecutionEngine(
+            team_context_root=context_root,
+            bus=bus,
+            task_id=task_id,
+            storage=storage,
+        )
+        engine.record_approval_result(
+            phase_id=req.phase_id,
+            result="approve",
+            feedback=req.notes or "",
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    # Emit SSE event so the PMO board refreshes without polling.
+    try:
+        bus.publish(Event.create(
+            topic="gate.approved",
+            task_id=task_id,
+            payload={"phase_id": req.phase_id, "result": "approve"},
+        ))
+    except Exception:
+        pass  # SSE emission is best-effort; never block the response.
+
+    return GateActionResponse(
+        task_id=task_id,
+        phase_id=req.phase_id,
+        result="approve",
+        recorded=True,
+    )
+
+
+@router.post(
+    "/pmo/gates/{task_id}/reject",
+    response_model=GateActionResponse,
+    summary="Reject a pending gate",
+    tags=["pmo"],
+)
+async def reject_gate(
+    task_id: str,
+    req: GateRejectRequest,
+    scanner: PmoScanner = Depends(get_pmo_scanner),
+    store: PmoStore = Depends(get_pmo_store),
+    bus: EventBus = Depends(get_bus),
+) -> GateActionResponse:
+    """Record a human rejection decision for a paused execution.
+
+    POST /api/v1/pmo/gates/{task_id}/reject
+
+    Equivalent to running ``baton execute approve --phase-id N --result reject``
+    from the CLI.  The execution is marked as failed and an SSE
+    ``gate.rejected`` event is published.
+
+    Args:
+        task_id: The task ID of the paused execution (URL path parameter).
+        req: Validated request body with ``phase_id`` and required ``reason``.
+        scanner: Injected ``PmoScanner`` singleton.
+        store: Injected PMO store singleton (used to resolve the project path).
+        bus: The shared ``EventBus`` (for SSE event emission).
+
+    Returns:
+        ``GateActionResponse`` confirming the rejection was recorded.
+
+    Raises:
+        HTTPException 404: If the task cannot be found.
+        HTTPException 409: If the task is not in ``awaiting_human`` state.
+        HTTPException 500: If the engine fails to record the rejection.
+    """
+    from agent_baton.core.storage import detect_backend, get_project_storage
+    from agent_baton.core.engine.executor import ExecutionEngine
+    from agent_baton.models.events import Event
+
+    card, project_root = _locate_awaiting_card(task_id, scanner, store)
+
+    context_root = project_root / ".claude" / "team-context"
+    try:
+        backend = detect_backend(context_root)
+        storage = get_project_storage(context_root, backend=backend)
+        engine = ExecutionEngine(
+            team_context_root=context_root,
+            bus=bus,
+            task_id=task_id,
+            storage=storage,
+        )
+        engine.record_approval_result(
+            phase_id=req.phase_id,
+            result="reject",
+            feedback=req.reason,
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    # Emit SSE event so the PMO board refreshes.
+    try:
+        bus.publish(Event.create(
+            topic="gate.rejected",
+            task_id=task_id,
+            payload={"phase_id": req.phase_id, "result": "reject", "reason": req.reason},
+        ))
+    except Exception:
+        pass
+
+    return GateActionResponse(
+        task_id=task_id,
+        phase_id=req.phase_id,
+        result="reject",
+        recorded=True,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Signals
 # ---------------------------------------------------------------------------
 
@@ -1118,6 +1460,245 @@ async def forge_signal(
         "plan_id": plan.task_id,
         "path": str(saved_path),
     }
+
+
+# ---------------------------------------------------------------------------
+# External items — adapter data surfaced in the PMO dashboard
+# ---------------------------------------------------------------------------
+
+_VALID_SOURCE_TYPES = frozenset(["ado", "github", "jira", "linear"])
+
+
+@router.get("/pmo/external-items", response_model=list[ExternalItemResponse])
+async def list_external_items(
+    source: str | None = None,
+    project_id: str | None = None,
+    status: str | None = None,
+    central: object = Depends(get_central_store),
+) -> list[ExternalItemResponse]:
+    """List external work items from central.db.
+
+    GET /api/v1/pmo/external-items
+
+    Returns items from the ``external_items`` table joined with
+    ``external_sources`` so the ``source_type`` field is populated.
+    All filters are optional; omitting them returns all items.
+
+    Query parameters:
+        source:     Filter by source type: ``ado``, ``github``,
+                    ``jira``, or ``linear``.
+        project_id: Filter to items mapped to this baton project ID
+                    (requires a matching row in ``external_mappings``).
+        status:     Filter by workflow state string (exact match).
+
+    Returns:
+        A list of ``ExternalItemResponse`` objects (empty when no
+        adapters are configured or no items have been synced).
+
+    Raises:
+        HTTPException 400: If ``source`` is not a recognised type.
+    """
+    from agent_baton.core.storage.central import CentralStore
+
+    if source is not None and source not in _VALID_SOURCE_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unknown source type '{source}'. "
+                f"Valid values: {', '.join(sorted(_VALID_SOURCE_TYPES))}."
+            ),
+        )
+
+    store: CentralStore = central  # type: ignore[assignment]
+
+    # Build the WHERE clauses incrementally.
+    conditions: list[str] = []
+    params: list[object] = []
+
+    if source is not None:
+        conditions.append("es.source_type = ?")
+        params.append(source)
+
+    if status is not None:
+        conditions.append("ei.state = ?")
+        params.append(status)
+
+    if project_id is not None:
+        # Only items that have at least one mapping to this project.
+        conditions.append(
+            "EXISTS ("
+            "  SELECT 1 FROM external_mappings em"
+            "  WHERE em.source_id = ei.source_id"
+            "    AND em.external_id = ei.external_id"
+            "    AND em.project_id = ?"
+            ")"
+        )
+        params.append(project_id)
+
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    sql = f"""
+        SELECT
+            ei.id,
+            ei.source_id,
+            ei.external_id,
+            ei.item_type,
+            ei.title,
+            ei.description,
+            ei.state,
+            ei.assigned_to,
+            ei.priority,
+            ei.tags,
+            ei.url,
+            ei.updated_at,
+            COALESCE(es.source_type, '') AS source_type
+        FROM external_items ei
+        LEFT JOIN external_sources es ON es.source_id = ei.source_id
+        {where}
+        ORDER BY ei.updated_at DESC
+    """
+
+    try:
+        rows = store.query(sql, tuple(params))
+    except Exception:
+        # central.db may not exist or may have no external tables yet.
+        return []
+
+    results: list[ExternalItemResponse] = []
+    for row in rows:
+        import json as _json
+        try:
+            tags = _json.loads(row.get("tags") or "[]")
+            if not isinstance(tags, list):
+                tags = []
+        except (ValueError, TypeError):
+            tags = []
+        results.append(
+            ExternalItemResponse(
+                id=row["id"],
+                source_id=row["source_id"],
+                external_id=row["external_id"],
+                item_type=row.get("item_type", ""),
+                title=row.get("title", ""),
+                description=row.get("description", ""),
+                state=row.get("state", ""),
+                assigned_to=row.get("assigned_to", ""),
+                priority=str(row.get("priority", "")),
+                tags=tags,
+                url=row.get("url", ""),
+                updated_at=row.get("updated_at", ""),
+                source_type=row.get("source_type", ""),
+            )
+        )
+    return results
+
+
+@router.get(
+    "/pmo/external-items/{item_id}/mappings",
+    response_model=list[ExternalMappingResponse],
+)
+async def get_external_item_mappings(
+    item_id: int,
+    central: object = Depends(get_central_store),
+) -> list[ExternalMappingResponse]:
+    """Return all plan/execution mappings for an external item.
+
+    GET /api/v1/pmo/external-items/{item_id}/mappings
+
+    Looks up all rows in ``external_mappings`` for the item identified
+    by its ``external_items.id`` primary key, joining back to
+    ``external_items`` and ``external_sources`` so the caller receives
+    full item details in a single request.
+
+    Args:
+        item_id: The ``external_items.id`` row PK (URL path parameter).
+        central: Injected ``CentralStore`` singleton.
+
+    Returns:
+        A list of ``ExternalMappingResponse`` objects.  Empty when the
+        item has no mappings or does not exist.
+    """
+    from agent_baton.core.storage.central import CentralStore
+    import json as _json
+
+    store: CentralStore = central  # type: ignore[assignment]
+
+    # First resolve the item to get source_id + external_id.
+    try:
+        item_rows = store.query(
+            """
+            SELECT
+                ei.id, ei.source_id, ei.external_id, ei.item_type,
+                ei.title, ei.description, ei.state, ei.assigned_to,
+                ei.priority, ei.tags, ei.url, ei.updated_at,
+                COALESCE(es.source_type, '') AS source_type
+            FROM external_items ei
+            LEFT JOIN external_sources es ON es.source_id = ei.source_id
+            WHERE ei.id = ?
+            """,
+            (item_id,),
+        )
+    except Exception:
+        return []
+
+    if not item_rows:
+        raise HTTPException(
+            status_code=404,
+            detail=f"External item {item_id} not found.",
+        )
+
+    item_row = item_rows[0]
+
+    try:
+        tags = _json.loads(item_row.get("tags") or "[]")
+        if not isinstance(tags, list):
+            tags = []
+    except (ValueError, TypeError):
+        tags = []
+
+    item_resp = ExternalItemResponse(
+        id=item_row["id"],
+        source_id=item_row["source_id"],
+        external_id=item_row["external_id"],
+        item_type=item_row.get("item_type", ""),
+        title=item_row.get("title", ""),
+        description=item_row.get("description", ""),
+        state=item_row.get("state", ""),
+        assigned_to=item_row.get("assigned_to", ""),
+        priority=str(item_row.get("priority", "")),
+        tags=tags,
+        url=item_row.get("url", ""),
+        updated_at=item_row.get("updated_at", ""),
+        source_type=item_row.get("source_type", ""),
+    )
+
+    # Now fetch all mappings for this (source_id, external_id) pair.
+    try:
+        mapping_rows = store.query(
+            """
+            SELECT id, source_id, external_id, project_id,
+                   task_id, mapping_type, created_at
+            FROM external_mappings
+            WHERE source_id = ? AND external_id = ?
+            ORDER BY created_at DESC
+            """,
+            (item_row["source_id"], item_row["external_id"]),
+        )
+    except Exception:
+        mapping_rows = []
+
+    return [
+        ExternalMappingResponse(
+            id=m["id"],
+            source_id=m["source_id"],
+            external_id=m["external_id"],
+            project_id=m["project_id"],
+            task_id=m.get("task_id", ""),
+            mapping_type=m.get("mapping_type", ""),
+            created_at=m.get("created_at", ""),
+            item=item_resp,
+        )
+        for m in mapping_rows
+    ]
 
 
 # ---------------------------------------------------------------------------

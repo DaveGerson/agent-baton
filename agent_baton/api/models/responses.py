@@ -878,3 +878,100 @@ class ExecuteCardResponse(BaseModel):
         default=False,
         description="When True, the subprocess runs in dry-run mode without making changes.",
     )
+
+
+# ---------------------------------------------------------------------------
+# External items responses
+# ---------------------------------------------------------------------------
+
+
+class ExternalItemResponse(BaseModel):
+    """A work item fetched from an external source (ADO, GitHub, Jira, Linear).
+
+    Rows come from the ``external_items`` table in central.db.  Only
+    fields that are useful for display in the PMO dashboard are surfaced
+    here; the full raw payload is omitted.
+    """
+
+    id: int = Field(..., description="Row ID in external_items.")
+    source_id: str = Field(..., description="Baton source ID (external_sources.source_id).")
+    external_id: str = Field(..., description="ID in the source system (e.g. 'JIRA-42', 'GH-99').")
+    item_type: str = Field(default="", description="Canonical type: feature, bug, epic, story, task.")
+    title: str = Field(default="", description="Short human-readable title.")
+    description: str = Field(default="", description="Full description or body text.")
+    state: str = Field(default="", description="Workflow state from the source system.")
+    assigned_to: str = Field(default="", description="Current assignee display name.")
+    priority: str = Field(default="", description="Priority string from the source system.")
+    tags: list[str] = Field(default_factory=list, description="Label/tag list.")
+    url: str = Field(default="", description="Link to the item in the source system's web UI.")
+    updated_at: str = Field(default="", description="ISO-8601 timestamp of last update in source.")
+    source_type: str = Field(default="", description="Source adapter type: ado, github, jira, linear.")
+
+
+class ExternalMappingResponse(BaseModel):
+    """A mapping between an external work item and a baton plan/execution.
+
+    Rows come from the ``external_mappings`` table in central.db joined
+    with ``external_items`` so the caller does not need a second request.
+    """
+
+    id: int = Field(..., description="Row ID in external_mappings.")
+    source_id: str = Field(..., description="Baton source ID.")
+    external_id: str = Field(..., description="ID in the source system.")
+    project_id: str = Field(..., description="Baton project ID.")
+    task_id: str = Field(default="", description="Plan task ID this item is mapped to.")
+    mapping_type: str = Field(default="", description="Relationship type (e.g. 'implements', 'tracks').")
+    created_at: str = Field(default="", description="ISO-8601 timestamp.")
+    item: Optional[ExternalItemResponse] = Field(
+        default=None,
+        description="Linked external item details when available.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Gate approval responses
+# ---------------------------------------------------------------------------
+
+
+class PendingGateResponse(BaseModel):
+    """A single execution currently paused and waiting for gate approval.
+
+    Returned as an element of ``GET /pmo/gates/pending``.  The
+    ``approval_context`` field contains the markdown review summary
+    built by the execution engine so the approver can make an informed
+    decision without leaving the PMO UI.
+    """
+
+    task_id: str = Field(..., description="Task ID of the paused execution.")
+    project_id: str = Field(..., description="Project that owns this execution.")
+    phase_id: int = Field(..., description="Phase ID awaiting approval.")
+    phase_name: str = Field(default="", description="Human-readable name of the phase.")
+    approval_context: str = Field(
+        default="",
+        description="Markdown review summary produced by the execution engine.",
+    )
+    approval_options: list[str] = Field(
+        default_factory=list,
+        description="Choices available to the reviewer (approve, reject, approve-with-feedback).",
+    )
+    task_summary: str = Field(default="", description="Top-level task description.")
+    current_phase_name: str = Field(
+        default="",
+        description="Name of the phase currently awaiting approval.",
+    )
+
+
+class GateActionResponse(BaseModel):
+    """Confirmation that a gate approval or rejection was recorded.
+
+    Returned by ``POST /pmo/gates/{task_id}/approve`` and
+    ``POST /pmo/gates/{task_id}/reject``.
+    """
+
+    task_id: str = Field(..., description="Task ID the decision was recorded against.")
+    phase_id: int = Field(..., description="Phase ID the decision applies to.")
+    result: str = Field(
+        ...,
+        description="The recorded result: 'approve', 'approve-with-feedback', or 'reject'.",
+    )
+    recorded: bool = Field(default=True, description="Always True on success.")
