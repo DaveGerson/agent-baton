@@ -15,10 +15,13 @@ without side effects.  Gate evaluation results are recorded by the
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 
 from agent_baton.core.govern.spec_validator import SpecValidator
 from agent_baton.models.execution import ActionType, ExecutionAction, GateResult, PlanGate
+
+logger = logging.getLogger(__name__)
 
 
 # Patterns that indicate lint errors (as opposed to warnings).
@@ -158,8 +161,11 @@ class GateRunner:
         checked_at = datetime.now(timezone.utc).isoformat()
         gate_type = gate.gate_type
 
+        logger.debug("Evaluating gate: type=%s exit_code=%d", gate_type, exit_code)
+
         if gate_type == "review":
             # Advisory — always pass regardless of exit code or output content.
+            logger.debug("Gate '%s': advisory — always pass", gate_type)
             return GateResult(
                 phase_id=0,
                 gate_type=gate_type,
@@ -170,6 +176,12 @@ class GateRunner:
 
         if gate_type in ("test", "build"):
             passed = exit_code == 0
+            logger.info(
+                "Gate '%s': %s (exit_code=%d)",
+                gate_type,
+                "PASS" if passed else "FAIL",
+                exit_code,
+            )
             return GateResult(
                 phase_id=0,
                 gate_type=gate_type,
@@ -180,7 +192,14 @@ class GateRunner:
 
         if gate_type == "lint":
             # Warnings are acceptable; only hard errors block progress.
-            passed = exit_code == 0 and not _has_lint_errors(command_output)
+            has_errors = _has_lint_errors(command_output)
+            passed = exit_code == 0 and not has_errors
+            logger.info(
+                "Gate 'lint': %s (exit_code=%d, error_markers=%s)",
+                "PASS" if passed else "FAIL",
+                exit_code,
+                has_errors,
+            )
             return GateResult(
                 phase_id=0,
                 gate_type=gate_type,
@@ -201,6 +220,7 @@ class GateRunner:
 
             result = self._spec_validator.run_gate([("spec output", _check_spec)])
             passed = result.passed
+            logger.info("Gate 'spec': %s", "PASS" if passed else "FAIL")
             return GateResult(
                 phase_id=0,
                 gate_type=gate_type,
@@ -211,6 +231,11 @@ class GateRunner:
 
         # Unknown gate type — fall back to exit_code check.
         passed = exit_code == 0
+        logger.warning(
+            "Unknown gate type '%s' — falling back to exit_code check: %s",
+            gate_type,
+            "PASS" if passed else "FAIL",
+        )
         return GateResult(
             phase_id=0,
             gate_type=gate_type,

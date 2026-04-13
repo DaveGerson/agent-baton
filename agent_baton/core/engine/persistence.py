@@ -15,9 +15,12 @@ Supports namespaced execution directories for concurrent plans::
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 from agent_baton.models.execution import ExecutionState
+
+logger = logging.getLogger(__name__)
 
 _STATE_FILENAME = "execution-state.json"
 _EXECUTIONS_DIR = "executions"
@@ -99,6 +102,11 @@ class StatePersistence:
             data = json.loads(self._state_path.read_text(encoding="utf-8"))
             return ExecutionState.from_dict(data)
         except (json.JSONDecodeError, KeyError, TypeError):
+            logger.warning(
+                "Corrupted or unreadable execution state at %s — state lost",
+                self._state_path,
+                exc_info=True,
+            )
             return None
 
     def exists(self) -> bool:

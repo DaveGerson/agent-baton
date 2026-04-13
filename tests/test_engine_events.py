@@ -102,30 +102,42 @@ class TestStartEvents:
 
 
 # ---------------------------------------------------------------------------
-# Step-level events are NOT published by the engine (P1.4: owned by Worker)
+# Step-level events ARE published by the engine (CLI path fix)
+# The engine now publishes step.completed, step.failed, and step.dispatched
+# directly so that CLI-driven execution reaches projections and the PMO
+# dashboard without going through TaskWorker.  TaskWorker also emits the
+# same events via its own engine instance; no double-emit risk.
 # ---------------------------------------------------------------------------
 
 class TestStepResultEvents:
-    def test_engine_does_not_publish_step_completed(self, tmp_path: Path) -> None:
+    def test_engine_publishes_step_completed(self, tmp_path: Path) -> None:
         engine, bus = _engine_with_bus(tmp_path)
         engine.start(_plan())
         engine.record_step_result("1.1", "backend", status="complete", outcome="done")
         evts = [e for e in bus.replay("t1") if e.topic == "step.completed"]
-        assert len(evts) == 0
+        assert len(evts) == 1
+        assert evts[0].payload["step_id"] == "1.1"
+        assert evts[0].payload["agent_name"] == "backend"
+        assert evts[0].payload["outcome"] == "done"
 
-    def test_engine_does_not_publish_step_failed(self, tmp_path: Path) -> None:
+    def test_engine_publishes_step_failed(self, tmp_path: Path) -> None:
         engine, bus = _engine_with_bus(tmp_path)
         engine.start(_plan())
         engine.record_step_result("1.1", "backend", status="failed", error="boom")
         evts = [e for e in bus.replay("t1") if e.topic == "step.failed"]
-        assert len(evts) == 0
+        assert len(evts) == 1
+        assert evts[0].payload["step_id"] == "1.1"
+        assert evts[0].payload["agent_name"] == "backend"
+        assert evts[0].payload["error"] == "boom"
 
-    def test_engine_does_not_publish_step_dispatched(self, tmp_path: Path) -> None:
+    def test_engine_publishes_step_dispatched(self, tmp_path: Path) -> None:
         engine, bus = _engine_with_bus(tmp_path)
         engine.start(_plan())
         engine.mark_dispatched("1.1", "backend")
         evts = [e for e in bus.replay("t1") if e.topic == "step.dispatched"]
-        assert len(evts) == 0
+        assert len(evts) == 1
+        assert evts[0].payload["step_id"] == "1.1"
+        assert evts[0].payload["agent_name"] == "backend"
 
 
 # ---------------------------------------------------------------------------

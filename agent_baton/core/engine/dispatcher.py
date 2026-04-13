@@ -18,10 +18,13 @@ disk only when the attachment delivery is ``inline``.
 """
 from __future__ import annotations
 
+import logging
 import warnings
 from pathlib import Path
 
 from agent_baton.utils.frontmatter import parse_frontmatter
+
+logger = logging.getLogger(__name__)
 from agent_baton.models.execution import (
     ActionType,
     ExecutionAction,
@@ -234,6 +237,16 @@ class PromptDispatcher:
         """
         role = step.agent_name
         project_line = project_description or task_summary or "this project"
+
+        logger.debug(
+            "Building delegation prompt for step %s: agent=%s task_type=%s "
+            "knowledge_attachments=%d prior_beads=%d",
+            step.step_id,
+            role,
+            task_type or "unset",
+            len(step.knowledge),
+            len(prior_beads) if prior_beads else 0,
+        )
 
         # Context files section
         if step.context_files:
@@ -571,6 +584,14 @@ class PromptDispatcher:
             delegation_prompt.  path_enforcement is populated whenever the
             step declares allowed_paths or blocked_paths.
         """
+        logger.info(
+            "Dispatching step %s to agent '%s' (model=%s, task_type=%s)",
+            step.step_id,
+            step.agent_name,
+            step.model or "default",
+            task_type or "unset",
+        )
+
         if step.agent_name == "orchestrator":
             warnings.warn(
                 "Dispatching 'orchestrator' as a subagent will fail — "

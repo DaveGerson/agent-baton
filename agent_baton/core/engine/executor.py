@@ -16,9 +16,11 @@ Key design decisions:
 
 - The engine is synchronous and stateless between calls.  The async runtime
   layer (``TaskWorker``) wraps it for concurrent dispatch.
-- Event ownership is split: the engine publishes task-level and phase-level
-  events; step-level events are published by ``TaskWorker`` to avoid
-  duplication.
+- Event ownership: the engine publishes task-level, phase-level, and
+  step-level events.  ``TaskWorker`` also publishes step-level events via
+  its own path (headless/async execution); both paths call ``_publish``,
+  which is a no-op when no bus is configured, so there is no double-emit
+  risk — each path owns its own engine instance.
 - Knowledge gap detection (``KNOWLEDGE_GAP:`` signals in agent output) is
   handled inline during ``record_step_result()``, with escalation routed
   through the escalation matrix in ``knowledge_gap.py``.
@@ -97,6 +99,13 @@ def _elapsed_seconds(started_at: str) -> float:
 
 # ---------------------------------------------------------------------------
 # TaskViewSubscriber — materialized view maintained as events fire
+# ---------------------------------------------------------------------------
+# NOTE: As of 2026-04-13 the task-view.json file written by this subscriber
+# is not consumed by any production subsystem (CLI commands, API routes, or
+# the PMO UI all read from different sources).  The subscriber is kept because
+# it is exercised by tests (test_executor.py TestTaskViewSubscriber and
+# test_events.py TestTaskViewSubscriber) and the file may be useful for
+# external tooling or future dashboards.
 # ---------------------------------------------------------------------------
 
 _HIGH_RISK_LEVELS: frozenset[str] = frozenset({"HIGH", "CRITICAL"})
@@ -496,7 +505,11 @@ class ExecutionEngine:
                 self._persistence._task_id = plan.task_id
                 self._persistence.set_active()
             except Exception:
-                pass
+                _log.warning(
+                    "Failed to write active-task-id.txt for task %s — default task resolution may be affected",
+                    plan.task_id,
+                    exc_info=True,
+                )
 
         # Wire the materialized-view subscriber now that we know the task_id.
         # One subscriber per engine instance; replace any previous one.
@@ -863,6 +876,39 @@ class ExecutionEngine:
             result.deviations.append(f"TOKEN_BUDGET_WARNING: {warning}")
 
         self._save_execution(state)
+
+        # ── Domain event publication ──────────────────────────────────────────
+        # Publish step-level domain events to the event bus so that CLI-driven
+        # execution (which does not go through TaskWorker) still emits these
+        # events to projections, EventPersistence, and the PMO dashboard.
+        # TaskWorker publishes the same events in its own path; this call is
+        # only reached via the CLI path (mark_dispatched / record_step_result
+        # directly), so there is no duplication.
+        if status == "dispatched":
+            self._publish(evt.step_dispatched(
+                task_id=state.task_id,
+                step_id=step_id,
+                agent_name=agent_name,
+            ))
+        elif status == "complete":
+            self._publish(evt.step_completed(
+                task_id=state.task_id,
+                step_id=step_id,
+                agent_name=agent_name,
+                outcome=outcome,
+                files_changed=files_changed or [],
+                commit_hash=commit_hash,
+                duration_seconds=duration_seconds,
+                estimated_tokens=estimated_tokens,
+            ))
+        elif status == "failed":
+            self._publish(evt.step_failed(
+                task_id=state.task_id,
+                step_id=step_id,
+                agent_name=agent_name,
+                error=error,
+                duration_seconds=duration_seconds,
+            ))
 
     def mark_dispatched(self, step_id: str, agent_name: str) -> None:
         """Record that a step has been dispatched (in-flight, not yet complete).
@@ -1619,9 +1665,11 @@ class ExecutionEngine:
 
     # ── Internal helpers ────────────────────────────────────────────────────
 
-    # Event ownership: Engine publishes task-level and phase-level events.
-    # Step-level events (step.dispatched, step.completed, step.failed) are
-    # published by the runtime layer (TaskWorker) to avoid duplication.
+    # Event ownership: Engine publishes task-level, phase-level, and
+    # step-level events (step.dispatched, step.completed, step.failed).
+    # TaskWorker also emits step-level events via its own engine instance;
+    # because each path holds a separate engine object, there is no
+    # double-publish risk.
 
     def _persist_event(self, event: Event) -> None:
         """EventBus subscriber that appends *event* to all active persistence stores.

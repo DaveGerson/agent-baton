@@ -35,8 +35,11 @@ Reports are stored at ``.claude/team-context/improvements/reports/<id>.json``.
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from pathlib import Path
+
+_log = logging.getLogger(__name__)
 
 from agent_baton.core.improve.experiments import ExperimentManager
 from agent_baton.core.improve.proposals import ProposalManager
@@ -151,6 +154,27 @@ class ImprovementLoop:
 
         # Generate recommendations
         recommendations = self._recommender.analyze()
+
+        # Persist fresh patterns so the planner reads up-to-date data on the
+        # next execution.  Best-effort: a failure here must never block the
+        # execution completion flow.
+        try:
+            learner = getattr(self._recommender, "_learner", None)
+            if learner is not None:
+                learner.refresh()
+                _log.debug("Pattern learner refreshed learned-patterns.json")
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("Pattern learner refresh failed (non-fatal): %s", exc)
+
+        # Persist budget recommendations so the planner reads up-to-date tiers
+        # on the next execution.  Best-effort: same reasoning as above.
+        try:
+            tuner = getattr(self._recommender, "_tuner", None)
+            if tuner is not None:
+                tuner.save_recommendations()
+                _log.debug("Budget tuner saved budget-recommendations.json")
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("Budget tuner save_recommendations failed (non-fatal): %s", exc)
 
         # Persist all recommendations
         self._proposals.record_many(recommendations)

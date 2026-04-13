@@ -1,10 +1,13 @@
 """Agent router — detects project stack and maps to agent flavors."""
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from dataclasses import dataclass, field
 
 from agent_baton.core.orchestration.registry import AgentRegistry
+
+logger = logging.getLogger(__name__)
 
 
 # Directories to skip when scanning subdirectories for stack signals.
@@ -192,8 +195,18 @@ class AgentRouter:
                                 profile.detected_files.append(rel)
                             break
                     except Exception:
-                        pass
+                        logger.debug(
+                            "Failed to parse package.json at %s for Vite/React detection — skipping",
+                            pkg_json,
+                            exc_info=True,
+                        )
 
+        logger.debug(
+            "Stack detection result: language=%s framework=%s files=%s",
+            profile.language,
+            profile.framework,
+            profile.detected_files,
+        )
         return profile
 
     def route(
@@ -219,6 +232,7 @@ class AgentRouter:
         # FLAVOR_MAP keys require a non-None language; when no language was
         # detected there is no flavor to apply, so return the base name early.
         if stack.language is None:
+            logger.debug("route(%s): no language detected — returning base name", base_name)
             return base_name
 
         # Look up flavor mapping for this stack
@@ -228,6 +242,15 @@ class AgentRouter:
             # Try language-only fallback
             key = (stack.language, None)
             flavors = FLAVOR_MAP.get(key, {})
+
+        logger.debug(
+            "route(%s): stack=(%s, %s) flavor_map_key=%s flavors=%s",
+            base_name,
+            stack.language,
+            stack.framework,
+            key,
+            flavors,
+        )
 
         # Check LearnedOverrides for project-specific flavor corrections that
         # should take precedence over the hardcoded FLAVOR_MAP.
@@ -247,17 +270,33 @@ class AgentRouter:
                     _learned_flavor = _stack_entry[base_name]
                     _candidate = f"{base_name}--{_learned_flavor}"
                     if self._registry.get(_candidate):
+                        logger.debug(
+                            "route(%s): applying learned override → %s",
+                            base_name,
+                            _candidate,
+                        )
                         return _candidate
         except Exception:
-            pass  # Never block routing on a learning failure
+            logger.warning(
+                "Failed to load learned flavor overrides — using default FLAVOR_MAP",
+                exc_info=True,
+            )
 
         suggested_flavor = flavors.get(base_name)
         if suggested_flavor:
             candidate = f"{base_name}--{suggested_flavor}"
             # Verify the flavored agent exists in the registry
             if self._registry.get(candidate):
+                logger.debug("route(%s): selected flavor → %s", base_name, candidate)
                 return candidate
+            else:
+                logger.debug(
+                    "route(%s): flavor '%s' not in registry — falling back to base",
+                    base_name,
+                    candidate,
+                )
 
+        logger.debug("route(%s): no flavor match — returning base name", base_name)
         return base_name
 
     def route_team(

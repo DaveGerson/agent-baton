@@ -134,24 +134,22 @@ class TestEventBusFlowsInExecution:
         topics = [e.topic for e in bus.history()]
         assert "task.started" in topics, "start() must publish task.started"
 
-    def test_record_step_does_not_publish_step_event(self, tmp_path: Path) -> None:
-        # By design the engine does NOT publish step.completed — that is the
-        # Worker's responsibility (see P1.4 decision).  Touchground verifies
-        # that the bus still receives events from the lifecycle calls so it is
-        # functionally wired, and that this specific omission is deliberate.
+    def test_record_step_publishes_step_completed_event(self, tmp_path: Path) -> None:
+        # The engine now publishes step.completed directly so that the CLI-driven
+        # execution path (which does not go through TaskWorker) emits step-level
+        # events to projections and the PMO dashboard.  TaskWorker publishes the
+        # same event via its own engine instance; there is no double-emit risk
+        # because each path owns a separate engine object.
         bus = EventBus()
         engine = _engine(tmp_path, bus=bus)
         engine.start(_plan())
-        pre_count = len(bus.history())
         engine.record_step_result("1.1", "backend-engineer")
-        # Bus count must not have decreased (no events were removed); the
-        # record call itself just doesn't add step.completed.
-        assert len(bus.history()) >= pre_count
-        # step.completed is intentionally absent from the engine-level bus
         step_completed = [e for e in bus.history() if e.topic == "step.completed"]
-        assert step_completed == [], (
-            "Engine must not publish step.completed — that belongs to the Worker"
+        assert len(step_completed) == 1, (
+            "record_step_result() with status='complete' must publish step.completed"
         )
+        assert step_completed[0].payload["step_id"] == "1.1"
+        assert step_completed[0].payload["agent_name"] == "backend-engineer"
 
     def test_complete_publishes_event(self, tmp_path: Path) -> None:
         bus = EventBus()

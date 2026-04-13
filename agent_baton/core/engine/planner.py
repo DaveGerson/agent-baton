@@ -551,6 +551,14 @@ class IntelligentPlanner:
             inferred_complexity = task_cls.complexity
             resolved_agents = list(task_cls.agents)
             classified_phases = list(task_cls.phases)
+            logger.debug(
+                "Task classified: type=%s complexity=%s agents=%s phases=%s source=%s",
+                inferred_type,
+                inferred_complexity,
+                resolved_agents,
+                classified_phases,
+                task_cls.source,
+            )
         else:
             inferred_type = task_type or self._infer_task_type(task_summary)
             inferred_complexity = complexity or "medium"
@@ -560,6 +568,12 @@ class IntelligentPlanner:
                 resolved_agents = list(_DEFAULT_AGENTS.get(inferred_type, []))
             else:
                 resolved_agents = list(agents)
+            logger.debug(
+                "Task classification (override path): type=%s complexity=%s agents=%s",
+                inferred_type,
+                inferred_complexity,
+                resolved_agents,
+            )
 
         # 4. Pattern lookup — only if classifier didn't provide agents
         pattern: LearnedPattern | None = None
@@ -662,6 +676,10 @@ class IntelligentPlanner:
 
         # 6a. Build route map (base name → routed name) for compound phases
         _agent_route_map = dict(zip(_pre_routing_agents, resolved_agents))
+        logger.debug(
+            "Agent routing complete: %s",
+            _agent_route_map if _agent_route_map else resolved_agents,
+        )
 
         # 6.5. Resolve knowledge attachments per step (KnowledgeRegistry if available).
         # This runs after routing so step.agent_name reflects the routed variant.
@@ -705,6 +723,15 @@ class IntelligentPlanner:
             risk_level = keyword_risk_level
         risk_level_enum = RiskLevel(risk_level)
 
+        logger.info(
+            "Risk classification: task_id=%s risk=%s (keyword=%s classifier=%s) git_strategy=%s",
+            task_id,
+            risk_level,
+            keyword_risk_level,
+            classification.risk_level.value if classification else "n/a",
+            _select_git_strategy(risk_level_enum).value,
+        )
+
         # 8b. Git strategy — derived from risk
         git_strategy = _select_git_strategy(risk_level_enum).value
 
@@ -734,6 +761,12 @@ class IntelligentPlanner:
             plan_phases = self._build_phases_for_names(complexity_phases, resolved_agents, task_summary)
         else:
             plan_phases = self._default_phases(inferred_type, resolved_agents, task_summary)
+
+        logger.info(
+            "Plan phases selected for task_id=%s: %s",
+            task_id,
+            [(p.name, [s.agent_name for s in p.steps]) for p in plan_phases],
+        )
 
         # 9b. Enrich steps with cross-phase context and default deliverables
         plan_phases = self._enrich_phases(plan_phases)

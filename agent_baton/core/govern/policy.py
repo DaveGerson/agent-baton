@@ -45,8 +45,11 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -425,6 +428,12 @@ class PolicyEngine:
                 data = json.loads(path.read_text(encoding="utf-8"))
                 return PolicySet.from_dict(data)
             except (json.JSONDecodeError, KeyError, OSError):
+                logger.warning(
+                    "Failed to load policy preset from %s — falling back to built-in preset '%s'",
+                    path,
+                    name,
+                    exc_info=True,
+                )
                 return None
         # Fall back to built-in presets
         return _STANDARD_PRESETS.get(name)
