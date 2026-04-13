@@ -2,6 +2,8 @@ import { useState, useEffect } from 'react';
 import { KanbanCard } from './KanbanCard';
 import { HealthBar } from './HealthBar';
 import { SignalsBar } from './SignalsBar';
+import { AnalyticsDashboard } from './AnalyticsDashboard';
+import { DataExport } from './DataExport';
 import { usePmoBoard } from '../hooks/usePmoBoard';
 import type { ConnectionMode } from '../hooks/usePmoBoard';
 import { usePersistedState } from '../hooks/usePersistedState';
@@ -23,6 +25,8 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
   const [search, setSearch] = usePersistedState<string>('pmo:board-search', '');
   const [sortBy, setSortBy] = usePersistedState<string>('pmo:board-sort', 'priority');
   const [openSignalCount, setOpenSignalCount] = useState(0);
+  const [showAnalytics, setShowAnalytics] = useState(false);
+  const [showExport, setShowExport] = useState(false);
 
   // Keep signal badge current regardless of whether SignalsBar is mounted.
   useEffect(() => {
@@ -193,6 +197,38 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
           </span>
         </>
 
+        {/* Analytics & Export */}
+        <button
+          onClick={() => setShowAnalytics(true)}
+          style={{
+            padding: '2px 7px',
+            borderRadius: 3,
+            border: `1px solid ${T.border}`,
+            background: 'transparent',
+            color: T.text3,
+            fontSize: 9,
+            fontWeight: 600,
+            cursor: 'pointer',
+          }}
+        >
+          Analytics
+        </button>
+        <button
+          onClick={() => setShowExport(true)}
+          style={{
+            padding: '2px 7px',
+            borderRadius: 3,
+            border: `1px solid ${T.border}`,
+            background: 'transparent',
+            color: T.text3,
+            fontSize: 9,
+            fontWeight: 600,
+            cursor: 'pointer',
+          }}
+        >
+          Export
+        </button>
+
         <div style={{ flex: 1 }} />
 
         {/* Status indicators */}
@@ -358,6 +394,14 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
           );
         })}
       </div>
+
+      {/* Modals */}
+      {showAnalytics && (
+        <AnalyticsDashboard cards={cards} health={health} onClose={() => setShowAnalytics(false)} />
+      )}
+      {showExport && (
+        <DataExport cards={cards} health={health} filteredCards={filtered} onClose={() => setShowExport(false)} />
+      )}
     </div>
   );
 }

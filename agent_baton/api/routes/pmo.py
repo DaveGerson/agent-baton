@@ -3,6 +3,7 @@
 GET  /pmo/board                          — Full Kanban board (cards + health)
 GET  /pmo/board/{program}               — Filter board by program
 GET  /pmo/cards/{card_id}               — Card detail (card + plan)
+GET  /pmo/cards/{card_id}/execution    — Execution progress events
 GET  /pmo/projects                      — List registered projects
 POST /pmo/projects                      — Register a project
 DELETE /pmo/projects/{project_id}       — Unregister a project
@@ -186,6 +187,96 @@ async def get_card(
         updated_at=card.updated_at,
         external_id=card.external_id,
         plan=plan_dict,
+    )
+
+
+class _StepEvent(BaseModel):
+    event_type: str
+    step_id: str
+    agent: str | None = None
+    status: str | None = None
+    timestamp: str
+    message: str | None = None
+
+
+class _ExecutionDetailResponse(BaseModel):
+    task_id: str
+    status: str
+    current_phase: str
+    steps: list[_StepEvent]
+    started_at: str
+    elapsed_seconds: float
+
+
+@router.get("/pmo/cards/{card_id}/execution")
+async def get_card_execution(
+    card_id: str,
+    scanner: PmoScanner = Depends(get_pmo_scanner),
+) -> _ExecutionDetailResponse:
+    """Return execution progress events for a card.
+
+    GET /api/v1/pmo/cards/{card_id}/execution
+
+    Reads the event log for the card's task_id and returns step-level
+    events for the execution progress monitor in the PMO UI.
+    """
+    from pathlib import Path
+    from datetime import datetime, timezone
+
+    try:
+        card, _ = scanner.find_card(card_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Card '{card_id}' not found.")
+
+    project_path = Path(card.project_id) if Path(card.project_id).is_dir() else None
+    events: list[_StepEvent] = []
+    started_at = card.created_at
+    status = card.column
+
+    if project_path:
+        event_log = project_path / ".claude" / "team-context" / "executions" / card_id / "events.jsonl"
+        if not event_log.exists():
+            event_log = project_path / ".claude" / "team-context" / "events.jsonl"
+        if event_log.exists():
+            try:
+                for line in event_log.read_text().splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        evt = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if evt.get("task_id") and evt["task_id"] != card_id:
+                        continue
+                    event_type = evt.get("topic", evt.get("event_type", ""))
+                    if not event_type:
+                        continue
+                    events.append(_StepEvent(
+                        event_type=event_type,
+                        step_id=evt.get("step_id", evt.get("payload", {}).get("step_id", "")),
+                        agent=evt.get("agent", evt.get("payload", {}).get("agent")),
+                        status=evt.get("status", evt.get("payload", {}).get("status")),
+                        timestamp=evt.get("timestamp", evt.get("ts", "")),
+                        message=evt.get("message", evt.get("payload", {}).get("message")),
+                    ))
+                    if event_type == "task.started":
+                        started_at = evt.get("timestamp", started_at)
+            except OSError:
+                pass
+
+    try:
+        started_dt = datetime.fromisoformat(started_at)
+    except (ValueError, TypeError):
+        started_dt = datetime.now(timezone.utc)
+    elapsed = (datetime.now(timezone.utc) - started_dt.replace(tzinfo=timezone.utc if started_dt.tzinfo is None else started_dt.tzinfo)).total_seconds()
+
+    return _ExecutionDetailResponse(
+        task_id=card_id,
+        status=status,
+        current_phase=card.current_phase or "",
+        steps=events,
+        started_at=started_at,
+        elapsed_seconds=max(0, elapsed),
     )
 
 

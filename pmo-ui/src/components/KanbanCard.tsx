@@ -5,6 +5,7 @@ import { api } from '../api/client';
 import { agentDisplayName } from '../utils/agent-names';
 import { useToast } from '../contexts/ToastContext';
 import { PlanPreview } from './PlanPreview';
+import { ExecutionProgress } from './ExecutionProgress';
 
 interface KanbanCardProps {
   card: PmoCard;
@@ -135,8 +136,10 @@ export function KanbanCard({ card, columnColor, onForge, onEditPlan, onMutateCar
   const toast = useToast();
   const { showPlan, planData, planLoading, handleViewPlan } = usePlanPreview(card.card_id);
   const { execLoading, execResult, handleExecute, dismissExecResult } = useExecuteCard(card.card_id, toast, onMutateCard);
+  const [showProgress, setShowProgress] = useState(false);
   const isHuman = card.column === 'awaiting_human';
   const isQueued = card.column === 'queued';
+  const isActive = card.column === 'executing' || card.column === 'validating' || card.column === 'awaiting_human';
   const priorityColor = PRIORITY_COLOR[card.priority] ?? T.text2;
 
   const borderColor = isHuman ? T.orange + '55' : expanded ? columnColor + '55' : T.border;
@@ -343,6 +346,24 @@ export function KanbanCard({ card, columnColor, onForge, onEditPlan, onMutateCar
                 {execLoading ? 'Launching...' : '\u25B6 Execute'}
               </button>
             )}
+            {isActive && (
+              <button
+                onClick={e => { e.stopPropagation(); setShowProgress(true); }}
+                style={{
+                  padding: '3px 9px',
+                  borderRadius: 3,
+                  border: `1px solid ${T.yellow}44`,
+                  background: T.yellow + '12',
+                  color: T.yellow,
+                  fontSize: 9,
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                }}
+                title="Monitor execution progress in real time"
+              >
+                Monitor
+              </button>
+            )}
             {onForge && (
               <button
                 onClick={e => { e.stopPropagation(); onForge(card); }}
@@ -464,6 +485,11 @@ export function KanbanCard({ card, columnColor, onForge, onEditPlan, onMutateCar
             </div>
           )}
         </div>
+      )}
+
+      {/* Execution progress modal */}
+      {showProgress && (
+        <ExecutionProgress card={card} onClose={() => setShowProgress(false)} />
       )}
     </div>
   );
