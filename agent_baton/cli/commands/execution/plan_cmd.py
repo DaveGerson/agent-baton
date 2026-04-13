@@ -110,12 +110,21 @@ def handler(args: argparse.Namespace) -> None:
     knowledge_registry.load_default_paths()
 
     retro_engine = RetrospectiveEngine()
+    bead_store = None
+    try:
+        from agent_baton.core.engine.bead_store import BeadStore
+        _db = Path(".claude/team-context/baton.db")
+        if _db.exists():
+            bead_store = BeadStore(_db)
+    except Exception:
+        pass
     print("  Analyzing patterns and history...", file=sys.stderr)
     planner = IntelligentPlanner(
         retro_engine=retro_engine,
         classifier=DataClassifier(),
         policy_engine=PolicyEngine(),
         knowledge_registry=knowledge_registry,
+        bead_store=bead_store,
     )
     print("  Creating execution plan...", file=sys.stderr)
     plan = planner.create_plan(
