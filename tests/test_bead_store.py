@@ -858,6 +858,7 @@ class TestSchemaMigration:
         # Force migration by triggering get_connection()
         store._table_exists()
 
+        from agent_baton.core.storage.schema import SCHEMA_VERSION
         conn = sqlite3.connect(str(db_path))
         row = conn.execute("SELECT version FROM _schema_version").fetchone()
         conn.close()

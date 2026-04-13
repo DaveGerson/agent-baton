@@ -4,11 +4,14 @@ Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
 
 Subcommands
 -----------
-list    List beads with optional filters (--type, --status, --task, --tag).
-show    Show a single bead as JSON.
-ready   List open beads whose blocked_by dependencies are all satisfied.
-close   Close a bead with a summary.
-link    Add a typed link between two beads.
+list     List beads with optional filters (--type, --status, --task, --tag).
+show     Show a single bead as JSON.
+ready    List open beads whose blocked_by dependencies are all satisfied.
+close    Close a bead with a summary.
+link     Add a typed link between two beads.
+cleanup  Archive old closed beads (memory decay).
+promote  Promote a bead to a persistent knowledge document.
+graph    Show the dependency graph for a task's beads.
 
 All subcommands degrade gracefully when the bead store is unavailable
 (older schema, no baton.db in the current project).
@@ -176,6 +179,63 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         help="Add a validates link to TARGET_ID",
     )
 
+    # -- cleanup -------------------------------------------------------------
+    cleanup_p = sub.add_parser(
+        "cleanup",
+        help="Archive old closed beads (memory decay, F6)",
+    )
+    cleanup_p.add_argument(
+        "--ttl",
+        dest="ttl_hours",
+        metavar="HOURS",
+        type=int,
+        default=168,
+        help="Archive beads closed more than HOURS ago (default: 168 = 7 days)",
+    )
+    cleanup_p.add_argument(
+        "--task",
+        dest="task_id",
+        metavar="TASK_ID",
+        default=None,
+        help="Limit decay to beads from this task ID",
+    )
+    cleanup_p.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        default=False,
+        help="Show how many beads would be archived without modifying anything",
+    )
+
+    # -- promote -------------------------------------------------------------
+    promote_p = sub.add_parser(
+        "promote",
+        help="Promote a bead to a persistent knowledge document (F9)",
+    )
+    promote_p.add_argument(
+        "bead_id",
+        metavar="BEAD_ID",
+        help="Bead ID to promote (e.g. bd-a1b2)",
+    )
+    promote_p.add_argument(
+        "--pack",
+        dest="pack_name",
+        metavar="PACK_NAME",
+        required=True,
+        help="Knowledge pack to add the document to (e.g. 'project-context')",
+    )
+
+    # -- graph ---------------------------------------------------------------
+    graph_p = sub.add_parser(
+        "graph",
+        help="Show the dependency graph for a task's beads (F11)",
+    )
+    graph_p.add_argument(
+        "task_id",
+        metavar="TASK_ID",
+        help="Task ID whose bead graph to display",
+    )
+
     return p
 
 
@@ -198,6 +258,9 @@ def handler(args: argparse.Namespace) -> None:
         "ready": _handle_ready,
         "close": _handle_close,
         "link": _handle_link,
+        "cleanup": _handle_cleanup,
+        "promote": _handle_promote,
+        "graph": _handle_graph,
     }
     fn = dispatch.get(cmd)
     if fn is None:
@@ -335,3 +398,148 @@ def _handle_link(args: argparse.Namespace) -> None:
 
     store.link(args.source_id, target_id, link_type)
     print(f"Linked {args.source_id} --[{link_type}]--> {target_id}.")
+
+
+def _handle_cleanup(args: argparse.Namespace) -> None:
+    """F6 — Memory Decay: archive old closed beads."""
+    store = _get_bead_store()
+    if store is None:
+        print("No baton.db found in .claude/team-context/ — nothing to clean up.")
+        return
+
+    from agent_baton.core.engine.bead_decay import decay_beads
+
+    count = decay_beads(
+        store,
+        ttl_hours=args.ttl_hours,
+        task_id=args.task_id,
+        dry_run=args.dry_run,
+    )
+
+    if args.dry_run:
+        print(
+            f"Dry run: {count} bead(s) would be archived "
+            f"(TTL={args.ttl_hours}h, task={args.task_id or 'all'})."
+        )
+    else:
+        print(
+            f"Archived {count} bead(s) "
+            f"(TTL={args.ttl_hours}h, task={args.task_id or 'all'})."
+        )
+
+
+def _handle_promote(args: argparse.Namespace) -> None:
+    """F9 — Bead-to-Knowledge Promotion: write bead content as a knowledge doc."""
+    store = _get_bead_store()
+    if store is None:
+        print("No baton.db found in .claude/team-context/.")
+        return
+
+    bead = store.read(args.bead_id)
+    if bead is None:
+        print(f"Bead not found: {args.bead_id}", file=sys.stderr)
+        sys.exit(1)
+
+    pack_name = args.pack_name
+    # Resolve the knowledge pack directory.
+    knowledge_dir = Path(".claude/knowledge") / pack_name
+    knowledge_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write bead content as a markdown document.
+    safe_id = bead.bead_id.replace("bd-", "")
+    doc_name = f"bead-{safe_id}-{bead.bead_type}.md"
+    doc_path = knowledge_dir / doc_name
+
+    doc_content = "\n".join([
+        f"---",
+        f"title: \"{bead.bead_type.capitalize()}: {bead.content[:60]}\"",
+        f"source: bead-promotion",
+        f"bead_id: {bead.bead_id}",
+        f"bead_type: {bead.bead_type}",
+        f"agent: {bead.agent_name}",
+        f"created_at: {bead.created_at}",
+        f"tags: [{', '.join(bead.tags)}]",
+        f"---",
+        f"",
+        f"# {bead.bead_type.capitalize()} from {bead.agent_name}",
+        f"",
+        bead.content,
+        f"",
+    ])
+    if bead.affected_files:
+        doc_content += f"**Affected files:** {', '.join(bead.affected_files)}\n"
+
+    doc_path.write_text(doc_content, encoding="utf-8")
+
+    # Update pack.yaml index if it exists.
+    pack_yaml = knowledge_dir / "pack.yaml"
+    if pack_yaml.exists():
+        try:
+            text = pack_yaml.read_text(encoding="utf-8")
+            if doc_name not in text:
+                # Append a simple documents entry.
+                with pack_yaml.open("a", encoding="utf-8") as f:
+                    f.write(f"  - path: {doc_name}\n")
+                    f.write(f"    description: \"Promoted from bead {bead.bead_id}\"\n")
+        except Exception as exc:
+            print(f"Warning: could not update pack.yaml: {exc}", file=sys.stderr)
+
+    # Close the bead now that it has been promoted.
+    store.close(bead.bead_id, summary=f"Promoted to knowledge pack '{pack_name}' as {doc_name}")
+    print(f"Promoted bead {bead.bead_id} to {doc_path}.")
+    print(f"Bead {bead.bead_id} marked as closed.")
+
+
+def _handle_graph(args: argparse.Namespace) -> None:
+    """F11 — Bead Dependency Graph: display link relationships for a task."""
+    store = _get_bead_store()
+    if store is None:
+        print("No baton.db found in .claude/team-context/.")
+        return
+
+    task_id = args.task_id
+    beads = store.query(task_id=task_id, limit=500)
+    if not beads:
+        print(f"No beads found for task {task_id}.")
+        return
+
+    print(f"Bead graph for task {task_id} ({len(beads)} bead(s)):")
+    print()
+
+    bead_index = {b.bead_id: b for b in beads}
+
+    for bead in beads:
+        conflict_marker = ""
+        try:
+            has_conflict = any(
+                t == "conflict:unresolved"
+                for b2 in [bead]
+                for t in (b2.tags or [])
+            )
+            if has_conflict:
+                conflict_marker = " [CONFLICT]"
+        except Exception:
+            pass
+
+        print(
+            f"  {bead.bead_id} [{bead.bead_type:9s}] [{bead.status:8s}]"
+            f"  {bead.agent_name}{conflict_marker}"
+        )
+        print(f"    {bead.content[:80]!r}")
+        if bead.links:
+            for lnk in bead.links:
+                target = bead_index.get(lnk.target_bead_id)
+                target_label = (
+                    f"{target.bead_type}/{target.agent_name}"
+                    if target else "external"
+                )
+                print(f"    --[{lnk.link_type}]--> {lnk.target_bead_id} ({target_label})")
+        print()
+
+    # Summary
+    conflict_beads = [b for b in beads if "conflict:unresolved" in (b.tags or [])]
+    if conflict_beads:
+        print(f"WARNING: {len(conflict_beads)} unresolved conflict(s) detected.")
+        print("Run `baton beads list --tag conflict:unresolved` to inspect.")
+    else:
+        print("No unresolved conflicts.")

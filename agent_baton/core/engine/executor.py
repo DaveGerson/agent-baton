@@ -792,6 +792,25 @@ class ExecutionEngine:
             except Exception as _bead_exc:
                 _log.debug("Bead signal extraction failed (non-fatal): %s", _bead_exc)
 
+        # ── Bead feedback protocol (F12 — Quality Scoring) ────────────────────
+        # Parse BEAD_FEEDBACK signals from the outcome and apply quality score
+        # adjustments to the referenced beads.  This is a tiebreaker in
+        # BeadSelector ranking: useful beads surface more, misleading beads decay.
+        # Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
+        if status in ("complete", "interrupted") and outcome and self._bead_store:
+            try:
+                from agent_baton.core.engine.bead_signal import parse_bead_feedback
+                feedback_items = parse_bead_feedback(outcome)
+                for _fb_bead_id, _fb_delta in feedback_items:
+                    self._bead_store.update_quality_score(_fb_bead_id, _fb_delta)
+                if feedback_items:
+                    _log.debug(
+                        "Bead feedback: applied %d quality adjustment(s) from step %s",
+                        len(feedback_items), step_id,
+                    )
+            except Exception as _fb_exc:
+                _log.debug("Bead feedback processing failed (non-fatal): %s", _fb_exc)
+
         # Determine phase + step index for trace context.
         phase_idx, step_idx = self._locate_step(state, step_id)
         if phase_idx == -1:
@@ -1004,6 +1023,24 @@ class ExecutionEngine:
             conflicts=retro_data.get("conflicts"),
         )
         retro_path = self._save_retro(retro)
+
+        # F6 — Memory Decay: archive old closed beads for the finished task.
+        # Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
+        if self._bead_store is not None:
+            try:
+                from agent_baton.core.engine.bead_decay import decay_beads
+                _archived = decay_beads(
+                    self._bead_store,
+                    ttl_hours=168,  # 7 days default
+                    task_id=state.task_id,
+                )
+                if _archived:
+                    _log.debug(
+                        "Bead decay: archived %d bead(s) for task %s",
+                        _archived, state.task_id,
+                    )
+            except Exception as _decay_exc:
+                _log.debug("Bead decay skipped (non-fatal): %s", _decay_exc)
 
         # Trigger improvement loop (best-effort, non-blocking).
         # The loop has built-in guards: circuit breaker, trigger thresholds,
@@ -2082,6 +2119,24 @@ class ExecutionEngine:
                     phase_id=phase_obj.phase_id,
                 )
 
+        # F11 — Conflict Detection: warn when unresolved bead conflicts exist.
+        # Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
+        # This is a non-blocking warning — execution continues but the conflict
+        # is surfaced as a log warning and a domain event so operators are aware.
+        if self._bead_store is not None:
+            try:
+                if self._bead_store.has_unresolved_conflicts(state.task_id):
+                    _log.warning(
+                        "Bead conflict: unresolved contradicting beads detected "
+                        "for task %s — review with `baton beads list --tag conflict:unresolved`",
+                        state.task_id,
+                    )
+                    if self._bus is not None:
+                        from agent_baton.core.events.events import bead_conflict
+                        self._bus.publish(bead_conflict(task_id=state.task_id))
+            except Exception as _cf_exc:
+                _log.debug("Bead conflict check failed (non-fatal): %s", _cf_exc)
+
         # No more phases — all done.
         if state.current_phase >= len(state.plan.phases):
             return ExecutionAction(
@@ -2233,12 +2288,34 @@ class ExecutionEngine:
         # knowledge gaps that have already been answered.
         handoff = _append_resolved_decisions(handoff, state.resolved_decisions)
 
+        # F3 — Forward Relay: select relevant beads to inject into the prompt.
+        # Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
+        prior_beads = []
+        if self._bead_store is not None:
+            try:
+                from agent_baton.core.engine.bead_selector import BeadSelector
+                selector = BeadSelector()
+                prior_beads = selector.select(
+                    self._bead_store,
+                    step,
+                    state.plan,
+                    token_budget=4096,
+                    max_beads=5,
+                )
+                # Increment retrieval_count for each selected bead (F12).
+                for _pb in prior_beads:
+                    self._bead_store.increment_retrieval_count(_pb.bead_id)
+            except Exception as _sel_exc:
+                _log.debug("BeadSelector failed (non-fatal): %s", _sel_exc)
+                prior_beads = []
+
         prompt = dispatcher.build_delegation_prompt(
             step,
             shared_context=state.plan.shared_context,
             handoff_from=handoff,
             task_summary=state.plan.task_summary,
             task_type=state.plan.task_type or "",
+            prior_beads=prior_beads or None,
         )
         enforcement = PromptDispatcher.build_path_enforcement(step)
         return ExecutionAction(
@@ -2534,6 +2611,7 @@ class ExecutionEngine:
             risk_level=risk_level,
             intervention_level=intervention_level,
             resolution_found=resolution_found,
+            bead_store=self._bead_store,
         )
 
         logger.info(

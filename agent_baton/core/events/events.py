@@ -180,6 +180,41 @@ def bead_created(
     )
 
 
+def bead_conflict(
+    task_id: str,
+    bead_id: str = "",
+    conflicting_bead_id: str = "",
+    sequence: int = 0,
+) -> Event:
+    """Create an event indicating unresolved conflicting beads were detected.
+
+    Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
+
+    Published by :meth:`~agent_baton.core.engine.executor.ExecutionEngine._determine_action`
+    when :meth:`~agent_baton.core.engine.bead_store.BeadStore.has_unresolved_conflicts`
+    returns ``True``.  Consumed by observability tooling to surface conflicts
+    before they cause agent confusion.
+
+    Args:
+        task_id: The execution task identifier.
+        bead_id: Optional primary bead involved in the conflict.
+        conflicting_bead_id: Optional secondary bead that contradicts *bead_id*.
+        sequence: Event sequence number (0 = auto-assign).
+
+    Returns:
+        An :class:`Event` with topic ``"bead.conflict"``.
+    """
+    return Event.create(
+        topic="bead.conflict",
+        task_id=task_id,
+        sequence=sequence,
+        payload={
+            "bead_id": bead_id,
+            "conflicting_bead_id": conflicting_bead_id,
+        },
+    )
+
+
 # ── Gates ───────────────────────────────────────────────────────────────────
 
 def gate_required(

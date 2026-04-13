@@ -93,40 +93,83 @@ class BeadStore:
             return ""
         try:
             conn = self._conn()
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO beads (
-                    bead_id, task_id, step_id, agent_name, bead_type,
-                    content, confidence, scope, tags, affected_files,
-                    status, created_at, closed_at, summary, links,
-                    source, token_estimate
-                ) VALUES (
-                    ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?,
-                    ?, ?
+            # Use a column list that gracefully degrades on schema v4 databases
+            # (which lack quality_score/retrieval_count).  We attempt the full
+            # v5 INSERT first; if it fails due to missing columns we fall back
+            # to the v4 insert.
+            try:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO beads (
+                        bead_id, task_id, step_id, agent_name, bead_type,
+                        content, confidence, scope, tags, affected_files,
+                        status, created_at, closed_at, summary, links,
+                        source, token_estimate, quality_score, retrieval_count
+                    ) VALUES (
+                        ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?
+                    )
+                    """,
+                    (
+                        bead.bead_id,
+                        bead.task_id,
+                        bead.step_id,
+                        bead.agent_name,
+                        bead.bead_type,
+                        bead.content,
+                        bead.confidence,
+                        bead.scope,
+                        json.dumps(bead.tags),
+                        json.dumps(bead.affected_files),
+                        bead.status,
+                        bead.created_at or _utcnow(),
+                        bead.closed_at,
+                        bead.summary,
+                        json.dumps([lnk.to_dict() for lnk in bead.links]),
+                        bead.source,
+                        bead.token_estimate,
+                        getattr(bead, "quality_score", 0.0),
+                        getattr(bead, "retrieval_count", 0),
+                    ),
                 )
-                """,
-                (
-                    bead.bead_id,
-                    bead.task_id,
-                    bead.step_id,
-                    bead.agent_name,
-                    bead.bead_type,
-                    bead.content,
-                    bead.confidence,
-                    bead.scope,
-                    json.dumps(bead.tags),
-                    json.dumps(bead.affected_files),
-                    bead.status,
-                    bead.created_at or _utcnow(),
-                    bead.closed_at,
-                    bead.summary,
-                    json.dumps([lnk.to_dict() for lnk in bead.links]),
-                    bead.source,
-                    bead.token_estimate,
-                ),
-            )
+            except Exception:
+                # Fall back to v4-compatible insert (no quality/retrieval cols).
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO beads (
+                        bead_id, task_id, step_id, agent_name, bead_type,
+                        content, confidence, scope, tags, affected_files,
+                        status, created_at, closed_at, summary, links,
+                        source, token_estimate
+                    ) VALUES (
+                        ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?,
+                        ?, ?
+                    )
+                    """,
+                    (
+                        bead.bead_id,
+                        bead.task_id,
+                        bead.step_id,
+                        bead.agent_name,
+                        bead.bead_type,
+                        bead.content,
+                        bead.confidence,
+                        bead.scope,
+                        json.dumps(bead.tags),
+                        json.dumps(bead.affected_files),
+                        bead.status,
+                        bead.created_at or _utcnow(),
+                        bead.closed_at,
+                        bead.summary,
+                        json.dumps([lnk.to_dict() for lnk in bead.links]),
+                        bead.source,
+                        bead.token_estimate,
+                    ),
+                )
             # Normalised tag rows — delete existing tags for this bead first
             # so that a replace operation does not leave stale tags.
             conn.execute("DELETE FROM bead_tags WHERE bead_id = ?", (bead.bead_id,))
@@ -306,6 +349,11 @@ class BeadStore:
         to the ``links`` JSON column of the source bead.  Both beads must
         already exist.
 
+        When *link_type* is ``"contradicts"`` or ``"supersedes"``, the tag
+        ``"conflict:unresolved"`` is added to both beads so that
+        :meth:`has_unresolved_conflicts` can detect the conflict without
+        joining on the links column.
+
         Args:
             source_id: Bead that originates the link.
             target_id: Bead that the link points to.
@@ -334,12 +382,138 @@ class BeadStore:
                 "UPDATE beads SET links = ? WHERE bead_id = ?",
                 (json.dumps(existing), source_id),
             )
+            # F11 — conflict detection: tag both beads when a conflict link is created.
+            if link_type in ("contradicts", "supersedes"):
+                self._add_conflict_tag(conn, source_id)
+                self._add_conflict_tag(conn, target_id)
             conn.commit()
         except Exception as exc:
             _log.warning(
                 "BeadStore.link failed (%s -> %s, %s): %s",
                 source_id, target_id, link_type, exc,
             )
+
+    # ------------------------------------------------------------------
+    # F11 — Conflict detection helpers
+    # ------------------------------------------------------------------
+
+    def _add_conflict_tag(self, conn, bead_id: str) -> None:
+        """Insert the ``conflict:unresolved`` tag row for *bead_id* (no-op if exists)."""
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO bead_tags (bead_id, tag) VALUES (?, ?)",
+                (bead_id, "conflict:unresolved"),
+            )
+        except Exception as exc:
+            _log.debug("_add_conflict_tag failed for %s: %s", bead_id, exc)
+
+    def has_unresolved_conflicts(self, task_id: str) -> bool:
+        """Return ``True`` if any open bead in *task_id* has an unresolved conflict.
+
+        Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
+
+        Args:
+            task_id: Execution scope to check.
+
+        Returns:
+            ``True`` when at least one bead is tagged ``"conflict:unresolved"``
+            and still has ``status = 'open'``.
+        """
+        if not self._table_exists():
+            return False
+        try:
+            row = self._conn().execute(
+                """
+                SELECT 1 FROM beads b
+                JOIN bead_tags bt ON bt.bead_id = b.bead_id
+                WHERE b.task_id = ? AND b.status = 'open'
+                  AND bt.tag = 'conflict:unresolved'
+                LIMIT 1
+                """,
+                (task_id,),
+            ).fetchone()
+            return row is not None
+        except Exception as exc:
+            _log.debug("has_unresolved_conflicts failed: %s", exc)
+            return False
+
+    def resolve_conflict(self, bead_id: str) -> None:
+        """Remove the ``conflict:unresolved`` tag from *bead_id*.
+
+        Call this after a human or automated process has reviewed and
+        resolved the conflict represented by this bead.
+
+        Args:
+            bead_id: The bead whose conflict has been resolved.
+        """
+        if not self._table_exists():
+            return
+        try:
+            conn = self._conn()
+            conn.execute(
+                "DELETE FROM bead_tags WHERE bead_id = ? AND tag = 'conflict:unresolved'",
+                (bead_id,),
+            )
+            conn.commit()
+        except Exception as exc:
+            _log.warning("BeadStore.resolve_conflict failed for %s: %s", bead_id, exc)
+
+    # ------------------------------------------------------------------
+    # F12 — Quality scoring helpers
+    # ------------------------------------------------------------------
+
+    def increment_retrieval_count(self, bead_id: str) -> None:
+        """Increment the ``retrieval_count`` for *bead_id* by 1.
+
+        Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
+        Called by :class:`~agent_baton.core.engine.bead_selector.BeadSelector`
+        after selection so the store tracks how often each bead is surfaced
+        to agents.
+
+        Args:
+            bead_id: The bead that was retrieved.
+        """
+        if not self._table_exists():
+            return
+        try:
+            conn = self._conn()
+            conn.execute(
+                "UPDATE beads SET retrieval_count = retrieval_count + 1 WHERE bead_id = ?",
+                (bead_id,),
+            )
+            conn.commit()
+        except Exception as exc:
+            _log.debug("BeadStore.increment_retrieval_count failed for %s: %s", bead_id, exc)
+
+    def update_quality_score(self, bead_id: str, delta: float) -> None:
+        """Adjust the ``quality_score`` for *bead_id* by *delta*.
+
+        Positive *delta* rewards useful beads (from ``BEAD_FEEDBACK: useful``
+        signals); negative *delta* penalises misleading or outdated ones.
+        The score is clamped to ``[-1.0, 1.0]``.
+
+        Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
+
+        Args:
+            bead_id: The bead to update.
+            delta: Score adjustment.  Typical values: ``+0.5`` (useful),
+                ``-0.5`` (misleading), ``-0.3`` (outdated).
+        """
+        if not self._table_exists():
+            return
+        try:
+            conn = self._conn()
+            conn.execute(
+                """
+                UPDATE beads
+                SET quality_score = MAX(-1.0, MIN(1.0, quality_score + ?))
+                WHERE bead_id = ?
+                """,
+                (delta, bead_id),
+            )
+            conn.commit()
+        except Exception as exc:
+            _log.debug("BeadStore.update_quality_score failed for %s: %s", bead_id, exc)
 
     def decay(self, max_age_days: int, task_id: str | None = None) -> int:
         """Archive closed beads older than *max_age_days*.
@@ -414,6 +588,17 @@ class BeadStore:
         except (json.JSONDecodeError, TypeError):
             links = []
 
+        # quality_score and retrieval_count were added in schema v5 — use
+        # dict-style access with a fallback so v4 databases degrade gracefully.
+        try:
+            quality_score = float(row["quality_score"] or 0.0)
+        except (IndexError, KeyError, TypeError):
+            quality_score = 0.0
+        try:
+            retrieval_count = int(row["retrieval_count"] or 0)
+        except (IndexError, KeyError, TypeError):
+            retrieval_count = 0
+
         return Bead(
             bead_id=row["bead_id"],
             task_id=row["task_id"],
@@ -432,4 +617,6 @@ class BeadStore:
             links=links,
             source=row["source"] or "agent-signal",
             token_estimate=int(row["token_estimate"] or 0),
+            quality_score=quality_score,
+            retrieval_count=retrieval_count,
         )

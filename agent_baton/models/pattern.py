@@ -5,6 +5,54 @@ from dataclasses import dataclass, field
 
 
 @dataclass
+class PlanStructureHint:
+    """A structural recommendation for plan construction derived from bead analysis.
+
+    Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
+
+    ``BeadAnalyzer`` produces these hints by mining historical bead data for
+    recurring patterns (warning frequency, discovery clustering, decision
+    reversals).  The planner applies hints during phase construction to
+    proactively add review phases, pre-load context files, or insert approval
+    gates before risky transitions.
+
+    Attributes:
+        hint_type: What structural change to apply.  One of:
+            ``"add_review_phase"`` — insert a review phase before the next phase;
+            ``"add_context_file"`` — pre-load a file into step context_files;
+            ``"add_approval_gate"`` — require human approval on a phase.
+        reason: Human-readable explanation of why this hint was generated.
+        evidence_bead_ids: Bead IDs that contributed to this hint.
+        metadata: Extra key/value data (e.g. ``{"file": "src/auth.py"}``
+            for ``add_context_file`` hints).
+    """
+
+    hint_type: str  # "add_review_phase" | "add_context_file" | "add_approval_gate"
+    reason: str
+    evidence_bead_ids: list[str] = field(default_factory=list)
+    metadata: dict = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        """Serialise to a plain dict."""
+        return {
+            "hint_type": self.hint_type,
+            "reason": self.reason,
+            "evidence_bead_ids": self.evidence_bead_ids,
+            "metadata": self.metadata,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "PlanStructureHint":
+        """Deserialise from a plain dict with backward-compatible defaults."""
+        return cls(
+            hint_type=data.get("hint_type", ""),
+            reason=data.get("reason", ""),
+            evidence_bead_ids=data.get("evidence_bead_ids", []),
+            metadata=data.get("metadata", {}),
+        )
+
+
+@dataclass
 class TeamPattern:
     """A recurring team composition pattern derived from usage logs.
 

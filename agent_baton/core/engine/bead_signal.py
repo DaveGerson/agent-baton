@@ -71,9 +71,63 @@ _BEAD_WARNING_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Matches a BEAD_FEEDBACK line (F12 — Quality Scoring).
+# Format: BEAD_FEEDBACK: <bead-id> useful|misleading|outdated
+# Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
+_BEAD_FEEDBACK_PATTERN = re.compile(
+    r"BEAD_FEEDBACK:\s*(bd-[0-9a-f]+)\s+(useful|misleading|outdated)",
+    re.IGNORECASE,
+)
+
+# Score deltas applied per feedback verdict.
+_FEEDBACK_DELTAS: dict[str, float] = {
+    "useful": 0.5,
+    "misleading": -0.5,
+    "outdated": -0.3,
+}
+
 
 def _utcnow() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_bead_feedback(outcome: str) -> list[tuple[str, float]]:
+    """Parse ``BEAD_FEEDBACK`` signals from agent outcome text.
+
+    Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
+
+    Scans *outcome* for lines of the form::
+
+        BEAD_FEEDBACK: bd-a1b2 useful
+        BEAD_FEEDBACK: bd-c3d4 misleading
+        BEAD_FEEDBACK: bd-e5f6 outdated
+
+    Returns a list of ``(bead_id, score_delta)`` tuples that callers pass
+    to :meth:`~agent_baton.core.engine.bead_store.BeadStore.update_quality_score`.
+
+    Malformed signals are silently dropped.  This function never raises.
+
+    Args:
+        outcome: Free-text agent outcome that may contain ``BEAD_FEEDBACK`` lines.
+
+    Returns:
+        List of ``(bead_id, delta)`` pairs.  Empty when no feedback signals
+        are present or when *outcome* is empty.
+    """
+    if not outcome:
+        return []
+    try:
+        results: list[tuple[str, float]] = []
+        for match in _BEAD_FEEDBACK_PATTERN.finditer(outcome):
+            bead_id = match.group(1).strip()
+            verdict = match.group(2).strip().lower()
+            delta = _FEEDBACK_DELTAS.get(verdict)
+            if bead_id and delta is not None:
+                results.append((bead_id, delta))
+        return results
+    except Exception as exc:
+        _log.debug("parse_bead_feedback: unexpected error — %s", exc)
+        return []
 
 
 def parse_bead_signals(

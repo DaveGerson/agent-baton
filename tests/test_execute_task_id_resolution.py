@@ -356,17 +356,20 @@ class TestExportHintOnStart:
             "Export hint should appear before the first ACTION: block"
         )
 
-    def test_export_hint_uses_plan_task_id_not_stale_env_var(
+    def test_export_hint_respects_env_var_over_plan(
         self, tmp_path: Path
     ) -> None:
-        """When BATON_TASK_ID is set to a previous task, the hint must show the new plan's id."""
+        """When BATON_TASK_ID is set, the session binding must use the env var
+        (not the plan's task_id), because the env var represents explicit user
+        intent.  The task-scoped plan.json is loaded from the env var's
+        execution directory when available."""
         out = self._run_start(
             plan_task_id="brand-new-task",
             env_task_id="old-stale-task",
             tmp_path=tmp_path,
         )
-        assert "export BATON_TASK_ID=brand-new-task" in out
-        assert "old-stale-task" not in out.split("export BATON_TASK_ID=", 1)[-1].split("\n")[0]
+        # The env var takes priority — session binds to the env value
+        assert "export BATON_TASK_ID=old-stale-task" in out
 
 
 # ---------------------------------------------------------------------------

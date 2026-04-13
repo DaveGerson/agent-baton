@@ -123,6 +123,7 @@ def determine_escalation(
     risk_level: str,
     intervention_level: str,
     resolution_found: bool,
+    bead_store=None,  # BeadStore | None
 ) -> str:
     """Apply the escalation matrix and return the recommended action.
 
@@ -132,11 +133,20 @@ def determine_escalation(
     Gap type   Resolution   Risk × Intervention       Action
     =========  ===========  ========================  ==============
     factual    match found  any                       auto-resolve
+    factual    bead match   any                       auto-resolve  (F8)
     factual    no match     LOW + low intervention    best-effort
     factual    no match     LOW + medium/high         queue-for-gate
     factual    no match     MEDIUM+ any               queue-for-gate
     contextual —            any                       queue-for-gate
     =========  ===========  ========================  ==============
+
+    F8 — Knowledge Gap Auto-Resolution from Beads:
+    Before applying the matrix, search the bead store for high-confidence
+    ``discovery`` beads whose content keywords overlap with the gap
+    description (>= 2 matching keywords).  When found, treat as
+    ``resolution_found=True`` (auto-resolve without human escalation).
+
+    Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
 
     Args:
         signal: The parsed KnowledgeGapSignal.
@@ -145,6 +155,10 @@ def determine_escalation(
         intervention_level: Plan intervention setting (case-insensitive).
             E.g. "low", "medium", "high".
         resolution_found: Whether the resolver found matching knowledge.
+        bead_store: Optional
+            :class:`~agent_baton.core.engine.bead_store.BeadStore`.
+            When provided, discovery beads are searched for gap auto-resolution
+            before the escalation matrix is applied.
 
     Returns:
         One of ``"auto-resolve"``, ``"best-effort"``, or
@@ -162,6 +176,22 @@ def determine_escalation(
     if resolution_found:
         return "auto-resolve"
 
+    # F8 — Bead auto-resolution: check discovery beads for a matching answer
+    # before escalating.  Only for factual gaps (contextual already returned).
+    if bead_store is not None and not resolution_found:
+        try:
+            bead_resolved = _resolve_from_beads(signal.description, bead_store)
+            if bead_resolved:
+                logger.debug(
+                    "Knowledge gap auto-resolved from bead store: %r",
+                    signal.description,
+                )
+                return "auto-resolve"
+        except Exception as _bead_exc:
+            logger.debug(
+                "Bead gap resolution failed (non-fatal): %s", _bead_exc
+            )
+
     # Factual gap, no match — escalate based on risk × intervention.
     if normalised_risk in _HIGH_RISK_LEVELS:
         return "queue-for-gate"
@@ -172,3 +202,45 @@ def determine_escalation(
 
     # LOW risk + low intervention + no match — best-effort (log and continue).
     return "best-effort"
+
+
+def _resolve_from_beads(description: str, bead_store) -> bool:
+    """Return True if a high-confidence discovery bead covers *description*.
+
+    Computes keyword overlap between *description* and the content of each
+    ``discovery`` bead with ``confidence = "high"``.  A match requires at
+    least 2 overlapping content keywords (stop-words excluded).
+
+    Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
+
+    Args:
+        description: The knowledge gap description text.
+        bead_store: A live :class:`~agent_baton.core.engine.bead_store.BeadStore`.
+
+    Returns:
+        ``True`` when a matching high-confidence discovery bead is found.
+    """
+    _STOP_WORDS = frozenset({
+        "the", "a", "an", "is", "it", "in", "on", "at", "to", "for",
+        "of", "and", "or", "with", "by", "from", "that", "this", "are",
+        "be", "has", "have", "was", "were", "not", "no", "as", "its",
+    })
+
+    def _keywords(text: str) -> frozenset:
+        words = re.findall(r"\b[a-zA-Z_][a-zA-Z0-9_]{2,}\b", text.lower())
+        return frozenset(w for w in words if w not in _STOP_WORDS)
+
+    gap_keywords = _keywords(description)
+    if len(gap_keywords) < 2:
+        return False
+
+    candidates = bead_store.query(bead_type="discovery", limit=200)
+    for bead in candidates:
+        if getattr(bead, "confidence", "medium") != "high":
+            continue
+        bead_keywords = _keywords(bead.content)
+        overlap = gap_keywords & bead_keywords
+        if len(overlap) >= 2:
+            return True
+
+    return False

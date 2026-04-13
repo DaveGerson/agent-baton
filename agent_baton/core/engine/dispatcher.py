@@ -43,7 +43,9 @@ _BEAD_SIGNALS_LINE = (
     "Report discoveries and decisions using structured signals:\n"
     "  BEAD_DISCOVERY: <what you found>\n"
     "  BEAD_DECISION: <what you decided> CHOSE: <choice> BECAUSE: <rationale>\n"
-    "  BEAD_WARNING: <what might cause problems>"
+    "  BEAD_WARNING: <what might cause problems>\n"
+    "Rate prior discoveries injected above (if any) to improve future selection:\n"
+    "  BEAD_FEEDBACK: <bead-id> useful|misleading|outdated"
 )
 
 # Success criteria by task type — shown in the delegation prompt to make the
@@ -149,6 +151,56 @@ class PromptDispatcher:
             )
         return f"Retrieve via: `Read {attachment.path}`"
 
+    @staticmethod
+    def _build_prior_beads_section(prior_beads: list) -> str:
+        """Render the ``## Prior Discoveries`` section from a list of beads.
+
+        Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
+
+        Returns an empty string when *prior_beads* is empty so callers can
+        skip the section entirely without adding blank lines.
+        """
+        if not prior_beads:
+            return ""
+
+        lines = [
+            "## Prior Discoveries",
+            "The following were discovered by prior agents in this execution.",
+            "Treat as established context unless you find contrary evidence.",
+            "",
+        ]
+
+        total = len(prior_beads)
+        shown = min(total, 5)  # hard cap matches BeadSelector.max_beads default
+
+        for bead in prior_beads[:shown]:
+            bead_type_label = bead.bead_type.capitalize()
+            files_str = ""
+            if bead.affected_files:
+                files_str = f"\nFiles: {', '.join(bead.affected_files)}"
+            tags_str = ""
+            if bead.tags:
+                tags_str = f"\nTags: {', '.join(bead.tags)}"
+            lines.append(
+                f"### {bead_type_label} (step {bead.step_id}, "
+                f"{bead.agent_name}, confidence: {bead.confidence})"
+            )
+            lines.append(bead.content)
+            if files_str:
+                lines.append(files_str.strip())
+            if tags_str:
+                lines.append(tags_str.strip())
+            lines.append("")
+
+        if total > shown:
+            lines.append(
+                f"[{total - shown} additional discovery/ies omitted — "
+                f"run `baton beads list` to review]"
+            )
+            lines.append("")
+
+        return "\n".join(lines).rstrip()
+
     # ------------------------------------------------------------------
     # Delegation prompt builders
     # ------------------------------------------------------------------
@@ -162,6 +214,7 @@ class PromptDispatcher:
         project_description: str = "",
         task_summary: str = "",
         task_type: str = "",
+        prior_beads: "list | None" = None,
     ) -> str:
         """Build a complete delegation prompt for an agent.
 
@@ -230,6 +283,14 @@ class PromptDispatcher:
         if knowledge_section:
             parts.append(knowledge_section)
             parts.append("")
+
+        # Insert Prior Discoveries section (F3 Forward Relay).
+        # Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
+        if prior_beads:
+            prior_section = self._build_prior_beads_section(prior_beads)
+            if prior_section:
+                parts.append(prior_section)
+                parts.append("")
 
         parts += [
             f"## Your Task (Step {step.step_id})",
@@ -300,6 +361,7 @@ class PromptDispatcher:
         shared_context: str = "",
         task_summary: str = "",
         team_overview: str = "",
+        prior_beads: "list | None" = None,
     ) -> str:
         """Build a delegation prompt for a single team member.
 
@@ -349,6 +411,14 @@ class PromptDispatcher:
         if knowledge_section:
             parts.append(knowledge_section)
             parts.append("")
+
+        # Insert Prior Discoveries section (F3 Forward Relay).
+        # Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
+        if prior_beads:
+            prior_section = self._build_prior_beads_section(prior_beads)
+            if prior_section:
+                parts.append(prior_section)
+                parts.append("")
 
         parts.extend([
             f"## Your Task (Step {step.step_id}, Member {member.member_id})",

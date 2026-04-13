@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -142,6 +142,16 @@ CREATE INDEX IF NOT EXISTS idx_learning_issues_target
 CREATE UNIQUE INDEX IF NOT EXISTS idx_learning_issues_type_target_open
     ON learning_issues(issue_type, target)
     WHERE status NOT IN ('resolved', 'wontfix');
+""",
+    6: """
+-- v6: add quality_score and retrieval_count to beads (F12 Quality Scoring).
+-- Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
+--
+-- NOTE: No FK constraints — this migration is applied to BOTH project and
+-- central databases via ConnectionManager._run_migrations().  See the v4
+-- note for the full rationale.
+ALTER TABLE beads ADD COLUMN quality_score   REAL    NOT NULL DEFAULT 0.0;
+ALTER TABLE beads ADD COLUMN retrieval_count INTEGER NOT NULL DEFAULT 0;
 """,
 }
 
@@ -581,6 +591,8 @@ CREATE TABLE IF NOT EXISTS beads (
     links            TEXT NOT NULL DEFAULT '[]',
     source           TEXT NOT NULL DEFAULT 'agent-signal',
     token_estimate   INTEGER NOT NULL DEFAULT 0,
+    quality_score    REAL    NOT NULL DEFAULT 0.0,
+    retrieval_count  INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (task_id) REFERENCES executions(task_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_beads_task ON beads(task_id);
@@ -1246,6 +1258,8 @@ CREATE TABLE IF NOT EXISTS beads (
     links            TEXT NOT NULL DEFAULT '[]',
     source           TEXT NOT NULL DEFAULT 'agent-signal',
     token_estimate   INTEGER NOT NULL DEFAULT 0,
+    quality_score    REAL    NOT NULL DEFAULT 0.0,
+    retrieval_count  INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (project_id, bead_id)
 );
 CREATE INDEX IF NOT EXISTS idx_central_beads_task ON beads(project_id, task_id);
@@ -1342,6 +1356,28 @@ SELECT
     )                                                              AS failure_rate
 FROM executions e
 GROUP BY e.project_id;
+
+-- Cross-project discovery analytics (F10 — Bead Central Store Analytics).
+-- Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
+-- Query via: baton query "SELECT * FROM v_cross_project_discoveries LIMIT 20"
+CREATE VIEW IF NOT EXISTS v_cross_project_discoveries AS
+SELECT
+    b.project_id,
+    b.bead_id,
+    b.bead_type,
+    b.agent_name,
+    b.content,
+    b.confidence,
+    b.tags,
+    b.affected_files,
+    b.created_at,
+    b.quality_score,
+    b.retrieval_count,
+    p.task_summary      AS task_summary
+FROM beads b
+LEFT JOIN plans p
+    ON p.project_id = b.project_id AND p.task_id = b.task_id
+WHERE b.bead_type IN ('discovery', 'warning');
 
 CREATE VIEW IF NOT EXISTS v_external_plan_mapping AS
 SELECT

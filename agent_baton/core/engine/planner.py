@@ -420,6 +420,7 @@ class IntelligentPlanner:
         retro_engine: RetroEngine | None = None,
         knowledge_registry: KnowledgeRegistry | None = None,
         task_classifier: TaskClassifier | None = None,
+        bead_store=None,  # BeadStore | None (F4 planning capture, F7 BeadAnalyzer)
     ) -> None:
         self._team_context_root = team_context_root
         self._pattern_learner = PatternLearner(team_context_root)
@@ -440,6 +441,11 @@ class IntelligentPlanner:
         # Optional knowledge registry — enables per-step knowledge resolution.
         # When None, the knowledge resolution step is skipped entirely.
         self.knowledge_registry: KnowledgeRegistry | None = knowledge_registry
+
+        # Optional bead store — enables F4 planning decision capture and
+        # F7 BeadAnalyzer plan enrichment.
+        # Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
+        self._bead_store = bead_store
 
         # Populated during create_plan for use in explain_plan
         self._last_pattern_used: LearnedPattern | None = None
@@ -576,6 +582,19 @@ class IntelligentPlanner:
                         break
             except Exception:
                 pass
+
+        # 4b. F7 — BeadAnalyzer: mine historical beads for plan structure hints.
+        # Runs after pattern lookup so it can complement (not override) patterns.
+        # Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
+        _bead_hints: list = []
+        if self._bead_store is not None:
+            try:
+                from agent_baton.core.learn.bead_analyzer import BeadAnalyzer
+                _bead_hints = BeadAnalyzer().analyze(
+                    self._bead_store, task_description=task_summary
+                )
+            except Exception:
+                _bead_hints = []
 
         # 5b. Retrospective feedback — filter dropped agents and record gaps.
         # This is consulted before routing so the feedback applies to base names.
@@ -815,6 +834,11 @@ class IntelligentPlanner:
             if phase.name.lower() in ("implement", "fix") and len(phase.steps) >= 2:
                 phase.steps = [self._consolidate_team_step(phase)]
 
+        # 12d. Apply bead hints from BeadAnalyzer (F7).
+        # Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
+        if _bead_hints:
+            plan_phases = self._apply_bead_hints(plan_phases, _bead_hints)
+
         # 13. Populate context_files — every agent should read CLAUDE.md
         for phase in plan_phases:
             for step in phase.steps:
@@ -887,6 +911,24 @@ class IntelligentPlanner:
 
         shared_context = self._build_shared_context(tmp_plan)
         tmp_plan.shared_context = shared_context
+
+        # F4 — Planning Decision Capture: persist key planner decisions as beads.
+        # Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
+        if self._bead_store is not None:
+            try:
+                self._capture_planning_bead(
+                    task_id=task_id,
+                    content=(
+                        f"Plan created for: {task_summary}. "
+                        f"Type={inferred_type}, complexity={inferred_complexity}, "
+                        f"risk={risk_level}, agents={resolved_agents}, "
+                        f"phases={[p.name for p in plan_phases]}, "
+                        f"budget_tier={budget_tier}, git_strategy={git_strategy}."
+                    ),
+                    tags=["planning", "plan-complete", inferred_type],
+                )
+            except Exception:
+                pass
 
         return tmp_plan
 
@@ -1039,6 +1081,130 @@ class IntelligentPlanner:
         lines.append("")
 
         return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # Private helpers — bead capture and hint application (F4, F7)
+    # ------------------------------------------------------------------
+
+    def _capture_planning_bead(
+        self,
+        task_id: str,
+        content: str,
+        tags: list[str] | None = None,
+    ) -> None:
+        """Write a planning bead to the bead store.
+
+        Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
+
+        Called during ``create_plan()`` to capture key planning decisions as
+        durable beads.  Silently no-ops when ``_bead_store`` is not set.
+
+        Args:
+            task_id: Task ID of the plan being created.
+            content: The planning decision or observation to record.
+            tags: Optional semantic tags for retrieval.
+        """
+        if self._bead_store is None:
+            return
+        try:
+            from datetime import datetime, timezone
+            from agent_baton.models.bead import Bead, _generate_bead_id
+            timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            try:
+                existing_count = len(
+                    self._bead_store.query(task_id=task_id, limit=10000)
+                )
+            except Exception:
+                existing_count = 0
+            bead_id = _generate_bead_id(task_id, "planning", content, timestamp, existing_count)
+            bead = Bead(
+                bead_id=bead_id,
+                task_id=task_id,
+                step_id="planning",
+                agent_name="planner",
+                bead_type="planning",
+                content=content,
+                confidence="high",
+                scope="task",
+                tags=tags or ["planning"],
+                status="open",
+                created_at=timestamp,
+                source="planning-capture",
+            )
+            self._bead_store.write(bead)
+        except Exception as exc:
+            logger.debug("_capture_planning_bead failed (non-fatal): %s", exc)
+
+    def _apply_bead_hints(
+        self,
+        plan_phases: list,
+        hints: list,
+    ) -> list:
+        """Apply :class:`~agent_baton.models.pattern.PlanStructureHint` objects to phases.
+
+        Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
+
+        Three hint types are handled:
+
+        - ``add_context_file``: Append the hinted file to every step's
+          ``context_files`` (deduplicated).
+        - ``add_review_phase``: Insert a review phase before the first
+          non-design, non-research phase (idempotent — skipped if a review
+          phase already exists).
+        - ``add_approval_gate``: Mark the first non-design phase as
+          requiring human approval if it is not already gated.
+
+        Args:
+            plan_phases: The current list of :class:`~agent_baton.models.execution.PlanPhase`.
+            hints: List of :class:`~agent_baton.models.pattern.PlanStructureHint`.
+
+        Returns:
+            Possibly-modified list of phases.
+        """
+        for hint in hints:
+            try:
+                if hint.hint_type == "add_context_file":
+                    file_path = hint.metadata.get("file", "")
+                    if file_path:
+                        for phase in plan_phases:
+                            for step in phase.steps:
+                                if file_path not in step.context_files:
+                                    step.context_files.append(file_path)
+
+                elif hint.hint_type == "add_review_phase":
+                    # Skip if a review phase already exists.
+                    has_review = any(
+                        p.name.lower() == "review" for p in plan_phases
+                    )
+                    if not has_review and plan_phases:
+                        # Build a minimal review phase using the last agent.
+                        last_agent = "code-reviewer"
+                        if plan_phases[-1].steps:
+                            last_agent = plan_phases[-1].steps[-1].agent_name
+                        review_phase = self._build_phases_for_names(
+                            ["Review"], [last_agent], "Review bead-flagged concerns"
+                        )
+                        plan_phases.extend(review_phase)
+
+                elif hint.hint_type == "add_approval_gate":
+                    # Add approval_required to the first non-design phase.
+                    for phase in plan_phases:
+                        if phase.name.lower() not in ("design", "research", "investigate"):
+                            if not phase.approval_required:
+                                phase.approval_required = True
+                                phase.approval_description = (
+                                    "Bead analysis detected decision reversals — "
+                                    "review before proceeding. "
+                                    "Approve to continue, reject to stop."
+                                )
+                            break
+            except Exception as _hint_exc:
+                logger.debug(
+                    "_apply_bead_hints: hint %s failed (non-fatal): %s",
+                    hint.hint_type, _hint_exc,
+                )
+
+        return plan_phases
 
     # ------------------------------------------------------------------
     # Private helpers — task ID and type inference
