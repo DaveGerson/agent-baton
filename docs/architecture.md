@@ -135,6 +135,8 @@ agent_baton/
   |  mission_log.py   MissionLogEntry
   |  plan.py          MissionLogEntry (canonical location)
   |  reference.py     ReferenceDocument
+  |  bead.py          Bead, BeadLink (structured agent memory,
+  |                   inspired by beads-ai/beads-cli)
   |
   utils/
   |  frontmatter.py   parse_frontmatter() — YAML frontmatter extraction
@@ -145,7 +147,8 @@ agent_baton/
   |
   |  engine/          ExecutionEngine, IntelligentPlanner, PromptDispatcher,
   |  |                GateRunner, StatePersistence, ExecutionDriver protocol,
-  |  |                KnowledgeResolver, KnowledgeGap handler
+  |  |                KnowledgeResolver, KnowledgeGap handler,
+  |  |                BeadStore, bead_signal (structured memory)
   |  |
   |  runtime/         TaskWorker, WorkerSupervisor, StepScheduler,
   |  |                AgentLauncher protocol, DryRunLauncher, ClaudeCodeLauncher,
@@ -232,7 +235,7 @@ agents/              Distributable agent definitions (19 .md files)
 references/          Distributable reference docs (13 .md files)
 templates/           CLAUDE.md + settings.json installed to target projects
 scripts/             Install scripts (Linux + Windows)
-tests/               Test suite (~3907 tests, pytest)
+tests/               Test suite (~4665 tests, pytest)
 docs/                Architecture documentation
 ```
 
@@ -325,6 +328,8 @@ for the driving session (Claude or daemon) to perform.
 | `protocols.py` | `ExecutionDriver` | `typing.Protocol` (runtime-checkable) defining the 12-method interface between the async worker layer and the engine. |
 | `knowledge_resolver.py` | `KnowledgeResolver` | 4-layer knowledge resolution pipeline: explicit -> agent-declared -> planner-matched (strict tag) -> planner-matched (TF-IDF relevance fallback). Per-step token budget governs inline vs. reference delivery decisions. |
 | `knowledge_gap.py` | `parse_knowledge_gap()`, `determine_escalation()` | Parses `KNOWLEDGE_GAP` / `CONFIDENCE` / `TYPE` signals from agent output. Applies escalation matrix (gap type x risk level x intervention level) returning `auto-resolve`, `best-effort`, or `queue-for-gate`. |
+| `bead_store.py` | `BeadStore` | SQLite-backed persistence for structured agent memory (schema v4). CRUD for `beads` and `bead_tags` tables with query filters, dependency-aware `ready()`, decay for archiving old beads. Inspired by Steve Yegge's Beads (beads-ai/beads-cli). |
+| `bead_signal.py` | `parse_bead_signals()` | Parses `BEAD_DISCOVERY` / `BEAD_DECISION` / `BEAD_WARNING` signals from agent output. Called in `record_step_result()` after the knowledge gap block. Publishes `bead.created` events to the EventBus. |
 
 #### ExecutionEngine Lifecycle
 

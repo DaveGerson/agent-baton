@@ -355,3 +355,71 @@ became O(N) filesystem reads per PMO status request.
   updating the environment variable — no database writes, no migration.
 
 **Status**: Implemented (2026-03-24)
+
+---
+
+## ADR-13: Native SQLite Bead Memory (Not Beads Go CLI Backend)
+
+**Decision**: Implement structured agent memory as native SQLite tables in
+`baton.db` (schema v4), adopting the concepts from Steve Yegge's Beads agent
+memory system (beads-ai/beads-cli) but not the Go binary, Dolt backend, or
+`.beads/` file format. Agents emit inline signals (`BEAD_DISCOVERY`,
+`BEAD_DECISION`, `BEAD_WARNING`) that are parsed and persisted by the
+executor, following the same pattern as the existing knowledge gap protocol.
+
+**Context**: Beads (18.7k GitHub stars) introduced a compelling model for
+agent memory — hash-based IDs, typed dependency graphs, memory decay, and
+a `bd ready` command for surfacing unblocked work items. Gastown (built on
+Beads for 20-160+ concurrent agents) demonstrated that shared context reduces
+token burn 60-80% and that design decisions become the execution bottleneck.
+However, Beads requires a Go binary (breaks `pip install`), uses Dolt for
+storage (heavy dependency, 3 storage migrations in 4 months), and solves
+concurrent-write contention that Agent Baton doesn't have (serialized executor).
+
+**Alternatives considered**:
+
+- **Adopt Beads Go CLI as runtime dependency**: Rejected. Requires Go
+  toolchain or prebuilt binaries, breaks the "pip install and go" developer
+  experience. Beads had 3 storage backend migrations in 4 months (flatfile →
+  sqlite → Dolt), indicating an unstable storage layer.
+
+- **Adopt Dolt as storage backend**: Rejected. Dolt adds a 200MB+ binary
+  dependency, requires a running server process, and is designed for
+  concurrent multi-writer scenarios. Agent Baton's serialized executor
+  has no concurrent-write problem — SQLite WAL mode is sufficient.
+
+- **Import Beads as a Python library (wrap the Go CLI)**: Rejected. FFI
+  wrappers add brittleness, version coupling, and complicate debugging.
+  The signal parsing and storage patterns are simple enough to implement
+  natively in ~1000 lines of Python.
+
+- **Use `.beads/` file format for interoperability**: Deferred as a
+  pull-forward feature. The `ExternalSourceAdapter` protocol can bridge
+  to `.beads/` directories when/if interop is needed, without changing
+  the core engine.
+
+**Key trade-offs**:
+
+- **Native SQLite vs. Beads backend**: SQLite is already the storage layer
+  for all other engine data. Using it for beads means one database, one
+  sync pipeline, one backup story. The cost is implementing bead CRUD from
+  scratch (~435 LOC for `BeadStore`), which is modest.
+
+- **Signal protocol vs. structured API**: Agents emit signals as free-text
+  markers (like `KNOWLEDGE_GAP`), not via a structured API. This works
+  because agents write to stdout — there is no function-call interface.
+  Regex parsing is fragile in theory but robust in practice (the knowledge
+  gap protocol has been running reliably since v2).
+
+- **Schema v4 migration shared across DB types**: The `MIGRATIONS` dict is
+  applied to both project and central databases. FK constraints that
+  reference single-column PKs must be omitted from migrations because
+  central tables use composite PKs. Fresh project DBs get FKs from
+  `PROJECT_SCHEMA_DDL` directly.
+
+- **Pull-forward hedge**: The `ExternalSourceAdapter` protocol and
+  `StorageBackend` protocol preserve the option to integrate with the
+  Beads ecosystem later without changing the core engine. If Beads
+  stabilizes its storage layer, a `BeadsAdapter` could bridge the gap.
+
+**Status**: Implemented — Tier 1 (2026-04-13). Tiers 2-4 deferred per spec.
