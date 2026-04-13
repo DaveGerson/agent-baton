@@ -31,7 +31,7 @@ from pathlib import Path
 if sys.platform != "win32":
     import fcntl
 else:
-    import msvcrt
+    fcntl = None  # type: ignore[assignment]
 
 from agent_baton.core.engine.executor import ExecutionEngine
 from agent_baton.core.engine.protocols import ExecutionDriver
@@ -349,18 +349,15 @@ class WorkerSupervisor:
         # Open the PID file and acquire an exclusive lock BEFORE writing.
         # The OS releases the lock automatically when the process exits or the
         # FD is closed, which eliminates the stale-PID-file race condition.
-        # Use "w+" so the holding process can read back through the same FD
-        # (required on Windows where msvcrt.locking blocks other handles).
-        self._pid_fd = open(self.pid_path, "w+")  # noqa: SIM115
-        try:
-            if sys.platform != "win32":
+        # Note: flock() on network filesystems may not enforce mutual exclusion.
+        self._pid_fd = open(self.pid_path, "w")  # noqa: SIM115
+        if fcntl is not None:
+            try:
                 fcntl.flock(self._pid_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            else:
-                msvcrt.locking(self._pid_fd.fileno(), msvcrt.LK_NBLCK, 1)
-        except OSError:
-            self._pid_fd.close()
-            self._pid_fd = None
-            raise RuntimeError("Another daemon is already running.")
+            except OSError:
+                self._pid_fd.close()
+                self._pid_fd = None
+                raise RuntimeError("Another daemon is already running.")
         self._pid_fd.write(str(os.getpid()))
         self._pid_fd.flush()
         # Hold the FD open — lock is released when process exits or FD closes.
@@ -368,11 +365,8 @@ class WorkerSupervisor:
     def _remove_pid(self) -> None:
         if hasattr(self, "_pid_fd") and self._pid_fd is not None:
             try:
-                if sys.platform != "win32":
+                if fcntl is not None:
                     fcntl.flock(self._pid_fd, fcntl.LOCK_UN)
-                else:
-                    self._pid_fd.seek(0)
-                    msvcrt.locking(self._pid_fd.fileno(), msvcrt.LK_UNLCK, 1)
                 self._pid_fd.close()
             except OSError:
                 pass
