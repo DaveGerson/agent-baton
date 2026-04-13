@@ -49,7 +49,7 @@ agents/            ← Distributable agent definitions (19 .md files)
 references/        ← Distributable reference docs (15 .md files)
 templates/         ← CLAUDE.md + settings.json installed to target projects
 scripts/           ← Install scripts (Linux + Windows)
-tests/             ← Test suite (~4690 tests, pytest)
+tests/             ← Test suite (~5035 tests, pytest)
 pmo-ui/            ← React/Vite PMO frontend (served at /pmo/)
 .claude/           ← Project-specific orchestration setup:
   agents/          ← 19 packaged agents (mirrored from agents/) +
@@ -117,7 +117,7 @@ pmo-ui/            ← React/Vite PMO frontend (served at /pmo/)
 
 ```bash
 pip install -e ".[dev]"    # Install in editable mode
-pytest                     # Run tests (~4690 tests)
+pytest                     # Run tests (~5035 tests)
 scripts/install.sh         # Re-install globally after editing agents/references
 ```
 
