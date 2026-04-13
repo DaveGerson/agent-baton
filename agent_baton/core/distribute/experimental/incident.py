@@ -15,8 +15,6 @@ Each phase specifies which agents are involved and what gate check must
 pass before advancing. Incident documents are persisted as markdown files
 under ``.claude/team-context/incidents/``.
 
-**Status: Experimental** -- built and tested but not yet validated with real
-usage data.
 """
 from __future__ import annotations
 

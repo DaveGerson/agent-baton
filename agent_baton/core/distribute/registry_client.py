@@ -26,8 +26,6 @@ Workflow:
 The caller is responsible for git commit/push operations if the registry
 directory is a git repository.
 
-**Status: Experimental** -- built and tested but not yet validated with real
-usage data.
 """
 from __future__ import annotations
 

@@ -20,8 +20,6 @@ preset. The classification cascade is:
 When no signals are detected, the task defaults to LOW risk with the
 "Standard Development" guardrail preset.
 
-**Status: Experimental** -- built and tested but not yet validated with real
-usage data.
 """
 from __future__ import annotations
 

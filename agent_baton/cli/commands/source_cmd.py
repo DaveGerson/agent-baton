@@ -2,17 +2,15 @@
 
 Subcommands
 -----------
-add         Register an external source (ADO only — other adapters not yet implemented).
+add         Register an external source (ADO, GitHub, Jira, Linear).
 list        List all registered external sources.
 sync        Pull work items from a source into central.db.
 remove      Remove a registered external source.
 map         Map an external item to a baton project/task.
 
-Only the ADO adapter is currently implemented. Support for Jira, GitHub, and
-Linear can be added by creating an adapter module in
-``agent_baton/core/storage/adapters/`` that satisfies the
-``ExternalSourceAdapter`` protocol and self-registers via
-``AdapterRegistry.register()``.
+Supported adapters: ADO, GitHub, Jira, Linear.  Each adapter module lives in
+``agent_baton/core/storage/adapters/`` and self-registers via
+``AdapterRegistry.register()`` on import.
 """
 from __future__ import annotations
 
@@ -29,7 +27,7 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     """Register the ``source`` subcommand group."""
     p = subparsers.add_parser(
         "source",
-        help="Manage external work-item source connections (ADO adapter implemented)",
+        help="Manage external work-item source connections (ado, github, jira, linear)",
     )
     sub = p.add_subparsers(dest="subcommand")
 
@@ -38,7 +36,7 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     p_add.add_argument(
         "source_type",
         metavar="TYPE",
-        help="Source type: ado (jira/github/linear adapters not yet implemented)",
+        help="Source type: ado, github, jira, linear",
     )
     p_add.add_argument(
         "--name",
@@ -155,19 +153,10 @@ def _add(args: argparse.Namespace) -> None:
     """Register an external source in central.db."""
     import json
 
-    _IMPLEMENTED_TYPES = {"ado"}
-    _PLANNED_TYPES = {"jira", "github", "linear"}
-    if args.source_type in _PLANNED_TYPES:
-        print(f"error: no adapter implemented for source type '{args.source_type}'")
-        print(f"implemented types: {', '.join(sorted(_IMPLEMENTED_TYPES))}")
-        print(
-            f"To add a '{args.source_type}' adapter, implement "
-            f"ExternalSourceAdapter in agent_baton/core/storage/adapters/{args.source_type}.py"
-        )
-        sys.exit(1)
+    _IMPLEMENTED_TYPES = {"ado", "github", "jira", "linear"}
     if args.source_type not in _IMPLEMENTED_TYPES:
         print(f"error: unknown source type '{args.source_type}'")
-        print(f"implemented types: {', '.join(sorted(_IMPLEMENTED_TYPES))}")
+        print(f"supported types: {', '.join(sorted(_IMPLEMENTED_TYPES))}")
         sys.exit(1)
 
     # Build a stable source_id from type + org + project
@@ -254,7 +243,8 @@ def _list(_args: argparse.Namespace) -> None:
 
     if not rows:
         print("No external sources registered.")
-        print("Add one with: baton source add ado --name NAME --org ORG --project PROJ --pat-env ADO_PAT")
+        print("Add one with: baton source add <type> --name NAME ...")
+        print("Supported types: ado, github, jira, linear")
         return
 
     print(f"External Sources ({len(rows)} registered)")
@@ -308,11 +298,14 @@ def _sync(args: argparse.Namespace) -> None:
             print("Run 'baton source list' to see registered sources.")
         sys.exit(1)
 
-    # Load adapters — import triggers self-registration side effects.
+    # Load adapters — each import triggers self-registration side effects.
     AdapterRegistry = None  # type: ignore[assignment]
     try:
         from agent_baton.core.storage.adapters import AdapterRegistry
-        import agent_baton.core.storage.adapters.ado  # noqa: F401  # type: ignore[import]  triggers registration
+        import agent_baton.core.storage.adapters.ado  # noqa: F401  # type: ignore[import]
+        import agent_baton.core.storage.adapters.github  # noqa: F401  # type: ignore[import]
+        import agent_baton.core.storage.adapters.jira  # noqa: F401  # type: ignore[import]
+        import agent_baton.core.storage.adapters.linear  # noqa: F401  # type: ignore[import]
     except ImportError:
         pass
 
@@ -345,13 +338,36 @@ def _sync(args: argparse.Namespace) -> None:
 
         import json as _json
         raw_config = _json.loads(config_rows[0]["config"])
-        # Normalise config keys to match adapter expectations
-        config = {
-            "organization": raw_config.get("org", ""),
-            "project": raw_config.get("project", ""),
-            "pat_env_var": raw_config.get("pat_env", "ADO_PAT"),
-            "url": raw_config.get("url", ""),
-        }
+        # Normalise config keys to match each adapter's expectations.
+        # The stored config uses generic CLI key names (org, project,
+        # pat_env, url); adapters consume source-type-specific names.
+        if source_type == "ado":
+            config = {
+                "organization": raw_config.get("org", ""),
+                "project": raw_config.get("project", ""),
+                "pat_env_var": raw_config.get("pat_env", "ADO_PAT"),
+                "url": raw_config.get("url", ""),
+            }
+        elif source_type == "github":
+            config = {
+                "owner": raw_config.get("org", ""),
+                "repo": raw_config.get("project", ""),
+                "token_env_var": raw_config.get("pat_env", "GITHUB_TOKEN"),
+            }
+        elif source_type == "jira":
+            config = {
+                "url": raw_config.get("url", ""),
+                "project": raw_config.get("project", ""),
+                "email": raw_config.get("org", ""),  # --org used for email
+                "token_env_var": raw_config.get("pat_env", "JIRA_API_TOKEN"),
+            }
+        elif source_type == "linear":
+            config = {
+                "team_key": raw_config.get("project", ""),
+                "token_env_var": raw_config.get("pat_env", "LINEAR_API_KEY"),
+            }
+        else:
+            config = dict(raw_config)
 
         adapter = adapter_cls()
         try:

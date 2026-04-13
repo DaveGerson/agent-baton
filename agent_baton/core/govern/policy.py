@@ -40,8 +40,6 @@ Each rule has a severity of ``"block"`` (hard failure) or ``"warn"``
 (advisory). The engine returns a list of ``PolicyViolation`` objects so the
 caller can decide how to handle blocks versus warnings.
 
-**Status: Experimental** -- built and tested but not yet validated with real
-usage data.
 """
 from __future__ import annotations
 

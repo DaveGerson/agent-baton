@@ -45,8 +45,6 @@ Safety guardrails:
   timestamped backup before any modification.
 * Rollback is automatic on detected degradation via the experiment system.
 
-**Status: Experimental** -- built and tested but not yet validated with
-real usage data.
 """
 from __future__ import annotations
 

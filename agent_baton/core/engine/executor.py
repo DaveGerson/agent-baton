@@ -337,9 +337,7 @@ class ExecutionEngine:
                 if self._persistence is not None:
                     self._persistence.save(state)
                 return
-            # Dual-write: keep file-based readers current during transition
-            # (only when a file persistence layer exists alongside the backend).
-            # TODO(T4): remove file dual-write once all readers use SQLite.
+            # Dual-write: keep file-based persistence in sync for resilience.
             if self._persistence is not None:
                 try:
                     self._persistence.save(state)
@@ -491,8 +489,7 @@ class ExecutionEngine:
                 self._storage.set_active_task(plan.task_id)
             except Exception as exc:
                 _log.warning("Failed to set active task in storage: %s", exc)
-        # Keep file-based active-task-id.txt in sync during the SQLite transition.
-        # TODO(T4): remove active-task-id.txt dual-write once all readers use SQLite.
+        # Keep file-based active-task-id.txt in sync for resilience.
         if self._persistence is not None:
             try:
                 # Update persistence's task_id then write the active marker.
@@ -583,7 +580,6 @@ class ExecutionEngine:
             except Exception:
                 pass
         elif self._persistence is not None:
-            # TODO(T4): remove active-task-id.txt dual-write once all readers use SQLite.
             self._persistence.set_active()
         return self._determine_action(state)
 

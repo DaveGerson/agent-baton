@@ -33,8 +33,6 @@ Integration with the improvement loop:
   always require human approval.
 * :meth:`auto_apply_recommendations` enforces this guardrail directly.
 
-**Status: Experimental** -- built and tested but not yet validated with
-real usage data.
 """
 from __future__ import annotations
 

@@ -14,8 +14,6 @@ The ``AsyncDispatcher`` records task intent on disk but does NOT launch
 subprocesses itself. The caller is responsible for actually executing the
 task and calling ``mark_complete()`` or ``mark_failed()`` when done.
 
-**Status: Experimental** -- built and tested but not yet validated with
-real usage data.
 """
 from __future__ import annotations
 
