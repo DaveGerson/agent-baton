@@ -826,3 +826,185 @@ class TestCLIHandler:
         sp = register(sub)
 
         assert sp.prog.endswith("migrate-storage")
+
+
+# ---------------------------------------------------------------------------
+# ConnectionManager migration idempotency tests
+# ---------------------------------------------------------------------------
+
+class TestConnectionManagerMigrationIdempotency:
+    """Guard against 'duplicate column name' errors when a column that a
+    migration adds already exists in the database.
+
+    This scenario occurs when a database received schema changes outside
+    the normal version-tracking path — e.g. when a migration was applied
+    once but the version counter was rolled back, so the engine attempts
+    to apply the same migration again on the next startup.
+
+    The real-world trigger was baton.db sitting at version=5 but already
+    possessing the ``quality_score`` and ``retrieval_count`` columns that
+    the v6 migration adds to the ``beads`` table.
+    """
+
+    def test_migration_normal_path(self, tmp_path: Path) -> None:
+        """A v5 database without quality_score upgrades to v6 cleanly."""
+        from agent_baton.core.storage.connection import ConnectionManager
+        from agent_baton.core.storage.schema import MIGRATIONS, PROJECT_SCHEMA_DDL
+
+        db_path = tmp_path / "test.db"
+
+        # Build a minimal v5-equivalent DB: _schema_version table + beads
+        # table WITHOUT quality_score/retrieval_count.
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "CREATE TABLE _schema_version (version INTEGER NOT NULL)"
+        )
+        conn.execute("INSERT INTO _schema_version (version) VALUES (5)")
+        conn.execute(
+            """CREATE TABLE beads (
+                bead_id        TEXT PRIMARY KEY,
+                task_id        TEXT NOT NULL,
+                step_id        TEXT NOT NULL,
+                agent_name     TEXT NOT NULL,
+                bead_type      TEXT NOT NULL,
+                content        TEXT NOT NULL DEFAULT '',
+                confidence     TEXT NOT NULL DEFAULT 'medium',
+                scope          TEXT NOT NULL DEFAULT 'step',
+                tags           TEXT NOT NULL DEFAULT '[]',
+                affected_files TEXT NOT NULL DEFAULT '[]',
+                status         TEXT NOT NULL DEFAULT 'open',
+                created_at     TEXT NOT NULL DEFAULT '',
+                closed_at      TEXT NOT NULL DEFAULT '',
+                summary        TEXT NOT NULL DEFAULT '',
+                links          TEXT NOT NULL DEFAULT '[]',
+                source         TEXT NOT NULL DEFAULT 'agent-signal',
+                token_estimate INTEGER NOT NULL DEFAULT 0
+            )"""
+        )
+        conn.commit()
+        conn.close()
+
+        mgr = ConnectionManager(db_path)
+        mgr.configure_schema(PROJECT_SCHEMA_DDL, 6)
+        result_conn = mgr.get_connection()  # triggers _ensure_schema
+
+        cols = {
+            row[1]
+            for row in result_conn.execute("PRAGMA table_info(beads)")
+        }
+        assert "quality_score" in cols
+        assert "retrieval_count" in cols
+
+        version = result_conn.execute(
+            "SELECT version FROM _schema_version"
+        ).fetchone()[0]
+        assert version == 6
+        mgr.close()
+
+    def test_migration_idempotent_duplicate_columns(self, tmp_path: Path) -> None:
+        """A v5 database that already has quality_score/retrieval_count
+        upgrades to v6 without raising an error.
+
+        This is the exact bug: baton.db had version=5 in _schema_version
+        but quality_score already present in beads.  Previously
+        _run_migrations called executescript() which failed hard on the
+        duplicate column.  After the fix it skips those statements silently.
+        """
+        from agent_baton.core.storage.connection import ConnectionManager
+        from agent_baton.core.storage.schema import PROJECT_SCHEMA_DDL
+
+        db_path = tmp_path / "test.db"
+
+        # Simulate the broken state: version=5 but beads already has the
+        # v6 columns.
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "CREATE TABLE _schema_version (version INTEGER NOT NULL)"
+        )
+        conn.execute("INSERT INTO _schema_version (version) VALUES (5)")
+        conn.execute(
+            """CREATE TABLE beads (
+                bead_id         TEXT PRIMARY KEY,
+                task_id         TEXT NOT NULL,
+                step_id         TEXT NOT NULL,
+                agent_name      TEXT NOT NULL,
+                bead_type       TEXT NOT NULL,
+                content         TEXT NOT NULL DEFAULT '',
+                confidence      TEXT NOT NULL DEFAULT 'medium',
+                scope           TEXT NOT NULL DEFAULT 'step',
+                tags            TEXT NOT NULL DEFAULT '[]',
+                affected_files  TEXT NOT NULL DEFAULT '[]',
+                status          TEXT NOT NULL DEFAULT 'open',
+                created_at      TEXT NOT NULL DEFAULT '',
+                closed_at       TEXT NOT NULL DEFAULT '',
+                summary         TEXT NOT NULL DEFAULT '',
+                links           TEXT NOT NULL DEFAULT '[]',
+                source          TEXT NOT NULL DEFAULT 'agent-signal',
+                token_estimate  INTEGER NOT NULL DEFAULT 0,
+                quality_score   REAL    NOT NULL DEFAULT 0.0,
+                retrieval_count INTEGER NOT NULL DEFAULT 0
+            )"""
+        )
+        conn.commit()
+        conn.close()
+
+        mgr = ConnectionManager(db_path)
+        mgr.configure_schema(PROJECT_SCHEMA_DDL, 6)
+
+        # Must not raise; previously raised OperationalError duplicate column
+        result_conn = mgr.get_connection()
+
+        cols = {
+            row[1]
+            for row in result_conn.execute("PRAGMA table_info(beads)")
+        }
+        assert "quality_score" in cols
+        assert "retrieval_count" in cols
+
+        version = result_conn.execute(
+            "SELECT version FROM _schema_version"
+        ).fetchone()[0]
+        assert version == 6
+        mgr.close()
+
+    def test_migration_real_errors_still_propagate(self, tmp_path: Path) -> None:
+        """A genuine SQL error (not duplicate-column) is not swallowed."""
+        from agent_baton.core.storage.connection import ConnectionManager
+
+        db_path = tmp_path / "test.db"
+
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "CREATE TABLE _schema_version (version INTEGER NOT NULL)"
+        )
+        conn.execute("INSERT INTO _schema_version (version) VALUES (1)")
+        conn.commit()
+        conn.close()
+
+        # Inject a migration that references a non-existent table — a real
+        # schema error that must not be silently ignored.
+        bad_ddl = "ALTER TABLE nonexistent_table ADD COLUMN foo TEXT;"
+        from agent_baton.core.storage import schema as schema_mod
+        original_migrations = schema_mod.MIGRATIONS.copy()
+        schema_mod.MIGRATIONS[2] = bad_ddl
+
+        try:
+            mgr = ConnectionManager(db_path)
+            mgr.configure_schema("", 2)  # empty DDL, version=2 triggers migration
+            # configure_schema only sets ddl/version; _ensure_schema is called
+            # on first get_connection().  Provide a stub DDL that creates
+            # _schema_version so the version-check branch is reached.
+            mgr._schema_ddl = ""
+            mgr._schema_version = 2
+
+            with pytest.raises(sqlite3.OperationalError, match="nonexistent_table"):
+                # We need to call _run_migrations directly because
+                # _ensure_schema sees _schema_version already exists and
+                # goes into the migration branch.
+                raw = sqlite3.connect(str(db_path))
+                raw.row_factory = sqlite3.Row
+                mgr._run_migrations(raw, 1, 2)
+                raw.close()
+        finally:
+            schema_mod.MIGRATIONS.clear()
+            schema_mod.MIGRATIONS.update(original_migrations)

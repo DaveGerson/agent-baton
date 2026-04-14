@@ -146,14 +146,52 @@ class ConnectionManager:
         the DDL string registered in ``schema.MIGRATIONS`` for each version.
         Versions that have no entry in the dictionary are silently skipped.
 
+        Each migration DDL is split into individual statements and run one
+        at a time.  Statements that would add a column that already exists
+        (``OperationalError: duplicate column name``) are skipped silently
+        so that applying the same migration twice is idempotent.  This
+        guards against databases that received schema changes outside the
+        normal migration path (e.g. via a partial migration that was later
+        rolled back at the version-tracking level).
+
         Args:
             conn: An open SQLite connection (within a transaction managed
                 by the caller).
             from_v: Current schema version in the database.
             to_v: Target schema version to migrate to.
         """
+        import logging
         from agent_baton.core.storage.schema import MIGRATIONS
+
+        _log = logging.getLogger(__name__)
+
         for v in range(from_v + 1, to_v + 1):
             ddl = MIGRATIONS.get(v)
-            if ddl:
-                conn.executescript(ddl)
+            if not ddl:
+                continue
+            # Strip -- line comments before splitting on ';' so that
+            # semicolons embedded inside comment text (e.g.
+            # "-- PROJECT_SCHEMA_DDL; central databases...") do not
+            # split a comment mid-sentence and produce garbage fragments.
+            sql_only_lines = [
+                line for line in ddl.splitlines()
+                if not line.strip().startswith("--")
+            ]
+            sql_only = "\n".join(sql_only_lines)
+            for statement in sql_only.split(";"):
+                stmt = statement.strip()
+                if not stmt:
+                    continue
+                try:
+                    conn.execute(stmt)
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column name" in str(exc).lower():
+                        _log.debug(
+                            "Migration v%d: skipping already-present column "
+                            "(%s) — statement: %.120s",
+                            v,
+                            exc,
+                            stmt,
+                        )
+                    else:
+                        raise
