@@ -366,6 +366,116 @@ class PromptDispatcher:
 
         return "\n".join(parts)
 
+    def build_continuation_prompt(
+        self,
+        step: "PlanStep",
+        interaction_history: "list",
+        *,
+        shared_context: str = "",
+        task_summary: str = "",
+    ) -> str:
+        """Build a continuation delegation prompt for an interactive step re-dispatch.
+
+        Called when a step in ``interact_dispatched`` status is re-dispatched so
+        the agent can respond to human input.  Includes the full interaction
+        history using a sliding window: the last 3 turns in full detail, earlier
+        turns condensed to one-line summaries.
+
+        The prompt ends with instructions for the ``INTERACT_COMPLETE`` signal so
+        the agent can signal when it is done without waiting for a human ``--done``.
+
+        Args:
+            step: The PlanStep being re-dispatched.
+            interaction_history: List of :class:`InteractionTurn` objects
+                accumulated so far.
+            shared_context: Pre-built context string (plan's ``shared_context``).
+            task_summary: High-level task description (shown in Intent section).
+
+        Returns:
+            A formatted markdown delegation prompt ready to pass to the Agent tool.
+        """
+        from agent_baton.models.execution import InteractionTurn  # avoid circular at module level
+
+        role = step.agent_name
+        project_line = task_summary or "this project"
+        article = "an" if role[0:1] in "aeiouAEIOU" else "a"
+        shared_context_block = shared_context.strip() or "_No shared context provided._"
+
+        # Build the sliding-window interaction history section.
+        # Last 3 turns in full; earlier turns as one-line summaries.
+        _WINDOW = 3
+        history_lines: list[str] = ["## Interaction History", ""]
+
+        if interaction_history:
+            older = interaction_history[:-_WINDOW] if len(interaction_history) > _WINDOW else []
+            recent = interaction_history[-_WINDOW:] if len(interaction_history) > _WINDOW else interaction_history
+
+            if older:
+                history_lines.append(
+                    f"_Earlier turns ({len(older)} summarised):_"
+                )
+                for turn in older:
+                    snippet = turn.content[:100].replace("\n", " ")
+                    if len(turn.content) > 100:
+                        snippet += "…"
+                    history_lines.append(
+                        f"- Turn {turn.turn_number} [{turn.role}]: {snippet}"
+                    )
+                history_lines.append("")
+
+            for turn in recent:
+                label = "Agent" if turn.role == "agent" else "Human"
+                history_lines.append(f"### Turn {turn.turn_number} — {label}")
+                history_lines.append(turn.content)
+                history_lines.append("")
+
+        history_section = "\n".join(history_lines)
+
+        turn_count = len(interaction_history)
+
+        parts = [
+            f"You are {article} {role} working on {project_line}.",
+            "",
+            "## Shared Context",
+            shared_context_block,
+            "",
+            "Read `CLAUDE.md` for project conventions.",
+            "",
+        ]
+
+        if task_summary.strip():
+            parts += [
+                "## Intent",
+                task_summary.strip(),
+                "",
+            ]
+
+        parts += [
+            f"## Your Task (Step {step.step_id} — Continuation, Turn {turn_count + 1})",
+            step.task_description.strip(),
+            "",
+            history_section,
+            "",
+            "## Instructions",
+            "Continue the interaction above, responding to the latest human input.",
+            "When you are done and no further turns are needed, output the following",
+            "signal on its own line at the end of your response:",
+            "",
+            "    INTERACT_COMPLETE",
+            "",
+            "If you still need another round of input, do NOT output INTERACT_COMPLETE",
+            "and end your response normally.",
+            "",
+            _KNOWLEDGE_GAPS_LINE,
+            "",
+            _BEAD_SIGNALS_LINE,
+            "",
+            "Log non-obvious decisions under a **Decisions** heading. "
+            "If you deviate from the plan, explain under a **Deviations** heading.",
+        ]
+
+        return "\n".join(parts)
+
     def build_team_delegation_prompt(
         self,
         step: PlanStep,

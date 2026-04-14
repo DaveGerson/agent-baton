@@ -43,6 +43,7 @@ from agent_baton.models.execution import (
     FeedbackQuestion,
     FeedbackResult,
     GateResult,
+    InteractionTurn,
     MachinePlan,
     PlanAmendment,
     PlanGate,
@@ -911,7 +912,17 @@ class ExecutionEngine:
 
         completed = state.completed_step_ids
         dispatched = state.dispatched_step_ids
-        occupied = completed | state.failed_step_ids | dispatched | state.interrupted_step_ids
+        interacting_ids = {
+            r.step_id for r in state.step_results
+            if r.status in ("interacting", "interact_dispatched")
+        }
+        occupied = (
+            completed
+            | state.failed_step_ids
+            | dispatched
+            | state.interrupted_step_ids
+            | interacting_ids
+        )
 
         actions: list[ExecutionAction] = []
         for step in phase_obj.steps:
@@ -979,7 +990,10 @@ class ExecutionEngine:
         - Emits trace events (``agent_complete`` or ``agent_failed``).
         - Saves state to disk.
         """
-        _VALID_STEP_STATUSES = {"complete", "failed", "dispatched", "interrupted"}
+        _VALID_STEP_STATUSES = {
+            "complete", "failed", "dispatched", "interrupted",
+            "interacting", "interact_dispatched",
+        }
         if status not in _VALID_STEP_STATUSES:
             raise ValueError(
                 f"Invalid step status '{status}'. Must be one of: {_VALID_STEP_STATUSES}"
@@ -990,6 +1004,86 @@ class ExecutionEngine:
             raise RuntimeError(
                 "record_step_result() called with no active execution state."
             )
+
+        # ── Interacting status: multi-turn interaction protocol ────────────────
+        # When an interactive step reports status="interacting", we append the
+        # agent turn to the existing StepResult rather than creating a new one.
+        # The execution status stays "running" — other steps keep flowing.
+        if status == "interacting":
+            existing = state.get_step_result(step_id)
+            plan_step = self._find_step(state, step_id)
+            max_turns = plan_step.max_turns if plan_step else 10
+
+            if existing is None:
+                # First interacting record: create a new StepResult.
+                existing = StepResult(
+                    step_id=step_id,
+                    agent_name=agent_name,
+                    status="interacting",
+                    outcome=outcome,
+                    files_changed=files_changed or [],
+                    commit_hash=commit_hash,
+                    estimated_tokens=estimated_tokens,
+                    duration_seconds=duration_seconds,
+                    error=error,
+                    completed_at="",
+                )
+                state.step_results.append(existing)
+            else:
+                # Update mutable fields from the new agent response.
+                existing.agent_name = agent_name
+                existing.outcome = outcome
+
+            # Count existing agent turns to determine current turn number.
+            agent_turns = [t for t in existing.interaction_history if t.role == "agent"]
+            turn_number = len(agent_turns) + 1
+
+            # Check for INTERACT_COMPLETE signal before appending.
+            clean_outcome = outcome
+            if "\nINTERACT_COMPLETE" in outcome or outcome.strip() == "INTERACT_COMPLETE":
+                clean_outcome = outcome.replace("INTERACT_COMPLETE", "").strip()
+                existing.outcome = clean_outcome
+                existing.status = "complete"
+                existing.completed_at = _utcnow()
+                existing.deviations = self._extract_deviations(clean_outcome)
+                existing.interaction_history.append(InteractionTurn(
+                    role="agent",
+                    content=clean_outcome,
+                    turn_number=turn_number,
+                ))
+                self._save_execution(state)
+                return
+
+            # Auto-complete when max_turns is exhausted (turn_count = agent + human pairs).
+            total_turns = len(existing.interaction_history)
+            if total_turns >= max_turns * 2:
+                existing.outcome = (
+                    clean_outcome
+                    + "\n\n[Auto-completed: max_turns reached]"
+                )
+                existing.status = "complete"
+                existing.completed_at = _utcnow()
+                existing.deviations = self._extract_deviations(clean_outcome)
+                existing.interaction_history.append(InteractionTurn(
+                    role="agent",
+                    content=clean_outcome,
+                    turn_number=turn_number,
+                ))
+                _log.warning(
+                    "Step %s auto-completed: max_turns (%d) reached.", step_id, max_turns
+                )
+                self._save_execution(state)
+                return
+
+            # Normal interacting turn — append and stay in "interacting".
+            existing.interaction_history.append(InteractionTurn(
+                role="agent",
+                content=clean_outcome,
+                turn_number=turn_number,
+            ))
+            existing.status = "interacting"
+            self._save_execution(state)
+            return
 
         # ── Token estimation fallback ──────────────────────────────────────────
         # When the caller supplies estimated_tokens=0 (the default) and the
@@ -2660,9 +2754,21 @@ class ExecutionEngine:
         # Find the next dispatchable step — must not be completed, failed,
         # dispatched, or interrupted (interrupted steps have been superseded
         # by a re-dispatch step inserted via the knowledge-gap amend flow).
+        # Interactive steps in "interacting" or "interact_dispatched" are
+        # treated as in-flight (parallel-safe): other steps keep flowing.
         completed = state.completed_step_ids
         dispatched = state.dispatched_step_ids
-        occupied = completed | state.failed_step_ids | dispatched | state.interrupted_step_ids
+        interacting_ids = {
+            r.step_id for r in state.step_results
+            if r.status in ("interacting", "interact_dispatched")
+        }
+        occupied = (
+            completed
+            | state.failed_step_ids
+            | dispatched
+            | state.interrupted_step_ids
+            | interacting_ids
+        )
 
         next_step: PlanStep | None = None
         for step in steps:
@@ -2681,6 +2787,23 @@ class ExecutionEngine:
             if next_step.team:
                 return self._team_dispatch_action(next_step, state)
             return self._dispatch_action(next_step, state)
+
+        # After exhausting normal dispatch candidates, check whether any step
+        # is waiting for human input (interacting).  Return an INTERACT action
+        # so the orchestrator can surface it — but only when there is no other
+        # pending work being dispatched.
+        for result in state.step_results:
+            if result.status == "interacting":
+                plan_step = self._find_step(state, result.step_id)
+                if plan_step is not None:
+                    return self._interact_action(plan_step, result, state)
+
+        # Check for interact_dispatched steps that need a continuation DISPATCH.
+        for result in state.step_results:
+            if result.status == "interact_dispatched":
+                plan_step = self._find_step(state, result.step_id)
+                if plan_step is not None:
+                    return self._dispatch_action(plan_step, state)
 
         # If no step is dispatchable but some are still pending (dispatched or
         # blocked by dependencies), return WAIT.
@@ -2760,6 +2883,44 @@ class ExecutionEngine:
 
         dispatcher = PromptDispatcher()
 
+        # ── Interactive step continuation detection ──────────────────────────
+        # When a step is interactive and has an existing result in
+        # "interact_dispatched" status, build a continuation prompt that
+        # includes the accumulated interaction history instead of a fresh
+        # delegation prompt.  Also reset the step status to "dispatched" so
+        # _determine_action treats it as in-flight.
+        existing_result = state.get_step_result(step.step_id)
+        is_continuation = (
+            step.interactive
+            and existing_result is not None
+            and existing_result.status == "interact_dispatched"
+        )
+        if is_continuation:
+            existing_result.status = "dispatched"
+            prompt = dispatcher.build_continuation_prompt(
+                step,
+                existing_result.interaction_history,
+                shared_context=state.plan.shared_context,
+                task_summary=state.plan.task_summary,
+            )
+            enforcement = PromptDispatcher.build_path_enforcement(step)
+            self._save_execution(state)
+            return ExecutionAction(
+                action_type=ActionType.DISPATCH,
+                message=(
+                    f"Dispatch agent '{step.agent_name}' for step {step.step_id} "
+                    f"(interactive continuation, turn "
+                    f"{len(existing_result.interaction_history) + 1})."
+                ),
+                agent_name=step.agent_name,
+                agent_model=step.model,
+                delegation_prompt=prompt,
+                step_id=step.step_id,
+                path_enforcement=enforcement or "",
+                interactive=True,
+                interact_max_turns=step.max_turns,
+            )
+
         # Find the most recent completed step (different step_id) for handoff.
         handoff = ""
         for result in reversed(state.step_results):
@@ -2811,15 +2972,133 @@ class ExecutionEngine:
             policy_context=preset_name,
         )
 
+        msg = f"Dispatch agent '{step.agent_name}' for step {step.step_id}."
+        if step.interactive:
+            msg += f" (interactive, max {step.max_turns} turns)"
         return ExecutionAction(
             action_type=ActionType.DISPATCH,
-            message=f"Dispatch agent '{step.agent_name}' for step {step.step_id}.",
+            message=msg,
             agent_name=step.agent_name,
             agent_model=step.model,
             delegation_prompt=prompt,
             step_id=step.step_id,
             path_enforcement=enforcement or "",
+            interactive=step.interactive,
+            interact_max_turns=step.max_turns if step.interactive else 10,
         )
+
+    def _interact_action(
+        self,
+        step: PlanStep,
+        result: StepResult,
+        state: ExecutionState,
+    ) -> ExecutionAction:
+        """Build an INTERACT action for a step in ``interacting`` status.
+
+        Called by :meth:`_determine_action` when a step has responded but is
+        waiting for human input to continue.
+
+        Args:
+            step: The :class:`PlanStep` that is interacting.
+            result: The :class:`StepResult` with the accumulated history.
+            state: Current execution state.
+
+        Returns:
+            An :class:`ExecutionAction` with ``action_type=INTERACT``.
+        """
+        agent_turns = [t for t in result.interaction_history if t.role == "agent"]
+        turn_number = len(agent_turns)
+        # Latest agent output is the result.outcome field.
+        latest_output = result.outcome or ""
+
+        return ExecutionAction(
+            action_type=ActionType.INTERACT,
+            message=f"Interactive step {step.step_id} awaiting input (turn {turn_number}/{step.max_turns}).",
+            interact_prompt=latest_output,
+            interact_step_id=step.step_id,
+            interact_agent_name=step.agent_name,
+            interact_turn=turn_number,
+            interact_max_turns=step.max_turns,
+        )
+
+    def provide_interact_input(self, step_id: str, input_text: str) -> None:
+        """Record human input for an interactive step and set it to ``interact_dispatched``.
+
+        Called by ``baton execute interact --step-id X --input "..."`` to
+        record the human's response to the agent's latest output.  After this
+        call the next ``_determine_action()`` will find the step in
+        ``interact_dispatched`` status and return a DISPATCH continuation.
+
+        Args:
+            step_id: The step ID that is currently in ``interacting`` status.
+            input_text: Human-provided text to send as the next turn.
+
+        Raises:
+            RuntimeError: If no active execution state exists.
+            ValueError: If the step is not in ``interacting`` status.
+        """
+        state = self._load_execution()
+        if state is None:
+            raise RuntimeError(
+                "provide_interact_input() called with no active execution state."
+            )
+
+        result = state.get_step_result(step_id)
+        if result is None or result.status != "interacting":
+            raise ValueError(
+                f"Step '{step_id}' is not in 'interacting' status "
+                f"(current status: {result.status if result else 'not found'})."
+            )
+
+        # Compute human turn number.
+        human_turns = [t for t in result.interaction_history if t.role == "human"]
+        turn_number = len(human_turns) + 1
+
+        result.interaction_history.append(InteractionTurn(
+            role="human",
+            content=input_text,
+            turn_number=turn_number,
+        ))
+        result.status = "interact_dispatched"
+        self._save_execution(state)
+        _log.info(
+            "Interaction input recorded for step %s (human turn %d).",
+            step_id, turn_number,
+        )
+
+    def complete_interaction(self, step_id: str) -> None:
+        """Promote an ``interacting`` step to ``complete`` using its last agent output.
+
+        Called by ``baton execute interact --step-id X --done`` when the human
+        decides the interaction is finished without the agent signalling
+        ``INTERACT_COMPLETE``.
+
+        Args:
+            step_id: The step ID that is currently in ``interacting`` status.
+
+        Raises:
+            RuntimeError: If no active execution state exists.
+            ValueError: If the step is not in ``interacting`` status.
+        """
+        state = self._load_execution()
+        if state is None:
+            raise RuntimeError(
+                "complete_interaction() called with no active execution state."
+            )
+
+        result = state.get_step_result(step_id)
+        if result is None or result.status != "interacting":
+            raise ValueError(
+                f"Step '{step_id}' is not in 'interacting' status "
+                f"(current status: {result.status if result else 'not found'})."
+            )
+
+        result.status = "complete"
+        result.completed_at = _utcnow()
+        if not result.deviations:
+            result.deviations = self._extract_deviations(result.outcome)
+        self._save_execution(state)
+        _log.info("Interaction completed (human --done) for step %s.", step_id)
 
     @staticmethod
     def _gate_passed_for_phase(state: ExecutionState, phase_id: int) -> bool:

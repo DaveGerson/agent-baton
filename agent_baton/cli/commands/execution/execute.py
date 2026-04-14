@@ -159,6 +159,17 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     p_team.add_argument("--outcome", default="", help="Summary of work done")
     p_team.add_argument("--files", default="", help="Comma-separated files changed")
 
+    # baton execute interact --step-id ID (--input TEXT | --done)
+    p_interact = sub.add_parser("interact", parents=[_task_id_parent],
+                                help="Provide input to an interactive step or signal it is done")
+    p_interact.add_argument("--step-id", required=True, dest="step_id",
+                            help="Step ID in 'interacting' status (e.g. 1.1)")
+    _interact_grp = p_interact.add_mutually_exclusive_group(required=True)
+    _interact_grp.add_argument("--input", dest="interact_input", default=None,
+                               help="Human input text to send to the agent")
+    _interact_grp.add_argument("--done", action="store_true", dest="interact_done",
+                               help="Signal that the interaction is complete")
+
     # baton execute run [--plan PATH] [--task-id ID] [--model MODEL] [--max-steps N] [--dry-run]
     p_run = sub.add_parser("run", parents=[_task_id_parent],
                            help="Autonomous execution loop (no Claude Code session needed)")
@@ -291,6 +302,9 @@ def _print_action(action: dict) -> None:
             print(f"  Team-Step: yes")
             print(f"  Parent-Step: {parent_step_id}")
             print(f"  Record-With: baton execute team-record --step-id {parent_step_id} --member-id {step_id} ...")
+        if action.get("interactive"):
+            print(f"  Interactive: yes")
+            print(f"  Max-Turns: {action.get('interact_max_turns', 10)}")
         print(f"  Message: {msg}")
         print()
         print("--- Delegation Prompt ---")
@@ -348,6 +362,24 @@ def _print_action(action: dict) -> None:
         print(f"ACTION: FAILED")
         print(f"  {action.get('summary', msg)}")
 
+    elif atype == ActionType.INTERACT.value:
+        step_id = action.get("interact_step_id", "")
+        agent = action.get("interact_agent_name", "")
+        turn = action.get("interact_turn", 0)
+        max_turns = action.get("interact_max_turns", 10)
+        print(f"ACTION: INTERACT")
+        print(f"  Step:    {step_id}")
+        print(f"  Agent:   {agent}")
+        print(f"  Turn:    {turn}/{max_turns}")
+        print(f"  Message: {msg}")
+        print()
+        print("--- Agent Output ---")
+        print(action.get("interact_prompt", ""))
+        print("--- End Output ---")
+        print()
+        print(f"Respond with: baton execute interact --step-id {step_id} --input \"<your input>\"")
+        print(f"Signal done:  baton execute interact --step-id {step_id} --done")
+
     else:
         print(f"ACTION: {atype}")
         print(f"  {msg}")
@@ -355,7 +387,7 @@ def _print_action(action: dict) -> None:
 
 def handler(args: argparse.Namespace) -> None:
     if args.subcommand is None:
-        validation_error("supply a subcommand: start, next, record, dispatched, gate, approve, feedback, amend, team-record, complete, status, resume, list, switch, cancel, run")
+        validation_error("supply a subcommand: start, next, record, dispatched, gate, approve, feedback, amend, team-record, interact, complete, status, resume, list, switch, cancel, run")
 
     if args.subcommand == "list":
         _handle_list()
@@ -620,6 +652,30 @@ def handler(args: argparse.Namespace) -> None:
             print(json.dumps({"status": "recorded", "step_id": args.step_id, "member_id": args.member_id, "agent": args.agent, "result": args.status}))
         else:
             print(f"Team member recorded: {args.member_id} ({args.agent}) — {args.status}")
+
+    elif args.subcommand == "interact":
+        step_id = args.step_id
+        if getattr(args, "interact_done", False):
+            try:
+                engine.complete_interaction(step_id=step_id)
+            except (RuntimeError, ValueError) as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                sys.exit(1)
+            if getattr(args, "output", "text") == "json":
+                print(json.dumps({"status": "interaction_complete", "step_id": step_id}))
+            else:
+                print(f"Interaction completed: step {step_id}")
+        else:
+            input_text = getattr(args, "interact_input", None) or ""
+            try:
+                engine.provide_interact_input(step_id=step_id, input_text=input_text)
+            except (RuntimeError, ValueError) as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                sys.exit(1)
+            if getattr(args, "output", "text") == "json":
+                print(json.dumps({"status": "input_recorded", "step_id": step_id}))
+            else:
+                print(f"Interaction input recorded: step {step_id}")
 
     elif args.subcommand == "complete":
         summary = engine.complete()
