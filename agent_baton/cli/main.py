@@ -68,12 +68,37 @@ def main(argv: list[str] | None = None) -> None:
     # the CLI output and logging.  Reconfigure stdout/stderr to UTF-8 with
     # replacement fallback so these characters are printed instead of raising
     # UnicodeEncodeError.
+    #
+    # On non-Windows platforms, terminals with non-UTF-8 LANG settings can
+    # also fail.  The guard now runs on all platforms when the stream encoding
+    # is not UTF-8.  When reconfigure is unavailable (piped/redirected output,
+    # older Python builds), we set PYTHONIOENCODING as a last-resort fallback
+    # and wrap the stream.
+    import os
     import sys
-    if sys.platform == "win32":
-        for stream_name in ("stdout", "stderr"):
-            stream = getattr(sys, stream_name, None)
-            if stream is not None and hasattr(stream, "reconfigure"):
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if stream is None:
+            continue
+        encoding = getattr(stream, "encoding", None) or ""
+        if encoding.lower().replace("-", "") == "utf8":
+            continue
+        if hasattr(stream, "reconfigure"):
+            try:
                 stream.reconfigure(encoding="utf-8", errors="replace")
+                continue
+            except Exception:
+                pass
+        # Last-resort: set env var for any subprocesses and wrap the stream
+        os.environ.setdefault("PYTHONIOENCODING", "utf-8:replace")
+        try:
+            import io
+            wrapped = io.TextIOWrapper(
+                stream.buffer, encoding="utf-8", errors="replace", line_buffering=stream.line_buffering,
+            )
+            setattr(sys, stream_name, wrapped)
+        except Exception:
+            pass
 
     from importlib.metadata import version, PackageNotFoundError
     try:

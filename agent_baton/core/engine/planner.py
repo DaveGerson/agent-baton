@@ -347,13 +347,36 @@ _TASK_TYPE_KEYWORDS: list[tuple[str, list[str]]] = [
     ("migration", ["migrate", "migration", "upgrade", "move"]),
     ("refactor", ["refactor", "clean up", "reorganize", "restructure", "rename",
                    "cleanup", "simplify", "decouple", "extract"]),
-    ("data-analysis", ["analyze", "analyse", "analytics", "report", "dashboard",
-                        "query", "insight", "metric", "kpi", "data exploration"]),
+    ("data-analysis", ["analyze", "analyse", "analytics", "report",
+                        "query", "insight", "metric", "kpi", "data exploration",
+                        "audit", "assessment", "scorecard", "evaluate"]),
     ("test", ["test suite", "tests for", "testing", "test coverage", "e2e test",
               "unit test", "integration test", "playwright", "pytest"]),
     ("documentation", ["document", "documentation", "readme", "adr", "spec",
-                        "wiki", "summarize", "write docs"]),
+                        "wiki", "summarize", "write docs", "review", "explore",
+                        "architecture", "overview"]),
 ]
+
+
+# Fuzzy aliases for agent name detection in structured descriptions.
+# Keys are lower-cased tokens/phrases found in user text; values are canonical
+# agent names from the registry.
+_AGENT_ALIASES: dict[str, str] = {
+    "viz": "visualization-expert",
+    "viz expert": "visualization-expert",
+    "visualization": "visualization-expert",
+    "sme": "subject-matter-expert",
+    "subject matter expert": "subject-matter-expert",
+    "backend": "backend-engineer",
+    "frontend": "frontend-engineer",
+    "devops": "devops-engineer",
+    "security": "security-reviewer",
+    "reviewer": "code-reviewer",
+    "tester": "test-engineer",
+    "data analyst": "data-analyst",
+    "data engineer": "data-engineer",
+    "data scientist": "data-scientist",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -461,6 +484,133 @@ class IntelligentPlanner:
         self._last_task_classification: TaskClassification | None = None
 
     # ------------------------------------------------------------------
+    # Structured description parsing
+    # ------------------------------------------------------------------
+
+    def _parse_structured_description(
+        self, summary: str
+    ) -> tuple[list[dict] | None, list[str] | None]:
+        """Detect and extract structured phase/agent information from a task summary.
+
+        Recognises patterns such as:
+        - ``Phase 1: ...  Phase 2: ...``
+        - ``Step 1: ...  Step 2: ...``
+        - ``1. ...  2. ...`` (numbered list)
+        - Semicolon- or newline-separated clauses that each mention an agent name
+
+        Returns ``(phases_dicts, agent_hints)`` when structure is detected, or
+        ``(None, None)`` when the summary appears to be a plain unstructured
+        description.
+
+        Args:
+            summary: The raw task summary string supplied by the caller.
+
+        Returns:
+            A 2-tuple of ``(phases_dicts, agent_hints)`` where *phases_dicts* is
+            a list of ``{"name": str, "agents": list[str]}`` dicts and
+            *agent_hints* is a deduplicated list of detected agent names.
+            Both elements are ``None`` when no structure is detected.
+        """
+        # Collect all known agent names for exact matching.
+        try:
+            known_agents: set[str] = set(self._registry.names)
+        except Exception:
+            known_agents = set()
+
+        def _detect_agents_in_text(text: str) -> list[str]:
+            """Return agent names found in *text* via exact or alias matching."""
+            lower = text.lower()
+            found: list[str] = []
+            seen: set[str] = set()
+
+            # Exact match against registry names (longest first to prefer specifics)
+            for name in sorted(known_agents, key=len, reverse=True):
+                if name in lower and name not in seen:
+                    found.append(name)
+                    seen.add(name)
+
+            # Alias / fuzzy match (longest key first to avoid sub-string collisions)
+            for alias, canonical in sorted(
+                _AGENT_ALIASES.items(), key=lambda kv: len(kv[0]), reverse=True
+            ):
+                if alias in lower and canonical not in seen:
+                    found.append(canonical)
+                    seen.add(canonical)
+
+            return found
+
+        # --- Pattern 1: "Phase N: ..." or "Step N: ..." labelled segments ---
+        labelled_pattern = re.compile(
+            r"(?:phase|step)\s*\d+\s*:",
+            re.IGNORECASE,
+        )
+        labelled_matches = list(labelled_pattern.finditer(summary))
+        if len(labelled_matches) >= 2:
+            segments: list[str] = []
+            for idx, m in enumerate(labelled_matches):
+                start = m.start()
+                end = labelled_matches[idx + 1].start() if idx + 1 < len(labelled_matches) else len(summary)
+                segments.append(summary[start:end].strip())
+
+            phases_dicts: list[dict] = []
+            all_agents: list[str] = []
+            seen_agents: set[str] = set()
+            for i, seg in enumerate(segments, start=1):
+                agents_in_seg = _detect_agents_in_text(seg)
+                phase_name = f"Phase {i}"
+                phases_dicts.append({"name": phase_name, "agents": agents_in_seg})
+                for a in agents_in_seg:
+                    if a not in seen_agents:
+                        all_agents.append(a)
+                        seen_agents.add(a)
+
+            if phases_dicts:
+                return phases_dicts, all_agents or None
+
+        # --- Pattern 2: numbered list "1. ... 2. ..." ---
+        numbered_pattern = re.compile(r"(?:^|\s)(\d+)\.\s+(.+?)(?=\s+\d+\.|$)", re.DOTALL)
+        numbered_matches = numbered_pattern.findall(summary)
+        if len(numbered_matches) >= 2:
+            phases_dicts = []
+            all_agents = []
+            seen_agents = set()
+            for num, text in numbered_matches:
+                agents_in_seg = _detect_agents_in_text(text)
+                phases_dicts.append({"name": f"Phase {num}", "agents": agents_in_seg})
+                for a in agents_in_seg:
+                    if a not in seen_agents:
+                        all_agents.append(a)
+                        seen_agents.add(a)
+
+            if phases_dicts:
+                return phases_dicts, all_agents or None
+
+        # --- Pattern 3: semicolon- or newline-separated clauses with agent hints ---
+        delimiter_pattern = re.compile(r"[;\n]+")
+        clauses = [c.strip() for c in delimiter_pattern.split(summary) if c.strip()]
+        if len(clauses) >= 2:
+            # Only treat as structured if at least 2 clauses contain agent hints
+            clause_agents: list[list[str]] = [_detect_agents_in_text(c) for c in clauses]
+            clauses_with_agents = sum(1 for ca in clause_agents if ca)
+            if clauses_with_agents >= 2:
+                phases_dicts = []
+                all_agents = []
+                seen_agents = set()
+                for i, (clause, agents_in_clause) in enumerate(
+                    zip(clauses, clause_agents), start=1
+                ):
+                    phases_dicts.append({"name": f"Phase {i}", "agents": agents_in_clause})
+                    for a in agents_in_clause:
+                        if a not in seen_agents:
+                            all_agents.append(a)
+                            seen_agents.add(a)
+
+                if phases_dicts:
+                    return phases_dicts, all_agents or None
+
+        return None, None
+
+    # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
@@ -535,6 +685,14 @@ class IntelligentPlanner:
                 stack_profile = self._router.detect_stack(project_root)
             except Exception:
                 pass
+
+        # 2b. Parse structured descriptions — extract phases and agent hints
+        # before falling through to the classifier/keyword path.
+        parsed_phases, parsed_agents = self._parse_structured_description(task_summary)
+        if parsed_phases is not None:
+            phases = parsed_phases
+        if parsed_agents is not None and agents is None:
+            agents = parsed_agents
 
         # 3. Classify — determines task_type, complexity, agents, and phases.
         # Explicit overrides take precedence over the classifier.
@@ -864,7 +1022,7 @@ class IntelligentPlanner:
 
         # 12c. Consolidate multi-agent Implement/Fix phases into team steps
         for phase in plan_phases:
-            if phase.name.lower() in ("implement", "fix") and len(phase.steps) >= 2:
+            if self._is_team_phase(phase, task_summary):
                 phase.steps = [self._consolidate_team_step(phase)]
 
         # 12d. Apply bead hints from BeadAnalyzer (F7).
@@ -1811,6 +1969,40 @@ class IntelligentPlanner:
             description="Run test suite to verify the implementation builds cleanly.",
             fail_on=["test failure", "import error"],
         )
+
+    @staticmethod
+    def _is_team_phase(phase: PlanPhase, task_summary: str) -> bool:
+        """Detect if a phase should use team dispatch.
+
+        Returns ``True`` when the phase should be collapsed into a single
+        ``TEAM_DISPATCH`` step.  Two rules apply:
+
+        1. **Existing rule** — Implement or Fix phases with 2+ steps always
+           consolidate so parallel implementers run as a team.
+        2. **New rule** — Any phase with 2+ steps is consolidated when the
+           task summary signals paired/joint/adversarial work (e.g. "pair",
+           "joint", "adversarial").
+
+        Args:
+            phase: The ``PlanPhase`` being evaluated.
+            task_summary: The original task description passed to ``create_plan``.
+
+        Returns:
+            ``True`` if the phase should be converted to a team step.
+        """
+        # Existing rule: multi-agent implement/fix
+        if phase.name.lower() in ("implement", "fix") and len(phase.steps) >= 2:
+            return True
+        # New rule: phases with 2+ steps where task mentions pairing
+        if len(phase.steps) >= 2:
+            lower_summary = task_summary.lower()
+            team_signals = [
+                "pair", "joint", "together", "adversarial", "paired", "team",
+                "collaborate", "combined", "dual",
+            ]
+            if any(signal in lower_summary for signal in team_signals):
+                return True
+        return False
 
     @staticmethod
     def _consolidate_team_step(phase: PlanPhase) -> PlanStep:
