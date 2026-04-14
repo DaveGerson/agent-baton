@@ -16,6 +16,8 @@ The models are organized into groups:
   ``BatchResolveRequest``
 - **Forge interview**: ``InterviewRequest``, ``InterviewAnswerPayload``,
   ``RegenerateRequest``
+- **Learning**: ``ApplyLearningFixRequest``, ``UpdateLearningIssueRequest``
+- **Feedback**: ``RecordFeedbackRequest``
 """
 from __future__ import annotations
 
@@ -451,4 +453,81 @@ class GateRejectRequest(BaseModel):
         ...,
         min_length=1,
         description="Mandatory explanation for the rejection.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Learning requests
+# ---------------------------------------------------------------------------
+
+
+class ApplyLearningFixRequest(BaseModel):
+    """Request body for ``POST /api/v1/learn/issues/{issue_id}/apply``.
+
+    Triggers the type-specific resolver for a learning issue and marks it
+    as ``"applied"`` in the ledger.  The ``resolution_type`` controls how
+    the resolution is attributed.
+    """
+
+    resolution_type: str = Field(
+        default="human",
+        pattern="^(auto|human|interview)$",
+        description="How the fix is being applied: auto, human, or interview.",
+    )
+
+
+class UpdateLearningIssueRequest(BaseModel):
+    """Request body for ``PATCH /api/v1/learn/issues/{issue_id}``.
+
+    Partially updates a learning issue's lifecycle fields.  All fields are
+    optional; only non-None values are written.
+    """
+
+    status: str = Field(
+        ...,
+        description=(
+            "New lifecycle status: open, investigating, proposed, "
+            "applied, resolved, or wontfix."
+        ),
+    )
+    resolution: Optional[str] = Field(
+        default=None,
+        description="Description of how the issue was resolved.",
+    )
+    resolution_type: Optional[str] = Field(
+        default=None,
+        pattern="^(auto|human|interview)$",
+        description="How it was resolved: auto, human, or interview.",
+    )
+    proposed_fix: Optional[str] = Field(
+        default=None,
+        description="Proposed remediation description.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Feedback recording request
+# ---------------------------------------------------------------------------
+
+
+class RecordFeedbackRequest(BaseModel):
+    """Request body for ``POST /api/v1/executions/{task_id}/feedback``.
+
+    Records the user's answer to a feedback question gate and amends the
+    plan with a new dispatch step based on the chosen option.
+    """
+
+    phase_id: int = Field(
+        ...,
+        description="Phase ID that presented the feedback questions.",
+    )
+    question_id: str = Field(
+        ...,
+        min_length=1,
+        description="ID of the feedback question being answered.",
+    )
+    chosen_index: int = Field(
+        ...,
+        ge=0,
+        description="Zero-based index into the question's options list.",
     )

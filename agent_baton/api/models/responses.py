@@ -975,3 +975,205 @@ class GateActionResponse(BaseModel):
         description="The recorded result: 'approve', 'approve-with-feedback', or 'reject'.",
     )
     recorded: bool = Field(default=True, description="Always True on success.")
+
+
+# ---------------------------------------------------------------------------
+# Learning responses
+# ---------------------------------------------------------------------------
+
+
+class LearningIssueResponse(BaseModel):
+    """A learning issue record from the ledger (summary view, no evidence).
+
+    Returned by ``GET /api/v1/learn/issues`` and mutation endpoints.
+    Maps to ``agent_baton.models.learning.LearningIssue`` with the
+    ``evidence`` list omitted for compactness.
+    """
+
+    issue_id: str = Field(..., description="UUID identifying this issue.")
+    issue_type: str = Field(
+        ...,
+        description=(
+            "Category: routing_mismatch, agent_degradation, knowledge_gap, "
+            "roster_bloat, gate_mismatch, pattern_drift, or prompt_evolution."
+        ),
+    )
+    severity: str = Field(
+        ...,
+        description="Impact rating: low, medium, high, or critical.",
+    )
+    status: str = Field(
+        ...,
+        description=(
+            "Lifecycle state: open, investigating, proposed, "
+            "applied, resolved, or wontfix."
+        ),
+    )
+    title: str = Field(..., description="Human-readable summary of the issue.")
+    target: str = Field(
+        ...,
+        description="Subject of the issue (agent name, flavor key, etc.).",
+    )
+    evidence_count: int = Field(
+        default=0,
+        description="Number of evidence entries accumulated so far.",
+    )
+    first_seen: str = Field(default="", description="ISO 8601 timestamp of first observation.")
+    last_seen: str = Field(default="", description="ISO 8601 timestamp of most recent observation.")
+    occurrence_count: int = Field(
+        default=1,
+        description="Total times this signal has been observed.",
+    )
+    proposed_fix: Optional[str] = Field(
+        default=None,
+        description="Recommended remediation description, if any.",
+    )
+    resolution: Optional[str] = Field(
+        default=None,
+        description="How the issue was resolved, if resolved.",
+    )
+    resolution_type: Optional[str] = Field(
+        default=None,
+        description="Resolution attribution: auto, human, or interview.",
+    )
+
+    @classmethod
+    def from_dataclass(cls, obj: object) -> LearningIssueResponse:
+        """Convert from ``agent_baton.models.learning.LearningIssue``.
+
+        Args:
+            obj: A ``LearningIssue`` dataclass instance.
+
+        Returns:
+            A ``LearningIssueResponse`` with ``evidence_count`` derived
+            from the length of the evidence list.
+        """
+        from agent_baton.models.learning import LearningIssue  # local import to avoid circularity
+        issue: LearningIssue = obj  # type: ignore[assignment]
+        return cls(
+            issue_id=issue.issue_id,
+            issue_type=issue.issue_type,
+            severity=issue.severity,
+            status=issue.status,
+            title=issue.title,
+            target=issue.target,
+            evidence_count=len(issue.evidence),
+            first_seen=issue.first_seen,
+            last_seen=issue.last_seen,
+            occurrence_count=issue.occurrence_count,
+            proposed_fix=issue.proposed_fix,
+            resolution=issue.resolution,
+            resolution_type=issue.resolution_type,
+        )
+
+
+class LearningEvidenceResponse(BaseModel):
+    """A single piece of evidence contributing to a learning issue."""
+
+    timestamp: str = Field(..., description="ISO 8601 timestamp of the observation.")
+    source_task_id: str = Field(..., description="Execution task_id that produced this signal.")
+    detail: str = Field(..., description="Human-readable description of what was observed.")
+    data: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Structured payload (agent names, scores, gate commands, etc.).",
+    )
+
+
+class LearningIssueDetailResponse(LearningIssueResponse):
+    """Full learning issue including all evidence entries.
+
+    Returned by ``GET /api/v1/learn/issues/{issue_id}``.
+    Extends ``LearningIssueResponse`` with the complete ``evidence`` list.
+    """
+
+    evidence: list[LearningEvidenceResponse] = Field(
+        default_factory=list,
+        description="Chronological list of evidence entries.",
+    )
+
+    @classmethod
+    def from_dataclass(cls, obj: object) -> LearningIssueDetailResponse:  # type: ignore[override]
+        """Convert from ``agent_baton.models.learning.LearningIssue`` with evidence.
+
+        Args:
+            obj: A ``LearningIssue`` dataclass instance.
+
+        Returns:
+            A ``LearningIssueDetailResponse`` with the full evidence list
+            and all summary fields populated.
+        """
+        from agent_baton.models.learning import LearningIssue  # local import
+        issue: LearningIssue = obj  # type: ignore[assignment]
+        evidence = [
+            LearningEvidenceResponse(
+                timestamp=e.timestamp,
+                source_task_id=e.source_task_id,
+                detail=e.detail,
+                data=e.data,
+            )
+            for e in issue.evidence
+        ]
+        return cls(
+            issue_id=issue.issue_id,
+            issue_type=issue.issue_type,
+            severity=issue.severity,
+            status=issue.status,
+            title=issue.title,
+            target=issue.target,
+            evidence_count=len(evidence),
+            first_seen=issue.first_seen,
+            last_seen=issue.last_seen,
+            occurrence_count=issue.occurrence_count,
+            proposed_fix=issue.proposed_fix,
+            resolution=issue.resolution,
+            resolution_type=issue.resolution_type,
+            evidence=evidence,
+        )
+
+
+class LearningAnalyzeResponse(BaseModel):
+    """Result of a ``POST /api/v1/learn/analyze`` cycle.
+
+    Lists all candidate issues (open issues with confidence computed)
+    and a count of those that were promoted to ``"proposed"`` status.
+    """
+
+    candidates: list[LearningIssueResponse] = Field(
+        default_factory=list,
+        description="Issues reviewed during the analysis cycle.",
+    )
+    proposed_count: int = Field(
+        default=0,
+        description=(
+            "Number of issues that crossed the auto-apply threshold "
+            "and were promoted to 'proposed' status."
+        ),
+    )
+
+
+class ApplyLearningFixResponse(BaseModel):
+    """Result of ``POST /api/v1/learn/issues/{issue_id}/apply``.
+
+    Confirms the resolver ran and reports the issue's new state.
+    """
+
+    issue_id: str = Field(..., description="The issue that was resolved.")
+    resolution: str = Field(..., description="Human-readable description of the fix applied.")
+    status: str = Field(
+        default="applied",
+        description="The issue's new lifecycle status after the fix.",
+    )
+
+
+class RecordFeedbackResponse(BaseModel):
+    """Result of ``POST /api/v1/executions/{task_id}/feedback``.
+
+    Confirms the feedback answer was recorded and returns the next
+    actions the orchestrator should dispatch.
+    """
+
+    recorded: bool = Field(default=True, description="Always True on success.")
+    next_actions: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Next batch of dispatchable actions after the plan amendment.",
+    )

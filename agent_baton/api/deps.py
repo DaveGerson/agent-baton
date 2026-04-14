@@ -35,6 +35,7 @@ from agent_baton.core.engine.planner import IntelligentPlanner
 from agent_baton.core.events.bus import EventBus
 from agent_baton.core.govern.classifier import DataClassifier
 from agent_baton.core.govern.policy import PolicyEngine
+from agent_baton.core.learn.engine import LearningEngine
 from agent_baton.core.observe.dashboard import DashboardGenerator
 from agent_baton.core.observe.retrospective import RetrospectiveEngine
 from agent_baton.core.observe.trace import TraceRecorder
@@ -69,6 +70,7 @@ _forge_session: ForgeSession | None = None
 _classifier: DataClassifier | None = None
 _policy_engine: PolicyEngine | None = None
 _central_store: CentralStore | None = None
+_learning_engine: LearningEngine | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +109,7 @@ def init_dependencies(
     global _classifier
     global _policy_engine
     global _central_store
+    global _learning_engine
 
     _team_context_root = team_context_root
 
@@ -183,6 +186,12 @@ def init_dependencies(
     # endpoints work without additional configuration.  central.db may not exist
     # yet on a fresh install; CentralStore creates it on first access.
     _central_store = get_central_storage()
+
+    # LearningEngine — scoped to the team-context root so it reads the same
+    # baton.db as the execution engine.  Instantiation is lightweight (no I/O
+    # until a method is called) so this is always initialised even if the
+    # learning_issues table has not been created yet.
+    _learning_engine = LearningEngine(team_context_root=team_context_root)
 
 
 # ---------------------------------------------------------------------------
@@ -389,3 +398,20 @@ def get_central_store() -> CentralStore:
             "CentralStore not initialised. Call init_dependencies() before serving requests."
         )
     return _central_store
+
+
+def get_learning_engine() -> LearningEngine:
+    """Return the shared :class:`~agent_baton.core.learn.engine.LearningEngine`.
+
+    The engine is scoped to the team-context root configured at startup and
+    reads/writes the ``learning_issues`` table in the project-level
+    ``baton.db``.
+
+    Raises:
+        RuntimeError: If :func:`init_dependencies` has not been called.
+    """
+    if _learning_engine is None:
+        raise RuntimeError(
+            "LearningEngine not initialised. Call init_dependencies() before serving requests."
+        )
+    return _learning_engine

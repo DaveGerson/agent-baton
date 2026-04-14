@@ -15,11 +15,12 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from agent_baton.api.deps import get_decision_manager, get_engine
 from agent_baton.api.models.requests import (
+    RecordFeedbackRequest,
     RecordGateRequest,
     RecordStepRequest,
     StartExecutionRequest,
 )
-from agent_baton.api.models.responses import ActionResponse, ExecutionResponse
+from agent_baton.api.models.responses import ActionResponse, ExecutionResponse, RecordFeedbackResponse
 from agent_baton.core.engine.executor import ExecutionEngine
 from agent_baton.core.runtime.decisions import DecisionManager
 from agent_baton.models.execution import MachinePlan
@@ -310,6 +311,62 @@ async def complete_execution(
         "status": "complete",
         "summary": summary,
     }
+
+
+# ---------------------------------------------------------------------------
+# POST /executions/{task_id}/feedback — record feedback answer
+# ---------------------------------------------------------------------------
+
+@router.post("/executions/{task_id}/feedback")
+async def record_feedback(
+    task_id: str,
+    req: RecordFeedbackRequest,
+    engine: ExecutionEngine = Depends(get_engine),
+) -> dict:
+    """Record the user's answer to a feedback question and amend the plan.
+
+    POST /api/v1/executions/{task_id}/feedback
+
+    Looks up the chosen option's mapped agent and prompt template,
+    inserts a new dispatch step into the plan (via ``amend_plan``), and
+    returns the next actions the orchestrator should dispatch.
+
+    Args:
+        task_id: The execution/task identifier (URL path parameter).
+        req: Validated request body with ``phase_id``, ``question_id``,
+            and ``chosen_index``.
+        engine: Injected ``ExecutionEngine`` singleton.
+
+    Returns:
+        A ``RecordFeedbackResponse`` dict with ``recorded: true`` and
+        ``next_actions`` (list of ``ActionResponse`` dicts).
+
+    Raises:
+        HTTPException 404: If no active execution matches *task_id*.
+        HTTPException 400: If ``phase_id``, ``question_id``, or
+            ``chosen_index`` is invalid.
+        HTTPException 500: If the engine encounters an internal error
+            while recording or amending.
+    """
+    _assert_active_task(engine, task_id)
+
+    try:
+        engine.record_feedback_result(
+            phase_id=req.phase_id,
+            question_id=req.question_id,
+            chosen_index=req.chosen_index,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    next_actions = _collect_next_actions(engine)
+    result = RecordFeedbackResponse(
+        recorded=True,
+        next_actions=[a.model_dump() for a in next_actions],
+    )
+    return result.model_dump()
 
 
 # ---------------------------------------------------------------------------
