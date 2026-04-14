@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -152,6 +152,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_learning_issues_type_target_open
 -- note for the full rationale.
 ALTER TABLE beads ADD COLUMN quality_score   REAL    NOT NULL DEFAULT 0.0;
 ALTER TABLE beads ADD COLUMN retrieval_count INTEGER NOT NULL DEFAULT 0;
+""",
+    7: """
+-- v7: add project_id to learning_issues for central DB sync compatibility.
+-- Central databases need project_id for cross-project aggregation.
+-- Project databases get the column too (harmless, stays NULL).
+-- The idempotent migration handler silently skips if the column already
+-- exists (fresh installs from CENTRAL_SCHEMA_DDL).
+ALTER TABLE learning_issues ADD COLUMN project_id TEXT;
 """,
 }
 
