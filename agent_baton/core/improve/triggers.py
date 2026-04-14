@@ -24,18 +24,30 @@ Anomaly types detected by :meth:`detect_anomalies`:
 * **budget_overrun** -- actual token usage deviates > 50% from expected
   tier midpoint.
 * **retry_spike** -- average retries for an agent exceed 2.0.
+
+Configuration priority (highest to lowest):
+
+1. Explicit ``config`` argument passed to the constructor.
+2. ``trigger_config`` block inside ``learned-overrides.json``.
+3. Environment variables: ``BATON_MIN_TASKS``, ``BATON_ANALYSIS_INTERVAL``.
+4. Compiled-in defaults (``min_tasks_before_analysis=3``,
+   ``analysis_interval_tasks=3``).
 """
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 from agent_baton.core.observe.usage import UsageLogger
 from agent_baton.models.improvement import Anomaly, TriggerConfig
 from agent_baton.models.usage import TaskUsageRecord
 
+_log = logging.getLogger(__name__)
+
 _DEFAULT_TEAM_CONTEXT = Path(".claude/team-context")
 _TRIGGER_STATE_FILE = "improvement-trigger-state.json"
+_OVERRIDES_FILE = "learned-overrides.json"
 
 
 class TriggerEvaluator:
@@ -45,10 +57,17 @@ class TriggerEvaluator:
     team-context directory.  The state file contains a single watermark:
     the total task count at the time of the last analysis.
 
+    Configuration is resolved in priority order:
+
+    1. Explicit *config* argument — highest precedence, used as-is.
+    2. ``trigger_config`` block in ``learned-overrides.json`` — lets operators
+       tune thresholds per-project without redeploying.
+    3. ``BATON_MIN_TASKS`` / ``BATON_ANALYSIS_INTERVAL`` env vars.
+    4. Compiled-in defaults (3 / 3).
+
     Args:
-        config: Trigger thresholds.  Defaults to :class:`TriggerConfig`
-            with ``min_tasks_before_analysis=5``,
-            ``analysis_interval_tasks=5``.
+        config: Trigger thresholds.  When ``None``, the evaluator resolves
+            configuration from ``learned-overrides.json`` and env vars.
         team_context_root: Root directory for team context files.
     """
 
@@ -57,10 +76,18 @@ class TriggerEvaluator:
         config: TriggerConfig | None = None,
         team_context_root: Path | None = None,
     ) -> None:
-        self._config = config or TriggerConfig()
         self._root = (team_context_root or _DEFAULT_TEAM_CONTEXT).resolve()
         self._state_path = self._root / _TRIGGER_STATE_FILE
         self._log_path = self._root / "usage-log.jsonl"
+
+        if config is not None:
+            self._config = config
+        else:
+            # Start from env-var defaults, then let learned-overrides.json
+            # override only the fields it explicitly sets.
+            self._config = self._load_config_from_overrides(
+                base=TriggerConfig.from_env()
+            )
 
     # ------------------------------------------------------------------
     # Public API
@@ -221,9 +248,63 @@ class TriggerEvaluator:
 
         return anomalies
 
+    def reset_watermark(self) -> None:
+        """Reset the last-analyzed watermark to zero.
+
+        Forces :meth:`should_analyze` to consider all existing tasks as new
+        on the next call.  Useful when the state file has drifted (e.g. a
+        usage log was truncated) or after a fresh install.
+        """
+        self._write_state(0)
+
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    def _load_config_from_overrides(self, base: TriggerConfig) -> TriggerConfig:
+        """Overlay ``trigger_config`` from ``learned-overrides.json`` onto *base*.
+
+        Only keys that are explicitly present in the overrides file are applied;
+        absent keys leave *base* values intact.  Errors reading the file are
+        silently ignored (best-effort, non-blocking).
+
+        Args:
+            base: Starting :class:`TriggerConfig` (from env vars or defaults).
+
+        Returns:
+            A new :class:`TriggerConfig` with any overrides applied.
+        """
+        overrides_path = self._root / _OVERRIDES_FILE
+        if not overrides_path.exists():
+            return base
+        try:
+            data = json.loads(overrides_path.read_text(encoding="utf-8"))
+            tc_data: dict = data.get("trigger_config", {})
+            if not tc_data:
+                return base
+            # Build a merged dict: start from base, overlay explicit keys.
+            merged = base.to_dict()
+            for key in (
+                "min_tasks_before_analysis",
+                "analysis_interval_tasks",
+                "agent_failure_threshold",
+                "gate_failure_threshold",
+                "budget_deviation_threshold",
+                "confidence_threshold",
+            ):
+                if key in tc_data:
+                    merged[key] = tc_data[key]
+            result = TriggerConfig.from_dict(merged)
+            _log.debug(
+                "TriggerEvaluator: loaded trigger_config from overrides "
+                "(min_tasks=%d, interval=%d)",
+                result.min_tasks_before_analysis,
+                result.analysis_interval_tasks,
+            )
+            return result
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("TriggerEvaluator: failed to load overrides (%s)", exc)
+            return base
 
     def _read_records(self) -> list[TaskUsageRecord]:
         logger = UsageLogger(self._log_path)

@@ -5,6 +5,7 @@ improvement reports, and top-level improvement configuration.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -301,8 +302,8 @@ class TriggerConfig:
             recommendation.
     """
 
-    min_tasks_before_analysis: int = 10
-    analysis_interval_tasks: int = 5
+    min_tasks_before_analysis: int = 3
+    analysis_interval_tasks: int = 3
     agent_failure_threshold: float = 0.3
     gate_failure_threshold: float = 0.2
     budget_deviation_threshold: float = 0.5
@@ -321,12 +322,46 @@ class TriggerConfig:
     @classmethod
     def from_dict(cls, data: dict) -> TriggerConfig:
         return cls(
-            min_tasks_before_analysis=int(data.get("min_tasks_before_analysis", 10)),
-            analysis_interval_tasks=int(data.get("analysis_interval_tasks", 5)),
+            min_tasks_before_analysis=int(data.get("min_tasks_before_analysis", 3)),
+            analysis_interval_tasks=int(data.get("analysis_interval_tasks", 3)),
             agent_failure_threshold=float(data.get("agent_failure_threshold", 0.3)),
             gate_failure_threshold=float(data.get("gate_failure_threshold", 0.2)),
             budget_deviation_threshold=float(data.get("budget_deviation_threshold", 0.5)),
             confidence_threshold=float(data.get("confidence_threshold", 0.7)),
+        )
+
+    @classmethod
+    def from_env(cls) -> TriggerConfig:
+        """Build a :class:`TriggerConfig` with values from environment variables.
+
+        Reads the following env vars (all optional; falls back to the class
+        defaults when absent or non-numeric):
+
+        * ``BATON_MIN_TASKS`` — ``min_tasks_before_analysis`` (int, default 3).
+        * ``BATON_ANALYSIS_INTERVAL`` — ``analysis_interval_tasks`` (int, default 3).
+
+        Other thresholds (failure rates, budget deviation, confidence) are not
+        overridable via env vars because they are anomaly-detection knobs rather
+        than cadence controls, and mis-setting them via env can silently suppress
+        important signals.
+
+        Returns:
+            A :class:`TriggerConfig` populated from env vars where present.
+        """
+        def _int(key: str, default: int) -> int:
+            raw = os.environ.get(key, "").strip()
+            if raw:
+                try:
+                    val = int(raw)
+                    if val > 0:
+                        return val
+                except ValueError:
+                    pass
+            return default
+
+        return cls(
+            min_tasks_before_analysis=_int("BATON_MIN_TASKS", 3),
+            analysis_interval_tasks=_int("BATON_ANALYSIS_INTERVAL", 3),
         )
 
 

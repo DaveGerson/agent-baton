@@ -29,7 +29,7 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     group.add_argument(
         "--force",
         action="store_true",
-        help="Force-run a cycle even if triggers haven't fired",
+        help="Force-run a cycle bypassing the data-threshold check entirely",
     )
     group.add_argument(
         "--report",
@@ -46,11 +46,45 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         action="store_true",
         help="Show all improvement reports",
     )
+    # Threshold overrides (only meaningful with --run; ignored with --force)
+    p.add_argument(
+        "--min-tasks",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Minimum total tasks before analysis fires (overrides default and "
+            "BATON_MIN_TASKS env var for this run only)"
+        ),
+    )
+    p.add_argument(
+        "--interval",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Re-analyze every N new tasks (overrides default and "
+            "BATON_ANALYSIS_INTERVAL env var for this run only)"
+        ),
+    )
     return p
 
 
 def handler(args: argparse.Namespace) -> None:
-    loop = ImprovementLoop()
+    from agent_baton.core.improve.triggers import TriggerEvaluator
+    from agent_baton.models.improvement import TriggerConfig
+
+    # Build a custom TriggerConfig when CLI overrides are supplied.
+    trigger_evaluator = None
+    if getattr(args, "min_tasks", None) is not None or getattr(args, "interval", None) is not None:
+        base_config = TriggerConfig.from_env()
+        if args.min_tasks is not None:
+            base_config.min_tasks_before_analysis = args.min_tasks
+        if args.interval is not None:
+            base_config.analysis_interval_tasks = args.interval
+        trigger_evaluator = TriggerEvaluator(config=base_config)
+
+    loop = ImprovementLoop(trigger_evaluator=trigger_evaluator)
 
     if args.run or args.force:
         report = loop.run_cycle(force=args.force)
