@@ -377,6 +377,30 @@ to the same phase unless they do genuinely different work.
 - Phase count should match complexity."""
 
 
+def _haiku_available() -> tuple[bool, str]:
+    """Check whether HaikuClassifier can be used without making an API call.
+
+    Returns a ``(available, reason)`` tuple.  When ``available`` is ``False``,
+    ``reason`` is a human-readable explanation suitable for a log message.
+
+    Checks:
+    1. The ``anthropic`` SDK is importable (optional dependency).
+    2. The ``ANTHROPIC_API_KEY`` environment variable is set and non-empty.
+    """
+    import importlib
+    import os
+
+    sdk_spec = importlib.util.find_spec("anthropic")
+    if sdk_spec is None:
+        return False, "anthropic SDK not installed (pip install agent-baton[classify])"
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if not api_key:
+        return False, "ANTHROPIC_API_KEY is not set"
+
+    return True, ""
+
+
 def _call_haiku(prompt: str) -> str:
     """Call Claude Haiku via the Anthropic SDK.
 
@@ -487,14 +511,28 @@ class HaikuClassifier:
 class FallbackClassifier:
     """Try HaikuClassifier; on any failure, fall back to KeywordClassifier.
 
-    Checks for Haiku availability (SDK import, API key) at call time,
-    not at construction time, so the planner works regardless of when
-    the API key becomes available.
+    Pre-flight check (``_haiku_available()``) runs at call time — not
+    construction time — so the planner works regardless of when the API
+    key or SDK becomes available in the environment.
+
+    Logging strategy:
+    - INFO  when Haiku is structurally unavailable (no SDK / no key).
+            Logged once per unique reason so operator logs stay clean.
+    - WARNING when Haiku is available but fails during a call (network
+            error, timeout, bad response).  Includes exc_info so the
+            root cause is always visible.
+    - DEBUG on successful Haiku classification.
+
+    ``classification_source`` on the returned ``TaskClassification`` is
+    ``"haiku"`` when Haiku succeeds, ``"keyword-fallback"`` otherwise.
     """
 
     def __init__(self) -> None:
         self._haiku = HaikuClassifier()
         self._keyword = KeywordClassifier()
+        # Track the last unavailability reason to avoid log spam on
+        # repeated calls within the same process.
+        self._last_unavailable_reason: str = ""
 
     def classify(
         self,
@@ -502,11 +540,30 @@ class FallbackClassifier:
         registry: AgentRegistry,
         project_root: Path | None = None,
     ) -> TaskClassification:
+        available, reason = _haiku_available()
+        if not available:
+            if reason != self._last_unavailable_reason:
+                logger.info(
+                    "HaikuClassifier unavailable — using keyword fallback. Reason: %s",
+                    reason,
+                )
+                self._last_unavailable_reason = reason
+            return self._keyword.classify(summary, registry, project_root)
+
+        # Haiku appears available — attempt classification.
         try:
-            return self._haiku.classify(summary, registry, project_root)
-        except Exception:
+            result = self._haiku.classify(summary, registry, project_root)
             logger.debug(
-                "Haiku classification failed — falling back to keyword classifier",
+                "Haiku classification succeeded: type=%s complexity=%s",
+                result.task_type,
+                result.complexity,
+            )
+            return result
+        except Exception as exc:
+            logger.warning(
+                "Haiku classification failed — falling back to keyword classifier. "
+                "Reason: %s",
+                exc,
                 exc_info=True,
             )
             return self._keyword.classify(summary, registry, project_root)

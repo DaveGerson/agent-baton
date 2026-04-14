@@ -12,6 +12,7 @@ from agent_baton.core.engine.classifier import (
     HaikuClassifier,
     KeywordClassifier,
     TaskClassification,
+    _haiku_available,
     _score_task_type,
 )
 from agent_baton.core.orchestration.registry import AgentRegistry
@@ -284,8 +285,27 @@ class TestHaikuClassifier:
 # ---------------------------------------------------------------------------
 
 class TestFallbackClassifier:
+    """Tests for FallbackClassifier.classify() — API-call-level behavior.
+
+    These tests assume Haiku is structurally available (SDK + key present),
+    so they patch both ``_haiku_available`` to return ``(True, "")`` and
+    ``_call_haiku`` to control what the API returns.  Tests for the
+    pre-flight (no SDK / no key) path live in TestFallbackClassifierPreFlight.
+    """
+
     def setup_method(self):
         self.registry = _make_registry()
+        # Patch _haiku_available so all tests in this class see Haiku as
+        # structurally available.  Individual tests then control _call_haiku
+        # to exercise success and transient-failure paths.
+        self._avail_patcher = patch(
+            "agent_baton.core.engine.classifier._haiku_available",
+            return_value=(True, ""),
+        )
+        self._avail_patcher.start()
+
+    def teardown_method(self):
+        self._avail_patcher.stop()
 
     @patch("agent_baton.core.engine.classifier._call_haiku")
     def test_uses_haiku_when_available(self, mock_call):
@@ -307,8 +327,8 @@ class TestFallbackClassifier:
         result = classifier.classify("Move 3 files", self.registry)
         assert result.source == "keyword-fallback"
 
-    @patch("agent_baton.core.engine.classifier._call_haiku", side_effect=ImportError("no anthropic"))
-    def test_falls_back_on_missing_sdk(self, mock_call):
+    @patch("agent_baton.core.engine.classifier._call_haiku", side_effect=Exception("connection timeout"))
+    def test_falls_back_on_network_timeout(self, mock_call):
         classifier = FallbackClassifier()
         result = classifier.classify("Move 3 files", self.registry)
         assert result.source == "keyword-fallback"
@@ -318,6 +338,273 @@ class TestFallbackClassifier:
         classifier = FallbackClassifier()
         result = classifier.classify("Move 3 files", self.registry)
         assert result.source == "keyword-fallback"
+
+    @patch("agent_baton.core.engine.classifier._call_haiku", side_effect=Exception("API error"))
+    def test_fallback_result_is_valid_task_classification(self, _mock_call):
+        classifier = FallbackClassifier()
+        result = classifier.classify("Fix the login bug", self.registry)
+        assert isinstance(result, TaskClassification)
+        assert result.complexity in ("light", "medium", "heavy")
+        assert len(result.agents) >= 1
+        assert len(result.phases) >= 1
+
+    @patch("agent_baton.core.engine.classifier._call_haiku")
+    def test_source_is_haiku_on_success(self, mock_call):
+        mock_call.return_value = json.dumps({
+            "task_type": "bug-fix",
+            "complexity": "medium",
+            "agents": ["backend-engineer", "test-engineer"],
+            "phases": ["Implement", "Test"],
+            "reasoning": "Bug needs implementation and tests",
+        })
+        classifier = FallbackClassifier()
+        result = classifier.classify("Fix the auth crash", self.registry)
+        assert result.source == "haiku"
+
+    @patch("agent_baton.core.engine.classifier._call_haiku", side_effect=Exception("5xx"))
+    def test_source_is_keyword_fallback_on_failure(self, _mock_call):
+        classifier = FallbackClassifier()
+        result = classifier.classify("Fix the auth crash", self.registry)
+        assert result.source == "keyword-fallback"
+
+
+# ---------------------------------------------------------------------------
+# Pre-flight availability check
+# ---------------------------------------------------------------------------
+
+class TestHaikuAvailable:
+    """Unit tests for _haiku_available() — no API calls made."""
+
+    def test_returns_false_when_sdk_not_installed(self):
+        import importlib
+        with patch.object(importlib.util, "find_spec", return_value=None):
+            available, reason = _haiku_available()
+        assert available is False
+        assert "anthropic" in reason.lower()
+
+    def test_returns_false_when_api_key_missing(self):
+        import importlib
+        import types
+        # Simulate SDK present but ANTHROPIC_API_KEY not set.
+        fake_spec = types.SimpleNamespace()
+        with patch.object(importlib.util, "find_spec", return_value=fake_spec):
+            with patch.dict("os.environ", {}, clear=True):
+                # Remove key if set in the outer environment.
+                import os
+                env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+                with patch.dict("os.environ", env, clear=True):
+                    available, reason = _haiku_available()
+        assert available is False
+        assert "ANTHROPIC_API_KEY" in reason
+
+    def test_returns_false_when_api_key_is_whitespace_only(self):
+        import importlib
+        import types
+        fake_spec = types.SimpleNamespace()
+        with patch.object(importlib.util, "find_spec", return_value=fake_spec):
+            with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "   "}, clear=False):
+                available, reason = _haiku_available()
+        assert available is False
+        assert "ANTHROPIC_API_KEY" in reason
+
+    def test_returns_true_when_sdk_and_key_present(self):
+        import importlib
+        import types
+        fake_spec = types.SimpleNamespace()
+        with patch.object(importlib.util, "find_spec", return_value=fake_spec):
+            with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "sk-ant-test-key"}, clear=False):
+                available, reason = _haiku_available()
+        assert available is True
+        assert reason == ""
+
+    def test_reason_is_empty_string_when_available(self):
+        import importlib
+        import types
+        fake_spec = types.SimpleNamespace()
+        with patch.object(importlib.util, "find_spec", return_value=fake_spec):
+            with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "sk-ant-x"}, clear=False):
+                _, reason = _haiku_available()
+        assert reason == ""
+
+
+class TestFallbackClassifierPreFlight:
+    """Tests for FallbackClassifier's pre-flight path.
+
+    These tests verify behavior when _haiku_available() returns False
+    (no SDK installed or no API key set), which should go directly to
+    KeywordClassifier without ever calling _call_haiku.
+    """
+
+    def setup_method(self):
+        self.registry = _make_registry()
+
+    def test_no_sdk_uses_keyword_without_calling_haiku(self):
+        """When SDK is absent, _call_haiku must never be invoked."""
+        with patch(
+            "agent_baton.core.engine.classifier._haiku_available",
+            return_value=(False, "anthropic SDK not installed"),
+        ):
+            with patch(
+                "agent_baton.core.engine.classifier._call_haiku",
+                side_effect=AssertionError("_call_haiku must not be called when SDK absent"),
+            ):
+                classifier = FallbackClassifier()
+                result = classifier.classify("Fix the login bug", self.registry)
+        assert result.source == "keyword-fallback"
+
+    def test_no_api_key_uses_keyword_without_calling_haiku(self):
+        """When API key is absent, _call_haiku must never be invoked."""
+        with patch(
+            "agent_baton.core.engine.classifier._haiku_available",
+            return_value=(False, "ANTHROPIC_API_KEY is not set"),
+        ):
+            with patch(
+                "agent_baton.core.engine.classifier._call_haiku",
+                side_effect=AssertionError("_call_haiku must not be called when key absent"),
+            ):
+                classifier = FallbackClassifier()
+                result = classifier.classify("Add user authentication", self.registry)
+        assert result.source == "keyword-fallback"
+
+    def test_preflight_unavailable_returns_valid_classification(self):
+        """Keyword fallback when pre-flight fails must still produce valid output."""
+        with patch(
+            "agent_baton.core.engine.classifier._haiku_available",
+            return_value=(False, "ANTHROPIC_API_KEY is not set"),
+        ):
+            classifier = FallbackClassifier()
+            result = classifier.classify("Add user authentication", self.registry)
+        assert isinstance(result, TaskClassification)
+        assert result.complexity in ("light", "medium", "heavy")
+        assert len(result.agents) >= 1
+        assert len(result.phases) >= 1
+
+    def test_preflight_unavailable_logs_info(self, caplog):
+        """Structural unavailability must be logged at INFO, not silently swallowed."""
+        import logging
+        with patch(
+            "agent_baton.core.engine.classifier._haiku_available",
+            return_value=(False, "ANTHROPIC_API_KEY is not set"),
+        ):
+            classifier = FallbackClassifier()
+            with caplog.at_level(logging.INFO, logger="agent_baton.core.engine.classifier"):
+                classifier.classify("Fix the auth crash", self.registry)
+        assert any(
+            "unavailable" in record.message.lower() or "keyword" in record.message.lower()
+            for record in caplog.records
+        )
+
+    def test_preflight_unavailable_does_not_log_warning(self, caplog):
+        """Structural unavailability (no SDK/key) must not produce WARNING-level noise."""
+        import logging
+        with patch(
+            "agent_baton.core.engine.classifier._haiku_available",
+            return_value=(False, "ANTHROPIC_API_KEY is not set"),
+        ):
+            classifier = FallbackClassifier()
+            with caplog.at_level(logging.WARNING, logger="agent_baton.core.engine.classifier"):
+                classifier.classify("Fix the auth crash", self.registry)
+        # No WARNING records from the classifier logger
+        warning_records = [
+            r for r in caplog.records
+            if r.levelno >= logging.WARNING
+            and r.name == "agent_baton.core.engine.classifier"
+        ]
+        assert warning_records == []
+
+    def test_transient_failure_logs_warning(self, caplog):
+        """A transient API failure (Haiku available but call fails) must log WARNING."""
+        import logging
+        with patch(
+            "agent_baton.core.engine.classifier._haiku_available",
+            return_value=(True, ""),
+        ):
+            with patch(
+                "agent_baton.core.engine.classifier._call_haiku",
+                side_effect=Exception("connection reset"),
+            ):
+                classifier = FallbackClassifier()
+                with caplog.at_level(logging.WARNING, logger="agent_baton.core.engine.classifier"):
+                    result = classifier.classify("Fix the auth crash", self.registry)
+        assert result.source == "keyword-fallback"
+        warning_records = [
+            r for r in caplog.records
+            if r.levelno >= logging.WARNING
+            and r.name == "agent_baton.core.engine.classifier"
+        ]
+        assert len(warning_records) >= 1
+        assert "connection reset" in warning_records[0].message
+
+    def test_same_unavailable_reason_logged_only_once(self, caplog):
+        """Repeated calls with the same unavailability reason must not repeat the INFO log."""
+        import logging
+        reason = "ANTHROPIC_API_KEY is not set"
+        with patch(
+            "agent_baton.core.engine.classifier._haiku_available",
+            return_value=(False, reason),
+        ):
+            classifier = FallbackClassifier()
+            with caplog.at_level(logging.INFO, logger="agent_baton.core.engine.classifier"):
+                classifier.classify("Task one", self.registry)
+                classifier.classify("Task two", self.registry)
+                classifier.classify("Task three", self.registry)
+        info_records = [
+            r for r in caplog.records
+            if r.levelno == logging.INFO
+            and r.name == "agent_baton.core.engine.classifier"
+        ]
+        # The INFO message must appear exactly once, not three times.
+        assert len(info_records) == 1
+
+    def test_different_unavailable_reasons_each_logged_once(self, caplog):
+        """If the unavailability reason changes (e.g. key set then unset), re-log."""
+        import logging
+        classifier = FallbackClassifier()
+        with caplog.at_level(logging.INFO, logger="agent_baton.core.engine.classifier"):
+            with patch(
+                "agent_baton.core.engine.classifier._haiku_available",
+                return_value=(False, "ANTHROPIC_API_KEY is not set"),
+            ):
+                classifier.classify("Task one", self.registry)
+            with patch(
+                "agent_baton.core.engine.classifier._haiku_available",
+                return_value=(False, "anthropic SDK not installed"),
+            ):
+                classifier.classify("Task two", self.registry)
+        info_records = [
+            r for r in caplog.records
+            if r.levelno == logging.INFO
+            and r.name == "agent_baton.core.engine.classifier"
+        ]
+        assert len(info_records) == 2
+
+    def test_classification_source_is_keyword_fallback_when_preflight_fails(self):
+        with patch(
+            "agent_baton.core.engine.classifier._haiku_available",
+            return_value=(False, "ANTHROPIC_API_KEY is not set"),
+        ):
+            classifier = FallbackClassifier()
+            result = classifier.classify("Redesign the entire auth system", self.registry)
+        assert result.source == "keyword-fallback"
+
+    def test_classification_source_is_haiku_when_preflight_passes_and_call_succeeds(self):
+        with patch(
+            "agent_baton.core.engine.classifier._haiku_available",
+            return_value=(True, ""),
+        ):
+            with patch(
+                "agent_baton.core.engine.classifier._call_haiku",
+                return_value=json.dumps({
+                    "task_type": "bug-fix",
+                    "complexity": "light",
+                    "agents": ["backend-engineer"],
+                    "phases": ["Implement"],
+                    "reasoning": "Simple fix",
+                }),
+            ):
+                classifier = FallbackClassifier()
+                result = classifier.classify("Fix the login bug", self.registry)
+        assert result.source == "haiku"
 
 
 # ---------------------------------------------------------------------------
