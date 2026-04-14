@@ -90,7 +90,9 @@ class SqliteStorage:
 
         Within a single transaction, this method:
 
-        1. ``INSERT OR REPLACE`` the ``executions`` row.
+        1. Upsert the ``executions`` row using INSERT ... ON CONFLICT DO UPDATE
+           (safe upsert — does NOT delete the row, so FK CASCADE children such
+           as ``beads`` are preserved across saves).
         2. Upsert the plan via ``_upsert_plan`` (``plans``, ``plan_phases``,
            ``plan_steps``, ``team_members``).
         3. DELETE + INSERT all ``step_results`` and ``team_step_results``.
@@ -101,6 +103,11 @@ class SqliteStorage:
         The DELETE-then-INSERT pattern ensures removed list items (e.g. a
         step result that was retracted) do not leave stale rows.
 
+        Note: ``INSERT OR REPLACE`` was previously used for the executions row
+        but that is equivalent to DELETE + INSERT in SQLite, which triggers
+        ON DELETE CASCADE on every child table (including ``beads``), silently
+        destroying bead memory on every save.  The safe upsert form avoids this.
+
         Args:
             state: The complete execution state to persist.
         """
@@ -109,15 +116,26 @@ class SqliteStorage:
         conn = self._conn()
         with conn:
             # -- executions row ------------------------------------------------
+            # Use INSERT ... ON CONFLICT DO UPDATE (safe upsert) rather than
+            # INSERT OR REPLACE so that FK CASCADE children (beads, events, etc.)
+            # are NOT deleted when the execution row is updated mid-flight.
             conn.execute(
                 """
-                INSERT OR REPLACE INTO executions
+                INSERT INTO executions
                     (task_id, status, current_phase, current_step_index,
                      started_at, completed_at, updated_at,
                      pending_gaps, resolved_decisions)
                 VALUES (?, ?, ?, ?, ?, ?,
                         strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
                         ?, ?)
+                ON CONFLICT(task_id) DO UPDATE SET
+                    status             = excluded.status,
+                    current_phase      = excluded.current_phase,
+                    current_step_index = excluded.current_step_index,
+                    completed_at       = excluded.completed_at,
+                    updated_at         = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+                    pending_gaps       = excluded.pending_gaps,
+                    resolved_decisions = excluded.resolved_decisions
                 """,
                 (
                     state.task_id,
@@ -459,14 +477,18 @@ class SqliteStorage:
         """
         conn = self._conn()
         with conn:
+            # Safe upsert — keeps existing row intact (preserves FK CASCADE
+            # children like beads) if the execution already exists.
             conn.execute(
                 """
-                INSERT OR REPLACE INTO executions
+                INSERT INTO executions
                     (task_id, status, current_phase, current_step_index,
                      started_at, updated_at)
                 VALUES (?, 'queued', 0, 0,
                         strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
                         strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+                ON CONFLICT(task_id) DO UPDATE SET
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
                 """,
                 (plan.task_id,),
             )

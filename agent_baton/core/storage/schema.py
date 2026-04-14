@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -160,6 +160,16 @@ ALTER TABLE beads ADD COLUMN retrieval_count INTEGER NOT NULL DEFAULT 0;
 -- The idempotent migration handler silently skips if the column already
 -- exists (fresh installs from CENTRAL_SCHEMA_DDL).
 ALTER TABLE learning_issues ADD COLUMN project_id TEXT;
+""",
+    8: """
+-- v8: no schema DDL change.
+-- This version documents the fix for the beads FK cascade bug:
+-- save_execution() previously used INSERT OR REPLACE INTO executions, which
+-- is DELETE + INSERT in SQLite and triggered ON DELETE CASCADE, silently
+-- destroying all bead rows for the task on every save.  The query was changed
+-- to INSERT ... ON CONFLICT(task_id) DO UPDATE SET which is a true in-place
+-- upsert that does not fire the CASCADE.  No ALTER TABLE is required.
+SELECT 1;
 """,
 }
 
