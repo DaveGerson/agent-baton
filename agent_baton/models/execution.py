@@ -20,6 +20,7 @@ from agent_baton.models.knowledge import (
     ResolvedDecision,
 )
 from agent_baton.models.parallel import ResourceLimits
+from agent_baton.models.taxonomy import ForesightInsight
 
 
 # ---------------------------------------------------------------------------
@@ -401,6 +402,7 @@ class MachinePlan:
     classification_source: str = "keyword-fallback"  # haiku | keyword-fallback
     resource_limits: ResourceLimits | None = None  # optional concurrency constraints
     detected_stack: str | None = None  # e.g. "python", "python/react", "typescript/react"
+    foresight_insights: list[ForesightInsight] = field(default_factory=list)  # proactive insights
 
     def __post_init__(self) -> None:
         if not self.created_at:
@@ -437,6 +439,7 @@ class MachinePlan:
             "complexity": self.complexity,
             "classification_source": self.classification_source,
             "detected_stack": self.detected_stack,
+            "foresight_insights": [i.to_dict() for i in self.foresight_insights],
         }
         if self.resource_limits is not None:
             d["resource_limits"] = self.resource_limits.to_dict()
@@ -464,6 +467,10 @@ class MachinePlan:
             classification_source=data.get("classification_source", "keyword-fallback"),
             resource_limits=ResourceLimits.from_dict(rl_data) if rl_data else None,
             detected_stack=data.get("detected_stack"),
+            foresight_insights=[
+                ForesightInsight.from_dict(i)
+                for i in data.get("foresight_insights", [])
+            ],
         )
 
     def to_markdown(self) -> str:
@@ -487,6 +494,8 @@ class MachinePlan:
             lines.append(f"**Intervention Level**: {self.intervention_level}")
         lines.append(f"**Complexity**: {self.complexity}")
         lines.append(f"**Classification Source**: {self.classification_source}")
+        if self.foresight_insights:
+            lines.append(f"**Foresight Insights**: {len(self.foresight_insights)} proactive gap(s) addressed")
         if self.explicit_knowledge_packs:
             lines.append(f"**Explicit Knowledge Packs**: {', '.join(self.explicit_knowledge_packs)}")
         if self.explicit_knowledge_docs:

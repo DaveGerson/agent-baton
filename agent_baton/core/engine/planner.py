@@ -33,6 +33,7 @@ from agent_baton.models.enums import GitStrategy, RiskLevel
 from agent_baton.models.execution import MachinePlan, PlanGate, PlanPhase, PlanStep, TeamMember
 from agent_baton.models.feedback import RetrospectiveFeedback
 from agent_baton.models.pattern import LearnedPattern
+from agent_baton.models.taxonomy import ForesightInsight
 
 if TYPE_CHECKING:
     from agent_baton.core.orchestration.knowledge_registry import KnowledgeRegistry
@@ -483,6 +484,11 @@ class IntelligentPlanner:
         self._task_classifier: TaskClassifier = task_classifier or FallbackClassifier()
         self._last_task_classification: TaskClassification | None = None
 
+        # Foresight engine — proactive gap analysis during plan creation.
+        from agent_baton.core.engine.foresight import ForesightEngine
+        self._foresight_engine = ForesightEngine()
+        self._last_foresight_insights: list[ForesightInsight] = []
+
     # ------------------------------------------------------------------
     # Structured description parsing
     # ------------------------------------------------------------------
@@ -674,6 +680,7 @@ class IntelligentPlanner:
         self._last_policy_violations = []
         self._last_retro_feedback = None
         self._last_task_classification = None
+        self._last_foresight_insights = []
 
         # 1. Task ID
         task_id = self._generate_task_id(task_summary)
@@ -981,6 +988,48 @@ class IntelligentPlanner:
                             exc_info=True,
                         )
 
+        # 9.7. Foresight analysis — proactively insert preparatory steps
+        # for predicted capability gaps, prerequisites, and edge cases.
+        try:
+            plan_phases, foresight_insights = self._foresight_engine.analyze(
+                plan_phases,
+                task_summary,
+                risk_level=risk_level,
+                existing_agents=resolved_agents,
+            )
+            self._last_foresight_insights = foresight_insights
+        except Exception:
+            logger.debug(
+                "Foresight analysis failed — skipping",
+                exc_info=True,
+            )
+
+        # 9.8. Resolve knowledge for foresight-inserted steps.
+        # Foresight steps are inserted after the initial knowledge resolution
+        # pass (9.5), so they need their own resolution pass.
+        if _resolver is not None and self._last_foresight_insights:
+            foresight_step_ids = set()
+            for ins in self._last_foresight_insights:
+                foresight_step_ids.update(ins.inserted_step_ids)
+            for phase in plan_phases:
+                for step in phase.steps:
+                    if step.step_id in foresight_step_ids:
+                        try:
+                            step.knowledge = _resolver.resolve(
+                                agent_name=step.agent_name,
+                                task_description=step.task_description,
+                                task_type=inferred_type,
+                                risk_level=risk_level,
+                                explicit_packs=explicit_knowledge_packs or [],
+                                explicit_docs=explicit_knowledge_docs or [],
+                            )
+                        except Exception:
+                            logger.debug(
+                                "Knowledge resolution failed for foresight step %s — skipping",
+                                step.step_id,
+                                exc_info=True,
+                            )
+
         # 10. Score check — warn about low-health agents
         self._check_agent_scores(resolved_agents)
 
@@ -1089,6 +1138,7 @@ class IntelligentPlanner:
                 if stack_profile and stack_profile.framework
                 else (stack_profile.language if stack_profile else None)
             ),
+            foresight_insights=list(self._last_foresight_insights),
         )
         # 16. Team cost estimation — look up historical cost data for team steps.
         self._last_team_cost_estimates: dict[str, int] = {}
@@ -1253,6 +1303,31 @@ class IntelligentPlanner:
             total_team = sum(self._last_team_cost_estimates.values())
             lines.append(f"- **Total team cost estimate:** ~{total_team:,} tokens")
             lines.append("")
+
+        # Foresight insights
+        if self._last_foresight_insights:
+            lines += ["## Foresight Insights", ""]
+            lines.append(
+                "The planner proactively identified the following gaps and "
+                "inserted preparatory steps:"
+            )
+            lines.append("")
+            for insight in self._last_foresight_insights:
+                lines.append(
+                    f"- **{insight.category}** ({insight.source_rule}, "
+                    f"confidence {insight.confidence:.0%}): {insight.description}"
+                )
+                lines.append(f"  - *Resolution*: {insight.resolution}")
+                if insight.inserted_phase_name:
+                    lines.append(f"  - *Inserted phase*: {insight.inserted_phase_name}")
+            lines.append("")
+        else:
+            lines += [
+                "## Foresight Insights",
+                "",
+                "No proactive gaps detected. The plan is self-contained.",
+                "",
+            ]
 
         # Phase summary
         lines += ["## Phase Summary", ""]
@@ -2412,6 +2487,18 @@ class IntelligentPlanner:
             lines.append(
                 f"Team Cost Estimate: ~{total_team_cost:,} tokens "
                 f"({budget_pct:.0f}% of {plan.budget_tier} budget)"
+            )
+
+        # Foresight — surface proactive insights so agents understand
+        # why preparatory phases were inserted
+        if self._last_foresight_insights:
+            insight_lines = [
+                f"  - [{ins.category}] {ins.description}"
+                + (f" (phase: {ins.inserted_phase_name})" if ins.inserted_phase_name else "")
+                for ins in self._last_foresight_insights
+            ]
+            lines.append(
+                "Foresight (proactive gaps addressed):\n" + "\n".join(insight_lines)
             )
 
         # External items — only when adapters are connected (central.db present

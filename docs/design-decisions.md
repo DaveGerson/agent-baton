@@ -1014,3 +1014,84 @@ when human input is required.
   executions within the same project.
 
 **Status**: Implemented (2026-03-29, Phases 1-5)
+
+---
+
+## ADR-22: Foresight Engine — Proactive Gap Analysis During Plan Creation
+
+**Decision**: Add a `ForesightEngine` that scans planned phases and steps
+during `create_plan()` and inserts preparatory phases when it predicts
+capability gaps, missing prerequisites, or edge cases.
+
+**Context**: Users frequently describe tasks at the outcome level ("build a
+data quality pipeline") without specifying prerequisites that agents will
+need ("the data quality agent needs delete/drop capability for duplicates").
+This gap surfaced repeatedly in retrospectives as knowledge-gap signals
+after execution had already started — wasting budget on interrupted steps.
+The foresight engine addresses this proactively at plan-time instead of
+reactively at execution-time, before any agents are dispatched.
+
+**Mechanism**: The engine evaluates a set of `ForesightRule` objects against
+step descriptions and agent assignments. Each rule has trigger keywords,
+trigger agents, a confidence score, and a resolution template. When a rule
+matches, a preparatory phase is inserted before the triggering phase. Rules
+fire at most once (deduplicated by `rule_id`). Confidence thresholds scale
+inversely with risk level — higher-risk plans lower the threshold so more
+rules fire. Each insertion is recorded as a `ForesightInsight` on the plan.
+
+**Integration point**: Step 9.7 in `create_plan()`, after phase enrichment
+and knowledge resolution (9.5-9.6), before score checks and budget (10-11).
+A second knowledge resolution pass (9.8) runs on foresight-inserted steps
+so they receive the same knowledge attachments as other steps.
+
+**Key trade-offs**:
+
+- **Heuristic rules vs. LLM analysis**: Heuristic rules are fast (no API
+  call), deterministic, and testable. LLM analysis would catch more subtle
+  gaps but adds latency and cost to every `baton plan` invocation. The engine
+  is designed to accept custom rules, so a future LLM-based rule source can
+  be added without changing the architecture.
+
+- **Insert-before vs. amend-during**: Foresight inserts phases at plan-time
+  rather than amending during execution. This keeps plans self-contained and
+  reviewable — users see the full plan including prerequisites before
+  execution starts.
+
+**Status**: Implemented (2026-03-29)
+
+---
+
+## ADR-23: Planning Taxonomy — Universal Semantic Object Model
+
+**Decision**: Codify a formal taxonomy (`models/taxonomy.py`,
+`references/planning-taxonomy.md`) that defines the semantic vocabulary for
+all planning concepts: step intents, phase archetypes, plan element kinds,
+foresight insight categories, and agent-intent affinity mappings.
+
+**Context**: The planning system had implicit classifications scattered
+across constants (`_PHASE_VERBS`, `_PHASE_IDEAL_ROLES`, `_STEP_TEMPLATES`)
+without a unified model that named what each element *means*. This made it
+hard for agents to reason about their role in a plan and for users to
+understand why the planner made specific choices. The taxonomy provides
+machine-readable definitions (enums, dataclasses) and human-readable
+documentation (reference doc, knowledge pack) from a single source.
+
+**Key concepts**:
+
+- `StepIntent` — 13 intents grouped into 4 families (core work, support,
+  governance, foresight) that describe *why* a step exists.
+- `PhaseArchetype` — 7 archetypes that map free-form phase names to
+  canonical lifecycle roles (discovery > design > preparation >
+  implementation > verification > review > remediation).
+- `PlanElementKind` — type discriminator for every structural element in
+  the plan hierarchy.
+- `AGENT_INTENT_AFFINITY` — maps each agent to the intents it naturally
+  fulfils.
+
+**Delivery**: `PlanningTaxonomy` class provides `to_dict()` for structured
+data, `to_markdown()` for human rendering, and per-vocabulary query methods
+(`step_intents()`, `phase_archetypes()`, `plan_elements()`). A knowledge
+pack (`planning-taxonomy`) and reference doc (`planning-taxonomy.md`)
+deliver the taxonomy to agents and users respectively.
+
+**Status**: Implemented (2026-03-29)
