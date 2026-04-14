@@ -21,7 +21,7 @@ existing execution tests.  The test starts a real (in-memory) execution so the
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -29,7 +29,7 @@ fastapi = pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from agent_baton.api.server import create_app  # noqa: E402
-from agent_baton.models.execution import MachinePlan, PlanGate, PlanPhase, PlanStep  # noqa: E402
+from agent_baton.models.execution import ActionType, MachinePlan, PlanGate, PlanPhase, PlanStep  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -68,18 +68,12 @@ def _make_test_plan(task_id: str = "fb-task") -> MachinePlan:
     )
 
 
-def _start_execution(client: TestClient, task_id: str = "fb-task") -> None:
-    plan = _make_test_plan(task_id=task_id)
-    r = client.post("/api/v1/executions", json={"plan": plan.to_dict()})
-    assert r.status_code == 201, r.text
-
-
 # ---------------------------------------------------------------------------
 # Shared mock-engine fixture for tests that need to reach record_feedback_result
 # ---------------------------------------------------------------------------
 
 
-def _make_engine_mock(next_actions: list | None = None) -> MagicMock:
+def _make_engine_mock(_next_actions: list | None = None) -> MagicMock:
     """Return a MagicMock shaped like ExecutionEngine for feedback tests."""
     from agent_baton.models.execution import ExecutionAction
 
@@ -89,7 +83,7 @@ def _make_engine_mock(next_actions: list | None = None) -> MagicMock:
     # record_feedback_result is a no-op by default (success)
     eng.record_feedback_result.return_value = None
     # next_actions() returns a minimal COMPLETE action
-    complete_action = ExecutionAction(action_type="complete", message="done")
+    complete_action = ExecutionAction(action_type=ActionType.COMPLETE, message="done")
     eng.next_actions.return_value = [complete_action]
     eng.next_action.return_value = complete_action
     return eng
@@ -227,7 +221,7 @@ class TestFeedbackEndpoint400:
         assert "Phase 99" in r.json()["detail"]
 
     @pytest.fixture()
-    def engine_mock_bad_question(self, app) -> MagicMock:
+    def engine_mock_bad_question(self, _app) -> MagicMock:  # _app injected for fixture ordering
         eng = _make_engine_mock()
         eng.record_feedback_result.side_effect = ValueError(
             "Feedback question 'bad-q' not found on phase 0."
@@ -244,7 +238,7 @@ class TestFeedbackEndpoint400:
         assert r.status_code == 400
 
     @pytest.fixture()
-    def engine_mock_bad_index(self, app) -> MagicMock:
+    def engine_mock_bad_index(self, _app) -> MagicMock:  # _app injected for fixture ordering
         eng = _make_engine_mock()
         eng.record_feedback_result.side_effect = ValueError(
             "chosen_index 9 out of range for question 'q1' with 2 options."

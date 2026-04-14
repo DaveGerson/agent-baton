@@ -279,12 +279,9 @@ class TestBeadSelectorF3:
         assert result_ids.index("bd-high") < result_ids.index("bd-low")
 
     def test_select_increments_retrieval_count_for_selected_beads(
-        self, store: BeadStore, db_path: Path
+        self, store: BeadStore
     ) -> None:
-        from agent_baton.core.engine.bead_selector import BeadSelector
-
         plan = _make_plan_with_steps()
-        current_step = plan.phases[1].steps[0]
 
         bead = _make_bead("bd-r001", step_id="1.1", token_estimate=50)
         store.write(bead)
@@ -476,7 +473,7 @@ class TestMemoryDecayF6:
         result = decay_beads(None, ttl_hours=24)
         assert result == 0
 
-    def test_decay_cli_dry_run(self, db_path: Path, tmp_path: Path) -> None:
+    def test_decay_cli_dry_run(self, db_path: Path) -> None:
         """CLI: baton beads cleanup --dry-run prints eligible count."""
         from agent_baton.cli.commands import bead_cmd
 
@@ -798,7 +795,8 @@ class TestBeadPromotionF9:
         bead = _make_bead("bd-promo1", content="Important discovery about JWT RS256")
         store.write(bead)
 
-        knowledge_dir = tmp_path / ".claude" / "knowledge" / "project-context"
+        _knowledge_dir = tmp_path / ".claude" / "knowledge" / "project-context"
+        del _knowledge_dir  # computed but unused; actual dir is created in patched_promote
 
         with patch("agent_baton.cli.commands.bead_cmd._DEFAULT_DB_PATH", db_path), \
              patch("agent_baton.cli.commands.bead_cmd.Path") as mock_path_cls:
@@ -856,7 +854,7 @@ class TestBeadPromotionF9:
         assert refreshed.status == "closed"
 
     def test_promote_closes_bead_after_promotion(
-        self, db_path: Path, tmp_path: Path
+        self, db_path: Path
     ) -> None:
         """Verify the bead store close() marks the bead as closed after promotion."""
         _seed_execution_for_cli(db_path, "task-001")
@@ -1253,7 +1251,7 @@ class TestQualityScoringF12:
         self, tmp_path: Path
     ) -> None:
         """Verify MIGRATIONS[6] adds both columns to an existing v5 database."""
-        from agent_baton.core.storage.schema import MIGRATIONS, SCHEMA_VERSION
+        from agent_baton.core.storage.schema import MIGRATIONS
 
         assert 6 in MIGRATIONS
         migration_sql = MIGRATIONS[6]
@@ -1264,7 +1262,7 @@ class TestQualityScoringF12:
         self, tmp_path: Path
     ) -> None:
         """A database migrated from v5 can read/write quality_score and retrieval_count."""
-        from agent_baton.core.storage.schema import MIGRATIONS, PROJECT_SCHEMA_DDL
+        from agent_baton.core.storage.schema import PROJECT_SCHEMA_DDL
 
         db_path = tmp_path / "v5_upgrade.db"
 
@@ -1365,7 +1363,6 @@ class TestBeadSelectorTeamDispatchFix:
 
     def test_bead_selector_select_is_instance_method_not_static(self) -> None:
         """BeadSelector.select() requires a self arg — calling as classmethod raises."""
-        import inspect
         from agent_baton.core.engine.bead_selector import BeadSelector
 
         # select must NOT be a classmethod or staticmethod

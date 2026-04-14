@@ -14,6 +14,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
+from typing import Any
 
 from agent_baton.models.knowledge import (
     KnowledgeAttachment,
@@ -1113,10 +1114,10 @@ class ExecutionAction:
     # For batch dispatch (parallel steps / team members):
     parallel_actions: list[ExecutionAction] = field(default_factory=list)
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         # action_type is serialised as a plain string so CLI / Claude output
         # is unaffected by the internal enum representation.
-        d = {"action_type": self.action_type.value, "message": self.message}
+        d: dict[str, Any] = {"action_type": self.action_type.value, "message": self.message}
         if self.action_type == ActionType.DISPATCH:
             is_team_member = bool(_TEAM_MEMBER_ID_RE.match(self.step_id))
             d.update({

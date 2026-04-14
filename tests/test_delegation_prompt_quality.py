@@ -18,7 +18,6 @@ from agent_baton.core.engine.dispatcher import PromptDispatcher, _SUCCESS_CRITER
 from agent_baton.core.engine.planner import (
     IntelligentPlanner,
     _AGENT_DELIVERABLES,
-    _STEP_TEMPLATES,
 )
 from agent_baton.core.orchestration.registry import AgentRegistry
 from agent_baton.core.orchestration.router import AgentRouter
@@ -194,14 +193,14 @@ class TestAgentExpertiseLevel:
 
 
 class TestAgentHasOutputSpec:
-    @pytest.mark.parametrize("marker,body", [
+    @pytest.mark.parametrize("_marker,body", [
         ("output format", "## Output Format\nReturn a dict.\n"),
         ("when you finish", "## When You Finish\nReturn files.\n"),
         ("return:", "Return: a JSON document.\n"),
         ("deliverables", "## Deliverables\nList all files.\n"),
     ])
     def test_detects_output_markers(
-        self, tmp_path: Path, marker: str, body: str
+        self, tmp_path: Path, _marker: str, body: str
     ) -> None:
         """Each recognized output-spec marker causes True to be returned."""
         d = tmp_path / "agents"

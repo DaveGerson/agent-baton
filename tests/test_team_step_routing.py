@@ -14,9 +14,6 @@ which record command to use:
 from __future__ import annotations
 
 import argparse
-import json
-import sys
-from io import StringIO
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -353,11 +350,10 @@ class TestTeamRecordGuard:
         assert exc_info.value.code != 0
 
     def test_plain_step_error_message_names_correct_command(
-        self, tmp_path: Path, capsys
+        self, tmp_path: Path
     ) -> None:
         """The error output tells the user to use 'baton execute record'."""
         from agent_baton.cli.commands.execution import execute as execute_mod
-        from agent_baton.cli.errors import user_error as real_user_error
 
         engine, _ = _plan_with_plain_step(tmp_path)
         args = self._make_args(step_id="7.1", member_id="7.1.a")
@@ -365,7 +361,7 @@ class TestTeamRecordGuard:
         captured_msg: list[str] = []
         captured_hint: list[str] = []
 
-        def fake_user_error(msg: str, *, hint: str = "", **kw):  # type: ignore[override]
+        def fake_user_error(msg: str, *, hint: str = "", **_kw):  # type: ignore[override]
             captured_msg.append(msg)
             captured_hint.append(hint)
             raise SystemExit(1)
@@ -432,7 +428,7 @@ class TestTeamRecordGuard:
 
         captured_user_error_calls: list[str] = []
 
-        def fake_user_error(msg: str, **kw):
+        def fake_user_error(msg: str, **_kw):
             captured_user_error_calls.append(msg)
             raise SystemExit(1)
 

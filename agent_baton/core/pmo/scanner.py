@@ -17,11 +17,15 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from agent_baton.core.engine.persistence import StatePersistence
 from agent_baton.core.pmo.store import PmoStore
 from agent_baton.core.storage import detect_backend, get_project_storage
 from agent_baton.models.execution import ExecutionState
+
+if TYPE_CHECKING:
+    from agent_baton.core.storage.pmo_sqlite import PmoSqliteStore
 from agent_baton.models.pmo import (
     PmoCard,
     PmoProject,
@@ -63,7 +67,7 @@ class PmoScanner:
             and the archive of completed cards.
     """
 
-    def __init__(self, store: PmoStore) -> None:
+    def __init__(self, store: PmoStore | PmoSqliteStore) -> None:
         self._store = store
 
     def _state_to_card(

@@ -30,7 +30,6 @@ from agent_baton.models.retrospective import (
     RosterRecommendation,
     SequencingNote,
 )
-from agent_baton.models.trace import TaskTrace, TraceEvent
 from agent_baton.models.usage import AgentUsageRecord, TaskUsageRecord
 
 
@@ -423,7 +422,7 @@ class TestMigrateEvents:
         # in schema — it's a standalone PK table, so this is fine without execution row)
         events_dir = ctx / "events"
         events_dir.mkdir()
-        for i in range(3):
+        for _i in range(3):
             ev = Event.create(topic="step.completed", task_id="task-ev")
             with (events_dir / "task-ev.jsonl").open("a", encoding="utf-8") as f:
                 f.write(json.dumps(ev.to_dict()) + "\n")
@@ -849,7 +848,7 @@ class TestConnectionManagerMigrationIdempotency:
     def test_migration_normal_path(self, tmp_path: Path) -> None:
         """A v5 database without quality_score upgrades to v6 cleanly."""
         from agent_baton.core.storage.connection import ConnectionManager
-        from agent_baton.core.storage.schema import MIGRATIONS, PROJECT_SCHEMA_DDL
+        from agent_baton.core.storage.schema import PROJECT_SCHEMA_DDL
 
         db_path = tmp_path / "test.db"
 

@@ -87,7 +87,7 @@ def _seed_issue(
 
 def _real_engine(tmp_path: Path) -> LearningEngine:
     """Return a real LearningEngine backed by a temp SQLite file."""
-    db_path = tmp_path / "baton.db"
+    _db_path = tmp_path / "baton.db"
     return LearningEngine(team_context_root=tmp_path)
 
 
@@ -125,14 +125,14 @@ class TestListLearningIssues:
         return _real_engine(engine_root)
 
     @pytest.fixture()
-    def seeded_ledger(self, engine: LearningEngine) -> LearningLedger:
+    def _seeded_ledger(self, engine: LearningEngine) -> LearningLedger:
         ledger = engine._ledger  # noqa: SLF001
         _seed_issue(ledger, issue_type="routing_mismatch", severity="medium")
         _seed_issue(ledger, issue_type="agent_degradation", severity="high")
         return ledger
 
     @pytest.fixture()
-    def client(self, base_app, engine: LearningEngine, seeded_ledger) -> TestClient:
+    def client(self, base_app, engine: LearningEngine, _seeded_ledger: LearningLedger) -> TestClient:
         from agent_baton.api.deps import get_learning_engine
         base_app.dependency_overrides[get_learning_engine] = lambda: engine
         return TestClient(base_app)
@@ -263,7 +263,7 @@ class TestGetLearningIssue:
         )
 
     @pytest.fixture()
-    def client(self, base_app, engine: LearningEngine, issue) -> TestClient:
+    def client(self, base_app, engine: LearningEngine, _issue) -> TestClient:
         from agent_baton.api.deps import get_learning_engine
         base_app.dependency_overrides[get_learning_engine] = lambda: engine
         return TestClient(base_app)
@@ -404,7 +404,7 @@ class TestApplyLearningFix:
     @pytest.fixture()
     def engine(self) -> MagicMock:
         eng = _mock_engine()
-        eng.apply.side_effect = lambda iid, resolution_type="auto": (
+        eng.apply.side_effect = lambda iid, _resolution_type="auto": (
             f"Applied routing fix for {iid}"
             if iid == self.ISSUE_ID
             else (_ for _ in ()).throw(ValueError(f"Issue not found: {iid}"))
@@ -507,7 +507,7 @@ class TestUpdateLearningIssueStatus:
         return _seed_issue(engine._ledger, title="Status update test issue")  # noqa: SLF001
 
     @pytest.fixture()
-    def client(self, base_app, engine: LearningEngine, issue) -> TestClient:
+    def client(self, base_app, engine: LearningEngine, _issue) -> TestClient:
         from agent_baton.api.deps import get_learning_engine
         base_app.dependency_overrides[get_learning_engine] = lambda: engine
         return TestClient(base_app)

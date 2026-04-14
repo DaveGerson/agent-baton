@@ -9,10 +9,7 @@ Covers:
 """
 from __future__ import annotations
 
-import json
 import logging
-import os
-import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -127,7 +124,7 @@ class TestRegistryWarnsOnUnreadableFile:
 
         with patch.object(Path, "read_text", selective_read):
             with caplog.at_level(logging.WARNING, logger="agent_baton.core.orchestration.registry"):
-                count = registry.load_directory(agents_dir)
+                _count = registry.load_directory(agents_dir)
 
         # Good agent was loaded; bad was skipped
         assert registry.get("good-agent") is not None
@@ -353,7 +350,7 @@ class TestLearningLoopClosure:
 # ---------------------------------------------------------------------------
 
 
-def _make_cmd_module(subparsers_adder, cmd_name: str, handler_side_effect):
+def _make_cmd_module(_subparsers_adder, cmd_name: str, handler_side_effect):
     """Build a fake command module that registers a real argparse subparser.
 
     main() calls mod.register(sub) to create the subparser and then extracts
@@ -361,8 +358,6 @@ def _make_cmd_module(subparsers_adder, cmd_name: str, handler_side_effect):
     the register() call must actually add the subparser to argparse so that
     parse_args() accepts the subcommand.
     """
-    import argparse
-
     mod = MagicMock()
     mod.handler.side_effect = handler_side_effect
 
@@ -378,7 +373,7 @@ class TestMainErrorHandler:
     """cli/main.py catches unexpected exceptions, prints a user message, exits 1."""
 
     def test_exception_prints_user_friendly_message(
-        self, capsys, monkeypatch
+        self, capsys
     ) -> None:
         from agent_baton.cli.main import main
 
@@ -440,7 +435,7 @@ class TestMainErrorHandler:
         captured = capsys.readouterr()
         assert "Traceback" not in captured.err
 
-    def test_system_exit_not_caught(self, capsys) -> None:
+    def test_system_exit_not_caught(self) -> None:
         """SystemExit from a handler must propagate, not be swallowed."""
         from agent_baton.cli.main import main
 
@@ -743,7 +738,7 @@ class TestBuildPolicyEngine:
         assert engine is not None
         assert isinstance(engine, PolicyEngine)
 
-    def test_returns_none_gracefully_on_import_error(self, monkeypatch) -> None:
+    def test_returns_none_gracefully_on_import_error(self) -> None:
         """When the import fails, _build_policy_engine returns None without raising."""
         import importlib
         import sys
@@ -784,7 +779,7 @@ class TestExecutionEngineReceivesPolicyEngine:
         from agent_baton.core.engine.executor import ExecutionEngine
         from agent_baton.core.govern.policy import PolicyEngine, PolicyRule, PolicySet
         from agent_baton.models.execution import (
-            ActionType, MachinePlan, PlanGate, PlanPhase, PlanStep,
+            ActionType, MachinePlan, PlanPhase, PlanStep,
         )
         from unittest.mock import MagicMock
 
