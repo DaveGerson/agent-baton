@@ -2982,7 +2982,7 @@ class ExecutionEngine:
             if self._bead_store:
                 try:
                     from agent_baton.core.engine.bead_selector import BeadSelector as _TBS
-                    _team_beads = _TBS.select(
+                    _team_beads = _TBS().select(
                         self._bead_store, step, state.plan,
                     )
                 except Exception:

@@ -1347,3 +1347,78 @@ class TestQualityScoringF12:
         )
         prompt = PromptDispatcher().build_delegation_prompt(step, prior_beads=None)
         assert "Prior Discoveries" not in prompt
+
+
+# ---------------------------------------------------------------------------
+# F3 — BeadSelector instance call in team dispatch path
+# ---------------------------------------------------------------------------
+
+
+class TestBeadSelectorTeamDispatchFix:
+    """Regression tests for the team dispatch path using BeadSelector().select()
+    (instance method), not BeadSelector.select() (unbound method).
+
+    The bug: executor.py originally called ``_TBS.select(store, step, plan)``
+    which binds *store* to *self*, *step* to *bead_store*, and *plan* to
+    *current_step*.  The fix is ``_TBS().select(store, step, plan)``.
+    """
+
+    def test_bead_selector_select_is_instance_method_not_static(self) -> None:
+        """BeadSelector.select() requires a self arg — calling as classmethod raises."""
+        import inspect
+        from agent_baton.core.engine.bead_selector import BeadSelector
+
+        # select must NOT be a classmethod or staticmethod
+        method = BeadSelector.__dict__["select"]
+        assert not isinstance(method, classmethod)
+        assert not isinstance(method, staticmethod)
+
+    def test_bead_selector_instance_call_succeeds_with_empty_store(
+        self, store: BeadStore
+    ) -> None:
+        """BeadSelector().select(store, step, plan) works without error."""
+        from agent_baton.core.engine.bead_selector import BeadSelector
+
+        plan = _make_plan_with_steps()
+        step = plan.phases[0].steps[0]
+
+        # Must not raise; empty store returns []
+        result = BeadSelector().select(store, step, plan)
+        assert isinstance(result, list)
+
+    def test_bead_selector_unbound_call_raises_type_error(self) -> None:
+        """Calling BeadSelector.select(store, step, plan) without instantiation
+        raises TypeError because *self* (the store) would be bound as the instance."""
+        from agent_baton.core.engine.bead_selector import BeadSelector
+        from agent_baton.models.execution import MachinePlan, PlanPhase, PlanStep
+        from unittest.mock import MagicMock
+
+        step = PlanStep(step_id="1.1", agent_name="arch", task_description="x")
+        plan = MachinePlan(
+            task_id="t", task_summary="t",
+            phases=[PlanPhase(phase_id=1, name="p", steps=[step])],
+        )
+        mock_store = MagicMock()
+        mock_store.query.return_value = []
+
+        # Calling the unbound method binds mock_store as self → TypeError on plan arg
+        with pytest.raises(TypeError):
+            BeadSelector.select(mock_store, step, plan)
+
+    def test_bead_selector_returns_beads_via_instance_call(
+        self, store: BeadStore
+    ) -> None:
+        """Instance call routes correctly and returns beads from store."""
+        from agent_baton.core.engine.bead_selector import BeadSelector
+
+        plan = _make_plan_with_steps()
+        # step 2.1 depends on 1.2 which depends on 1.1
+        step = plan.phases[1].steps[0]  # step 2.1
+
+        dep_bead = _make_bead(
+            "bd-team-dep", step_id="1.1", bead_type="warning", token_estimate=50
+        )
+        store.write(dep_bead)
+
+        result = BeadSelector().select(store, step, plan, token_budget=4096, max_beads=5)
+        assert any(b.bead_id == "bd-team-dep" for b in result)
