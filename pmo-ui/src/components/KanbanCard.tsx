@@ -24,7 +24,7 @@ function Chip({ children, color = T.text2 }: { children: React.ReactNode; color?
       gap: 3,
       padding: '1px 6px',
       borderRadius: 3,
-      fontSize: 8,
+      fontSize: 9,
       fontWeight: 600,
       color,
       background: color + '14',
@@ -329,6 +329,38 @@ export function KanbanCard({ card, columnColor, onForge, onEditPlan, onMutateCar
               <span style={{ fontSize: 9, color: T.text0, fontWeight: 600 }}>{card.gates_passed}</span>
             </div>
           </div>
+
+          {/* Full untruncated phase/error text — only shown when expanded */}
+          {card.current_phase && !card.error && card.current_phase.length > 65 && (
+            <div style={{
+              fontSize: 9,
+              color: isHuman ? T.orange : T.text2,
+              lineHeight: 1.4,
+              marginBottom: 6,
+              padding: '4px 6px',
+              background: T.bg1,
+              borderRadius: 2,
+              borderLeft: `2px solid ${isHuman ? T.orange : T.accent}`,
+              wordBreak: 'break-word',
+            }}>
+              {card.current_phase}
+            </div>
+          )}
+          {card.error && card.error.length > 80 && (
+            <div style={{
+              fontSize: 9,
+              color: T.red,
+              lineHeight: 1.4,
+              marginBottom: 6,
+              padding: '4px 6px',
+              background: T.bg1,
+              borderRadius: 2,
+              borderLeft: `2px solid ${T.red}`,
+              wordBreak: 'break-word',
+            }}>
+              {card.error}
+            </div>
+          )}
           {card.agents.length > 0 && (
             <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap', marginBottom: 6 }}>
               {card.agents.map(a => (
@@ -488,7 +520,7 @@ export function KanbanCard({ card, columnColor, onForge, onEditPlan, onMutateCar
               }}
             >
               {planLoading && (
-                <div style={{ fontSize: 8, color: T.text3, fontStyle: 'italic', padding: 8 }}>
+                <div style={{ fontSize: 9, color: T.text3, fontStyle: 'italic', padding: 8 }}>
                   Loading plan…
                 </div>
               )}
@@ -496,7 +528,7 @@ export function KanbanCard({ card, columnColor, onForge, onEditPlan, onMutateCar
                 <PlanPreview plan={planData} collapsible />
               )}
               {!planLoading && !planData && (
-                <div style={{ fontSize: 8, color: T.text3, fontStyle: 'italic', padding: 8 }}>
+                <div style={{ fontSize: 9, color: T.text3, fontStyle: 'italic', padding: 8 }}>
                   No plan available for this card.
                 </div>
               )}

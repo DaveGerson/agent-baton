@@ -52,7 +52,7 @@ export function InterviewPanel({ questions, onSubmit, onCancel, loading }: Inter
               width: 16, height: 16, borderRadius: '50%',
               background: T.yellow + '20',
               display: 'flex', alignItems: 'center', justifyContent: 'center',
-              fontSize: 8, fontWeight: 700, color: T.yellow, flexShrink: 0,
+              fontSize: 9, fontWeight: 700, color: T.yellow, flexShrink: 0,
             }}>
               {i + 1}
             </div>

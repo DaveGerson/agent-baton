@@ -12,6 +12,8 @@ import type { PmoProject, PmoSignal, ForgePlanResponse, InterviewQuestion, Inter
 interface ForgePanelProps {
   onBack: () => void;
   initialSignal?: PmoSignal | null;
+  /** Called after a plan is successfully approved and queued, so the board can refresh. */
+  onApproved?: () => void;
 }
 
 type Phase = 'intake' | 'generating' | 'preview' | 'regenerating' | 'saved';
@@ -31,7 +33,7 @@ const PRIORITIES = [
   { value: 0, label: 'P2 \u2014 Normal' },
 ];
 
-export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
+export function ForgePanel({ onBack, initialSignal, onApproved }: ForgePanelProps) {
   const toast = useToast();
   const [phase, setPhase] = useState<Phase>('intake');
   const [projects, setProjects] = useState<PmoProject[]>([]);
@@ -212,9 +214,22 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
       const result = await api.forgeApprove({ plan, project_id: projectId });
       // Clear any saved draft once the plan is officially queued.
       try { localStorage.removeItem('pmo:plan-draft'); } catch { /* ignore */ }
+
+      // PMO-UX-007: if this plan was forged from a signal, resolve that signal
+      // so it is cleared from the Signals Bar and linked to this plan.
+      if (initialSignal?.signal_id) {
+        api.resolveSignal(initialSignal.signal_id).catch(() => {
+          // Non-fatal — the plan is saved; signal will be resolved on next poll.
+        });
+      }
+
       setSavePath(result.path);
       setPhase('saved');
       toast.success('Plan approved & queued');
+
+      // PMO-UX-006: trigger an immediate board refresh so the new card appears
+      // without waiting for the next poll cycle.
+      onApproved?.();
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : 'Save failed');
     } finally {
@@ -257,7 +272,7 @@ export function ForgePanel({ onBack, initialSignal }: ForgePanelProps) {
           <span
             title={`Signal: ${initialSignal.title} (${initialSignal.signal_id})`}
             style={{
-              padding: '1px 6px', borderRadius: 3, fontSize: 7, fontWeight: 600,
+              padding: '1px 6px', borderRadius: 3, fontSize: 9, fontWeight: 600,
               color: T.red, background: T.red + '14', border: `1px solid ${T.red}22`,
               maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
             }}

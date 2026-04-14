@@ -269,7 +269,7 @@ export function PlanEditor({ plan, onPlanChange, onDraftSave, projectId }: PlanE
                   width: 16, height: 16, borderRadius: 3,
                   background: T.accent + '20', border: `1px solid ${T.accent}33`,
                   display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  fontSize: 8, fontWeight: 700, color: T.accent, flexShrink: 0,
+                  fontSize: 9, fontWeight: 700, color: T.accent, flexShrink: 0,
                 }}>
                   {pi + 1}
                 </div>
@@ -336,13 +336,13 @@ export function PlanEditor({ plan, onPlanChange, onDraftSave, projectId }: PlanE
                       aria-label={`Move step ${si + 1} up`}
                       onClick={() => moveStep(pi, si, -1)}
                       disabled={si === 0}
-                      style={{ background: 'none', border: 'none', color: si === 0 ? T.bg3 : T.text3, fontSize: 8, cursor: si === 0 ? 'default' : 'pointer', padding: 0, lineHeight: 1, minWidth: 24, minHeight: 24, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                      style={{ background: 'none', border: 'none', color: si === 0 ? T.bg3 : T.text3, fontSize: 9, cursor: si === 0 ? 'default' : 'pointer', padding: 0, lineHeight: 1, minWidth: 24, minHeight: 24, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
                     >{'\u25b2'}</button>
                     <button
                       aria-label={`Move step ${si + 1} down`}
                       onClick={() => moveStep(pi, si, 1)}
                       disabled={si === phase.steps.length - 1}
-                      style={{ background: 'none', border: 'none', color: si === phase.steps.length - 1 ? T.bg3 : T.text3, fontSize: 8, cursor: si === phase.steps.length - 1 ? 'default' : 'pointer', padding: 0, lineHeight: 1, minWidth: 24, minHeight: 24, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                      style={{ background: 'none', border: 'none', color: si === phase.steps.length - 1 ? T.bg3 : T.text3, fontSize: 9, cursor: si === phase.steps.length - 1 ? 'default' : 'pointer', padding: 0, lineHeight: 1, minWidth: 24, minHeight: 24, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
                     >{'\u25bc'}</button>
                   </div>
 

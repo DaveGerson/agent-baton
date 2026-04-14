@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useLayoutEffect } from 'react';
 import { KanbanCard } from './KanbanCard';
 import { HealthBar } from './HealthBar';
 import { SignalsBar } from './SignalsBar';
@@ -18,10 +18,18 @@ interface KanbanBoardProps {
   onCardForge: (card: PmoCard) => void;
   showSignals: boolean;
   onToggleSignals: () => void;
+  /** Called once on mount with the board's refresh function so parent can trigger it. */
+  onRefreshReady?: (refresh: () => void) => void;
 }
 
-export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSignals, onToggleSignals }: KanbanBoardProps) {
-  const { cards, health, loading, error, lastUpdated, connectionMode, mutateCard } = usePmoBoard();
+export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSignals, onToggleSignals, onRefreshReady }: KanbanBoardProps) {
+  const { cards, health, loading, error, lastUpdated, connectionMode, mutateCard, refresh } = usePmoBoard();
+
+  // Register the refresh callback with the parent once on mount.
+  useLayoutEffect(() => {
+    onRefreshReady?.(refresh);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const [filter, setFilter] = usePersistedState<string>('pmo:board-filter', 'all');
   const [search, setSearch] = usePersistedState<string>('pmo:board-search', '');
   const [sortBy, setSortBy] = usePersistedState<string>('pmo:board-sort', 'priority');

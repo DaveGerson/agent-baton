@@ -173,7 +173,7 @@ export function GateApprovalPanel({ card, onResolved }: GateApprovalPanelProps) 
             border: `1px solid ${T.border}`,
             background: T.bg3,
             color: contextLoaded ? T.text3 : T.text1,
-            fontSize: 8,
+            fontSize: 9,
             cursor: contextLoaded ? 'default' : 'pointer',
             opacity: contextLoading ? 0.6 : 1,
           }}
@@ -229,7 +229,7 @@ export function GateApprovalPanel({ card, onResolved }: GateApprovalPanelProps) 
       {/* Approve sub-form */}
       {activeForm === 'approve' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <label style={{ fontSize: 8, color: T.text2 }}>
+          <label style={{ fontSize: 9, color: T.text2 }}>
             Notes (optional)
           </label>
           <textarea
@@ -261,7 +261,7 @@ export function GateApprovalPanel({ card, onResolved }: GateApprovalPanelProps) 
       {/* Reject sub-form */}
       {activeForm === 'reject' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <label style={{ fontSize: 8, color: T.red }}>
+          <label style={{ fontSize: 9, color: T.red }}>
             Reason for rejection (required)
           </label>
           <textarea

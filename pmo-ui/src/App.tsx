@@ -1,10 +1,10 @@
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useMemo, useRef } from 'react';
 import { KanbanBoard } from './components/KanbanBoard';
 import { ForgePanel } from './components/ForgePanel';
 import { KeyboardShortcutsDialog } from './components/KeyboardShortcutsDialog';
 import { useHotkeys } from './hooks/useHotkeys';
 import { usePersistedState } from './hooks/usePersistedState';
-import { T } from './styles/tokens';
+import { T, FONT_SIZES } from './styles/tokens';
 import { ToastProvider } from './contexts/ToastContext';
 import type { PmoCard, PmoSignal } from './api/types';
 
@@ -15,6 +15,16 @@ export default function App() {
   const [forgeSignal, setForgeSignal] = useState<PmoSignal | null>(null);
   const [showSignals, setShowSignals] = usePersistedState('pmo:show-signals', false);
   const [showShortcuts, setShowShortcuts] = useState(false);
+
+  // KanbanBoard registers its refresh function here so ForgePanel can trigger
+  // an immediate board refresh after plan approval (PMO-UX-006).
+  const boardRefreshRef = useRef<(() => void) | null>(null);
+  function handleBoardRefreshReady(fn: () => void) {
+    boardRefreshRef.current = fn;
+  }
+  function refreshBoard() {
+    boardRefreshRef.current?.();
+  }
 
   function openForge(signal?: PmoSignal) {
     setForgeSignal(signal ?? null);
@@ -95,8 +105,8 @@ export default function App() {
             B
           </div>
           <div>
-            <h1 style={{ fontSize: 10, fontWeight: 700, letterSpacing: -0.3, margin: 0 }}>Baton PMO</h1>
-            <div style={{ fontSize: 9, color: T.text3, letterSpacing: 0.5, textTransform: 'uppercase' }}>
+            <h1 style={{ fontSize: FONT_SIZES.sm, fontWeight: 700, letterSpacing: -0.3, margin: 0 }}>Baton PMO</h1>
+            <div style={{ fontSize: FONT_SIZES.xs, color: T.text3, letterSpacing: 0.5, textTransform: 'uppercase' }}>
               Orchestration Board
             </div>
           </div>
@@ -167,6 +177,7 @@ export default function App() {
             onCardForge={handleCardForge}
             showSignals={showSignals}
             onToggleSignals={toggleSignals}
+            onRefreshReady={handleBoardRefreshReady}
           />
         </div>
         <div
@@ -179,6 +190,7 @@ export default function App() {
           <ForgePanel
             onBack={backToBoard}
             initialSignal={forgeSignal}
+            onApproved={refreshBoard}
           />
         </div>
       </div>

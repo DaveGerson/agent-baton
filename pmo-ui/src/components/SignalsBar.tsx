@@ -96,8 +96,10 @@ export function SignalsBar({ onForge, onOpenCountChange }: SignalsBarProps) {
 
   async function handleResolve(id: string) {
     try {
-      const updated = await api.resolveSignal(id);
-      setSignals(prev => prev.map(s => s.signal_id === id ? updated : s));
+      await api.resolveSignal(id);
+      // Filter the resolved signal out rather than replacing it with the partial
+      // response object (which lacks title, severity, etc. and would corrupt the row).
+      setSignals(prev => prev.filter(s => s.signal_id !== id));
       setSelected(prev => {
         const next = new Set(prev);
         next.delete(id);
@@ -346,7 +348,7 @@ export function SignalsBar({ onForge, onOpenCountChange }: SignalsBarProps) {
               border: 'none',
               background: T.green,
               color: '#fff',
-              fontSize: 8,
+              fontSize: 9,
               fontWeight: 600,
               cursor: 'pointer',
               opacity: submitting || !newTitle.trim() ? 0.5 : 1,
@@ -358,12 +360,12 @@ export function SignalsBar({ onForge, onOpenCountChange }: SignalsBarProps) {
       )}
 
       {loading && (
-        <div style={{ fontSize: 8, color: T.text3, fontStyle: 'italic', padding: 4 }}>
+        <div style={{ fontSize: 9, color: T.text3, fontStyle: 'italic', padding: 4 }}>
           Loading signals...
         </div>
       )}
       {error && (
-        <div style={{ fontSize: 8, color: T.red, padding: 4 }}>{error}</div>
+        <div style={{ fontSize: 9, color: T.red, padding: 4 }}>{error}</div>
       )}
 
       {/* Signal rows */}
@@ -503,7 +505,7 @@ export function SignalsBar({ onForge, onOpenCountChange }: SignalsBarProps) {
       )}
 
       {!loading && open.length === 0 && (
-        <div style={{ fontSize: 8, color: T.text3, fontStyle: 'italic', padding: 6 }}>
+        <div style={{ fontSize: 9, color: T.text3, fontStyle: 'italic', padding: 6 }}>
           No open signals.
         </div>
       )}

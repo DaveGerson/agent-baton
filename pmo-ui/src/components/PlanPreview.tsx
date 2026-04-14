@@ -56,17 +56,17 @@ export function PlanPreview({ plan, collapsible = false }: PlanPreviewProps) {
                   borderBottom: isOpen ? `1px solid ${T.border}` : 'none',
                 }}
               >
-                <span style={{ fontSize: 8, color: T.text3, minWidth: 10 }}>
+                <span style={{ fontSize: 9, color: T.text3, minWidth: 10 }}>
                   {isOpen ? '▾' : '▸'}
                 </span>
                 <span style={{ fontSize: 9, fontWeight: 600, color: T.text0, flex: 1 }}>
                   {pi + 1}. {phase.name}
                 </span>
-                <span style={{ fontSize: 8, color: T.text3 }}>
+                <span style={{ fontSize: 9, color: T.text3 }}>
                   {phase.steps.length} steps
                 </span>
                 {phase.gate && (
-                  <span style={{ fontSize: 8, color: T.yellow }}>gate</span>
+                  <span style={{ fontSize: 9, color: T.yellow }}>gate</span>
                 )}
               </div>
               {isOpen && (
@@ -82,7 +82,7 @@ export function PlanPreview({ plan, collapsible = false }: PlanPreviewProps) {
                         borderBottom: si < phase.steps.length - 1 ? `1px solid ${T.border}` : 'none',
                       }}
                     >
-                      <span style={{ fontSize: 8, color: T.text4, minWidth: 14, flexShrink: 0 }}>
+                      <span style={{ fontSize: 9, color: T.text4, minWidth: 14, flexShrink: 0 }}>
                         {si + 1}.
                       </span>
                       <span style={{ fontSize: 9, color: T.text1, flex: 1, lineHeight: 1.4 }}>
@@ -90,7 +90,7 @@ export function PlanPreview({ plan, collapsible = false }: PlanPreviewProps) {
                       </span>
                       {step.agent_name && (
                         <span style={{
-                          fontSize: 8,
+                          fontSize: 9,
                           color: T.cyan,
                           background: T.cyan + '14',
                           border: `1px solid ${T.cyan}22`,
@@ -105,7 +105,7 @@ export function PlanPreview({ plan, collapsible = false }: PlanPreviewProps) {
                     </div>
                   ))}
                   {phase.steps.length === 0 && (
-                    <div style={{ fontSize: 8, color: T.text3, fontStyle: 'italic', padding: '4px 8px' }}>
+                    <div style={{ fontSize: 9, color: T.text3, fontStyle: 'italic', padding: '4px 8px' }}>
                       No steps.
                     </div>
                   )}
@@ -173,7 +173,7 @@ export function PlanPreview({ plan, collapsible = false }: PlanPreviewProps) {
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
-                fontSize: 8,
+                fontSize: 9,
                 fontWeight: 700,
                 color: T.accent,
                 flexShrink: 0,
