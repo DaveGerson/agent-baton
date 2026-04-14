@@ -354,6 +354,88 @@ class TestClearResolved:
 
 
 # ---------------------------------------------------------------------------
+# EscalationManager event bus integration
+# ---------------------------------------------------------------------------
+
+class TestEscalationEventBus:
+    """EscalationManager publishes domain events when a bus is provided."""
+
+    def _bus_manager(self, tmp_path: Path):
+        from agent_baton.core.events.bus import EventBus
+        bus = EventBus()
+        mgr = EscalationManager(
+            path=tmp_path / "escalations.md",
+            bus=bus,
+        )
+        return mgr, bus
+
+    def test_add_publishes_escalation_raised_event(self, tmp_path: Path) -> None:
+        mgr, bus = self._bus_manager(tmp_path)
+        esc = _escalation(agent_name="backend-engineer", question="Which DB?")
+        mgr.add(esc)
+
+        all_events = bus.replay("")
+        topics = [e.topic for e in all_events]
+        assert "escalation.raised" in topics
+
+    def test_escalation_raised_payload_contains_agent_name(self, tmp_path: Path) -> None:
+        mgr, bus = self._bus_manager(tmp_path)
+        mgr.add(_escalation(agent_name="data-engineer", question="Schema?"))
+
+        raised = [e for e in bus.replay("") if e.topic == "escalation.raised"]
+        assert len(raised) == 1
+        assert raised[0].payload["agent_name"] == "data-engineer"
+
+    def test_escalation_raised_payload_contains_question(self, tmp_path: Path) -> None:
+        mgr, bus = self._bus_manager(tmp_path)
+        mgr.add(_escalation(question="How should I handle auth?"))
+
+        raised = [e for e in bus.replay("") if e.topic == "escalation.raised"]
+        assert raised[0].payload["question"] == "How should I handle auth?"
+
+    def test_resolve_publishes_escalation_resolved_event(self, tmp_path: Path) -> None:
+        mgr, bus = self._bus_manager(tmp_path)
+        mgr.add(_escalation(agent_name="backend-engineer"))
+        mgr.resolve("backend-engineer", "Use Postgres")
+
+        topics = [e.topic for e in bus.replay("")]
+        assert "escalation.resolved" in topics
+
+    def test_escalation_resolved_payload_contains_answer(self, tmp_path: Path) -> None:
+        mgr, bus = self._bus_manager(tmp_path)
+        mgr.add(_escalation(agent_name="backend-engineer"))
+        mgr.resolve("backend-engineer", "Use Postgres")
+
+        resolved = [e for e in bus.replay("") if e.topic == "escalation.resolved"]
+        assert len(resolved) == 1
+        assert resolved[0].payload["answer"] == "Use Postgres"
+
+    def test_resolve_no_match_does_not_publish_resolved_event(self, tmp_path: Path) -> None:
+        mgr, bus = self._bus_manager(tmp_path)
+        mgr.add(_escalation(agent_name="agent-a"))
+        mgr.resolve("agent-b", "irrelevant answer")
+
+        resolved = [e for e in bus.replay("") if e.topic == "escalation.resolved"]
+        assert resolved == []
+
+    def test_no_bus_add_does_not_raise(self, tmp_path: Path) -> None:
+        """EscalationManager with no bus must still work without error."""
+        mgr = EscalationManager(path=tmp_path / "escalations.md")
+        mgr.add(_escalation())  # should not raise
+        assert len(mgr.get_pending()) == 1
+
+    def test_multiple_adds_each_emit_event(self, tmp_path: Path) -> None:
+        mgr, bus = self._bus_manager(tmp_path)
+        mgr.add(_escalation(agent_name="agent-a", question="Q1?"))
+        mgr.add(_escalation(agent_name="agent-b", question="Q2?"))
+
+        raised = [e for e in bus.replay("") if e.topic == "escalation.raised"]
+        assert len(raised) == 2
+        agent_names = {e.payload["agent_name"] for e in raised}
+        assert agent_names == {"agent-a", "agent-b"}
+
+
+# ---------------------------------------------------------------------------
 # Edge cases: empty / missing file
 # ---------------------------------------------------------------------------
 

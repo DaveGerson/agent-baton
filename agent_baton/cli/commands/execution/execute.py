@@ -402,11 +402,16 @@ def handler(args: argparse.Namespace) -> None:
         # runtime KNOWLEDGE_GAP signals can be auto-resolved without human gates.
         knowledge_resolver = _build_knowledge_resolver(plan)
 
+        # Build a PolicyEngine so block-severity violations inject APPROVAL
+        # actions at dispatch time rather than silently proceeding.
+        policy_engine = _build_policy_engine()
+
         engine = ExecutionEngine(
             bus=bus,
             task_id=task_id,
             storage=storage,
             knowledge_resolver=knowledge_resolver,
+            policy_engine=policy_engine,
         )
         ContextManager(task_id=task_id).init_mission_log(plan.task_summary, risk_level=plan.risk_level)
         try:
@@ -716,6 +721,27 @@ def handler(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Policy engine construction
+# ---------------------------------------------------------------------------
+
+def _build_policy_engine():
+    """Construct a PolicyEngine for runtime pre-dispatch enforcement.
+
+    Loads the project-local policy presets directory (same as plan time).
+    Returns None (gracefully) if the import fails, so callers in file-only
+    installations degrade gracefully without ImportError.
+    """
+    try:
+        from agent_baton.core.govern.policy import PolicyEngine
+        return PolicyEngine()
+    except Exception as exc:
+        _log.debug(
+            "PolicyEngine construction failed (non-fatal): %s", exc
+        )
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Knowledge resolver construction
 # ---------------------------------------------------------------------------
 
@@ -801,9 +827,11 @@ def _handle_run(args: argparse.Namespace) -> None:
             validation_error(f"plan.json has invalid structure: {exc}")
         task_id = plan.task_id
         knowledge_resolver = _build_knowledge_resolver(plan)
+        policy_engine = _build_policy_engine()
         engine = ExecutionEngine(
             bus=bus, task_id=task_id, storage=storage,
             knowledge_resolver=knowledge_resolver,
+            policy_engine=policy_engine,
         )
         ContextManager(task_id=task_id).init_mission_log(
             plan.task_summary, risk_level=plan.risk_level

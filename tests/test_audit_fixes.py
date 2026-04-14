@@ -725,3 +725,106 @@ class TestStepDomainEventPayload:
             if e.topic.startswith("step.")
         ]
         assert len(step_events) == 1
+
+
+# ---------------------------------------------------------------------------
+# 6. Governance CLI wiring — _build_policy_engine is importable and functional
+# ---------------------------------------------------------------------------
+
+
+class TestBuildPolicyEngine:
+    """_build_policy_engine() must return a PolicyEngine and never raise."""
+
+    def test_returns_policy_engine_instance(self) -> None:
+        from agent_baton.cli.commands.execution.execute import _build_policy_engine
+        from agent_baton.core.govern.policy import PolicyEngine
+
+        engine = _build_policy_engine()
+        assert engine is not None
+        assert isinstance(engine, PolicyEngine)
+
+    def test_returns_none_gracefully_on_import_error(self, monkeypatch) -> None:
+        """When the import fails, _build_policy_engine returns None without raising."""
+        import importlib
+        import sys
+
+        # Temporarily break the import by inserting a sentinel that raises.
+        original = sys.modules.get("agent_baton.core.govern.policy")
+        sys.modules["agent_baton.core.govern.policy"] = None  # type: ignore[assignment]
+        try:
+            # Re-import execute to pick up a fresh function reference under the
+            # monkeypatched module state.
+            from agent_baton.cli.commands.execution import execute as exec_mod
+            importlib.reload(exec_mod)
+            result = exec_mod._build_policy_engine()
+            assert result is None
+        finally:
+            # Restore original module state.
+            if original is not None:
+                sys.modules["agent_baton.core.govern.policy"] = original
+            else:
+                sys.modules.pop("agent_baton.core.govern.policy", None)
+            importlib.reload(exec_mod)
+
+    def test_policy_engine_has_list_presets(self) -> None:
+        """The returned PolicyEngine knows the five standard presets."""
+        from agent_baton.cli.commands.execution.execute import _build_policy_engine
+
+        engine = _build_policy_engine()
+        presets = engine.list_presets()
+        assert "standard_dev" in presets
+        assert "regulated" in presets
+
+
+class TestExecutionEngineReceivesPolicyEngine:
+    """ExecutionEngine constructed in the CLI start path must have a policy_engine."""
+
+    def test_policy_engine_wired_into_engine_start(self, tmp_path: Path) -> None:
+        """When a PolicyEngine is supplied, block violations inject APPROVAL actions."""
+        from agent_baton.core.engine.executor import ExecutionEngine
+        from agent_baton.core.govern.policy import PolicyEngine, PolicyRule, PolicySet
+        from agent_baton.models.execution import (
+            ActionType, MachinePlan, PlanGate, PlanPhase, PlanStep,
+        )
+        from unittest.mock import MagicMock
+
+        # Build a policy set with one path_block rule.
+        block_rule = PolicyRule(
+            name="block_env",
+            description="Block .env writes",
+            scope="all",
+            rule_type="path_block",
+            pattern="**/.env",
+            severity="block",
+        )
+        policy_set = PolicySet(name="standard_dev", rules=[block_rule])
+        mock_pe = MagicMock(spec=PolicyEngine)
+        mock_pe.load_preset.return_value = policy_set
+        real_pe = PolicyEngine()
+        mock_pe.evaluate.side_effect = real_pe.evaluate
+
+        step = PlanStep(
+            step_id="1.1",
+            agent_name="backend-engineer",
+            task_description="Write .env",
+            model="sonnet",
+            deliverables=[],
+            allowed_paths=[".env"],
+            context_files=[],
+        )
+        phase = PlanPhase(phase_id=1, name="Impl", steps=[step])
+        plan = MachinePlan(
+            task_id="test-policy-wiring",
+            task_summary="Test task",
+            risk_level="LOW",
+            phases=[phase],
+        )
+
+        engine = ExecutionEngine(
+            team_context_root=tmp_path,
+            policy_engine=mock_pe,
+        )
+        action = engine.start(plan)
+
+        # A block violation must produce APPROVAL, not DISPATCH.
+        assert action.action_type == ActionType.APPROVAL

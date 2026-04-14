@@ -28,10 +28,17 @@ remain in the file for audit purposes until ``clear_resolved()`` is called.
 """
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from agent_baton.models.escalation import Escalation
+
+if TYPE_CHECKING:
+    from agent_baton.core.events.bus import EventBus
+
+_log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -108,8 +115,13 @@ class EscalationManager:
     disk to avoid stale state when multiple agents interact concurrently.
     """
 
-    def __init__(self, path: Path | None = None) -> None:
+    def __init__(
+        self,
+        path: Path | None = None,
+        bus: "EventBus | None" = None,
+    ) -> None:
         self._path: Path = (path or Path(".claude/team-context/escalations.md")).resolve()
+        self._bus = bus
 
     @property
     def path(self) -> Path:
@@ -145,6 +157,9 @@ class EscalationManager:
         """Append a new escalation to the file.
 
         Creates the file and parent directories if they do not exist.
+        If a bus was provided at construction, publishes an
+        ``escalation.raised`` event so the event system records the
+        escalation independently of the markdown file.
 
         Args:
             escalation: The ``Escalation`` to record. Its ``resolved``
@@ -153,6 +168,22 @@ class EscalationManager:
         existing = self._read_all()
         existing.append(escalation)
         self._write_all(existing)
+
+        if self._bus is not None:
+            try:
+                from agent_baton.models.events import Event
+                self._bus.publish(Event.create(
+                    topic="escalation.raised",
+                    task_id="",
+                    payload={
+                        "agent_name": escalation.agent_name,
+                        "question": escalation.question,
+                        "priority": escalation.priority,
+                        "timestamp": escalation.timestamp,
+                    },
+                ))
+            except Exception as exc:
+                _log.debug("escalation.raised event publish failed (non-fatal): %s", exc)
 
     def get_pending(self) -> list[Escalation]:
         """Return all unresolved escalations.
@@ -188,6 +219,21 @@ class EscalationManager:
                 esc.resolved = True
                 esc.answer = answer
                 self._write_all(escalations)
+                if self._bus is not None:
+                    try:
+                        from agent_baton.models.events import Event
+                        self._bus.publish(Event.create(
+                            topic="escalation.resolved",
+                            task_id="",
+                            payload={
+                                "agent_name": agent_name,
+                                "answer": answer,
+                            },
+                        ))
+                    except Exception as exc:
+                        _log.debug(
+                            "escalation.resolved event publish failed (non-fatal): %s", exc
+                        )
                 return True
         return False
 
