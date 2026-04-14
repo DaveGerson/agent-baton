@@ -263,7 +263,7 @@ class TestGetLearningIssue:
         )
 
     @pytest.fixture()
-    def client(self, base_app, engine: LearningEngine, _issue) -> TestClient:
+    def client(self, base_app, engine: LearningEngine, issue) -> TestClient:
         from agent_baton.api.deps import get_learning_engine
         base_app.dependency_overrides[get_learning_engine] = lambda: engine
         return TestClient(base_app)
@@ -404,7 +404,7 @@ class TestApplyLearningFix:
     @pytest.fixture()
     def engine(self) -> MagicMock:
         eng = _mock_engine()
-        eng.apply.side_effect = lambda iid, _resolution_type="auto": (
+        eng.apply.side_effect = lambda iid, resolution_type="auto": (
             f"Applied routing fix for {iid}"
             if iid == self.ISSUE_ID
             else (_ for _ in ()).throw(ValueError(f"Issue not found: {iid}"))
@@ -507,7 +507,7 @@ class TestUpdateLearningIssueStatus:
         return _seed_issue(engine._ledger, title="Status update test issue")  # noqa: SLF001
 
     @pytest.fixture()
-    def client(self, base_app, engine: LearningEngine, _issue) -> TestClient:
+    def client(self, base_app, engine: LearningEngine, issue) -> TestClient:
         from agent_baton.api.deps import get_learning_engine
         base_app.dependency_overrides[get_learning_engine] = lambda: engine
         return TestClient(base_app)

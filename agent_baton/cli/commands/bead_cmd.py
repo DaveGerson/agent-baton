@@ -231,9 +231,11 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         help="Show the dependency graph for a task's beads (F11)",
     )
     graph_p.add_argument(
-        "task_id",
+        "--task",
+        dest="task_id",
         metavar="TASK_ID",
-        help="Task ID whose bead graph to display",
+        default=None,
+        help="Task ID whose bead graph to display (defaults to active task)",
     )
 
     return p
@@ -501,7 +503,14 @@ def _handle_graph(args: argparse.Namespace) -> None:
         print("No baton.db found in .claude/team-context/.")
         return
 
-    task_id = args.task_id
+    task_id = args.task_id or _get_active_task_id()
+    if not task_id:
+        print(
+            "No active task found. Pass --task TASK_ID to specify one.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     beads = store.query(task_id=task_id, limit=500)
     if not beads:
         print(f"No beads found for task {task_id}.")

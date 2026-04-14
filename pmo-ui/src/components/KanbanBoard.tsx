@@ -2,6 +2,7 @@ import { useState, useEffect, useLayoutEffect } from 'react';
 import { KanbanCard } from './KanbanCard';
 import { HealthBar } from './HealthBar';
 import { SignalsBar } from './SignalsBar';
+import { InteractionQueue } from './InteractionQueue';
 import { AnalyticsDashboard } from './AnalyticsDashboard';
 import { DataExport } from './DataExport';
 import { ExternalItemsPanel } from './ExternalItemsPanel';
@@ -18,11 +19,13 @@ interface KanbanBoardProps {
   onCardForge: (card: PmoCard) => void;
   showSignals: boolean;
   onToggleSignals: () => void;
+  showInteractions: boolean;
+  onToggleInteractions: () => void;
   /** Called once on mount with the board's refresh function so parent can trigger it. */
   onRefreshReady?: (refresh: () => void) => void;
 }
 
-export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSignals, onToggleSignals, onRefreshReady }: KanbanBoardProps) {
+export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSignals, onToggleSignals, showInteractions, onToggleInteractions, onRefreshReady }: KanbanBoardProps) {
   const { cards, health, loading, error, lastUpdated, connectionMode, mutateCard, refresh } = usePmoBoard();
 
   // Register the refresh callback with the parent once on mount.
@@ -33,6 +36,11 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
   const [filter, setFilter] = usePersistedState<string>('pmo:board-filter', 'all');
   const [search, setSearch] = usePersistedState<string>('pmo:board-search', '');
   const [sortBy, setSortBy] = usePersistedState<string>('pmo:board-sort', 'priority');
+  const [riskFilter, setRiskFilter] = usePersistedState<string>('pmo:board-risk', 'all');
+  const [agentFilter, setAgentFilter] = usePersistedState<string>('pmo:board-agent', '');
+  const [dateFrom, setDateFrom] = usePersistedState<string>('pmo:board-date-from', '');
+  const [dateTo, setDateTo] = usePersistedState<string>('pmo:board-date-to', '');
+  const [showAdvancedFilters, setShowAdvancedFilters] = usePersistedState<boolean>('pmo:board-adv-filters', false);
   const [openSignalCount, setOpenSignalCount] = useState(0);
   const [showAnalytics, setShowAnalytics] = useState(false);
   const [showExport, setShowExport] = useState(false);
@@ -52,6 +60,14 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
 
   const programs = Array.from(new Set(cards.map(c => c.program))).sort();
 
+  // Collect all agent names across all cards for the agent dropdown.
+  const allAgents = Array.from(
+    new Set(cards.flatMap(c => c.agents ?? []).filter(Boolean))
+  ).sort();
+
+  const hasAdvancedFilters =
+    riskFilter !== 'all' || agentFilter !== '' || dateFrom !== '' || dateTo !== '';
+
   const filtered = cards
     .filter(c => filter === 'all' || c.program.toUpperCase() === filter.toUpperCase())
     .filter(c => {
@@ -61,6 +77,26 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
         || c.project_id.toLowerCase().includes(q)
         || (c.external_id ?? '').toLowerCase().includes(q)
         || (c.current_phase ?? '').toLowerCase().includes(q);
+    })
+    .filter(c => {
+      if (riskFilter === 'all') return true;
+      return (c.risk_level ?? '').toLowerCase() === riskFilter.toLowerCase();
+    })
+    .filter(c => {
+      if (!agentFilter) return true;
+      return (c.agents ?? []).some(a => a.toLowerCase() === agentFilter.toLowerCase());
+    })
+    .filter(c => {
+      if (!dateFrom && !dateTo) return true;
+      const created = new Date(c.created_at).getTime();
+      if (dateFrom && created < new Date(dateFrom).getTime()) return false;
+      // dateTo is an inclusive date — advance to end-of-day in local time.
+      if (dateTo) {
+        const end = new Date(dateTo);
+        end.setHours(23, 59, 59, 999);
+        if (created > end.getTime()) return false;
+      }
+      return true;
     });
 
   const sorted = [...filtered].sort((a, b) => {
@@ -158,6 +194,51 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
           <option value="risk">Risk</option>
           <option value="progress">Progress</option>
         </select>
+
+        <div role="separator" aria-orientation="vertical" style={{ width: 1, height: 14, background: T.border }} />
+
+        {/* Advanced filters toggle */}
+        <button
+          onClick={() => setShowAdvancedFilters(v => !v)}
+          aria-pressed={showAdvancedFilters}
+          aria-expanded={showAdvancedFilters}
+          aria-controls="advanced-filter-bar"
+          style={{
+            padding: '2px 7px',
+            borderRadius: 3,
+            border: `1px solid ${(showAdvancedFilters || hasAdvancedFilters) ? T.accent + '66' : T.border}`,
+            background: (showAdvancedFilters || hasAdvancedFilters) ? T.accent + '15' : 'transparent',
+            color: (showAdvancedFilters || hasAdvancedFilters) ? T.accent : T.text3,
+            fontSize: 9,
+            fontWeight: 600,
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 4,
+          }}
+        >
+          Filters
+          {hasAdvancedFilters && (
+            <span
+              aria-hidden="true"
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                minWidth: 14,
+                height: 14,
+                borderRadius: 7,
+                background: T.accent,
+                color: '#fff',
+                fontSize: 9,
+                fontWeight: 700,
+                padding: '0 3px',
+              }}
+            >
+              {[riskFilter !== 'all', agentFilter !== '', dateFrom !== '' || dateTo !== ''].filter(Boolean).length}
+            </span>
+          )}
+        </button>
 
         <div role="separator" aria-orientation="vertical" style={{ width: 1, height: 14, background: T.border }} />
 
@@ -287,7 +368,10 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
             </div>
           )}
           <span style={{ color: T.text3 }}>
-            {executing > 0 && `${executing} executing · `}{filtered.length} plans
+            {executing > 0 && `${executing} executing · `}
+            {filtered.length < cards.length
+              ? <><span style={{ color: T.accent, fontWeight: 600 }}>{filtered.length}</span>{` / ${cards.length} plans`}</>
+              : `${cards.length} plans`}
           </span>
           {lastUpdated && (
             <span style={{ color: T.text4, fontSize: 9 }}>
@@ -321,6 +405,27 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
           + New Plan
         </button>
       </div>
+
+      {/* Advanced filter bar */}
+      {showAdvancedFilters && (
+        <AdvancedFilterBar
+          allAgents={allAgents}
+          riskFilter={riskFilter}
+          agentFilter={agentFilter}
+          dateFrom={dateFrom}
+          dateTo={dateTo}
+          onRiskChange={setRiskFilter}
+          onAgentChange={setAgentFilter}
+          onDateFromChange={setDateFrom}
+          onDateToChange={setDateTo}
+          onClear={() => {
+            setRiskFilter('all');
+            setAgentFilter('');
+            setDateFrom('');
+            setDateTo('');
+          }}
+        />
+      )}
 
       {/* Signals panel */}
       {showSignals && (
@@ -516,6 +621,197 @@ function ConnectionIndicator({ mode }: { mode: ConnectionMode }) {
         }}
       />
       <span aria-hidden="true" style={{ fontSize: 9, color: dotColor, fontWeight: 600 }}>{label}</span>
+    </div>
+  );
+}
+
+const RISK_LEVELS = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'] as const;
+const RISK_COLORS: Record<string, string> = {
+  critical: T.red,
+  high: T.red,
+  medium: T.yellow,
+  low: T.text2,
+};
+
+interface AdvancedFilterBarProps {
+  allAgents: string[];
+  riskFilter: string;
+  agentFilter: string;
+  dateFrom: string;
+  dateTo: string;
+  onRiskChange: (v: string) => void;
+  onAgentChange: (v: string) => void;
+  onDateFromChange: (v: string) => void;
+  onDateToChange: (v: string) => void;
+  onClear: () => void;
+}
+
+function AdvancedFilterBar({
+  allAgents,
+  riskFilter,
+  agentFilter,
+  dateFrom,
+  dateTo,
+  onRiskChange,
+  onAgentChange,
+  onDateFromChange,
+  onDateToChange,
+  onClear,
+}: AdvancedFilterBarProps) {
+  const hasAny = riskFilter !== 'all' || agentFilter !== '' || dateFrom !== '' || dateTo !== '';
+
+  const inputStyle = {
+    fontSize: 9,
+    padding: '3px 6px',
+    borderRadius: 3,
+    border: `1px solid ${T.border}`,
+    background: T.bg1,
+    color: T.text0,
+    outline: 'none',
+  } as const;
+
+  const labelStyle = {
+    fontSize: 9,
+    color: T.text3,
+    fontWeight: 600,
+    whiteSpace: 'nowrap' as const,
+  };
+
+  return (
+    <div
+      id="advanced-filter-bar"
+      role="search"
+      aria-label="Advanced card filters"
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        flexWrap: 'wrap',
+        gap: 8,
+        padding: '6px 14px',
+        borderBottom: `1px solid ${T.border}`,
+        background: T.bg2,
+        flexShrink: 0,
+      }}
+    >
+      {/* Risk level */}
+      <label style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+        <span style={labelStyle}>Risk</span>
+        <select
+          value={riskFilter}
+          onChange={e => onRiskChange(e.target.value)}
+          aria-label="Filter by risk level"
+          style={inputStyle}
+        >
+          <option value="all">All levels</option>
+          {RISK_LEVELS.map(level => (
+            <option key={level} value={level.toLowerCase()}>
+              {level}
+            </option>
+          ))}
+        </select>
+        {riskFilter !== 'all' && (
+          <span
+            aria-hidden="true"
+            style={{
+              width: 6,
+              height: 6,
+              borderRadius: '50%',
+              background: RISK_COLORS[riskFilter] ?? T.text2,
+              flexShrink: 0,
+            }}
+          />
+        )}
+      </label>
+
+      <div role="separator" aria-orientation="vertical" style={{ width: 1, height: 14, background: T.border }} />
+
+      {/* Agent */}
+      <label style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+        <span style={labelStyle}>Agent</span>
+        {allAgents.length > 0 ? (
+          <select
+            value={agentFilter}
+            onChange={e => onAgentChange(e.target.value)}
+            aria-label="Filter by agent name"
+            style={{ ...inputStyle, maxWidth: 160 }}
+          >
+            <option value="">All agents</option>
+            {allAgents.map(a => (
+              <option key={a} value={a}>{a}</option>
+            ))}
+          </select>
+        ) : (
+          <input
+            type="text"
+            value={agentFilter}
+            onChange={e => onAgentChange(e.target.value)}
+            placeholder="Agent name…"
+            aria-label="Filter by agent name"
+            style={{ ...inputStyle, width: 120 }}
+          />
+        )}
+      </label>
+
+      <div role="separator" aria-orientation="vertical" style={{ width: 1, height: 14, background: T.border }} />
+
+      {/* Date range */}
+      <fieldset
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 4,
+          border: 'none',
+          margin: 0,
+          padding: 0,
+        }}
+      >
+        <legend style={{ ...labelStyle, float: 'left', marginRight: 4 }}>Created</legend>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+          <span style={{ fontSize: 9, color: T.text4 }}>from</span>
+          <input
+            type="date"
+            value={dateFrom}
+            onChange={e => onDateFromChange(e.target.value)}
+            max={dateTo || undefined}
+            aria-label="Created from date"
+            style={{ ...inputStyle, colorScheme: 'dark' }}
+          />
+        </label>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+          <span style={{ fontSize: 9, color: T.text4 }}>to</span>
+          <input
+            type="date"
+            value={dateTo}
+            onChange={e => onDateToChange(e.target.value)}
+            min={dateFrom || undefined}
+            aria-label="Created to date"
+            style={{ ...inputStyle, colorScheme: 'dark' }}
+          />
+        </label>
+      </fieldset>
+
+      {/* Clear */}
+      {hasAny && (
+        <>
+          <div role="separator" aria-orientation="vertical" style={{ width: 1, height: 14, background: T.border }} />
+          <button
+            onClick={onClear}
+            aria-label="Clear all advanced filters"
+            style={{
+              padding: '2px 7px',
+              borderRadius: 3,
+              border: `1px solid ${T.border}`,
+              background: 'transparent',
+              color: T.text3,
+              fontSize: 9,
+              fontWeight: 600,
+              cursor: 'pointer',
+            }}
+          >
+            Clear filters
+          </button>
+        </>
+      )}
     </div>
   );
 }

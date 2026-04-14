@@ -221,7 +221,7 @@ class TestFeedbackEndpoint400:
         assert "Phase 99" in r.json()["detail"]
 
     @pytest.fixture()
-    def engine_mock_bad_question(self, _app) -> MagicMock:  # _app injected for fixture ordering
+    def engine_mock_bad_question(self, app) -> MagicMock:  # app injected for fixture ordering
         eng = _make_engine_mock()
         eng.record_feedback_result.side_effect = ValueError(
             "Feedback question 'bad-q' not found on phase 0."
@@ -238,7 +238,7 @@ class TestFeedbackEndpoint400:
         assert r.status_code == 400
 
     @pytest.fixture()
-    def engine_mock_bad_index(self, _app) -> MagicMock:  # _app injected for fixture ordering
+    def engine_mock_bad_index(self, app) -> MagicMock:  # app injected for fixture ordering
         eng = _make_engine_mock()
         eng.record_feedback_result.side_effect = ValueError(
             "chosen_index 9 out of range for question 'q1' with 2 options."

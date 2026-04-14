@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import re
 import sys
 import uuid
@@ -28,6 +29,8 @@ from agent_baton.core.govern.policy import PolicyEngine
 from agent_baton.core.observe.retrospective import RetrospectiveEngine
 from agent_baton.core.orchestration.knowledge_registry import KnowledgeRegistry
 from agent_baton.models.execution import MachinePlan
+
+_log = logging.getLogger(__name__)
 
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
@@ -118,6 +121,29 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         help="Output a skeleton plan.json template for hand-editing",
     )
     return p
+
+
+def _persist_plan_to_db(ctx_dir: Path, plan: MachinePlan) -> None:
+    """Best-effort: save *plan* to the SQLite ``plans`` table in baton.db.
+
+    Logs a warning on failure — never raises, so the caller's file-based
+    save path is not interrupted.
+
+    Args:
+        ctx_dir: Path to ``.claude/team-context/`` (the context root).
+        plan:    The plan to persist.
+    """
+    try:
+        from agent_baton.core.storage import get_project_storage
+        storage = get_project_storage(ctx_dir, backend="sqlite")
+        storage.save_plan(plan)
+        _log.debug("plan %s persisted to baton.db", plan.task_id)
+    except Exception as exc:  # noqa: BLE001
+        _log.warning(
+            "Could not persist plan %s to baton.db (non-fatal): %s",
+            plan.task_id,
+            exc,
+        )
 
 
 def _make_task_id(summary: str) -> str:
@@ -227,6 +253,7 @@ def handler(args: argparse.Namespace) -> None:
                 encoding="utf-8",
             )
             md_path.write_text(plan.to_markdown(), encoding="utf-8")
+            _persist_plan_to_db(ctx_dir, plan)
             print(f"Imported plan saved: {ctx.plan_json_path} and {ctx.plan_path}")
             print(f"  (also copied to {json_path} for backward compat)")
             print()
@@ -295,6 +322,7 @@ def handler(args: argparse.Namespace) -> None:
             encoding="utf-8",
         )
         md_path.write_text(plan.to_markdown(), encoding="utf-8")
+        _persist_plan_to_db(ctx_dir, plan)
         print(f"Plan saved: {ctx.plan_json_path} and {ctx.plan_path}")
         print(f"  (also copied to {json_path} for backward compat)")
         print()
