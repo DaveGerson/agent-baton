@@ -55,6 +55,7 @@ class ActionType(Enum):
     FAILED = "failed"           # execution cannot continue
     WAIT = "wait"               # parallel steps still running
     APPROVAL = "approval"       # pause for human review / approval
+    FEEDBACK = "feedback"       # present multiple-choice questions, dispatch based on answers
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +310,7 @@ class PlanPhase:
     gate: PlanGate | None = None
     approval_required: bool = False         # pause for human approval after steps complete
     approval_description: str = ""          # what the human should review
+    feedback_questions: list[FeedbackQuestion] = field(default_factory=list)  # multiple-choice feedback gate
 
     def to_dict(self) -> dict:
         d: dict = {
@@ -321,6 +323,8 @@ class PlanPhase:
         if self.approval_required:
             d["approval_required"] = self.approval_required
             d["approval_description"] = self.approval_description
+        if self.feedback_questions:
+            d["feedback_questions"] = [q.to_dict() for q in self.feedback_questions]
         return d
 
     @classmethod
@@ -333,6 +337,10 @@ class PlanPhase:
             gate=gate,
             approval_required=data.get("approval_required", False),
             approval_description=data.get("approval_description", ""),
+            feedback_questions=[
+                FeedbackQuestion.from_dict(q)
+                for q in data.get("feedback_questions", [])
+            ],
         )
 
 
@@ -486,8 +494,9 @@ class MachinePlan:
         lines.append("")
 
         for phase in self.phases:
+            feedback_tag = " [FEEDBACK GATE]" if phase.feedback_questions else ""
             approval_tag = " [APPROVAL REQUIRED]" if phase.approval_required else ""
-            lines.append(f"## Phase {phase.phase_id}: {phase.name}{approval_tag}")
+            lines.append(f"## Phase {phase.phase_id}: {phase.name}{approval_tag}{feedback_tag}")
             lines.append("")
             if phase.approval_required and phase.approval_description:
                 lines.append(f"> {phase.approval_description}")
@@ -530,6 +539,18 @@ class MachinePlan:
                 if phase.gate.description:
                     lines.append(f"- {phase.gate.description}")
                 lines.append("")
+
+            if phase.feedback_questions:
+                lines.append("### Feedback Gate")
+                lines.append("")
+                for fq in phase.feedback_questions:
+                    lines.append(f"**{fq.question_id}**: {fq.question}")
+                    if fq.context:
+                        lines.append(f"> {fq.context}")
+                    for idx, opt in enumerate(fq.options):
+                        agent = fq.option_agents[idx] if idx < len(fq.option_agents) else "?"
+                        lines.append(f"  - [{idx}] {opt} → *{agent}*")
+                    lines.append("")
 
         return "\n".join(lines)
 
@@ -760,6 +781,105 @@ class ApprovalResult:
 
 
 @dataclass
+class FeedbackQuestion:
+    """A multiple-choice question presented during a feedback gate.
+
+    Feedback gates present 1-4 focused questions to the user after
+    initial planning and research phases complete.  Each answer maps
+    to an agent and prompt that will be dispatched immediately,
+    enabling high-throughput user steering of large changes.
+
+    Attributes:
+        question_id: Unique identifier within the feedback set.
+        question: The question text shown to the user.
+        context: Background explaining why this choice matters.
+        options: Available choices (2-6 items).
+        option_agents: Parallel list — agent name to dispatch for
+            each option.
+        option_prompts: Parallel list — delegation prompt template
+            for each option.  ``{task}`` is replaced with the plan's
+            ``task_summary`` at dispatch time.
+    """
+
+    question_id: str
+    question: str
+    context: str = ""
+    options: list[str] = field(default_factory=list)
+    option_agents: list[str] = field(default_factory=list)
+    option_prompts: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "question_id": self.question_id,
+            "question": self.question,
+            "context": self.context,
+            "options": self.options,
+            "option_agents": self.option_agents,
+            "option_prompts": self.option_prompts,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> FeedbackQuestion:
+        return cls(
+            question_id=data.get("question_id", ""),
+            question=data.get("question", ""),
+            context=data.get("context", ""),
+            options=data.get("options", []),
+            option_agents=data.get("option_agents", []),
+            option_prompts=data.get("option_prompts", []),
+        )
+
+
+@dataclass
+class FeedbackResult:
+    """Outcome of a user's answer to a feedback question.
+
+    When the user selects an option, the engine maps the choice to an
+    agent and prompt, then amends the plan with a new dispatch step.
+
+    Attributes:
+        phase_id: Phase that presented the feedback gate.
+        question_id: Which question was answered.
+        chosen_option: The selected option text.
+        chosen_index: Zero-based index into the options list.
+        dispatched_step_id: Step ID created for the resulting dispatch.
+        decided_at: ISO 8601 timestamp of the decision.
+    """
+
+    phase_id: int
+    question_id: str
+    chosen_option: str
+    chosen_index: int
+    dispatched_step_id: str = ""
+    decided_at: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.decided_at:
+            self.decided_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    def to_dict(self) -> dict:
+        return {
+            "phase_id": self.phase_id,
+            "question_id": self.question_id,
+            "chosen_option": self.chosen_option,
+            "chosen_index": self.chosen_index,
+            "dispatched_step_id": self.dispatched_step_id,
+            "decided_at": self.decided_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> FeedbackResult:
+        return cls(
+            phase_id=data.get("phase_id", 0),
+            question_id=data.get("question_id", ""),
+            chosen_option=data.get("chosen_option", ""),
+            chosen_index=data.get("chosen_index", 0),
+            dispatched_step_id=data.get("dispatched_step_id", ""),
+            decided_at=data.get("decided_at", ""),
+        )
+
+
+@dataclass
 class GateResult:
     """Outcome of a QA gate check.
 
@@ -825,10 +945,11 @@ class ExecutionState:
     plan: MachinePlan
     current_phase: int = 0              # index into plan.phases
     current_step_index: int = 0         # index into current phase's steps
-    status: str = "running"             # running, gate_pending, approval_pending, complete, failed, cancelled
+    status: str = "running"             # running, gate_pending, approval_pending, feedback_pending, complete, failed, cancelled
     step_results: list[StepResult] = field(default_factory=list)
     gate_results: list[GateResult] = field(default_factory=list)
     approval_results: list[ApprovalResult] = field(default_factory=list)
+    feedback_results: list[FeedbackResult] = field(default_factory=list)
     amendments: list[PlanAmendment] = field(default_factory=list)
     started_at: str = ""
     completed_at: str = ""
@@ -886,6 +1007,7 @@ class ExecutionState:
             "step_results": [r.to_dict() for r in self.step_results],
             "gate_results": [g.to_dict() for g in self.gate_results],
             "approval_results": [a.to_dict() for a in self.approval_results],
+            "feedback_results": [f.to_dict() for f in self.feedback_results],
             "amendments": [a.to_dict() for a in self.amendments],
             "started_at": self.started_at,
             "completed_at": self.completed_at,
@@ -904,6 +1026,7 @@ class ExecutionState:
             step_results=[StepResult.from_dict(r) for r in data.get("step_results", [])],
             gate_results=[GateResult.from_dict(g) for g in data.get("gate_results", [])],
             approval_results=[ApprovalResult.from_dict(a) for a in data.get("approval_results", [])],
+            feedback_results=[FeedbackResult.from_dict(f) for f in data.get("feedback_results", [])],
             amendments=[PlanAmendment.from_dict(a) for a in data.get("amendments", [])],
             started_at=data.get("started_at", ""),
             completed_at=data.get("completed_at", ""),
@@ -966,6 +1089,10 @@ class ExecutionAction:
     approval_context: str = ""          # summary of phase output for reviewer
     approval_options: list[str] = field(default_factory=list)
 
+    # For FEEDBACK actions:
+    feedback_questions: list[FeedbackQuestion] = field(default_factory=list)
+    feedback_context: str = ""          # summary of prior work for context
+
     # For COMPLETE/FAILED actions:
     summary: str = ""
 
@@ -997,6 +1124,12 @@ class ExecutionAction:
                 "phase_id": self.phase_id,
                 "approval_context": self.approval_context,
                 "approval_options": self.approval_options,
+            })
+        elif self.action_type == ActionType.FEEDBACK:
+            d.update({
+                "phase_id": self.phase_id,
+                "feedback_questions": [q.to_dict() for q in self.feedback_questions],
+                "feedback_context": self.feedback_context,
             })
         elif self.action_type in (ActionType.COMPLETE, ActionType.FAILED):
             d["summary"] = self.summary

@@ -148,6 +148,25 @@ class ExecutionDriver(Protocol):
         """
         ...
 
+    def record_feedback_result(
+        self,
+        phase_id: int,
+        question_id: str,
+        chosen_index: int,
+    ) -> None:
+        """Record a user's answer to a feedback question.
+
+        Looks up the chosen option's mapped agent and prompt, inserts
+        a new dispatch step via plan amendment, and resumes execution
+        once all questions are answered.
+
+        Args:
+            phase_id: The phase presenting the feedback gate.
+            question_id: Which question was answered.
+            chosen_index: Zero-based index into the question's options.
+        """
+        ...
+
     def amend_plan(
         self,
         description: str,

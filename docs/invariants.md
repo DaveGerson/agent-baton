@@ -24,6 +24,7 @@ control API between Claude and the engine.
 | `baton execute record --step-id ... --agent ... --status ...` | Record a completed step result |
 | `baton execute gate --phase-id ... --result pass/fail` | Record a gate result |
 | `baton execute approve --phase-id ... --result ...` | Record a human approval decision |
+| `baton execute feedback --phase-id ... --question-id ... --chosen-index ...` | Record a feedback question answer |
 | `baton execute amend --description ... [--add-phase ...]` | Amend the running plan |
 | `baton execute team-record --step-id ... --member-id ...` | Record a team member completion |
 | `baton execute complete` | Finalize execution |
@@ -134,6 +135,28 @@ ACTION: APPROVAL
 Options: approve, reject, approve-with-feedback
 ```
 
+For FEEDBACK actions (high-throughput multiple-choice steering):
+
+```
+ACTION: FEEDBACK
+  Phase:   <phase-id>
+  Message: <one-line summary>
+
+--- Feedback Context ---
+<summary of prior work for context>
+--- End Context ---
+
+--- Question: <question-id> ---
+  <question text>
+  Context: <background>
+  [0] <option A>
+  [1] <option B>
+  ...
+--- End Question ---
+
+Respond with: baton execute feedback --phase-id <N> --question-id <ID> --chosen-index <N>
+```
+
 **COMPLETE** / **FAILED** (terminal actions):
 
 ```
@@ -160,6 +183,7 @@ ACTION: <type>
 | `ACTION: DISPATCH` | `dispatch` | Claude should invoke the named agent with the delegation prompt |
 | `ACTION: GATE` | `gate` | Claude should run the QA gate command and record the result |
 | `ACTION: APPROVAL` | `approval` | Execution paused for human review; respond with `baton execute approve` |
+| `ACTION: FEEDBACK` | `feedback` | Execution paused for user steering; respond with `baton execute feedback` |
 | `ACTION: COMPLETE` | `complete` | All phases done; execution is finished |
 | `ACTION: FAILED` | `failed` | Execution cannot continue due to failure |
 | `ACTION: wait` | `wait` | All pending steps are dispatched; wait for results (uses fallback format) |
@@ -178,12 +202,15 @@ ACTION: <type>
 3. Section delimiters (`--- Delegation Prompt ---`, `--- End Prompt ---`) must
    remain verbatim.
 4. The `ActionType` enum `.value` strings are **lowercase** (`dispatch`,
-   `gate`, `complete`, `failed`, `wait`, `approval`). The `_print_action()`
-   function compares against these values but prints **uppercase** labels.
-   If `ActionType` values change, `_print_action()` comparisons must be
-   updated simultaneously.
+   `gate`, `complete`, `failed`, `wait`, `approval`, `feedback`). The
+   `_print_action()` function compares against these values but prints
+   **uppercase** labels. If `ActionType` values change, `_print_action()`
+   comparisons must be updated simultaneously.
 5. Section delimiters for APPROVAL (`--- Approval Context ---`,
    `--- End Context ---`) must remain verbatim.
+6. Section delimiters for FEEDBACK (`--- Feedback Context ---`,
+   `--- End Context ---`, `--- Question: <id> ---`,
+   `--- End Question ---`) must remain verbatim.
 
 **Safeguard**: A regression test asserts that `_print_action()` produces
 exactly the expected text for each `ActionType` value. The test uses fixture
@@ -213,6 +240,7 @@ machine-readable JSON (designed for programmatic consumption).
 | `record` | Plain text confirmation | Human-readable |
 | `gate` | Plain text confirmation | Human-readable |
 | `approve` | Plain text confirmation | Human-readable |
+| `feedback` | Plain text confirmation | Human-readable |
 | `amend` | Plain text confirmation | Human-readable |
 | `team-record` | Plain text confirmation | Human-readable |
 | `complete` | Engine summary text | Human-readable |
@@ -236,6 +264,7 @@ accept `--output` (they use separate parsers with no shared parent).
 | `record` | `{"status": "recorded", "step_id": "...", "agent": "...", "result": "..."}` |
 | `gate` | `{"status": "recorded", "phase_id": N, "result": "pass\|fail"}` |
 | `approve` | `{"status": "recorded", "phase_id": N, "result": "..."}` |
+| `feedback` | `{"status": "recorded", "phase_id": N, "question_id": "...", "chosen_index": N}` |
 | `amend` | `{"status": "amended", "amendment_id": "...", "description": "..."}` |
 | `team-record` | `{"status": "recorded", "step_id": "...", "member_id": "...", "agent": "...", "result": "..."}` |
 | `complete` | `{"status": "complete", "summary": "..."}` |

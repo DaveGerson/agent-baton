@@ -1934,7 +1934,7 @@ class IntelligentPlanner:
         - All others (Implement, Fix, etc.) → build check (language-appropriate)
         """
         name_lower = phase_name.lower()
-        if name_lower in ("investigate", "research", "review", "design"):
+        if name_lower in ("investigate", "research", "review", "design", "feedback"):
             # No automated gate — these phases don't produce code
             return None
 
