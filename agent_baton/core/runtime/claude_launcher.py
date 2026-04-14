@@ -438,6 +438,12 @@ class ClaudeCodeLauncher:
         # --- Raw text fallback -----------------------------------------------
         outcome = stdout_text[: self._config.max_outcome_length]
 
+        # Estimate tokens from raw output length (1 token ≈ 4 chars).
+        # stdout_text is used (not truncated outcome) to keep the estimate
+        # representative of actual consumption; the cap is set by the OS
+        # pipe buffer in practice.
+        raw_estimated_tokens = max(1, len(stdout_text) // 4) if stdout_text else 0
+
         if exit_code != 0:
             return LaunchResult(
                 step_id=step_id,
@@ -445,6 +451,7 @@ class ClaudeCodeLauncher:
                 status="failed",
                 outcome=outcome,
                 duration_seconds=elapsed,
+                estimated_tokens=raw_estimated_tokens,
                 error=_redact_stderr(stderr_text) or f"exit code {exit_code}",
             )
 
@@ -454,6 +461,7 @@ class ClaudeCodeLauncher:
             status="complete",
             outcome=outcome,
             duration_seconds=elapsed,
+            estimated_tokens=raw_estimated_tokens,
         )
 
     def _is_rate_limit(self, stderr: str) -> bool:

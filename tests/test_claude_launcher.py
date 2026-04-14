@@ -250,7 +250,9 @@ class TestClaudeCodeLauncherHappyPath:
             result = await launcher.launch("backend", "sonnet", "do something", "1.2")
             assert result.status == "complete"
             assert "Task completed successfully" in result.outcome
-            assert result.estimated_tokens == 0  # raw path has no token data
+            # Raw-text path estimates tokens from stdout length (1 token ≈ 4 chars).
+            expected_tokens = max(1, len(raw) // 4)
+            assert result.estimated_tokens == expected_tokens
 
         asyncio.run(_run())
 
