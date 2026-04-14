@@ -69,6 +69,7 @@ from agent_baton.models.trace import TaskTrace, TraceEvent
 from agent_baton.core.observe.usage import UsageLogger
 from agent_baton.core.observe.retrospective import RetrospectiveEngine
 from agent_baton.core.observe.context_profiler import ContextProfiler
+from agent_baton.core.govern.compliance import ComplianceEntry, ComplianceReportGenerator
 
 
 # ---------------------------------------------------------------------------
@@ -990,6 +991,17 @@ class ExecutionEngine:
                 "record_step_result() called with no active execution state."
             )
 
+        # ── Token estimation fallback ──────────────────────────────────────────
+        # When the caller supplies estimated_tokens=0 (the default) and the
+        # step has actually completed (not just been dispatched), derive a
+        # conservative estimate from the plan step's task description.
+        # This ensures the DB row is never left with a zero that permanently
+        # suppresses usage reporting and budget-tuner learning.
+        # "dispatched" steps have no outcome yet; skip the fallback for them.
+        effective_tokens = estimated_tokens
+        if effective_tokens == 0 and status not in ("dispatched",) and state.plan is not None:
+            effective_tokens = _estimate_tokens_for_step(state.plan, step_id)
+
         result = StepResult(
             step_id=step_id,
             agent_name=agent_name,
@@ -997,7 +1009,7 @@ class ExecutionEngine:
             outcome=outcome,
             files_changed=files_changed or [],
             commit_hash=commit_hash,
-            estimated_tokens=estimated_tokens,
+            estimated_tokens=effective_tokens,
             duration_seconds=duration_seconds,
             error=error,
             completed_at=_utcnow(),
@@ -1261,6 +1273,56 @@ class ExecutionEngine:
 
         self._save_execution(state)
 
+    # ── Compliance report helpers ────────────────────────────────────────────
+
+    @staticmethod
+    def _should_generate_compliance_report(state: "ExecutionState") -> bool:
+        """Return True when a compliance report should be produced.
+
+        A report is warranted for HIGH or CRITICAL risk plans.  LOW and MEDIUM
+        plans are skipped to keep the audit trail lean.
+        """
+        return state.plan.risk_level.upper() in _HIGH_RISK_LEVELS
+
+    def _build_compliance_entries(
+        self, state: "ExecutionState"
+    ) -> list[ComplianceEntry]:
+        """Assemble one ``ComplianceEntry`` per completed step.
+
+        Gate results are associated with the agents in each phase using a
+        best-effort lookup (mirrors the pattern in ``_build_usage_record``).
+        """
+        # Build a phase_id → gate-result string map.
+        phase_gate: dict[int, str] = {}
+        for gate in state.gate_results:
+            phase_gate[gate.phase_id] = "PASS" if gate.passed else "FAIL"
+
+        # Build a step_id → phase_id reverse-lookup from the plan.
+        step_to_phase: dict[str, int] = {}
+        for phase in state.plan.phases:
+            for step in phase.steps:
+                step_to_phase[step.step_id] = phase.phase_id
+
+        entries: list[ComplianceEntry] = []
+        for result in state.step_results:
+            phase_id = step_to_phase.get(result.step_id, -1)
+            gate_result = phase_gate.get(phase_id, "")
+            if result.status != "complete":
+                action = "failed"
+            elif result.files_changed:
+                action = "modified"
+            else:
+                action = "reviewed"
+            entries.append(ComplianceEntry(
+                agent_name=result.agent_name,
+                action=action,
+                files=list(result.files_changed),
+                commit_hash=result.commit_hash,
+                gate_result=gate_result,
+                notes=result.outcome[:200] if result.outcome else "",
+            ))
+        return entries
+
     def complete(self) -> str:
         """Finalise execution.
 
@@ -1268,6 +1330,7 @@ class ExecutionEngine:
         - Completes the trace via :class:`TraceRecorder`.
         - Writes a :class:`TaskUsageRecord` via :class:`UsageLogger`.
         - Generates and writes a retrospective via :class:`RetrospectiveEngine`.
+        - Generates and saves a compliance report for HIGH/CRITICAL plans.
         - Returns a human-readable completion summary string.
         """
         state = self._load_execution()
@@ -1324,6 +1387,32 @@ class ExecutionEngine:
             conflicts=retro_data.get("conflicts"),
         )
         retro_path = self._save_retro(retro)
+
+        # Generate compliance report for HIGH/CRITICAL risk plans (best-effort).
+        # Stored alongside traces and retrospectives in the execution directory.
+        compliance_report_path: Path | None = None
+        try:
+            if self._should_generate_compliance_report(state):
+                _compliance_gen = ComplianceReportGenerator(
+                    reports_dir=self._root / "compliance-reports"
+                )
+                _entries = self._build_compliance_entries(state)
+                _preset = _risk_level_to_preset(state.plan.risk_level)
+                _report = _compliance_gen.generate(
+                    task_id=state.task_id,
+                    task_description=state.plan.task_summary,
+                    risk_level=state.plan.risk_level,
+                    classification=_preset,
+                    entries=_entries,
+                    usage=usage_record,
+                )
+                compliance_report_path = _compliance_gen.save(_report)
+                _log.debug(
+                    "Compliance report written: %s (risk=%s)",
+                    compliance_report_path, state.plan.risk_level,
+                )
+        except Exception as exc:
+            _log.warning("Compliance report generation skipped (non-fatal): %s", exc)
 
         # F6 — Memory Decay: archive old closed beads for the finished task.
         # Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
@@ -1405,6 +1494,8 @@ class ExecutionEngine:
         if trace_path:
             summary_lines.append(f"Trace: {trace_path}")
         summary_lines.append(f"Retrospective: {retro_path}")
+        if compliance_report_path:
+            summary_lines.append(f"Compliance report: {compliance_report_path}")
         if context_profile_path:
             summary_lines.append(f"Context profile: {context_profile_path}")
         return "\n".join(summary_lines)
@@ -1774,6 +1865,68 @@ class ExecutionEngine:
                 # Apply synthesis strategy.
                 self._apply_synthesis(plan_step, parent)
                 parent.completed_at = _utcnow()
+
+        # ── Bead signal protocol (team dispatch path) ────────────────────────
+        # Mirror the same bead signal extraction done in record_step_result so
+        # that BEAD_DISCOVERY / BEAD_DECISION / BEAD_WARNING signals emitted
+        # by team-member agents are captured.  Only process when the member
+        # reached a terminal success state (complete) — failed/dispatched
+        # members have no useful outcome to mine.
+        # Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
+        if status in ("complete", "interrupted") and outcome and self._bead_store:
+            try:
+                from agent_baton.core.engine.bead_signal import parse_bead_signals
+                _bead_count = len(
+                    self._bead_store.query(task_id=state.task_id, limit=10000)
+                )
+                _member_beads = parse_bead_signals(
+                    outcome,
+                    step_id=member_id,
+                    agent_name=agent_name,
+                    task_id=state.task_id,
+                    bead_count=_bead_count,
+                )
+                for _mb in _member_beads:
+                    self._bead_store.write(_mb)
+                    if self._bus is not None:
+                        from agent_baton.core.events.events import bead_created
+                        self._bus.publish(bead_created(
+                            task_id=state.task_id,
+                            bead_id=_mb.bead_id,
+                            bead_type=_mb.bead_type,
+                            agent_name=agent_name,
+                            step_id=member_id,
+                        ))
+                if _member_beads:
+                    _log.debug(
+                        "Bead store: wrote %d bead(s) from team member %s (%s)",
+                        len(_member_beads), member_id, agent_name,
+                    )
+            except Exception as _bead_exc:
+                _log.debug(
+                    "Bead signal extraction failed for team member %s (non-fatal): %s",
+                    member_id, _bead_exc,
+                )
+
+        # ── Bead feedback protocol (team dispatch path, F12) ─────────────────
+        # Apply BEAD_FEEDBACK quality adjustments from team member outcomes.
+        if status in ("complete", "interrupted") and outcome and self._bead_store:
+            try:
+                from agent_baton.core.engine.bead_signal import parse_bead_feedback
+                _fb_items = parse_bead_feedback(outcome)
+                for _fb_bead_id, _fb_delta in _fb_items:
+                    self._bead_store.update_quality_score(_fb_bead_id, _fb_delta)
+                if _fb_items:
+                    _log.debug(
+                        "Bead feedback: applied %d quality adjustment(s) from "
+                        "team member %s",
+                        len(_fb_items), member_id,
+                    )
+            except Exception as _fb_exc:
+                _log.debug(
+                    "Bead feedback processing failed for team member %s (non-fatal): %s",
+                    member_id, _fb_exc,
+                )
 
         # Check token budget and warn when exceeded.
         warning = self._check_token_budget(state)

@@ -503,6 +503,224 @@ class TestComplete:
 
 
 # ---------------------------------------------------------------------------
+# complete() — compliance report generation
+# ---------------------------------------------------------------------------
+
+class TestCompleteComplianceReport:
+    """complete() must generate a compliance report for HIGH/CRITICAL plans
+    and skip it for LOW/MEDIUM plans.  Failures must never block completion.
+    """
+
+    @staticmethod
+    def _run_to_complete(
+        engine: ExecutionEngine,
+        task_id: str = "cr-task",
+        files: list[str] | None = None,
+        commit_hash: str = "",
+    ) -> str:
+        engine.start(_plan(task_id=task_id, risk_level="HIGH"))
+        engine.record_step_result(
+            "1.1",
+            "backend-engineer",
+            files_changed=files or ["models.py"],
+            commit_hash=commit_hash,
+        )
+        engine.next_action()
+        return engine.complete()
+
+    # -- Report written for HIGH risk ----------------------------------------
+
+    def test_compliance_report_written_for_high_risk(self, tmp_path: Path) -> None:
+        engine = _engine(tmp_path)
+        self._run_to_complete(engine, task_id="high-task")
+        report_dir = tmp_path / "compliance-reports"
+        assert report_dir.exists(), "compliance-reports dir must be created for HIGH risk"
+        md_files = list(report_dir.glob("*.md"))
+        assert len(md_files) == 1
+
+    def test_compliance_report_written_for_critical_risk(self, tmp_path: Path) -> None:
+        engine = _engine(tmp_path)
+        plan = _plan(task_id="critical-task", risk_level="CRITICAL")
+        engine.start(plan)
+        engine.record_step_result("1.1", "backend-engineer")
+        engine.next_action()
+        engine.complete()
+        report_dir = tmp_path / "compliance-reports"
+        assert report_dir.exists()
+        assert len(list(report_dir.glob("*.md"))) == 1
+
+    def test_compliance_report_filename_matches_task_id(self, tmp_path: Path) -> None:
+        engine = _engine(tmp_path)
+        self._run_to_complete(engine, task_id="audit-007")
+        report_path = tmp_path / "compliance-reports" / "audit-007.md"
+        assert report_path.exists()
+
+    def test_compliance_report_content_contains_task_id(self, tmp_path: Path) -> None:
+        engine = _engine(tmp_path)
+        self._run_to_complete(engine, task_id="content-check")
+        report_path = tmp_path / "compliance-reports" / "content-check.md"
+        content = report_path.read_text(encoding="utf-8")
+        assert "content-check" in content
+
+    def test_compliance_report_content_contains_risk_level(self, tmp_path: Path) -> None:
+        engine = _engine(tmp_path)
+        self._run_to_complete(engine, task_id="risk-check")
+        report_path = tmp_path / "compliance-reports" / "risk-check.md"
+        content = report_path.read_text(encoding="utf-8")
+        assert "HIGH" in content
+
+    def test_compliance_report_summary_line_present(self, tmp_path: Path) -> None:
+        engine = _engine(tmp_path)
+        summary = self._run_to_complete(engine, task_id="summary-check")
+        assert "Compliance report:" in summary
+
+    # -- Report NOT written for LOW/MEDIUM risk ------------------------------
+
+    @pytest.mark.parametrize("risk_level", ["LOW", "MEDIUM"])
+    def test_compliance_report_skipped_for_low_medium(
+        self, tmp_path: Path, risk_level: str
+    ) -> None:
+        engine = _engine(tmp_path)
+        plan = _plan(task_id=f"low-{risk_level}", risk_level=risk_level)
+        engine.start(plan)
+        engine.record_step_result("1.1", "backend-engineer")
+        engine.next_action()
+        summary = engine.complete()
+        report_dir = tmp_path / "compliance-reports"
+        # Directory must not be created at all for non-regulated plans.
+        assert not report_dir.exists()
+        assert "Compliance report:" not in summary
+
+    # -- Entry content -------------------------------------------------------
+
+    def test_compliance_entries_include_files_changed(self, tmp_path: Path) -> None:
+        engine = _engine(tmp_path)
+        self._run_to_complete(
+            engine, task_id="files-check", files=["models.py", "migrations/001.py"]
+        )
+        content = (tmp_path / "compliance-reports" / "files-check.md").read_text()
+        assert "models.py" in content
+
+    def test_compliance_entry_action_modified_when_files_changed(
+        self, tmp_path: Path
+    ) -> None:
+        engine = _engine(tmp_path)
+        self._run_to_complete(
+            engine, task_id="action-check", files=["app.py"]
+        )
+        content = (tmp_path / "compliance-reports" / "action-check.md").read_text()
+        assert "modified" in content
+
+    def test_compliance_entry_action_reviewed_when_no_files(
+        self, tmp_path: Path
+    ) -> None:
+        engine = _engine(tmp_path)
+        # complete step with no files_changed
+        engine.start(_plan(task_id="reviewed-check", risk_level="HIGH"))
+        engine.record_step_result("1.1", "backend-engineer", files_changed=[])
+        engine.next_action()
+        engine.complete()
+        content = (tmp_path / "compliance-reports" / "reviewed-check.md").read_text()
+        assert "reviewed" in content
+
+    # -- Fail-graceful -------------------------------------------------------
+
+    def test_compliance_report_failure_does_not_crash_complete(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A crash inside ComplianceReportGenerator.save() must not propagate."""
+        from agent_baton.core.govern import compliance as compliance_mod
+
+        original_save = compliance_mod.ComplianceReportGenerator.save
+
+        def _boom(self, report):  # noqa: ANN001
+            raise OSError("Simulated disk failure")
+
+        monkeypatch.setattr(compliance_mod.ComplianceReportGenerator, "save", _boom)
+
+        engine = _engine(tmp_path)
+        engine.start(_plan(task_id="safe-cr", risk_level="HIGH"))
+        engine.record_step_result("1.1", "backend-engineer")
+        engine.next_action()
+        summary = engine.complete()  # must not raise
+        assert isinstance(summary, str)
+        # Path should not appear in summary when generation failed.
+        assert "Compliance report:" not in summary
+
+    # -- _should_generate_compliance_report unit tests -----------------------
+
+    @pytest.mark.parametrize("risk_level,expected", [
+        ("HIGH",     True),
+        ("CRITICAL", True),
+        ("LOW",      False),
+        ("MEDIUM",   False),
+        ("high",     True),   # case-insensitive
+        ("critical", True),
+    ])
+    def test_should_generate_flag(
+        self, tmp_path: Path, risk_level: str, expected: bool
+    ) -> None:
+        from agent_baton.models.execution import ExecutionState
+        engine = _engine(tmp_path)
+        plan = _plan(risk_level=risk_level)
+        state = ExecutionState(task_id="x", plan=plan)
+        assert engine._should_generate_compliance_report(state) is expected
+
+    # -- _build_compliance_entries unit tests --------------------------------
+
+    def test_build_entries_count_matches_step_results(self, tmp_path: Path) -> None:
+        from agent_baton.models.execution import ExecutionState, StepResult
+        engine = _engine(tmp_path)
+        plan = _plan(
+            risk_level="HIGH",
+            phases=[
+                _phase(steps=[_step("1.1"), _step("1.2", agent_name="auditor")]),
+            ],
+        )
+        state = ExecutionState(task_id="entries-test", plan=plan)
+        state.step_results = [
+            StepResult(step_id="1.1", agent_name="backend-engineer",
+                       status="complete", files_changed=["a.py"]),
+            StepResult(step_id="1.2", agent_name="auditor",
+                       status="complete", files_changed=[]),
+        ]
+        entries = engine._build_compliance_entries(state)
+        assert len(entries) == 2
+
+    def test_build_entries_gate_result_propagated(self, tmp_path: Path) -> None:
+        from agent_baton.models.execution import ExecutionState, GateResult, StepResult
+        engine = _engine(tmp_path)
+        # Planner produces 1-based phase_ids; mirror that convention here so
+        # the step→phase lookup and gate→phase lookup share the same key space.
+        plan = _plan(
+            risk_level="HIGH",
+            phases=[_phase(phase_id=1, steps=[_step("1.1")])],
+        )
+        state = ExecutionState(task_id="gate-entries", plan=plan)
+        state.step_results = [
+            StepResult(step_id="1.1", agent_name="backend-engineer",
+                       status="complete", files_changed=["x.py"]),
+        ]
+        state.gate_results = [GateResult(phase_id=1, gate_type="test", passed=True, output="ok")]
+        entries = engine._build_compliance_entries(state)
+        assert entries[0].gate_result == "PASS"
+
+    def test_build_entries_failed_step_action_is_failed(
+        self, tmp_path: Path
+    ) -> None:
+        from agent_baton.models.execution import ExecutionState, StepResult
+        engine = _engine(tmp_path)
+        plan = _plan(risk_level="HIGH")
+        state = ExecutionState(task_id="fail-entries", plan=plan)
+        state.step_results = [
+            StepResult(step_id="1.1", agent_name="backend-engineer",
+                       status="failed", files_changed=[]),
+        ]
+        entries = engine._build_compliance_entries(state)
+        assert entries[0].action == "failed"
+
+
+# ---------------------------------------------------------------------------
 # status() — snapshot dict
 # ---------------------------------------------------------------------------
 
