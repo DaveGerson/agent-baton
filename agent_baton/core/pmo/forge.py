@@ -31,6 +31,7 @@ from agent_baton.models.pmo import InterviewQuestion, InterviewAnswer, PmoProjec
 
 if TYPE_CHECKING:
     from agent_baton.core.engine.planner import IntelligentPlanner
+    from agent_baton.core.storage.pmo_sqlite import PmoSqliteStore
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +61,7 @@ class ForgeSession:
     def __init__(
         self,
         planner: IntelligentPlanner,
-        store: PmoStore,
+        store: PmoStore | PmoSqliteStore,
         headless: HeadlessClaude | None = None,
     ) -> None:
         self._planner = planner
@@ -72,7 +73,7 @@ class ForgeSession:
     def create_plan(
         self,
         description: str,
-        program: str,
+        program: str,  # noqa: ARG002
         project_id: str,
         *,
         task_type: str | None = None,
