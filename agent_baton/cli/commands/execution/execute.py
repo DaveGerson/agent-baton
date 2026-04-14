@@ -43,6 +43,21 @@ from agent_baton.models.plan import MissionLogEntry
 _log = logging.getLogger(__name__)
 
 _STEP_ID_RE = re.compile(r'^\d+\.\d+$')
+# Matches team-member IDs of the form N.N.x (e.g. "1.1.a", "2.3.b").
+_TEAM_MEMBER_ID_RE = re.compile(r'^\d+\.\d+\.[a-z]+$')
+
+
+def _is_team_member_id(step_id: str) -> bool:
+    """Return True if *step_id* is a team-member ID (e.g. ``"1.1.a"``).
+
+    Team-member IDs are produced by the executor when it dispatches
+    individual members of a team step.  They differ from regular step IDs
+    (``"N.N"``) by having a lowercase-letter suffix (``"N.N.x"``).
+
+    This helper is used both in :func:`_print_action` (to annotate DISPATCH
+    output) and in the ``team-record`` handler (to detect mis-routed calls).
+    """
+    return bool(_TEAM_MEMBER_ID_RE.match(step_id))
 
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
@@ -264,10 +279,18 @@ def _print_action(action: dict) -> None:
     msg = action.get("message", "")
 
     if atype == ActionType.DISPATCH.value:
+        step_id = action.get('step_id', '')
         print(f"ACTION: DISPATCH")
         print(f"  Agent: {action.get('agent_name', '')}")
         print(f"  Model: {action.get('agent_model', '')}")
-        print(f"  Step:  {action.get('step_id', '')}")
+        print(f"  Step:  {step_id}")
+        if _is_team_member_id(step_id):
+            # Derive the parent step ID (e.g. "1.1.a" → "1.1") so the
+            # orchestrator knows which parent to reference in team-record.
+            parent_step_id = ".".join(step_id.split(".")[:2])
+            print(f"  Team-Step: yes")
+            print(f"  Parent-Step: {parent_step_id}")
+            print(f"  Record-With: baton execute team-record --step-id {parent_step_id} --member-id {step_id} ...")
         print(f"  Message: {msg}")
         print()
         print("--- Delegation Prompt ---")
@@ -567,15 +590,32 @@ def handler(args: argparse.Namespace) -> None:
             print(f"Plan amended: {amendment.amendment_id} — {amendment.description}")
 
     elif args.subcommand == "team-record":
+        # Guard: verify the referenced step is actually a team step.  This
+        # catches the common mistake of calling team-record for a plain step
+        # (e.g. after seeing "Step: 7.1" in DISPATCH output and reaching for
+        # the wrong subcommand).  The check is best-effort: if the plan cannot
+        # be loaded we fall through and let record_team_member_result raise.
+        state = engine._load_execution()
+        if state is not None:
+            plan_step = engine._find_step(state, args.step_id)
+            if plan_step is not None and not plan_step.team:
+                user_error(
+                    f"Step {args.step_id!r} is not a team step.",
+                    hint=f"Use 'baton execute record --step {args.step_id} --agent {args.agent} ...' instead.",
+                )
         files = [f.strip() for f in args.files.split(",") if f.strip()] if args.files else []
-        engine.record_team_member_result(
-            step_id=args.step_id,
-            member_id=args.member_id,
-            agent_name=args.agent,
-            status=args.status,
-            outcome=args.outcome,
-            files_changed=files,
-        )
+        try:
+            engine.record_team_member_result(
+                step_id=args.step_id,
+                member_id=args.member_id,
+                agent_name=args.agent,
+                status=args.status,
+                outcome=args.outcome,
+                files_changed=files,
+            )
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            sys.exit(1)
         if getattr(args, "output", "text") == "json":
             print(json.dumps({"status": "recorded", "step_id": args.step_id, "member_id": args.member_id, "agent": args.agent, "result": args.status}))
         else:

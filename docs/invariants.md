@@ -111,6 +111,35 @@ ACTION: DISPATCH
 --- End Prompt ---
 ```
 
+For **team-member dispatches** (step ID has the form `N.N.x`, e.g. `1.1.a`),
+three additional lines appear between `Step:` and `Message:`:
+
+```
+ACTION: DISPATCH
+  Agent: <agent-name>
+  Model: <model-id>
+  Step:  <member-id>          ← e.g. 1.1.a
+  Team-Step: yes
+  Parent-Step: <parent-step-id>   ← e.g. 1.1
+  Record-With: baton execute team-record --step-id <parent-step-id> --member-id <member-id> ...
+  Message: <one-line summary>
+
+--- Delegation Prompt ---
+<full delegation prompt text>
+--- End Prompt ---
+```
+
+These lines are informational hints — they do **not** change the meaning of
+the existing required fields (`Agent:`, `Model:`, `Step:`, `Message:`).
+Parsers that only read the established fields are unaffected.  The
+`Team-Step: yes` line is the signal to use `baton execute team-record`
+(with `--step-id <Parent-Step>` and `--member-id <Step>`) rather than
+the plain `baton execute record` command.
+
+The `ExecutionAction.to_dict()` JSON representation also exposes this
+information as `"is_team_member": true` and `"parent_step_id": "N.N"` for
+callers using the `--output json` or `--all` paths.
+
 **GATE** (run a QA check):
 
 ```

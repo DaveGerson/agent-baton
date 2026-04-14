@@ -10,6 +10,7 @@ These models are the contract between the planner, executor, and CLI.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -21,6 +22,10 @@ from agent_baton.models.knowledge import (
 )
 from agent_baton.models.parallel import ResourceLimits
 from agent_baton.models.taxonomy import ForesightInsight
+
+# Matches team-member IDs of the form N.N.x  (e.g. "1.1.a", "2.3.b").
+# Used in ExecutionAction.to_dict() to set the is_team_member flag.
+_TEAM_MEMBER_ID_RE = re.compile(r'^\d+\.\d+\.[a-z]+$')
 
 
 # ---------------------------------------------------------------------------
@@ -1113,13 +1118,19 @@ class ExecutionAction:
         # is unaffected by the internal enum representation.
         d = {"action_type": self.action_type.value, "message": self.message}
         if self.action_type == ActionType.DISPATCH:
+            is_team_member = bool(_TEAM_MEMBER_ID_RE.match(self.step_id))
             d.update({
                 "agent_name": self.agent_name,
                 "agent_model": self.agent_model,
                 "delegation_prompt": self.delegation_prompt,
                 "step_id": self.step_id,
                 "path_enforcement": self.path_enforcement,
+                "is_team_member": is_team_member,
             })
+            if is_team_member:
+                # Provide the parent step ID so consumers can call team-record
+                # without parsing the member ID themselves.
+                d["parent_step_id"] = ".".join(self.step_id.split(".")[:2])
             if self.mcp_servers:
                 d["mcp_servers"] = self.mcp_servers
         elif self.action_type == ActionType.GATE:
