@@ -2899,6 +2899,12 @@ class ExecutionEngine:
             and existing_result.status == "interact_dispatched"
         )
         if is_continuation:
+            # Pyright cannot narrow through a boolean flag — assert explicitly
+            # so the type checker knows existing_result is non-None here.
+            assert existing_result is not None, (
+                f"is_continuation is True but existing_result is None for "
+                f"step '{step.step_id}' — this is a logic error"
+            )
             existing_result.status = "dispatched"
             prompt = dispatcher.build_continuation_prompt(
                 step,
