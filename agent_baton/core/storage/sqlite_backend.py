@@ -152,14 +152,19 @@ class SqliteStorage:
             # -- plan ----------------------------------------------------------
             _upsert_plan(conn, state.plan)
 
-            # -- step_results (DELETE + INSERT for clean replacement) ----------
+            # -- step_results (DELETE + INSERT OR REPLACE for clean replacement) -
+            # INSERT OR REPLACE guards against duplicate (task_id, step_id) rows
+            # that can accumulate in the in-memory list when a step is
+            # re-dispatched after crash recovery (dispatched→complete transition
+            # appends a new StepResult before the old one is removed).  The last
+            # occurrence wins, which is always the most recent state.
             conn.execute(
                 "DELETE FROM step_results WHERE task_id = ?", (state.task_id,)
             )
             for sr in state.step_results:
                 conn.execute(
                     """
-                    INSERT INTO step_results
+                    INSERT OR REPLACE INTO step_results
                         (task_id, step_id, agent_name, status, outcome,
                          files_changed, commit_hash, estimated_tokens,
                          duration_seconds, retries, error, completed_at,
