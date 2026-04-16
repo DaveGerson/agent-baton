@@ -350,7 +350,7 @@ class WorkerSupervisor:
         # The OS releases the lock automatically when the process exits or the
         # FD is closed, which eliminates the stale-PID-file race condition.
         # Note: flock() on network filesystems may not enforce mutual exclusion.
-        self._pid_fd = open(self.pid_path, "w")  # noqa: SIM115
+        self._pid_fd = open(self.pid_path, "w+")  # noqa: SIM115
         if fcntl is not None:
             try:
                 fcntl.flock(self._pid_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
