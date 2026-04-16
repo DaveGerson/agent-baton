@@ -1047,7 +1047,7 @@ class TestConflictDetectionF11:
         store.write(b2)
         store.link("bd-g1a", "bd-g1b", "contradicts")
 
-        output, exit_code = _run_bead_cmd(db_path, ["graph", "task-001"])
+        output, exit_code = _run_bead_cmd(db_path, ["graph", "--task", "task-001"])
         assert exit_code == 0
         assert "bd-g1a" in output
         assert "contradicts" in output
@@ -1070,7 +1070,7 @@ class TestConflictDetectionF11:
         )
         store.write(b1)
 
-        output, exit_code = _run_bead_cmd(db_path, ["graph", "task-001"])
+        output, exit_code = _run_bead_cmd(db_path, ["graph", "--task", "task-001"])
         assert exit_code == 0
         assert "CONFLICT" in output
 
@@ -1083,7 +1083,7 @@ class TestConflictDetectionF11:
         b = _make_bead("bd-clean1", bead_type="discovery")
         store.write(b)
 
-        output, exit_code = _run_bead_cmd(db_path, ["graph", "task-001"])
+        output, exit_code = _run_bead_cmd(db_path, ["graph", "--task", "task-001"])
         assert exit_code == 0
         assert "No unresolved conflicts" in output
 
