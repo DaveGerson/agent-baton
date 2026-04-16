@@ -20,8 +20,8 @@ Responsibilities:
 Event ownership split:
     - **Engine** publishes: ``task.started``, ``task.completed``,
       ``phase.started``, ``phase.completed``, ``gate.passed``, ``gate.failed``.
-    - **Worker** publishes: ``step.dispatched``, ``step.completed``,
-      ``step.failed``.
+    - **Worker** publishes: ``step.pre_dispatch``, ``step.dispatched``,
+      ``step.completed``, ``step.failed``, ``gate.pre_check``.
 """
 from __future__ import annotations
 
@@ -182,9 +182,18 @@ class TaskWorker:
                 # Event ownership: Worker publishes step-level events.
                 # Task-level and phase-level events are published by ExecutionEngine.
 
-                # Publish step.dispatched events.
+                # Publish step.pre_dispatch and step.dispatched events.
                 task_id = self._engine.status().get("task_id", "")
                 for a in actions:
+                    self._bus.publish(
+                        evt.step_pre_dispatch(
+                            task_id=task_id,
+                            step_id=a.step_id,
+                            agent_name=a.agent_name,
+                            model=a.agent_model,
+                            delegation_prompt=a.delegation_prompt,
+                        )
+                    )
                     self._bus.publish(
                         evt.step_dispatched(
                             task_id=task_id,
@@ -363,6 +372,17 @@ class TaskWorker:
         """
         gate_type = getattr(action, "gate_type", "")
         phase_id = getattr(action, "phase_id", 0)
+
+        # Publish gate.pre_check event.
+        task_id = self._engine.status().get("task_id", "")
+        self._bus.publish(
+            evt.gate_pre_check(
+                task_id=task_id,
+                phase_id=phase_id,
+                gate_type=gate_type,
+                command=getattr(action, "gate_command", ""),
+            )
+        )
 
         # CI gate: dispatch GitHub Actions workflow and poll until completion.
         # run_github_actions_gate is synchronous (uses time.sleep polling), so

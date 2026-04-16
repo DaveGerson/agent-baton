@@ -1038,6 +1038,12 @@ class ExecutionEngine:
         ))
         if plan.phases:
             first_phase = plan.phases[0]
+            self._publish(evt.phase_pre_start(
+                task_id=plan.task_id,
+                phase_id=first_phase.phase_id,
+                phase_name=first_phase.name,
+                step_count=len(first_phase.steps),
+            ))
             self._publish(evt.phase_started(
                 task_id=plan.task_id,
                 phase_id=first_phase.phase_id,
@@ -1804,6 +1810,11 @@ class ExecutionEngine:
                 f"Run 'baton execute list' to find existing executions."
             )
 
+        self._publish(evt.task_completing(
+            task_id=state.task_id,
+            steps_completed=len(state.completed_step_ids),
+            steps_failed=len(state.failed_step_ids),
+        ))
         state.status = "complete"
         state.completed_at = _utcnow()
         self._save_execution(state)
@@ -3267,6 +3278,12 @@ class ExecutionEngine:
             state.current_step_index = 0
             if state.current_phase < len(state.plan.phases):
                 next_phase = state.plan.phases[state.current_phase]
+                self._publish(evt.phase_pre_start(
+                    task_id=state.task_id,
+                    phase_id=next_phase.phase_id,
+                    phase_name=next_phase.name,
+                    step_count=len(next_phase.steps),
+                ))
                 self._publish(evt.phase_started(
                     task_id=state.task_id,
                     phase_id=next_phase.phase_id,
@@ -3391,6 +3408,12 @@ class ExecutionEngine:
         state.status = "running"
         if state.current_phase < len(state.plan.phases):
             next_phase = state.plan.phases[state.current_phase]
+            self._publish(evt.phase_pre_start(
+                task_id=state.task_id,
+                phase_id=next_phase.phase_id,
+                phase_name=next_phase.name,
+                step_count=len(next_phase.steps),
+            ))
             self._publish(evt.phase_started(
                 task_id=state.task_id,
                 phase_id=next_phase.phase_id,
