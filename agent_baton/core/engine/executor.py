@@ -432,6 +432,24 @@ class ExecutionEngine:
                 return None
             return state
 
+    def _require_execution(self, caller: str) -> ExecutionState:
+        """Load execution state or raise with a diagnostic message.
+
+        Use this in any public method that requires an active execution.
+        ``caller`` is the method name shown in the error message.
+        """
+        state = self._load_execution()
+        if state is None:
+            task_hint = self._task_id or "(no task_id)"
+            raise RuntimeError(
+                f"{caller}() called but no execution state found for "
+                f"task '{task_hint}'. The active task pointer may reference "
+                f"an execution that was never started or was cleaned up.\n"
+                f"Recovery: run 'baton execute start' to begin a new "
+                f"execution, or 'baton execute list' to find existing ones."
+            )
+        return state
+
     def _log_usage(self, record: TaskUsageRecord) -> None:
         """Log a TaskUsageRecord via storage backend or legacy logger."""
         if self._storage is not None:
@@ -751,23 +769,13 @@ class ExecutionEngine:
 
         # Track the task_id for subsequent load/save calls.
         self._task_id = plan.task_id
-        if self._storage is not None:
-            try:
-                self._storage.set_active_task(plan.task_id)
-            except Exception as exc:
-                _log.warning("Failed to set active task in storage: %s", exc)
-        # Keep file-based active-task-id.txt in sync for resilience.
+        # Update file-based persistence's task_id so save() targets the right
+        # directory, but do NOT set_active_task() yet — the execution row does
+        # not exist until _save_execution() below.  Setting active before save
+        # creates a dangling reference that causes "no active execution state"
+        # errors if anything fails between here and save.
         if self._persistence is not None:
-            try:
-                # Update persistence's task_id then write the active marker.
-                self._persistence._task_id = plan.task_id
-                self._persistence.set_active()
-            except Exception:
-                _log.warning(
-                    "Failed to write active-task-id.txt for task %s — default task resolution may be affected",
-                    plan.task_id,
-                    exc_info=True,
-                )
+            self._persistence._task_id = plan.task_id
 
         # Wire the materialized-view subscriber now that we know the task_id.
         # One subscriber per engine instance; replace any previous one.
@@ -842,16 +850,22 @@ class ExecutionEngine:
         self._save_execution(state)
         # Track the new task_id so _load_execution() can find it by ID.
         self._task_id = state.task_id
-        # In storage mode, also mark this as the active task so any engine
-        # instance without an explicit task_id (e.g. from init_dependencies)
-        # can still load the state via get_active_task().
+        # NOW mark as active — the execution row exists, so the active
+        # pointer won't dangle.  Write to both backends for resilience.
         if self._storage is not None:
             try:
                 self._storage.set_active_task(state.task_id)
             except Exception:
                 pass
-        elif self._persistence is not None:
-            self._persistence.set_active()
+        if self._persistence is not None:
+            try:
+                self._persistence.set_active()
+            except Exception:
+                _log.warning(
+                    "Failed to write active-task-id.txt for task %s",
+                    state.task_id,
+                    exc_info=True,
+                )
         return self._determine_action(state)
 
     def next_action(self) -> ExecutionAction:
@@ -875,10 +889,15 @@ class ExecutionEngine:
         """
         state = self._load_execution()
         if state is None:
+            task_hint = self._task_id or "(no task_id)"
             return ExecutionAction(
                 action_type=ActionType.FAILED,
-                message="No active execution state found. Call start() first.",
-                summary="No execution state on disk.",
+                message=(
+                    f"No execution state found for task '{task_hint}'. "
+                    f"Run 'baton execute start' to begin, or "
+                    f"'baton execute list' to find existing executions."
+                ),
+                summary=f"No execution state for '{task_hint}'.",
             )
 
         action = self._determine_action(state)
@@ -999,11 +1018,7 @@ class ExecutionEngine:
                 f"Invalid step status '{status}'. Must be one of: {_VALID_STEP_STATUSES}"
             )
 
-        state = self._load_execution()
-        if state is None:
-            raise RuntimeError(
-                "record_step_result() called with no active execution state."
-            )
+        state = self._require_execution("record_step_result")
 
         # ── Interacting status: multi-turn interaction protocol ────────────────
         # When an interactive step reports status="interacting", we append the
@@ -1299,11 +1314,7 @@ class ExecutionEngine:
         - If *passed*: advances the phase pointer and resets step index.
         - Saves state.
         """
-        state = self._load_execution()
-        if state is None:
-            raise RuntimeError(
-                "record_gate_result() called with no active execution state."
-            )
+        state = self._require_execution("record_gate_result")
 
         phase_obj = state.current_phase_obj
         gate_type = phase_obj.gate.gate_type if (phase_obj and phase_obj.gate) else "unknown"
@@ -1429,7 +1440,11 @@ class ExecutionEngine:
         """
         state = self._load_execution()
         if state is None:
-            return "No active execution state found."
+            task_hint = self._task_id or "(no task_id)"
+            return (
+                f"No execution state found for task '{task_hint}'. "
+                f"Run 'baton execute list' to find existing executions."
+            )
 
         state.status = "complete"
         state.completed_at = _utcnow()
@@ -1742,11 +1757,7 @@ class ExecutionEngine:
                 f"Invalid approval result '{result}'. Must be one of: {_VALID_RESULTS}"
             )
 
-        state = self._load_execution()
-        if state is None:
-            raise RuntimeError(
-                "record_approval_result() called with no active execution state."
-            )
+        state = self._require_execution("record_approval_result")
 
         approval = ApprovalResult(
             phase_id=phase_id,
@@ -1811,11 +1822,7 @@ class ExecutionEngine:
         Returns:
             The :class:`PlanAmendment` record.
         """
-        state = self._load_execution()
-        if state is None:
-            raise RuntimeError(
-                "amend_plan() called with no active execution state."
-            )
+        state = self._require_execution("amend_plan")
 
         amendment = PlanAmendment(
             amendment_id=f"amend-{len(state.amendments) + 1}",
@@ -1887,11 +1894,7 @@ class ExecutionEngine:
         When all members have completed, the parent step is automatically
         marked as complete.  If any member fails, the parent step fails.
         """
-        state = self._load_execution()
-        if state is None:
-            raise RuntimeError(
-                "record_team_member_result() called with no active execution state."
-            )
+        state = self._require_execution("record_team_member_result")
 
         # Find or create the parent StepResult for this team step.
         parent = state.get_step_result(step_id)
@@ -3037,11 +3040,7 @@ class ExecutionEngine:
             RuntimeError: If no active execution state exists.
             ValueError: If the step is not in ``interacting`` status.
         """
-        state = self._load_execution()
-        if state is None:
-            raise RuntimeError(
-                "provide_interact_input() called with no active execution state."
-            )
+        state = self._require_execution("provide_interact_input")
 
         result = state.get_step_result(step_id)
         if result is None or result.status != "interacting":
@@ -3080,11 +3079,7 @@ class ExecutionEngine:
             RuntimeError: If no active execution state exists.
             ValueError: If the step is not in ``interacting`` status.
         """
-        state = self._load_execution()
-        if state is None:
-            raise RuntimeError(
-                "complete_interaction() called with no active execution state."
-            )
+        state = self._require_execution("complete_interaction")
 
         result = state.get_step_result(step_id)
         if result is None or result.status != "interacting":
@@ -3254,11 +3249,7 @@ class ExecutionEngine:
             question_id: Which question was answered.
             chosen_index: Zero-based index into the question's options list.
         """
-        state = self._load_execution()
-        if state is None:
-            raise RuntimeError(
-                "record_feedback_result() called with no active execution state."
-            )
+        state = self._require_execution("record_feedback_result")
 
         # Find the question definition on the phase.
         phase_obj = None

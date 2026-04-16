@@ -1444,11 +1444,14 @@ class IntelligentPlanner:
                     )
                     if not has_review and plan_phases:
                         # Build a minimal review phase using the last agent.
+                        # Use max existing phase_id + 1 to avoid duplicate IDs.
                         last_agent = "code-reviewer"
                         if plan_phases[-1].steps:
                             last_agent = plan_phases[-1].steps[-1].agent_name
+                        next_id = max(p.phase_id for p in plan_phases) + 1
                         review_phase = self._build_phases_for_names(
-                            ["Review"], [last_agent], "Review bead-flagged concerns"
+                            ["Review"], [last_agent], "Review bead-flagged concerns",
+                            start_phase_id=next_id,
                         )
                         plan_phases.extend(review_phase)
 
@@ -1937,12 +1940,19 @@ class IntelligentPlanner:
         return phases
 
     def _build_phases_for_names(
-        self, phase_names: list[str], agents: list[str], task_summary: str = ""
+        self, phase_names: list[str], agents: list[str], task_summary: str = "",
+        start_phase_id: int = 1,
     ) -> list[PlanPhase]:
-        """Build PlanPhase objects for a list of names, distributing agents."""
+        """Build PlanPhase objects for a list of names, distributing agents.
+
+        Args:
+            start_phase_id: First phase_id to assign.  Callers appending to
+                an existing plan should pass ``max_existing_id + 1`` to avoid
+                duplicate phase_id values.
+        """
         phases: list[PlanPhase] = [
             PlanPhase(phase_id=idx, name=name, steps=[])
-            for idx, name in enumerate(phase_names, start=1)
+            for idx, name in enumerate(phase_names, start=start_phase_id)
         ]
         return self._assign_agents_to_phases(phases, agents, task_summary)
 

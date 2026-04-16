@@ -449,7 +449,7 @@ class TestComplete:
         engine = _engine(tmp_path)
         result = engine.complete()
         assert isinstance(result, str)
-        assert "No active" in result
+        assert "No execution state found" in result
 
     def test_complete_writes_context_profile_json(self, tmp_path: Path) -> None:
         """complete() auto-invokes ContextProfiler and writes context-profile.json."""
