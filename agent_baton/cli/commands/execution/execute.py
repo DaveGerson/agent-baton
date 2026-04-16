@@ -474,13 +474,8 @@ def handler(args: argparse.Namespace) -> None:
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
             sys.exit(1)
-        # Mark this as the active execution
-        try:
-            storage.set_active_task(task_id)
-        except Exception:
-            # Fallback to legacy persistence marker when storage is unavailable.
-            if engine._persistence is not None:
-                engine._persistence.set_active()
+        # engine.start() already calls set_active_task() post-save; no need
+        # to call it again here.
         if getattr(args, "output", "text") == "json":
             result = {"task_id": task_id, "action": action.to_dict()}
             print(json.dumps(result, indent=2))
