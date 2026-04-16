@@ -1378,13 +1378,18 @@ class IntelligentPlanner:
                     "Skipped — light complexity plan.",
                     "",
                 ]
-            elif rr.splits_applied > 0 or rr.dependencies_added > 0 or rr.warnings:
+            elif rr.splits_applied > 0 or rr.teams_created > 0 or rr.dependencies_added > 0 or rr.warnings:
                 lines += ["## Plan Review", ""]
                 lines.append(f"**Source:** {rr.source}")
                 if rr.splits_applied:
                     lines.append(
                         f"**Steps split:** {rr.splits_applied} broad step(s) "
                         f"split into parallel concern-scoped steps."
+                    )
+                if rr.teams_created:
+                    lines.append(
+                        f"**Teams created:** {rr.teams_created} broad step(s) "
+                        f"converted to same-agent team(s) with scoped members."
                     )
                 if rr.dependencies_added:
                     lines.append(

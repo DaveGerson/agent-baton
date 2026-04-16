@@ -9,6 +9,7 @@ import pytest
 from agent_baton.core.engine.plan_reviewer import (
     PlanReviewer,
     _cluster_by_directory,
+    _detect_coupling,
     _extract_file_paths,
     _humanize_directory,
 )
@@ -167,8 +168,8 @@ class TestHeuristicReview:
         assert result.source == "skipped-light"
         assert result.splits_applied == 0
 
-    def test_splits_broad_single_step(self):
-        """The core bug: a single step spanning 4+ files across 3+ dirs should split."""
+    def test_creates_team_for_coupled_concerns(self):
+        """The core bug: a single step spanning coupled concerns should become a team."""
         reviewer = PlanReviewer()
         plan = _make_broad_plan()
         impl_phase = plan.phases[1]
@@ -193,15 +194,61 @@ class TestHeuristicReview:
             )
 
         assert result.source == "heuristic"
+        # Coupled concerns (engine+runtime+models+execution) → team
+        assert result.teams_created >= 1
+        # The step should now be a team step
+        team_step = impl_phase.steps[0]
+        assert team_step.agent_name == "team"
+        assert len(team_step.team) >= 2
+        # All team members should use the same agent
+        member_agents = {m.agent_name for m in team_step.team}
+        assert member_agents == {"backend-engineer--python"}
+        # Team should have synthesis
+        assert team_step.synthesis is not None
+
+    def test_splits_independent_concerns_into_parallel_steps(self):
+        """Truly independent concerns should produce parallel steps, not a team."""
+        # Use files in unrelated directories that are NOT in _COUPLED_PAIRS
+        step = _make_step(
+            desc="Update docs, add tests, fix distribution scripts, and update PMO UI",
+            context_files=[
+                "docs/architecture.md",
+                "docs/cli-reference.md",
+                "tests/test_executor.py",
+                "tests/test_planner.py",
+                "agent_baton/core/distribute/packaging.py",
+                "pmo-ui/src/components/Board.tsx",
+            ],
+        )
+        plan = _make_plan(phases=[
+            PlanPhase(phase_id=1, name="Implement", steps=[step]),
+        ])
+        reviewer = PlanReviewer()
+        with patch(
+            "agent_baton.core.engine.plan_reviewer.PlanReviewer._try_haiku_review",
+            return_value=None,
+        ):
+            result = reviewer.review(
+                plan,
+                "Update docs, tests, distribution, and PMO UI",
+                file_paths=[
+                    "docs/architecture.md",
+                    "docs/cli-reference.md",
+                    "tests/test_executor.py",
+                    "tests/test_planner.py",
+                    "agent_baton/core/distribute/packaging.py",
+                    "pmo-ui/src/components/Board.tsx",
+                ],
+                complexity="medium",
+            )
+        assert result.source == "heuristic"
         assert result.splits_applied >= 1
-        # The implementation phase should now have multiple steps
-        assert len(impl_phase.steps) > 1
-        # All steps should use the same agent
-        agents = {s.agent_name for s in impl_phase.steps}
-        assert agents == {"backend-engineer--python"}
-        # Steps should be parallel (no depends_on)
-        for step in impl_phase.steps:
-            assert step.depends_on == []
+        assert result.teams_created == 0
+        # Multiple parallel steps
+        assert len(plan.phases[0].steps) > 1
+        # All steps should be parallel (no depends_on)
+        for s in plan.phases[0].steps:
+            assert s.depends_on == []
 
     def test_does_not_split_narrow_step(self):
         """A step touching 2 files in the same directory should not split."""
@@ -503,3 +550,169 @@ class TestPlannerIntegration:
         )
         explanation = planner.explain_plan(plan)
         assert "## Plan Review" in explanation
+
+
+# ---------------------------------------------------------------------------
+# Coupling detection tests
+# ---------------------------------------------------------------------------
+
+class TestCouplingDetection:
+    """Tests for _detect_coupling heuristic."""
+
+    def test_coupled_engine_and_runtime(self):
+        """Engine + runtime directories are known coupled pairs."""
+        groups = {
+            "engine": ["agent_baton/core/engine/executor.py"],
+            "runtime": ["agent_baton/core/runtime/worker.py"],
+            "models": ["agent_baton/models/execution.py"],
+        }
+        assert _detect_coupling(groups, "Wire new step type through engine and runtime")
+
+    def test_coupled_engine_and_cli(self):
+        """Engine + execution (CLI commands) are coupled."""
+        groups = {
+            "engine": ["agent_baton/core/engine/executor.py"],
+            "execution": ["agent_baton/cli/commands/execution/execute.py"],
+            "models": ["agent_baton/models/execution.py"],
+        }
+        assert _detect_coupling(groups, "Add new action type")
+
+    def test_uncoupled_docs_and_tests(self):
+        """Docs + tests + unrelated dirs are independent."""
+        groups = {
+            "docs": ["docs/architecture.md"],
+            "tests": ["tests/test_executor.py"],
+            "pmo-ui": ["pmo-ui/src/App.tsx"],
+        }
+        assert not _detect_coupling(groups, "Update docs and tests")
+
+    def test_coupling_keywords_boost_signal(self):
+        """Integration keywords increase coupling score."""
+        # Groups that are NOT in _COUPLED_PAIRS but task description is coupling
+        groups = {
+            "observe": ["agent_baton/core/observe/trace.py"],
+            "learn": ["agent_baton/core/learn/engine.py"],
+            "improve": ["agent_baton/core/improve/scoring.py"],
+        }
+        # "wire" and "end-to-end" are coupling keywords — with shared parent
+        # they should trigger coupling
+        assert _detect_coupling(
+            groups, "Wire end-to-end learning pipeline from observe to improve"
+        )
+
+    def test_uncoupled_no_keywords_no_pairs(self):
+        """Completely unrelated directories with neutral description."""
+        groups = {
+            "distribute": ["agent_baton/core/distribute/packaging.py"],
+            "pmo": ["pmo-ui/src/components/Board.tsx"],
+            "scripts": ["scripts/install.sh"],
+        }
+        assert not _detect_coupling(groups, "Update packaging and PMO board")
+
+
+# ---------------------------------------------------------------------------
+# Haiku team coordination tests
+# ---------------------------------------------------------------------------
+
+class TestHaikuTeamCoordination:
+    """Tests for Haiku recommendations with coordination=team."""
+
+    def test_applies_team_recommendation(self):
+        """Haiku team recommendation should produce a team step."""
+        reviewer = PlanReviewer()
+        plan = _make_broad_plan()
+
+        recommendations = {
+            "splits": [{
+                "phase_id": 2,
+                "step_id": "2.1",
+                "reason": "Coupled concerns need coordination",
+                "coordination": "team",
+                "groups": [
+                    {"label": "engine", "files": ["executor.py"],
+                     "description_hint": "Implement engine routing",
+                     "depends_on_groups": []},
+                    {"label": "runtime", "files": ["worker.py"],
+                     "description_hint": "Implement runtime changes",
+                     "depends_on_groups": ["engine"]},
+                    {"label": "CLI", "files": ["execute.py"],
+                     "description_hint": "Implement CLI output",
+                     "depends_on_groups": ["engine"]},
+                ],
+            }],
+            "dependencies": [],
+            "warnings": [],
+        }
+
+        result = reviewer._apply_recommendations(plan, recommendations)
+        assert result.teams_created == 1
+        assert result.splits_applied == 0
+
+        team_step = plan.phases[1].steps[0]
+        assert team_step.agent_name == "team"
+        assert len(team_step.team) == 3
+        # All members should be the original agent type
+        assert all(m.agent_name == "backend-engineer--python" for m in team_step.team)
+        # First member is lead
+        assert team_step.team[0].role == "lead"
+        # Runtime and CLI members depend on engine
+        engine_id = team_step.team[0].member_id
+        assert engine_id in team_step.team[1].depends_on
+        assert engine_id in team_step.team[2].depends_on
+        # Team has synthesis
+        assert team_step.synthesis is not None
+        assert team_step.synthesis.strategy == "merge_files"
+
+    def test_parallel_recommendation_still_works(self):
+        """Haiku parallel recommendation should produce independent steps."""
+        reviewer = PlanReviewer()
+        plan = _make_broad_plan()
+
+        recommendations = {
+            "splits": [{
+                "phase_id": 2,
+                "step_id": "2.1",
+                "reason": "Independent concerns",
+                "coordination": "parallel",
+                "groups": [
+                    {"label": "docs", "files": ["docs/arch.md"],
+                     "description_hint": "Update docs"},
+                    {"label": "tests", "files": ["tests/test_x.py"],
+                     "description_hint": "Add tests"},
+                ],
+            }],
+            "dependencies": [],
+            "warnings": [],
+        }
+
+        result = reviewer._apply_recommendations(plan, recommendations)
+        assert result.splits_applied == 1
+        assert result.teams_created == 0
+        assert len(plan.phases[1].steps) == 2
+        assert all(s.agent_name == "backend-engineer--python"
+                    for s in plan.phases[1].steps)
+
+    def test_defaults_to_parallel_when_coordination_missing(self):
+        """When coordination field is absent, default to parallel."""
+        reviewer = PlanReviewer()
+        plan = _make_broad_plan()
+
+        recommendations = {
+            "splits": [{
+                "phase_id": 2,
+                "step_id": "2.1",
+                "reason": "Broad step",
+                "groups": [
+                    {"label": "a", "files": ["a.py"],
+                     "description_hint": "Do A"},
+                    {"label": "b", "files": ["b.py"],
+                     "description_hint": "Do B"},
+                ],
+            }],
+            "dependencies": [],
+            "warnings": [],
+        }
+
+        result = reviewer._apply_recommendations(plan, recommendations)
+        assert result.splits_applied == 1
+        assert result.teams_created == 0
