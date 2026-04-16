@@ -539,18 +539,18 @@ class TestBeadsSurviveSaveExecution:
 
 
 class TestSchemaVersion:
-    """SCHEMA_VERSION is 8 after the FK cascade fix migration."""
+    """SCHEMA_VERSION is 9 after the step_type taxonomy migration."""
 
-    def test_schema_version_is_8(self) -> None:
+    def test_schema_version_is_9(self) -> None:
         from agent_baton.core.storage.schema import SCHEMA_VERSION
-        assert SCHEMA_VERSION == 8
+        assert SCHEMA_VERSION == 9
 
-    def test_migration_8_is_registered(self) -> None:
+    def test_migration_9_is_registered(self) -> None:
         from agent_baton.core.storage.schema import MIGRATIONS
-        assert 8 in MIGRATIONS
+        assert 9 in MIGRATIONS
 
-    def test_new_database_is_at_version_8(self, tmp_path: Path) -> None:
-        """A freshly created baton.db is stamped at version 8."""
+    def test_new_database_is_at_version_9(self, tmp_path: Path) -> None:
+        """A freshly created baton.db is stamped at version 9."""
         storage = SqliteStorage(tmp_path / "baton.db")
         # Trigger schema initialisation
         from agent_baton.core.engine.bead_store import BeadStore
@@ -563,6 +563,6 @@ class TestSchemaVersion:
                 "SELECT version FROM _schema_version"
             ).fetchone()
             assert row is not None
-            assert row[0] == 8
+            assert row[0] == 9
         finally:
             conn.close()

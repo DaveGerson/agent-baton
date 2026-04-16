@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -171,6 +171,23 @@ ALTER TABLE learning_issues ADD COLUMN project_id TEXT;
 -- upsert that does not fire the CASCADE.  No ALTER TABLE is required.
 SELECT 1;
 """,
+    9: """
+-- v9: add step_type taxonomy columns to plan_steps and step_results.
+-- step_type classifies what kind of work a step performs (developing,
+-- planning, testing, reviewing, consulting, task, automation) so the
+-- engine can route each step through the appropriate execution path.
+-- command holds the shell command for automation steps (no LLM dispatch).
+-- All existing rows default to 'developing' / '' which preserves
+-- existing behaviour unchanged.
+--
+-- NOTE: FK constraints are intentionally omitted from this migration
+-- because it is applied to BOTH project and central databases via
+-- ConnectionManager._run_migrations().  Fresh project DBs get FKs
+-- from PROJECT_SCHEMA_DDL directly.
+ALTER TABLE plan_steps ADD COLUMN step_type TEXT NOT NULL DEFAULT 'developing';
+ALTER TABLE plan_steps ADD COLUMN command TEXT NOT NULL DEFAULT '';
+ALTER TABLE step_results ADD COLUMN step_type TEXT NOT NULL DEFAULT 'developing';
+""",
 }
 
 # =====================================================================
@@ -247,6 +264,8 @@ CREATE TABLE IF NOT EXISTS plan_steps (
     blocked_paths         TEXT NOT NULL DEFAULT '[]',
     context_files         TEXT NOT NULL DEFAULT '[]',
     knowledge_attachments TEXT NOT NULL DEFAULT '[]',
+    step_type             TEXT NOT NULL DEFAULT 'developing',
+    command               TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (task_id, step_id),
     FOREIGN KEY (task_id, phase_id) REFERENCES plan_phases(task_id, phase_id) ON DELETE CASCADE
 );
@@ -283,6 +302,7 @@ CREATE TABLE IF NOT EXISTS step_results (
     error             TEXT NOT NULL DEFAULT '',
     completed_at      TEXT NOT NULL DEFAULT '',
     deviations        TEXT NOT NULL DEFAULT '[]',
+    step_type         TEXT NOT NULL DEFAULT 'developing',
     PRIMARY KEY (task_id, step_id),
     FOREIGN KEY (task_id) REFERENCES executions(task_id) ON DELETE CASCADE
 );
@@ -957,6 +977,8 @@ CREATE TABLE IF NOT EXISTS plan_steps (
     blocked_paths         TEXT NOT NULL DEFAULT '[]',
     context_files         TEXT NOT NULL DEFAULT '[]',
     knowledge_attachments TEXT NOT NULL DEFAULT '[]',
+    step_type             TEXT NOT NULL DEFAULT 'developing',
+    command               TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (project_id, task_id, step_id)
 );
 CREATE INDEX IF NOT EXISTS idx_central_steps_agent ON plan_steps(agent_name);
@@ -991,6 +1013,7 @@ CREATE TABLE IF NOT EXISTS step_results (
     error             TEXT NOT NULL DEFAULT '',
     completed_at      TEXT NOT NULL DEFAULT '',
     deviations        TEXT NOT NULL DEFAULT '[]',
+    step_type         TEXT NOT NULL DEFAULT 'developing',
     PRIMARY KEY (project_id, task_id, step_id)
 );
 CREATE INDEX IF NOT EXISTS idx_central_step_results_status ON step_results(status);

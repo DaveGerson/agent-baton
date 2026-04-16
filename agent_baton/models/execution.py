@@ -272,6 +272,9 @@ class PlanStep:
     mcp_servers: list[str] = field(default_factory=list)  # MCP server names for this step
     interactive: bool = False       # step uses multi-turn interaction protocol
     max_turns: int = 10             # cost guard: maximum interaction turns
+    step_type: str = "developing"   # planning, developing, testing, reviewing,
+                                    # consulting, task, automation
+    command: str = ""               # shell command for automation steps
 
     def to_dict(self) -> dict:
         d = {
@@ -284,6 +287,7 @@ class PlanStep:
             "allowed_paths": self.allowed_paths,
             "blocked_paths": self.blocked_paths,
             "context_files": self.context_files,
+            "step_type": self.step_type,
         }
         if self.team:
             d["team"] = [m.to_dict() for m in self.team]
@@ -296,6 +300,8 @@ class PlanStep:
         if self.interactive:
             d["interactive"] = self.interactive
             d["max_turns"] = self.max_turns
+        if self.command:
+            d["command"] = self.command
         return d
 
     @classmethod
@@ -317,6 +323,8 @@ class PlanStep:
             mcp_servers=data.get("mcp_servers", []),
             interactive=data.get("interactive", False),
             max_turns=data.get("max_turns", 10),
+            step_type=data.get("step_type", "developing"),
+            command=data.get("command", ""),
         )
 
 
@@ -673,6 +681,7 @@ class PlanAmendment:
     steps_added: list[str] = field(default_factory=list)    # step_ids of new steps
     created_at: str = ""
     feedback: str = ""              # reviewer/approver feedback that triggered this
+    metadata: dict[str, str] = field(default_factory=dict)  # arbitrary key/value context
 
     def __post_init__(self) -> None:
         if not self.created_at:
@@ -688,6 +697,7 @@ class PlanAmendment:
             "steps_added": self.steps_added,
             "created_at": self.created_at,
             "feedback": self.feedback,
+            "metadata": self.metadata,
         }
 
     @classmethod
@@ -701,6 +711,7 @@ class PlanAmendment:
             steps_added=data.get("steps_added", []),
             created_at=data.get("created_at", ""),
             feedback=data.get("feedback", ""),
+            metadata=data.get("metadata", {}),
         )
 
 
@@ -789,6 +800,7 @@ class StepResult:
     member_results: list[TeamStepResult] = field(default_factory=list)  # team step results
     deviations: list[str] = field(default_factory=list)  # plan deviations reported by agent
     interaction_history: list[InteractionTurn] = field(default_factory=list)  # multi-turn exchange
+    step_type: str = "developing"   # echoed from PlanStep for analytics/queries
 
     def to_dict(self) -> dict:
         d = {
@@ -804,6 +816,7 @@ class StepResult:
             "error": self.error,
             "completed_at": self.completed_at,
             "deviations": self.deviations,
+            "step_type": self.step_type,
         }
         if self.member_results:
             d["member_results"] = [m.to_dict() for m in self.member_results]
@@ -1167,6 +1180,8 @@ class ExecutionAction:
     agent_model: str = ""
     delegation_prompt: str = ""
     step_id: str = ""
+    step_type: str = ""             # echoed from PlanStep for caller routing
+    command: str = ""               # for automation steps
     # Path enforcement hook command (for PreToolUse):
     path_enforcement: str = ""
     # MCP server names to pass through to this dispatch:
@@ -1210,6 +1225,7 @@ class ExecutionAction:
                 "agent_model": self.agent_model,
                 "delegation_prompt": self.delegation_prompt,
                 "step_id": self.step_id,
+                "step_type": self.step_type,
                 "path_enforcement": self.path_enforcement,
                 "is_team_member": is_team_member,
                 "interactive": self.interactive,
@@ -1222,6 +1238,8 @@ class ExecutionAction:
                 d["mcp_servers"] = self.mcp_servers
             if self.interactive:
                 d["interact_max_turns"] = self.interact_max_turns
+            if self.command:
+                d["command"] = self.command
         elif self.action_type == ActionType.GATE:
             d.update({
                 "gate_type": self.gate_type,

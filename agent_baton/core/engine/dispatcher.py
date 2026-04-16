@@ -51,6 +51,32 @@ _BEAD_SIGNALS_LINE = (
     "  BEAD_FEEDBACK: <bead-id> useful|misleading|outdated"
 )
 
+_FLAG_SIGNALS_LINE = '''
+## When You're Stuck
+
+If you encounter a situation where you have multiple valid approaches
+and the choice matters, emit a DESIGN_CHOICE flag:
+
+    DESIGN_CHOICE: <description of the choice>
+    OPTION_A: <first approach and why>
+    OPTION_B: <second approach and why>
+    CONFIDENCE: none | low | partial
+    RECOMMENDATION: <your preferred option and reasoning>
+
+If you find your work conflicts with another agent's output, emit
+a CONFLICT flag:
+
+    CONFLICT: <what's in conflict>
+    PARTIES: <agent (step), agent (step)>
+    DESCRIPTION: <specifics>
+    CONFIDENCE: none | low | partial
+    RECOMMENDATION: <your preferred resolution>
+
+Do NOT emit flags for trivial decisions you can make yourself. Only
+flag when the choice would meaningfully change the outcome and you
+lack sufficient context to decide confidently.
+'''
+
 # Success criteria by task type — shown in the delegation prompt to make the
 # definition of done concrete.  Selected by the caller via the task_type arg.
 _SUCCESS_CRITERIA: dict[str, str] = {
@@ -349,6 +375,8 @@ class PromptDispatcher:
         parts.append("")
         parts.append(_BEAD_SIGNALS_LINE)
         parts.append("")
+        parts.append(_FLAG_SIGNALS_LINE)
+        parts.append("")
 
         # Previous Step Output — only when there is actual handoff content
         if handoff_from.strip():
@@ -476,6 +504,147 @@ class PromptDispatcher:
 
         return "\n".join(parts)
 
+    def build_consultation_prompt(
+        self,
+        step: PlanStep,
+        *,
+        flag_context: str = "",
+        original_outcome: str = "",
+        task_summary: str = "",
+        prior_beads: "list | None" = None,
+    ) -> str:
+        """Build a lightweight consultation prompt for specialist agent dispatch.
+
+        Targets ~3-5K tokens input.  Includes the agent role preamble, the
+        structured flag context describing the obstacle, relevant excerpts from
+        the blocked agent's output, precedent beads (if any), and resolution
+        instructions.
+
+        Intentionally excludes the full shared_context document, knowledge pack
+        attachments, handoff chain, context_files list, path enforcement, and
+        success criteria — all of which are irrelevant for a focused specialist
+        consultation.
+
+        Args:
+            step: The consulting PlanStep (``step.agent_name`` is the specialist).
+            flag_context: Structured description of the obstacle (e.g. from
+                ``flag.to_consultation_description()``).  Optional — Layer 1
+                callers may omit it when no flag context exists yet.
+            original_outcome: What the blocked agent produced (last 2000 chars
+                are extracted here).  Optional.
+            task_summary: One-line mission context.
+            prior_beads: Precedent decision beads for similar past choices.
+
+        Returns:
+            A focused markdown delegation prompt ready to pass to the Agent tool.
+        """
+        role = step.agent_name
+        project_line = task_summary or "this project"
+        article = "an" if role[0:1] in "aeiouAEIOU" else "a"
+
+        # Truncate original_outcome to last 2000 chars to keep the prompt lean.
+        outcome_excerpt = ""
+        if original_outcome.strip():
+            outcome_excerpt = original_outcome.strip()[-2000:]
+
+        parts = [
+            f"You are {article} {role} consulting on {project_line}.",
+            "",
+        ]
+
+        if task_summary.strip():
+            parts += [
+                "## Mission Context",
+                task_summary.strip(),
+                "",
+            ]
+
+        parts += [
+            f"## Your Consultation Task (Step {step.step_id})",
+            step.task_description.strip(),
+            "",
+        ]
+
+        if flag_context.strip():
+            parts += [
+                "## Obstacle / Flag",
+                flag_context.strip(),
+                "",
+            ]
+
+        if outcome_excerpt:
+            parts += [
+                "## Relevant Agent Output (excerpt)",
+                outcome_excerpt,
+                "",
+            ]
+
+        # Insert Prior Discoveries section when precedent beads are available.
+        if prior_beads:
+            prior_section = self._build_prior_beads_section(prior_beads)
+            if prior_section:
+                parts.append(prior_section)
+                parts.append("")
+
+        parts += [
+            "## Resolution Instructions",
+            "Provide a focused, actionable recommendation. Use one of these signals:",
+            "- `FLAG_RESOLVED: <your recommendation>` — you have a clear answer.",
+            "- `ESCALATE_TO_INTERACT: <reason>` — human judgement is needed.",
+            "- `KNOWLEDGE_GAP: <description>` with `CONFIDENCE: none|low|partial`"
+            " — critical information is missing.",
+            "",
+            "Keep your response under 500 tokens.",
+        ]
+
+        return "\n".join(parts)
+
+    def build_task_prompt(
+        self,
+        step: PlanStep,
+        *,
+        task_summary: str = "",
+    ) -> str:
+        """Build a minimal prompt for task-runner agents executing bespoke skill instructions.
+
+        Targets ~1-3K tokens input.  Passes the step's ``task_description``
+        verbatim — the caller is responsible for embedding the bespoke skill
+        instructions there.
+
+        Intentionally excludes shared context, knowledge packs, beads, handoff
+        chain, context files, deliverables, path enforcement, and success
+        criteria.
+
+        Args:
+            step: The task PlanStep (``step.task_description`` contains bespoke
+                skill instructions).
+            task_summary: One-line mission context.
+
+        Returns:
+            A minimal markdown delegation prompt ready to pass to the Agent tool.
+        """
+        parts = [
+            "You are a task runner. Follow these instructions exactly.",
+            "",
+        ]
+
+        if task_summary.strip():
+            parts += [
+                f"**Context:** {task_summary.strip()}",
+                "",
+            ]
+
+        parts += [
+            f"## Task Instructions (Step {step.step_id})",
+            step.task_description.strip(),
+            "",
+            "## Output Format",
+            "Report what you did, the result, and whether it succeeded.",
+            "Keep your response under 500 tokens.",
+        ]
+
+        return "\n".join(parts)
+
     def build_team_delegation_prompt(
         self,
         step: PlanStep,
@@ -559,6 +728,8 @@ class PromptDispatcher:
             _KNOWLEDGE_GAPS_LINE,
             "",
             _BEAD_SIGNALS_LINE,
+            "",
+            _FLAG_SIGNALS_LINE,
             "",
             "Log non-obvious decisions under a **Decisions** heading. "
             "If you deviate from the plan, explain under a **Deviations** heading.",

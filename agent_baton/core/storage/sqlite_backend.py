@@ -152,24 +152,19 @@ class SqliteStorage:
             # -- plan ----------------------------------------------------------
             _upsert_plan(conn, state.plan)
 
-            # -- step_results (DELETE + INSERT OR REPLACE for clean replacement) -
-            # INSERT OR REPLACE guards against duplicate (task_id, step_id) rows
-            # that can accumulate in the in-memory list when a step is
-            # re-dispatched after crash recovery (dispatched→complete transition
-            # appends a new StepResult before the old one is removed).  The last
-            # occurrence wins, which is always the most recent state.
+            # -- step_results (DELETE + INSERT for clean replacement) ----------
             conn.execute(
                 "DELETE FROM step_results WHERE task_id = ?", (state.task_id,)
             )
             for sr in state.step_results:
                 conn.execute(
                     """
-                    INSERT OR REPLACE INTO step_results
+                    INSERT INTO step_results
                         (task_id, step_id, agent_name, status, outcome,
                          files_changed, commit_hash, estimated_tokens,
                          duration_seconds, retries, error, completed_at,
-                         deviations)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         deviations, step_type)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         state.task_id,
@@ -185,6 +180,7 @@ class SqliteStorage:
                         sr.error,
                         sr.completed_at,
                         json.dumps(sr.deviations),
+                        sr.step_type,
                     ),
                 )
                 # team step results cascade from step_results, delete via FK
@@ -354,6 +350,7 @@ class SqliteStorage:
                     deviations=json.loads(
                         sr["deviations"] if "deviations" in sr.keys() else "[]"
                     ),
+                    step_type=sr["step_type"] if "step_type" in sr.keys() else "developing",
                 )
             )
 
@@ -537,8 +534,8 @@ class SqliteStorage:
                     (task_id, step_id, agent_name, status, outcome,
                      files_changed, commit_hash, estimated_tokens,
                      duration_seconds, retries, error, completed_at,
-                     deviations)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     deviations, step_type)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task_id,
@@ -554,6 +551,7 @@ class SqliteStorage:
                     result.error,
                     result.completed_at,
                     json.dumps(result.deviations),
+                    result.step_type,
                 ),
             )
             # Replace team member results for this step
@@ -1680,8 +1678,9 @@ def _upsert_plan(conn: sqlite3.Connection, plan: "MachinePlan") -> None:  # noqa
                     (task_id, step_id, phase_id, agent_name,
                      task_description, model, depends_on,
                      deliverables, allowed_paths, blocked_paths,
-                     context_files, knowledge_attachments)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     context_files, knowledge_attachments,
+                     step_type, command)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     plan.task_id,
@@ -1696,6 +1695,8 @@ def _upsert_plan(conn: sqlite3.Connection, plan: "MachinePlan") -> None:  # noqa
                     json.dumps(step.blocked_paths),
                     json.dumps(step.context_files),
                     json.dumps([a.to_dict() for a in step.knowledge]),
+                    step.step_type,
+                    step.command,
                 ),
             )
 
@@ -1825,6 +1826,8 @@ def _load_plan_struct(
                         KnowledgeAttachment.from_dict(a)
                         for a in json.loads(raw_ka or "[]")
                     ],
+                    step_type=sr["step_type"] if "step_type" in sr.keys() else "developing",
+                    command=sr["command"] if "command" in sr.keys() else "",
                 )
             )
 

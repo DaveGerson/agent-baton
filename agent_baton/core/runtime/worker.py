@@ -26,6 +26,8 @@ Event ownership split:
 from __future__ import annotations
 
 import asyncio
+import subprocess
+from pathlib import Path
 
 from agent_baton.core.engine.protocols import ExecutionDriver
 from agent_baton.core.events.bus import EventBus
@@ -148,10 +150,17 @@ class TaskWorker:
                 if not actions:
                     actions = [action]
 
-                # Mark every step as dispatched so the engine does not
-                # re-dispatch them while they are in-flight.
+                # ── Separate automation from agent-dispatched steps ───────────
+                automation_actions = [a for a in actions if getattr(a, "step_type", "") == "automation"]
+                agent_actions = [a for a in actions if getattr(a, "step_type", "") != "automation"]
+
+                # Mark ALL steps (including automation) as dispatched so the
+                # engine does not re-dispatch them while they are in-flight.
                 for a in actions:
-                    self._engine.mark_dispatched(a.step_id, a.agent_name)
+                    self._engine.mark_dispatched(
+                        a.step_id,
+                        a.agent_name or "automation",
+                    )
 
                 # Event ownership: Worker publishes step-level events.
                 # Task-level and phase-level events are published by ExecutionEngine.
@@ -163,77 +172,159 @@ class TaskWorker:
                         evt.step_dispatched(
                             task_id=task_id,
                             step_id=a.step_id,
-                            agent_name=a.agent_name,
+                            agent_name=a.agent_name or "automation",
                             model=a.agent_model,
                         )
                     )
 
-                # Build step dicts for the scheduler.
-                steps = [
-                    {
-                        "agent_name": a.agent_name,
-                        "model": a.agent_model,
-                        "prompt": a.delegation_prompt,
-                        "step_id": a.step_id,
-                        "mcp_servers": a.mcp_servers,
-                    }
-                    for a in actions
-                ]
-
-                results = await self._scheduler.dispatch_batch(steps, self._launcher)
-
-                # Record all results back into the engine.
-                for result in results:
-                    if isinstance(result, Exception):
-                        # Should not reach here with return_exceptions=False,
-                        # but guard defensively.
+                # ── Automation: run commands directly, no LLM ────────────────
+                for a in automation_actions:
+                    try:
+                        proc = await self._run_automation(a)
+                        succeeded = proc.returncode == 0
                         self._engine.record_step_result(
-                            step_id="unknown",
-                            agent_name="unknown",
-                            status="failed",
-                            error=str(result),
+                            step_id=a.step_id,
+                            agent_name="automation",
+                            status="complete" if succeeded else "failed",
+                            outcome=proc.stdout,
+                            error=proc.stderr if not succeeded else "",
                         )
-                    else:
-                        self._engine.record_step_result(
-                            step_id=result.step_id,
-                            agent_name=result.agent_name,
-                            status=result.status,
-                            outcome=result.outcome,
-                            files_changed=result.files_changed,
-                            commit_hash=result.commit_hash,
-                            estimated_tokens=result.estimated_tokens,
-                            duration_seconds=result.duration_seconds,
-                            error=result.error,
-                        )
-
-                        # Publish step.completed or step.failed event.
-                        if result.status == "complete":
+                        event_status = "complete" if succeeded else "failed"
+                        if event_status == "complete":
                             self._bus.publish(
                                 evt.step_completed(
                                     task_id=task_id,
-                                    step_id=result.step_id,
-                                    agent_name=result.agent_name,
-                                    outcome=result.outcome,
-                                    files_changed=result.files_changed,
-                                    commit_hash=result.commit_hash,
-                                    duration_seconds=result.duration_seconds,
-                                    estimated_tokens=result.estimated_tokens,
+                                    step_id=a.step_id,
+                                    agent_name="automation",
+                                    outcome=proc.stdout,
+                                    files_changed=[],
+                                    commit_hash="",
+                                    duration_seconds=0.0,
+                                    estimated_tokens=0,
                                 )
                             )
                         else:
                             self._bus.publish(
                                 evt.step_failed(
                                     task_id=task_id,
-                                    step_id=result.step_id,
-                                    agent_name=result.agent_name,
-                                    error=result.error,
+                                    step_id=a.step_id,
+                                    agent_name="automation",
+                                    error=proc.stderr,
                                 )
                             )
+                    except subprocess.TimeoutExpired:
+                        self._engine.record_step_result(
+                            step_id=a.step_id,
+                            agent_name="automation",
+                            status="failed",
+                            error=f"Automation command timed out after 300s: {a.command}",
+                        )
+                        self._bus.publish(
+                            evt.step_failed(
+                                task_id=task_id,
+                                step_id=a.step_id,
+                                agent_name="automation",
+                                error=f"Automation command timed out after 300s: {a.command}",
+                            )
+                        )
+
+                # ── Agent steps: existing scheduler path ─────────────────────
+                if agent_actions:
+                    steps = [
+                        {
+                            "agent_name": a.agent_name,
+                            "model": a.agent_model,
+                            "prompt": a.delegation_prompt,
+                            "step_id": a.step_id,
+                            "mcp_servers": a.mcp_servers,
+                        }
+                        for a in agent_actions
+                    ]
+
+                    results = await self._scheduler.dispatch_batch(steps, self._launcher)
+
+                    # Record all results back into the engine.
+                    for result in results:
+                        if isinstance(result, Exception):
+                            # Should not reach here with return_exceptions=False,
+                            # but guard defensively.
+                            self._engine.record_step_result(
+                                step_id="unknown",
+                                agent_name="unknown",
+                                status="failed",
+                                error=str(result),
+                            )
+                        else:
+                            self._engine.record_step_result(
+                                step_id=result.step_id,
+                                agent_name=result.agent_name,
+                                status=result.status,
+                                outcome=result.outcome,
+                                files_changed=result.files_changed,
+                                commit_hash=result.commit_hash,
+                                estimated_tokens=result.estimated_tokens,
+                                duration_seconds=result.duration_seconds,
+                                error=result.error,
+                            )
+
+                            # Publish step.completed or step.failed event.
+                            if result.status == "complete":
+                                self._bus.publish(
+                                    evt.step_completed(
+                                        task_id=task_id,
+                                        step_id=result.step_id,
+                                        agent_name=result.agent_name,
+                                        outcome=result.outcome,
+                                        files_changed=result.files_changed,
+                                        commit_hash=result.commit_hash,
+                                        duration_seconds=result.duration_seconds,
+                                        estimated_tokens=result.estimated_tokens,
+                                    )
+                                )
+                            else:
+                                self._bus.publish(
+                                    evt.step_failed(
+                                        task_id=task_id,
+                                        step_id=result.step_id,
+                                        agent_name=result.agent_name,
+                                        error=result.error,
+                                    )
+                                )
 
                 continue
 
         # Unreachable, but satisfies static analysis.
         return "Execution loop exited unexpectedly."
+
+    async def _run_automation(self, action: object) -> subprocess.CompletedProcess:
+        """Run an automation step's shell command in a thread pool.
+
+        Uses ``asyncio.to_thread`` so the event loop stays unblocked while the
+        subprocess runs.  A 5-minute timeout is enforced — callers must handle
+        ``subprocess.TimeoutExpired``.
+
+        The working directory is the project root (``Path.cwd()`` at the time of
+        invocation) rather than the engine's internal ``_root``, matching the
+        behaviour documented in the spec.
+
+        Args:
+            action: An :class:`~agent_baton.models.execution.ExecutionAction`
+                with ``step_type="automation"`` and a ``command`` attribute.
+
+        Returns:
+            A :class:`subprocess.CompletedProcess` with ``returncode``,
+            ``stdout``, and ``stderr`` populated.
+        """
+        command = getattr(action, "command", "")
+        return await asyncio.to_thread(
+            subprocess.run,
+            command,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=300,
+            cwd=str(Path.cwd()),
+        )
 
     async def _handle_gate(self, action: object) -> None:  # action: ExecutionAction
         """Handle a GATE action.

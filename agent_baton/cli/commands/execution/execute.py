@@ -291,25 +291,39 @@ def _print_action(action: dict) -> None:
 
     if atype == ActionType.DISPATCH.value:
         step_id = action.get('step_id', '')
+        step_type = action.get('step_type', '')
         print(f"ACTION: DISPATCH")
-        print(f"  Agent: {action.get('agent_name', '')}")
-        print(f"  Model: {action.get('agent_model', '')}")
-        print(f"  Step:  {step_id}")
-        if _is_team_member_id(step_id):
-            # Derive the parent step ID (e.g. "1.1.a" → "1.1") so the
-            # orchestrator knows which parent to reference in team-record.
-            parent_step_id = ".".join(step_id.split(".")[:2])
-            print(f"  Team-Step: yes")
-            print(f"  Parent-Step: {parent_step_id}")
-            print(f"  Record-With: baton execute team-record --step-id {parent_step_id} --member-id {step_id} ...")
-        if action.get("interactive"):
-            print(f"  Interactive: yes")
-            print(f"  Max-Turns: {action.get('interact_max_turns', 10)}")
-        print(f"  Message: {msg}")
-        print()
-        print("--- Delegation Prompt ---")
-        print(action.get("delegation_prompt", ""))
-        print("--- End Prompt ---")
+        if step_type == "automation":
+            # Automation steps have no agent or model — show command block only.
+            print(f"  Step:    {step_id}")
+            print(f"  Type:    automation")
+            print(f"  Command: {action.get('command', '')}")
+            print(f"  Message: {msg}")
+            print()
+            print("--- Command ---")
+            print(action.get("command", ""))
+            print("--- End Command ---")
+        else:
+            print(f"  Agent: {action.get('agent_name', '')}")
+            print(f"  Model: {action.get('agent_model', '')}")
+            print(f"  Step:  {step_id}")
+            if step_type:
+                print(f"  Type:  {step_type}")
+            if _is_team_member_id(step_id):
+                # Derive the parent step ID (e.g. "1.1.a" → "1.1") so the
+                # orchestrator knows which parent to reference in team-record.
+                parent_step_id = ".".join(step_id.split(".")[:2])
+                print(f"  Team-Step: yes")
+                print(f"  Parent-Step: {parent_step_id}")
+                print(f"  Record-With: baton execute team-record --step-id {parent_step_id} --member-id {step_id} ...")
+            if action.get("interactive"):
+                print(f"  Interactive: yes")
+                print(f"  Max-Turns: {action.get('interact_max_turns', 10)}")
+            print(f"  Message: {msg}")
+            print()
+            print("--- Delegation Prompt ---")
+            print(action.get("delegation_prompt", ""))
+            print("--- End Prompt ---")
 
     elif atype == ActionType.GATE.value:
         print(f"ACTION: GATE")
@@ -986,61 +1000,103 @@ def _handle_run(args: argparse.Namespace) -> None:
             sys.exit(1)
 
         if atype == ActionType.DISPATCH.value:
-            agent_name = action_dict.get("agent_name", "")
             step_id = action_dict.get("step_id", "")
-            agent_model = action_dict.get("agent_model", model_override)
-            prompt = action_dict.get("delegation_prompt", "")
+            step_type = action_dict.get("step_type", "")
             msg = action_dict.get("message", "")
 
-            print(f"\n  [{step_id}] Dispatching {agent_name} (model={agent_model})...", file=sys.stderr)
-            if msg:
-                print(f"    {msg[:120]}", file=sys.stderr)
+            if step_type == "automation":
+                # ── Automation: run shell command directly, no LLM ───────
+                command = action_dict.get("command", "")
+                print(f"\n  [{step_id}] Running automation: {command[:80]}...", file=sys.stderr)
+                engine.mark_dispatched(step_id=step_id, agent_name="automation")
 
-            engine.mark_dispatched(step_id=step_id, agent_name=agent_name)
-
-            if dry_run:
-                print(f"  [DRY RUN] Would launch {agent_name} with {len(prompt)} char prompt", file=sys.stderr)
-                engine.record_step_result(
-                    step_id=step_id, agent_name=agent_name,
-                    status="complete", outcome="dry-run skip",
-                )
+                if dry_run:
+                    print(f"  [DRY RUN] Would run: {command}", file=sys.stderr)
+                    engine.record_step_result(
+                        step_id=step_id, agent_name="automation",
+                        status="complete", outcome="dry-run skip",
+                    )
+                else:
+                    import subprocess as _subprocess
+                    try:
+                        proc = _subprocess.run(
+                            command, shell=True, capture_output=True,
+                            text=True, timeout=300,
+                        )
+                        succeeded = proc.returncode == 0
+                        engine.record_step_result(
+                            step_id=step_id,
+                            agent_name="automation",
+                            status="complete" if succeeded else "failed",
+                            outcome=proc.stdout,
+                            error=proc.stderr if not succeeded else "",
+                        )
+                        status_marker = success("done") if succeeded else color_error("FAIL")
+                        print(f"  [{step_id}] {status_marker}", file=sys.stderr)
+                        if not succeeded:
+                            print(f"    Error: {proc.stderr[:200]}", file=sys.stderr)
+                    except _subprocess.TimeoutExpired:
+                        engine.record_step_result(
+                            step_id=step_id, agent_name="automation",
+                            status="failed",
+                            error=f"Automation command timed out after 300s: {command}",
+                        )
+                        print(f"  [{step_id}] {color_error('TIMEOUT')}", file=sys.stderr)
             else:
-                import asyncio as _asyncio
-                assert launcher is not None  # guarded by user_error above
-                result = _asyncio.run(launcher.launch(
-                    agent_name=agent_name,
-                    model=agent_model,
-                    prompt=prompt,
-                    step_id=step_id,
-                ))
-                engine.record_step_result(
-                    step_id=step_id,
-                    agent_name=agent_name,
-                    status=result.status,
-                    outcome=result.outcome,
-                    files_changed=result.files_changed,
-                    commit_hash=result.commit_hash,
-                    estimated_tokens=result.estimated_tokens,
-                    duration_seconds=result.duration_seconds,
-                    error=result.error,
-                )
-                status_marker = success("done") if result.status == "complete" else color_error("FAIL")
-                print(f"  [{step_id}] {status_marker} ({result.duration_seconds:.1f}s)", file=sys.stderr)
-                if result.error:
-                    print(f"    Error: {result.error[:200]}", file=sys.stderr)
+                # ── Agent dispatch: existing LLM path ────────────────────
+                agent_name = action_dict.get("agent_name", "")
+                agent_model = action_dict.get("agent_model", model_override)
+                prompt = action_dict.get("delegation_prompt", "")
 
-                # Log to mission log
-                log_status = "COMPLETE" if result.status == "complete" else "FAILED"
-                entry = MissionLogEntry(
-                    agent_name=agent_name,
-                    status=log_status,
-                    assignment=step_id,
-                    result=result.outcome[:200],
-                    files=result.files_changed,
-                    commit_hash=result.commit_hash,
-                    issues=[result.error] if result.error else [],
-                )
-                ContextManager(task_id=task_id).append_to_mission_log(entry)
+                print(f"\n  [{step_id}] Dispatching {agent_name} (model={agent_model})...", file=sys.stderr)
+                if msg:
+                    print(f"    {msg[:120]}", file=sys.stderr)
+
+                engine.mark_dispatched(step_id=step_id, agent_name=agent_name)
+
+                if dry_run:
+                    print(f"  [DRY RUN] Would launch {agent_name} with {len(prompt)} char prompt", file=sys.stderr)
+                    engine.record_step_result(
+                        step_id=step_id, agent_name=agent_name,
+                        status="complete", outcome="dry-run skip",
+                    )
+                else:
+                    import asyncio as _asyncio
+                    assert launcher is not None  # guarded by user_error above
+                    result = _asyncio.run(launcher.launch(
+                        agent_name=agent_name,
+                        model=agent_model,
+                        prompt=prompt,
+                        step_id=step_id,
+                    ))
+                    engine.record_step_result(
+                        step_id=step_id,
+                        agent_name=agent_name,
+                        status=result.status,
+                        outcome=result.outcome,
+                        files_changed=result.files_changed,
+                        commit_hash=result.commit_hash,
+                        estimated_tokens=result.estimated_tokens,
+                        duration_seconds=result.duration_seconds,
+                        error=result.error,
+                    )
+                    status_marker = success("done") if result.status == "complete" else color_error("FAIL")
+                    print(f"  [{step_id}] {status_marker} ({result.duration_seconds:.1f}s)", file=sys.stderr)
+                    if result.error:
+                        print(f"    Error: {result.error[:200]}", file=sys.stderr)
+
+                    # Log to mission log
+                    log_status = "COMPLETE" if result.status == "complete" else "FAILED"
+                    entry = MissionLogEntry(
+                        agent_name=agent_name,
+                        status=log_status,
+                        assignment=step_id,
+                        result=result.outcome[:200],
+                        files=result.files_changed,
+                        commit_hash=result.commit_hash,
+                        issues=[result.error] if result.error else [],
+                    )
+                    ContextManager(task_id=task_id).append_to_mission_log(entry)
 
             steps_executed += 1
 

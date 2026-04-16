@@ -167,6 +167,55 @@ _CROSS_CONCERN_SIGNALS: dict[str, list[str]] = {
 
 
 # ---------------------------------------------------------------------------
+# Step type assignment — maps agent role to default step_type
+# ---------------------------------------------------------------------------
+# Unknown agents fall through to "developing" (the safe default).
+# test-engineer gets an override to "developing" when the task is building
+# test infrastructure rather than running validation.
+
+_AGENT_STEP_TYPE: dict[str, str] = {
+    "architect": "planning",
+    "ai-systems-architect": "planning",
+    "code-reviewer": "reviewing",
+    "security-reviewer": "reviewing",
+    "auditor": "reviewing",
+    "test-engineer": "testing",
+    "task-runner": "task",
+}
+
+# Keywords that flip test-engineer's step_type back to "developing"
+# (building test infrastructure, not running tests).
+_TEST_ENGINEER_DEVELOPING_KEYWORDS = ("create", "build", "scaffold")
+
+
+def _step_type_for_agent(agent_name: str, task_description: str = "") -> str:
+    """Return the appropriate step_type for a given agent role.
+
+    Uses ``_AGENT_STEP_TYPE`` for the lookup with ``"developing"`` as the
+    default.  ``test-engineer`` is overridden to ``"developing"`` when the
+    task description contains build/scaffold keywords (i.e. the step is
+    building test infrastructure, not running tests).
+
+    Args:
+        agent_name: Full agent name (may include ``--`` variant suffix).
+        task_description: Task description text used for the test-engineer
+            override check.  Optional — defaults to ``""``.
+
+    Returns:
+        One of the step_type strings defined in ``_AGENT_STEP_TYPE``, or
+        ``"developing"`` for unknown agents.
+    """
+    base = agent_name.split("--")[0]
+    step_type = _AGENT_STEP_TYPE.get(base, "developing")
+    # Override: test-engineer building test infrastructure → developing
+    if base == "test-engineer" and step_type == "testing":
+        lower_desc = task_description.lower()
+        if any(kw in lower_desc for kw in _TEST_ENGINEER_DEVELOPING_KEYWORDS):
+            step_type = "developing"
+    return step_type
+
+
+# ---------------------------------------------------------------------------
 # Compound task decomposition — sub-task phase name mapping
 # ---------------------------------------------------------------------------
 
@@ -1605,13 +1654,13 @@ class IntelligentPlanner:
             steps: list[PlanStep] = []
             for step_idx, agent_base in enumerate(st["agents"], start=1):
                 routed_name: str = agent_route_map.get(agent_base) or agent_base
+                _desc = self._step_description(phase_name, routed_name, st["text"])
                 steps.append(
                     PlanStep(
                         step_id=f"{idx}.{step_idx}",
                         agent_name=routed_name,
-                        task_description=self._step_description(
-                            phase_name, routed_name, st["text"],
-                        ),
+                        task_description=_desc,
+                        step_type=_step_type_for_agent(routed_name, _desc),
                     )
                 )
 
@@ -1832,13 +1881,13 @@ class IntelligentPlanner:
         if not agents:
             for phase in phases:
                 if not phase.steps:
+                    _desc = self._step_description(phase.name, "backend-engineer", task_summary)
                     phase.steps.append(
                         PlanStep(
                             step_id=f"{phase.phase_id}.1",
                             agent_name="backend-engineer",
-                            task_description=self._step_description(
-                                phase.name, "backend-engineer", task_summary
-                            ),
+                            task_description=_desc,
+                            step_type=_step_type_for_agent("backend-engineer", _desc),
                         )
                     )
             return phases
@@ -1914,26 +1963,26 @@ class IntelligentPlanner:
         for phase, agent in sorted(assigned, key=lambda x: x[0].phase_id):
             step_number = len(phase.steps) + 1
             step_id = f"{phase.phase_id}.{step_number}"
+            _desc = self._step_description(phase.name, agent, task_summary)
             phase.steps.append(
                 PlanStep(
                     step_id=step_id,
                     agent_name=agent,
-                    task_description=self._step_description(
-                        phase.name, agent, task_summary
-                    ),
+                    task_description=_desc,
+                    step_type=_step_type_for_agent(agent, _desc),
                 )
             )
 
         # Guarantee every phase has at least one step
         for phase in phases:
             if not phase.steps:
+                _desc = self._step_description(phase.name, agents[0], task_summary)
                 phase.steps.append(
                     PlanStep(
                         step_id=f"{phase.phase_id}.1",
                         agent_name=agents[0],
-                        task_description=self._step_description(
-                            phase.name, agents[0], task_summary
-                        ),
+                        task_description=_desc,
+                        step_type=_step_type_for_agent(agents[0], _desc),
                     )
                 )
 
@@ -1984,13 +2033,13 @@ class IntelligentPlanner:
                 )
             steps: list[PlanStep] = []
             for step_idx, agent in enumerate(phase_agents, start=1):
+                _desc = self._step_description(name, agent, task_summary)
                 steps.append(
                     PlanStep(
                         step_id=f"{idx}.{step_idx}",
                         agent_name=agent,
-                        task_description=self._step_description(
-                            name, agent, task_summary
-                        ),
+                        task_description=_desc,
+                        step_type=_step_type_for_agent(agent, _desc),
                     )
                 )
             phases.append(PlanPhase(phase_id=idx, name=name, steps=steps, gate=gate))

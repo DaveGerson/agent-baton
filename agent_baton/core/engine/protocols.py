@@ -258,7 +258,12 @@ class ExecutionDriver(Protocol):
         """
         ...
 
-    def provide_interact_input(self, step_id: str, input_text: str) -> None:
+    def provide_interact_input(
+        self,
+        step_id: str,
+        input_text: str,
+        source: str = "human",
+    ) -> None:
         """Record human input for an interactive step awaiting a response.
 
         Appends a human turn to the step's interaction history and sets the
@@ -268,6 +273,9 @@ class ExecutionDriver(Protocol):
         Args:
             step_id: The step ID currently in ``interacting`` status.
             input_text: Human-provided text for the next agent turn.
+            source: Origin of this input turn — ``"human"`` (default),
+                ``"auto-agent"`` (Tier 2 agent-to-agent dialogue), or
+                ``"webhook"`` (external webhook response).
         """
         ...
 

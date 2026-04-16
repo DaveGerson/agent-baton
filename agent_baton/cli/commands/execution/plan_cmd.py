@@ -175,6 +175,7 @@ def handler(args: argparse.Namespace) -> None:
                             "step_id": "1.1",
                             "agent_name": "architect",
                             "task_description": "Describe what this agent should do",
+                            "step_type": "planning",
                             "context_files": ["CLAUDE.md"],
                             "deliverables": [],
                         }
@@ -193,6 +194,7 @@ def handler(args: argparse.Namespace) -> None:
                             "step_id": "2.1",
                             "agent_name": "backend-engineer",
                             "task_description": "Implement the changes",
+                            "step_type": "developing",
                             "context_files": ["CLAUDE.md"],
                             "deliverables": [],
                         }

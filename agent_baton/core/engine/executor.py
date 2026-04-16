@@ -1126,11 +1126,62 @@ class ExecutionEngine:
         )
         state.step_results.append(result)
 
+        # ── Propagate step_type from PlanStep onto StepResult ─────────────────
+        # Allows analytics/queries against step_results to filter by type
+        # (e.g. "how many tokens did consulting steps save?") without joining
+        # back to plan_steps.
+        _plan_step = self._find_step(state, step_id)
+        if _plan_step is not None:
+            result.step_type = _plan_step.step_type
+
+        # ── Flag detection protocol ──────────────────────────────────────────
+        # Must run BEFORE _handle_knowledge_gap so flags take precedence.
+        # Skipped for automation steps: stdout is command output, not agent text.
+        if (
+            status in ("complete", "interrupted")
+            and outcome
+            and (_plan_step is None or _plan_step.step_type != "automation")
+        ):
+            flag_handled = self._handle_flags(
+                outcome=outcome,
+                step_id=step_id,
+                agent_name=agent_name,
+                state=state,
+            )
+            if flag_handled:
+                # Flag inserted a consultation step — skip knowledge gap
+                # processing.  The gap (if any) will re-surface via the
+                # specialist's output if the consultation can't resolve.
+                self._save_state(state)
+                return
+
+        # ── Consultation result handling ──────────────────────────────────────
+        # When a consulting step completes, check for resolution markers.
+        # If a resolution or Tier-2 escalation was handled, skip the
+        # knowledge-gap handler to avoid spurious gap processing.
+        consultation_handled = False
+        if status == "complete" and outcome:
+            if _plan_step is not None and _plan_step.step_type == "consulting":
+                consultation_handled = self._handle_consultation_result(
+                    outcome=outcome,
+                    step_id=step_id,
+                    agent_name=agent_name,
+                    state=state,
+                )
+                if consultation_handled:
+                    self._save_state(state)
+                    return
+
         # ── Knowledge gap protocol ──────────────────────────────────────────
         # Inspect the outcome for a KNOWLEDGE_GAP signal emitted by the agent.
         # Only process when status is "complete" or "interrupted" — a "failed"
         # step is handled by the failure path; "dispatched" has no outcome yet.
-        if status in ("complete", "interrupted") and outcome:
+        # Skipped for automation steps: stdout is command output, not agent text.
+        if (
+            status in ("complete", "interrupted")
+            and outcome
+            and (_plan_step is None or _plan_step.step_type != "automation")
+        ):
             self._handle_knowledge_gap(
                 outcome=outcome,
                 step_id=step_id,
@@ -1143,8 +1194,14 @@ class ExecutionEngine:
         # the agent outcome and persist them to the bead store.  Guarded by
         # self._bead_store so this block is a strict no-op when beads are
         # unavailable (older schema, no storage backend, init failure).
+        # Skipped for automation steps: command stdout won't contain bead signals.
         # Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
-        if status in ("complete", "interrupted") and outcome and self._bead_store:
+        if (
+            status in ("complete", "interrupted")
+            and outcome
+            and self._bead_store
+            and (_plan_step is None or _plan_step.step_type != "automation")
+        ):
             try:
                 from agent_baton.core.engine.bead_signal import parse_bead_signals
                 _bead_count = len(
@@ -1182,8 +1239,14 @@ class ExecutionEngine:
         # Parse BEAD_FEEDBACK signals from the outcome and apply quality score
         # adjustments to the referenced beads.  This is a tiebreaker in
         # BeadSelector ranking: useful beads surface more, misleading beads decay.
+        # Skipped for automation steps: command stdout won't contain bead signals.
         # Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
-        if status in ("complete", "interrupted") and outcome and self._bead_store:
+        if (
+            status in ("complete", "interrupted")
+            and outcome
+            and self._bead_store
+            and (_plan_step is None or _plan_step.step_type != "automation")
+        ):
             try:
                 from agent_baton.core.engine.bead_signal import parse_bead_feedback
                 feedback_items = parse_bead_feedback(outcome)
@@ -2878,7 +2941,26 @@ class ExecutionEngine:
 
         On a clean policy check (or after human unblock), a compliance audit
         entry is written recording the dispatch event.
+
+        Routing by step_type:
+        - ``automation``: skip policy check and LLM; return command directly.
+        - ``consulting``: lightweight consultation prompt.
+        - ``task``: minimal bespoke-skill prompt.
+        - everything else: full delegation prompt (existing behaviour).
         """
+        # ── Automation: bypass policy check and LLM dispatch ─────────────────
+        # Automation steps are deterministic shell commands — no token cost,
+        # no agent model, no prompt.  Return the action immediately so the
+        # caller (CLI orchestrator or TaskWorker) can run the command directly.
+        if step.step_type == "automation":
+            return ExecutionAction(
+                action_type=ActionType.DISPATCH,
+                step_id=step.step_id,
+                step_type="automation",
+                command=step.command,
+                message=f"Execute automation step {step.step_id}.",
+            )
+
         # ── Policy pre-dispatch check ────────────────────────────────────────
         policy_action = self._check_policy_block(state, step)
         if policy_action is not None:
@@ -2925,6 +3007,8 @@ class ExecutionEngine:
                 agent_model=step.model,
                 delegation_prompt=prompt,
                 step_id=step.step_id,
+                step_type=step.step_type,
+                command=step.command,
                 path_enforcement=enforcement or "",
                 interactive=True,
                 interact_max_turns=step.max_turns,
@@ -2962,14 +3046,30 @@ class ExecutionEngine:
                 _log.debug("BeadSelector failed (non-fatal): %s", _sel_exc)
                 prior_beads = []
 
-        prompt = dispatcher.build_delegation_prompt(
-            step,
-            shared_context=state.plan.shared_context,
-            handoff_from=handoff,
-            task_summary=state.plan.task_summary,
-            task_type=state.plan.task_type or "",
-            prior_beads=prior_beads or None,
-        )
+        # ── Route prompt builder by step_type ───────────────────────────────
+        # consulting → lightweight consultation prompt (no shared context chain)
+        # task       → minimal bespoke-skill prompt (no context overhead)
+        # everything else → full delegation prompt (existing behaviour)
+        if step.step_type == "consulting":
+            prompt = dispatcher.build_consultation_prompt(
+                step,
+                task_summary=state.plan.task_summary,
+                prior_beads=prior_beads or None,
+            )
+        elif step.step_type == "task":
+            prompt = dispatcher.build_task_prompt(
+                step,
+                task_summary=state.plan.task_summary,
+            )
+        else:
+            prompt = dispatcher.build_delegation_prompt(
+                step,
+                shared_context=state.plan.shared_context,
+                handoff_from=handoff,
+                task_summary=state.plan.task_summary,
+                task_type=state.plan.task_type or "",
+                prior_beads=prior_beads or None,
+            )
         enforcement = PromptDispatcher.build_path_enforcement(step)
 
         # ── Compliance audit: record dispatch event ──────────────────────────
@@ -2991,6 +3091,8 @@ class ExecutionEngine:
             agent_model=step.model,
             delegation_prompt=prompt,
             step_id=step.step_id,
+            step_type=step.step_type,
+            command=step.command,
             path_enforcement=enforcement or "",
             interactive=step.interactive,
             interact_max_turns=step.max_turns if step.interactive else 10,
@@ -3030,7 +3132,12 @@ class ExecutionEngine:
             interact_max_turns=step.max_turns,
         )
 
-    def provide_interact_input(self, step_id: str, input_text: str) -> None:
+    def provide_interact_input(
+        self,
+        step_id: str,
+        input_text: str,
+        source: str = "human",
+    ) -> None:
         """Record human input for an interactive step and set it to ``interact_dispatched``.
 
         Called by ``baton execute interact --step-id X --input "..."`` to
@@ -3041,6 +3148,9 @@ class ExecutionEngine:
         Args:
             step_id: The step ID that is currently in ``interacting`` status.
             input_text: Human-provided text to send as the next turn.
+            source: Origin of this input turn.  One of ``"human"`` (default,
+                typed by a person), ``"auto-agent"`` (generated by Tier 2
+                agent-to-agent dialogue), or ``"webhook"`` (external webhook).
 
         Raises:
             RuntimeError: If no active execution state exists.
@@ -3063,12 +3173,13 @@ class ExecutionEngine:
             role="human",
             content=input_text,
             turn_number=turn_number,
+            source=source,
         ))
         result.status = "interact_dispatched"
         self._save_execution(state)
         _log.info(
-            "Interaction input recorded for step %s (human turn %d).",
-            step_id, turn_number,
+            "Interaction input recorded for step %s (human turn %d, source=%s).",
+            step_id, turn_number, source,
         )
 
     def complete_interaction(self, step_id: str) -> None:
@@ -3527,6 +3638,252 @@ class ExecutionEngine:
                 if step.step_id == step_id:
                     return pi, si
         return -1, -1
+
+    def _handle_flags(
+        self,
+        outcome: str,
+        step_id: str,
+        agent_name: str,
+        state: ExecutionState,
+    ) -> bool:
+        """Detect a DESIGN_CHOICE: or CONFLICT: flag in *outcome* and handle it.
+
+        When a flag is found the original step is marked ``"interrupted"``, a
+        new ``consulting`` step is inserted into the same phase, and a
+        :class:`PlanAmendment` is recorded.
+
+        Returns ``True`` if a flag was found and handled, ``False`` otherwise.
+        The caller should return early and skip the knowledge-gap handler when
+        this method returns ``True``.
+
+        Anti-loop guard: consulting steps are exempt — a consultant that
+        cannot resolve emits ``KNOWLEDGE_GAP:`` (Tier 3) rather than
+        re-entering Tier 1.
+        """
+        from agent_baton.core.engine.flags import (
+            parse_design_flag,
+            parse_conflict_flag,
+            _FLAG_ROUTING,
+            _FLAG_ROUTING_DEFAULT,
+        )
+
+        # Parse flag — design-choice takes precedence over conflict.
+        flag = parse_design_flag(outcome, step_id=step_id, agent_name=agent_name)
+        if flag is None:
+            flag = parse_conflict_flag(outcome, step_id=step_id, agent_name=agent_name)
+        if flag is None:
+            return False
+
+        # Anti-loop guard: consulting steps must not spawn more consulting steps.
+        plan_step = self._find_step(state, step_id)
+        if plan_step is None or plan_step.step_type == "consulting":
+            return False
+
+        # Attach the full outcome so to_consultation_description() has context.
+        flag.partial_outcome = outcome
+
+        # Route to the appropriate specialist.
+        specialist = _FLAG_ROUTING.get(flag.flag_type, _FLAG_ROUTING_DEFAULT)
+
+        # Locate the containing phase BEFORE mutating any state.
+        containing_phase: PlanPhase | None = None
+        for phase in state.plan.phases:
+            if any(s.step_id == step_id for s in phase.steps):
+                containing_phase = phase
+                break
+
+        if containing_phase is None:
+            logger.warning(
+                "_handle_flags: could not locate phase for step %s — skipping flag insertion",
+                step_id,
+            )
+            return False
+
+        # Mark the current step as interrupted in step_results — only after
+        # confirming the phase exists so we don't orphan an interrupted step.
+        for sr in state.step_results:
+            if sr.step_id == step_id:
+                sr.status = "interrupted"
+                break
+
+        # Generate the new consulting step id.
+        new_step_id = f"{containing_phase.phase_id}.{len(containing_phase.steps) + 1}"
+
+        # Build the consulting PlanStep.
+        consulting_step = PlanStep(
+            step_id=new_step_id,
+            agent_name=specialist,
+            task_description=flag.to_consultation_description(),
+            step_type="consulting",
+            context_files=list(plan_step.context_files),
+        )
+        containing_phase.steps.append(consulting_step)
+
+        # Record the plan amendment.
+        amendment = PlanAmendment(
+            amendment_id=f"amend-{len(state.amendments) + 1}",
+            trigger=f"flag:{flag.flag_type}",
+            trigger_phase_id=containing_phase.phase_id,
+            description=(
+                f"Consulting {specialist} on {flag.flag_type} in step {step_id}"
+            ),
+            steps_added=[new_step_id],
+            metadata={
+                "original_step_id": step_id,
+                "consulting_step_id": new_step_id,
+            },
+        )
+        state.amendments.append(amendment)
+
+        logger.info(
+            "Flag escalation: %r in step %s (%s) — inserted consulting step %s "
+            "for specialist %s (amendment %s)",
+            flag.flag_type, step_id, agent_name, new_step_id,
+            specialist, amendment.amendment_id,
+        )
+        return True
+
+    def _handle_consultation_result(
+        self,
+        outcome: str,
+        step_id: str,
+        agent_name: str,
+        state: ExecutionState,
+    ) -> bool:
+        """Process the specialist's output from a consulting step.
+
+        Three resolution paths:
+
+        * ``FLAG_RESOLVED: <decision>`` — Tier 1 resolved.  Record a
+          :class:`ResolvedDecision`, find the original interrupted step via
+          the amendment's ``original_step_id`` metadata, and insert a
+          re-dispatch step for that agent.
+
+        * ``ESCALATE_TO_INTERACT:`` — Tier 2 promotion.  Set the consulting
+          :class:`PlanStep` to ``interactive=True`` and the :class:`StepResult`
+          status to ``"interacting"`` so the next ``_determine_action()`` cycle
+          returns an INTERACT action.
+
+        * Neither marker — the consulting step completed normally.  The
+          knowledge-gap handler (called next by ``record_step_result``) will
+          process any ``KNOWLEDGE_GAP:`` in the output for Tier 3 escalation.
+
+        Returns ``True`` if a resolution or escalation was handled (caller
+        should skip knowledge-gap processing), ``False`` otherwise.
+        """
+        from agent_baton.core.engine.flags import (
+            parse_flag_resolution,
+            has_escalate_to_interact,
+        )
+
+        resolution = parse_flag_resolution(outcome)
+        if resolution is not None:
+            # ── Tier 1 resolved ────────────────────────────────────────────
+            # Find the original interrupted step via the amendment metadata.
+            original_step_id = ""
+            for amendment in reversed(state.amendments):
+                if step_id in amendment.steps_added:
+                    original_step_id = amendment.metadata.get("original_step_id", "")
+                    break
+
+            # Record the resolved decision so re-dispatch carries the answer.
+            # ResolvedDecision reuses gap_description for the flag description
+            # (infrastructure reuse; avoids model changes).
+            decision = ResolvedDecision(
+                gap_description=f"Flag resolution for step {original_step_id or step_id}",
+                resolution=resolution,
+                step_id=step_id,
+                timestamp=_utcnow(),
+            )
+            state.resolved_decisions.append(decision)
+
+            # Insert re-dispatch step for the original agent.
+            if original_step_id:
+                original_plan_step = self._find_step(state, original_step_id)
+                if original_plan_step is not None:
+                    containing_phase: PlanPhase | None = None
+                    for phase in state.plan.phases:
+                        if any(s.step_id == step_id for s in phase.steps):
+                            containing_phase = phase
+                            break
+
+                    if containing_phase is not None:
+                        new_step_id = (
+                            f"{containing_phase.phase_id}.{len(containing_phase.steps) + 1}"
+                        )
+                        re_dispatch_step = PlanStep(
+                            step_id=new_step_id,
+                            agent_name=original_plan_step.agent_name,
+                            task_description=(
+                                original_plan_step.task_description
+                                + "\n\nContinue from partial progress."
+                            ),
+                            model=original_plan_step.model,
+                            step_type=original_plan_step.step_type,
+                            context_files=list(original_plan_step.context_files),
+                            allowed_paths=list(original_plan_step.allowed_paths),
+                            blocked_paths=list(original_plan_step.blocked_paths),
+                        )
+                        containing_phase.steps.append(re_dispatch_step)
+
+                        redispatch_amendment = PlanAmendment(
+                            amendment_id=f"amend-{len(state.amendments) + 1}",
+                            trigger=f"flag:resolved",
+                            trigger_phase_id=containing_phase.phase_id,
+                            description=(
+                                f"Re-dispatch {original_plan_step.agent_name} after "
+                                f"flag resolved by {agent_name} (step {step_id})"
+                            ),
+                            steps_added=[new_step_id],
+                            metadata={
+                                "original_step_id": original_step_id,
+                                "consulting_step_id": step_id,
+                                "resolution": resolution,
+                            },
+                        )
+                        state.amendments.append(redispatch_amendment)
+
+                        logger.info(
+                            "Flag resolved by %s (step %s): %r — "
+                            "re-dispatching %s as step %s",
+                            agent_name, step_id, resolution,
+                            original_plan_step.agent_name, new_step_id,
+                        )
+            return True
+
+        if has_escalate_to_interact(outcome):
+            # ── Tier 2 promotion ────────────────────────────────────────────
+            # Flip the consulting PlanStep to interactive mode so
+            # _determine_action() returns INTERACT on the next cycle.
+            consulting_plan_step = self._find_step(state, step_id)
+            if consulting_plan_step is not None:
+                consulting_plan_step.interactive = True
+
+            # Update the StepResult status to "interacting".
+            for sr in state.step_results:
+                if sr.step_id == step_id:
+                    sr.status = "interacting"
+                    sr.interaction_history.append(
+                        InteractionTurn(
+                            role="agent",
+                            content=outcome,
+                            source="agent",
+                            turn_number=1,
+                        )
+                    )
+                    break
+
+            logger.info(
+                "ESCALATE_TO_INTERACT from consulting step %s (%s) — "
+                "promoting to Tier 2 agent-to-agent INTERACT",
+                step_id, agent_name,
+            )
+            return True
+
+        # Neither FLAG_RESOLVED nor ESCALATE_TO_INTERACT — consulting step
+        # completed normally.  The knowledge-gap handler that runs next will
+        # catch any KNOWLEDGE_GAP: for Tier 3 escalation.
+        return False
 
     def _handle_knowledge_gap(
         self,
