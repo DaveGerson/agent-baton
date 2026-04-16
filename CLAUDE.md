@@ -7,8 +7,9 @@ system for Claude Code.
 
 ```
 agent_baton/       ← Python package (orchestration engine)
-  models/          ← Data models (23 modules, incl. pmo.py, knowledge.py, bead.py,
-  |                  learning.py, decision.py, events.py, session.py, parallel.py)
+  models/          ← Data models (25 modules, incl. execution.py, pmo.py, knowledge.py,
+  |                  bead.py, learning.py, decision.py, events.py, session.py,
+  |                  parallel.py, improvement.py, feedback.py, enums.py)
   core/            ← Business logic (11 sub-packages, no shim files)
     engine/        ← Execution core: planner, executor, dispatcher, gates,
     │                persistence, protocols (ExecutionDriver), classifier,
@@ -20,7 +21,8 @@ agent_baton/       ← Python package (orchestration engine)
     storage/       ← Central DB: sync.py (SyncEngine), central.py (CentralStore),
     │                connection, schema, migrate, queries, protocol,
     │                sqlite_backend, file_backend, pmo_sqlite,
-    │                adapters/ (ExternalSourceAdapter protocol, AdoAdapter)
+    │                adapters/ (ExternalSourceAdapter protocol,
+    │                AdoAdapter, GitHubAdapter, JiraAdapter, LinearAdapter)
     govern/        ← Policy enforcement, compliance, escalation,
     │                spec_validator, validator
     observe/       ← Tracing, usage, dashboard, retrospective, telemetry,
@@ -52,19 +54,24 @@ agent_baton/       ← Python package (orchestration engine)
       bead_cmd     ← baton beads list/show/ready/close/link (structured memory)
       serve        ← baton serve (API server)
       uninstall    ← baton uninstall (remove from target project)
-docs/              ← Architecture documentation (13 .md files incl. architecture.md,
+docs/              ← Architecture documentation (15 .md files incl. architecture.md,
 |                    design-decisions.md, invariants.md, cli-reference.md,
 |                    api-reference.md, engine-and-runtime.md, storage-sync-and-pmo.md,
 |                    governance-knowledge-and-events.md, observe-learn-and-improve.md,
-|                    terminology.md, troubleshooting.md)
-agents/            ← Distributable agent definitions (19 .md files)
-references/        ← Distributable reference docs (15 .md files)
-templates/         ← CLAUDE.md + settings.json installed to target projects
-scripts/           ← Install scripts (Linux + Windows)
-tests/             ← Test suite (~5035 tests, pytest)
+|                    terminology.md, troubleshooting.md, daemon-mode-evaluation.md,
+|                    PRODUCTION_READINESS.md, baton-engine-bugs.md,
+|                    pyright-diagnostics-triage.md)
+agents/            ← Distributable agent definitions (20 .md files)
+references/        ← Distributable reference docs (16 .md files)
+templates/         ← CLAUDE.md + settings.json + skills/baton-help/ installed to targets
+scripts/           ← Install scripts (Linux + Windows) + record_spec_audit_beads.py
+tests/             ← Test suite (~5719 tests, pytest)
 pmo-ui/            ← React/Vite PMO frontend (served at /pmo/)
+audit-reports/     ← Architecture audit documents (8 reports)
+proposals/         ← Design proposals and RFCs (6 documents)
+reference_files/   ← Integration questionnaires, roadmaps, analysis docs
 .claude/           ← Project-specific orchestration setup:
-  agents/          ← 19 packaged agents (mirrored from agents/) +
+  agents/          ← 20 packaged agents (mirrored from agents/) +
   |                  6 meta agents for baton development +
   |                  18 GSD framework agents
   references/      ← Symlink → ../references/ (canonical source)
@@ -97,7 +104,7 @@ pmo-ui/            ← React/Vite PMO frontend (served at /pmo/)
 
 ## Agent Roster (for this project)
 
-**Packaged agents** (19 — mirrored from `agents/`, also shipped to users):
+**Packaged agents** (20 — mirrored from `agents/`, also shipped to users):
 
 | Agent | Role |
 |-------|------|
@@ -109,6 +116,7 @@ pmo-ui/            ← React/Vite PMO frontend (served at /pmo/)
 | `code-reviewer` | Quality review before commits |
 | `auditor` | Safety review for guardrail/hook changes |
 | `talent-builder` | Create new distributable agent definitions |
+| `system-maintainer` | Post-cycle config tuning via learned-overrides.json |
 | `security-reviewer` | Security audit (OWASP, auth, secrets) |
 | `devops-engineer` | Infrastructure, CI/CD, Docker |
 | `data-engineer` / `data-analyst` / `data-scientist` | Data stack |
@@ -130,9 +138,28 @@ pmo-ui/            ← React/Vite PMO frontend (served at /pmo/)
 
 ```bash
 pip install -e ".[dev]"    # Install in editable mode
-pytest                     # Run tests (~5035 tests)
+pytest                     # Run tests (~5719 tests)
 scripts/install.sh         # Re-install globally after editing agents/references
 ```
+
+### Code Navigation (cymbal)
+
+`cymbal` is installed at `~/.local/bin/cymbal` for fast symbol-level
+codebase navigation. Index is stored in `~/.cache/cymbal/` (not in repo).
+
+```bash
+cymbal index .                    # Re-index (incremental, ~2ms when unchanged)
+cymbal investigate <symbol>       # Source + callers + callees in one shot
+cymbal impact <symbol>            # Transitive callers — what breaks if this changes
+cymbal trace <symbol>             # Downward call trace — what does it call
+cymbal refs <symbol>              # All reference sites across the repo
+cymbal structure                  # Entry points, hotspots, most-referenced symbols
+cymbal search <query>             # Full-text symbol search
+cymbal outline <file>             # Symbols defined in a file
+```
+
+Use `cymbal impact` before changing high-fanout symbols like
+`ExecutionEngine`, `PlanStep`, or `record_step_result`.
 
 ## Orchestrator Usage
 
@@ -161,6 +188,10 @@ loop:
   if APPROVAL:
     → present context to user, get decision ←
     baton execute approve --phase-id N --result approve
+  if INTERACT:
+    → agent produced output and awaits human input ←
+    baton execute interact --step ID --input "human response"
+    → engine records InteractionTurn, re-dispatches agent with context ←
   if COMPLETE:
     baton execute complete
     break
