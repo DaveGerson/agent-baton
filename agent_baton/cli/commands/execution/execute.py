@@ -87,11 +87,22 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         help="Path to plan.json (default: .claude/team-context/plan.json)",
     )
 
-    # baton execute next [--all] [--task-id ID]
+    # baton execute next [--all] [--terse] [--task-id ID]
     next_p = sub.add_parser("next", parents=[_task_id_parent],
                             help="Get the next action to perform")
     next_p.add_argument("--all", action="store_true", dest="all_actions",
                         help="Return all dispatchable actions (for parallel dispatch)")
+    next_p.add_argument(
+        "--terse",
+        action="store_true",
+        default=False,
+        help=(
+            "Terse mode: for DISPATCH actions, write the delegation_prompt to "
+            ".claude/team-context/current-dispatch.prompt.md and emit only a "
+            "Prompt-File pointer in stdout.  Reduces per-step token burn for "
+            "long plans.  Non-DISPATCH actions are unaffected."
+        ),
+    )
 
     # baton execute record --step ID --agent NAME [--status S] [--outcome O] [--tokens N] [--duration N] [--error E]
     p_record = sub.add_parser("record", parents=[_task_id_parent],
@@ -227,7 +238,22 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     return p
 
 
-def _print_action(action: dict) -> None:
+_DISPATCH_PROMPT_SIDECAR = ".claude/team-context/current-dispatch.prompt.md"
+
+
+def _write_dispatch_sidecar(prompt: str) -> str:
+    """Write *prompt* to the standard sidecar path and return the path string.
+
+    The directory is created if it does not already exist.  The file is always
+    overwritten so it always reflects the most-recently-dispatched step.
+    """
+    sidecar = Path(_DISPATCH_PROMPT_SIDECAR)
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.write_text(prompt, encoding="utf-8")
+    return _DISPATCH_PROMPT_SIDECAR
+
+
+def _print_action(action: dict, *, terse: bool = False) -> None:
     """Print an execution action in the structured text format that Claude Code parses.
 
     **PUBLIC API** -- This function defines the control protocol between the
@@ -338,10 +364,15 @@ def _print_action(action: dict) -> None:
                 print(f"  Interactive: yes")
                 print(f"  Max-Turns: {action.get('interact_max_turns', 10)}")
             print(f"  Message: {msg}")
-            print()
-            print("--- Delegation Prompt ---")
-            print(action.get("delegation_prompt", ""))
-            print("--- End Prompt ---")
+            if terse:
+                prompt = action.get("delegation_prompt", "")
+                sidecar_path = _write_dispatch_sidecar(prompt)
+                print(f"  Prompt-File: {sidecar_path}")
+            else:
+                print()
+                print("--- Delegation Prompt ---")
+                print(action.get("delegation_prompt", ""))
+                print("--- End Prompt ---")
 
     elif atype == ActionType.GATE.value:
         print(f"ACTION: GATE")
@@ -516,6 +547,7 @@ def handler(args: argparse.Namespace) -> None:
             _print_action(action.to_dict())
 
     elif args.subcommand == "next":
+        terse = getattr(args, "terse", False)
         try:
             if getattr(args, "output", "text") == "json":
                 if args.all_actions:
@@ -528,6 +560,13 @@ def handler(args: argparse.Namespace) -> None:
                 else:
                     action = engine.next_action()
                     result = [action.to_dict()]
+                if terse:
+                    for item in result:
+                        if item.get("action_type") == ActionType.DISPATCH.value:
+                            prompt = item.get("delegation_prompt", "")
+                            sidecar_path = _write_dispatch_sidecar(prompt)
+                            item["delegation_prompt"] = sidecar_path
+                            item["prompt_file"] = sidecar_path
                 print(json.dumps(result, indent=2))
             elif args.all_actions:
                 actions = engine.next_actions()
@@ -540,7 +579,7 @@ def handler(args: argparse.Namespace) -> None:
                 print(json.dumps(result, indent=2))
             else:
                 action = engine.next_action()
-                _print_action(action.to_dict())
+                _print_action(action.to_dict(), terse=terse)
         except RuntimeError as exc:
             print(f"error: {exc}", file=sys.stderr)
             print("Recovery options:", file=sys.stderr)
