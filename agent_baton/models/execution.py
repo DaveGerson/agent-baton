@@ -970,6 +970,10 @@ class ExecutionState:
     completed_at: str = ""
     pending_gaps: list[KnowledgeGapSignal] = field(default_factory=list)
     resolved_decisions: list[ResolvedDecision] = field(default_factory=list)
+    # Session-level knowledge deduplication: maps doc key → step_id where
+    # it was first delivered inline.  Empty on fresh starts; absent in older
+    # state files (graceful default applied in from_dict).
+    delivered_knowledge: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.started_at:
@@ -1028,6 +1032,7 @@ class ExecutionState:
             "completed_at": self.completed_at,
             "pending_gaps": [g.to_dict() for g in self.pending_gaps],
             "resolved_decisions": [d.to_dict() for d in self.resolved_decisions],
+            "delivered_knowledge": dict(self.delivered_knowledge),
         }
 
     @classmethod
@@ -1047,6 +1052,7 @@ class ExecutionState:
             completed_at=data.get("completed_at", ""),
             pending_gaps=[KnowledgeGapSignal.from_dict(g) for g in data.get("pending_gaps", [])],
             resolved_decisions=[ResolvedDecision.from_dict(d) for d in data.get("resolved_decisions", [])],
+            delivered_knowledge=dict(data.get("delivered_knowledge", {})),
         )
 
 

@@ -15,6 +15,13 @@ following the comms-protocols template.  It handles three prompt types:
 The class is stateless; every method operates purely on its arguments.
 Knowledge sections are built lazily -- inline documents are loaded from
 disk only when the attachment delivery is ``inline``.
+
+Session-level knowledge deduplication is supported via the
+``delivered_knowledge`` parameter on ``build_delegation_prompt``.  When
+provided, docs that were already inlined in a prior step are downgraded to
+reference delivery.  After building the prompt the caller is responsible
+for persisting the updated ``delivered_knowledge`` dict back to
+``ExecutionState``.
 """
 from __future__ import annotations
 
@@ -155,6 +162,71 @@ class PromptDispatcher:
         return f"Retrieve via: `Read {attachment.path}`"
 
     @staticmethod
+    def _attachment_dedup_key(attachment: "KnowledgeAttachment") -> str:
+        """Return the session-dedup key for an attachment.
+
+        Mirrors ``KnowledgeResolver._dedup_key``: prefer source path, fall back
+        to ``{pack_name}::{document_name}``.
+        """
+        if attachment.path:
+            return attachment.path
+        return f"{attachment.pack_name or ''}::{attachment.document_name}"
+
+    def _apply_session_dedup(
+        self,
+        attachments: "list[KnowledgeAttachment]",
+        current_step_id: str,
+        delivered_knowledge: "dict[str, str]",
+    ) -> "list[KnowledgeAttachment]":
+        """Apply session-level dedup to a list of attachments.
+
+        For each attachment:
+        - If it is from the ``"explicit"`` source layer, leave it unchanged
+          (explicit user attachments always inline regardless of prior delivery).
+        - If its dedup key is in *delivered_knowledge*, downgrade delivery to
+          ``"reference"`` and append a note to the grounding indicating which
+          prior step delivered it inline.
+        - Otherwise, if the attachment would be inlined, record the key in
+          *delivered_knowledge* (mutates the dict in-place) so future steps
+          can detect it.
+
+        Returns a new list with (potentially modified) attachments.
+        """
+        result: list[KnowledgeAttachment] = []
+        for att in attachments:
+            key = self._attachment_dedup_key(att)
+            if att.source == "explicit":
+                # Explicit layer: never downgrade; record if inline.
+                if att.delivery == "inline":
+                    delivered_knowledge.setdefault(key, current_step_id)
+                result.append(att)
+                continue
+
+            prior_step = delivered_knowledge.get(key)
+            if prior_step is not None and att.delivery == "inline":
+                # Downgrade: build a reference attachment with a retrieval note.
+                note = (
+                    f"(previously delivered inline in step {prior_step}"
+                    f" — re-read from: {att.path})"
+                )
+                new_grounding = f"{att.grounding} {note}".strip() if att.grounding else note
+                att = KnowledgeAttachment(
+                    source=att.source,
+                    pack_name=att.pack_name,
+                    document_name=att.document_name,
+                    path=att.path,
+                    delivery="reference",
+                    retrieval=att.retrieval,
+                    grounding=new_grounding,
+                    token_estimate=att.token_estimate,
+                )
+            elif att.delivery == "inline":
+                # First time inlined — record it.
+                delivered_knowledge.setdefault(key, current_step_id)
+            result.append(att)
+        return result
+
+    @staticmethod
     def _build_prior_beads_section(prior_beads: list) -> str:
         """Render the ``## Prior Discoveries`` section from a list of beads.
 
@@ -218,6 +290,7 @@ class PromptDispatcher:
         task_summary: str = "",
         task_type: str = "",
         prior_beads: "list | None" = None,
+        delivered_knowledge: "dict[str, str] | None" = None,
     ) -> str:
         """Build a complete delegation prompt for an agent.
 
@@ -231,6 +304,11 @@ class PromptDispatcher:
                 user's original words unmodified.
             task_type: Task type key (e.g. "bug-fix", "new-feature") used to
                 select the Success Criteria text.  Defaults to "" (no criteria shown).
+            delivered_knowledge: Session-level dedup map (doc-key → step_id).
+                Docs present in this map are downgraded from inline to reference
+                delivery in the knowledge section.  The dict is mutated in-place:
+                any doc that ends up inlined in THIS dispatch is added to it so
+                the caller can persist the updated state.
 
         Returns:
             A formatted markdown delegation prompt ready to pass to the Agent tool.
@@ -270,8 +348,20 @@ class PromptDispatcher:
         # Shared context block
         shared_context_block = shared_context.strip() if shared_context.strip() else "_No shared context provided._"
 
+        # Session-level knowledge deduplication.
+        # For each attachment that would be inlined, check whether it was already
+        # delivered inline in a prior step.  If so, downgrade it to reference.
+        # Explicit (layer-1) attachments are never downgraded.
+        # After building the section, mark newly-inlined docs in the dict so the
+        # caller can persist the update back to ExecutionState.
+        knowledge_attachments = list(step.knowledge)
+        if delivered_knowledge is not None:
+            knowledge_attachments = self._apply_session_dedup(
+                knowledge_attachments, step.step_id, delivered_knowledge
+            )
+
         # Knowledge section (empty string when no attachments)
-        knowledge_section = self._build_knowledge_section(step.knowledge)
+        knowledge_section = self._build_knowledge_section(knowledge_attachments)
 
         article = "an" if role[0:1] in "aeiouAEIOU" else "a"
         parts = [

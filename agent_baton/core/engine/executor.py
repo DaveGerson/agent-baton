@@ -2799,7 +2799,13 @@ class ExecutionEngine:
             task_summary=state.plan.task_summary,
             task_type=state.plan.task_type or "",
             prior_beads=prior_beads or None,
+            delivered_knowledge=state.delivered_knowledge,
         )
+        # Persist the updated delivered_knowledge map so subsequent dispatches
+        # in this run know which docs have already been inlined.
+        if self._persistence is not None:
+            self._persistence.save(state)
+
         enforcement = PromptDispatcher.build_path_enforcement(step)
 
         # ── Compliance audit: record dispatch event ──────────────────────────
