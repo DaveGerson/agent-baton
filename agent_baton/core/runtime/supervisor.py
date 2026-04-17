@@ -144,6 +144,7 @@ class WorkerSupervisor:
         if resume:
             logger.info("Daemon resuming: task=%s", plan.task_id)
             engine.resume()
+            engine.recover_dispatched_steps()
         else:
             logger.info("Daemon starting: task=%s", plan.task_id)
             engine.start(plan)
@@ -163,7 +164,7 @@ class WorkerSupervisor:
 
         summary = ""
         try:
-            summary = asyncio.run(self._run_with_signals(worker))
+            summary = asyncio.run(self._run_with_signals(worker, launcher))
         except KeyboardInterrupt:
             summary = "Daemon interrupted by user."
             logger.info("Daemon interrupted.")
@@ -177,12 +178,17 @@ class WorkerSupervisor:
 
         return summary
 
-    async def _run_with_signals(self, worker: TaskWorker) -> str:
+    async def _run_with_signals(
+        self, worker: TaskWorker, launcher: AgentLauncher
+    ) -> str:
         """Run the worker with signal handling for graceful shutdown.
 
         Installs SIGTERM and SIGINT handlers via :class:`SignalHandler`.
         When a signal arrives the worker task is cancelled and we wait up to
-        30 seconds for an orderly drain of in-flight agents.
+        30 seconds for an orderly drain of in-flight agents.  The ``finally``
+        block always calls ``launcher.cleanup()`` (if available) so that child
+        ``claude`` subprocesses started with ``start_new_session=True`` are not
+        orphaned when the daemon exits.
         """
         handler = SignalHandler()
         handler.install()
@@ -207,6 +213,9 @@ class WorkerSupervisor:
                 return worker_task.result()
         finally:
             handler.uninstall()
+            cleanup = getattr(launcher, "cleanup", None)
+            if cleanup is not None:
+                await cleanup()
 
     # ── Status ──────────────────────────────────────────────────────────────
 

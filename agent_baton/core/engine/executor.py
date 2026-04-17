@@ -251,6 +251,8 @@ class ExecutionEngine:
         storage=None,  # SqliteStorage | FileStorage | None
         knowledge_resolver=None,  # KnowledgeResolver | None
         policy_engine=None,  # PolicyEngine | None
+        enforce_token_budget: bool = True,
+        token_budget: int | None = None,
     ) -> None:
         self._root = (team_context_root or self._DEFAULT_CONTEXT_ROOT).resolve()
         self._task_id = task_id
@@ -270,6 +272,17 @@ class ExecutionEngine:
         # policy violation.  Populated by record_policy_approval(); checked
         # in _dispatch_action() to skip the policy gate on re-dispatch.
         self._policy_approved_steps: set[str] = set()
+
+        # Token budget enforcement (B1).
+        # When enforce_token_budget is True and the cumulative token count
+        # exceeds the plan tier threshold (or the explicit token_budget cap),
+        # _determine_action() will set state.status = "budget_exceeded" and
+        # return a COMPLETE action rather than dispatching new steps.
+        # In-flight work is never aborted — only NEW dispatches are blocked.
+        self._enforce_token_budget: bool = enforce_token_budget
+        # Explicit per-session token cap (overrides the tier threshold).
+        # 0 / None → use the plan's budget_tier threshold.
+        self._token_budget: int | None = token_budget or None
 
         # Compliance audit log — JSONL file written best-effort.  Path is
         # resolved after _root is known; initialized to None until first write.
@@ -356,13 +369,31 @@ class ExecutionEngine:
     # ── Storage routing helpers ──────────────────────────────────────────────
 
     def _save_execution(self, state: ExecutionState) -> None:
-        """Persist execution state via storage backend or legacy file."""
+        """Persist execution state via storage backend or legacy file.
+
+        When SQLite fails for any reason, the fallback writes *state* as-is
+        to the JSON file.  *state* is always the post-mutation object — the
+        caller mutates state before calling this method, never after.
+
+        When the two backends diverge (SQLite fails but file succeeds), a
+        WARNING is emitted with the task_id, status, and per-step status
+        summary so the split-brain is visible in logs without DB inspection.
+        """
         if self._storage is not None:
             try:
                 self._storage.save_execution(state)
             except Exception as e:
+                step_summary = ", ".join(
+                    f"{r.step_id}={r.status}" for r in state.step_results
+                ) or "(no steps)"
                 _log.warning(
-                    "SQLite save failed, falling back to file persistence: %s", e
+                    "SQLite save failed for task %r (status=%r, steps=[%s]); "
+                    "falling back to file persistence — SQLite and file state "
+                    "may diverge. Error: %s",
+                    state.task_id,
+                    state.status,
+                    step_summary,
+                    e,
                 )
                 if self._persistence is not None:
                     self._persistence.save(state)
@@ -512,6 +543,89 @@ class ExecutionEngine:
             if self._retro_engine is not None:
                 return self._retro_engine.save(retro)
             return None
+
+    # ── Split-brain reconciliation helpers ──────────────────────────────────
+    # Step status advancement order: dispatched < interrupted < failed < complete.
+    # Used by _reconcile_states to pick the more-advanced result when SQLite and
+    # the file backend disagree after a failed write.
+
+    _STEP_STATUS_RANK: dict[str, int] = {
+        "dispatched":  1,
+        "interrupted": 2,
+        "failed":      3,
+        "complete":    4,
+    }
+
+    @classmethod
+    def _step_status_rank(cls, status: str) -> int:
+        """Return lifecycle rank for a step status; unknown statuses rank 0."""
+        return cls._STEP_STATUS_RANK.get(status, 0)
+
+    def _reconcile_states(
+        self,
+        primary: "ExecutionState",
+        secondary: "ExecutionState",
+        primary_label: str = "primary",
+        secondary_label: str = "secondary",
+    ) -> "ExecutionState":
+        """Return the more-advanced of two execution states.
+
+        For each step_id that appears in both *primary* and *secondary*,
+        picks the result with the higher status rank.  If *secondary* has any
+        step at a more-advanced status than *primary*, the divergence is
+        logged at WARNING level and a corrected state is returned.
+
+        Does NOT mutate either input state.  Returns *primary* unchanged when
+        no divergence is detected.
+
+        Args:
+            primary: State from the normal ``_load_execution`` path (SQLite).
+            secondary: State from the alternate backend (file).
+            primary_label: Label for log messages.
+            secondary_label: Label for log messages.
+
+        Returns:
+            The reconciled ``ExecutionState``.
+        """
+        import copy
+
+        secondary_by_step: dict[str, "StepResult"] = {
+            r.step_id: r for r in secondary.step_results
+        }
+
+        corrections: list[str] = []
+        reconciled_results = list(primary.step_results)
+
+        for idx, primary_result in enumerate(reconciled_results):
+            sec_result = secondary_by_step.get(primary_result.step_id)
+            if sec_result is None:
+                continue
+            if self._step_status_rank(sec_result.status) > self._step_status_rank(
+                primary_result.status
+            ):
+                corrections.append(
+                    f"step {primary_result.step_id}: "
+                    f"{primary_label}={primary_result.status!r} -> "
+                    f"{secondary_label}={sec_result.status!r}"
+                )
+                reconciled_results[idx] = sec_result
+
+        if not corrections:
+            return primary
+
+        _log.warning(
+            "Persistence split-brain detected for task %r during resume — "
+            "%s state is behind %s state. Promoting more-advanced results: %s. "
+            "Check logs for earlier 'SQLite save failed' warnings.",
+            primary.task_id,
+            primary_label,
+            secondary_label,
+            "; ".join(corrections),
+        )
+
+        reconciled = copy.copy(primary)
+        reconciled.step_results = reconciled_results
+        return reconciled
 
     # ── Compliance audit helpers ─────────────────────────────────────────────
 
@@ -919,7 +1033,10 @@ class ExecutionEngine:
         if state is None:
             return []
 
-        if state.status in ("complete", "failed", "gate_pending", "approval_pending"):
+        if state.status in (
+            "complete", "failed", "gate_pending", "gate_failed",
+            "approval_pending", "budget_exceeded",
+        ):
             return []
 
         if state.current_phase >= len(state.plan.phases):
@@ -1124,7 +1241,18 @@ class ExecutionEngine:
             completed_at=_utcnow(),
             deviations=self._extract_deviations(outcome),
         )
-        state.step_results.append(result)
+        # Replace any existing result for this step_id (e.g. a prior
+        # "dispatched" row written by mark_dispatched) instead of appending.
+        # Appending a duplicate step_id causes save_execution's DELETE+INSERT
+        # loop to fail with a UNIQUE constraint on (task_id, step_id).
+        existing_idx = next(
+            (i for i, r in enumerate(state.step_results) if r.step_id == step_id),
+            None,
+        )
+        if existing_idx is not None:
+            state.step_results[existing_idx] = result
+        else:
+            state.step_results.append(result)
 
         # ── Propagate step_type from PlanStep onto StepResult ─────────────────
         # Allows analytics/queries against step_results to filter by type
@@ -1424,7 +1552,7 @@ class ExecutionEngine:
                 gate_type=gate_type,
                 output=output,
             ))
-            state.status = "failed"
+            state.status = "gate_failed"
         else:
             self._publish(evt.gate_passed(
                 task_id=state.task_id,
@@ -1439,6 +1567,62 @@ class ExecutionEngine:
             state.current_step_index = 0
             state.status = "running"
 
+        self._save_execution(state)
+
+    def reset_gate_failed(self, phase_id: int) -> None:
+        """Reset a ``gate_failed`` status back to ``gate_pending`` for retry.
+
+        Removes the most recent failed :class:`GateResult` for *phase_id* from
+        the state so the engine will re-issue the GATE action on the next call
+        to :meth:`next_action`.  The execution status is reset to
+        ``"gate_pending"`` so the gate is presented again to the caller.
+
+        Called by ``baton execute retry-gate --phase-id N``.
+
+        Raises:
+            RuntimeError: If no active execution is found.
+            ValueError: If the execution is not in ``gate_failed`` status, or
+                if no failed gate result exists for *phase_id*.
+        """
+        state = self._require_execution("reset_gate_failed")
+        if state.status != "gate_failed":
+            raise ValueError(
+                f"reset_gate_failed() requires status 'gate_failed', "
+                f"got '{state.status}'. "
+                "Use 'baton execute retry-gate' only after a gate has failed."
+            )
+        # Remove the most recent failed gate result for this phase so the gate
+        # is treated as pending again.
+        before = len(state.gate_results)
+        state.gate_results = [
+            r for r in state.gate_results
+            if not (r.phase_id == phase_id and not r.passed)
+        ]
+        if len(state.gate_results) == before:
+            raise ValueError(
+                f"No failed gate result found for phase_id={phase_id}. "
+                "Check 'baton execute status' for the correct phase ID."
+            )
+        state.status = "gate_pending"
+        self._save_execution(state)
+
+    def fail_gate(self, phase_id: int) -> None:
+        """Explicitly transition ``gate_failed`` to ``failed``.
+
+        Used when the operator decides not to retry a failed gate and wants to
+        terminate the execution.  Called by ``baton execute fail --phase-id N``.
+
+        Raises:
+            RuntimeError: If no active execution is found.
+            ValueError: If the execution is not in ``gate_failed`` status.
+        """
+        state = self._require_execution("fail_gate")
+        if state.status != "gate_failed":
+            raise ValueError(
+                f"fail_gate() requires status 'gate_failed', got '{state.status}'. "
+                "Use 'baton execute fail' only after a gate has failed."
+            )
+        state.status = "failed"
         self._save_execution(state)
 
     # ── Compliance report helpers ────────────────────────────────────────────
@@ -1722,6 +1906,11 @@ class ExecutionEngine:
            state directly from SQLite.  This handles the case where
            ``execution-state.json`` was overwritten by a concurrent run or
            e2e test but ``baton.db`` still holds the correct state.
+        3. Reconciliation: when both SQLite and the file backend are available
+           and both return a state, compare per-step statuses and promote any
+           step that is more advanced in the secondary backend.  This corrects
+           split-brain divergence caused by a prior SQLite write failure that
+           left SQLite stale while the file fallback captured the correct state.
 
         - Loads state from disk.
         - Determines where execution left off.
@@ -1751,6 +1940,42 @@ class ExecutionEngine:
                     exc,
                 )
 
+        # Reconciliation: when we have both a SQLite backend and a file
+        # persistence layer, load the alternate source and check whether any
+        # step result is more advanced there.  This heals split-brain state
+        # that arises when SQLite fails mid-write and the file fallback captures
+        # the correct (more-advanced) status while SQLite remains stale.
+        if (
+            state is not None
+            and self._storage is not None
+            and self._persistence is not None
+            and self._task_id
+        ):
+            try:
+                sqlite_state = self._storage.load_execution(self._task_id)
+                file_state = self._persistence.load()
+                # Only reconcile when both backends have state for the same task.
+                if (
+                    sqlite_state is not None
+                    and file_state is not None
+                    and file_state.task_id == self._task_id
+                ):
+                    # Primary is SQLite (loaded by _load_execution); secondary
+                    # is the file.  Promote any step that is more advanced in
+                    # the file backend.
+                    state = self._reconcile_states(
+                        primary=sqlite_state,
+                        secondary=file_state,
+                        primary_label="SQLite",
+                        secondary_label="file",
+                    )
+            except Exception as exc:
+                _log.warning(
+                    "Resume reconciliation check failed for task %r (non-fatal): %s",
+                    self._task_id,
+                    exc,
+                )
+
         if state is None:
             task_hint = f" (task {self._task_id!r})" if self._task_id else ""
             return ExecutionAction(
@@ -1770,6 +1995,8 @@ class ExecutionEngine:
                     task_id=state.task_id,
                     plan_snapshot=state.plan.to_dict(),
                 )
+
+        self.recover_dispatched_steps()
 
         return self._determine_action(state)
 
@@ -2210,13 +2437,18 @@ class ExecutionEngine:
         )
 
     def _check_token_budget(self, state: ExecutionState) -> str | None:
-        """Return a warning string if cumulative tokens exceed the plan's budget tier threshold.
+        """Return a warning string if cumulative tokens exceed the budget limit.
 
         Compares the sum of ``estimated_tokens`` across all completed step
-        results against the threshold for the plan's ``budget_tier``.  Returns
-        ``None`` when within budget.
+        results against the effective limit (explicit ``_token_budget`` cap,
+        or the per-tier threshold).  Returns ``None`` when within budget.
 
-        Thresholds by tier:
+        When ``_enforce_token_budget`` is True *and* the budget is exceeded,
+        this method also sets ``state.status = "budget_exceeded"`` so that
+        :meth:`_determine_action` will stop dispatching new steps.  In-flight
+        work (steps already dispatched) is never aborted.
+
+        Tier thresholds (used when no explicit cap is set):
         - ``lean``: 50,000 tokens
         - ``standard``: 500,000 tokens
         - ``full``: 2,000,000 tokens
@@ -2227,13 +2459,62 @@ class ExecutionEngine:
             "standard": 500_000,
             "full": 2_000_000,
         }
-        limit = thresholds.get(state.plan.budget_tier, 500_000)
+        if self._token_budget is not None and self._token_budget > 0:
+            limit = self._token_budget
+        else:
+            limit = thresholds.get(state.plan.budget_tier, 500_000)
+
         if total > limit:
-            return (
+            warning = (
                 f"Token budget exceeded: {total:,} tokens used, "
-                f"{state.plan.budget_tier} tier limit is {limit:,}"
+                f"limit is {limit:,}"
             )
+            if self._enforce_token_budget and state.status not in (
+                "complete", "failed", "budget_exceeded"
+            ):
+                state.status = "budget_exceeded"
+                _log.warning(
+                    "Budget enforced: setting status=budget_exceeded. %s. "
+                    "No new dispatches will be issued. "
+                    "Use 'baton execute resume-budget' to clear.",
+                    warning,
+                )
+                # Publish domain event so daemon webhooks can fire.
+                if self._bus is not None:
+                    try:
+                        from agent_baton.core.events.events import budget_exceeded as _budget_evt
+                        self._bus.publish(_budget_evt(
+                            task_id=state.task_id,
+                            tokens_used=total,
+                            tokens_limit=limit,
+                        ))
+                    except Exception as _be_exc:
+                        _log.debug("budget.exceeded event publish failed (non-fatal): %s", _be_exc)
+            return warning
         return None
+
+    def resume_budget(self) -> None:
+        """Clear a ``budget_exceeded`` status so execution can continue.
+
+        Resets ``state.status`` back to ``"running"`` and persists the change.
+        Intended to be called after the operator has reviewed the situation
+        and explicitly chooses to allow further token spend (e.g. after
+        adjusting the budget cap or upgrading the budget tier).
+
+        Raises:
+            ValueError: If the current execution is not in ``budget_exceeded``
+                status.
+        """
+        state = self._require_execution("resume_budget")
+        if state.status != "budget_exceeded":
+            raise ValueError(
+                f"resume_budget() requires status 'budget_exceeded', "
+                f"got '{state.status}'. "
+                "Use 'baton execute status' to check current state."
+            )
+        state.status = "running"
+        self._save_execution(state)
+        _log.info("Budget status cleared — execution resumed for task %s.", state.task_id)
 
     # ── Internal helpers ────────────────────────────────────────────────────
 
@@ -2740,6 +3021,46 @@ class ExecutionEngine:
                     gate_command=phase_obj.gate.command,
                     phase_id=phase_obj.phase_id,
                 )
+
+        # gate_failed — a gate ran and failed; re-issue the GATE action so
+        # the caller can retry.  Use 'baton execute retry-gate' to reset and
+        # re-run, or 'baton execute fail' to permanently fail the execution.
+        if state.status == "gate_failed":
+            phase_obj = state.current_phase_obj
+            if phase_obj and phase_obj.gate:
+                return ExecutionAction(
+                    action_type=ActionType.GATE,
+                    message=(
+                        f"Gate '{phase_obj.gate.gate_type}' for phase "
+                        f"{phase_obj.phase_id} failed. "
+                        "Retry with 'baton execute retry-gate --phase-id "
+                        f"{phase_obj.phase_id}', or permanently fail with "
+                        f"'baton execute fail --phase-id {phase_obj.phase_id}'."
+                    ),
+                    gate_type=phase_obj.gate.gate_type,
+                    gate_command=phase_obj.gate.command,
+                    phase_id=phase_obj.phase_id,
+                )
+
+        # budget_exceeded — token budget was reached; block new dispatches.
+        # In-flight steps already running are allowed to complete.  The operator
+        # can clear this status with 'baton execute resume-budget' to allow
+        # further spend (e.g. after reviewing costs or raising the cap).
+        if state.status == "budget_exceeded":
+            total = sum(r.estimated_tokens for r in state.step_results)
+            return ExecutionAction(
+                action_type=ActionType.COMPLETE,
+                message=(
+                    f"Task {state.task_id} stopped: token budget exceeded "
+                    f"({total:,} tokens used). "
+                    "Run 'baton execute resume-budget' to allow further spend, "
+                    "or 'baton execute complete' to finalize as-is."
+                ),
+                summary=(
+                    f"Budget exceeded at {total:,} tokens. "
+                    "Execution paused — no data lost."
+                ),
+            )
 
         # F11 — Conflict Detection: warn when unresolved bead conflicts exist.
         # Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).

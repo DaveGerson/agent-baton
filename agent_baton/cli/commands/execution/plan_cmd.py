@@ -6,8 +6,12 @@ plan can be output as markdown or JSON, and optionally saved to
 .claude/team-context/plan.json for consumption by ``baton execute start``.
 
 Additional flags:
-    --template   Print a skeleton plan.json to stdout for hand-editing.
-    --import     Import a hand-crafted plan.json instead of auto-generating.
+    --template          Print a skeleton plan.json to stdout for hand-editing.
+    --import            Import a hand-crafted plan.json instead of auto-generating.
+    --save-as-template  Save the generated plan's phase/step structure as a
+                        reusable template in .claude/plan-templates/.
+    --from-template     Instantiate a previously saved template with a new
+                        task description instead of auto-generating.
 
 Delegates to:
     agent_baton.core.engine.planner.IntelligentPlanner
@@ -120,7 +124,141 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         action="store_true",
         help="Output a skeleton plan.json template for hand-editing",
     )
+    p.add_argument(
+        "--save-as-template",
+        dest="save_as_template",
+        default=None,
+        metavar="NAME",
+        help=(
+            "Save the generated plan's phase/step structure as a reusable "
+            "template named NAME in .claude/plan-templates/NAME.json"
+        ),
+    )
+    p.add_argument(
+        "--from-template",
+        dest="from_template",
+        default=None,
+        metavar="NAME",
+        help=(
+            "Load a saved plan template by NAME from .claude/plan-templates/ "
+            "and instantiate it with the provided task description"
+        ),
+    )
     return p
+
+
+# ---------------------------------------------------------------------------
+# E1 — Plan template helpers
+# ---------------------------------------------------------------------------
+
+_PLAN_TEMPLATES_DIR = Path(".claude/plan-templates")
+
+
+def _template_path(name: str) -> Path:
+    """Return the resolved path for a named plan template."""
+    safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", name)
+    return (_PLAN_TEMPLATES_DIR / f"{safe_name}.json").resolve()
+
+
+def _plan_to_template(plan_dict: dict) -> dict:
+    """Strip task-specific fields from a plan dict, leaving only scaffold structure.
+
+    Retains phase names, step agents, step types, gate configs, and deliverable
+    stubs.  Removes task_id, task_summary, created_at, shared_context, and any
+    per-task knowledge attachments so the template is reusable across tasks.
+    """
+    template: dict = {
+        "_template_version": 1,
+        "task_type": plan_dict.get("task_type"),
+        "risk_level": plan_dict.get("risk_level", "LOW"),
+        "budget_tier": plan_dict.get("budget_tier", "standard"),
+        "git_strategy": plan_dict.get("git_strategy", "commit-per-agent"),
+        "complexity": plan_dict.get("complexity", "medium"),
+        "phases": [],
+    }
+    for phase in plan_dict.get("phases", []):
+        phase_entry: dict = {
+            "phase_id": phase.get("phase_id"),
+            "name": phase.get("name"),
+            "steps": [],
+        }
+        for step in phase.get("steps", []):
+            step_entry: dict = {
+                "agent_name": step.get("agent_name"),
+                "step_type": step.get("step_type", "developing"),
+                "deliverables": step.get("deliverables", []),
+            }
+            phase_entry["steps"].append(step_entry)
+        gate = phase.get("gate")
+        if gate:
+            phase_entry["gate"] = {
+                "gate_type": gate.get("gate_type"),
+                "command": gate.get("command", ""),
+                "description": gate.get("description", ""),
+            }
+        template["phases"].append(phase_entry)
+    return template
+
+
+def _instantiate_template(template: dict, task_summary: str) -> dict:
+    """Build a plan dict from a template and a new task description.
+
+    Assigns a fresh task_id and populates task_summary.  Step descriptions
+    are generated as '<agent_name>: <task_summary>' placeholders so the
+    plan is immediately usable with ``baton execute start``.
+    """
+    task_id = _make_task_id(task_summary)
+    plan: dict = {
+        "task_id": task_id,
+        "task_summary": task_summary,
+        "risk_level": template.get("risk_level", "LOW"),
+        "budget_tier": template.get("budget_tier", "standard"),
+        "git_strategy": template.get("git_strategy", "commit-per-agent"),
+        "complexity": template.get("complexity", "medium"),
+        "task_type": template.get("task_type"),
+        "execution_mode": "phased",
+        "shared_context": "",
+        "pattern_source": None,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "explicit_knowledge_packs": [],
+        "explicit_knowledge_docs": [],
+        "intervention_level": "low",
+        "classification_source": "template",
+        "detected_stack": None,
+        "foresight_insights": [],
+        "phases": [],
+    }
+    step_counter = 1
+    for phase in template.get("phases", []):
+        phase_entry: dict = {
+            "phase_id": phase.get("phase_id"),
+            "name": phase.get("name", f"Phase {phase.get('phase_id', step_counter)}"),
+            "steps": [],
+            "approval_required": False,
+            "approval_description": None,
+        }
+        for step in phase.get("steps", []):
+            agent = step.get("agent_name", "backend-engineer")
+            phase_entry["steps"].append({
+                "step_id": str(step_counter),
+                "agent_name": agent,
+                "task_description": f"{agent}: {task_summary}",
+                "step_type": step.get("step_type", "developing"),
+                "context_files": ["CLAUDE.md"],
+                "deliverables": step.get("deliverables", []),
+                "knowledge": [],
+                "model": None,
+                "team": [],
+                "depends_on": [],
+            })
+            step_counter += 1
+        gate = phase.get("gate")
+        if gate:
+            phase_entry["gate"] = gate
+        else:
+            phase_entry["gate"] = None
+        plan["phases"].append(phase_entry)
+    return plan
 
 
 def _persist_plan_to_db(ctx_dir: Path, plan: MachinePlan) -> None:
@@ -156,7 +294,70 @@ def _make_task_id(summary: str) -> str:
     return f"{base}-{uid}"
 
 
-def handler(args: argparse.Namespace) -> None:
+def handler(args: argparse.Namespace) -> None:  # noqa: C901
+    # --from-template: load a saved template and instantiate with new description
+    from_template = getattr(args, "from_template", None)
+    if from_template is not None:
+        tpl_path = _template_path(from_template)
+        if not tpl_path.exists():
+            # Also check relative to cwd (for projects that embed .claude elsewhere)
+            alt = Path(".claude/plan-templates") / f"{from_template}.json"
+            if alt.resolve().exists():
+                tpl_path = alt.resolve()
+            else:
+                print(
+                    f"Error: template '{from_template}' not found. "
+                    f"Expected at {tpl_path}",
+                    file=sys.stderr,
+                )
+                print(
+                    "Tip: use 'baton plan <desc> --save-as-template NAME' to save one first.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+
+        try:
+            template_data = json.loads(tpl_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            print(f"Error: invalid template JSON: {exc}", file=sys.stderr)
+            sys.exit(1)
+
+        plan_dict = _instantiate_template(template_data, args.summary)
+        try:
+            plan = MachinePlan.from_dict(plan_dict)
+        except Exception as exc:
+            print(f"Error: template instantiation failed: {exc}", file=sys.stderr)
+            sys.exit(1)
+
+        if args.save:
+            from agent_baton.core.orchestration.context import ContextManager
+
+            ctx_dir = Path(".claude/team-context").resolve()
+            ctx_dir.mkdir(parents=True, exist_ok=True)
+            ctx = ContextManager(team_context_dir=ctx_dir, task_id=plan.task_id)
+            ctx.write_plan(plan)
+            json_path = ctx_dir / "plan.json"
+            md_path = ctx_dir / "plan.md"
+            json_path.write_text(
+                json.dumps(plan.to_dict(), indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            md_path.write_text(plan.to_markdown(), encoding="utf-8")
+            _persist_plan_to_db(ctx_dir, plan)
+            print(
+                f"Template '{from_template}' instantiated and saved: "
+                f"{ctx.plan_json_path} and {ctx.plan_path}"
+            )
+            print(f"  (also copied to {json_path} for backward compat)")
+            print()
+            print("Next: baton execute start")
+        else:
+            if getattr(args, "json", False):
+                print(json.dumps(plan.to_dict(), indent=2, ensure_ascii=False))
+            else:
+                print(plan.to_markdown())
+        return
+
     # --template: emit a skeleton plan.json and exit
     if getattr(args, "template", False):
         template: dict = {
@@ -329,6 +530,22 @@ def handler(args: argparse.Namespace) -> None:
         print(f"  (also copied to {json_path} for backward compat)")
         print()
         print("Next: baton execute start")
+
+    # --save-as-template: serialize phase/step scaffold after generation
+    save_as_template = getattr(args, "save_as_template", None)
+    if save_as_template is not None:
+        tpl_dir = Path(".claude/plan-templates").resolve()
+        tpl_dir.mkdir(parents=True, exist_ok=True)
+        tpl_path = _template_path(save_as_template)
+        template_data = _plan_to_template(plan.to_dict())
+        tpl_path.write_text(
+            json.dumps(template_data, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        print(f"Plan template '{save_as_template}' saved to {tpl_path}")
+        print(
+            f"  Use: baton plan \"<new description>\" --from-template {save_as_template} --save"
+        )
 
     if args.explain:
         print(planner.explain_plan(plan))

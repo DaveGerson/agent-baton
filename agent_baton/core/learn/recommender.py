@@ -68,8 +68,9 @@ class Recommender:
         pattern_learner: PatternLearner | None = None,
         budget_tuner: BudgetTuner | None = None,
         evolution_engine: PromptEvolutionEngine | None = None,
+        storage=None,
     ) -> None:
-        self._scorer = scorer or PerformanceScorer()
+        self._scorer = scorer or PerformanceScorer(storage=storage)
         self._learner = pattern_learner or PatternLearner()
         self._tuner = budget_tuner or BudgetTuner()
         self._evolution = evolution_engine or PromptEvolutionEngine()

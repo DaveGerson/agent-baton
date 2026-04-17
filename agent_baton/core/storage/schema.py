@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -188,6 +188,75 @@ ALTER TABLE plan_steps ADD COLUMN step_type TEXT NOT NULL DEFAULT 'developing';
 ALTER TABLE plan_steps ADD COLUMN command TEXT NOT NULL DEFAULT '';
 ALTER TABLE step_results ADD COLUMN step_type TEXT NOT NULL DEFAULT 'developing';
 """,
+    10: """
+-- v10: Phase A compliance and identity columns (A2, A3, A4, A6).
+--
+-- A2 — Decision source and identity on gate_results and approval_results.
+--   decision_source: who/what made this decision (human, daemon_auto, api, policy_auto)
+--   actor: best-available identity string ($USER@$HOSTNAME or "daemon")
+--   rationale: structured rationale for approval decisions
+--
+-- A3 — Persist ClassificationResult signals/confidence on plans.
+--   classification_signals: JSON blob from ClassificationResult.to_dict()
+--   classification_confidence: 0.0–1.0 confidence score
+--
+-- A4 — Persist interaction_turns (multi-turn INTERACT exchanges).
+--   A new interaction_turns table stores each InteractionTurn individually.
+--   A new feedback_responses table stores each FeedbackResult individually.
+--
+-- A6 — Gate command traceability on gate_results.
+--   command: the shell command that was run
+--   exit_code: subprocess return code (NULL for manual/human gates)
+--
+-- NOTE: FK constraints are intentionally omitted from this migration
+-- because it is applied to BOTH project and central databases via
+-- ConnectionManager._run_migrations().  Fresh project DBs get FKs
+-- from PROJECT_SCHEMA_DDL directly.
+
+-- A6: gate traceability
+ALTER TABLE gate_results ADD COLUMN command TEXT NOT NULL DEFAULT '';
+ALTER TABLE gate_results ADD COLUMN exit_code INTEGER;
+
+-- A2: decision identity on gate_results
+ALTER TABLE gate_results ADD COLUMN decision_source TEXT NOT NULL DEFAULT '';
+ALTER TABLE gate_results ADD COLUMN actor TEXT NOT NULL DEFAULT '';
+
+-- A2: decision identity + rationale on approval_results
+ALTER TABLE approval_results ADD COLUMN decision_source TEXT NOT NULL DEFAULT '';
+ALTER TABLE approval_results ADD COLUMN actor TEXT NOT NULL DEFAULT '';
+ALTER TABLE approval_results ADD COLUMN rationale TEXT NOT NULL DEFAULT '';
+
+-- A3: classification signals on plans
+ALTER TABLE plans ADD COLUMN classification_signals TEXT;
+ALTER TABLE plans ADD COLUMN classification_confidence REAL;
+
+-- A4: interaction turns table
+CREATE TABLE IF NOT EXISTS interaction_turns (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id      TEXT NOT NULL,
+    step_id      TEXT NOT NULL,
+    turn_number  INTEGER NOT NULL DEFAULT 0,
+    role         TEXT NOT NULL,
+    content      TEXT NOT NULL DEFAULT '',
+    timestamp    TEXT NOT NULL DEFAULT '',
+    source       TEXT NOT NULL DEFAULT 'human'
+);
+CREATE INDEX IF NOT EXISTS idx_interaction_turns_task ON interaction_turns(task_id);
+CREATE INDEX IF NOT EXISTS idx_interaction_turns_step ON interaction_turns(task_id, step_id);
+
+-- A4: feedback responses table
+CREATE TABLE IF NOT EXISTS feedback_responses (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id            TEXT NOT NULL,
+    phase_id           INTEGER NOT NULL,
+    question_id        TEXT NOT NULL,
+    chosen_index       INTEGER NOT NULL DEFAULT 0,
+    chosen_option      TEXT NOT NULL DEFAULT '',
+    dispatched_step_id TEXT NOT NULL DEFAULT '',
+    decided_at         TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_feedback_responses_task ON feedback_responses(task_id);
+""",
 }
 
 # =====================================================================
@@ -232,6 +301,8 @@ CREATE TABLE IF NOT EXISTS plans (
     explicit_knowledge_docs    TEXT NOT NULL DEFAULT '[]',
     intervention_level         TEXT NOT NULL DEFAULT 'low',
     task_type                  TEXT,
+    classification_signals     TEXT,
+    classification_confidence  REAL,
     FOREIGN KEY (task_id) REFERENCES executions(task_id) ON DELETE CASCADE
 );
 
@@ -324,25 +395,32 @@ CREATE TABLE IF NOT EXISTS team_step_results (
 
 -- GATE_RESULTS
 CREATE TABLE IF NOT EXISTS gate_results (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_id     TEXT NOT NULL,
-    phase_id    INTEGER NOT NULL,
-    gate_type   TEXT NOT NULL,
-    passed      INTEGER NOT NULL,
-    output      TEXT NOT NULL DEFAULT '',
-    checked_at  TEXT NOT NULL DEFAULT '',
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id          TEXT NOT NULL,
+    phase_id         INTEGER NOT NULL,
+    gate_type        TEXT NOT NULL,
+    passed           INTEGER NOT NULL,
+    output           TEXT NOT NULL DEFAULT '',
+    checked_at       TEXT NOT NULL DEFAULT '',
+    command          TEXT NOT NULL DEFAULT '',
+    exit_code        INTEGER,
+    decision_source  TEXT NOT NULL DEFAULT '',
+    actor            TEXT NOT NULL DEFAULT '',
     FOREIGN KEY (task_id) REFERENCES executions(task_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_gate_results_task ON gate_results(task_id);
 
 -- APPROVAL_RESULTS
 CREATE TABLE IF NOT EXISTS approval_results (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_id     TEXT NOT NULL,
-    phase_id    INTEGER NOT NULL,
-    result      TEXT NOT NULL,
-    feedback    TEXT NOT NULL DEFAULT '',
-    decided_at  TEXT NOT NULL DEFAULT '',
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id          TEXT NOT NULL,
+    phase_id         INTEGER NOT NULL,
+    result           TEXT NOT NULL,
+    feedback         TEXT NOT NULL DEFAULT '',
+    decided_at       TEXT NOT NULL DEFAULT '',
+    decision_source  TEXT NOT NULL DEFAULT '',
+    actor            TEXT NOT NULL DEFAULT '',
+    rationale        TEXT NOT NULL DEFAULT '',
     FOREIGN KEY (task_id) REFERENCES executions(task_id) ON DELETE CASCADE
 );
 
@@ -646,6 +724,39 @@ CREATE TABLE IF NOT EXISTS bead_tags (
     FOREIGN KEY (bead_id) REFERENCES beads(bead_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_bead_tags_tag ON bead_tags(tag);
+
+-- INTERACTION_TURNS (A4: persist multi-turn INTERACT exchanges)
+-- Each row is one turn in a multi-turn agent interaction step.
+-- Persisted incrementally — rows are inserted as turns arrive and
+-- never deleted (append-only audit record).
+CREATE TABLE IF NOT EXISTS interaction_turns (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id      TEXT NOT NULL,
+    step_id      TEXT NOT NULL,
+    turn_number  INTEGER NOT NULL DEFAULT 0,
+    role         TEXT NOT NULL,
+    content      TEXT NOT NULL DEFAULT '',
+    timestamp    TEXT NOT NULL DEFAULT '',
+    source       TEXT NOT NULL DEFAULT 'human',
+    FOREIGN KEY (task_id) REFERENCES executions(task_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_interaction_turns_task ON interaction_turns(task_id);
+CREATE INDEX IF NOT EXISTS idx_interaction_turns_step ON interaction_turns(task_id, step_id);
+
+-- FEEDBACK_RESPONSES (A4: persist FeedbackResult per question answer)
+-- Each row records a user's answer to a single FeedbackQuestion.
+CREATE TABLE IF NOT EXISTS feedback_responses (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id            TEXT NOT NULL,
+    phase_id           INTEGER NOT NULL,
+    question_id        TEXT NOT NULL,
+    chosen_index       INTEGER NOT NULL DEFAULT 0,
+    chosen_option      TEXT NOT NULL DEFAULT '',
+    dispatched_step_id TEXT NOT NULL DEFAULT '',
+    decided_at         TEXT NOT NULL DEFAULT '',
+    FOREIGN KEY (task_id) REFERENCES executions(task_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_feedback_responses_task ON feedback_responses(task_id);
 """
 
 # =====================================================================
@@ -944,6 +1055,8 @@ CREATE TABLE IF NOT EXISTS plans (
     explicit_knowledge_docs    TEXT NOT NULL DEFAULT '[]',
     intervention_level         TEXT NOT NULL DEFAULT 'low',
     task_type                  TEXT,
+    classification_signals     TEXT,
+    classification_confidence  REAL,
     PRIMARY KEY (project_id, task_id)
 );
 CREATE INDEX IF NOT EXISTS idx_central_plans_risk ON plans(risk_level);
@@ -1033,25 +1146,32 @@ CREATE TABLE IF NOT EXISTS team_step_results (
 );
 
 CREATE TABLE IF NOT EXISTS gate_results (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    project_id  TEXT NOT NULL,
-    task_id     TEXT NOT NULL,
-    phase_id    INTEGER NOT NULL,
-    gate_type   TEXT NOT NULL,
-    passed      INTEGER NOT NULL,
-    output      TEXT NOT NULL DEFAULT '',
-    checked_at  TEXT NOT NULL DEFAULT ''
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id       TEXT NOT NULL,
+    task_id          TEXT NOT NULL,
+    phase_id         INTEGER NOT NULL,
+    gate_type        TEXT NOT NULL,
+    passed           INTEGER NOT NULL,
+    output           TEXT NOT NULL DEFAULT '',
+    checked_at       TEXT NOT NULL DEFAULT '',
+    command          TEXT NOT NULL DEFAULT '',
+    exit_code        INTEGER,
+    decision_source  TEXT NOT NULL DEFAULT '',
+    actor            TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_central_gate_task ON gate_results(project_id, task_id);
 
 CREATE TABLE IF NOT EXISTS approval_results (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    project_id  TEXT NOT NULL,
-    task_id     TEXT NOT NULL,
-    phase_id    INTEGER NOT NULL,
-    result      TEXT NOT NULL,
-    feedback    TEXT NOT NULL DEFAULT '',
-    decided_at  TEXT NOT NULL DEFAULT ''
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id       TEXT NOT NULL,
+    task_id          TEXT NOT NULL,
+    phase_id         INTEGER NOT NULL,
+    result           TEXT NOT NULL,
+    feedback         TEXT NOT NULL DEFAULT '',
+    decided_at       TEXT NOT NULL DEFAULT '',
+    decision_source  TEXT NOT NULL DEFAULT '',
+    actor            TEXT NOT NULL DEFAULT '',
+    rationale        TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_central_approval_task ON approval_results(project_id, task_id);
 
@@ -1342,6 +1462,35 @@ CREATE INDEX IF NOT EXISTS idx_central_learning_issues_status
     ON learning_issues(status);
 CREATE INDEX IF NOT EXISTS idx_central_learning_issues_project
     ON learning_issues(project_id);
+
+-- INTERACTION_TURNS (mirror — A4: multi-turn INTERACT exchanges)
+CREATE TABLE IF NOT EXISTS interaction_turns (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id   TEXT NOT NULL,
+    task_id      TEXT NOT NULL,
+    step_id      TEXT NOT NULL,
+    turn_number  INTEGER NOT NULL DEFAULT 0,
+    role         TEXT NOT NULL,
+    content      TEXT NOT NULL DEFAULT '',
+    timestamp    TEXT NOT NULL DEFAULT '',
+    source       TEXT NOT NULL DEFAULT 'human'
+);
+CREATE INDEX IF NOT EXISTS idx_central_interaction_turns_task ON interaction_turns(project_id, task_id);
+CREATE INDEX IF NOT EXISTS idx_central_interaction_turns_step ON interaction_turns(project_id, task_id, step_id);
+
+-- FEEDBACK_RESPONSES (mirror — A4: FeedbackResult per question answer)
+CREATE TABLE IF NOT EXISTS feedback_responses (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id         TEXT NOT NULL,
+    task_id            TEXT NOT NULL,
+    phase_id           INTEGER NOT NULL,
+    question_id        TEXT NOT NULL,
+    chosen_index       INTEGER NOT NULL DEFAULT 0,
+    chosen_option      TEXT NOT NULL DEFAULT '',
+    dispatched_step_id TEXT NOT NULL DEFAULT '',
+    decided_at         TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_central_feedback_responses_task ON feedback_responses(project_id, task_id);
 
 -- ================================================================
 -- Cross-project analytics views

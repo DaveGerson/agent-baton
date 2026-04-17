@@ -218,6 +218,10 @@ class ClaudeCodeLauncher:
                 "commit_hash will be empty in LaunchResult."
             )
 
+        # Registry of active subprocesses for cleanup on shutdown.
+        # Set operations are safe without locks because asyncio is single-threaded.
+        self._active_processes: set[asyncio.subprocess.Process] = set()
+
     # ── Public API ───────────────────────────────────────────────────────────
 
     async def launch(
@@ -567,6 +571,7 @@ class ClaudeCodeLauncher:
                 error=f"Failed to start claude subprocess: {exc}",
             )
 
+        self._active_processes.add(process)
         try:
             if prompt_stdin is not None:
                 stdout, stderr = await asyncio.wait_for(
@@ -592,6 +597,8 @@ class ClaudeCodeLauncher:
                 duration_seconds=elapsed,
                 error=f"Agent timed out after {timeout:.0f}s",
             )
+        finally:
+            self._active_processes.discard(process)
 
         elapsed = time.monotonic() - start
         exit_code = process.returncode if process.returncode is not None else -1
@@ -603,3 +610,47 @@ class ClaudeCodeLauncher:
             agent_name=agent_name,
             elapsed=elapsed,
         )
+
+    async def cleanup(self) -> None:
+        """Terminate all active subprocesses registered in ``_active_processes``.
+
+        Called during graceful shutdown (e.g. SIGTERM) to ensure that child
+        ``claude`` processes started with ``start_new_session=True`` are not
+        orphaned.  For each process:
+
+        1. Send ``SIGTERM`` via ``process.terminate()``.
+        2. Wait up to 5 seconds for the process to exit.
+        3. If still running, escalate to ``SIGKILL`` via ``process.kill()``.
+
+        Safe to call multiple times or when the set is empty.
+        """
+        if not self._active_processes:
+            return
+
+        processes = list(self._active_processes)
+        logger.info(
+            "ClaudeCodeLauncher.cleanup(): terminating %d active subprocess(es)",
+            len(processes),
+        )
+        for process in processes:
+            try:
+                process.terminate()
+            except ProcessLookupError:
+                # Process already exited between the snapshot and terminate().
+                self._active_processes.discard(process)
+                continue
+
+            try:
+                await asyncio.wait_for(process.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "ClaudeCodeLauncher.cleanup(): PID %s did not exit after SIGTERM, sending SIGKILL",
+                    process.pid,
+                )
+                try:
+                    process.kill()
+                    await process.wait()
+                except ProcessLookupError:
+                    pass
+            finally:
+                self._active_processes.discard(process)

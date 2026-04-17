@@ -330,21 +330,58 @@ class TaskWorker:
         """Handle a GATE action.
 
         Programmatic gate types (``test``, ``build``, ``lint``, ``spec``) are
-        auto-approved immediately.  Human-required gate types (``review``,
-        ``approval``, or anything else) are routed through the
-        :class:`DecisionManager` when one is configured; otherwise they fall
-        back to auto-approval.
+        executed via an async subprocess using the gate command from the action.
+        If no command is present on the action, the gate is auto-approved as a
+        fallback.  Human-required gate types (``review``, ``approval``, or
+        anything else) are routed through the :class:`DecisionManager` when one
+        is configured; otherwise they fall back to auto-approval.
         """
         gate_type = getattr(action, "gate_type", "")
         phase_id = getattr(action, "phase_id", 0)
 
-        # Auto-approve programmatic gates.
+        # Execute programmatic gates via subprocess — mirrors the CLI path in
+        # execute.py so daemon and CLI behaviour are identical (bug 0.1).
         if gate_type in ("test", "build", "lint", "spec"):
-            self._engine.record_gate_result(
-                phase_id=phase_id,
-                passed=True,
-                output=f"auto-approved ({gate_type})",
-            )
+            gate_command = getattr(action, "gate_command", "")
+            if not gate_command:
+                # No command specified — fall back to auto-approve.
+                self._engine.record_gate_result(
+                    phase_id=phase_id,
+                    passed=True,
+                    output=f"auto-approved ({gate_type}): no command specified",
+                )
+                return
+
+            try:
+                proc = await asyncio.wait_for(
+                    asyncio.create_subprocess_shell(
+                        gate_command,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        cwd=str(__import__("pathlib").Path.cwd()),
+                    ),
+                    timeout=300,
+                )
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                    proc.communicate(), timeout=300
+                )
+                stdout = stdout_bytes.decode(errors="replace") if stdout_bytes else ""
+                stderr = stderr_bytes.decode(errors="replace") if stderr_bytes else ""
+                passed = proc.returncode == 0
+                output = stdout[-2000:] if stdout else ""
+                if not passed and stderr:
+                    output += f"\n--- stderr ---\n{stderr[-1000:]}"
+                self._engine.record_gate_result(
+                    phase_id=phase_id,
+                    passed=passed,
+                    output=output,
+                )
+            except asyncio.TimeoutError:
+                self._engine.record_gate_result(
+                    phase_id=phase_id,
+                    passed=False,
+                    output=f"Gate timed out after 300s: {gate_command}",
+                )
             return
 
         # Human-required gate — use DecisionManager if available.

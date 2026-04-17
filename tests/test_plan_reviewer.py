@@ -55,7 +55,7 @@ def _make_step(
 def _make_broad_plan() -> MachinePlan:
     """Create a plan with a single broad implementation step spanning many concerns."""
     step = _make_step(
-        desc="Implement engine routing, dispatcher changes, worker automation, and CLI output",
+        desc="Wire engine routing, dispatcher changes, worker automation, and CLI output end-to-end",
         context_files=[
             "agent_baton/core/engine/executor.py",
             "agent_baton/core/engine/dispatcher.py",
@@ -76,7 +76,7 @@ def _make_broad_plan() -> MachinePlan:
             ]),
         ],
         task_summary=(
-            "Add new step type to executor.py, dispatcher.py, worker.py, "
+            "Wire new step type through executor.py, dispatcher.py, worker.py, "
             "execute.py, planner.py, and execution.py"
         ),
     )
@@ -569,13 +569,14 @@ class TestCouplingDetection:
         assert _detect_coupling(groups, "Wire new step type through engine and runtime")
 
     def test_coupled_engine_and_cli(self):
-        """Engine + execution (CLI commands) are coupled."""
+        """Engine + execution (CLI commands) are coupled when integration language present."""
         groups = {
             "engine": ["agent_baton/core/engine/executor.py"],
             "execution": ["agent_baton/cli/commands/execution/execute.py"],
             "models": ["agent_baton/models/execution.py"],
         }
-        assert _detect_coupling(groups, "Add new action type")
+        # Integration keyword "wire" signals genuine cross-layer coupling
+        assert _detect_coupling(groups, "Wire new action type through engine and CLI")
 
     def test_uncoupled_docs_and_tests(self):
         """Docs + tests + unrelated dirs are independent."""

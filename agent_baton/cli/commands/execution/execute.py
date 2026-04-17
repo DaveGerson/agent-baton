@@ -199,6 +199,18 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
                               help="Cancel a running execution")
     p_cancel.add_argument("--reason", default="", help="Reason for cancellation")
 
+    # baton execute retry-gate --phase-id N [--task-id ID]
+    p_retry_gate = sub.add_parser("retry-gate", parents=[_task_id_parent],
+                                  help="Reset a failed gate back to pending for retry")
+    p_retry_gate.add_argument("--phase-id", type=int, required=True, dest="phase_id",
+                              help="Phase ID whose failed gate should be reset")
+
+    # baton execute fail --phase-id N [--task-id ID]
+    p_fail = sub.add_parser("fail", parents=[_task_id_parent],
+                            help="Permanently fail an execution that is in gate_failed status")
+    p_fail.add_argument("--phase-id", type=int, required=True, dest="phase_id",
+                        help="Phase ID of the failed gate (for confirmation output)")
+
     # baton execute list
     sub.add_parser("list", help="List all executions (active and completed)")
 
@@ -401,7 +413,7 @@ def _print_action(action: dict) -> None:
 
 def handler(args: argparse.Namespace) -> None:
     if args.subcommand is None:
-        validation_error("supply a subcommand: start, next, record, dispatched, gate, approve, feedback, amend, team-record, interact, complete, status, resume, list, switch, cancel, run")
+        validation_error("supply a subcommand: start, next, record, dispatched, gate, approve, feedback, amend, team-record, interact, complete, status, resume, list, switch, cancel, run, retry-gate, fail")
 
     if args.subcommand == "list":
         _handle_list()
@@ -823,6 +835,26 @@ def handler(args: argparse.Namespace) -> None:
             print(f"Execution {state.task_id} cancelled.")
             if reason:
                 print(f"  Reason: {reason}")
+
+    elif args.subcommand == "retry-gate":
+        try:
+            engine.reset_gate_failed(phase_id=args.phase_id)
+        except ValueError as exc:
+            user_error(str(exc))
+        if getattr(args, "output", "text") == "json":
+            print(json.dumps({"status": "reset", "phase_id": args.phase_id}))
+        else:
+            print(f"Gate for phase {args.phase_id} reset to pending — run 'baton execute next' to retry.")
+
+    elif args.subcommand == "fail":
+        try:
+            engine.fail_gate(phase_id=args.phase_id)
+        except ValueError as exc:
+            user_error(str(exc))
+        if getattr(args, "output", "text") == "json":
+            print(json.dumps({"status": "failed", "phase_id": args.phase_id}))
+        else:
+            print(f"Execution permanently failed at phase {args.phase_id} gate.")
 
 
 # ---------------------------------------------------------------------------

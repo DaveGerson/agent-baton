@@ -152,14 +152,19 @@ class SqliteStorage:
             # -- plan ----------------------------------------------------------
             _upsert_plan(conn, state.plan)
 
-            # -- step_results (DELETE + INSERT for clean replacement) ----------
+            # -- step_results (DELETE + INSERT OR REPLACE for idempotent writes)
+            # INSERT OR REPLACE is used alongside the DELETE as belt-and-suspenders:
+            # if a prior partial transaction left a stale row that the DELETE missed,
+            # the upsert overwrites it safely instead of raising UNIQUE constraint
+            # failure.  This is the idempotent-write pattern for event-sourced state
+            # machines: writing the same (task_id, step_id) twice must be safe.
             conn.execute(
                 "DELETE FROM step_results WHERE task_id = ?", (state.task_id,)
             )
             for sr in state.step_results:
                 conn.execute(
                     """
-                    INSERT INTO step_results
+                    INSERT OR REPLACE INTO step_results
                         (task_id, step_id, agent_name, status, outcome,
                          files_changed, commit_hash, estimated_tokens,
                          duration_seconds, retries, error, completed_at,

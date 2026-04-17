@@ -198,6 +198,19 @@ def init_dependencies(
 # FastAPI dependency providers
 # ---------------------------------------------------------------------------
 
+def get_team_context_root() -> Path:
+    """Return the team-context root :class:`~pathlib.Path` configured at startup.
+
+    Raises:
+        RuntimeError: If :func:`init_dependencies` has not been called.
+    """
+    if _team_context_root is None:
+        raise RuntimeError(
+            "team_context_root not initialised. Call init_dependencies() before serving requests."
+        )
+    return _team_context_root
+
+
 def get_bus() -> EventBus:
     """Return the shared :class:`~agent_baton.core.events.bus.EventBus` instance.
 

@@ -8,6 +8,11 @@ type has specific pass/fail semantics:
   output (warnings are tolerated).
 - **spec**: delegates to ``SpecValidator`` for structural validation.
 - **review**: advisory only -- always passes regardless of output.
+- **ci**: triggers a CI provider workflow and polls for completion.
+  Currently supports GitHub Actions only.  Requires ``GITHUB_TOKEN`` env var
+  with ``checks:read`` and ``actions:write`` scopes.  Falls back to
+  ``DecisionManager`` escalation when the token is absent or the network
+  is unreachable.
 
 The ``GateRunner`` is stateless; each method operates on its arguments
 without side effects.  Gate evaluation results are recorded by the
@@ -16,12 +21,23 @@ without side effects.  Gate evaluation results are recorded by the
 from __future__ import annotations
 
 import logging
+import os
+import time
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 from agent_baton.core.govern.spec_validator import SpecValidator
 from agent_baton.models.execution import ActionType, ExecutionAction, GateResult, PlanGate
 
+if TYPE_CHECKING:
+    pass
+
 logger = logging.getLogger(__name__)
+
+# Default polling timeout for CI gates (seconds).
+_CI_DEFAULT_TIMEOUT_SECONDS = 900  # 15 minutes
+# Polling interval when waiting for a CI run to finish (seconds).
+_CI_POLL_INTERVAL_SECONDS = 30
 
 
 # Patterns that indicate lint errors (as opposed to warnings).
@@ -86,6 +102,7 @@ class GateRunner:
             "spec": "Validate agent output against the declared specification.",
             "review": "Advisory code review by the reviewer agent (never blocks).",
             "approval": "Human approval checkpoint — execution pauses for review.",
+            "ci": "Trigger CI pipeline and wait for completion (GitHub Actions).",
         }
         return descriptions.get(gate.gate_type, f"Run '{gate.gate_type}' gate check.")
 
@@ -221,6 +238,27 @@ class GateRunner:
             result = self._spec_validator.run_gate([("spec output", _check_spec)])
             passed = result.passed
             logger.info("Gate 'spec': %s", "PASS" if passed else "FAIL")
+            return GateResult(
+                phase_id=0,
+                gate_type=gate_type,
+                passed=passed,
+                output=command_output,
+                checked_at=checked_at,
+            )
+
+        if gate_type == "ci":
+            # CI gate: command_output is expected to carry pre-parsed CI output
+            # (e.g. from ci_gate.run_ci_gate).  If it contains a recognised
+            # pass marker the gate passes; if a fail marker is present it fails.
+            # When the output is raw (called directly via evaluate_output with
+            # subprocess output), fall back to exit_code semantics so the gate
+            # is still useful without the full CI integration.
+            passed = _parse_ci_output(command_output, exit_code)
+            logger.info(
+                "Gate 'ci': %s (exit_code=%d)",
+                "PASS" if passed else "FAIL",
+                exit_code,
+            )
             return GateResult(
                 phase_id=0,
                 gate_type=gate_type,

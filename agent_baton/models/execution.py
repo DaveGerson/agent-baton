@@ -856,12 +856,21 @@ class ApprovalResult:
             phase via plan amendment).
         feedback: Optional feedback from the reviewer.
         decided_at: ISO 8601 timestamp of the decision.
+        decision_source: How this approval was decided — ``"human"``,
+            ``"daemon_auto"``, ``"api"``, or ``"policy_auto"`` (A2).
+        actor: Best-available identity of the approver —
+            ``"$USER@$HOSTNAME"`` for CLI, ``"daemon"`` for auto (A2).
+        rationale: Optional structured rationale for the decision (A2).
+            Complements ``feedback`` with machine-readable context.
     """
 
     phase_id: int
     result: str                     # "approve", "reject", "approve-with-feedback"
     feedback: str = ""
     decided_at: str = ""
+    decision_source: str = ""       # A2: human | daemon_auto | api | policy_auto
+    actor: str = ""                 # A2: $USER@$HOSTNAME or "daemon"
+    rationale: str = ""             # A2: structured rationale
 
     def __post_init__(self) -> None:
         if not self.decided_at:
@@ -873,6 +882,9 @@ class ApprovalResult:
             "result": self.result,
             "feedback": self.feedback,
             "decided_at": self.decided_at,
+            "decision_source": self.decision_source,
+            "actor": self.actor,
+            "rationale": self.rationale,
         }
 
     @classmethod
@@ -882,6 +894,9 @@ class ApprovalResult:
             result=data.get("result", "approve"),
             feedback=data.get("feedback", ""),
             decided_at=data.get("decided_at", ""),
+            decision_source=data.get("decision_source", ""),
+            actor=data.get("actor", ""),
+            rationale=data.get("rationale", ""),
         )
 
 
@@ -997,6 +1012,12 @@ class GateResult:
         passed: Whether the gate check succeeded.
         output: Command stdout/stderr or reviewer notes.
         checked_at: ISO 8601 timestamp of the check.
+        command: The shell command that was executed (A6 traceability).
+        exit_code: Subprocess exit code, or ``None`` for manual gates (A6).
+        decision_source: How this gate was decided — ``"human"``,
+            ``"daemon_auto"``, ``"api"``, or ``"policy_auto"`` (A2).
+        actor: Best-available identity of who triggered this gate —
+            ``"$USER@$HOSTNAME"`` for CLI, ``"daemon"`` for auto (A2).
     """
 
     phase_id: int
@@ -1004,6 +1025,10 @@ class GateResult:
     passed: bool
     output: str = ""                # command output or reviewer notes
     checked_at: str = ""
+    command: str = ""               # A6: the command that was run
+    exit_code: int | None = None    # A6: subprocess exit code (None = manual)
+    decision_source: str = ""       # A2: human | daemon_auto | api | policy_auto
+    actor: str = ""                 # A2: $USER@$HOSTNAME or "daemon"
 
     def to_dict(self) -> dict:
         return {
@@ -1012,6 +1037,10 @@ class GateResult:
             "passed": self.passed,
             "output": self.output,
             "checked_at": self.checked_at,
+            "command": self.command,
+            "exit_code": self.exit_code,
+            "decision_source": self.decision_source,
+            "actor": self.actor,
         }
 
     @classmethod

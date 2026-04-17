@@ -300,6 +300,10 @@ class TriggerConfig:
             that triggers a recommendation.
         confidence_threshold: Minimum confidence for auto-applying a
             recommendation.
+        learning_cycle_count_threshold: Number of completed executions since
+            the last learning cycle before flagging that a cycle is due.
+            Controlled by the ``LEARNING_TRIGGER_COUNT`` env var.
+            Default 10.  Set to 0 to disable the counter-based flag.
     """
 
     min_tasks_before_analysis: int = 3
@@ -308,6 +312,7 @@ class TriggerConfig:
     gate_failure_threshold: float = 0.2
     budget_deviation_threshold: float = 0.5
     confidence_threshold: float = 0.7
+    learning_cycle_count_threshold: int = 10
 
     def to_dict(self) -> dict:
         return {
@@ -317,6 +322,7 @@ class TriggerConfig:
             "gate_failure_threshold": self.gate_failure_threshold,
             "budget_deviation_threshold": self.budget_deviation_threshold,
             "confidence_threshold": self.confidence_threshold,
+            "learning_cycle_count_threshold": self.learning_cycle_count_threshold,
         }
 
     @classmethod
@@ -328,6 +334,9 @@ class TriggerConfig:
             gate_failure_threshold=float(data.get("gate_failure_threshold", 0.2)),
             budget_deviation_threshold=float(data.get("budget_deviation_threshold", 0.5)),
             confidence_threshold=float(data.get("confidence_threshold", 0.7)),
+            learning_cycle_count_threshold=int(
+                data.get("learning_cycle_count_threshold", 10)
+            ),
         )
 
     @classmethod
@@ -339,6 +348,8 @@ class TriggerConfig:
 
         * ``BATON_MIN_TASKS`` — ``min_tasks_before_analysis`` (int, default 3).
         * ``BATON_ANALYSIS_INTERVAL`` — ``analysis_interval_tasks`` (int, default 3).
+        * ``LEARNING_TRIGGER_COUNT`` — ``learning_cycle_count_threshold`` (int,
+          default 10).  Set to 0 to disable the counter-based learning cycle flag.
 
         Other thresholds (failure rates, budget deviation, confidence) are not
         overridable via env vars because they are anomaly-detection knobs rather
@@ -353,7 +364,7 @@ class TriggerConfig:
             if raw:
                 try:
                     val = int(raw)
-                    if val > 0:
+                    if val >= 0:
                         return val
                 except ValueError:
                     pass
@@ -362,6 +373,7 @@ class TriggerConfig:
         return cls(
             min_tasks_before_analysis=_int("BATON_MIN_TASKS", 3),
             analysis_interval_tasks=_int("BATON_ANALYSIS_INTERVAL", 3),
+            learning_cycle_count_threshold=_int("LEARNING_TRIGGER_COUNT", 10),
         )
 
 
