@@ -1892,6 +1892,12 @@ class ExecutionEngine:
         except Exception as exc:
             _log.warning("Compliance report generation skipped (non-fatal): %s", exc)
 
+        # Close planning beads that agents never close (planning beads are
+        # created by the planner itself, not dispatched, so no agent emits a
+        # closing signal for them). Without this they leak forever and
+        # pollute BeadStore.ready() queries.
+        self._close_open_beads_at_terminal(state, succeeded=True)
+
         # F6 — Memory Decay: archive old closed beads for the finished task.
         # Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
         if self._bead_store is not None:
@@ -2697,6 +2703,45 @@ class ExecutionEngine:
             details=f"task_id={event.task_id} seq={event.sequence}",
         ))
 
+    def _close_open_beads_at_terminal(
+        self, state: ExecutionState, *, succeeded: bool
+    ) -> None:
+        """Close beads still open when a task reaches a terminal state.
+
+        On success, only planning beads (step_id == "planning") are closed.
+        These are created by the planner itself rather than by dispatched
+        agents, so nothing else ever closes them and they leak into future
+        BeadStore.ready() queries. Agent-level beads are left alone so the
+        normal signal flow and decay TTL can govern their lifecycle.
+
+        On failure, every still-open bead for the task is closed. Without
+        this, failed tasks leave open beads behind that the decay routine
+        (which only archives closed beads) can never clean up.
+
+        Errors here are logged and swallowed — a bookkeeping failure must
+        not mask the real completion/failure result returned to the caller.
+        """
+        if self._bead_store is None:
+            return
+        try:
+            open_beads = self._bead_store.query(
+                task_id=state.task_id, status="open", limit=10000,
+            )
+            if not open_beads:
+                return
+            if succeeded:
+                targets = [b for b in open_beads if b.step_id == "planning"]
+                summary = "Plan execution completed"
+            else:
+                targets = open_beads
+                summary = "Task failed before bead was closed"
+            for bead in targets:
+                self._bead_store.close(bead.bead_id, summary=summary)
+        except Exception as exc:
+            _log.debug(
+                "Terminal bead closure skipped (non-fatal): %s", exc,
+            )
+
     def _publish(self, event: Event) -> None:
         """Publish an event if a bus is configured."""
         if self._bus is not None:
@@ -3296,6 +3341,9 @@ class ExecutionEngine:
         for step in steps:
             if step.step_id in state.failed_step_ids:
                 state.status = "failed"
+                # Close any still-open beads (planning + agent-level) so decay
+                # can archive them; otherwise failed tasks leak open beads.
+                self._close_open_beads_at_terminal(state, succeeded=False)
                 msg = f"Step {step.step_id} failed."
                 return ExecutionAction(
                     action_type=ActionType.FAILED,

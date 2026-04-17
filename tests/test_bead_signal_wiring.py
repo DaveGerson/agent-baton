@@ -574,3 +574,103 @@ class TestSchemaVersion:
             assert row[0] == SCHEMA_VERSION
         finally:
             conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Terminal bead closure — planning beads on success, all open beads on failure
+# ---------------------------------------------------------------------------
+
+
+class TestTerminalBeadClosure:
+    """Beads that are still ``open`` when a task reaches a terminal state get
+    closed so that bead-decay (which only archives closed beads) can actually
+    clean them up. Planning beads in particular are created by the planner and
+    never closed by any agent signal, so they would otherwise leak forever."""
+
+    def _write_planning_bead(self, tmp_path: Path, task_id: str) -> str:
+        from agent_baton.models.bead import Bead
+        store = _bead_store(tmp_path)
+        bead = Bead(
+            bead_id=f"{task_id}-plan",
+            task_id=task_id,
+            agent_name="planner",
+            step_id="planning",
+            bead_type="decision",
+            content="Plan generated via forge.",
+            tags=["planning"],
+            created_at="2026-04-17T00:00:00Z",
+            status="open",
+        )
+        store.write(bead)
+        return bead.bead_id
+
+    def test_planning_beads_closed_on_complete(self, tmp_path: Path) -> None:
+        engine, _ = _engine_with_sqlite(tmp_path, task_id="task-term-success")
+        engine.start(_plan("task-term-success"))
+        self._write_planning_bead(tmp_path, "task-term-success")
+
+        engine.record_step_result(
+            "1.1", "backend-engineer", status="complete", outcome="done.",
+        )
+        engine.complete()
+
+        store = _bead_store(tmp_path)
+        planning = store.query(
+            task_id="task-term-success", status="open", tags=["planning"],
+        )
+        assert planning == [], "planning beads must be closed at task completion"
+
+    def test_non_planning_beads_untouched_on_complete(
+        self, tmp_path: Path,
+    ) -> None:
+        """Agent-emitted beads should NOT be force-closed on success — their
+        lifecycle is managed by agent signals and by bead decay."""
+        engine, _ = _engine_with_sqlite(tmp_path, task_id="task-term-agent")
+        engine.start(_plan("task-term-agent"))
+        engine.record_step_result(
+            "1.1", "backend-engineer", status="complete",
+            outcome="BEAD_DISCOVERY: discovered a thing.",
+        )
+        engine.complete()
+
+        store = _bead_store(tmp_path)
+        agent_beads = store.query(
+            task_id="task-term-agent", bead_type="discovery",
+        )
+        assert len(agent_beads) == 1
+        assert agent_beads[0].status == "open", (
+            "agent beads must remain open on success — decay handles them"
+        )
+
+    def test_all_open_beads_closed_on_failure(self, tmp_path: Path) -> None:
+        engine, _ = _engine_with_sqlite(tmp_path, task_id="task-term-fail")
+        # Build a two-step plan so failure on step 1.1 triggers the
+        # _determine_action failed-path we hook into.
+        plan = _plan(
+            "task-term-fail",
+            phases=[_phase(1, steps=[_step("1.1"), _step("1.2")])],
+        )
+        engine.start(plan)
+        self._write_planning_bead(tmp_path, "task-term-fail")
+        # An agent-level discovery bead, also open.
+        engine.record_step_result(
+            "1.1", "backend-engineer",
+            status="complete",
+            outcome="BEAD_DISCOVERY: partial finding before failure.",
+        )
+        # Now fail the next step to drive the task into failed terminal state.
+        engine.record_step_result(
+            "1.2", "backend-engineer",
+            status="failed",
+            outcome="boom",
+            error="simulated failure",
+        )
+        # Trigger the terminal transition via next_action, which routes
+        # through _determine_action.
+        engine.next_action()
+
+        store = _bead_store(tmp_path)
+        still_open = store.query(task_id="task-term-fail", status="open")
+        assert still_open == [], (
+            "every open bead must be closed when the task fails"
+        )

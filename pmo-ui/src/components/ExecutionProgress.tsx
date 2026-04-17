@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import type { PmoCard } from '../api/types';
 import { T, FONT_SIZES, SR_ONLY, FONTS, SHADOWS } from '../styles/tokens';
+import { useBodyScrollLock } from '../hooks/useBodyScrollLock';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -34,6 +35,7 @@ interface Props {
 // ---------------------------------------------------------------------------
 
 export function ExecutionProgress({ card, onClose }: Props) {
+  useBodyScrollLock();
   const [detail, setDetail] = useState<ExecutionDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [autoScroll, setAutoScroll] = useState(true);
