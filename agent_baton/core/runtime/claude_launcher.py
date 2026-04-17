@@ -54,6 +54,53 @@ logger = logging.getLogger(__name__)
 
 _API_KEY_RE = re.compile(r"sk-ant-[A-Za-z0-9_-]+")
 
+# ---------------------------------------------------------------------------
+# Prompt-cache optimisation flag detection
+# ---------------------------------------------------------------------------
+
+_EXCLUDE_FLAG = "--exclude-dynamic-system-prompt-sections"
+_exclude_flag_supported: bool | None = None  # None = not yet probed
+
+
+def _supports_exclude_flag() -> bool:
+    """Return True if the installed ``claude`` CLI supports
+    ``--exclude-dynamic-system-prompt-sections``.
+
+    The result is cached after the first call so we only probe once per
+    process lifetime.  The probe runs ``claude --print --help`` and checks
+    whether the flag name appears in the output; failure modes (binary not
+    found, timeout, non-zero exit) are treated as "not supported" so they
+    never block a dispatch.
+    """
+    global _exclude_flag_supported
+    if _exclude_flag_supported is not None:
+        return _exclude_flag_supported
+
+    claude_bin = shutil.which("claude")
+    if claude_bin is None:
+        _exclude_flag_supported = False
+        return False
+
+    try:
+        import subprocess  # noqa: PLC0415 — stdlib, intentional lazy import
+        result = subprocess.run(
+            [claude_bin, "--print", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        combined = result.stdout + result.stderr
+        _exclude_flag_supported = _EXCLUDE_FLAG in combined
+    except Exception:  # noqa: BLE001
+        _exclude_flag_supported = False
+
+    logger.debug(
+        "ClaudeCodeLauncher: %s is %s",
+        _EXCLUDE_FLAG,
+        "supported" if _exclude_flag_supported else "NOT supported",
+    )
+    return _exclude_flag_supported
+
 
 def _redact_stderr(text: str) -> str:
     """Strip Anthropic API key patterns from error text.
@@ -312,12 +359,22 @@ class ClaudeCodeLauncher:
         When *mcp_servers* is non-empty, ``--mcp-config`` is appended with
         the server names joined by commas.
         """
+        has_system_prompt = (
+            agent is not None
+            and bool(agent.instructions and agent.instructions.strip())
+        )
         cmd: list[str] = [
             self._claude_bin,
             "--print",
             "--model", model,
             "--output-format", "json",
         ]
+        # Improve cross-dispatch prompt-cache reuse by moving per-machine
+        # sections (cwd, env info, git status) out of the system prompt.
+        # The flag is documented as a no-op when --system-prompt is supplied,
+        # so we only add it when no custom system prompt will be injected.
+        if not has_system_prompt and _supports_exclude_flag():
+            cmd.append(_EXCLUDE_FLAG)
         if agent is not None:
             if agent.instructions and agent.instructions.strip():
                 cmd.extend(["--system-prompt", agent.instructions])

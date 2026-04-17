@@ -26,6 +26,10 @@ from pathlib import Path
 from typing import Any
 
 from agent_baton.models.execution import MachinePlan
+from agent_baton.core.runtime.claude_launcher import (
+    _EXCLUDE_FLAG,
+    _supports_exclude_flag,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +148,11 @@ class HeadlessClaude:
             "--model", effective_model,
             "--output-format", "json",
         ]
+        # Improve prompt-cache reuse by moving per-machine dynamic sections
+        # out of the system prompt.  HeadlessClaude never injects a custom
+        # --system-prompt, so the flag is always applicable when supported.
+        if _supports_exclude_flag():
+            cmd.append(_EXCLUDE_FLAG)
 
         use_stdin = len(prompt.encode()) > 131_072
         if not use_stdin:
