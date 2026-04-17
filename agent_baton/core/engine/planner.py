@@ -489,6 +489,12 @@ class IntelligentPlanner:
         self._foresight_engine = ForesightEngine()
         self._last_foresight_insights: list[ForesightInsight] = []
 
+        # Plan reviewer — post-generation quality review (step splitting,
+        # dependency suggestions, scope warnings).
+        from agent_baton.core.engine.plan_reviewer import PlanReviewer, PlanReviewResult
+        self._plan_reviewer = PlanReviewer()
+        self._last_review_result: PlanReviewResult | None = None
+
     # ------------------------------------------------------------------
     # Structured description parsing
     # ------------------------------------------------------------------
@@ -1074,6 +1080,40 @@ class IntelligentPlanner:
             if self._is_team_phase(phase, task_summary):
                 phase.steps = [self._consolidate_team_step(phase)]
 
+        # 12c.4. Extract file paths early — needed by plan reviewer (12c.5)
+        # and context richness (13c).
+        extracted_paths = self._extract_file_paths(task_summary)
+
+        # 12c.5. Plan structure review — detect overly broad single-agent
+        # steps and split them into parallel concern-scoped steps.
+        # Skips light-complexity plans (nothing to split).  Uses Haiku
+        # for medium+ plans, with heuristic fallback when unavailable.
+        try:
+            self._last_review_result = self._plan_reviewer.review(
+                plan=MachinePlan(
+                    task_id=task_id,
+                    task_summary=task_summary,
+                    risk_level=risk_level,
+                    budget_tier="standard",
+                    phases=plan_phases,
+                    task_type=inferred_type,
+                    complexity=inferred_complexity,
+                ),
+                task_summary=task_summary,
+                file_paths=extracted_paths,
+                complexity=inferred_complexity,
+            )
+            if self._last_review_result.splits_applied > 0:
+                logger.info(
+                    "Plan review applied %d split(s) (source=%s)",
+                    self._last_review_result.splits_applied,
+                    self._last_review_result.source,
+                )
+        except Exception:
+            logger.debug(
+                "Plan review failed — skipping", exc_info=True,
+            )
+
         # 12d. Apply bead hints from BeadAnalyzer (F7).
         # Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
         if _bead_hints:
@@ -1102,9 +1142,8 @@ class IntelligentPlanner:
                     elif default_model:
                         member.model = default_model
 
-        # 13c. Context richness — extract file paths from task summary and append
+        # 13c. Context richness — append extracted file paths (from 12c.4)
         # to every step's context_files (deduplicated).
-        extracted_paths = self._extract_file_paths(task_summary)
         if extracted_paths:
             for phase in plan_phases:
                 for step in phase.steps:
@@ -1328,6 +1367,45 @@ class IntelligentPlanner:
                 "No proactive gaps detected. The plan is self-contained.",
                 "",
             ]
+
+        # Plan review
+        if self._last_review_result is not None:
+            rr = self._last_review_result
+            if rr.source == "skipped-light":
+                lines += [
+                    "## Plan Review",
+                    "",
+                    "Skipped — light complexity plan.",
+                    "",
+                ]
+            elif rr.splits_applied > 0 or rr.teams_created > 0 or rr.dependencies_added > 0 or rr.warnings:
+                lines += ["## Plan Review", ""]
+                lines.append(f"**Source:** {rr.source}")
+                if rr.splits_applied:
+                    lines.append(
+                        f"**Steps split:** {rr.splits_applied} broad step(s) "
+                        f"split into parallel concern-scoped steps."
+                    )
+                if rr.teams_created:
+                    lines.append(
+                        f"**Teams created:** {rr.teams_created} broad step(s) "
+                        f"converted to same-agent team(s) with scoped members."
+                    )
+                if rr.dependencies_added:
+                    lines.append(
+                        f"**Dependencies added:** {rr.dependencies_added} "
+                        f"missing dependency edge(s) inserted."
+                    )
+                for w in rr.warnings:
+                    lines.append(f"- ⚠ {w}")
+                lines.append("")
+            else:
+                lines += [
+                    "## Plan Review",
+                    "",
+                    f"No structural issues found (source: {rr.source}).",
+                    "",
+                ]
 
         # Phase summary
         lines += ["## Phase Summary", ""]
