@@ -3486,7 +3486,7 @@ class ExecutionEngine:
         # ── Route prompt builder by step_type ───────────────────────────────
         # consulting → lightweight consultation prompt (no shared context chain)
         # task       → minimal bespoke-skill prompt (no context overhead)
-        # everything else → full delegation prompt (existing behaviour)
+        # everything else → full delegation prompt with knowledge dedup
         if step.step_type == "consulting":
             prompt = dispatcher.build_consultation_prompt(
                 step,
@@ -3506,7 +3506,12 @@ class ExecutionEngine:
                 task_summary=state.plan.task_summary,
                 task_type=state.plan.task_type or "",
                 prior_beads=prior_beads or None,
+                delivered_knowledge=state.delivered_knowledge,
             )
+            # Persist the updated delivered_knowledge map so subsequent
+            # dispatches in this run know which docs are already inlined.
+            if self._persistence is not None:
+                self._persistence.save(state)
         enforcement = PromptDispatcher.build_path_enforcement(step)
 
         # ── Compliance audit: record dispatch event ──────────────────────────
