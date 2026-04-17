@@ -128,12 +128,19 @@ class KnowledgeResolver:
         risk_level: str = "LOW",
         explicit_packs: list[str] | None = None,
         explicit_docs: list[str] | None = None,
+        already_delivered: dict[str, str] | None = None,
     ) -> list[KnowledgeAttachment]:
         """Resolve knowledge attachments for a single plan step.
 
         Runs the 4-layer pipeline in order. Documents encountered in earlier
         layers are skipped in later layers (deduplication by source_path,
         falling back to doc name + pack name).
+
+        Session-level deduplication: if *already_delivered* is provided, any
+        doc whose dedup key appears in that dict will be forced to
+        ``delivery="reference"`` with a note pointing back to the step where
+        it was first inlined — **unless** the doc is from the explicit layer
+        (layer 1), which always inlines regardless of prior delivery.
 
         Args:
             agent_name: Name of the agent being dispatched.
@@ -142,17 +149,23 @@ class KnowledgeResolver:
             risk_level: Risk classification of the plan (LOW/MEDIUM/HIGH/CRITICAL).
             explicit_packs: Pack names explicitly passed via --knowledge-pack.
             explicit_docs: Document file paths explicitly passed via --knowledge.
+            already_delivered: Mapping of doc-key → step_id for docs already
+                inlined in this execution run.  Docs in this map (that are not
+                from the explicit layer) are downgraded to reference delivery.
 
         Returns:
             Ordered list of KnowledgeAttachment objects with delivery decisions
             applied. Priority within each layer is high → normal → low.
         """
+        prior: dict[str, str] = already_delivered or {}
+
         # Mutable per-resolve state
         seen: set[str] = set()           # dedup keys: "{pack_name}::{doc_name}"
         remaining_budget = self._step_token_budget
         attachments: list[KnowledgeAttachment] = []
 
         # --- Layer 1: Explicit -----------------------------------------------
+        # Explicit (user-supplied) docs always inline — never downgraded.
         layer1_docs = self._resolve_explicit_layer(
             explicit_packs or [], explicit_docs or []
         )
@@ -174,7 +187,8 @@ class KnowledgeResolver:
                 continue
             seen.add(key)
             attachment, remaining_budget = self._make_attachment(
-                doc, pack_name, source, remaining_budget
+                doc, pack_name, source, remaining_budget,
+                prior_step_id=prior.get(key),
             )
             attachments.append(attachment)
 
@@ -187,7 +201,8 @@ class KnowledgeResolver:
                 continue
             seen.add(key)
             attachment, remaining_budget = self._make_attachment(
-                doc, pack_name, source, remaining_budget
+                doc, pack_name, source, remaining_budget,
+                prior_step_id=prior.get(key),
             )
             attachments.append(attachment)
 
@@ -203,7 +218,8 @@ class KnowledgeResolver:
                     continue
                 seen.add(key)
                 attachment, remaining_budget = self._make_attachment(
-                    doc, pack_name, source, remaining_budget
+                    doc, pack_name, source, remaining_budget,
+                    prior_step_id=prior.get(key),
                 )
                 attachments.append(attachment)
 
@@ -368,10 +384,14 @@ class KnowledgeResolver:
         pack_name: str | None,
         source: str,
         remaining_budget: int,
+        *,
+        prior_step_id: str | None = None,
     ) -> tuple[KnowledgeAttachment, int]:
         """Apply delivery decision and return (attachment, updated_remaining_budget).
 
         Delivery rules:
+        - prior_step_id is set (session dedup, non-explicit layer): reference
+          with a note pointing to the prior inline delivery step.
         - token_estimate <= 0:                           reference (unestimated)
         - token_estimate > doc_token_cap:                reference (over per-doc cap)
         - token_estimate <= remaining_budget:            inline (fits budget)
@@ -381,6 +401,28 @@ class KnowledgeResolver:
         rag_available=True, otherwise "file".
         """
         estimate = doc.token_estimate
+        grounding = _make_grounding(doc, pack_name)
+
+        # Session-level deduplication: doc was already inlined in a prior step.
+        # Force reference delivery and annotate the grounding with a retrieval note.
+        if prior_step_id is not None:
+            path_hint = _doc_path(doc)
+            dedup_note = (
+                f"(previously delivered inline in step {prior_step_id}"
+                f" — re-read from: {path_hint})"
+            )
+            grounding = f"{grounding} {dedup_note}".strip()
+            retrieval = "mcp-rag" if self._rag_available else "file"
+            return KnowledgeAttachment(
+                source=source,
+                pack_name=pack_name,
+                document_name=doc.name,
+                path=path_hint,
+                delivery="reference",
+                retrieval=retrieval,
+                grounding=grounding,
+                token_estimate=estimate,
+            ), remaining_budget
 
         if estimate <= 0 or estimate > self._doc_token_cap:
             delivery = "reference"
@@ -391,7 +433,6 @@ class KnowledgeResolver:
             delivery = "reference"
 
         retrieval = "mcp-rag" if (self._rag_available and delivery == "reference") else "file"
-        grounding = _make_grounding(doc, pack_name)
 
         attachment = KnowledgeAttachment(
             source=source,
