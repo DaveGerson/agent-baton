@@ -362,7 +362,20 @@ class TriggerConfig:
         Returns:
             A :class:`TriggerConfig` populated from env vars where present.
         """
-        def _int(key: str, default: int) -> int:
+        def _positive_int(key: str, default: int) -> int:
+            """Parse a strictly positive integer env var; ignore zero or negative."""
+            raw = os.environ.get(key, "").strip()
+            if raw:
+                try:
+                    val = int(raw)
+                    if val > 0:
+                        return val
+                except ValueError:
+                    pass
+            return default
+
+        def _nonneg_int(key: str, default: int) -> int:
+            """Parse a non-negative integer env var; 0 is a valid value."""
             raw = os.environ.get(key, "").strip()
             if raw:
                 try:
@@ -374,9 +387,10 @@ class TriggerConfig:
             return default
 
         return cls(
-            min_tasks_before_analysis=_int("BATON_MIN_TASKS", 3),
-            analysis_interval_tasks=_int("BATON_ANALYSIS_INTERVAL", 3),
-            learning_cycle_count_threshold=_int("LEARNING_TRIGGER_COUNT", 10),
+            min_tasks_before_analysis=_positive_int("BATON_MIN_TASKS", 3),
+            analysis_interval_tasks=_positive_int("BATON_ANALYSIS_INTERVAL", 3),
+            # LEARNING_TRIGGER_COUNT=0 means "disable the counter flag"
+            learning_cycle_count_threshold=_nonneg_int("LEARNING_TRIGGER_COUNT", 10),
         )
 
 
