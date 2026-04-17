@@ -47,51 +47,17 @@ from pathlib import Path
 from typing import Any
 
 from agent_baton.core.orchestration.registry import AgentRegistry
+from agent_baton.core.runtime._redaction import (
+    _REDACT_PATTERNS,
+    redact_sensitive as _redact_sensitive,
+)
 from agent_baton.core.runtime.launcher import LaunchResult
 from agent_baton.models.agent import AgentDefinition
 
 logger = logging.getLogger(__name__)
 
-# A5: Sensitive data patterns applied to both outcome and error text before storage.
-# Keep as a module-level tuple so operators can extend it without touching launch logic.
-_REDACT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
-    # Anthropic API keys
-    (re.compile(r"sk-ant-[A-Za-z0-9_-]+"), "sk-ant-***REDACTED***"),
-    # GitHub personal access tokens (classic and fine-grained)
-    (re.compile(r"ghp_[A-Za-z0-9_]+"), "ghp_***REDACTED***"),
-    (re.compile(r"github_pat_[A-Za-z0-9_]+"), "github_pat_***REDACTED***"),
-    # Slack bot/user tokens
-    (re.compile(r"xoxb-[A-Za-z0-9_-]+"), "xoxb-***REDACTED***"),
-    (re.compile(r"xoxp-[A-Za-z0-9_-]+"), "xoxp-***REDACTED***"),
-    # Generic JSON password fields  (e.g. {"password": "hunter2"})
-    (
-        re.compile(r'"password"\s*:\s*"[^"]*"', re.IGNORECASE),
-        '"password": "***REDACTED***"',
-    ),
-    # Generic JSON secret/token fields
-    (
-        re.compile(r'"(?:secret|token|api_key|apikey)"\s*:\s*"[^"]*"', re.IGNORECASE),
-        r'"***REDACTED_KEY***": "***REDACTED***"',
-    ),
-)
-
 # Keep the old name as an alias so any external callers do not break.
 _API_KEY_RE = _REDACT_PATTERNS[0][0]
-
-
-def _redact_sensitive(text: str) -> str:
-    """Strip known sensitive patterns from agent output or error text.
-
-    Applied to both ``LaunchResult.outcome`` and ``LaunchResult.error``
-    before they are stored in step results, traces, and retrospectives
-    (A5 — stdout redaction for sensitive data).
-
-    Patterns covered: Anthropic API keys, GitHub PATs, Slack tokens,
-    and generic JSON ``password``/``secret``/``token``/``api_key`` fields.
-    """
-    for pattern, replacement in _REDACT_PATTERNS:
-        text = pattern.sub(replacement, text)
-    return text
 
 
 def _redact_stderr(text: str) -> str:

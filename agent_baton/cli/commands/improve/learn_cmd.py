@@ -119,6 +119,16 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         ),
     )
     cycle_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        dest="dry_run",
+        help=(
+            "Print the 'baton execute run' command that would be invoked without "
+            "actually executing it.  Implies --run (shows the command even without "
+            "that flag).  Useful for verifying the plan path before committing."
+        ),
+    )
+    cycle_p.add_argument(
         "--template",
         default=None,
         metavar="PATH",
@@ -407,7 +417,9 @@ def _cmd_run_cycle(args: argparse.Namespace) -> None:
     except Exception:
         pass
 
-    if not getattr(args, "run", False):
+    dry_run = getattr(args, "dry_run", False)
+
+    if not getattr(args, "run", False) and not dry_run:
         print(
             "Plan printed. To execute, run:\n"
             "  baton learn run-cycle --run\n"
@@ -416,11 +428,7 @@ def _cmd_run_cycle(args: argparse.Namespace) -> None:
         )
         return
 
-    # --- Execute via baton execute run -----------------------------------
-    print("Executing learning cycle...")
-    print()
-
-    # Write the plan to the team-context directory so baton execute run can find it
+    # --- Write plan to team-context so baton execute run can locate it ---
     plan_dest = _team_context_root() / "learning-cycle-plan.json"
     plan_dest.parent.mkdir(parents=True, exist_ok=True)
     plan_dest.write_text(
@@ -429,6 +437,17 @@ def _cmd_run_cycle(args: argparse.Namespace) -> None:
     )
 
     cmd = ["baton", "execute", "run", "--plan", str(plan_dest)]
+
+    if dry_run:
+        # Print the command that would be run without actually running it.
+        print("Dry run — would execute:")
+        print(f"  {' '.join(cmd)}")
+        return
+
+    # --- Execute via baton execute run -----------------------------------
+    print("Executing learning cycle...")
+    print()
+
     try:
         result = subprocess.run(cmd, check=False)
         if result.returncode == 0:

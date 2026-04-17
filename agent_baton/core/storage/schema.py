@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 12
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -257,6 +257,90 @@ CREATE TABLE IF NOT EXISTS feedback_responses (
 );
 CREATE INDEX IF NOT EXISTS idx_feedback_responses_task ON feedback_responses(task_id);
 """,
+    11: """
+-- v11: relax beads.task_id to nullable.
+--
+-- Motivation: beads created via `baton beads create` (manual / CLI) do not
+-- have a corresponding executions row, so the FK constraint on task_id
+-- fires and rejects the INSERT.  Making task_id nullable lets project-scoped
+-- beads (task_id IS NULL) bypass the FK check under SQLite MATCH SIMPLE
+-- semantics (the default), while task-scoped beads (task_id IS NOT NULL)
+-- continue to be validated normally.
+--
+-- SQLite does not support DROP NOT NULL via ALTER TABLE.  The only safe
+-- approach is a table rebuild.  The migration uses the standard SQLite
+-- sequence: rename → create-new → insert-from-old → drop-old → re-index.
+--
+-- NOTE: This migration is applied to BOTH project and central databases.
+-- The central beads table also carries task_id as a non-nullable column so
+-- the same rebuild is required there.  Central beads have no FK constraint
+-- (by design — see the v4 note), so only the NOT NULL relaxation matters.
+
+-- Step 1: rename old table
+ALTER TABLE beads RENAME TO _beads_old_v10;
+
+-- Step 2: create new table with task_id nullable
+CREATE TABLE beads (
+    bead_id          TEXT PRIMARY KEY,
+    task_id          TEXT,
+    step_id          TEXT NOT NULL,
+    agent_name       TEXT NOT NULL,
+    bead_type        TEXT NOT NULL,
+    content          TEXT NOT NULL DEFAULT '',
+    confidence       TEXT NOT NULL DEFAULT 'medium',
+    scope            TEXT NOT NULL DEFAULT 'step',
+    tags             TEXT NOT NULL DEFAULT '[]',
+    affected_files   TEXT NOT NULL DEFAULT '[]',
+    status           TEXT NOT NULL DEFAULT 'open',
+    created_at       TEXT NOT NULL,
+    closed_at        TEXT NOT NULL DEFAULT '',
+    summary          TEXT NOT NULL DEFAULT '',
+    links            TEXT NOT NULL DEFAULT '[]',
+    source           TEXT NOT NULL DEFAULT 'agent-signal',
+    token_estimate   INTEGER NOT NULL DEFAULT 0,
+    quality_score    REAL    NOT NULL DEFAULT 0.0,
+    retrieval_count  INTEGER NOT NULL DEFAULT 0
+);
+
+-- Step 3: copy data (empty-string task_id → NULL for project-scope beads)
+INSERT INTO beads SELECT
+    bead_id,
+    CASE WHEN task_id = '' THEN NULL ELSE task_id END,
+    step_id, agent_name, bead_type, content, confidence, scope,
+    tags, affected_files, status, created_at, closed_at, summary,
+    links, source, token_estimate,
+    COALESCE(quality_score, 0.0),
+    COALESCE(retrieval_count, 0)
+FROM _beads_old_v10;
+
+-- Step 4: drop old table
+DROP TABLE _beads_old_v10;
+
+-- Step 5: recreate indexes
+CREATE INDEX IF NOT EXISTS idx_beads_task   ON beads(task_id);
+CREATE INDEX IF NOT EXISTS idx_beads_agent  ON beads(agent_name);
+CREATE INDEX IF NOT EXISTS idx_beads_type   ON beads(bead_type);
+CREATE INDEX IF NOT EXISTS idx_beads_status ON beads(status);
+""",
+    12: """
+-- v12: add updated_at to step_results for bi-directional split-brain reconciliation.
+--
+-- When a crash leaves SQLite and the file fallback with divergent step states,
+-- the reconciler needs a reliable "which write happened later?" signal.
+-- updated_at (ISO 8601 UTC) is set on every status mutation so the reconciler
+-- can compare timestamps across both backends and always pick the newer write,
+-- regardless of direction (SQLite newer OR file newer).
+--
+-- Fallback: rows with an empty updated_at string (pre-v12 data) continue to be
+-- resolved by the existing status-rank logic so existing databases are not
+-- affected.
+--
+-- NOTE: FK constraints are intentionally omitted from this migration because
+-- it is applied to BOTH project and central databases via
+-- ConnectionManager._run_migrations().  Fresh project DBs get FKs from
+-- PROJECT_SCHEMA_DDL directly.
+ALTER TABLE step_results ADD COLUMN updated_at TEXT NOT NULL DEFAULT '';
+""",
 }
 
 # =====================================================================
@@ -374,6 +458,7 @@ CREATE TABLE IF NOT EXISTS step_results (
     completed_at      TEXT NOT NULL DEFAULT '',
     deviations        TEXT NOT NULL DEFAULT '[]',
     step_type         TEXT NOT NULL DEFAULT 'developing',
+    updated_at        TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (task_id, step_id),
     FOREIGN KEY (task_id) REFERENCES executions(task_id) ON DELETE CASCADE
 );
@@ -689,9 +774,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_learning_issues_type_target_open
 
 -- BEADS (Inspired by Steve Yegge's Beads agent memory system, beads-ai/beads-cli)
 -- Discrete units of structured memory produced by agents during execution.
+-- task_id is nullable: NULL means project-scoped bead (no execution parent).
+-- Task-scoped beads (task_id IS NOT NULL) are validated by the FK constraint
+-- under SQLite MATCH SIMPLE semantics (NULL bypasses the FK check).
 CREATE TABLE IF NOT EXISTS beads (
     bead_id          TEXT PRIMARY KEY,
-    task_id          TEXT NOT NULL,
+    task_id          TEXT,
     step_id          TEXT NOT NULL,
     agent_name       TEXT NOT NULL,
     bead_type        TEXT NOT NULL,
@@ -1127,6 +1215,7 @@ CREATE TABLE IF NOT EXISTS step_results (
     completed_at      TEXT NOT NULL DEFAULT '',
     deviations        TEXT NOT NULL DEFAULT '[]',
     step_type         TEXT NOT NULL DEFAULT 'developing',
+    updated_at        TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (project_id, task_id, step_id)
 );
 CREATE INDEX IF NOT EXISTS idx_central_step_results_status ON step_results(status);
@@ -1400,10 +1489,11 @@ CREATE TABLE IF NOT EXISTS shared_context (
 );
 
 -- BEADS (mirror — Inspired by Steve Yegge's Beads agent memory system, beads-ai/beads-cli)
+-- task_id is nullable: NULL = project-scoped bead with no execution parent.
 CREATE TABLE IF NOT EXISTS beads (
     project_id       TEXT NOT NULL,
     bead_id          TEXT NOT NULL,
-    task_id          TEXT NOT NULL,
+    task_id          TEXT,
     step_id          TEXT NOT NULL,
     agent_name       TEXT NOT NULL,
     bead_type        TEXT NOT NULL,

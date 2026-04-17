@@ -24,7 +24,8 @@ from agent_baton.cli import commands as commands_pkg
 _COMMAND_GROUPS: dict[str, list[str]] = {
     "Core Workflow": ["plan", "execute", "status"],
     "Agents & Routing": ["agents", "route", "events", "incident"],
-    "Observability": ["dashboard", "trace", "usage", "telemetry", "context-profile", "retro", "context"],
+    "Observability": ["dashboard", "trace", "usage", "telemetry", "context-profile", "retro", "context", "export"],
+    "Integrations": ["webhook"],
     "Governance": ["classify", "compliance", "policy", "escalations", "validate", "spec-check", "detect"],
     "Improvement": ["scores", "evolve", "patterns", "budget", "changelog", "experiment", "anomalies", "improve", "learn"],
     "Distribution": ["install", "uninstall", "package", "publish", "pull", "transfer", "verify-package"],

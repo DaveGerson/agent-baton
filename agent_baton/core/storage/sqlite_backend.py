@@ -168,8 +168,8 @@ class SqliteStorage:
                         (task_id, step_id, agent_name, status, outcome,
                          files_changed, commit_hash, estimated_tokens,
                          duration_seconds, retries, error, completed_at,
-                         deviations, step_type)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         deviations, step_type, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         state.task_id,
@@ -186,6 +186,7 @@ class SqliteStorage:
                         sr.completed_at,
                         json.dumps(sr.deviations),
                         sr.step_type,
+                        sr.updated_at,
                     ),
                 )
                 # team step results cascade from step_results, delete via FK
@@ -417,6 +418,7 @@ class SqliteStorage:
                 )
                 for tr in turns_by_step.get(sr["step_id"], [])
             ]
+            sr_keys = sr.keys() if hasattr(sr, "keys") else []
             step_results.append(
                 StepResult(
                     step_id=sr["step_id"],
@@ -432,10 +434,11 @@ class SqliteStorage:
                     completed_at=sr["completed_at"],
                     member_results=member_results,
                     deviations=json.loads(
-                        sr["deviations"] if "deviations" in sr.keys() else "[]"
+                        sr["deviations"] if "deviations" in sr_keys else "[]"
                     ),
-                    step_type=sr["step_type"] if "step_type" in sr.keys() else "developing",
+                    step_type=sr["step_type"] if "step_type" in sr_keys else "developing",
                     interaction_history=interaction_history,
+                    updated_at=sr["updated_at"] if "updated_at" in sr_keys else "",
                 )
             )
 
@@ -653,8 +656,8 @@ class SqliteStorage:
                     (task_id, step_id, agent_name, status, outcome,
                      files_changed, commit_hash, estimated_tokens,
                      duration_seconds, retries, error, completed_at,
-                     deviations, step_type)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     deviations, step_type, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task_id,
@@ -671,6 +674,7 @@ class SqliteStorage:
                     result.completed_at,
                     json.dumps(result.deviations),
                     result.step_type,
+                    result.updated_at,
                 ),
             )
             # Replace team member results for this step

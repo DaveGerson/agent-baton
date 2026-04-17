@@ -585,15 +585,30 @@ class ExecutionEngine:
         primary_label: str = "primary",
         secondary_label: str = "secondary",
     ) -> "ExecutionState":
-        """Return the more-advanced of two execution states.
+        """Return a reconciled execution state from two potentially divergent backends.
 
-        For each step_id that appears in both *primary* and *secondary*,
-        picks the result with the higher status rank.  If *secondary* has any
-        step at a more-advanced status than *primary*, the divergence is
-        logged at WARNING level and a corrected state is returned.
+        Bi-directional reconciliation strategy (per-step):
+
+        1. If both results carry a non-empty ``updated_at`` timestamp, the
+           result with the **newer** timestamp wins, regardless of which
+           backend it came from.  This handles the reverse split-brain case
+           where SQLite has a step recorded *after* the last file dual-write
+           succeeded.
+
+        2. If either result has an empty/None ``updated_at`` (pre-v12 data),
+           fall back to status-rank ordering so older databases continue to
+           work correctly.
+
+        3. In both cases, status is **never downgraded** — if timestamps say
+           a stale record is newer but its status is lower rank, we keep the
+           higher-rank status.
+
+        4. Steps present only in *secondary* (not in primary at all) are
+           added to the reconciled result list — this handles the case where
+           SQLite recorded a step that the file backend never saw.
 
         Does NOT mutate either input state.  Returns *primary* unchanged when
-        no divergence is detected.
+        no corrections are needed.
 
         Args:
             primary: State from the normal ``_load_execution`` path (SQLite).
@@ -606,6 +621,9 @@ class ExecutionEngine:
         """
         import copy
 
+        primary_by_step: dict[str, "StepResult"] = {
+            r.step_id: r for r in primary.step_results
+        }
         secondary_by_step: dict[str, "StepResult"] = {
             r.step_id: r for r in secondary.step_results
         }
@@ -613,27 +631,68 @@ class ExecutionEngine:
         corrections: list[str] = []
         reconciled_results = list(primary.step_results)
 
+        # ── Pass 1: resolve steps present in both backends ───────────────────
         for idx, primary_result in enumerate(reconciled_results):
             sec_result = secondary_by_step.get(primary_result.step_id)
             if sec_result is None:
                 continue
+
+            pri_ts = primary_result.updated_at or ""
+            sec_ts = sec_result.updated_at or ""
+
+            if pri_ts and sec_ts:
+                # Both have timestamps — newer write wins (bi-directional).
+                try:
+                    pri_dt = datetime.fromisoformat(pri_ts)
+                    sec_dt = datetime.fromisoformat(sec_ts)
+                except ValueError:
+                    # Unparseable timestamp: fall through to rank-based logic.
+                    pri_dt = sec_dt = None
+
+                if pri_dt is not None and sec_dt is not None and sec_dt > pri_dt:
+                    # Secondary is newer — but never downgrade status.
+                    if self._step_status_rank(sec_result.status) >= self._step_status_rank(
+                        primary_result.status
+                    ):
+                        corrections.append(
+                            f"step {primary_result.step_id}: "
+                            f"{primary_label}={primary_result.status!r}"
+                            f"@{pri_ts} -> "
+                            f"{secondary_label}={sec_result.status!r}"
+                            f"@{sec_ts} (newer timestamp)"
+                        )
+                        reconciled_results[idx] = sec_result
+                    continue
+                # Primary is newer or equal — keep primary as-is.
+                continue
+
+            # ── Fallback: no timestamps on one or both sides — use rank ───────
             if self._step_status_rank(sec_result.status) > self._step_status_rank(
                 primary_result.status
             ):
                 corrections.append(
                     f"step {primary_result.step_id}: "
                     f"{primary_label}={primary_result.status!r} -> "
-                    f"{secondary_label}={sec_result.status!r}"
+                    f"{secondary_label}={sec_result.status!r} (status-rank fallback)"
                 )
                 reconciled_results[idx] = sec_result
+
+        # ── Pass 2: add steps present only in secondary ──────────────────────
+        for step_id, sec_result in secondary_by_step.items():
+            if step_id not in primary_by_step:
+                corrections.append(
+                    f"step {step_id}: only in {secondary_label} "
+                    f"(status={sec_result.status!r}) — added to reconciled state"
+                )
+                reconciled_results.append(sec_result)
 
         if not corrections:
             return primary
 
         _log.warning(
             "Persistence split-brain detected for task %r during resume — "
-            "%s state is behind %s state. Promoting more-advanced results: %s. "
-            "Check logs for earlier 'SQLite save failed' warnings.",
+            "reconciling %s and %s backends. Corrections: %s. "
+            "Check logs for earlier write-failure warnings.",
             primary.task_id,
             primary_label,
             secondary_label,
@@ -1194,6 +1253,7 @@ class ExecutionEngine:
                 existing.outcome = clean_outcome
                 existing.status = "complete"
                 existing.completed_at = _utcnow()
+                existing.updated_at = _utcnow()
                 existing.deviations = self._extract_deviations(clean_outcome)
                 existing.interaction_history.append(InteractionTurn(
                     role="agent",
@@ -1212,6 +1272,7 @@ class ExecutionEngine:
                 )
                 existing.status = "complete"
                 existing.completed_at = _utcnow()
+                existing.updated_at = _utcnow()
                 existing.deviations = self._extract_deviations(clean_outcome)
                 existing.interaction_history.append(InteractionTurn(
                     role="agent",
@@ -1257,6 +1318,7 @@ class ExecutionEngine:
             error=error,
             completed_at=_utcnow(),
             deviations=self._extract_deviations(outcome),
+            updated_at=_utcnow(),
         )
         # Replace any existing result for this step_id (e.g. a prior
         # "dispatched" row written by mark_dispatched) instead of appending.

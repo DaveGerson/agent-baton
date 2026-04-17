@@ -1028,6 +1028,43 @@ def _handle_run(args: argparse.Namespace) -> None:
     steps_executed = 0
     action_dict = action.to_dict()
 
+    try:
+        _run_loop(
+            engine=engine,
+            launcher=launcher,
+            action_dict=action_dict,
+            max_steps=max_steps,
+            dry_run=dry_run,
+            model_override=model_override,
+            task_id=task_id,
+            steps_executed=steps_executed,
+        )
+    finally:
+        # Issue 3: clean up any launcher subprocesses that are still alive
+        # if the loop exits via CancelledError, KeyboardInterrupt, or sys.exit.
+        _cleanup = getattr(launcher, "cleanup", None)
+        if _cleanup is not None:
+            import asyncio as _asyncio
+            try:
+                _asyncio.run(_cleanup())
+            except Exception:
+                pass
+
+
+def _run_loop(
+    *,
+    engine: ExecutionEngine,
+    launcher: object,
+    action_dict: dict,
+    max_steps: int,
+    dry_run: bool,
+    model_override: str,
+    task_id: str | None,
+    steps_executed: int = 0,
+) -> None:
+    """Inner execution loop extracted so _handle_run can wrap it in try/finally."""
+    import subprocess as _subprocess
+
     while True:
         atype = action_dict.get("action_type", "")
 
@@ -1163,6 +1200,27 @@ def _handle_run(args: argparse.Namespace) -> None:
             if dry_run:
                 print(f"  [DRY RUN] Would run: {gate_cmd}", file=sys.stderr)
                 engine.record_gate_result(phase_id=phase_id, passed=True, output="dry-run skip")
+            elif gate_type == "ci":
+                # CI gate: dispatch GitHub Actions workflow and poll for completion.
+                # This is a long-running synchronous operation (up to 15 minutes)
+                # so we call it directly in the CLI process rather than spawning a
+                # subprocess — the subprocess would lose the polling context.
+                from agent_baton.core.engine.gates import run_github_actions_gate
+
+                workflow_name = gate_cmd.strip() or "ci.yml"
+                print(f"  [GATE] Dispatching CI workflow '{workflow_name}' and waiting...", file=sys.stderr)
+                result = run_github_actions_gate(workflow_name)
+                engine.record_gate_result(
+                    phase_id=phase_id,
+                    passed=result.passed,
+                    output=result.output,
+                    command=f"gh workflow run {workflow_name}",
+                    exit_code=None,
+                )
+                marker = success("PASS") if result.passed else color_error("FAIL")
+                print(f"  [GATE] {marker}", file=sys.stderr)
+                if not result.passed and result.output:
+                    print(f"    Output: {result.output[:200]}", file=sys.stderr)
             else:
                 try:
                     proc = _subprocess.run(
@@ -1174,13 +1232,21 @@ def _handle_run(args: argparse.Namespace) -> None:
                     if not passed and proc.stderr:
                         output += f"\n--- stderr ---\n{proc.stderr[-1000:]}"
                     engine.record_gate_result(
-                        phase_id=phase_id, passed=passed, output=output,
+                        phase_id=phase_id,
+                        passed=passed,
+                        output=output,
+                        command=gate_cmd,
+                        exit_code=proc.returncode,
                     )
                     marker = success("PASS") if passed else color_error("FAIL")
                     print(f"  [GATE] {marker}", file=sys.stderr)
                 except _subprocess.TimeoutExpired:
                     engine.record_gate_result(
-                        phase_id=phase_id, passed=False, output="Gate timed out after 300s",
+                        phase_id=phase_id,
+                        passed=False,
+                        output="Gate timed out after 300s",
+                        command=gate_cmd,
+                        exit_code=-1,
                     )
                     print(f"  [GATE] {color_error('TIMEOUT')}", file=sys.stderr)
 

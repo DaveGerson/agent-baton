@@ -1222,6 +1222,23 @@ class IntelligentPlanner:
                 )
 
         # 14. Shared context
+        # A3: Derive classification_signals (JSON) and classification_confidence
+        # from the DataClassifier result when available.
+        _classification_signals: str | None = None
+        _classification_confidence: float | None = None
+        if classification is not None:
+            _classification_signals = json.dumps(
+                {
+                    "signals": classification.signals_found,
+                    "risk_level": classification.risk_level.value,
+                    "guardrail_preset": classification.guardrail_preset,
+                    "explanation": classification.explanation,
+                }
+            )
+            # ClassificationResult.confidence is "high" | "low" (string).
+            # Map to float so callers can order/threshold numerically.
+            _classification_confidence = 1.0 if classification.confidence == "high" else 0.5
+
         tmp_plan = MachinePlan(
             task_id=task_id,
             task_summary=task_summary,
@@ -1247,6 +1264,8 @@ class IntelligentPlanner:
             ),
             foresight_insights=list(self._last_foresight_insights),
             depends_on_task=depends_on_task_id,
+            classification_signals=_classification_signals,
+            classification_confidence=_classification_confidence,
         )
         # 16. Team cost estimation — look up historical cost data for team steps.
         self._last_team_cost_estimates: dict[str, int] = {}

@@ -509,3 +509,137 @@ class TestReconcileStatesUnit:
         assert primary.step_results[0].status == original_status, (
             "_reconcile_states must not mutate primary"
         )
+
+
+# ---------------------------------------------------------------------------
+# 5. Bi-directional reconciliation with updated_at timestamps
+# ---------------------------------------------------------------------------
+
+class TestBidirectionalReconciliation:
+    """_reconcile_states must use updated_at timestamps bi-directionally."""
+
+    def _make_state_with_ts(
+        self,
+        task_id: str,
+        step_statuses: dict[str, tuple[str, str]],
+    ) -> ExecutionState:
+        """Build a minimal ExecutionState with given step_id → (status, updated_at) mapping."""
+        plan = _plan(task_id)
+        state = ExecutionState(
+            task_id=task_id,
+            plan=plan,
+            current_phase=0,
+            current_step_index=0,
+            status="running",
+            started_at="2026-04-17T00:00:00+00:00",
+        )
+        state.step_results = [
+            StepResult(
+                step_id=sid,
+                agent_name="agent",
+                status=status,
+                outcome=f"{sid}={status}",
+                updated_at=ts,
+            )
+            for sid, (status, ts) in step_statuses.items()
+        ]
+        return state
+
+    def test_sqlite_newer_wins_over_file_dispatched(self) -> None:
+        """SQLite has step A complete with newer timestamp; file has step A dispatched.
+
+        The SQLite result is newer, so complete should win — even though in the
+        old one-directional logic, file-complete-over-sqlite would have been the
+        only scenario considered.
+        """
+        engine = ExecutionEngine.__new__(ExecutionEngine)
+        # SQLite (primary) is complete with a newer timestamp.
+        primary = self._make_state_with_ts("t1", {
+            "1.1": ("complete", "2026-04-17T10:00:01+00:00"),
+        })
+        # File (secondary) is dispatched with an older timestamp.
+        secondary = self._make_state_with_ts("t1", {
+            "1.1": ("dispatched", "2026-04-17T10:00:00+00:00"),
+        })
+        result = engine._reconcile_states(primary, secondary)
+        # Primary (SQLite) is newer — its complete status must be kept.
+        assert result.step_results[0].status == "complete", (
+            "Newer SQLite complete must win over older file dispatched"
+        )
+        # No changes needed — should return primary unchanged.
+        assert result is primary
+
+    def test_file_newer_wins_over_sqlite_complete(self) -> None:
+        """File has step A complete with newer timestamp; SQLite has step A complete with older.
+
+        Both are complete so no status change, but the newer (file) record
+        should be preferred when its timestamp is strictly later.
+        """
+        engine = ExecutionEngine.__new__(ExecutionEngine)
+        # SQLite (primary) is complete with an older timestamp.
+        primary = self._make_state_with_ts("t1", {
+            "1.1": ("complete", "2026-04-17T10:00:00+00:00"),
+        })
+        # File (secondary) is complete with a newer timestamp.
+        secondary = self._make_state_with_ts("t1", {
+            "1.1": ("complete", "2026-04-17T10:00:05+00:00"),
+        })
+        result = engine._reconcile_states(primary, secondary)
+        # Both are complete; newer file version wins on timestamp.
+        assert result.step_results[0].status == "complete"
+        assert result.step_results[0].updated_at == "2026-04-17T10:00:05+00:00", (
+            "The newer file record (updated_at=10:00:05) must replace the older SQLite record"
+        )
+
+    def test_sqlite_only_step_plus_file_step_both_appear(self) -> None:
+        """SQLite has step B complete (not in file); file has only step A.
+
+        The reconciled state must contain both A (from file) and B (from SQLite).
+        """
+        engine = ExecutionEngine.__new__(ExecutionEngine)
+        # SQLite (primary) has step B only.
+        primary = self._make_state_with_ts("t1", {
+            "1.2": ("complete", "2026-04-17T10:00:02+00:00"),
+        })
+        # File (secondary) has step A only.
+        secondary = self._make_state_with_ts("t1", {
+            "1.1": ("complete", "2026-04-17T10:00:01+00:00"),
+        })
+        result = engine._reconcile_states(primary, secondary)
+        step_ids = {r.step_id for r in result.step_results}
+        assert "1.1" in step_ids, "Step A from file must be added to reconciled state"
+        assert "1.2" in step_ids, "Step B from SQLite (primary) must be kept"
+
+    def test_timestamp_fallback_no_updated_at_uses_rank(self) -> None:
+        """When updated_at is empty on both sides, status-rank logic applies."""
+        engine = ExecutionEngine.__new__(ExecutionEngine)
+        # Primary has dispatched with no timestamp.
+        primary = self._make_state_with_ts("t1", {
+            "1.1": ("dispatched", ""),
+        })
+        # Secondary has complete with no timestamp.
+        secondary = self._make_state_with_ts("t1", {
+            "1.1": ("complete", ""),
+        })
+        result = engine._reconcile_states(primary, secondary)
+        # No timestamps — falls back to rank: complete > dispatched.
+        assert result.step_results[0].status == "complete", (
+            "Rank-based fallback must promote complete over dispatched when no timestamps"
+        )
+
+    def test_never_downgrade_status_even_if_secondary_newer(self) -> None:
+        """Secondary has a newer timestamp but a lower status; primary status must be kept."""
+        engine = ExecutionEngine.__new__(ExecutionEngine)
+        # Primary is complete (older timestamp).
+        primary = self._make_state_with_ts("t1", {
+            "1.1": ("complete", "2026-04-17T09:00:00+00:00"),
+        })
+        # Secondary is dispatched (newer timestamp — stale write that somehow has later clock).
+        secondary = self._make_state_with_ts("t1", {
+            "1.1": ("dispatched", "2026-04-17T10:00:00+00:00"),
+        })
+        result = engine._reconcile_states(primary, secondary)
+        # Must NOT downgrade complete → dispatched even though secondary is newer.
+        assert result.step_results[0].status == "complete", (
+            "Status must never be downgraded even if secondary has a newer timestamp"
+        )

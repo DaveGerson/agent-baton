@@ -84,6 +84,7 @@ class TaskWorker:
         shutdown_event: asyncio.Event | None = None,
         gate_poll_interval: float = 2.0,
         max_steps: int | None = None,
+        max_gate_retries: int = 1,
     ) -> None:
         self._engine = engine
         self._launcher = launcher
@@ -98,6 +99,9 @@ class TaskWorker:
         # None / 0 means unlimited.
         self._max_steps: int | None = max_steps if max_steps else None
         self._steps_executed: int = 0
+        # Issue 1: gate retry ceiling — tracks consecutive failures per phase_id.
+        self._max_gate_retries: int = max_gate_retries
+        self._gate_retry_counts: dict[int, int] = {}
 
     @property
     def is_running(self) -> bool:
@@ -350,12 +354,46 @@ class TaskWorker:
         Programmatic gate types (``test``, ``build``, ``lint``, ``spec``) are
         executed via an async subprocess using the gate command from the action.
         If no command is present on the action, the gate is auto-approved as a
-        fallback.  Human-required gate types (``review``, ``approval``, or
-        anything else) are routed through the :class:`DecisionManager` when one
-        is configured; otherwise they fall back to auto-approval.
+        fallback.  The ``ci`` gate type dispatches a GitHub Actions workflow via
+        :func:`~agent_baton.core.engine.gates.run_github_actions_gate` (run in a
+        thread executor so the event loop stays unblocked during the long poll).
+        Human-required gate types (``review``, ``approval``, or anything else)
+        are routed through the :class:`DecisionManager` when one is configured;
+        otherwise they fall back to auto-approval.
         """
         gate_type = getattr(action, "gate_type", "")
         phase_id = getattr(action, "phase_id", 0)
+
+        # CI gate: dispatch GitHub Actions workflow and poll until completion.
+        # run_github_actions_gate is synchronous (uses time.sleep polling), so
+        # we run it in a thread executor to avoid blocking the event loop.
+        if gate_type == "ci":
+            from agent_baton.core.engine.gates import run_github_actions_gate
+
+            gate_command = getattr(action, "gate_command", "")
+            # gate_command carries the workflow name/file (e.g. "ci.yml").
+            # Fall back to a sensible default when the plan left it empty.
+            workflow_name = gate_command.strip() or "ci.yml"
+            try:
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None, run_github_actions_gate, workflow_name
+                )
+            except Exception as exc:
+                self._engine.record_gate_result(
+                    phase_id=phase_id,
+                    passed=False,
+                    output=f"[escalate] CI gate raised an unexpected error: {exc}",
+                    command=f"gh workflow run {workflow_name}",
+                )
+                return
+            self._engine.record_gate_result(
+                phase_id=phase_id,
+                passed=result.passed,
+                output=result.output,
+                command=f"gh workflow run {workflow_name}",
+                exit_code=None,
+            )
+            return
 
         # Execute programmatic gates via subprocess — mirrors the CLI path in
         # execute.py so daemon and CLI behaviour are identical (bug 0.1).
@@ -370,22 +408,24 @@ class TaskWorker:
                 )
                 return
 
-            try:
-                proc = await asyncio.wait_for(
-                    asyncio.create_subprocess_shell(
-                        gate_command,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                        cwd=str(__import__("pathlib").Path.cwd()),
-                    ),
-                    timeout=300,
+            async def _run_gate_subprocess(cmd: str) -> tuple[int, bytes, bytes]:
+                _proc = await asyncio.create_subprocess_shell(
+                    cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=str(Path.cwd()),
                 )
-                stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                    proc.communicate(), timeout=300
+                _stdout, _stderr = await _proc.communicate()
+                return (_proc.returncode or 0), _stdout, _stderr
+
+            try:
+                rc, stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                    _run_gate_subprocess(gate_command),
+                    timeout=300,
                 )
                 stdout = stdout_bytes.decode(errors="replace") if stdout_bytes else ""
                 stderr = stderr_bytes.decode(errors="replace") if stderr_bytes else ""
-                passed = proc.returncode == 0
+                passed = rc == 0
                 output = stdout[-2000:] if stdout else ""
                 if not passed and stderr:
                     output += f"\n--- stderr ---\n{stderr[-1000:]}"
@@ -393,13 +433,54 @@ class TaskWorker:
                     phase_id=phase_id,
                     passed=passed,
                     output=output,
+                    command=gate_command,
+                    exit_code=rc,
                 )
+                # Reset retry counter on pass; increment and possibly escalate on fail.
+                if passed:
+                    self._gate_retry_counts.pop(phase_id, None)
+                else:
+                    self._gate_retry_counts[phase_id] = (
+                        self._gate_retry_counts.get(phase_id, 0) + 1
+                    )
+                    if self._gate_retry_counts[phase_id] > self._max_gate_retries:
+                        self._gate_retry_counts.pop(phase_id, None)
+                        if self._decision_manager is not None:
+                            _task_id = self._engine.status().get("task_id", "")
+                            _dr = DecisionRequest.create(
+                                task_id=_task_id,
+                                decision_type="gate_escalation",
+                                summary=(
+                                    f"Gate '{gate_type}' for phase {phase_id} has "
+                                    f"exceeded the retry ceiling "
+                                    f"(max_gate_retries={self._max_gate_retries}). "
+                                    "Manual intervention required."
+                                ),
+                                options=["retry", "fail"],
+                            )
+                            self._decision_manager.request(_dr)
+                        else:
+                            _state = self._engine._load_execution()
+                            if _state is not None:
+                                _state.status = "failed"
+                                self._engine._save_execution(_state)
             except asyncio.TimeoutError:
                 self._engine.record_gate_result(
                     phase_id=phase_id,
                     passed=False,
                     output=f"Gate timed out after 300s: {gate_command}",
+                    command=gate_command,
+                    exit_code=-1,
                 )
+                self._gate_retry_counts[phase_id] = (
+                    self._gate_retry_counts.get(phase_id, 0) + 1
+                )
+                if self._gate_retry_counts[phase_id] > self._max_gate_retries:
+                    self._gate_retry_counts.pop(phase_id, None)
+                    _state = self._engine._load_execution()
+                    if _state is not None:
+                        _state.status = "failed"
+                        self._engine._save_execution(_state)
             return
 
         # Human-required gate — use DecisionManager if available.

@@ -817,6 +817,7 @@ class StepResult:
     deviations: list[str] = field(default_factory=list)  # plan deviations reported by agent
     interaction_history: list[InteractionTurn] = field(default_factory=list)  # multi-turn exchange
     step_type: str = "developing"   # echoed from PlanStep for analytics/queries
+    updated_at: str = ""            # ISO 8601 UTC; set on every status mutation; used for bi-directional split-brain reconciliation
 
     def to_dict(self) -> dict:
         d = {
@@ -833,6 +834,7 @@ class StepResult:
             "completed_at": self.completed_at,
             "deviations": self.deviations,
             "step_type": self.step_type,
+            "updated_at": self.updated_at,
         }
         if self.member_results:
             d["member_results"] = [m.to_dict() for m in self.member_results]
