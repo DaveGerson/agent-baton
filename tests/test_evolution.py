@@ -1,9 +1,16 @@
-"""Tests for agent_baton.core.evolution — PromptEvolutionEngine and EvolutionProposal."""
+"""Tests for agent_baton.core.evolution — PromptEvolutionEngine and EvolutionProposal.
+
+PromptEvolutionEngine is deprecated (D7). These tests are retained for
+backward-compatibility coverage until the learning-cycle pipeline replaces it.
+"""
 from __future__ import annotations
 
 from pathlib import Path
 
 import pytest
+
+# Suppress DeprecationWarning for the deprecated PromptEvolutionEngine.
+pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 
 from agent_baton.models.usage import AgentUsageRecord, TaskUsageRecord
 from agent_baton.models.retrospective import (

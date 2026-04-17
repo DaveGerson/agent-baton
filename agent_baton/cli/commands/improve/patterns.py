@@ -128,11 +128,6 @@ def handler(args: argparse.Namespace) -> None:
 # Formatting helpers
 # ---------------------------------------------------------------------------
 
-def _confidence_bar(confidence: float, width: int = 10) -> str:
-    filled = round(confidence * width)
-    return "[" + "=" * filled + " " * (width - filled) + "]"
-
-
 def _print_patterns(patterns: list, min_confidence: float) -> None:
     shown = [p for p in patterns if p.confidence >= min_confidence]
     if not shown:

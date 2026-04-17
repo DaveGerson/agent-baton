@@ -15,6 +15,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+# Suppress DeprecationWarning for the deprecated ExperimentManager used
+# in test fixtures. Retained for backward-compatibility coverage.
+pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
+
 # ---------------------------------------------------------------------------
 # 1. Silent failures → logging
 # ---------------------------------------------------------------------------

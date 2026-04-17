@@ -6,6 +6,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
+# Suppress DeprecationWarning for the deprecated ExperimentManager used in
+# test fixtures. These tests remain for backward-compatibility coverage.
+pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
+
 from agent_baton.core.improve.experiments import ExperimentManager
 from agent_baton.core.improve.loop import ImprovementLoop
 from agent_baton.core.improve.proposals import ProposalManager

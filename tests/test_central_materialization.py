@@ -15,6 +15,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+# Suppress DeprecationWarning for the deprecated ExperimentManager used
+# indirectly via ImprovementLoop fixtures. Retained for backward-compatibility.
+pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
+
 from agent_baton.core.learn.budget_tuner import BudgetTuner
 from agent_baton.core.learn.pattern_learner import PatternLearner
 from agent_baton.models.budget import BudgetRecommendation

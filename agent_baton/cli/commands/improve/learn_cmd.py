@@ -135,6 +135,11 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
 def handler(args: argparse.Namespace) -> None:
     cmd = getattr(args, "learn_command", None) or "status"
 
+    # run-cycle does not need baton.db — it works from the plan template.
+    if cmd == "run-cycle":
+        _cmd_run_cycle(args)
+        return
+
     db = _db_path()
     if not db.exists():
         print("No baton.db found. Run 'baton execute start' to initialise the database.")
@@ -217,10 +222,6 @@ def handler(args: argparse.Namespace) -> None:
             if issue.resolution_type:
                 print(f"    Via: {issue.resolution_type}")
             print()
-
-    elif cmd == "run-cycle":
-        _cmd_run_cycle(args)
-        return
 
     elif cmd == "reset":
         issue_id = args.issue

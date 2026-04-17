@@ -303,6 +303,116 @@ def _make_task_id(summary: str) -> str:
     return f"{base}-{uid}"
 
 
+# ---------------------------------------------------------------------------
+# B6 — Talent-builder auto-initiation helper
+# ---------------------------------------------------------------------------
+
+def _maybe_run_talent_builder(project_root: Path) -> None:
+    """Run talent-builder to generate stack-tuned agents when none exist locally.
+
+    Called by the plan handler on the first ``baton plan`` in a project whose
+    ``.claude/agents/`` directory is absent or empty.  Subsequent calls are
+    no-ops because :meth:`AgentRegistry.has_project_agents` will return True.
+
+    The function detects the project stack, then dispatches the talent-builder
+    agent (via a subprocess call to ``baton execute run``) with a prompt that
+    asks it to create 3-5 agents tuned to the detected stack.  On failure the
+    function warns and proceeds — planning will fall back to bundled agents.
+
+    Args:
+        project_root: The resolved project root directory.
+    """
+    try:
+        from agent_baton.core.orchestration.registry import AgentRegistry
+        registry = AgentRegistry()
+        if registry.has_project_agents():
+            return  # Already initialised — nothing to do.
+
+        print(
+            "  No project agents found — running talent-builder to generate "
+            "stack-tuned agents...",
+            file=sys.stderr,
+        )
+
+        # Detect stack so talent-builder receives useful context.
+        stack_name = "unknown"
+        try:
+            from agent_baton.core.orchestration.router import AgentRouter
+            router = AgentRouter(registry)
+            stack = router.detect_stack(project_root)
+            stack_name = stack.primary_language or stack.framework or "unknown"
+        except Exception:
+            pass
+
+        # Ensure the agents directory exists before talent-builder writes to it.
+        agents_dir = AgentRegistry.project_agents_dir()
+        agents_dir.mkdir(parents=True, exist_ok=True)
+
+        # Build a minimal talent-builder prompt.
+        tb_prompt = (
+            f"You are talent-builder. The project stack is: {stack_name}. "
+            f"Project root: {project_root}. "
+            "Generate 3 to 5 agent definition files tuned to this project's stack "
+            "and write them to .claude/agents/. "
+            "Include at minimum: an orchestrator, a backend engineer with the detected "
+            "stack flavour, and a test engineer. "
+            "Use the standard agent frontmatter format with name, description, model, "
+            "and permissionMode fields."
+        )
+
+        # Invoke talent-builder via the installed Claude Code CLI.
+        # We use --print mode (non-interactive) to keep this synchronous.
+        import subprocess
+        result = subprocess.run(
+            ["claude", "--print", "--agent", "talent-builder", tb_prompt],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            cwd=str(project_root),
+        )
+
+        if result.returncode == 0:
+            # Verify at least one agent was written.
+            if registry.has_project_agents():
+                _log.info(
+                    "Talent-builder initialisation complete — agents written to %s",
+                    agents_dir,
+                )
+                print(
+                    f"  Agents generated in {agents_dir}",
+                    file=sys.stderr,
+                )
+            else:
+                _log.warning(
+                    "Talent-builder ran but no agent files found in %s — "
+                    "proceeding with bundled agents.",
+                    agents_dir,
+                )
+        else:
+            _log.warning(
+                "Talent-builder subprocess exited %d — proceeding with bundled agents. "
+                "stderr: %s",
+                result.returncode,
+                result.stderr[:500] if result.stderr else "",
+            )
+            print(
+                "  Warning: talent-builder did not complete — using bundled agents.",
+                file=sys.stderr,
+            )
+
+    except FileNotFoundError:
+        # claude CLI not installed — silently skip.
+        _log.debug("claude CLI not found; skipping talent-builder initiation.")
+    except Exception as exc:
+        # Never block planning due to talent-builder failure.
+        _log.warning("Talent-builder initiation failed (non-fatal): %s", exc)
+        print(
+            f"  Warning: talent-builder initiation skipped ({exc}). "
+            "Using bundled agents.",
+            file=sys.stderr,
+        )
+
+
 def handler(args: argparse.Namespace) -> None:  # noqa: C901
     # --from-template: load a saved template and instantiate with new description
     from_template = getattr(args, "from_template", None)
@@ -479,6 +589,15 @@ def handler(args: argparse.Namespace) -> None:  # noqa: C901
 
     project_root = Path(args.project) if args.project else Path.cwd()
     agents = [a.strip() for a in args.agents.split(",") if a.strip()] if args.agents else None
+
+    # B6 — Talent-builder auto-initiation.
+    # When .claude/agents/ is absent or empty (cold-start project), run
+    # talent-builder to generate stack-tuned agent definitions before planning.
+    # Skip when: --skip-init is set, --agents override is given, or this is an
+    # import/template flow (those paths returned early above).
+    skip_init = getattr(args, "skip_init", False)
+    if not skip_init and agents is None:
+        _maybe_run_talent_builder(project_root)
 
     print("Planning...", file=sys.stderr)
 
