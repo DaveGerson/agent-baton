@@ -49,6 +49,23 @@
           }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'HOOK=\"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/pyright-filter.sh\"; test -x \"$HOOK\" && bash \"$HOOK\" || exit 0'",
+            "timeout": 15,
+            "_comment": "Filters Pyright diagnostics to high-signal errors; strips cache-stale false positives. Silently no-ops if hook script is absent."
+          }
+        ]
+      }
     ]
+  },
+  "env": {
+    "CLAUDE_CODE_MAX_THINKING_TOKENS": "10000",
+    "_comment_thinking_cap": "Cap thinking budget for routine agents; lift for architect/planner via agent frontmatter if needed."
   }
 }

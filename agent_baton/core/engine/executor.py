@@ -3138,17 +3138,41 @@ class ExecutionEngine:
                     phase_id=phase_obj.phase_id,
                 )
 
-        # gate_failed — a gate ran and failed; re-issue the GATE action so
-        # the caller can retry.  Use 'baton execute retry-gate' to reset and
-        # re-run, or 'baton execute fail' to permanently fail the execution.
+        # gate_failed — a gate ran and failed.  Count how many times this
+        # gate has already failed for the current phase.  If the failure count
+        # has reached _max_gate_retries, auto-terminate with FAILED so the
+        # engine never loops forever in headless / API mode.  Otherwise
+        # re-issue the GATE action so the caller can retry manually.
+        # Use 'baton execute retry-gate' to reset and re-run, or
+        # 'baton execute fail' to permanently fail at any point.
         if state.status == "gate_failed":
             phase_obj = state.current_phase_obj
             if phase_obj and phase_obj.gate:
+                fail_count = sum(
+                    1
+                    for gr in state.gate_results
+                    if gr.phase_id == phase_obj.phase_id and not gr.passed
+                )
+                if fail_count >= self._max_gate_retries:
+                    state.status = "failed"
+                    self._save_execution(state)
+                    msg = (
+                        f"Gate '{phase_obj.gate.gate_type}' for phase "
+                        f"{phase_obj.phase_id} failed {fail_count} time(s) "
+                        f"(max_gate_retries={self._max_gate_retries}). "
+                        "Execution terminated."
+                    )
+                    return ExecutionAction(
+                        action_type=ActionType.FAILED,
+                        message=msg,
+                        summary=msg,
+                    )
                 return ExecutionAction(
                     action_type=ActionType.GATE,
                     message=(
                         f"Gate '{phase_obj.gate.gate_type}' for phase "
-                        f"{phase_obj.phase_id} failed. "
+                        f"{phase_obj.phase_id} failed "
+                        f"({fail_count}/{self._max_gate_retries} attempts). "
                         "Retry with 'baton execute retry-gate --phase-id "
                         f"{phase_obj.phase_id}', or permanently fail with "
                         f"'baton execute fail --phase-id {phase_obj.phase_id}'."
