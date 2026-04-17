@@ -139,10 +139,14 @@ class TestStart:
         action = _engine(tmp_path).start(plan)
         assert "src/main.py" in action.delegation_prompt
 
-    def test_delegation_prompt_mentions_claude_md(self, tmp_path: Path) -> None:
+    def test_delegation_prompt_does_not_re_inject_claude_md(self, tmp_path: Path) -> None:
+        # CLAUDE.md is loaded by Claude Code into every agent's system prompt
+        # at SessionStart. Re-injecting it in the per-DISPATCH delegation prompt
+        # measurably bloats the orchestrator's cached context on every turn
+        # (see docs/token-burn-audit). The line was removed from the dispatcher.
         plan = _plan(phases=[_phase(steps=[_step()])])
         action = _engine(tmp_path).start(plan)
-        assert "CLAUDE.md" in action.delegation_prompt
+        assert "Read `CLAUDE.md`" not in action.delegation_prompt
 
 
 # ---------------------------------------------------------------------------

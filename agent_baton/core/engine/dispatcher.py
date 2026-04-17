@@ -34,23 +34,27 @@ from agent_baton.models.execution import (
 )
 from agent_baton.models.knowledge import KnowledgeAttachment
 
-# Agents report discoveries, decisions, knowledge gaps, design choices, and
+# Agents report knowledge gaps, discoveries, decisions, design choices, and
 # conflicts using structured signals appended to their outcome text. Consolidated
 # into a single compact block to minimize per-dispatch token overhead.
+# Order: KNOWLEDGE_GAP first (a gap blocks progress), then BEAD signals (outputs),
+# then DESIGN_CHOICE / CONFLICT (escalations).
 # Full signal reference: references/signals.md
 _SIGNALS_BLOCK = (
     "## Signals (append to outcome as needed)\n"
+    "- `KNOWLEDGE_GAP: <desc>` + `CONFIDENCE: none|low|partial` — STOP if blocked on HIGH/CRITICAL risk.\n"
     "- `BEAD_DISCOVERY: <what>` / `BEAD_DECISION: <what> CHOSE: <x> BECAUSE: <y>` / `BEAD_WARNING: <risk>`\n"
     "- `BEAD_FEEDBACK: <bead-id> useful|misleading|outdated` (rate prior discoveries above)\n"
-    "- `KNOWLEDGE_GAP: <desc>` + `CONFIDENCE: none|low|partial` — STOP if blocked on HIGH/CRITICAL risk.\n"
     "- `DESIGN_CHOICE: <desc>` + `OPTION_A/B` + `RECOMMENDATION` — only for decisions that materially change outcome.\n"
     "- `CONFLICT: <what> PARTIES: <steps> RECOMMENDATION: <resolution>` — only for genuine disagreement with prior work."
 )
 
 # Retained for backward compatibility with any external callers; prefer _SIGNALS_BLOCK.
+# All three constants now point to the same consolidated block — the prompt
+# builder only emits _SIGNALS_BLOCK once, so legacy reads still see the content.
 _KNOWLEDGE_GAPS_LINE = _SIGNALS_BLOCK
-_BEAD_SIGNALS_LINE = ""
-_FLAG_SIGNALS_LINE = ""
+_BEAD_SIGNALS_LINE = _SIGNALS_BLOCK
+_FLAG_SIGNALS_LINE = _SIGNALS_BLOCK
 
 # Success criteria by task type — shown in the delegation prompt to make the
 # definition of done concrete.  Selected by the caller via the task_type arg.
