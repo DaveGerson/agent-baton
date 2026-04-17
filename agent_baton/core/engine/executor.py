@@ -270,11 +270,19 @@ class ExecutionEngine:
         policy_engine=None,  # PolicyEngine | None
         enforce_token_budget: bool = True,
         token_budget: int | None = None,
+        max_gate_retries: int = 3,
     ) -> None:
         self._root = (team_context_root or self._DEFAULT_CONTEXT_ROOT).resolve()
         self._task_id = task_id
         self._storage = storage  # May be None (legacy file mode)
         self._bus = bus
+        # Maximum number of times a gate may fail before the engine
+        # automatically transitions to "failed" instead of issuing another
+        # retryable GATE action.  Guards against infinite retry loops when
+        # gate failures are recorded programmatically (e.g. headless / API).
+        # Operators can still call fail_gate() at any time to force a terminal
+        # failure before the cap is reached.
+        self._max_gate_retries: int = max_gate_retries
 
         # KnowledgeResolver for runtime gap auto-resolution.  Callers (CLI and
         # tests) set this at construction time.  When None, gaps fall through to
