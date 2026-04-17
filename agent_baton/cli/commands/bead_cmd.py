@@ -220,11 +220,11 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     close_p = sub.add_parser("close", help="Close a bead with a summary")
     close_p.add_argument("bead_id", metavar="BEAD_ID", help="Bead ID to close")
     close_p.add_argument(
-        "--summary",
+        "--summary", "--note",
         dest="summary",
         metavar="TEXT",
         default="",
-        help="Compacted summary of the bead's outcome",
+        help="Compacted summary of the bead's outcome (alias: --note)",
     )
 
     # -- link ----------------------------------------------------------------

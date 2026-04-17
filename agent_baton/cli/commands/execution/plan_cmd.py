@@ -6,12 +6,8 @@ plan can be output as markdown or JSON, and optionally saved to
 .claude/team-context/plan.json for consumption by ``baton execute start``.
 
 Additional flags:
-    --template          Print a skeleton plan.json to stdout for hand-editing.
-    --import            Import a hand-crafted plan.json instead of auto-generating.
-    --save-as-template  Save the generated plan's phase/step structure as a
-                        reusable template in .claude/plan-templates/.
-    --from-template     Instantiate a previously saved template with a new
-                        task description instead of auto-generating.
+    --template   Print a skeleton plan.json to stdout for hand-editing.
+    --import     Import a hand-crafted plan.json instead of auto-generating.
 
 Delegates to:
     agent_baton.core.engine.planner.IntelligentPlanner
@@ -125,149 +121,11 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         help="Output a skeleton plan.json template for hand-editing",
     )
     p.add_argument(
-        "--save-as-template",
-        dest="save_as_template",
-        default=None,
-        metavar="NAME",
-        help=(
-            "Save the generated plan's phase/step structure as a reusable "
-            "template named NAME in .claude/plan-templates/NAME.json"
-        ),
-    )
-    p.add_argument(
-        "--from-template",
-        dest="from_template",
-        default=None,
-        metavar="NAME",
-        help=(
-            "Load a saved plan template by NAME from .claude/plan-templates/ "
-            "and instantiate it with the provided task description"
-        ),
-    )
-    p.add_argument(
-        "--skip-init",
-        dest="skip_init",
+        "--verbose",
         action="store_true",
-        help=(
-            "Skip talent-builder auto-initiation even when .claude/agents/ is "
-            "empty. Uses bundled generic agents instead."
-        ),
+        help="When --save is set, print the full plan markdown to stdout (default: compact summary only)",
     )
     return p
-
-
-# ---------------------------------------------------------------------------
-# E1 — Plan template helpers
-# ---------------------------------------------------------------------------
-
-_PLAN_TEMPLATES_DIR = Path(".claude/plan-templates")
-
-
-def _template_path(name: str) -> Path:
-    """Return the resolved path for a named plan template."""
-    safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", name)
-    return (_PLAN_TEMPLATES_DIR / f"{safe_name}.json").resolve()
-
-
-def _plan_to_template(plan_dict: dict) -> dict:
-    """Strip task-specific fields from a plan dict, leaving only scaffold structure.
-
-    Retains phase names, step agents, step types, gate configs, and deliverable
-    stubs.  Removes task_id, task_summary, created_at, shared_context, and any
-    per-task knowledge attachments so the template is reusable across tasks.
-    """
-    template: dict = {
-        "_template_version": 1,
-        "task_type": plan_dict.get("task_type"),
-        "risk_level": plan_dict.get("risk_level", "LOW"),
-        "budget_tier": plan_dict.get("budget_tier", "standard"),
-        "git_strategy": plan_dict.get("git_strategy", "commit-per-agent"),
-        "complexity": plan_dict.get("complexity", "medium"),
-        "phases": [],
-    }
-    for phase in plan_dict.get("phases", []):
-        phase_entry: dict = {
-            "phase_id": phase.get("phase_id"),
-            "name": phase.get("name"),
-            "steps": [],
-        }
-        for step in phase.get("steps", []):
-            step_entry: dict = {
-                "agent_name": step.get("agent_name"),
-                "step_type": step.get("step_type", "developing"),
-                "deliverables": step.get("deliverables", []),
-            }
-            phase_entry["steps"].append(step_entry)
-        gate = phase.get("gate")
-        if gate:
-            phase_entry["gate"] = {
-                "gate_type": gate.get("gate_type"),
-                "command": gate.get("command", ""),
-                "description": gate.get("description", ""),
-            }
-        template["phases"].append(phase_entry)
-    return template
-
-
-def _instantiate_template(template: dict, task_summary: str) -> dict:
-    """Build a plan dict from a template and a new task description.
-
-    Assigns a fresh task_id and populates task_summary.  Step descriptions
-    are generated as '<agent_name>: <task_summary>' placeholders so the
-    plan is immediately usable with ``baton execute start``.
-    """
-    task_id = _make_task_id(task_summary)
-    plan: dict = {
-        "task_id": task_id,
-        "task_summary": task_summary,
-        "risk_level": template.get("risk_level", "LOW"),
-        "budget_tier": template.get("budget_tier", "standard"),
-        "git_strategy": template.get("git_strategy", "commit-per-agent"),
-        "complexity": template.get("complexity", "medium"),
-        "task_type": template.get("task_type"),
-        "execution_mode": "phased",
-        "shared_context": "",
-        "pattern_source": None,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "explicit_knowledge_packs": [],
-        "explicit_knowledge_docs": [],
-        "intervention_level": "low",
-        "classification_source": "template",
-        "detected_stack": None,
-        "foresight_insights": [],
-        "phases": [],
-    }
-    step_counter = 1
-    for phase in template.get("phases", []):
-        phase_entry: dict = {
-            "phase_id": phase.get("phase_id"),
-            "name": phase.get("name", f"Phase {phase.get('phase_id', step_counter)}"),
-            "steps": [],
-            "approval_required": False,
-            "approval_description": None,
-        }
-        for step in phase.get("steps", []):
-            agent = step.get("agent_name", "backend-engineer")
-            phase_entry["steps"].append({
-                "step_id": str(step_counter),
-                "agent_name": agent,
-                "task_description": f"{agent}: {task_summary}",
-                "step_type": step.get("step_type", "developing"),
-                "context_files": ["CLAUDE.md"],
-                "deliverables": step.get("deliverables", []),
-                "knowledge": [],
-                "model": None,
-                "team": [],
-                "depends_on": [],
-            })
-            step_counter += 1
-        gate = phase.get("gate")
-        if gate:
-            phase_entry["gate"] = gate
-        else:
-            phase_entry["gate"] = None
-        plan["phases"].append(phase_entry)
-    return plan
 
 
 def _persist_plan_to_db(ctx_dir: Path, plan: MachinePlan) -> None:
@@ -303,180 +161,7 @@ def _make_task_id(summary: str) -> str:
     return f"{base}-{uid}"
 
 
-# ---------------------------------------------------------------------------
-# B6 — Talent-builder auto-initiation helper
-# ---------------------------------------------------------------------------
-
-def _maybe_run_talent_builder(project_root: Path) -> None:
-    """Run talent-builder to generate stack-tuned agents when none exist locally.
-
-    Called by the plan handler on the first ``baton plan`` in a project whose
-    ``.claude/agents/`` directory is absent or empty.  Subsequent calls are
-    no-ops because :meth:`AgentRegistry.has_project_agents` will return True.
-
-    The function detects the project stack, then dispatches the talent-builder
-    agent (via a subprocess call to ``baton execute run``) with a prompt that
-    asks it to create 3-5 agents tuned to the detected stack.  On failure the
-    function warns and proceeds — planning will fall back to bundled agents.
-
-    Args:
-        project_root: The resolved project root directory.
-    """
-    try:
-        from agent_baton.core.orchestration.registry import AgentRegistry
-        registry = AgentRegistry()
-        if registry.has_project_agents():
-            return  # Already initialised — nothing to do.
-
-        print(
-            "  No project agents found — running talent-builder to generate "
-            "stack-tuned agents...",
-            file=sys.stderr,
-        )
-
-        # Detect stack so talent-builder receives useful context.
-        stack_name = "unknown"
-        try:
-            from agent_baton.core.orchestration.router import AgentRouter
-            router = AgentRouter(registry)
-            stack = router.detect_stack(project_root)
-            stack_name = stack.primary_language or stack.framework or "unknown"
-        except Exception:
-            pass
-
-        # Ensure the agents directory exists before talent-builder writes to it.
-        agents_dir = AgentRegistry.project_agents_dir()
-        agents_dir.mkdir(parents=True, exist_ok=True)
-
-        # Build a minimal talent-builder prompt.
-        tb_prompt = (
-            f"You are talent-builder. The project stack is: {stack_name}. "
-            f"Project root: {project_root}. "
-            "Generate 3 to 5 agent definition files tuned to this project's stack "
-            "and write them to .claude/agents/. "
-            "Include at minimum: an orchestrator, a backend engineer with the detected "
-            "stack flavour, and a test engineer. "
-            "Use the standard agent frontmatter format with name, description, model, "
-            "and permissionMode fields."
-        )
-
-        # Invoke talent-builder via the installed Claude Code CLI.
-        # We use --print mode (non-interactive) to keep this synchronous.
-        import subprocess
-        result = subprocess.run(
-            ["claude", "--print", "--agent", "talent-builder", tb_prompt],
-            capture_output=True,
-            text=True,
-            timeout=120,
-            cwd=str(project_root),
-        )
-
-        if result.returncode == 0:
-            # Verify at least one agent was written.
-            if registry.has_project_agents():
-                _log.info(
-                    "Talent-builder initialisation complete — agents written to %s",
-                    agents_dir,
-                )
-                print(
-                    f"  Agents generated in {agents_dir}",
-                    file=sys.stderr,
-                )
-            else:
-                _log.warning(
-                    "Talent-builder ran but no agent files found in %s — "
-                    "proceeding with bundled agents.",
-                    agents_dir,
-                )
-        else:
-            _log.warning(
-                "Talent-builder subprocess exited %d — proceeding with bundled agents. "
-                "stderr: %s",
-                result.returncode,
-                result.stderr[:500] if result.stderr else "",
-            )
-            print(
-                "  Warning: talent-builder did not complete — using bundled agents.",
-                file=sys.stderr,
-            )
-
-    except FileNotFoundError:
-        # claude CLI not installed — silently skip.
-        _log.debug("claude CLI not found; skipping talent-builder initiation.")
-    except Exception as exc:
-        # Never block planning due to talent-builder failure.
-        _log.warning("Talent-builder initiation failed (non-fatal): %s", exc)
-        print(
-            f"  Warning: talent-builder initiation skipped ({exc}). "
-            "Using bundled agents.",
-            file=sys.stderr,
-        )
-
-
-def handler(args: argparse.Namespace) -> None:  # noqa: C901
-    # --from-template: load a saved template and instantiate with new description
-    from_template = getattr(args, "from_template", None)
-    if from_template is not None:
-        tpl_path = _template_path(from_template)
-        if not tpl_path.exists():
-            # Also check relative to cwd (for projects that embed .claude elsewhere)
-            alt = Path(".claude/plan-templates") / f"{from_template}.json"
-            if alt.resolve().exists():
-                tpl_path = alt.resolve()
-            else:
-                print(
-                    f"Error: template '{from_template}' not found. "
-                    f"Expected at {tpl_path}",
-                    file=sys.stderr,
-                )
-                print(
-                    "Tip: use 'baton plan <desc> --save-as-template NAME' to save one first.",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-
-        try:
-            template_data = json.loads(tpl_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            print(f"Error: invalid template JSON: {exc}", file=sys.stderr)
-            sys.exit(1)
-
-        plan_dict = _instantiate_template(template_data, args.summary)
-        try:
-            plan = MachinePlan.from_dict(plan_dict)
-        except Exception as exc:
-            print(f"Error: template instantiation failed: {exc}", file=sys.stderr)
-            sys.exit(1)
-
-        if args.save:
-            from agent_baton.core.orchestration.context import ContextManager
-
-            ctx_dir = Path(".claude/team-context").resolve()
-            ctx_dir.mkdir(parents=True, exist_ok=True)
-            ctx = ContextManager(team_context_dir=ctx_dir, task_id=plan.task_id)
-            ctx.write_plan(plan)
-            json_path = ctx_dir / "plan.json"
-            md_path = ctx_dir / "plan.md"
-            json_path.write_text(
-                json.dumps(plan.to_dict(), indent=2, ensure_ascii=False) + "\n",
-                encoding="utf-8",
-            )
-            md_path.write_text(plan.to_markdown(), encoding="utf-8")
-            _persist_plan_to_db(ctx_dir, plan)
-            print(
-                f"Template '{from_template}' instantiated and saved: "
-                f"{ctx.plan_json_path} and {ctx.plan_path}"
-            )
-            print(f"  (also copied to {json_path} for backward compat)")
-            print()
-            print("Next: baton execute start")
-        else:
-            if getattr(args, "json", False):
-                print(json.dumps(plan.to_dict(), indent=2, ensure_ascii=False))
-            else:
-                print(plan.to_markdown())
-        return
-
+def handler(args: argparse.Namespace) -> None:
     # --template: emit a skeleton plan.json and exit
     if getattr(args, "template", False):
         template: dict = {
@@ -495,7 +180,6 @@ def handler(args: argparse.Namespace) -> None:  # noqa: C901
                             "step_id": "1.1",
                             "agent_name": "architect",
                             "task_description": "Describe what this agent should do",
-                            "step_type": "planning",
                             "context_files": ["CLAUDE.md"],
                             "deliverables": [],
                         }
@@ -514,7 +198,6 @@ def handler(args: argparse.Namespace) -> None:  # noqa: C901
                             "step_id": "2.1",
                             "agent_name": "backend-engineer",
                             "task_description": "Implement the changes",
-                            "step_type": "developing",
                             "context_files": ["CLAUDE.md"],
                             "deliverables": [],
                         }
@@ -590,15 +273,6 @@ def handler(args: argparse.Namespace) -> None:  # noqa: C901
     project_root = Path(args.project) if args.project else Path.cwd()
     agents = [a.strip() for a in args.agents.split(",") if a.strip()] if args.agents else None
 
-    # B6 — Talent-builder auto-initiation.
-    # When .claude/agents/ is absent or empty (cold-start project), run
-    # talent-builder to generate stack-tuned agent definitions before planning.
-    # Skip when: --skip-init is set, --agents override is given, or this is an
-    # import/template flow (those paths returned early above).
-    skip_init = getattr(args, "skip_init", False)
-    if not skip_init and agents is None:
-        _maybe_run_talent_builder(project_root)
-
     print("Planning...", file=sys.stderr)
 
     knowledge_registry = KnowledgeRegistry()
@@ -654,49 +328,37 @@ def handler(args: argparse.Namespace) -> None:  # noqa: C901
         )
         md_path.write_text(plan.to_markdown(), encoding="utf-8")
         _persist_plan_to_db(ctx_dir, plan)
-        print(f"Plan saved: {ctx.plan_json_path} and {ctx.plan_path}")
-        print(f"  (also copied to {json_path} for backward compat)")
-        print()
-        print("Next: baton execute start")
 
-    # --save-as-template: serialize phase/step scaffold after generation
-    save_as_template = getattr(args, "save_as_template", None)
-    if save_as_template is not None:
-        tpl_dir = Path(".claude/plan-templates").resolve()
-        tpl_dir.mkdir(parents=True, exist_ok=True)
-        tpl_path = _template_path(save_as_template)
-        template_data = _plan_to_template(plan.to_dict())
-        tpl_path.write_text(
-            json.dumps(template_data, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
-        print(f"Plan template '{save_as_template}' saved to {tpl_path}")
-        print(
-            f"  Use: baton plan \"<new description>\" --from-template {save_as_template} --save"
-        )
-
-    if args.explain:
-        explanation = planner.explain_plan(plan)
-        # When --save is also active, the full plan is already written to disk.
-        # Streaming the entire explanation to stdout re-echoes the task prose
-        # into every orchestrator context window — a measurable token-burn
-        # source during long sessions. Write the explanation alongside plan.md
-        # and print a compact pointer instead.
-        if args.save:
-            try:
-                from agent_baton.core.orchestration.context import ContextManager
-                ctx_dir = Path(".claude/team-context").resolve()
-                ctx = ContextManager(team_context_dir=ctx_dir, task_id=plan.task_id)
-                expl_path = ctx.plan_path.parent / "explanation.md"
-                expl_path.write_text(explanation, encoding="utf-8")
-                print(f"Plan explanation: {expl_path}")
-                print(f"  Task ID: {plan.task_id} | Risk: {plan.risk_level} | "
-                      f"Budget: {plan.budget_tier} | Phases: {len(plan.phases)}")
-                return
-            except Exception:
-                # Fall through to stdout on any failure — backward compatible.
-                pass
-        print(explanation)
+        if args.explain:
+            explanation_path = ctx_dir / "explanation.md"
+            explanation_path.write_text(planner.explain_plan(plan), encoding="utf-8")
+            print(f"Plan saved: {json_path}")
+            print(f"Plan markdown: {md_path}")
+            n_phases = len(plan.phases)
+            n_steps = plan.total_steps
+            print(
+                f"Task ID: {plan.task_id} | Risk: {plan.risk_level} | "
+                f"Budget: {plan.budget_tier} | Phases: {n_phases} | Steps: {n_steps}"
+            )
+            print(f"Plan explanation: {explanation_path}")
+            print("Next: baton execute start")
+        elif getattr(args, "verbose", False):
+            print(f"Plan saved: {ctx.plan_json_path} and {ctx.plan_path}")
+            print(f"  (also copied to {json_path} for backward compat)")
+            print()
+            print(plan.to_markdown())
+            print()
+            print("Next: baton execute start")
+        else:
+            print(f"Plan saved: {json_path}")
+            print(f"Plan markdown: {md_path}")
+            n_phases = len(plan.phases)
+            n_steps = plan.total_steps
+            print(
+                f"Task ID: {plan.task_id} | Risk: {plan.risk_level} | "
+                f"Budget: {plan.budget_tier} | Phases: {n_phases} | Steps: {n_steps}"
+            )
+            print("Next: baton execute start")
         return
 
     if args.json:

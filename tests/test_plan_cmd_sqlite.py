@@ -68,6 +68,7 @@ def _make_args(
     json_flag: bool = False,
     import_path: str | None = None,
     template: bool = False,
+    verbose: bool = False,
 ) -> argparse.Namespace:
     """Construct a Namespace that mirrors what argparse produces for plan_cmd."""
     return argparse.Namespace(
@@ -77,6 +78,7 @@ def _make_args(
         json=json_flag,
         import_path=import_path,
         template=template,
+        verbose=verbose,
         task_type=None,
         agents=None,
         project=None,

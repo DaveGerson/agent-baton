@@ -306,3 +306,34 @@ commands, or data models, update the relevant documentation:
   references, or CLI commands.
 - **This file (`CLAUDE.md`)** — Developer guide. Update when the repo
   structure, test count, or development workflow changes.
+
+## Token Efficiency
+
+Orchestrators working against this repo burn significant context on redundant
+reads and CLI ceremony. Follow these conventions to keep sessions lean.
+
+- **Prefer file-references over inline tool output.** When a CLI tool writes
+  to disk, read from disk on demand rather than capturing full stdout. Use
+  `baton plan --save` and then read `.claude/team-context/plan.md` only when
+  you need a specific detail — do not echo the full plan into the thread.
+  Same for `trace.json`, retro reports, and usage logs.
+
+- **Trust engine records; don't re-verify.** When `baton execute record` has
+  captured a step's outcome and files, do not re-read those files to confirm
+  the work. The engine's record is the source of truth. Re-read a file only
+  when you need its content as input to the next step, not to audit what an
+  agent already did.
+
+- **Default to `baton execute run` for non-INTERACT phases.** The interactive
+  `next`/`dispatched`/`record` loop costs ~1-5 KB of CLI output per call,
+  multiplied across 10-15 calls per phase and N phases. Use
+  `baton execute run` unless the plan contains INTERACT or APPROVAL gates
+  that require a human decision mid-flight.
+
+- **Don't re-read files already summarized in plan.md, spec docs, or beads.**
+  The plan's task description and attached knowledge packs cover most context.
+  Re-grep only for symbols and code locations — not for prose summaries you
+  already have in the plan. Use `cymbal investigate <symbol>` instead of
+  reading entire modules to locate a function.
+
+See `memory/project_token_burn_reduction.md` for research evidence.
