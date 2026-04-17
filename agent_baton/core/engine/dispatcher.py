@@ -34,48 +34,23 @@ from agent_baton.models.execution import (
 )
 from agent_baton.models.knowledge import KnowledgeAttachment
 
-_KNOWLEDGE_GAPS_LINE = (
-    "If you lack context, output `KNOWLEDGE_GAP: <description>` with "
-    "`CONFIDENCE: none|low|partial` and stop. Do not guess on HIGH/CRITICAL risk tasks."
+# Agents report discoveries, decisions, knowledge gaps, design choices, and
+# conflicts using structured signals appended to their outcome text. Consolidated
+# into a single compact block to minimize per-dispatch token overhead.
+# Full signal reference: references/signals.md
+_SIGNALS_BLOCK = (
+    "## Signals (append to outcome as needed)\n"
+    "- `BEAD_DISCOVERY: <what>` / `BEAD_DECISION: <what> CHOSE: <x> BECAUSE: <y>` / `BEAD_WARNING: <risk>`\n"
+    "- `BEAD_FEEDBACK: <bead-id> useful|misleading|outdated` (rate prior discoveries above)\n"
+    "- `KNOWLEDGE_GAP: <desc>` + `CONFIDENCE: none|low|partial` — STOP if blocked on HIGH/CRITICAL risk.\n"
+    "- `DESIGN_CHOICE: <desc>` + `OPTION_A/B` + `RECOMMENDATION` — only for decisions that materially change outcome.\n"
+    "- `CONFLICT: <what> PARTIES: <steps> RECOMMENDATION: <resolution>` — only for genuine disagreement with prior work."
 )
 
-# Bead signal protocol — agents append these lines to their outcome text to
-# record structured memory for downstream agents.
-# Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
-_BEAD_SIGNALS_LINE = (
-    "Report discoveries and decisions using structured signals:\n"
-    "  BEAD_DISCOVERY: <what you found>\n"
-    "  BEAD_DECISION: <what you decided> CHOSE: <choice> BECAUSE: <rationale>\n"
-    "  BEAD_WARNING: <what might cause problems>\n"
-    "Rate prior discoveries injected above (if any) to improve future selection:\n"
-    "  BEAD_FEEDBACK: <bead-id> useful|misleading|outdated"
-)
-
-_FLAG_SIGNALS_LINE = '''
-## When You're Stuck
-
-If you encounter a situation where you have multiple valid approaches
-and the choice matters, emit a DESIGN_CHOICE flag:
-
-    DESIGN_CHOICE: <description of the choice>
-    OPTION_A: <first approach and why>
-    OPTION_B: <second approach and why>
-    CONFIDENCE: none | low | partial
-    RECOMMENDATION: <your preferred option and reasoning>
-
-If you find your work conflicts with another agent's output, emit
-a CONFLICT flag:
-
-    CONFLICT: <what's in conflict>
-    PARTIES: <agent (step), agent (step)>
-    DESCRIPTION: <specifics>
-    CONFIDENCE: none | low | partial
-    RECOMMENDATION: <your preferred resolution>
-
-Do NOT emit flags for trivial decisions you can make yourself. Only
-flag when the choice would meaningfully change the outcome and you
-lack sufficient context to decide confidently.
-'''
+# Retained for backward compatibility with any external callers; prefer _SIGNALS_BLOCK.
+_KNOWLEDGE_GAPS_LINE = _SIGNALS_BLOCK
+_BEAD_SIGNALS_LINE = ""
+_FLAG_SIGNALS_LINE = ""
 
 # Success criteria by task type — shown in the delegation prompt to make the
 # definition of done concrete.  Selected by the caller via the task_type arg.
@@ -262,7 +237,10 @@ class PromptDispatcher:
             A formatted markdown delegation prompt ready to pass to the Agent tool.
         """
         role = step.agent_name
-        project_line = project_description or task_summary or "this project"
+        # Use a short fallback rather than the full task_summary — task_summary is
+        # rendered canonically in the Intent section below, and duplicating it in
+        # the opening sentence inflates the prompt on every DISPATCH (token burn).
+        project_line = project_description or "this project"
 
         logger.debug(
             "Building delegation prompt for step %s: agent=%s task_type=%s "
@@ -305,8 +283,6 @@ class PromptDispatcher:
             "",
             "## Shared Context",
             shared_context_block,
-            "",
-            "Read `CLAUDE.md` for project conventions.",
             "",
         ]
 
@@ -371,11 +347,7 @@ class PromptDispatcher:
                 "",
             ]
 
-        parts.append(_KNOWLEDGE_GAPS_LINE)
-        parts.append("")
-        parts.append(_BEAD_SIGNALS_LINE)
-        parts.append("")
-        parts.append(_FLAG_SIGNALS_LINE)
+        parts.append(_SIGNALS_BLOCK)
         parts.append("")
 
         # Previous Step Output — only when there is actual handoff content
@@ -466,8 +438,6 @@ class PromptDispatcher:
             "",
             "## Shared Context",
             shared_context_block,
-            "",
-            "Read `CLAUDE.md` for project conventions.",
             "",
         ]
 

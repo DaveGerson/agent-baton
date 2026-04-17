@@ -676,7 +676,27 @@ def handler(args: argparse.Namespace) -> None:  # noqa: C901
         )
 
     if args.explain:
-        print(planner.explain_plan(plan))
+        explanation = planner.explain_plan(plan)
+        # When --save is also active, the full plan is already written to disk.
+        # Streaming the entire explanation to stdout re-echoes the task prose
+        # into every orchestrator context window — a measurable token-burn
+        # source during long sessions. Write the explanation alongside plan.md
+        # and print a compact pointer instead.
+        if args.save:
+            try:
+                from agent_baton.core.orchestration.context import ContextManager
+                ctx_dir = Path(".claude/team-context").resolve()
+                ctx = ContextManager(team_context_dir=ctx_dir, task_id=plan.task_id)
+                expl_path = ctx.plan_path.parent / "explanation.md"
+                expl_path.write_text(explanation, encoding="utf-8")
+                print(f"Plan explanation: {expl_path}")
+                print(f"  Task ID: {plan.task_id} | Risk: {plan.risk_level} | "
+                      f"Budget: {plan.budget_tier} | Phases: {len(plan.phases)}")
+                return
+            except Exception:
+                # Fall through to stdout on any failure — backward compatible.
+                pass
+        print(explanation)
         return
 
     if args.json:
