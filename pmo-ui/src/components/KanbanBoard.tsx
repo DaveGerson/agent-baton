@@ -2,7 +2,6 @@ import { useState, useEffect, useLayoutEffect } from 'react';
 import { KanbanCard } from './KanbanCard';
 import { HealthBar } from './HealthBar';
 import { SignalsBar } from './SignalsBar';
-import { InteractionQueue } from './InteractionQueue';
 import { AnalyticsDashboard } from './AnalyticsDashboard';
 import { DataExport } from './DataExport';
 import { ExternalItemsPanel } from './ExternalItemsPanel';
@@ -19,13 +18,11 @@ interface KanbanBoardProps {
   onCardForge: (card: PmoCard) => void;
   showSignals: boolean;
   onToggleSignals: () => void;
-  showInteractions: boolean;
-  onToggleInteractions: () => void;
   /** Called once on mount with the board's refresh function so parent can trigger it. */
   onRefreshReady?: (refresh: () => void) => void;
 }
 
-export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSignals, onToggleSignals, showInteractions, onToggleInteractions, onRefreshReady }: KanbanBoardProps) {
+export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSignals, onToggleSignals, onRefreshReady }: KanbanBoardProps) {
   const { cards, health, loading, error, lastUpdated, connectionMode, mutateCard, refresh } = usePmoBoard();
 
   // Register the refresh callback with the parent once on mount.
