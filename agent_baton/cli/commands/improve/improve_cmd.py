@@ -71,8 +71,34 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
 
 
 def handler(args: argparse.Namespace) -> None:
+    from pathlib import Path
     from agent_baton.core.improve.triggers import TriggerEvaluator
+    from agent_baton.core.storage import get_project_storage
     from agent_baton.models.improvement import TriggerConfig
+
+    # Resolve storage backend for the current project so the improvement
+    # pipeline reads from SQLite instead of stale JSONL.
+    context_root = Path(".claude/team-context").resolve()
+    try:
+        storage = get_project_storage(context_root)
+    except Exception:
+        storage = None
+
+    # Construct bead_store and ledger from storage.db_path when available
+    # (SqliteStorage only; FileStorage has no db_path and fails gracefully).
+    bead_store = None
+    ledger = None
+    if storage is not None:
+        try:
+            from agent_baton.core.engine.bead_store import BeadStore
+            bead_store = BeadStore(storage.db_path)
+        except Exception:
+            pass
+        try:
+            from agent_baton.core.learn.ledger import LearningLedger
+            ledger = LearningLedger(storage.db_path)
+        except Exception:
+            pass
 
     # Build a custom TriggerConfig when CLI overrides are supplied.
     trigger_evaluator = None
@@ -82,9 +108,19 @@ def handler(args: argparse.Namespace) -> None:
             base_config.min_tasks_before_analysis = args.min_tasks
         if args.interval is not None:
             base_config.analysis_interval_tasks = args.interval
-        trigger_evaluator = TriggerEvaluator(config=base_config)
+        trigger_evaluator = TriggerEvaluator(
+            config=base_config,
+            storage=storage,
+            bead_store=bead_store,
+            ledger=ledger,
+        )
 
-    loop = ImprovementLoop(trigger_evaluator=trigger_evaluator)
+    loop = ImprovementLoop(
+        trigger_evaluator=trigger_evaluator,
+        storage=storage,
+        bead_store=bead_store,
+        ledger=ledger,
+    )
 
     if args.run or args.force:
         report = loop.run_cycle(force=args.force)
