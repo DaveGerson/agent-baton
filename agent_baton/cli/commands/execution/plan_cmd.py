@@ -121,6 +121,35 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         help="Output a skeleton plan.json template for hand-editing",
     )
     p.add_argument(
+        "--save-as-template",
+        dest="save_as_template",
+        default=None,
+        metavar="NAME",
+        help=(
+            "Save the generated plan's phase/step structure as a reusable "
+            "template named NAME in .claude/plan-templates/NAME.json"
+        ),
+    )
+    p.add_argument(
+        "--from-template",
+        dest="from_template",
+        default=None,
+        metavar="NAME",
+        help=(
+            "Load a saved plan template by NAME from .claude/plan-templates/ "
+            "and instantiate it with the provided task description"
+        ),
+    )
+    p.add_argument(
+        "--skip-init",
+        dest="skip_init",
+        action="store_true",
+        help=(
+            "Skip talent-builder auto-initiation even when .claude/agents/ is "
+            "empty. Uses bundled generic agents instead."
+        ),
+    )
+    p.add_argument(
         "--verbose",
         action="store_true",
         help="When --save is set, print the full plan markdown to stdout (default: compact summary only)",
