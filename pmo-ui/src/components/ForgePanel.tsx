@@ -578,7 +578,6 @@ export function ForgePanel({ onBack, initialSignal, onApproved }: ForgePanelProp
         {phase === 'saved' && (
           <SavedPhase
             savePath={savePath}
-            plan={plan}
             onNewPlan={() => { setPhase('intake'); setDescription(''); setPlan(null); }}
             onBack={onBack}
           />
@@ -599,30 +598,12 @@ export function ForgePanel({ onBack, initialSignal, onApproved }: ForgePanelProp
 }
 
 function SavedPhase({
-  savePath, plan, onNewPlan, onBack,
+  savePath, onNewPlan, onBack,
 }: {
   savePath: string | null;
-  plan: ForgePlanResponse | null;
   onNewPlan: () => void;
   onBack: () => void;
 }) {
-  const [execLoading, setExecLoading] = useState(false);
-  const [execResult, setExecResult] = useState<string | null>(null);
-
-  async function handleExecute() {
-    if (!plan) return;
-    setExecLoading(true);
-    setExecResult(null);
-    try {
-      const resp = await api.executeCard(plan.task_id);
-      setExecResult(`Execution launched (PID ${resp.pid})`);
-    } catch (err) {
-      setExecResult(err instanceof Error ? err.message : 'Launch failed');
-    } finally {
-      setExecLoading(false);
-    }
-  }
-
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12, paddingTop: 40 }}>
       <div style={{
@@ -638,37 +619,9 @@ function SavedPhase({
         </div>
       )}
 
-      {/* Execution launch */}
-      <button
-        onClick={handleExecute}
-        disabled={execLoading || !plan || execResult?.startsWith('Execution launched')}
-        style={{
-          padding: '7px 24px', borderRadius: 4, border: 'none',
-          background: (execLoading || execResult?.startsWith('Execution launched')) ? T.bg3 : `linear-gradient(135deg, ${T.green}, #059669)`,
-          color: '#fff', fontSize: 11, fontWeight: 700,
-          cursor: execLoading ? 'not-allowed' : 'pointer',
-          opacity: execLoading ? 0.6 : 1,
-        }}
-      >
-        {execLoading ? 'Launching...' : '\u25B6 Start Execution'}
-      </button>
-
-      <div
-        role="status"
-        aria-live="polite"
-        aria-atomic="true"
-      >
-        {execResult && (
-          <div style={{
-            fontSize: 9,
-            color: execResult.startsWith('Execution launched') ? T.green : T.red,
-            padding: '4px 10px',
-            background: execResult.startsWith('Execution launched') ? T.green + '12' : T.red + '12',
-            borderRadius: 4,
-          }}>
-            {execResult}
-          </div>
-        )}
+      <div style={{ fontSize: 10, color: T.text2, maxWidth: 340, textAlign: 'center', lineHeight: 1.5 }}>
+        The plan is now in the Queued column on the board. Open the card there
+        and press <strong>Execute</strong> to start it.
       </div>
 
       <div style={{ display: 'flex', gap: 8 }}>

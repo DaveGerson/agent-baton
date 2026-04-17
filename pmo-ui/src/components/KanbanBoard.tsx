@@ -1,4 +1,4 @@
-import { useState, useEffect, useLayoutEffect } from 'react';
+import { useState, useEffect, useLayoutEffect, useMemo } from 'react';
 import { KanbanCard } from './KanbanCard';
 import { HealthBar } from './HealthBar';
 import { SignalsBar } from './SignalsBar';
@@ -65,7 +65,7 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
   const hasAdvancedFilters =
     riskFilter !== 'all' || agentFilter !== '' || dateFrom !== '' || dateTo !== '';
 
-  const filtered = cards
+  const filtered = useMemo(() => cards
     .filter(c => filter === 'all' || c.program.toUpperCase() === filter.toUpperCase())
     .filter(c => {
       if (!search.trim()) return true;
@@ -94,9 +94,9 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
         if (created > end.getTime()) return false;
       }
       return true;
-    });
+    }), [cards, filter, search, riskFilter, agentFilter, dateFrom, dateTo]);
 
-  const sorted = [...filtered].sort((a, b) => {
+  const sorted = useMemo(() => [...filtered].sort((a, b) => {
     switch (sortBy) {
       case 'priority': return b.priority - a.priority;
       case 'updated': return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
@@ -107,7 +107,7 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
       case 'progress': return (b.steps_completed / Math.max(b.steps_total, 1)) - (a.steps_completed / Math.max(a.steps_total, 1));
       default: return 0;
     }
-  });
+  }), [filtered, sortBy]);
 
   const awaitingHuman = cards.filter(c => c.column === 'awaiting_human').length;
   const executing = cards.filter(c => c.column === 'executing').length;
@@ -451,7 +451,11 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
       </div>
 
       {/* Kanban columns */}
-      <div style={{ flex: 1, display: 'flex', overflow: 'auto', padding: '10px 6px' }}>
+      {/* overflowX:auto lets the row scroll horizontally when the viewport is
+          too narrow to fit all columns. overflowY:hidden + minHeight:0 on each
+          column are what let the inner card lists scroll independently; without
+          minHeight:0 a flex child's overflow:auto can't actually clip. */}
+      <div style={{ flex: 1, display: 'flex', overflowX: 'auto', overflowY: 'hidden', padding: '10px 6px', minHeight: 0 }}>
         {COLUMNS.map(col => {
           const colCards = sorted.filter(c => c.column === col.id);
           return (
@@ -460,8 +464,9 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
               aria-labelledby={`col-${col.id}-heading`}
               style={{
                 flex: 1,
-                minWidth: 170,
+                minWidth: 150,
                 maxWidth: 240,
+                minHeight: 0,
                 display: 'flex',
                 flexDirection: 'column',
                 margin: '0 3px',

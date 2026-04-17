@@ -35,7 +35,7 @@ export default function App() {
     setView('kanban');
   }
 
-  function handleCardForge(card: PmoCard) {
+  const handleCardForge = useCallback((card: PmoCard) => {
     const signal: PmoSignal = {
       signal_id: card.card_id,
       signal_type: 'reforge',
@@ -47,8 +47,11 @@ export default function App() {
       forge_task_id: card.card_id,
       source_project_id: card.project_id,
     };
+    // openForge is referenced via closure; it's a plain function but only
+    // calls setState, so it's safe to exclude from deps.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
     openForge(signal);
-  }
+  }, []);
 
   const toggleSignals = useCallback(() => setShowSignals(s => !s), []);
   const goForge = useCallback(() => openForge(), []); // eslint-disable-line react-hooks/exhaustive-deps

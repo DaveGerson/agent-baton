@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { memo, useState, useEffect, useRef } from 'react';
 import type { PmoCard, ForgePlanResponse } from '../api/types';
 import { T, PRIORITY_COLOR, programColor } from '../styles/tokens';
 import { api } from '../api/client';
@@ -93,7 +93,7 @@ function usePlanPreview(cardId: string) {
 }
 
 function useExecuteCard(
-  cardId: string,
+  card: PmoCard,
   toast: ReturnType<typeof useToast>,
   onMutateCard?: (cardId: string, updater: (card: PmoCard) => PmoCard) => void,
 ) {
@@ -108,12 +108,21 @@ function useExecuteCard(
   async function handleExecute(e: React.MouseEvent) {
     e.stopPropagation();
     if (execTimerRef.current) clearTimeout(execTimerRef.current);
+    // Stale-state guard: SSE may have moved the card out of 'queued' between
+    // render and click. Bail early so we show a clear message instead of a
+    // generic 409 from the backend.
+    if (card.column !== 'queued') {
+      setExecResult('Card is no longer queued — refresh to see its current state.');
+      toast.error('Card is no longer queued');
+      execTimerRef.current = setTimeout(() => setExecResult(null), 8000);
+      return;
+    }
     setExecLoading(true);
     setExecResult(null);
     try {
-      const resp = await api.executeCard(cardId);
+      const resp = await api.executeCard(card.card_id);
       setExecResult(`Launched (PID ${resp.pid})`);
-      onMutateCard?.(cardId, c => ({ ...c, column: 'executing' }));
+      onMutateCard?.(card.card_id, c => ({ ...c, column: 'executing' }));
       toast.success('Execution launched');
     } catch (err) {
       setExecResult(err instanceof Error ? err.message : 'Launch failed');
@@ -132,11 +141,11 @@ function useExecuteCard(
   return { execLoading, execResult, handleExecute, dismissExecResult };
 }
 
-export function KanbanCard({ card, columnColor, onForge, onEditPlan, onMutateCard }: KanbanCardProps) {
+function KanbanCardImpl({ card, columnColor, onForge, onEditPlan, onMutateCard }: KanbanCardProps) {
   const [expanded, setExpanded] = useState(false);
   const toast = useToast();
   const { showPlan, planData, planLoading, handleViewPlan } = usePlanPreview(card.card_id);
-  const { execLoading, execResult, handleExecute, dismissExecResult } = useExecuteCard(card.card_id, toast, onMutateCard);
+  const { execLoading, execResult, handleExecute, dismissExecResult } = useExecuteCard(card, toast, onMutateCard);
   const [showProgress, setShowProgress] = useState(false);
   const [gateResolved, setGateResolved] = useState(false);
   const isHuman = card.column === 'awaiting_human';
@@ -544,6 +553,18 @@ export function KanbanCard({ card, columnColor, onForge, onEditPlan, onMutateCar
     </div>
   );
 }
+
+// Memoized so that a mutation to one card (e.g. SSE update, gate approval)
+// doesn't force all sibling cards on the board to reconcile. Cards are
+// uniquely identified by card_id; when the parent creates a new `filtered`
+// array each render, same-identity card objects still skip re-render.
+export const KanbanCard = memo(KanbanCardImpl, (prev, next) => (
+  prev.card === next.card
+  && prev.columnColor === next.columnColor
+  && prev.onForge === next.onForge
+  && prev.onEditPlan === next.onEditPlan
+  && prev.onMutateCard === next.onMutateCard
+));
 
 function fmtTime(iso: string): string {
   try {
