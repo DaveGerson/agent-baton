@@ -270,11 +270,19 @@ class ExecutionEngine:
         policy_engine=None,  # PolicyEngine | None
         enforce_token_budget: bool = True,
         token_budget: int | None = None,
+        max_gate_retries: int = 3,
     ) -> None:
         self._root = (team_context_root or self._DEFAULT_CONTEXT_ROOT).resolve()
         self._task_id = task_id
         self._storage = storage  # May be None (legacy file mode)
         self._bus = bus
+        # Maximum number of times a gate may fail before the engine
+        # automatically transitions to "failed" instead of issuing another
+        # retryable GATE action.  Guards against infinite retry loops when
+        # gate failures are recorded programmatically (e.g. headless / API).
+        # Operators can still call fail_gate() at any time to force a terminal
+        # failure before the cap is reached.
+        self._max_gate_retries: int = max_gate_retries
 
         # KnowledgeResolver for runtime gap auto-resolution.  Callers (CLI and
         # tests) set this at construction time.  When None, gaps fall through to
@@ -3510,7 +3518,7 @@ class ExecutionEngine:
         # ── Route prompt builder by step_type ───────────────────────────────
         # consulting → lightweight consultation prompt (no shared context chain)
         # task       → minimal bespoke-skill prompt (no context overhead)
-        # everything else → full delegation prompt (existing behaviour)
+        # everything else → full delegation prompt with knowledge dedup
         if step.step_type == "consulting":
             prompt = dispatcher.build_consultation_prompt(
                 step,
@@ -3530,7 +3538,12 @@ class ExecutionEngine:
                 task_summary=state.plan.task_summary,
                 task_type=state.plan.task_type or "",
                 prior_beads=prior_beads or None,
+                delivered_knowledge=state.delivered_knowledge,
             )
+            # Persist the updated delivered_knowledge map so subsequent
+            # dispatches in this run know which docs are already inlined.
+            if self._persistence is not None:
+                self._persistence.save(state)
         enforcement = PromptDispatcher.build_path_enforcement(step)
 
         # ── Compliance audit: record dispatch event ──────────────────────────

@@ -337,3 +337,34 @@ reads and CLI ceremony. Follow these conventions to keep sessions lean.
   reading entire modules to locate a function.
 
 See `memory/project_token_burn_reduction.md` for research evidence.
+
+## Autonomous Incident Handling (MANDATORY)
+
+When a bug, test failure, CLI glitch, race condition, or unexpected behavior
+appears during any work — especially pre-existing failures surfaced while
+working on something else — do NOT pause to ask. Handle it autonomously:
+
+1. **File a bead** with `baton beads create --type warning ... --tag <context-tag>`.
+   Beads are the structured audit trail; they link to affected files and survive
+   across sessions. A warning bead is always sufficient; an `incident` doc
+   (`baton incident --create`) is only needed for P1/P2 severity.
+
+2. **Launch a background subagent** (`run_in_background: true`) to fix it.
+   Brief the agent thoroughly: bead IDs, exact failing tests, current-behavior
+   vs expected-behavior, and the constraint not to run the full test suite.
+   Require the agent to write a regression test alongside the fix.
+
+3. **Continue the main execution flow** without waiting. The subagent works
+   on a separate branch (`fix/<short-description>`); you will be notified on
+   completion and can merge/review then.
+
+4. **Only pause and ask the human** when: (a) the fix requires destructive
+   action, (b) the correct behavior is genuinely ambiguous (not "tests are
+   outdated" but "behavior has a bug"), (c) human judgment is needed on a
+   design decision, or (d) the fix would conflict with files another agent
+   is currently editing.
+
+This is the default behavior, not a special case. The user explicitly trusts
+autonomous fixes within the project directory and prioritizes velocity.
+Pausing the main flow to manually triage a test failure that the subagent
+could fix in parallel is an anti-pattern.
