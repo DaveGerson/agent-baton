@@ -36,6 +36,8 @@ _MAX_AGENTS_BY_COMPLEXITY: dict[str, int] = {
 _VALID_TASK_TYPES = (
     "new-feature", "bug-fix", "refactor", "data-analysis",
     "documentation", "migration", "test",
+    # E3 — fallback type for unknown/ambiguous tasks
+    "generic",
 )
 
 # ---------------------------------------------------------------------------
@@ -113,6 +115,8 @@ _CATEGORY_AFFINITY: dict[str, set[str]] = {
     "refactor": {AgentCategory.ENGINEERING.value},
     "documentation": {AgentCategory.ENGINEERING.value, AgentCategory.META.value},
     "test": {AgentCategory.ENGINEERING.value},
+    # E3 — generic falls back to engineering category
+    "generic": {AgentCategory.ENGINEERING.value},
 }
 
 # Preferred "primary implementer" per task type for light complexity
@@ -124,6 +128,8 @@ _PRIMARY_IMPLEMENTER: dict[str, str] = {
     "data-analysis": "data-analyst",
     "documentation": "architect",
     "test": "test-engineer",
+    # E3 — generic uses backend-engineer as its light-complexity implementer
+    "generic": "backend-engineer",
 }
 
 
@@ -481,10 +487,14 @@ class HaikuClassifier:
         if complexity not in _VALID_COMPLEXITIES:
             complexity = "medium"
 
-        # Validate task_type
+        # Validate task_type — unknown types fall through to "generic" (E3)
         task_type = data.get("task_type", "new-feature")
         if task_type not in _VALID_TASK_TYPES:
-            task_type = "new-feature"
+            logger.info(
+                "HaikuClassifier returned unknown task_type %r — routing to 'generic' fallback",
+                task_type,
+            )
+            task_type = "generic"
 
         phases = data.get("phases", ["Implement"])
         if not phases:

@@ -110,8 +110,11 @@ def handler(args: argparse.Namespace) -> None:
         return
 
     if args.experiments:
+        import warnings
         from agent_baton.core.improve.experiments import ExperimentManager
-        mgr = ExperimentManager()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            mgr = ExperimentManager()
         active = mgr.active()
         if not active:
             print("No active experiments.")

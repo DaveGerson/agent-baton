@@ -83,6 +83,7 @@ class TaskWorker:
         decision_manager: DecisionManager | None = None,
         shutdown_event: asyncio.Event | None = None,
         gate_poll_interval: float = 2.0,
+        max_steps: int | None = None,
     ) -> None:
         self._engine = engine
         self._launcher = launcher
@@ -93,6 +94,10 @@ class TaskWorker:
         self._decision_manager = decision_manager
         self._shutdown_event = shutdown_event
         self._gate_poll_interval = gate_poll_interval
+        # B2: optional step ceiling — stop cleanly after N steps.
+        # None / 0 means unlimited.
+        self._max_steps: int | None = max_steps if max_steps else None
+        self._steps_executed: int = 0
 
     @property
     def is_running(self) -> bool:
@@ -119,6 +124,14 @@ class TaskWorker:
         while True:
             if self._shutdown_event is not None and self._shutdown_event.is_set():
                 return "Execution stopped: shutdown requested."
+
+            # B2: enforce --max-steps ceiling before asking for the next action.
+            if self._max_steps is not None and self._steps_executed >= self._max_steps:
+                return (
+                    f"Execution stopped: reached max-steps limit "
+                    f"({self._max_steps}). "
+                    "Run 'baton daemon start --resume' to continue."
+                )
 
             action = self._engine.next_action()
 
@@ -290,6 +303,11 @@ class TaskWorker:
                                         error=result.error,
                                     )
                                 )
+
+                # B2: count each dispatched batch as one step toward the ceiling.
+                # Automation and agent batches both count — one increment per loop
+                # iteration that included at least one dispatched action.
+                self._steps_executed += len(actions)
 
                 continue
 

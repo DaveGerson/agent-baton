@@ -52,18 +52,55 @@ from agent_baton.models.agent import AgentDefinition
 
 logger = logging.getLogger(__name__)
 
-_API_KEY_RE = re.compile(r"sk-ant-[A-Za-z0-9_-]+")
+# A5: Sensitive data patterns applied to both outcome and error text before storage.
+# Keep as a module-level tuple so operators can extend it without touching launch logic.
+_REDACT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    # Anthropic API keys
+    (re.compile(r"sk-ant-[A-Za-z0-9_-]+"), "sk-ant-***REDACTED***"),
+    # GitHub personal access tokens (classic and fine-grained)
+    (re.compile(r"ghp_[A-Za-z0-9_]+"), "ghp_***REDACTED***"),
+    (re.compile(r"github_pat_[A-Za-z0-9_]+"), "github_pat_***REDACTED***"),
+    # Slack bot/user tokens
+    (re.compile(r"xoxb-[A-Za-z0-9_-]+"), "xoxb-***REDACTED***"),
+    (re.compile(r"xoxp-[A-Za-z0-9_-]+"), "xoxp-***REDACTED***"),
+    # Generic JSON password fields  (e.g. {"password": "hunter2"})
+    (
+        re.compile(r'"password"\s*:\s*"[^"]*"', re.IGNORECASE),
+        '"password": "***REDACTED***"',
+    ),
+    # Generic JSON secret/token fields
+    (
+        re.compile(r'"(?:secret|token|api_key|apikey)"\s*:\s*"[^"]*"', re.IGNORECASE),
+        r'"***REDACTED_KEY***": "***REDACTED***"',
+    ),
+)
+
+# Keep the old name as an alias so any external callers do not break.
+_API_KEY_RE = _REDACT_PATTERNS[0][0]
+
+
+def _redact_sensitive(text: str) -> str:
+    """Strip known sensitive patterns from agent output or error text.
+
+    Applied to both ``LaunchResult.outcome`` and ``LaunchResult.error``
+    before they are stored in step results, traces, and retrospectives
+    (A5 — stdout redaction for sensitive data).
+
+    Patterns covered: Anthropic API keys, GitHub PATs, Slack tokens,
+    and generic JSON ``password``/``secret``/``token``/``api_key`` fields.
+    """
+    for pattern, replacement in _REDACT_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
 
 
 def _redact_stderr(text: str) -> str:
-    """Strip Anthropic API key patterns from error text.
+    """Backward-compatible alias for :func:`_redact_sensitive`.
 
-    Matches the ``sk-ant-`` prefix followed by alphanumeric characters,
-    hyphens, and underscores.  Applied to all error output before it is
-    stored in ``LaunchResult.error`` to prevent accidental key exposure
-    in logs, traces, and retrospectives.
+    Retained so that call sites outside this module that reference
+    ``_redact_stderr`` by name continue to work without modification.
     """
-    return _API_KEY_RE.sub("sk-ant-***REDACTED***", text)
+    return _redact_sensitive(text)
 
 
 # ---------------------------------------------------------------------------
@@ -396,7 +433,8 @@ class ClaudeCodeLauncher:
         if parsed is not None:
             is_error: bool = bool(parsed.get("is_error", False))
             result_text: str = str(parsed.get("result", ""))
-            outcome = result_text[: self._config.max_outcome_length]
+            # A5: redact sensitive patterns from outcome before storage.
+            outcome = _redact_sensitive(result_text)[: self._config.max_outcome_length]
 
             # Token usage
             usage = parsed.get("usage", {}) or {}
@@ -415,11 +453,11 @@ class ClaudeCodeLauncher:
                 # Include both stderr and result_text so rate-limit
                 # detection works regardless of where the 429 appears.
                 if is_error and stderr_text:
-                    error = _redact_stderr(f"{stderr_text}\n{result_text}")
+                    error = _redact_sensitive(f"{stderr_text}\n{result_text}")
                 elif is_error:
-                    error = _redact_stderr(result_text)
+                    error = _redact_sensitive(result_text)
                 else:
-                    error = _redact_stderr(stderr_text) or f"exit code {exit_code}"
+                    error = _redact_sensitive(stderr_text) or f"exit code {exit_code}"
                 return LaunchResult(
                     step_id=step_id,
                     agent_name=agent_name,
@@ -440,7 +478,8 @@ class ClaudeCodeLauncher:
             )
 
         # --- Raw text fallback -----------------------------------------------
-        outcome = stdout_text[: self._config.max_outcome_length]
+        # A5: redact sensitive patterns from raw stdout before storage.
+        outcome = _redact_sensitive(stdout_text)[: self._config.max_outcome_length]
 
         # Estimate tokens from raw output length (1 token ≈ 4 chars).
         # stdout_text is used (not truncated outcome) to keep the estimate
@@ -456,7 +495,7 @@ class ClaudeCodeLauncher:
                 outcome=outcome,
                 duration_seconds=elapsed,
                 estimated_tokens=raw_estimated_tokens,
-                error=_redact_stderr(stderr_text) or f"exit code {exit_code}",
+                error=_redact_sensitive(stderr_text) or f"exit code {exit_code}",
             )
 
         return LaunchResult(

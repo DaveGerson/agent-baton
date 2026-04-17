@@ -88,6 +88,23 @@ def _utcnow() -> str:
     return datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
 
 
+def _cli_actor() -> str:
+    """Return a best-effort identity string for the current CLI user.
+
+    Produces ``"$USER@$HOSTNAME"`` when both environment variables are
+    available, falls back to ``"$USER"`` or ``"unknown"`` if not.
+    Used to populate the A2 ``actor`` field on gate and approval results.
+    """
+    import os
+    import socket
+    user = os.environ.get("USER") or os.environ.get("USERNAME") or "unknown"
+    try:
+        hostname = socket.gethostname()
+    except OSError:
+        hostname = ""
+    return f"{user}@{hostname}" if hostname else user
+
+
 def _elapsed_seconds(started_at: str) -> float:
     """Return elapsed wall-clock seconds since started_at (ISO string)."""
     try:
@@ -1496,6 +1513,10 @@ class ExecutionEngine:
         phase_id: int,
         passed: bool,
         output: str = "",
+        command: str = "",
+        exit_code: int | None = None,
+        decision_source: str = "human",
+        actor: str = "",
     ) -> None:
         """Record the result of a QA gate check.
 
@@ -1504,11 +1525,27 @@ class ExecutionEngine:
         - If *failed*: sets state status to ``failed``.
         - If *passed*: advances the phase pointer and resets step index.
         - Saves state.
+
+        Args:
+            phase_id: Phase whose gate was checked.
+            passed: Whether the gate check succeeded.
+            output: Command stdout/stderr or reviewer notes.
+            command: The shell command that was executed (A6).
+            exit_code: Subprocess exit code; ``None`` for manual gates (A6).
+            decision_source: How the gate was decided — ``"human"``,
+                ``"daemon_auto"``, ``"api"``, or ``"policy_auto"`` (A2).
+            actor: Best-available identity string (A2).
         """
         state = self._require_execution("record_gate_result")
 
         phase_obj = state.current_phase_obj
         gate_type = phase_obj.gate.gate_type if (phase_obj and phase_obj.gate) else "unknown"
+        # Derive command from the plan gate if not supplied by caller (A6).
+        if not command and phase_obj and phase_obj.gate and phase_obj.gate.command:
+            command = phase_obj.gate.command
+        # Populate actor from environment when not supplied (A2).
+        if not actor:
+            actor = _cli_actor()
 
         gate_result = GateResult(
             phase_id=phase_id,
@@ -1516,6 +1553,10 @@ class ExecutionEngine:
             passed=passed,
             output=output,
             checked_at=_utcnow(),
+            command=command,
+            exit_code=exit_code,
+            decision_source=decision_source,
+            actor=actor,
         )
         state.gate_results.append(gate_result)
 
@@ -2031,6 +2072,9 @@ class ExecutionEngine:
         phase_id: int,
         result: str,
         feedback: str = "",
+        decision_source: str = "human",
+        actor: str = "",
+        rationale: str = "",
     ) -> None:
         """Record a human approval decision for a phase.
 
@@ -2040,6 +2084,10 @@ class ExecutionEngine:
                 ``"approve-with-feedback"``.
             feedback: Free-text feedback (used when result is
                 ``"approve-with-feedback"`` to trigger a plan amendment).
+            decision_source: How the approval was decided — ``"human"``,
+                ``"daemon_auto"``, ``"api"``, or ``"policy_auto"`` (A2).
+            actor: Best-available identity string (A2).
+            rationale: Optional structured rationale for the decision (A2).
         """
         _VALID_RESULTS = {"approve", "reject", "approve-with-feedback"}
         if result not in _VALID_RESULTS:
@@ -2048,11 +2096,17 @@ class ExecutionEngine:
             )
 
         state = self._require_execution("record_approval_result")
+        # Populate actor from environment when not supplied (A2).
+        if not actor:
+            actor = _cli_actor()
 
         approval = ApprovalResult(
             phase_id=phase_id,
             result=result,
             feedback=feedback,
+            decision_source=decision_source,
+            actor=actor,
+            rationale=rationale,
         )
         state.approval_results.append(approval)
 

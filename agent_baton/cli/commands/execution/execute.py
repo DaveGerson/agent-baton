@@ -179,6 +179,8 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
                        help="Default model for dispatched agents (default: sonnet)")
     p_run.add_argument("--max-steps", type=int, default=50, dest="max_steps",
                        help="Safety limit: maximum steps before aborting (default: 50)")
+    p_run.add_argument("--token-budget", type=int, default=0, dest="token_budget",
+                       help="Soft token cap: stop dispatching new steps when exceeded (0 = use tier default)")
     p_run.add_argument("--dry-run", action="store_true", dest="dry_run",
                        help="Print actions without executing them")
 
@@ -210,6 +212,10 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
                             help="Permanently fail an execution that is in gate_failed status")
     p_fail.add_argument("--phase-id", type=int, required=True, dest="phase_id",
                         help="Phase ID of the failed gate (for confirmation output)")
+
+    # baton execute resume-budget [--task-id ID]
+    sub.add_parser("resume-budget", parents=[_task_id_parent],
+                   help="Clear budget_exceeded status so execution can continue")
 
     # baton execute list
     sub.add_parser("list", help="List all executions (active and completed)")
@@ -413,7 +419,7 @@ def _print_action(action: dict) -> None:
 
 def handler(args: argparse.Namespace) -> None:
     if args.subcommand is None:
-        validation_error("supply a subcommand: start, next, record, dispatched, gate, approve, feedback, amend, team-record, interact, complete, status, resume, list, switch, cancel, run, retry-gate, fail")
+        validation_error("supply a subcommand: start, next, record, dispatched, gate, approve, feedback, amend, team-record, interact, complete, status, resume, list, switch, cancel, run, retry-gate, fail, resume-budget")
 
     if args.subcommand == "list":
         _handle_list()
@@ -856,6 +862,16 @@ def handler(args: argparse.Namespace) -> None:
         else:
             print(f"Execution permanently failed at phase {args.phase_id} gate.")
 
+    elif args.subcommand == "resume-budget":
+        try:
+            engine.resume_budget()
+        except ValueError as exc:
+            user_error(str(exc))
+        if getattr(args, "output", "text") == "json":
+            print(json.dumps({"status": "running", "message": "budget_exceeded cleared"}))
+        else:
+            print("Budget status cleared — execution resumed. Run 'baton execute next' to continue.")
+
 
 # ---------------------------------------------------------------------------
 # Policy engine construction
@@ -929,6 +945,7 @@ def _handle_run(args: argparse.Namespace) -> None:
     max_steps = args.max_steps
     dry_run = args.dry_run
     model_override = args.model
+    token_budget: int = getattr(args, "token_budget", 0)
 
     # Resolve or create the execution
     bus = EventBus()
@@ -941,7 +958,10 @@ def _handle_run(args: argparse.Namespace) -> None:
     # If no active execution, start from plan
     engine: ExecutionEngine | None = None
     if task_id:
-        engine = ExecutionEngine(bus=bus, task_id=task_id, storage=storage)
+        engine = ExecutionEngine(
+            bus=bus, task_id=task_id, storage=storage,
+            token_budget=token_budget or None,
+        )
         st = engine.status()
         if st and st.get("status") in ("running", "pending"):
             print(f"Resuming execution: {task_id}", file=sys.stderr)
@@ -969,6 +989,7 @@ def _handle_run(args: argparse.Namespace) -> None:
             bus=bus, task_id=task_id, storage=storage,
             knowledge_resolver=knowledge_resolver,
             policy_engine=policy_engine,
+            token_budget=token_budget or None,
         )
         ContextManager(task_id=task_id).init_mission_log(
             plan.task_summary, risk_level=plan.risk_level

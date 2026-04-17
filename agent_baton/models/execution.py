@@ -486,6 +486,14 @@ class MachinePlan:
     resource_limits: ResourceLimits | None = None  # optional concurrency constraints
     detected_stack: str | None = None  # e.g. "python", "python/react", "typescript/react"
     foresight_insights: list[ForesightInsight] = field(default_factory=list)  # proactive insights
+    # E7 — dependency detection: task_id this plan depends on (from prior output)
+    depends_on_task: str | None = None
+    # A3: persist ClassificationResult signals and confidence alongside the plan.
+    # Populated by the planner when a ClassificationResult is available.
+    # ``None`` when the classification was performed before this field existed
+    # (pre-v10 databases) or when the planner used keyword-fallback only.
+    classification_signals: str | None = None    # JSON blob from ClassificationResult.to_dict()
+    classification_confidence: float | None = None  # 0.0–1.0 confidence score
 
     def __post_init__(self) -> None:
         if not self.created_at:
@@ -523,6 +531,9 @@ class MachinePlan:
             "classification_source": self.classification_source,
             "detected_stack": self.detected_stack,
             "foresight_insights": [i.to_dict() for i in self.foresight_insights],
+            "depends_on_task": self.depends_on_task,
+            "classification_signals": self.classification_signals,
+            "classification_confidence": self.classification_confidence,
         }
         if self.resource_limits is not None:
             d["resource_limits"] = self.resource_limits.to_dict()
@@ -554,6 +565,9 @@ class MachinePlan:
                 ForesightInsight.from_dict(i)
                 for i in data.get("foresight_insights", [])
             ],
+            depends_on_task=data.get("depends_on_task"),
+            classification_signals=data.get("classification_signals"),
+            classification_confidence=data.get("classification_confidence"),
         )
 
     def to_markdown(self) -> str:
@@ -577,6 +591,8 @@ class MachinePlan:
             lines.append(f"**Intervention Level**: {self.intervention_level}")
         lines.append(f"**Complexity**: {self.complexity}")
         lines.append(f"**Classification Source**: {self.classification_source}")
+        if self.depends_on_task:
+            lines.append(f"**Depends On Task**: {self.depends_on_task}")
         if self.foresight_insights:
             lines.append(f"**Foresight Insights**: {len(self.foresight_insights)} proactive gap(s) addressed")
         if self.explicit_knowledge_packs:

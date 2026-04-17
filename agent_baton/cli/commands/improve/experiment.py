@@ -1,8 +1,13 @@
 """``baton experiment`` -- manage improvement experiments.
 
-Experiments are controlled trials that test whether an improvement
-recommendation actually improves agent performance. Each experiment
-tracks a metric against a baseline and can be concluded or rolled back.
+.. deprecated::
+    ``baton experiment`` is deprecated. Use ``baton learn run-cycle`` instead.
+    The learning-cycle pipeline supersedes the experiment concept with
+    before/after scorecard comparison across full learning cycles.
+
+Experiments are before/after metric comparisons that test whether an applied
+recommendation improved agent performance. Note: there is no concurrent A/B
+testing and no statistical significance validation.
 
 Delegates to:
     agent_baton.core.improve.experiments.ExperimentManager
@@ -12,8 +17,8 @@ Delegates to:
 from __future__ import annotations
 
 import argparse
+import warnings
 
-from agent_baton.core.improve.experiments import ExperimentManager
 from agent_baton.core.improve.proposals import ProposalManager
 from agent_baton.core.improve.rollback import RollbackManager
 
@@ -21,7 +26,10 @@ from agent_baton.core.improve.rollback import RollbackManager
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     p = subparsers.add_parser(
         "experiment",
-        help="Manage improvement experiments",
+        help=(
+            "[DEPRECATED] Manage improvement experiments. "
+            "Use 'baton learn run-cycle' instead."
+        ),
     )
     sub = p.add_subparsers(dest="subcommand")
 
@@ -50,7 +58,15 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
 
 
 def handler(args: argparse.Namespace) -> None:
-    mgr = ExperimentManager()
+    from agent_baton.core.improve.experiments import ExperimentManager
+
+    print(
+        "Warning: 'baton experiment' is deprecated. "
+        "Use 'baton learn run-cycle' instead.\n"
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        mgr = ExperimentManager()
 
     if args.subcommand == "list":
         _handle_list(mgr)

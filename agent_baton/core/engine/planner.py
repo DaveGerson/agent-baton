@@ -103,6 +103,8 @@ _DEFAULT_AGENTS: dict[str, list[str]] = {
     "documentation": ["architect", "talent-builder", "code-reviewer"],
     "migration": ["architect", "backend-engineer", "test-engineer", "code-reviewer", "auditor"],
     "test": ["test-engineer"],
+    # E3 — fallback for unknown/generic tasks: default four-phase roster
+    "generic": ["architect", "backend-engineer", "test-engineer", "code-reviewer"],
 }
 
 # Phase templates by task type
@@ -117,6 +119,8 @@ _PHASE_NAMES: dict[str, list[str]] = {
     "documentation": ["Research", "Draft", "Review"],
     "migration": ["Design", "Implement", "Test", "Review"],
     "test": ["Implement", "Review"],
+    # E3 — fallback phases for generic/unknown task types
+    "generic": ["Investigate", "Implement", "Test", "Review"],
 }
 
 _DEFAULT_PHASE_NAMES: list[str] = ["Design", "Implement", "Test", "Review"]
@@ -1202,6 +1206,21 @@ class IntelligentPlanner:
                             step.context_files.append(path)
                             existing.add(path)
 
+        # 13d. E7 — Dependency detection: scan task summary for references to
+        # prior task outputs and attach their outcome beads as knowledge context.
+        depends_on_task_id: str | None = None
+        if self._bead_store is not None:
+            depends_on_task_id = self._detect_task_dependency(task_summary)
+            if depends_on_task_id is not None:
+                logger.info(
+                    "E7 dependency detected: task_id=%s depends on prior task %s",
+                    task_id,
+                    depends_on_task_id,
+                )
+                self._attach_prior_task_beads(
+                    plan_phases, depends_on_task_id
+                )
+
         # 14. Shared context
         tmp_plan = MachinePlan(
             task_id=task_id,
@@ -1227,6 +1246,7 @@ class IntelligentPlanner:
                 else (stack_profile.language if stack_profile else None)
             ),
             foresight_insights=list(self._last_foresight_insights),
+            depends_on_task=depends_on_task_id,
         )
         # 16. Team cost estimation — look up historical cost data for team steps.
         self._last_team_cost_estimates: dict[str, int] = {}
@@ -1601,6 +1621,131 @@ class IntelligentPlanner:
                 )
 
         return plan_phases
+
+    # ------------------------------------------------------------------
+    # Private helpers — E7 dependency detection
+    # ------------------------------------------------------------------
+
+    # Regex patterns that signal "this task builds on / continues prior work".
+    # Group 1 (when present) captures a candidate task_id token.
+    _DEP_PATTERNS: list[re.Pattern] = [
+        re.compile(
+            r"\bbased on(?:\s+(?:task|the\s+results?\s+of|output\s+of))?\s+([a-z0-9][-a-z0-9]{6,})",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\bbuilding on(?:\s+(?:task|the\s+results?\s+of|output\s+of))?\s+([a-z0-9][-a-z0-9]{6,})",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\bcontinuing(?:\s+(?:from|the\s+work\s+of|task))?\s+([a-z0-9][-a-z0-9]{6,})",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\bfollows?\s+(?:from\s+)?(?:task\s+)?([a-z0-9][-a-z0-9]{6,})",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\bdepends?\s+on\s+(?:task\s+)?([a-z0-9][-a-z0-9]{6,})",
+            re.IGNORECASE,
+        ),
+        # Explicit "task: TASK_ID" or "task ID: TASK_ID" notation
+        re.compile(
+            r"\btask[-_\s]?id\s*[=:]\s*([a-z0-9][-a-z0-9]{6,})",
+            re.IGNORECASE,
+        ),
+    ]
+
+    def _detect_task_dependency(self, task_summary: str) -> str | None:
+        """Scan *task_summary* for references to a prior task_id.
+
+        Applies :attr:`_DEP_PATTERNS` to find phrases like "based on task X",
+        "building on Y", "depends on Z", etc.  When a candidate token is
+        found it is validated against the bead store: if no beads exist for
+        that task_id the match is discarded (avoids false positives from
+        generic English phrases).
+
+        Returns the matched task_id string, or ``None`` when no credible
+        dependency is detected.
+
+        Requires ``self._bead_store`` to be set; callers must guard before
+        calling this method.
+        """
+        for pattern in self._DEP_PATTERNS:
+            m = pattern.search(task_summary)
+            if m:
+                candidate = m.group(1)
+                # Validate: must have at least one bead in the store for this task.
+                try:
+                    beads = self._bead_store.query(task_id=candidate, limit=1)
+                    if beads:
+                        return candidate
+                except Exception:
+                    pass
+        return None
+
+    def _attach_prior_task_beads(
+        self,
+        plan_phases: list,
+        prior_task_id: str,
+        max_beads: int = 5,
+    ) -> None:
+        """Attach outcome beads from *prior_task_id* as shared context to all steps.
+
+        Retrieves up to *max_beads* beads from the prior task (preferring
+        ``decision`` and ``outcome`` types) and appends a summary of their
+        content to each step's ``task_description`` as a "Prior context:"
+        block.  This ensures agents in the new plan are aware of what the
+        prior task produced without manual copy-paste.
+
+        Silently no-ops if the bead store is unavailable or returns no beads.
+
+        Args:
+            plan_phases: The plan phases to enrich in place.
+            prior_task_id: Task ID whose outcome beads to pull.
+            max_beads: Cap on how many beads to attach.
+        """
+        try:
+            # Prefer decision and outcome beads — highest signal for downstream work
+            beads = self._bead_store.query(
+                task_id=prior_task_id,
+                bead_type="decision",
+                limit=max_beads,
+            )
+            if len(beads) < max_beads:
+                outcome_beads = self._bead_store.query(
+                    task_id=prior_task_id,
+                    bead_type="outcome",
+                    limit=max_beads - len(beads),
+                )
+                # Deduplicate by bead_id
+                existing_ids = {b.bead_id for b in beads}
+                beads += [b for b in outcome_beads if b.bead_id not in existing_ids]
+            # Fall back to any bead type if we still have nothing
+            if not beads:
+                beads = self._bead_store.query(task_id=prior_task_id, limit=max_beads)
+        except Exception:
+            return
+
+        if not beads:
+            return
+
+        prior_context_lines = [
+            f"Prior task context (from {prior_task_id}):",
+        ]
+        for bead in beads[:max_beads]:
+            snippet = (bead.content or "").replace("\n", " ").strip()
+            if len(snippet) > 200:
+                snippet = snippet[:197] + "..."
+            prior_context_lines.append(f"  - [{bead.bead_type}] {snippet}")
+
+        prior_context_block = "\n".join(prior_context_lines)
+
+        for phase in plan_phases:
+            for step in phase.steps:
+                step.task_description = (
+                    f"{step.task_description}\n\n{prior_context_block}"
+                )
 
     # ------------------------------------------------------------------
     # Private helpers — task ID and type inference

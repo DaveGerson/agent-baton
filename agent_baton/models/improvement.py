@@ -71,7 +71,10 @@ class Recommendation:
         action: Short verb phrase describing the change.
         description: Human-readable explanation of the recommendation.
         evidence: References to data that supports this recommendation.
-        confidence: Confidence score in ``[0.0, 1.0]``.
+        confidence: Evidence strength score in ``[0.0, 1.0]``.  This is a
+            heuristic ranking signal derived from sample size and success rate,
+            NOT a statistically validated confidence interval.  Used internally
+            for ranking and auto-apply threshold comparisons only.
         risk: Assessed risk of applying the change.
         auto_applicable: Whether this can be applied without human approval.
         proposed_change: Machine-readable specification of the change.

@@ -73,7 +73,16 @@ class Recommender:
         self._scorer = scorer or PerformanceScorer(storage=storage)
         self._learner = pattern_learner or PatternLearner()
         self._tuner = budget_tuner or BudgetTuner()
-        self._evolution = evolution_engine or PromptEvolutionEngine()
+        # PromptEvolutionEngine is deprecated (D7). Suppress the warning here
+        # because Recommender is a grandfathered internal caller. New code
+        # should use the learning-cycle pipeline instead.
+        import warnings
+        if evolution_engine is not None:
+            self._evolution = evolution_engine
+        else:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                self._evolution = PromptEvolutionEngine()
 
     # ------------------------------------------------------------------
     # Public API

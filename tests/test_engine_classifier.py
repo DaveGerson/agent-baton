@@ -715,12 +715,14 @@ class TestHaikuClassifierMarkdownWrapping:
         result = self.classifier._parse_response(raw, self.registry)
         assert result.complexity == "medium"
 
-    def test_invalid_task_type_in_markdown_json_defaults_to_new_feature(self):
+    def test_invalid_task_type_in_markdown_json_defaults_to_generic(self):
         payload = self._valid_payload()
         payload["task_type"] = "unknown-type"  # invalid
         raw = "```json\n" + json.dumps(payload) + "\n```"
         result = self.classifier._parse_response(raw, self.registry)
-        assert result.task_type == "new-feature"
+        # Phase E change: unknown types route to "generic" fallback instead of
+        # silently becoming "new-feature".
+        assert result.task_type == "generic"
 
     def test_missing_phases_in_response_defaults_to_implement(self):
         payload = self._valid_payload()

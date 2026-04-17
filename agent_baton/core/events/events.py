@@ -750,3 +750,42 @@ def team_member_completed(
             "outcome": outcome,
         },
     )
+
+
+# ── Cost enforcement ─────────────────────────────────────────────────────────
+
+def budget_exceeded(
+    task_id: str,
+    tokens_used: int,
+    tokens_limit: int,
+    sequence: int = 0,
+) -> Event:
+    """Create an event indicating the execution has reached its token budget.
+
+    Published by :meth:`ExecutionEngine._check_token_budget` when enforcement
+    is active and the cumulative token count crosses the configured limit.
+    Consumers: webhook layer (delivers ``budget.exceeded`` to registered URLs),
+    telemetry recorder, and daemon monitoring hooks.
+
+    The engine sets ``state.status = "budget_exceeded"`` before publishing
+    this event.  No new dispatch actions will be issued until the operator
+    clears the status via ``baton execute resume-budget``.
+
+    Args:
+        task_id: The execution task identifier.
+        tokens_used: Cumulative estimated tokens consumed so far.
+        tokens_limit: The configured limit that was exceeded.
+        sequence: Event sequence number (0 = auto-assign).
+
+    Returns:
+        An :class:`Event` with topic ``"budget.exceeded"``.
+    """
+    return Event.create(
+        topic="budget.exceeded",
+        task_id=task_id,
+        sequence=sequence,
+        payload={
+            "tokens_used": tokens_used,
+            "tokens_limit": tokens_limit,
+        },
+    )

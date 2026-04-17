@@ -1,7 +1,13 @@
 """``baton evolve`` -- analyse agent performance and propose prompt improvements.
 
+.. deprecated::
+    ``baton evolve`` is deprecated. Use ``baton learn run-cycle`` instead.
+    The learning-cycle pipeline dispatches the ``learning-analyst`` agent which
+    reads actual retrospectives rather than matching scorecard thresholds to
+    generic suggestion templates.
+
 The evolution engine identifies underperforming agents and generates
-prompt improvement proposals based on failure patterns.
+prompt improvement proposals based on scorecard thresholds.
 
 Delegates to:
     agent_baton.core.improve.evolution.PromptEvolutionEngine
@@ -9,13 +15,16 @@ Delegates to:
 from __future__ import annotations
 
 import argparse
-
-from agent_baton.core.improve.evolution import PromptEvolutionEngine
+import warnings
 
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     p = subparsers.add_parser(
-        "evolve", help="Propose prompt improvements for underperforming agents"
+        "evolve",
+        help=(
+            "[DEPRECATED] Propose prompt improvements for underperforming agents. "
+            "Use 'baton learn run-cycle' instead."
+        ),
     )
     group = p.add_mutually_exclusive_group()
     group.add_argument(
@@ -35,7 +44,15 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
 
 
 def handler(args: argparse.Namespace) -> None:
-    engine = PromptEvolutionEngine()
+    from agent_baton.core.improve.evolution import PromptEvolutionEngine
+
+    print(
+        "Warning: 'baton evolve' is deprecated. "
+        "Use 'baton learn run-cycle' instead.\n"
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        engine = PromptEvolutionEngine()
 
     if args.agent:
         proposal = engine.propose_for_agent(args.agent)

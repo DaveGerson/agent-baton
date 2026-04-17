@@ -144,6 +144,15 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
             "and instantiate it with the provided task description"
         ),
     )
+    p.add_argument(
+        "--skip-init",
+        dest="skip_init",
+        action="store_true",
+        help=(
+            "Skip talent-builder auto-initiation even when .claude/agents/ is "
+            "empty. Uses bundled generic agents instead."
+        ),
+    )
     return p
 
 

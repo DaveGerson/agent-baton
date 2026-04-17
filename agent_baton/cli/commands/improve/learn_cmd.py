@@ -101,6 +101,34 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     )
     reset_p.add_argument("--issue", metavar="ID", required=True, help="Issue ID to reset")
 
+    # ---- run-cycle -----------------------------------------------------
+    cycle_p = sub.add_parser(
+        "run-cycle",
+        help=(
+            "Instantiate the learning-cycle plan template and optionally execute it. "
+            "The cycle collects execution data, analyzes patterns, proposes improvements, "
+            "requires human approval, applies changes, and documents outcomes."
+        ),
+    )
+    cycle_p.add_argument(
+        "--run",
+        action="store_true",
+        help=(
+            "Execute the learning cycle immediately via 'baton execute run' after "
+            "creating the plan.  Without --run, the plan is printed but not executed."
+        ),
+    )
+    cycle_p.add_argument(
+        "--template",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to the learning-cycle plan template JSON file.  "
+            "Defaults to templates/learning-cycle-plan.json relative to the "
+            "current working directory, then falls back to the bundled template."
+        ),
+    )
+
     return p
 
 
@@ -189,6 +217,10 @@ def handler(args: argparse.Namespace) -> None:
             if issue.resolution_type:
                 print(f"    Via: {issue.resolution_type}")
             print()
+
+    elif cmd == "run-cycle":
+        _cmd_run_cycle(args)
+        return
 
     elif cmd == "reset":
         issue_id = args.issue
@@ -281,6 +313,144 @@ def _cmd_status(ledger: LearningLedger) -> None:
 
     if not open_issues and not proposed:
         print("No open issues. System is healthy.")
+
+
+def _cmd_run_cycle(args: argparse.Namespace) -> None:
+    """Instantiate the learning-cycle plan template and optionally execute it.
+
+    Template resolution order:
+    1. ``--template PATH`` CLI argument.
+    2. ``templates/learning-cycle-plan.json`` relative to cwd.
+    3. Bundled template shipped with the agent_baton package.
+    """
+    import importlib.resources
+    import json
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    # --- Resolve template path -------------------------------------------
+    template_path: Path | None = None
+
+    cli_template = getattr(args, "template", None)
+    if cli_template:
+        template_path = Path(cli_template).resolve()
+        if not template_path.exists():
+            print(f"Error: template not found at {template_path}")
+            sys.exit(1)
+
+    if template_path is None:
+        candidate = Path("templates/learning-cycle-plan.json").resolve()
+        if candidate.exists():
+            template_path = candidate
+
+    if template_path is None:
+        # Fall back to bundled template via importlib.resources
+        try:
+            pkg_files = importlib.resources.files("agent_baton")
+            bundled = pkg_files / "templates" / "learning-cycle-plan.json"
+            bundled_path = Path(str(bundled))
+            if bundled_path.exists():
+                template_path = bundled_path
+        except Exception:
+            pass
+
+    if template_path is None:
+        print(
+            "Error: learning-cycle-plan.json not found.\n"
+            "Expected at templates/learning-cycle-plan.json (relative to cwd) "
+            "or installable via the agent_baton package.\n"
+            "Run from the agent-baton repository root, or pass --template PATH."
+        )
+        sys.exit(1)
+
+    # --- Load and display template summary --------------------------------
+    try:
+        template = json.loads(template_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        print(f"Error reading template: {exc}")
+        sys.exit(1)
+
+    meta = template.get("_template_meta", {})
+    task_desc = template.get("task", "Learning cycle")
+    phases = template.get("phases", [])
+
+    print(f"Learning Cycle Plan")
+    print(f"{'=' * 50}")
+    print(f"  Template: {meta.get('name', 'learning-cycle')} v{meta.get('version', '?')}")
+    print(f"  Task:     {task_desc}")
+    print(f"  Phases:   {len(phases)}")
+    print()
+    for phase in phases:
+        phase_name = phase.get("name", f"Phase {phase.get('phase_id', '?')}")
+        phase_desc = phase.get("description", "")
+        if "gate" in phase:
+            gate_type = phase["gate"].get("gate_type", "gate")
+            print(f"  {phase.get('phase_id', '?')}. {phase_name} [{gate_type.upper()} GATE]")
+        else:
+            steps = phase.get("steps", [])
+            agents = ", ".join(s.get("agent", "?") for s in steps)
+            print(f"  {phase.get('phase_id', '?')}. {phase_name} ({agents})")
+        if phase_desc:
+            print(f"     {phase_desc}")
+    print()
+
+    # --- Show learning cycle counter status ------------------------------
+    try:
+        from agent_baton.core.improve.triggers import TriggerEvaluator
+        evaluator = TriggerEvaluator(team_context_root=_team_context_root())
+        since_last = evaluator.executions_since_last_learning_cycle()
+        threshold = evaluator._config.learning_cycle_count_threshold
+        print(f"  Executions since last cycle: {since_last} (threshold: {threshold})")
+        print()
+    except Exception:
+        pass
+
+    if not getattr(args, "run", False):
+        print(
+            "Plan printed. To execute, run:\n"
+            "  baton learn run-cycle --run\n"
+            "\nOr drive it manually:\n"
+            "  baton execute start  (after creating a plan from this template)"
+        )
+        return
+
+    # --- Execute via baton execute run -----------------------------------
+    print("Executing learning cycle...")
+    print()
+
+    # Write the plan to the team-context directory so baton execute run can find it
+    plan_dest = _team_context_root() / "learning-cycle-plan.json"
+    plan_dest.parent.mkdir(parents=True, exist_ok=True)
+    plan_dest.write_text(
+        json.dumps(template, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    cmd = ["baton", "execute", "run", "--plan", str(plan_dest)]
+    try:
+        result = subprocess.run(cmd, check=False)
+        if result.returncode == 0:
+            # Reset the learning cycle counter on success
+            try:
+                from agent_baton.core.improve.triggers import TriggerEvaluator
+                evaluator = TriggerEvaluator(team_context_root=_team_context_root())
+                evaluator.mark_learning_cycle_complete()
+                print("\nLearning cycle counter reset.")
+            except Exception as exc:
+                print(f"\nWarning: could not reset learning cycle counter: {exc}")
+        else:
+            print(
+                f"\nLearning cycle execution exited with code {result.returncode}. "
+                "Review the output above for details."
+            )
+            sys.exit(result.returncode)
+    except FileNotFoundError:
+        print(
+            "Error: 'baton' command not found. "
+            "Ensure agent-baton is installed and on PATH."
+        )
+        sys.exit(1)
 
 
 def _cmd_issues(ledger: LearningLedger, args: argparse.Namespace) -> None:

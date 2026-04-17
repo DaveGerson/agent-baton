@@ -16,6 +16,11 @@ Integration:
   record the watermark.
 * Anomaly detection is always run during a cycle, even when triggered by
   ``force=True``, to ensure urgent issues are surfaced.
+* :meth:`learning_cycle_due` provides a separate counter-based check for
+  whether a full learning cycle (COLLECT→ANALYZE→PROPOSE→REVIEW→APPLY→DOCUMENT)
+  is recommended.  This flag is informational only — it never auto-triggers
+  the cycle.  The threshold is controlled by ``LEARNING_TRIGGER_COUNT`` env
+  var (default 10).
 
 Anomaly types detected by :meth:`detect_anomalies`:
 
@@ -29,9 +34,10 @@ Configuration priority (highest to lowest):
 
 1. Explicit ``config`` argument passed to the constructor.
 2. ``trigger_config`` block inside ``learned-overrides.json``.
-3. Environment variables: ``BATON_MIN_TASKS``, ``BATON_ANALYSIS_INTERVAL``.
+3. Environment variables: ``BATON_MIN_TASKS``, ``BATON_ANALYSIS_INTERVAL``,
+   ``LEARNING_TRIGGER_COUNT``.
 4. Compiled-in defaults (``min_tasks_before_analysis=3``,
-   ``analysis_interval_tasks=3``).
+   ``analysis_interval_tasks=3``, ``learning_cycle_count_threshold=10``).
 """
 from __future__ import annotations
 
@@ -53,6 +59,7 @@ _log = logging.getLogger(__name__)
 _DEFAULT_TEAM_CONTEXT = Path(".claude/team-context")
 _TRIGGER_STATE_FILE = "improvement-trigger-state.json"
 _OVERRIDES_FILE = "learned-overrides.json"
+_LEARNING_CYCLE_STATE_FILE = "learning-cycle-state.json"
 
 
 class TriggerEvaluator:
@@ -341,6 +348,75 @@ class TriggerEvaluator:
     # Private helpers
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Counter-based learning cycle flag (D4)
+    # ------------------------------------------------------------------
+
+    def learning_cycle_due(self) -> bool:
+        """Return ``True`` if enough executions have completed since the last
+        learning cycle to recommend running one.
+
+        This is a **flag only** — it never auto-triggers the cycle.  Callers
+        are expected to surface it (e.g. via ``baton execute status``) and let
+        the operator or daemon decide when to run ``baton learn run-cycle``.
+
+        The counter threshold is ``config.learning_cycle_count_threshold``
+        (default 10, overridable via ``LEARNING_TRIGGER_COUNT`` env var).
+        A threshold of 0 disables the flag entirely.
+
+        State is persisted to ``learning-cycle-state.json`` in the
+        team-context directory (separate from the improvement-trigger-state
+        so the two counters advance independently).
+
+        Returns:
+            ``True`` when the number of completed executions since the last
+            learning cycle meets or exceeds the threshold.
+        """
+        threshold = self._config.learning_cycle_count_threshold
+        if threshold <= 0:
+            return False
+
+        since_last = self._executions_since_last_learning_cycle()
+        return since_last >= threshold
+
+    def executions_since_last_learning_cycle(self) -> int:
+        """Return the number of completed executions since the last learning cycle."""
+        return self._executions_since_last_learning_cycle()
+
+    def mark_learning_cycle_complete(self) -> None:
+        """Record that a learning cycle just ran, resetting the counter."""
+        path = self._root / _LEARNING_CYCLE_STATE_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        records = self._read_records()
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        path.write_text(
+            json.dumps({
+                "last_cycle_count": len(records),
+                "last_cycle_at": now,
+            }, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        _log.debug(
+            "TriggerEvaluator: learning cycle counter reset at count=%d", len(records)
+        )
+
+    def _executions_since_last_learning_cycle(self) -> int:
+        """Internal: executions completed since last learning cycle."""
+        records = self._read_records()
+        total = len(records)
+        path = self._root / _LEARNING_CYCLE_STATE_FILE
+        if not path.exists():
+            return total
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            last_count = int(data.get("last_cycle_count", 0))
+            # Guard against stale state from a different data source.
+            if last_count > total:
+                return total
+            return total - last_count
+        except (json.JSONDecodeError, OSError, ValueError):
+            return total
+
     def _load_config_from_overrides(self, base: TriggerConfig) -> TriggerConfig:
         """Overlay ``trigger_config`` from ``learned-overrides.json`` onto *base*.
 
@@ -371,6 +447,7 @@ class TriggerEvaluator:
                 "gate_failure_threshold",
                 "budget_deviation_threshold",
                 "confidence_threshold",
+                "learning_cycle_count_threshold",
             ):
                 if key in tc_data:
                     merged[key] = tc_data[key]
