@@ -155,12 +155,12 @@ export function KanbanCard({ card, columnColor, onForge, onEditPlan, onMutateCar
 
   function handleGateResolved(result: 'approve' | 'reject') {
     setGateResolved(true);
-    // Optimistically update the column so the card moves off awaiting_human.
-    if (onMutateCard) {
-      onMutateCard(card.card_id, c => ({
-        ...c,
-        column: result === 'approve' ? 'executing' : 'executing',
-      }));
+    // On approve, optimistically move to executing so the card visibly leaves
+    // awaiting_human. On reject, leave the column alone — the backend decides
+    // the next state (typically back to queued for re-planning) and the SSE
+    // update will deliver it. Hiding the gate panel is handled by gateResolved.
+    if (result === 'approve' && onMutateCard) {
+      onMutateCard(card.card_id, c => ({ ...c, column: 'executing' }));
     }
   }
   const priorityColor = PRIORITY_COLOR[card.priority] ?? T.text2;

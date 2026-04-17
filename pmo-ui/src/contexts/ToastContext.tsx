@@ -87,8 +87,8 @@ export function ToastProvider({ children }: { children: ReactNode }) {
                   padding: '8px 12px',
                   background: T.bg1,
                   borderRadius: 4,
-                  borderLeft: `3px solid ${color}`,
                   border: `1px solid ${T.border}`,
+                  borderLeft: `3px solid ${color}`,
                   boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
                 }}
               >
