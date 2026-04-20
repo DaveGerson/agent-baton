@@ -125,6 +125,10 @@ export interface ForgePlanStep {
   allowed_paths: string[];
   blocked_paths: string[];
   context_files: string[];
+  step_type?: 'planning' | 'developing' | 'testing' | 'reviewing' | 'consulting' | 'task' | 'automation';
+  command?: string;
+  interactive?: boolean;
+  max_turns?: number;
 }
 
 export interface ForgePlanGate {

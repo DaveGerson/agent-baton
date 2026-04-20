@@ -91,7 +91,11 @@ function KanbanCardImpl({ card, columnColor, onForge, onEditPlan, onMutateCard }
     ? `2px solid ${T.tangerine}`
     : `2px solid ${T.border}`;
 
+  // NOTE: CardDetailModal is rendered as a Fragment sibling, NOT inside this
+  // div. CSS `transform` on the card creates a new containing block which
+  // breaks `position:fixed` on descendants — the modal must live outside it.
   return (
+    <>
     <div
       role="button"
       tabIndex={0}
@@ -254,16 +258,17 @@ function KanbanCardImpl({ card, columnColor, onForge, onEditPlan, onMutateCard }
         </div>
       </div>
 
-      {showDetail && (
-        <CardDetailModal
-          card={card}
-          onClose={() => setShowDetail(false)}
-          onForge={onForge}
-          onEditPlan={onEditPlan}
-          onMutateCard={onMutateCard}
-        />
-      )}
     </div>
+    {showDetail && (
+      <CardDetailModal
+        card={card}
+        onClose={() => setShowDetail(false)}
+        onForge={onForge}
+        onEditPlan={onEditPlan}
+        onMutateCard={onMutateCard}
+      />
+    )}
+    </>
   );
 }
 

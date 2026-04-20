@@ -2,9 +2,15 @@ import { useState, useRef, useEffect, useMemo } from 'react';
 import type { DragEvent, KeyboardEvent } from 'react';
 import { T, FONTS, SHADOWS, FONT_SIZES } from '../styles/tokens';
 import type { ForgePlanResponse, ForgePlanPhase, ForgePlanStep, ForgePlanGate } from '../api/types';
+import type { Agent } from '../api/types';
+import { api } from '../api/client';
 import { agentDisplayName } from '../utils/agent-names';
 
-const AGENT_LIST = [
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+const AGENT_LIST_FALLBACK = [
   'backend-engineer',
   'frontend-engineer',
   'test-engineer',
@@ -14,7 +20,7 @@ const AGENT_LIST = [
   'data-engineer',
 ] as const;
 
-const AGENT_DESCRIPTIONS: Record<string, string> = {
+const AGENT_DESCRIPTIONS_FALLBACK: Record<string, string> = {
   'backend-engineer': 'Server-side implementation, APIs, business logic',
   'frontend-engineer': 'Client-side UI, components, styling',
   'test-engineer': 'Test suites, coverage, quality assurance',
@@ -29,6 +35,17 @@ type ModelOption = typeof MODEL_LIST[number];
 
 const GATE_TYPE_LIST = ['build', 'test', 'lint', 'custom'] as const;
 type GateType = typeof GATE_TYPE_LIST[number];
+
+const STEP_TYPE_LIST = [
+  'developing',
+  'planning',
+  'testing',
+  'reviewing',
+  'consulting',
+  'task',
+  'automation',
+] as const;
+type StepType = typeof STEP_TYPE_LIST[number];
 
 // Agent role colors — warm kitchen palette
 const AGENT_COLORS: Record<string, string> = {
@@ -45,6 +62,16 @@ const MODEL_COLORS: Record<ModelOption, string> = {
   sonnet: T.blueberry,
   opus: T.cherry,
   haiku: T.mint,
+};
+
+const STEP_TYPE_COLORS: Record<StepType, string> = {
+  developing: T.blueberry,
+  planning: T.crust,
+  testing: T.mint,
+  reviewing: T.tangerine,
+  consulting: T.butter,
+  task: T.text2,
+  automation: T.cherry,
 };
 
 function agentColor(name: string): string {
@@ -160,6 +187,60 @@ function TagInput({ values, onChange, placeholder = 'Type and press Enter', aria
 }
 
 // ---------------------------------------------------------------------------
+// AutosizeTextarea — always-visible, grows with content
+// ---------------------------------------------------------------------------
+
+interface AutosizeTextareaProps {
+  value: string;
+  onChange: (value: string) => void;
+  ariaLabel?: string;
+  placeholder?: string;
+}
+
+function AutosizeTextarea({ value, onChange, ariaLabel, placeholder }: AutosizeTextareaProps) {
+  const ref = useRef<HTMLTextAreaElement>(null);
+
+  // Re-adjust height whenever value changes
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${el.scrollHeight}px`;
+  }, [value]);
+
+  return (
+    <textarea
+      ref={ref}
+      rows={2}
+      aria-label={ariaLabel}
+      placeholder={placeholder}
+      value={value}
+      onChange={e => onChange(e.target.value)}
+      style={{
+        width: '100%',
+        padding: '6px 8px',
+        borderRadius: 6,
+        border: `1.5px solid ${T.borderSoft}`,
+        background: T.bg0,
+        color: T.text0,
+        fontSize: 13,
+        fontWeight: 600,
+        outline: 'none',
+        fontFamily: FONTS.body,
+        resize: 'none',
+        overflow: 'hidden',
+        lineHeight: 1.5,
+        boxSizing: 'border-box',
+        display: 'block',
+        transition: 'border-color 0.15s',
+      }}
+      onFocus={e => { e.currentTarget.style.borderColor = T.cherry; }}
+      onBlur={e => { e.currentTarget.style.borderColor = T.borderSoft; }}
+    />
+  );
+}
+
+// ---------------------------------------------------------------------------
 // DependencySelect — multi-select checkboxes for step IDs
 // ---------------------------------------------------------------------------
 
@@ -242,6 +323,99 @@ function AdvancedFieldRow({ label, children }: { label: string; children: React.
       </div>
       {children}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// FieldRow — labelled row for main (non-advanced) step body fields
+// ---------------------------------------------------------------------------
+
+function FieldRow({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+      <div style={{
+        fontSize: FONT_SIZES.xs,
+        fontWeight: 800,
+        fontFamily: FONTS.body,
+        textTransform: 'uppercase',
+        letterSpacing: '0.1em',
+        color: T.text3,
+      }}>
+        {label}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// AgentSelect — populated from API, grouped by category
+// ---------------------------------------------------------------------------
+
+interface AgentSelectProps {
+  value: string;
+  onChange: (name: string) => void;
+  agents: Agent[];
+  color: string;
+  ariaLabel?: string;
+}
+
+function AgentSelect({ value, onChange, agents, color, ariaLabel }: AgentSelectProps) {
+  // Group by category
+  const grouped = useMemo(() => {
+    const map = new Map<string, Agent[]>();
+    for (const a of agents) {
+      const cat = a.category || 'other';
+      if (!map.has(cat)) map.set(cat, []);
+      map.get(cat)!.push(a);
+    }
+    return map;
+  }, [agents]);
+
+  const hasCurrentValue = agents.some(a => a.name === value);
+
+  return (
+    <select
+      value={value}
+      onChange={e => onChange(e.target.value)}
+      onClick={e => e.stopPropagation()}
+      aria-label={ariaLabel}
+      style={{
+        fontSize: 11,
+        color,
+        background: T.bg3,
+        border: `2px solid ${T.border}`,
+        borderRadius: 6,
+        padding: '3px 6px',
+        outline: 'none',
+        flexShrink: 0,
+        cursor: 'pointer',
+        fontFamily: FONTS.body,
+        fontWeight: 700,
+      }}
+    >
+      {grouped.size > 0 ? (
+        Array.from(grouped.entries()).map(([cat, catAgents]) => (
+          <optgroup key={cat} label={cat.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}>
+            {catAgents.map(a => (
+              <option key={a.name} value={a.name} title={a.description}>
+                {agentDisplayName(a.name)}
+              </option>
+            ))}
+          </optgroup>
+        ))
+      ) : (
+        AGENT_LIST_FALLBACK.map(a => (
+          <option key={a} value={a} title={AGENT_DESCRIPTIONS_FALLBACK[a] || ''}>
+            {agentDisplayName(a)}
+          </option>
+        ))
+      )}
+      {/* Preserve current value if not present in the loaded list */}
+      {!hasCurrentValue && (
+        <option value={value}>{agentDisplayName(value)}</option>
+      )}
+    </select>
   );
 }
 
@@ -419,16 +593,28 @@ export function PlanEditor({
   onBack, onApprove, saving, onStartRegenerate, regenLoading,
 }: PlanEditorProps) {
   const [expandedPhase, setExpandedPhase] = useState<number | null>(0);
-  const [editingStep, setEditingStep] = useState<string | null>(null);
   const [expandedAdvanced, setExpandedAdvanced] = useState<Set<string>>(new Set());
   const [expandedGateEditor, setExpandedGateEditor] = useState<Set<number>>(new Set());
   const [draftSaved, setDraftSaved] = useState(false);
   const [lastSaveTime, setLastSaveTime] = useState<string | null>(null);
   const [dragState, setDragState] = useState<{ phaseIdx: number; stepIdx: number } | null>(null);
   const [dropTarget, setDropTarget] = useState<{ phaseIdx: number; stepIdx: number } | null>(null);
-  const originalPlanRef = useRef<string>(JSON.stringify(plan));
 
+  // Agent registry state
+  const [agents, setAgents] = useState<Agent[]>([]);
+
+  const originalPlanRef = useRef<string>(JSON.stringify(plan));
   const isDirty = useMemo(() => JSON.stringify(plan) !== originalPlanRef.current, [plan]);
+
+  // Fetch real agent list on mount; fall back gracefully on failure
+  useEffect(() => {
+    api.getAgents()
+      .then(res => setAgents(res.agents))
+      .catch(() => {
+        // Fall back to empty — AgentSelect will render the hardcoded fallback list
+        setAgents([]);
+      });
+  }, []);
 
   // Reset the original snapshot when the plan prop is replaced wholesale
   // (e.g. after regeneration ForgePanel sets a brand-new plan).
@@ -496,6 +682,7 @@ export function PlanEditor({
           agent_name: 'backend-engineer',
           task_description: 'New step',
           model: 'sonnet',
+          step_type: 'developing' as const,
           depends_on: [],
           deliverables: [],
           allowed_paths: [],
@@ -581,6 +768,21 @@ export function PlanEditor({
   }
 
   const riskColor = plan.risk_level === 'LOW' ? T.mint : plan.risk_level === 'HIGH' ? T.cherry : T.butter;
+
+  const sharedSelectStyle = {
+    fontSize: 10,
+    background: T.bg3,
+    border: `1.5px solid ${T.border}`,
+    borderRadius: 6,
+    padding: '3px 5px',
+    outline: 'none',
+    flexShrink: 0 as const,
+    cursor: 'pointer',
+    fontFamily: FONTS.body,
+    fontWeight: 800,
+    textTransform: 'uppercase' as const,
+    letterSpacing: '0.04em',
+  };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 18, fontFamily: FONTS.body }}>
@@ -830,6 +1032,9 @@ export function PlanEditor({
                 const aColor = agentColor(step.agent_name);
                 const isAdvancedOpen = expandedAdvanced.has(step.step_id);
                 const model = (step.model ?? 'sonnet') as ModelOption;
+                const stepType = (step.step_type ?? 'developing') as StepType;
+                const isAutomation = stepType === 'automation';
+                const isInteractive = step.interactive ?? false;
 
                 return (
                   <div
@@ -846,12 +1051,12 @@ export function PlanEditor({
                       transition: 'opacity 0.1s',
                     }}
                   >
-                    {/* Primary step row */}
-                    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '8px 14px' }}>
+                    {/* ── Step header row ── */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '8px 14px 4px' }}>
                       {/* Drag handle */}
                       <span
                         aria-hidden="true"
-                        style={{ cursor: 'grab', color: T.text3, fontSize: 14, flexShrink: 0, lineHeight: 1, paddingTop: 4, userSelect: 'none' }}
+                        style={{ cursor: 'grab', color: T.text3, fontSize: 14, flexShrink: 0, lineHeight: 1, userSelect: 'none' }}
                         title="Drag to reorder"
                       >
                         {'⠿'}
@@ -867,7 +1072,7 @@ export function PlanEditor({
                             background: 'none', border: 'none',
                             color: si === 0 ? T.bg3 : T.text3,
                             fontSize: 10, cursor: si === 0 ? 'default' : 'pointer',
-                            padding: 0, lineHeight: 1, minWidth: 22, minHeight: 22,
+                            padding: 0, lineHeight: 1, minWidth: 22, minHeight: 16,
                             display: 'flex', alignItems: 'center', justifyContent: 'center',
                           }}
                         >{'\u25b2'}</button>
@@ -879,7 +1084,7 @@ export function PlanEditor({
                             background: 'none', border: 'none',
                             color: si === phase.steps.length - 1 ? T.bg3 : T.text3,
                             fontSize: 10, cursor: si === phase.steps.length - 1 ? 'default' : 'pointer',
-                            padding: 0, lineHeight: 1, minWidth: 22, minHeight: 22,
+                            padding: 0, lineHeight: 1, minWidth: 22, minHeight: 16,
                             display: 'flex', alignItems: 'center', justifyContent: 'center',
                           }}
                         >{'\u25bc'}</button>
@@ -888,72 +1093,36 @@ export function PlanEditor({
                       {/* Step ID */}
                       <span style={{
                         fontFamily: FONTS.mono, fontSize: 11, color: T.text2,
-                        flexShrink: 0, paddingTop: 3,
+                        flexShrink: 0,
                       }}>
                         {step.step_id}
                       </span>
 
-                      {/* Step content */}
-                      <div style={{ flex: 1 }}>
-                        {editingStep === step.step_id ? (
-                          <input
-                            autoFocus
-                            value={step.task_description}
-                            onChange={e => updateStep(pi, si, s => ({ ...s, task_description: e.target.value }))}
-                            onBlur={() => setEditingStep(null)}
-                            onKeyDown={e => e.key === 'Enter' && setEditingStep(null)}
-                            style={{
-                              width: '100%', padding: '4px 8px', borderRadius: 6,
-                              border: `2px solid ${T.cherry}`, background: T.bg3,
-                              color: T.text0, fontSize: 13, fontWeight: 600,
-                              outline: 'none', fontFamily: FONTS.body,
-                            }}
-                          />
-                        ) : (
-                          <div
-                            onClick={() => setEditingStep(step.step_id)}
-                            style={{
-                              fontSize: 13, color: T.text0, fontWeight: 600,
-                              cursor: 'text', minHeight: 18, fontFamily: FONTS.body,
-                            }}
-                            title="Click to edit"
-                          >
-                            {step.task_description || (
-                              <span style={{ color: T.text3, fontStyle: 'italic' }}>Click to add description</span>
-                            )}
-                          </div>
-                        )}
-                        {/* Dependency hint */}
-                        {step.depends_on && step.depends_on.length > 0 && (
-                          <div style={{
-                            fontFamily: FONTS.hand, fontSize: 14, color: T.text2,
-                            transform: 'rotate(-0.5deg)', display: 'inline-block', marginTop: 2,
-                          }}>
-                            after {step.depends_on.join(', ')}
-                          </div>
-                        )}
-                      </div>
+                      {/* Step Type dropdown */}
+                      <select
+                        value={stepType}
+                        onChange={e => updateStep(pi, si, s => ({ ...s, step_type: e.target.value as StepType }))}
+                        onClick={e => e.stopPropagation()}
+                        aria-label={`Step type for step ${step.step_id}`}
+                        style={{
+                          ...sharedSelectStyle,
+                          color: STEP_TYPE_COLORS[stepType] ?? T.text2,
+                        }}
+                      >
+                        {STEP_TYPE_LIST.map(t => (
+                          <option key={t} value={t}>{t}</option>
+                        ))}
+                      </select>
 
-                      {/* Model dropdown — always visible */}
+                      {/* Model dropdown */}
                       <select
                         value={model}
                         onChange={e => updateStep(pi, si, s => ({ ...s, model: e.target.value }))}
                         onClick={e => e.stopPropagation()}
                         aria-label={`Model for step ${step.step_id}`}
                         style={{
-                          fontSize: 10,
+                          ...sharedSelectStyle,
                           color: MODEL_COLORS[model] ?? T.text2,
-                          background: T.bg3,
-                          border: `1.5px solid ${T.border}`,
-                          borderRadius: 6,
-                          padding: '3px 5px',
-                          outline: 'none',
-                          flexShrink: 0,
-                          cursor: 'pointer',
-                          fontFamily: FONTS.body,
-                          fontWeight: 800,
-                          textTransform: 'uppercase',
-                          letterSpacing: '0.04em',
                         }}
                       >
                         {MODEL_LIST.map(m => (
@@ -961,47 +1130,16 @@ export function PlanEditor({
                         ))}
                       </select>
 
-                      {/* Agent chip — dropdown when editing, badge when not */}
-                      {editingStep === step.step_id ? (
-                        <select
-                          value={step.agent_name}
-                          onChange={e => updateStep(pi, si, s => ({ ...s, agent_name: e.target.value }))}
-                          onClick={e => e.stopPropagation()}
-                          style={{
-                            fontSize: 11,
-                            color: aColor,
-                            background: T.bg3,
-                            border: `2px solid ${T.border}`,
-                            borderRadius: 6,
-                            padding: '3px 6px',
-                            outline: 'none',
-                            flexShrink: 0,
-                            cursor: 'pointer',
-                            fontFamily: FONTS.body,
-                            fontWeight: 700,
-                          }}
-                        >
-                          {AGENT_LIST.map(a => (
-                            <option key={a} value={a} title={AGENT_DESCRIPTIONS[a] || ''}>{agentDisplayName(a)}</option>
-                          ))}
-                          {/* Preserve current value if it's not in the standard list */}
-                          {!AGENT_LIST.includes(step.agent_name as typeof AGENT_LIST[number]) && (
-                            <option value={step.agent_name} title={AGENT_DESCRIPTIONS[step.agent_name] || ''}>{agentDisplayName(step.agent_name)}</option>
-                          )}
-                        </select>
-                      ) : (
-                        <span style={{
-                          fontSize: 11, color: aColor,
-                          background: T.bg2,
-                          border: `1.5px solid ${T.border}`,
-                          padding: '3px 8px',
-                          borderRadius: 999, whiteSpace: 'nowrap', flexShrink: 0,
-                          fontFamily: FONTS.body, fontWeight: 800,
-                          boxShadow: SHADOWS.sm,
-                        }}>
-                          {agentDisplayName(step.agent_name)}
-                        </span>
-                      )}
+                      {/* Agent selector — always a dropdown, populated from API */}
+                      <AgentSelect
+                        value={step.agent_name}
+                        onChange={name => updateStep(pi, si, s => ({ ...s, agent_name: name }))}
+                        agents={agents}
+                        color={aColor}
+                        ariaLabel={`Agent for step ${step.step_id}`}
+                      />
+
+                      <div style={{ flex: 1 }} />
 
                       {/* Advanced toggle */}
                       <button
@@ -1045,7 +1183,63 @@ export function PlanEditor({
                       </button>
                     </div>
 
-                    {/* Advanced accordion */}
+                    {/* ── Step body — always visible fields ── */}
+                    <div style={{ padding: '4px 14px 10px', display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      {/* Task description — always-visible textarea */}
+                      <AutosizeTextarea
+                        value={step.task_description}
+                        onChange={val => updateStep(pi, si, s => ({ ...s, task_description: val }))}
+                        ariaLabel={`Task description for step ${step.step_id}`}
+                        placeholder="Describe what this step should accomplish..."
+                      />
+
+                      {/* Command — only shown for automation steps */}
+                      {isAutomation && (
+                        <FieldRow label="Command">
+                          <input
+                            value={step.command ?? ''}
+                            onChange={e => updateStep(pi, si, s => ({ ...s, command: e.target.value }))}
+                            placeholder="e.g. python scripts/run_pipeline.py"
+                            aria-label={`Command for step ${step.step_id}`}
+                            style={{
+                              width: '100%',
+                              padding: '5px 8px',
+                              borderRadius: 6,
+                              border: `1.5px solid ${T.borderSoft}`,
+                              background: T.bg0,
+                              color: T.text0,
+                              fontSize: FONT_SIZES.sm,
+                              fontFamily: FONTS.mono,
+                              fontWeight: 600,
+                              outline: 'none',
+                              boxSizing: 'border-box',
+                            }}
+                          />
+                        </FieldRow>
+                      )}
+
+                      {/* Deliverables — always visible */}
+                      <FieldRow label="Deliverables">
+                        <TagInput
+                          values={step.deliverables ?? []}
+                          onChange={vals => updateStep(pi, si, s => ({ ...s, deliverables: vals }))}
+                          placeholder="e.g. README.md"
+                          ariaLabel={`Deliverables for step ${step.step_id}`}
+                        />
+                      </FieldRow>
+
+                      {/* Context Files — always visible */}
+                      <FieldRow label="Context Files">
+                        <TagInput
+                          values={step.context_files ?? []}
+                          onChange={vals => updateStep(pi, si, s => ({ ...s, context_files: vals }))}
+                          placeholder="e.g. docs/architecture.md"
+                          ariaLabel={`Context files for step ${step.step_id}`}
+                        />
+                      </FieldRow>
+                    </div>
+
+                    {/* ── Advanced accordion ── */}
                     <div
                       id={`advanced-${step.step_id}`}
                       hidden={!isAdvancedOpen}
@@ -1082,15 +1276,6 @@ export function PlanEditor({
                           />
                         </AdvancedFieldRow>
 
-                        <AdvancedFieldRow label="Deliverables">
-                          <TagInput
-                            values={step.deliverables ?? []}
-                            onChange={vals => updateStep(pi, si, s => ({ ...s, deliverables: vals }))}
-                            placeholder="e.g. README.md"
-                            ariaLabel={`Deliverables for step ${step.step_id}`}
-                          />
-                        </AdvancedFieldRow>
-
                         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
                           <AdvancedFieldRow label="Allowed Paths">
                             <TagInput
@@ -1111,14 +1296,53 @@ export function PlanEditor({
                           </AdvancedFieldRow>
                         </div>
 
-                        <AdvancedFieldRow label="Context Files">
-                          <TagInput
-                            values={step.context_files ?? []}
-                            onChange={vals => updateStep(pi, si, s => ({ ...s, context_files: vals }))}
-                            placeholder="e.g. docs/architecture.md"
-                            ariaLabel={`Context files for step ${step.step_id}`}
-                          />
-                        </AdvancedFieldRow>
+                        {/* Interactive / max_turns */}
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                          <label style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: 7,
+                            cursor: 'pointer',
+                            fontSize: FONT_SIZES.sm,
+                            fontFamily: FONTS.body,
+                            fontWeight: 700,
+                            color: T.text1,
+                            userSelect: 'none',
+                          }}>
+                            <input
+                              type="checkbox"
+                              checked={isInteractive}
+                              onChange={e => updateStep(pi, si, s => ({ ...s, interactive: e.target.checked }))}
+                              style={{ accentColor: T.cherry, width: 13, height: 13 }}
+                            />
+                            Interactive (multi-turn)
+                          </label>
+
+                          {isInteractive && (
+                            <AdvancedFieldRow label="Max Turns">
+                              <input
+                                type="number"
+                                min={1}
+                                max={100}
+                                value={step.max_turns ?? 10}
+                                onChange={e => updateStep(pi, si, s => ({ ...s, max_turns: Math.max(1, parseInt(e.target.value, 10) || 10) }))}
+                                aria-label={`Max turns for step ${step.step_id}`}
+                                style={{
+                                  width: 80,
+                                  padding: '4px 7px',
+                                  borderRadius: 6,
+                                  border: `1.5px solid ${T.borderSoft}`,
+                                  background: T.bg0,
+                                  color: T.text0,
+                                  fontSize: FONT_SIZES.sm,
+                                  fontFamily: FONTS.mono,
+                                  fontWeight: 700,
+                                  outline: 'none',
+                                }}
+                              />
+                            </AdvancedFieldRow>
+                          )}
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -1301,4 +1525,3 @@ function StatChip({ label, value, valueColor }: { label: string; value: string; 
     </div>
   );
 }
-
