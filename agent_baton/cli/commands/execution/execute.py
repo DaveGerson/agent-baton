@@ -1042,7 +1042,7 @@ def _handle_run(args: argparse.Namespace) -> None:
     import subprocess as _subprocess
 
     plan_path = Path(args.plan)
-    context_root = Path(".claude/team-context").resolve()
+    context_root = _resolve_context_root()
     max_steps = args.max_steps
     dry_run = args.dry_run
     model_override = args.model
@@ -1401,7 +1401,7 @@ def _run_loop(
 
 def _handle_list() -> None:
     """Print a table of all known executions with status and worker info."""
-    context_root = Path(".claude/team-context")
+    context_root = _resolve_context_root()
 
     # Collect task IDs from file backend (namespaced dirs)
     file_task_ids = StatePersistence.list_executions(context_root)
