@@ -113,7 +113,7 @@ export function ExecutionProgress({ card, onClose }: Props) {
       ? T.cherry
       : detail?.status === 'complete' || isTerminal
         ? T.mint
-        : 'repeating-linear-gradient(45deg, #ffc94a 0 8px, #ff8a3d 8px 16px)';
+        : `repeating-linear-gradient(45deg, ${T.butter} 0 8px, ${T.tangerine} 8px 16px)`;
 
   return (
     <div
