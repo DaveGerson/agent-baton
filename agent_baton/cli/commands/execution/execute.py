@@ -1530,7 +1530,7 @@ def _handle_list() -> None:
 
 def _handle_switch(task_id: str) -> None:
     """Switch the active execution to the given task ID."""
-    context_root = Path(".claude/team-context")
+    context_root = _resolve_context_root()
     sp = StatePersistence(context_root, task_id=task_id)
 
     # Check whether the execution exists in either backend

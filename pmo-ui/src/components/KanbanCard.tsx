@@ -10,6 +10,7 @@ import { PlanPreview } from './PlanPreview';
 import { ExecutionProgress } from './ExecutionProgress';
 import { GateApprovalPanel } from './GateApprovalPanel';
 import { ChangelistPanel } from './ChangelistPanel';
+import { ReviewPanel } from './ReviewPanel';
 
 interface KanbanCardProps {
   card: PmoCard;
