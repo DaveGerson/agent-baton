@@ -479,7 +479,7 @@ class TestFallbackClassifierPreFlight:
     def test_same_unavailable_reason_logged_only_once(self, caplog):
         """Repeated calls with the same unavailability reason must not repeat the INFO log."""
         import logging
-        reason = "ANTHROPIC_API_KEY is not set"
+        reason = "anthropic SDK not installed"
         with patch(
             "agent_baton.core.engine.classifier._haiku_available",
             return_value=(False, reason),
@@ -498,7 +498,7 @@ class TestFallbackClassifierPreFlight:
         assert len(info_records) == 1
 
     def test_different_unavailable_reasons_each_logged_once(self, caplog):
-        """If the unavailability reason changes (e.g. key set then unset), re-log."""
+        """If the unavailability reason changes, each distinct reason is logged once."""
         import logging
         classifier = FallbackClassifier()
         with caplog.at_level(logging.INFO, logger="agent_baton.core.engine.classifier"):
@@ -509,7 +509,7 @@ class TestFallbackClassifierPreFlight:
                 classifier.classify("Task one", self.registry)
             with patch(
                 "agent_baton.core.engine.classifier._haiku_available",
-                return_value=(False, "anthropic SDK not installed"),
+                return_value=(False, "HaikuClassifier unavailable"),
             ):
                 classifier.classify("Task two", self.registry)
         info_records = [
