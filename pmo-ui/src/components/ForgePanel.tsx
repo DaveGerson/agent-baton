@@ -49,19 +49,36 @@ export function ForgePanel({ onBack, initialSignal, onApproved }: ForgePanelProp
   const [priority, setPriority] = usePersistedState<number>('pmo:forge-priority', 1);
 
   // When initialSignal changes (card reforge, signal triage), reset the form.
+  // For reforge signals, load the card's existing plan and jump to editor.
   useEffect(() => {
     if (initialSignal) {
       const desc = `Signal: ${initialSignal.title}\n\nSeverity: ${initialSignal.severity}\nType: ${initialSignal.signal_type}\n\n${initialSignal.description ?? ''}`;
       setDescription(desc);
-      setPhase('intake');
-      setPlan(null);
       setGenerateError(null);
       setSaveError(null);
       setSavePath(null);
       setInterviewQuestions([]);
-      // Auto-select project if signal has source_project_id
       if (initialSignal.source_project_id) {
         setProjectId(initialSignal.source_project_id);
+      }
+      if (initialSignal.signal_type === 'reforge' && initialSignal.forge_task_id) {
+        setPlan(null);
+        setPhase('generating');
+        api.getCardDetail(initialSignal.forge_task_id)
+          .then(detail => {
+            if (detail.plan) {
+              setPlan(detail.plan);
+              setPhase('preview');
+            } else {
+              setPhase('intake');
+            }
+          })
+          .catch(() => {
+            setPhase('intake');
+          });
+      } else {
+        setPhase('intake');
+        setPlan(null);
       }
     }
   }, [initialSignal]); // eslint-disable-line react-hooks/exhaustive-deps
