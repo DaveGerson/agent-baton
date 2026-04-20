@@ -987,16 +987,28 @@ class ExecutionEngine:
 
         # Track the task_id for subsequent load/save calls.
         self._task_id = plan.task_id
-        # Update file-based persistence so save() targets the right namespaced
-        # directory.  Use set_task_id() rather than bare _task_id mutation so
-        # that _state_path is also recomputed — otherwise the dual-write
-        # fallback would save to the wrong (legacy flat-file) path.
-        # Do NOT set_active_task() yet — the execution row does not exist until
-        # _save_execution() below.  Setting active before save creates a
-        # dangling reference that causes "no active execution state" errors if
-        # anything fails between here and save.
+        # Update file-based persistence's task_id so save() targets the right
+        # directory, but do NOT set_active_task() yet — the execution row does
+        # not exist until _save_execution() below.  Setting active before save
+        # creates a dangling reference that causes "no active execution state"
+        # errors if anything fails between here and save.
+        #
+        # When _storage is present (SQLite mode), the CLI always constructs the
+        # engine with task_id=plan.task_id so set_task_id() would be a no-op.
+        # When _storage is absent (file-only mode), we preserve the legacy
+        # flat-file path for backward compatibility with crash-recovery tooling.
+        # Use set_task_id() only in storage mode to repair _state_path when the
+        # engine was (rarely) constructed without an explicit task_id.
         if self._persistence is not None:
-            self._persistence.set_task_id(plan.task_id)
+            if self._storage is not None:
+                # Storage mode: use set_task_id() so _state_path is recomputed
+                # for the dual-write fallback.  The CLI always passes task_id at
+                # construction time, so this is typically a no-op.
+                self._persistence.set_task_id(plan.task_id)
+            else:
+                # File-only mode: bare mutation preserves the existing _state_path
+                # so crash-recovery can still locate the flat execution-state.json.
+                self._persistence._task_id = plan.task_id
 
         # Wire the materialized-view subscriber now that we know the task_id.
         # One subscriber per engine instance; replace any previous one.
