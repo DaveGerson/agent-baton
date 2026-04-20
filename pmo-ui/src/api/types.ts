@@ -3,7 +3,7 @@ export interface PmoCard {
   project_id: string;
   program: string;
   title: string;
-  column: 'queued' | 'executing' | 'awaiting_human' | 'validating' | 'deployed' | 'review' | 'awaiting_review';
+  column: 'intake' | 'queued' | 'executing' | 'awaiting_human' | 'validating' | 'deployed' | 'review' | 'awaiting_review';
   consolidation_result?: ConsolidationResult;
   risk_level: string;
   priority: number;

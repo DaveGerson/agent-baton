@@ -68,10 +68,22 @@ export type TokenKey = keyof typeof T;
 // Column definitions — kitchen station metaphors
 export const COLUMNS = [
   {
+    id: 'intake' as const,
+    label: 'Tickets Up',
+    color: T.crust,
+    desc: 'Fresh orders — signals & items needing a plan',
+  },
+  {
     id: 'queued' as const,
     label: 'On Deck',
-    color: T.crust,
-    desc: "Dough's resting — plan ready, awaiting execution slot",
+    color: T.bg4,
+    desc: 'Plan forged — prepped and waiting for the pass',
+  },
+  {
+    id: 'awaiting_human' as const,
+    label: 'Pick Up',
+    color: T.tangerine,
+    desc: "Manager's window — review & approve for firing",
   },
   {
     id: 'executing' as const,
@@ -80,28 +92,22 @@ export const COLUMNS = [
     desc: 'Actively baking — Baton steps running',
   },
   {
-    id: 'awaiting_human' as const,
-    label: 'Ding! Pick Up',
-    color: T.tangerine,
-    desc: 'Chef needs input — interactive step paused',
-  },
-  {
     id: 'validating' as const,
     label: 'Taste Test',
     color: T.blueberry,
-    desc: 'Expediter sampling — test suites, baseline comparison',
-  },
-  {
-    id: 'deployed' as const,
-    label: 'Served!',
-    color: T.mint,
-    desc: 'Out the window — complete, ADO synced',
+    desc: 'Flagged — needs attention, blocked, or gate check',
   },
   {
     id: 'review' as const,
     label: 'Plating Review',
     color: T.crust,
-    desc: 'Expediter checks — consolidation ready for merge',
+    desc: 'Expediter checks — commits ready for merge',
+  },
+  {
+    id: 'deployed' as const,
+    label: 'Served!',
+    color: T.mint,
+    desc: 'Out the window — merged and delivered',
   },
 ];
 

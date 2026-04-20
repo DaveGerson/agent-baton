@@ -523,7 +523,8 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
         {COLUMNS.map((col) => {
           const colCards = sorted.filter(c => c.column === col.id);
           const isBlueberry = col.id === 'validating';
-          const headerTextColor = isBlueberry ? T.cream : T.ink;
+          const isMint = col.id === 'deployed';
+          const headerTextColor = (isBlueberry || isMint) ? T.cream : T.ink;
           const colEmoji = colStationEmoji(col.id);
           return (
             <section
@@ -595,10 +596,13 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
                 }}>{col.desc}</div>
               </div>
 
-              {/* Cards — column scrolls independently when there are many items */}
-              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 4, overflowY: 'auto', padding: '8px 6px 16px' }}>
+              {/* Cards — block layout so cards keep natural height and the
+                  container scrolls rather than squishing cards to fit. */}
+              <div style={{ flex: 1, overflowY: 'auto', padding: '8px 6px 16px', minHeight: 0 }}>
                 {colCards.map(card => (
-                  <KanbanCard key={card.card_id} card={card} columnColor={col.color} onForge={onCardForge} onEditPlan={onCardForge} onMutateCard={mutateCard} />
+                  <div key={card.card_id} style={{ marginBottom: 4 }}>
+                    <KanbanCard card={card} columnColor={col.color} onForge={onCardForge} onEditPlan={onCardForge} onMutateCard={mutateCard} />
+                  </div>
                 ))}
                 {colCards.length === 0 && (
                   <div style={{
@@ -634,12 +638,13 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
 
 function colStationEmoji(colId: string): string {
   switch (colId) {
-    case 'queued': return '🥟';
-    case 'executing': return '🔥';
+    case 'intake': return '🎫';
+    case 'queued': return '🧑‍🍳';
     case 'awaiting_human': return '🛎';
-    case 'validating': return '👅';
-    case 'deployed': return '🍽';
+    case 'executing': return '🔥';
+    case 'validating': return '⚠️';
     case 'review': return '🔍';
+    case 'deployed': return '✅';
     default: return '🍴';
   }
 }

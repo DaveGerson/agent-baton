@@ -161,6 +161,7 @@ function KanbanCardImpl({ card, columnColor, onForge, onEditPlan, onMutateCard }
   const [gateResolved, setGateResolved] = useState(false);
   const [reviewResolved, setReviewResolved] = useState(false);
   const [sendReviewLoading, setSendReviewLoading] = useState(false);
+  const isIntake = card.column === 'intake';
   const isHuman = card.column === 'awaiting_human';
   const isQueued = card.column === 'queued';
   const isReview = card.column === 'review';
@@ -511,12 +512,12 @@ function KanbanCardImpl({ card, columnColor, onForge, onEditPlan, onMutateCard }
             {onForge && (
               <ActionButton
                 onClick={e => { e.stopPropagation(); onForge(card); }}
-                title="Open this card in the Forge for editing or re-planning"
+                title={isIntake ? 'Open the Forge to create a plan for this item' : 'Open this card in the Forge for editing or re-planning'}
                 bg={T.cherry + '18'}
                 border={`1.5px solid ${T.cherry}`}
                 color={T.cherry}
               >
-                Re-forge
+                {isIntake ? 'Forge Plan' : 'Re-forge'}
               </ActionButton>
             )}
             {card.steps_total > 0 && onEditPlan && (
@@ -669,6 +670,8 @@ interface CardDetailModalProps {
   onMutateCard?: (cardId: string, updater: (card: PmoCard) => PmoCard) => void;
 }
 
+type DetailTab = 'overview' | 'plan' | 'execution' | 'changes';
+
 function CardDetailModal({ card, onClose, onForge, onEditPlan, onMutateCard }: CardDetailModalProps) {
   const [planData, setPlanData] = useState<ForgePlanResponse | null>(null);
   const [planLoading, setPlanLoading] = useState(true);
@@ -677,15 +680,36 @@ function CardDetailModal({ card, onClose, onForge, onEditPlan, onMutateCard }: C
   const [sendReviewLoading, setSendReviewLoading] = useState(false);
   const [showProgress, setShowProgress] = useState(false);
   const [showChangelist, setShowChangelist] = useState(false);
+  const [gateResolved, setGateResolved] = useState(false);
+  const [activeTab, setActiveTab] = useState<DetailTab>('overview');
   const toast = useToast();
 
-  const isQueued = card.column === 'queued';
-  const isActive = card.column === 'executing' || card.column === 'validating' || card.column === 'awaiting_human';
-  const isReview = card.column === 'review';
+  const col = card.column;
+  const isIntake = col === 'intake';
+  const isQueued = col === 'queued';
+  const isAwaitingHuman = col === 'awaiting_human';
+  const isExecuting = col === 'executing';
+  const isValidating = col === 'validating';
+  const isReview = col === 'review';
+  const isDeployed = col === 'deployed';
+  const isActive = isExecuting || isValidating || isAwaitingHuman;
 
   const approvalMode = (
     document.querySelector('meta[name="baton-approval-mode"]')?.getAttribute('content') ?? 'local'
   ) as 'local' | 'team';
+
+  // Determine which tabs are available for this column
+  const availableTabs: DetailTab[] = ['overview', 'plan'];
+  if (isActive || isValidating || isExecuting) availableTabs.push('execution');
+  if (isReview || isDeployed) availableTabs.push('changes');
+
+  // Auto-switch to a sensible default tab per column
+  useEffect(() => {
+    if (isActive) setActiveTab('execution');
+    else if (isReview || isDeployed) setActiveTab('changes');
+    else setActiveTab('overview');
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [card.card_id]);
 
   // Fetch plan on mount
   useEffect(() => {
@@ -743,11 +767,37 @@ function CardDetailModal({ card, onClose, onForge, onEditPlan, onMutateCard }: C
     }
   }
 
+  function handleGateResolved(result: 'approve' | 'reject') {
+    setGateResolved(true);
+    if (result === 'approve' && onMutateCard) {
+      onMutateCard(card.card_id, c => ({ ...c, column: 'executing' }));
+    }
+  }
+
   const riskColor = card.risk_level === 'high' || card.risk_level === 'critical'
     ? T.red
     : card.risk_level === 'medium'
     ? T.yellow
     : T.text2;
+
+  // Column label for display
+  const colLabel: Record<string, string> = {
+    intake: 'Tickets Up',
+    queued: 'On Deck',
+    awaiting_human: 'Pick Up',
+    executing: 'In the Oven',
+    validating: 'Taste Test',
+    review: 'Plating Review',
+    deployed: 'Served!',
+    awaiting_review: 'Awaiting Review',
+  };
+
+  const TAB_LABELS: Record<DetailTab, string> = {
+    overview: 'Overview',
+    plan: 'Plan',
+    execution: 'Execution',
+    changes: 'Changes',
+  };
 
   return (
     <div
@@ -759,11 +809,11 @@ function CardDetailModal({ card, onClose, onForge, onEditPlan, onMutateCard }: C
         position: 'fixed',
         inset: 0,
         zIndex: 1000,
-        background: 'rgba(42,26,16,0.55)',
+        background: 'rgba(42,26,16,0.65)',
         display: 'flex',
-        alignItems: 'center',
+        alignItems: 'stretch',
         justifyContent: 'center',
-        padding: 24,
+        padding: '20px 24px',
       }}
     >
       <div
@@ -774,19 +824,18 @@ function CardDetailModal({ card, onClose, onForge, onEditPlan, onMutateCard }: C
           border: `2px solid ${T.border}`,
           boxShadow: SHADOWS.xl,
           width: '100%',
-          maxWidth: 760,
-          maxHeight: '88vh',
+          maxWidth: 900,
           display: 'flex',
           flexDirection: 'column',
           overflow: 'hidden',
         }}
       >
-        {/* Modal header */}
+        {/* ── Modal header ── */}
         <div style={{
           display: 'flex',
           alignItems: 'flex-start',
-          gap: 10,
-          padding: '14px 18px 12px',
+          gap: 12,
+          padding: '16px 20px 14px',
           borderBottom: `2px solid ${T.border}`,
           background: T.bg3,
           flexShrink: 0,
@@ -795,34 +844,45 @@ function CardDetailModal({ card, onClose, onForge, onEditPlan, onMutateCard }: C
             <div style={{
               fontFamily: FONTS.display,
               fontWeight: 900,
-              fontSize: 20,
+              fontSize: 22,
               color: T.text0,
               lineHeight: 1.2,
-              marginBottom: 6,
+              marginBottom: 8,
             }}>
               {card.title}
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-              <span style={{ fontSize: 10, color: T.text2, fontFamily: FONTS.mono }}>{card.project_id}</span>
+              <span style={{ fontSize: 10, color: T.text2, fontFamily: FONTS.mono }}>{card.card_id.slice(0, 8)}</span>
+              {card.external_id && (
+                <>
+                  <span style={{ fontSize: 10, color: T.text4 }}>·</span>
+                  <span style={{ fontSize: 10, color: T.text2, fontFamily: FONTS.mono }}>{card.external_id}</span>
+                </>
+              )}
+              <span style={{ fontSize: 10, color: T.text4 }}>·</span>
+              <span style={{ fontSize: 10, color: T.text2, fontFamily: FONTS.body }}>{card.project_id}</span>
               <span style={{ fontSize: 10, color: T.text4 }}>·</span>
               <span style={{ fontSize: 10, color: T.text2, fontFamily: FONTS.body }}>{card.program}</span>
               {card.risk_level && card.risk_level !== 'low' && (
                 <>
                   <span style={{ fontSize: 10, color: T.text4 }}>·</span>
-                  <span style={{
-                    fontSize: 10,
-                    fontWeight: 700,
-                    color: riskColor,
-                    fontFamily: FONTS.body,
-                    textTransform: 'uppercase',
-                  }}>
+                  <span style={{ fontSize: 10, fontWeight: 700, color: riskColor, fontFamily: FONTS.body, textTransform: 'uppercase' }}>
                     {card.risk_level} risk
                   </span>
                 </>
               )}
               <span style={{ fontSize: 10, color: T.text4 }}>·</span>
-              <span style={{ fontSize: 10, color: T.text2, fontFamily: FONTS.body }}>
-                {card.column.replace('_', ' ')}
+              <span style={{
+                fontSize: 10,
+                fontWeight: 700,
+                color: T.ink,
+                background: T.creamSoft,
+                border: `1.5px solid ${T.border}`,
+                borderRadius: 999,
+                padding: '1px 7px',
+                fontFamily: FONTS.body,
+              }}>
+                {colLabel[col] ?? col.replace('_', ' ')}
               </span>
               {card.steps_total > 0 && (
                 <>
@@ -842,52 +902,96 @@ function CardDetailModal({ card, onClose, onForge, onEditPlan, onMutateCard }: C
               border: `1.5px solid ${T.border}`,
               borderRadius: 8,
               color: T.text1,
-              fontSize: 16,
+              fontSize: 18,
               cursor: 'pointer',
-              padding: '2px 8px',
+              padding: '2px 10px',
               fontFamily: FONTS.body,
               flexShrink: 0,
+              lineHeight: 1,
             }}
           >
             {'\u00d7'}
           </button>
         </div>
 
-        {/* Actions row */}
+        {/* ── Contextual action bar ── */}
         <div style={{
           display: 'flex',
           gap: 6,
-          padding: '10px 18px',
-          borderBottom: `1.5px dashed ${T.borderSoft}`,
+          padding: '10px 20px',
+          borderBottom: `1.5px solid ${T.borderSoft}`,
           flexWrap: 'wrap',
           flexShrink: 0,
           background: T.bg1,
+          alignItems: 'center',
         }}>
+          {/* intake */}
+          {isIntake && onForge && (
+            <ActionButton
+              onClick={e => { e.stopPropagation(); onForge(card); onClose(); }}
+              title="Open the Forge to generate a plan for this item"
+              bg={T.cherry + '18'}
+              border={`1.5px solid ${T.cherry}`}
+              color={T.cherry}
+            >
+              Forge Plan
+            </ActionButton>
+          )}
+
+          {/* queued */}
           {isQueued && (
+            <>
+              <ActionButton
+                onClick={handleExecute}
+                disabled={execLoading}
+                title="Launch autonomous execution for this card"
+                bg={T.mint + '22'}
+                border={`1.5px solid ${T.mint}`}
+                color={T.mint}
+              >
+                {execLoading ? 'Launching...' : '\u25B6 Execute'}
+              </ActionButton>
+              {onEditPlan && (
+                <ActionButton
+                  onClick={e => { e.stopPropagation(); onEditPlan(card); onClose(); }}
+                  title="Edit the plan before executing"
+                  bg={T.blueberry + '18'}
+                  border={`1.5px solid ${T.blueberry}`}
+                  color={T.blueberry}
+                >
+                  {'\u270e'} Edit Plan
+                </ActionButton>
+              )}
+              {approvalMode === 'team' && (
+                <ActionButton
+                  onClick={handleSendForReview}
+                  disabled={sendReviewLoading}
+                  title="Send this plan for peer review before execution"
+                  bg={T.tangerine + '18'}
+                  border={`1.5px solid ${T.tangerine}`}
+                  color={T.tangerine}
+                >
+                  {sendReviewLoading ? 'Sending…' : 'Send for Review'}
+                </ActionButton>
+              )}
+            </>
+          )}
+
+          {/* awaiting_human */}
+          {isAwaitingHuman && !gateResolved && (
             <ActionButton
-              onClick={handleExecute}
-              disabled={execLoading}
-              title="Launch autonomous execution for this card"
-              bg={T.mint + '22'}
-              border={`1.5px solid ${T.mint}`}
-              color={T.mint}
+              onClick={e => { e.stopPropagation(); setActiveTab('execution'); }}
+              title="Review gate context and approve or reject"
+              bg={T.tangerine + '22'}
+              border={`1.5px solid ${T.tangerine}`}
+              color={T.tangerine}
             >
-              {execLoading ? 'Launching...' : '\u25B6 Execute'}
+              Review Gate
             </ActionButton>
           )}
-          {isQueued && approvalMode === 'team' && (
-            <ActionButton
-              onClick={handleSendForReview}
-              disabled={sendReviewLoading}
-              title="Send this plan for peer review before execution"
-              bg={T.blueberry + '18'}
-              border={`1.5px solid ${T.blueberry}`}
-              color={T.blueberry}
-            >
-              {sendReviewLoading ? 'Sending…' : 'Send for Review'}
-            </ActionButton>
-          )}
-          {isActive && (
+
+          {/* executing */}
+          {isExecuting && (
             <ActionButton
               onClick={e => { e.stopPropagation(); setShowProgress(true); }}
               title="Monitor execution progress in real time"
@@ -898,6 +1002,21 @@ function CardDetailModal({ card, onClose, onForge, onEditPlan, onMutateCard }: C
               Monitor
             </ActionButton>
           )}
+
+          {/* validating */}
+          {isValidating && (
+            <ActionButton
+              onClick={e => { e.stopPropagation(); setShowProgress(true); }}
+              title="View execution log and retry or skip the failing step"
+              bg={T.blueberry + '18'}
+              border={`1.5px solid ${T.blueberry}`}
+              color={T.blueberry}
+            >
+              Monitor
+            </ActionButton>
+          )}
+
+          {/* review */}
           {isReview && (
             <ActionButton
               onClick={e => { e.stopPropagation(); setShowChangelist(true); }}
@@ -909,10 +1028,14 @@ function CardDetailModal({ card, onClose, onForge, onEditPlan, onMutateCard }: C
               Review Changes
             </ActionButton>
           )}
-          {onForge && (
+
+          {/* deployed — read-only; no primary action, Plan tab is view-only */}
+
+          {/* Re-forge always available (except deployed where it would be unusual) */}
+          {onForge && !isIntake && !isDeployed && (
             <ActionButton
               onClick={e => { e.stopPropagation(); onForge(card); onClose(); }}
-              title="Open this card in the Forge for editing or re-planning"
+              title="Re-open in the Forge for editing or re-planning"
               bg={T.cherry + '18'}
               border={`1.5px solid ${T.cherry}`}
               color={T.cherry}
@@ -920,17 +1043,7 @@ function CardDetailModal({ card, onClose, onForge, onEditPlan, onMutateCard }: C
               Re-forge
             </ActionButton>
           )}
-          {card.steps_total > 0 && onEditPlan && (
-            <ActionButton
-              onClick={e => { e.stopPropagation(); onEditPlan(card); onClose(); }}
-              title="Jump directly to the Forge plan editor for this card"
-              bg={T.blueberry + '18'}
-              border={`1.5px solid ${T.blueberry}`}
-              color={T.blueberry}
-            >
-              {'\u270e'} Edit Plan
-            </ActionButton>
-          )}
+
           {execResult && (
             <span style={{
               fontSize: 10,
@@ -943,33 +1056,295 @@ function CardDetailModal({ card, onClose, onForge, onEditPlan, onMutateCard }: C
           )}
         </div>
 
-        {/* Plan body */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: '14px 18px' }}>
-          {planLoading && (
-            <div style={{
-              fontSize: 12,
-              color: T.text3,
-              fontStyle: 'italic',
-              fontFamily: FONTS.body,
-              padding: '20px 0',
-              textAlign: 'center',
-            }}>
-              Loading plan…
+        {/* ── Tab bar ── */}
+        <div style={{
+          display: 'flex',
+          gap: 0,
+          borderBottom: `2px solid ${T.border}`,
+          background: T.bg3,
+          flexShrink: 0,
+          paddingLeft: 20,
+        }}>
+          {availableTabs.map(tab => {
+            const active = activeTab === tab;
+            return (
+              <button
+                key={tab}
+                onClick={() => setActiveTab(tab)}
+                aria-selected={active}
+                role="tab"
+                style={{
+                  padding: '9px 18px',
+                  border: 'none',
+                  borderBottom: active ? `3px solid ${T.cherry}` : '3px solid transparent',
+                  background: 'transparent',
+                  color: active ? T.cherry : T.text1,
+                  fontFamily: FONTS.body,
+                  fontWeight: active ? 800 : 600,
+                  fontSize: 12,
+                  cursor: 'pointer',
+                  marginBottom: -2,
+                  transition: 'color 0.1s',
+                }}
+              >
+                {TAB_LABELS[tab]}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* ── Tab panels ── */}
+        <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
+
+          {/* Overview tab */}
+          {activeTab === 'overview' && (
+            <div style={{ padding: '18px 20px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+              {/* Status / progress strip */}
+              <div style={{
+                display: 'flex',
+                gap: 10,
+                flexWrap: 'wrap',
+              }}>
+                <MetaTile label="Column" value={colLabel[col] ?? col} />
+                <MetaTile label="Priority" value={card.priority >= 2 ? 'P0' : card.priority >= 1 ? 'P1' : 'P2'} />
+                <MetaTile label="Risk" value={card.risk_level || 'low'} color={riskColor} />
+                {card.steps_total > 0 && (
+                  <MetaTile label="Progress" value={`${card.steps_completed} / ${card.steps_total} steps`} />
+                )}
+                <MetaTile label="Gates passed" value={String(card.gates_passed)} />
+              </div>
+
+              {/* Step progress bar */}
+              {card.steps_total > 0 && (
+                <div>
+                  <div style={{ fontSize: 10, color: T.text3, fontFamily: FONTS.body, marginBottom: 5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.4 }}>
+                    Step progress
+                  </div>
+                  <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap' }}>
+                    {Array.from({ length: card.steps_total }).map((_, i) => (
+                      <div
+                        key={i}
+                        style={{
+                          width: 14,
+                          height: 14,
+                          borderRadius: 3,
+                          background: i < card.steps_completed ? T.mint : T.bg3,
+                          border: `1.5px solid ${T.border}`,
+                        }}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Current phase / error */}
+              {card.current_phase && !card.error && (
+                <div style={{
+                  padding: '10px 14px',
+                  background: T.bg3,
+                  borderRadius: 8,
+                  borderLeft: `3px solid ${isAwaitingHuman ? T.tangerine : T.cherry}`,
+                }}>
+                  <div style={{ fontSize: 10, color: T.text3, fontFamily: FONTS.body, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 4 }}>
+                    Current phase
+                  </div>
+                  <div style={{ fontFamily: FONTS.hand, fontSize: 15, color: isAwaitingHuman ? T.tangerine : T.text1, lineHeight: 1.4 }}>
+                    &ldquo;{card.current_phase}&rdquo;
+                  </div>
+                </div>
+              )}
+              {card.error && (
+                <div style={{
+                  padding: '10px 14px',
+                  background: T.cherrySoft,
+                  borderRadius: 8,
+                  borderLeft: `3px solid ${T.cherry}`,
+                }}>
+                  <div style={{ fontSize: 10, color: T.cherry, fontFamily: FONTS.body, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 4 }}>
+                    Error
+                  </div>
+                  <div style={{ fontFamily: FONTS.mono, fontSize: 11, color: T.cherry, lineHeight: 1.5, wordBreak: 'break-word' }}>
+                    {card.error}
+                  </div>
+                </div>
+              )}
+
+              {/* Agents */}
+              {card.agents.length > 0 && (
+                <div>
+                  <div style={{ fontSize: 10, color: T.text3, fontFamily: FONTS.body, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 6 }}>
+                    Agents
+                  </div>
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                    {card.agents.map(a => (
+                      <span key={a} style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        padding: '3px 10px',
+                        borderRadius: 999,
+                        fontSize: 11,
+                        fontWeight: 600,
+                        color: T.blueberry,
+                        background: T.blueberrySoft,
+                        border: `1.5px solid ${T.border}`,
+                        fontFamily: FONTS.body,
+                      }}>
+                        {a}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Timestamps */}
+              <div style={{ display: 'flex', gap: 16, fontSize: 10, color: T.text3, fontFamily: FONTS.mono }}>
+                <span>Created: {new Date(card.created_at).toLocaleString()}</span>
+                <span>Updated: {new Date(card.updated_at).toLocaleString()}</span>
+              </div>
             </div>
           )}
-          {!planLoading && planData && (
-            <PlanPreview plan={planData} />
+
+          {/* Plan tab */}
+          {activeTab === 'plan' && (
+            <div style={{ padding: '18px 20px' }}>
+              {planLoading && (
+                <div style={{ fontSize: 12, color: T.text3, fontStyle: 'italic', fontFamily: FONTS.body, padding: '30px 0', textAlign: 'center' }}>
+                  Loading plan…
+                </div>
+              )}
+              {!planLoading && planData && (
+                <PlanPreview plan={planData} />
+              )}
+              {!planLoading && !planData && (
+                <div style={{ fontSize: 12, color: T.text3, fontStyle: 'italic', fontFamily: FONTS.body, padding: '30px 0', textAlign: 'center' }}>
+                  No plan on file for this card.
+                  {(isIntake || isQueued) && onForge && (
+                    <div style={{ marginTop: 12 }}>
+                      <button
+                        onClick={() => { onForge(card); onClose(); }}
+                        style={{
+                          padding: '6px 16px',
+                          borderRadius: 8,
+                          border: `1.5px solid ${T.cherry}`,
+                          background: T.cherry + '18',
+                          color: T.cherry,
+                          fontFamily: FONTS.body,
+                          fontSize: 12,
+                          fontWeight: 700,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        Open Forge to create a plan
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
           )}
-          {!planLoading && !planData && (
-            <div style={{
-              fontSize: 12,
-              color: T.text3,
-              fontStyle: 'italic',
-              fontFamily: FONTS.body,
-              padding: '20px 0',
-              textAlign: 'center',
-            }}>
-              No plan available for this card.
+
+          {/* Execution tab */}
+          {activeTab === 'execution' && (
+            <div style={{ padding: '18px 20px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+              {/* Gate approval panel for awaiting_human */}
+              {isAwaitingHuman && !gateResolved && (
+                <GateApprovalPanel card={card} onResolved={handleGateResolved} />
+              )}
+              {isAwaitingHuman && gateResolved && (
+                <div style={{ fontSize: 12, color: T.mint, fontFamily: FONTS.body, padding: '10px 0', fontWeight: 700 }}>
+                  Gate resolved. Waiting for engine to update…
+                </div>
+              )}
+              {/* Live progress for executing/validating */}
+              {(isExecuting || isValidating) && (
+                <div>
+                  <div style={{ fontSize: 12, color: T.text1, fontFamily: FONTS.body, marginBottom: 10 }}>
+                    Click <strong>Monitor</strong> in the action bar to open the live execution log.
+                  </div>
+                  {card.current_phase && (
+                    <div style={{
+                      padding: '10px 14px',
+                      background: T.butterSoft,
+                      borderRadius: 8,
+                      borderLeft: `3px solid ${T.butter}`,
+                    }}>
+                      <div style={{ fontSize: 10, color: T.text3, fontFamily: FONTS.body, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 4 }}>
+                        Active phase
+                      </div>
+                      <div style={{ fontFamily: FONTS.hand, fontSize: 15, color: T.text0, lineHeight: 1.4 }}>
+                        &ldquo;{card.current_phase}&rdquo;
+                      </div>
+                    </div>
+                  )}
+                  {isValidating && card.error && (
+                    <div style={{
+                      marginTop: 10,
+                      padding: '10px 14px',
+                      background: T.cherrySoft,
+                      borderRadius: 8,
+                      borderLeft: `3px solid ${T.cherry}`,
+                    }}>
+                      <div style={{ fontSize: 10, color: T.cherry, fontFamily: FONTS.body, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 4 }}>
+                        Blocked — needs attention
+                      </div>
+                      <div style={{ fontFamily: FONTS.mono, fontSize: 11, color: T.cherry, lineHeight: 1.5, wordBreak: 'break-word' }}>
+                        {card.error}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Changes tab */}
+          {activeTab === 'changes' && (
+            <div style={{ padding: '18px 20px' }}>
+              {isReview && card.consolidation_result ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                    <MetaTile label="Files changed" value={String(card.consolidation_result.files_changed.length)} />
+                    <MetaTile label="Insertions" value={`+${card.consolidation_result.total_insertions}`} color={T.mint} />
+                    <MetaTile label="Deletions" value={`-${card.consolidation_result.total_deletions}`} color={T.cherry} />
+                    <MetaTile label="Status" value={card.consolidation_result.status} />
+                  </div>
+                  <div style={{ fontSize: 10, color: T.text3, fontFamily: FONTS.body, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.4, marginTop: 4 }}>
+                    Changed files
+                  </div>
+                  <div style={{
+                    background: T.bg3,
+                    borderRadius: 8,
+                    border: `1.5px solid ${T.borderSoft}`,
+                    padding: '8px 12px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 3,
+                    maxHeight: 260,
+                    overflowY: 'auto',
+                  }}>
+                    {card.consolidation_result.files_changed.map(f => (
+                      <div key={f} style={{ fontFamily: FONTS.mono, fontSize: 11, color: T.text0 }}>{f}</div>
+                    ))}
+                  </div>
+                  <div style={{ marginTop: 4 }}>
+                    <ActionButton
+                      onClick={e => { e.stopPropagation(); setShowChangelist(true); }}
+                      title="Open full changelist reviewer"
+                      bg={T.crust + '33'}
+                      border={`1.5px solid ${T.crust}`}
+                      color={T.crustDark}
+                    >
+                      Open Full Changelist
+                    </ActionButton>
+                  </div>
+                </div>
+              ) : (
+                <div style={{ fontSize: 12, color: T.text3, fontStyle: 'italic', fontFamily: FONTS.body, padding: '30px 0', textAlign: 'center' }}>
+                  {isDeployed
+                    ? 'Delivered — changelist no longer available inline.'
+                    : 'No consolidation result yet. Run review to generate.'}
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -985,6 +1360,29 @@ function CardDetailModal({ card, onClose, onForge, onEditPlan, onMutateCard }: C
             onClose={() => setShowChangelist(false)}
           />
         )}
+      </div>
+    </div>
+  );
+}
+
+// ----------------------------------------------------------------
+// MetaTile — compact label+value tile used in the Overview tab
+// ----------------------------------------------------------------
+function MetaTile({ label, value, color }: { label: string; value: string; color?: string }) {
+  return (
+    <div style={{
+      padding: '7px 12px',
+      background: T.bg2,
+      borderRadius: 10,
+      border: `1.5px solid ${T.border}`,
+      boxShadow: SHADOWS.sm,
+      minWidth: 80,
+    }}>
+      <div style={{ fontFamily: FONTS.body, fontSize: 9, color: T.text2, textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 2 }}>
+        {label}
+      </div>
+      <div style={{ fontFamily: FONTS.display, fontSize: 14, fontWeight: 900, color: color ?? T.text0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 130 }}>
+        {value}
       </div>
     </div>
   );
