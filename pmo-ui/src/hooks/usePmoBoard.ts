@@ -101,6 +101,16 @@ export function usePmoBoard(program?: string): UsePmoBoardResult {
       fetchBoard();
     });
 
+    es.addEventListener('card_consolidated', () => {
+      // Card has been consolidated and moved to the review column.
+      fetchBoard();
+    });
+
+    es.addEventListener('card_merged', () => {
+      // Card has been merged and is now deployed.
+      fetchBoard();
+    });
+
     es.onopen = () => {
       if (!mountedRef.current) return;
       backoffRef.current = SSE_BACKOFF_INITIAL_MS; // reset back-off on success

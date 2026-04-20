@@ -35,6 +35,7 @@ from fastapi import FastAPI
 from agent_baton.api.deps import init_dependencies, get_bus, get_webhook_registry
 from agent_baton.api.middleware.auth import TokenAuthMiddleware
 from agent_baton.api.middleware.cors import configure_cors
+from agent_baton.api.middleware.user_identity import UserIdentityMiddleware
 from agent_baton.core.events.bus import EventBus
 
 try:
@@ -139,6 +140,11 @@ def create_app(
 
     # Auth middleware — no-op when token is None.
     app.add_middleware(TokenAuthMiddleware, token=token)
+
+    # User identity middleware — resolves X-Baton-User header or Bearer token
+    # into request.state.user_id.  In local approval mode (BATON_APPROVAL_MODE
+    # unset or "local") falls back to "local-user" with admin role.
+    app.add_middleware(UserIdentityMiddleware)
 
     # --- Routes --------------------------------------------------------------
 

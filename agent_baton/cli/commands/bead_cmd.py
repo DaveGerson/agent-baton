@@ -106,11 +106,11 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         help="Bead type: discovery, decision, warning, outcome, planning",
     )
     create_p.add_argument(
-        "--content",
+        "--content", "--body",
         dest="content",
         metavar="TEXT",
         required=True,
-        help="The bead text (insight, decision, or warning)",
+        help="The bead text (insight, decision, or warning) (--body is accepted as an alias)",
     )
     create_p.add_argument(
         "--task-id",

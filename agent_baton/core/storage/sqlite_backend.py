@@ -168,8 +168,11 @@ class SqliteStorage:
                         (task_id, step_id, agent_name, status, outcome,
                          files_changed, commit_hash, estimated_tokens,
                          duration_seconds, retries, error, completed_at,
-                         deviations, step_type, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         deviations, step_type, updated_at,
+                         input_tokens, cache_read_tokens, cache_creation_tokens,
+                         output_tokens, model_id, session_id, step_started_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         state.task_id,
@@ -187,6 +190,13 @@ class SqliteStorage:
                         json.dumps(sr.deviations),
                         sr.step_type,
                         sr.updated_at,
+                        sr.input_tokens,
+                        sr.cache_read_tokens,
+                        sr.cache_creation_tokens,
+                        sr.output_tokens,
+                        sr.model_id,
+                        sr.session_id,
+                        sr.step_started_at,
                     ),
                 )
                 # team step results cascade from step_results, delete via FK
@@ -439,6 +449,13 @@ class SqliteStorage:
                     step_type=sr["step_type"] if "step_type" in sr_keys else "developing",
                     interaction_history=interaction_history,
                     updated_at=sr["updated_at"] if "updated_at" in sr_keys else "",
+                    input_tokens=sr["input_tokens"] if "input_tokens" in sr_keys else 0,
+                    cache_read_tokens=sr["cache_read_tokens"] if "cache_read_tokens" in sr_keys else 0,
+                    cache_creation_tokens=sr["cache_creation_tokens"] if "cache_creation_tokens" in sr_keys else 0,
+                    output_tokens=sr["output_tokens"] if "output_tokens" in sr_keys else 0,
+                    model_id=sr["model_id"] if "model_id" in sr_keys else "",
+                    session_id=sr["session_id"] if "session_id" in sr_keys else "",
+                    step_started_at=sr["step_started_at"] if "step_started_at" in sr_keys else "",
                 )
             )
 
@@ -656,8 +673,11 @@ class SqliteStorage:
                     (task_id, step_id, agent_name, status, outcome,
                      files_changed, commit_hash, estimated_tokens,
                      duration_seconds, retries, error, completed_at,
-                     deviations, step_type, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     deviations, step_type, updated_at,
+                     input_tokens, cache_read_tokens, cache_creation_tokens,
+                     output_tokens, model_id, session_id, step_started_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task_id,
@@ -675,6 +695,13 @@ class SqliteStorage:
                     json.dumps(result.deviations),
                     result.step_type,
                     result.updated_at,
+                    result.input_tokens,
+                    result.cache_read_tokens,
+                    result.cache_creation_tokens,
+                    result.output_tokens,
+                    result.model_id,
+                    result.session_id,
+                    result.step_started_at,
                 ),
             )
             # Replace team member results for this step

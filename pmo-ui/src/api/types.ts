@@ -3,7 +3,8 @@ export interface PmoCard {
   project_id: string;
   program: string;
   title: string;
-  column: 'queued' | 'executing' | 'awaiting_human' | 'validating' | 'deployed';
+  column: 'queued' | 'executing' | 'awaiting_human' | 'validating' | 'deployed' | 'review';
+  consolidation_result?: ConsolidationResult;
   risk_level: string;
   priority: number;
   agents: string[];
@@ -268,4 +269,46 @@ export interface GateActionResponse {
   phase_id: number;
   result: 'approve' | 'reject' | 'approve-with-feedback';
   recorded: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Changelist / consolidation types
+// ---------------------------------------------------------------------------
+
+export interface FileAttribution {
+  file_path: string;
+  step_id: string;
+  agent_name: string;
+  insertions: number;
+  deletions: number;
+}
+
+export interface ConsolidationResult {
+  status: 'success' | 'partial' | 'conflict';
+  rebased_commits: Array<{
+    step_id: string;
+    agent_name: string;
+    original_hash: string;
+    new_hash: string;
+  }>;
+  final_head: string;
+  base_commit: string;
+  files_changed: string[];
+  total_insertions: number;
+  total_deletions: number;
+  attributions: FileAttribution[];
+  conflict_files: string[];
+  conflict_step_id: string;
+  skipped_steps: string[];
+  error: string;
+}
+
+export interface MergeResponse {
+  merge_commit: string;
+  cleaned_worktrees: string[];
+}
+
+export interface CreatePrResponse {
+  pr_url: string;
+  pr_number: number;
 }
