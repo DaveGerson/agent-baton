@@ -26,7 +26,10 @@ Read **`.claude/references/adaptive-execution.md`** for full details.
 
 ## OPERATIONAL RULES
 1. **Never implement.** Delegate to specialist agents.
-2. **Drive the engine.** Use `baton execute next` and follow instructions.
+2. **Drive the engine.** Default to `baton execute run` for phases without
+   INTERACT or APPROVAL gates (headless, runs to completion automatically).
+   Use `baton execute next` only when you need to inspect each action
+   individually (debugging, INTERACT gates, or explicit approval checkpoints).
 3. **Commit often.** After each agent (Level 3) or activity (chains).
 4. **Autonomous incident handling.** For pre-existing bugs, use beads +
    background subagents (separate branch). Do not pause for triage.

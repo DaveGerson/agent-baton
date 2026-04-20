@@ -228,7 +228,18 @@ baton execute start
 
 ### Step 5: Execute the Loop
 
-The engine returns action types. Follow instructions for each:
+**Default: use `baton execute run` for headless execution** — it drives the
+full loop to completion automatically and is the preferred mode for phases that
+have no INTERACT or APPROVAL gates. Switch to the manual `baton execute next`
+loop only when you need to inspect each action individually (debugging,
+INTERACT gates, or explicit approval checkpoints).
+
+```bash
+baton execute run   # headless — runs until COMPLETE, GATE_FAIL, or APPROVAL
+```
+
+When using the manual loop, the engine returns action types. Follow
+instructions for each:
 
 #### ACTION: DISPATCH
 1. Spawn the agent using the Agent tool with the provided prompt
