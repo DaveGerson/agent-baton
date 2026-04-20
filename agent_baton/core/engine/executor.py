@@ -385,7 +385,9 @@ class ExecutionEngine:
         if storage is not None:
             try:
                 from agent_baton.core.engine.bead_store import BeadStore
-                self._bead_store = BeadStore(storage.db_path)
+                _bead_db = storage.db_path
+                if isinstance(_bead_db, Path):
+                    self._bead_store = BeadStore(_bead_db)
             except Exception as _bead_init_exc:
                 _log.debug(
                     "BeadStore init skipped (non-fatal): %s", _bead_init_exc
