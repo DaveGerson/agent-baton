@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { usePersistedState } from '../hooks/usePersistedState';
+import type { ReactNode, CSSProperties } from 'react';
 import { T, FONTS, SHADOWS } from '../styles/tokens';
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -115,7 +116,7 @@ function RoomBanner({ accent, emoji, title, sub, rightSlot }: {
   emoji: string;
   title: string;
   sub: string;
-  rightSlot?: React.ReactNode;
+  rightSlot?: ReactNode;
 }) {
   return (
     <div style={{
@@ -157,7 +158,7 @@ function RoomBanner({ accent, emoji, title, sub, rightSlot }: {
 
 function SectionHeader({ title, rightSlot }: {
   title: string;
-  rightSlot?: React.ReactNode;
+  rightSlot?: ReactNode;
 }) {
   return (
     <div style={{
@@ -185,22 +186,22 @@ function SectionHeader({ title, rightSlot }: {
 // ── Main Component ─────────────────────────────────────────────────────────
 
 export function BohTipJar() {
-  const [prefs, setPrefs] = useState<Record<string, NotifPref>>({
+  const [prefs, setPrefs] = usePersistedState<Record<string, NotifPref>>('pmo:boh-notif-prefs', {
     gate_pending:  { desktop: true,  slack: true,  email: true  },
     step_fail:     { desktop: true,  slack: true,  email: false },
     cost_alert:    { desktop: true,  slack: false, email: true  },
     step_complete: { desktop: false, slack: false, email: false },
     recipe_saved:  { desktop: false, slack: true,  email: false },
     delivery_in:   { desktop: true,  slack: false, email: false },
-  });
+  }, localStorage);
 
-  const [quiet, setQuiet] = useState({ start: '22:00', end: '06:00', on: true });
+  const [quiet, setQuiet] = usePersistedState('pmo:boh-quiet-hours', { start: '22:00', end: '06:00', on: true }, localStorage);
 
   function toggle(k: string, ch: Channel) {
     setPrefs(p => ({ ...p, [k]: { ...p[k], [ch]: !p[k][ch] } }));
   }
 
-  const timeInputStyle: React.CSSProperties = {
+  const timeInputStyle: CSSProperties = {
     background: T.bg1,
     border: `2px solid ${T.border}`,
     borderRadius: 6,

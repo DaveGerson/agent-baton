@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { usePersistedState } from '../hooks/usePersistedState';
 import { T, FONTS, SHADOWS } from '../styles/tokens';
 
 // ---------------------------------------------------------------------------
@@ -153,7 +153,7 @@ function IntegrationCard({
 // ---------------------------------------------------------------------------
 
 export function BohLoadingDock() {
-  const [integrations, setIntegrations] = useState<Integration[]>(INITIAL_INTEGRATIONS);
+  const [integrations, setIntegrations] = usePersistedState<Integration[]>('pmo:boh-integrations', INITIAL_INTEGRATIONS, localStorage);
 
   function handleToggle(id: string) {
     setIntegrations((prev) =>

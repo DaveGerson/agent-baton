@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { usePersistedState } from '../hooks/usePersistedState';
+import type { ReactNode } from 'react';
 import { T, FONTS, SHADOWS } from '../styles/tokens';
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -118,7 +119,7 @@ function RoomBanner({ accent, emoji, title, sub, rightSlot }: {
   emoji: string;
   title: string;
   sub: string;
-  rightSlot?: React.ReactNode;
+  rightSlot?: ReactNode;
 }) {
   return (
     <div style={{
@@ -158,7 +159,7 @@ function RoomBanner({ accent, emoji, title, sub, rightSlot }: {
 
 function SectionHeader({ title, rightSlot }: {
   title: string;
-  rightSlot?: React.ReactNode;
+  rightSlot?: ReactNode;
 }) {
   return (
     <div style={{
@@ -186,7 +187,7 @@ function SectionHeader({ title, rightSlot }: {
 // ── Main Component ─────────────────────────────────────────────────────────
 
 export function BohRulebook() {
-  const [rules, setRules] = useState<Rule[]>(INITIAL_RULES);
+  const [rules, setRules] = usePersistedState<Rule[]>('pmo:boh-rules', INITIAL_RULES, localStorage);
 
   function toggleRule(i: number) {
     setRules(r => r.map((x, j) => j === i ? { ...x, on: !x.on } : x));

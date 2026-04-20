@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { ReactNode } from 'react';
+import { usePersistedState } from '../hooks/usePersistedState';
 import { T, FONTS, SHADOWS } from '../styles/tokens';
 
 // ─── Shared primitives ────────────────────────────────────────────────────────
@@ -285,8 +286,8 @@ interface ApiKey {
 }
 
 export function BohWalkIn() {
-  const [preferredModel, setPreferredModel] = useState<ModelTier>('sonnet');
-  const [keys, setKeys] = useState<ApiKey[]>([
+  const [preferredModel, setPreferredModel] = usePersistedState<'haiku' | 'sonnet' | 'opus'>('pmo:boh-preferred-model', 'sonnet', localStorage);
+  const [keys, setKeys] = usePersistedState<ApiKey[]>('pmo:boh-api-keys', [
     {
       id: 'anthropic',
       label: 'Anthropic',

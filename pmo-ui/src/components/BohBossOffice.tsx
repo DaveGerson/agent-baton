@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import type { ReactNode } from 'react';
+import { usePersistedState } from '../hooks/usePersistedState';
+import type { ReactNode, ChangeEvent } from 'react';
 import { T, FONTS, SHADOWS } from '../styles/tokens';
 
 // ─── Shared primitives ────────────────────────────────────────────────────────
@@ -240,7 +240,7 @@ function BudgetDial({
         max={max}
         step={step}
         value={value}
-        onChange={(e: React.ChangeEvent<HTMLInputElement>) => onChange(Number(e.target.value))}
+        onChange={(e: ChangeEvent<HTMLInputElement>) => onChange(Number(e.target.value))}
         aria-label={`${label} cap`}
         style={{ width: '100%', accentColor: T.mint, cursor: 'pointer' }}
       />
@@ -292,10 +292,10 @@ function BudgetDial({
 // ─── Main export ──────────────────────────────────────────────────────────────
 
 export function BohBossOffice() {
-  const [monthCap, setMonthCap] = useState(800);
-  const [perTicket, setPerTicket] = useState(5);
-  const [alertAt, setAlertAt] = useState(75);
-  const [freezeOn, setFreezeOn] = useState(true);
+  const [monthCap, setMonthCap] = usePersistedState<number>('pmo:boh-month-cap', 800, localStorage);
+  const [perTicket, setPerTicket] = usePersistedState<number>('pmo:boh-per-ticket-cap', 5, localStorage);
+  const [alertAt, setAlertAt] = usePersistedState<number>('pmo:boh-alert-threshold', 75, localStorage);
+  const [freezeOn, setFreezeOn] = usePersistedState<boolean>('pmo:boh-freeze-on', true, localStorage);
 
   const SPENT_MONTH = 412;
   const SPENT_TICKET = 1.18;
@@ -393,7 +393,7 @@ export function BohBossOffice() {
                 max={100}
                 step={5}
                 value={alertAt}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                onChange={(e: ChangeEvent<HTMLInputElement>) =>
                   setAlertAt(Number(e.target.value))
                 }
                 aria-label="Alert threshold percentage"

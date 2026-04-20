@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { usePersistedState } from '../hooks/usePersistedState';
 import { T, FONTS, SHADOWS } from '../styles/tokens';
 
 // ---------------------------------------------------------------------------
@@ -246,7 +246,7 @@ function SectionHeader({
 // ---------------------------------------------------------------------------
 
 export function BohLockerRoom() {
-  const [roster, setRoster] = useState<CrewMember[]>(INITIAL_ROSTER);
+  const [roster, setRoster] = usePersistedState<CrewMember[]>('pmo:boh-roster', INITIAL_ROSTER, localStorage);
 
   function handleToggle(id: string) {
     setRoster((prev) =>
