@@ -23,6 +23,7 @@ import type {
   ConsolidationResult,
   MergeResponse,
   CreatePrResponse,
+  ApprovalLogEntry,
   ApprovalLogResponse,
   RequestReviewBody,
   RequestReviewResponse,

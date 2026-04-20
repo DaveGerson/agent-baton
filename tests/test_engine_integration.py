@@ -260,17 +260,23 @@ class TestStartExecution:
 
     def test_state_file_created(self, tmp_path: Path, plan: MachinePlan) -> None:
         _make_engine(tmp_path).start(plan)
-        assert (tmp_path / "execution-state.json").exists()
+        # State is now saved to the namespaced path (executions/<task_id>/) even
+        # when the engine was constructed without an explicit task_id, because
+        # start() calls set_task_id() to bind the plan's task_id.
+        state_path = tmp_path / "executions" / plan.task_id / "execution-state.json"
+        assert state_path.exists()
 
     def test_state_file_is_valid_json(self, tmp_path: Path, plan: MachinePlan) -> None:
         _make_engine(tmp_path).start(plan)
-        data = json.loads((tmp_path / "execution-state.json").read_text())
+        state_path = tmp_path / "executions" / plan.task_id / "execution-state.json"
+        data = json.loads(state_path.read_text())
         assert "task_id" in data
         assert data["task_id"] == plan.task_id
 
     def test_state_file_status_is_running(self, tmp_path: Path, plan: MachinePlan) -> None:
         _make_engine(tmp_path).start(plan)
-        data = json.loads((tmp_path / "execution-state.json").read_text())
+        state_path = tmp_path / "executions" / plan.task_id / "execution-state.json"
+        data = json.loads(state_path.read_text())
         assert data["status"] == "running"
 
     def test_first_step_id_matches_first_phase_first_step(
@@ -759,8 +765,9 @@ class TestCrashRecovery:
         engine1 = _make_engine(tmp_path)
         action = engine1.start(plan)
         engine1.record_step_result(action.step_id, action.agent_name, status="complete")
-        # Crash — state file should still be on disk
-        assert (tmp_path / "execution-state.json").exists()
+        # Crash — state file should still be on disk under the namespaced path.
+        state_path = tmp_path / "executions" / plan.task_id / "execution-state.json"
+        assert state_path.exists()
 
 
 # ---------------------------------------------------------------------------
