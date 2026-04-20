@@ -6,7 +6,7 @@
  * AnalyticsDashboard.  Opens from the KanbanBoard toolbar.
  */
 import { useState, useEffect, useCallback } from 'react';
-import { T } from '../styles/tokens';
+import { T, FONTS, SHADOWS } from '../styles/tokens';
 import { api } from '../api/client';
 import type { ExternalItem, ExternalMapping } from '../api/types';
 
@@ -38,13 +38,14 @@ function Badge({ children, color }: { children: React.ReactNode; color: string }
     <span style={{
       display: 'inline-flex',
       alignItems: 'center',
-      padding: '1px 6px',
-      borderRadius: 3,
+      padding: '2px 8px',
+      borderRadius: 999,
       fontSize: 9,
-      fontWeight: 600,
+      fontWeight: 800,
+      fontFamily: FONTS.body,
       color,
       background: color + '18',
-      border: `1px solid ${color}28`,
+      border: `1.5px solid ${color}`,
       whiteSpace: 'nowrap',
       flexShrink: 0,
     }}>
@@ -86,17 +87,18 @@ function MappingRow({ mapping }: { mapping: ExternalMapping }) {
       gap: 6,
       padding: '3px 8px',
       background: T.bg3,
-      borderRadius: 3,
+      border: `1.5px dashed ${T.borderSoft}`,
+      borderRadius: 8,
       marginTop: 4,
     }}>
-      <span style={{ fontSize: 9, color: T.text3 }}>Mapped to plan:</span>
-      <span style={{ fontSize: 9, color: T.text1, fontFamily: 'monospace' }}>
+      <span style={{ fontSize: 9, color: T.text3, fontFamily: FONTS.mono }}>Mapped to plan:</span>
+      <span style={{ fontSize: 9, color: T.text1, fontFamily: FONTS.mono, fontWeight: 700 }}>
         {mapping.task_id || '—'}
       </span>
       {mapping.mapping_type && (
         <Badge color={T.text3}>{mapping.mapping_type}</Badge>
       )}
-      <span style={{ fontSize: 9, color: T.text4 }}>{mapping.project_id}</span>
+      <span style={{ fontSize: 9, color: T.text4, fontFamily: FONTS.mono }}>{mapping.project_id}</span>
     </div>
   );
 }
@@ -130,10 +132,11 @@ function ItemCard({ item }: { item: ExternalItem }) {
   return (
     <div
       style={{
-        background: T.bg2,
-        border: `1px solid ${expanded ? color + '44' : T.border}`,
-        borderRadius: 4,
+        background: T.bg1,
+        border: `2px solid ${expanded ? color : T.border}`,
+        borderRadius: 12,
         overflow: 'hidden',
+        boxShadow: SHADOWS.sm,
         transition: 'border-color 0.15s',
       }}
     >
@@ -153,7 +156,7 @@ function ItemCard({ item }: { item: ExternalItem }) {
           display: 'flex',
           alignItems: 'center',
           gap: 6,
-          padding: '6px 8px',
+          padding: '10px 12px',
           cursor: 'pointer',
         }}
       >
@@ -161,7 +164,12 @@ function ItemCard({ item }: { item: ExternalItem }) {
         <Badge color={color}>{sourceLabel(item.source_type)}</Badge>
 
         {/* External ID */}
-        <span style={{ fontSize: 9, color, fontFamily: 'monospace', fontWeight: 700 }}>
+        <span style={{
+          fontSize: 9,
+          color,
+          fontFamily: FONTS.mono,
+          fontWeight: 700,
+        }}>
           {item.external_id}
         </span>
 
@@ -172,8 +180,9 @@ function ItemCard({ item }: { item: ExternalItem }) {
         {/* Title — takes remaining space */}
         <span style={{
           flex: 1,
-          fontSize: 11,
-          fontWeight: 600,
+          fontFamily: FONTS.body,
+          fontSize: 13,
+          fontWeight: 700,
           color: T.text0,
           overflow: 'hidden',
           textOverflow: 'ellipsis',
@@ -184,7 +193,12 @@ function ItemCard({ item }: { item: ExternalItem }) {
 
         {/* Assignee */}
         {item.assigned_to && (
-          <span style={{ fontSize: 9, color: T.text3, flexShrink: 0 }}>
+          <span style={{
+            fontSize: 9,
+            color: T.text3,
+            flexShrink: 0,
+            fontFamily: FONTS.body,
+          }}>
             {item.assigned_to}
           </span>
         )}
@@ -194,7 +208,7 @@ function ItemCard({ item }: { item: ExternalItem }) {
           aria-hidden="true"
           style={{
             fontSize: 10,
-            color: T.text3,
+            color: T.text2,
             transition: 'transform 0.15s',
             transform: expanded ? 'rotate(180deg)' : 'rotate(0deg)',
             display: 'inline-block',
@@ -208,15 +222,16 @@ function ItemCard({ item }: { item: ExternalItem }) {
       {/* Expanded detail */}
       {expanded && (
         <div style={{
-          borderTop: `1px solid ${T.border}`,
-          padding: '6px 8px',
-          background: T.bg1,
+          borderTop: `1.5px dashed ${T.borderSoft}`,
+          padding: '10px 12px',
+          background: T.bg3,
         }}>
           {/* Description */}
           {item.description && (
             <p style={{
-              fontSize: 10,
-              color: T.text2,
+              fontFamily: FONTS.body,
+              fontSize: 11,
+              color: T.text1,
               lineHeight: 1.5,
               margin: '0 0 6px',
               whiteSpace: 'pre-wrap',
@@ -230,9 +245,23 @@ function ItemCard({ item }: { item: ExternalItem }) {
 
           {/* Tags */}
           {item.tags.length > 0 && (
-            <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap', marginBottom: 6 }}>
+            <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 6 }}>
               {item.tags.map(tag => (
-                <Badge key={tag} color={T.text3}>{tag}</Badge>
+                <span
+                  key={tag}
+                  style={{
+                    padding: '2px 8px',
+                    borderRadius: 999,
+                    background: T.bg1,
+                    border: `1.5px solid ${T.border}`,
+                    fontFamily: FONTS.body,
+                    fontWeight: 700,
+                    fontSize: 9,
+                    color: T.text1,
+                  }}
+                >
+                  {tag}
+                </span>
               ))}
             </div>
           )}
@@ -245,11 +274,13 @@ function ItemCard({ item }: { item: ExternalItem }) {
               rel="noopener noreferrer"
               onClick={(e) => e.stopPropagation()}
               style={{
-                fontSize: 9,
+                fontSize: 11,
                 color: color,
                 textDecoration: 'none',
                 display: 'inline-block',
                 marginBottom: 6,
+                fontFamily: FONTS.body,
+                fontWeight: 700,
               }}
             >
               Open in {sourceLabel(item.source_type)} &rarr;
@@ -258,16 +289,35 @@ function ItemCard({ item }: { item: ExternalItem }) {
 
           {/* Mappings */}
           <div>
-            <span style={{ fontSize: 9, color: T.text3, fontWeight: 600 }}>
+            <span style={{
+              fontSize: 9,
+              color: T.text2,
+              fontWeight: 800,
+              fontFamily: FONTS.body,
+              textTransform: 'uppercase',
+              letterSpacing: '.06em',
+            }}>
               Plan mappings
             </span>
             {loadingMappings && (
-              <div style={{ fontSize: 9, color: T.text4, fontStyle: 'italic', marginTop: 4 }}>
+              <div style={{
+                fontSize: 9,
+                color: T.text4,
+                fontStyle: 'italic',
+                marginTop: 4,
+                fontFamily: FONTS.mono,
+              }}>
                 Loading…
               </div>
             )}
             {!loadingMappings && mappings !== null && mappings.length === 0 && (
-              <div style={{ fontSize: 9, color: T.text4, fontStyle: 'italic', marginTop: 4 }}>
+              <div style={{
+                fontSize: 9,
+                color: T.text4,
+                fontStyle: 'italic',
+                marginTop: 4,
+                fontFamily: FONTS.mono,
+              }}>
                 No plan mappings yet.
               </div>
             )}
@@ -277,7 +327,12 @@ function ItemCard({ item }: { item: ExternalItem }) {
           </div>
 
           {/* Updated at */}
-          <div style={{ fontSize: 9, color: T.text4, marginTop: 6 }}>
+          <div style={{
+            fontSize: 9,
+            color: T.text3,
+            marginTop: 6,
+            fontFamily: FONTS.mono,
+          }}>
             Last updated: {item.updated_at || '—'}
           </div>
         </div>
@@ -312,26 +367,30 @@ function FilterBar({
       display: 'flex',
       alignItems: 'center',
       gap: 8,
-      padding: '6px 12px',
-      borderBottom: `1px solid ${T.border}`,
-      background: T.bg2,
+      padding: '8px 12px',
+      borderBottom: `2px solid ${T.border}`,
+      background: T.bg3,
       flexShrink: 0,
     }}>
-      {/* Source type tabs */}
-      <div style={{ display: 'flex', gap: 2 }}>
+      {/* Source type pills */}
+      <div style={{ display: 'flex', gap: 4 }}>
         {SOURCE_FILTERS.map(f => (
           <button
             key={f.value}
             onClick={() => onSource(f.value)}
             style={{
-              padding: '2px 8px',
-              borderRadius: 3,
-              border: 'none',
-              background: source === f.value ? T.accent + '20' : 'transparent',
-              color: source === f.value ? T.accent : T.text3,
-              fontSize: 9,
-              fontWeight: source === f.value ? 700 : 500,
+              padding: '3px 10px',
+              borderRadius: 999,
+              border: `1.5px solid ${T.border}`,
+              background: source === f.value ? T.butter : T.bg1,
+              color: T.text0,
+              fontFamily: FONTS.body,
+              fontWeight: 800,
+              fontSize: 11,
               cursor: 'pointer',
+              boxShadow: source === f.value ? SHADOWS.sm : 'none',
+              transform: source === f.value ? 'translate(-1px, -1px)' : 'none',
+              transition: 'all 0.1s',
             }}
           >
             {f.label}
@@ -348,12 +407,13 @@ function FilterBar({
         value={search}
         onChange={(e) => onSearch(e.target.value)}
         style={{
-          padding: '3px 8px',
-          borderRadius: 3,
-          border: `1px solid ${T.border}`,
-          background: T.bg3,
+          padding: '4px 10px',
+          borderRadius: 8,
+          border: `2px solid ${T.border}`,
+          background: T.bg1,
           color: T.text0,
-          fontSize: 10,
+          fontFamily: FONTS.body,
+          fontSize: 11,
           width: 200,
           outline: 'none',
         }}
@@ -415,20 +475,21 @@ export function ExternalItemsPanel({ onClose }: ExternalItemsPanelProps) {
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        background: 'rgba(0,0,0,0.6)',
+        background: 'rgba(42,26,16,.6)',
       }}
       onClick={onClose}
     >
       <div
         onClick={(e) => e.stopPropagation()}
         style={{
-          width: 760,
+          width: 780,
           maxHeight: '85vh',
           display: 'flex',
           flexDirection: 'column',
           background: T.bg1,
-          border: `1px solid ${T.border}`,
-          borderRadius: 8,
+          border: `3px solid ${T.border}`,
+          borderRadius: 18,
+          boxShadow: SHADOWS.xl,
           overflow: 'hidden',
         }}
       >
@@ -437,27 +498,63 @@ export function ExternalItemsPanel({ onClose }: ExternalItemsPanelProps) {
           display: 'flex',
           alignItems: 'center',
           gap: 8,
-          padding: '8px 12px',
-          borderBottom: `1px solid ${T.border}`,
+          padding: '14px 18px',
+          borderBottom: `3px solid ${T.border}`,
+          background: T.mint,
           flexShrink: 0,
         }}>
-          <span style={{ fontSize: 12, fontWeight: 700, color: T.text0, flex: 1 }}>
-            External Items
-          </span>
-          <span style={{ fontSize: 9, color: T.text3 }}>
+          <span style={{ fontSize: 28, lineHeight: 1, marginRight: 4 }}>🚚</span>
+          <div style={{ flex: 1 }}>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
+              <span style={{
+                fontFamily: FONTS.display,
+                fontWeight: 900,
+                fontSize: 22,
+                color: T.ink,
+                lineHeight: 1.1,
+              }}>
+                Deliveries
+              </span>
+              <span style={{
+                fontFamily: FONTS.hand,
+                fontSize: 16,
+                color: T.inkSoft,
+                transform: 'rotate(-1deg)',
+                display: 'inline-block',
+              }}>
+                fresh deliveries out back
+              </span>
+            </div>
+          </div>
+
+          {/* Item count chip */}
+          <span style={{
+            padding: '2px 10px',
+            borderRadius: 999,
+            background: T.bg0,
+            border: `1.5px solid ${T.border}`,
+            fontFamily: FONTS.mono,
+            fontWeight: 700,
+            fontSize: 11,
+            color: T.text0,
+            flexShrink: 0,
+          }}>
             {filtered.length} item{filtered.length !== 1 ? 's' : ''}
           </span>
+
+          {/* Close button */}
           <button
             aria-label="Close external items panel"
             onClick={onClose}
             style={{
               background: 'none',
-              border: 'none',
-              color: T.text2,
+              border: `1.5px solid ${T.border}`,
+              borderRadius: 6,
+              color: T.ink,
               fontSize: 14,
               cursor: 'pointer',
               lineHeight: 1,
-              padding: '0 2px',
+              padding: '2px 8px',
             }}
           >
             {'\u00d7'}
@@ -475,34 +572,46 @@ export function ExternalItemsPanel({ onClose }: ExternalItemsPanelProps) {
         {/* Content */}
         <div style={{ flex: 1, overflowY: 'auto', padding: 10 }}>
           {loading && (
-            <div style={{ fontSize: 10, color: T.text3, fontStyle: 'italic', padding: 12 }}>
-              Loading external items…
+            <div style={{
+              fontFamily: FONTS.hand,
+              fontSize: 16,
+              color: T.text2,
+              padding: 12,
+            }}>
+              heatin' up the pantry…
             </div>
           )}
 
           {!loading && error && (
             <div style={{
-              fontSize: 10,
-              color: T.red,
+              fontFamily: FONTS.body,
+              fontWeight: 700,
+              fontSize: 11,
+              color: T.cherry,
               padding: '8px 10px',
-              background: T.red + '10',
-              borderRadius: 4,
-              border: `1px solid ${T.red}33`,
+              background: T.cherrySoft,
+              borderRadius: 8,
+              border: `1.5px solid ${T.cherry}`,
             }}>
               {error}
             </div>
           )}
 
           {!loading && !error && filtered.length === 0 && (
-            <div style={{ fontSize: 10, color: T.text3, fontStyle: 'italic', padding: 12 }}>
+            <div style={{
+              fontFamily: FONTS.hand,
+              fontSize: 16,
+              color: T.text2,
+              padding: 12,
+            }}>
               {items.length === 0
-                ? 'No external items found. Configure an adapter with `baton source add`.'
-                : 'No items match the current filter.'}
+                ? "nothin' out back yet 📦"
+                : 'no crates match that filter'}
             </div>
           )}
 
           {!loading && !error && filtered.length > 0 && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               {filtered.map((item) => (
                 <ItemCard key={item.id} item={item} />
               ))}
