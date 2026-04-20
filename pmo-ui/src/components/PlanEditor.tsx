@@ -207,7 +207,7 @@ export function PlanEditor({
       <div style={{
         position: 'relative',
         background: T.bg2,
-        backgroundImage: 'repeating-linear-gradient(0deg, transparent 0 28px, #c9a97a44 28px 29px)',
+        backgroundImage: `repeating-linear-gradient(0deg, transparent 0 28px, ${T.borderSoft}44 28px 29px)`,
         border: `3px solid ${T.border}`,
         borderRadius: 18,
         boxShadow: SHADOWS.lg,

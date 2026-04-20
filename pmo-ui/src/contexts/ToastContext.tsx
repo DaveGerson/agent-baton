@@ -27,7 +27,7 @@ const TOAST_COLORS: Record<ToastType, string> = {
 const MAX_TOASTS = 5;
 const AUTO_DISMISS_MS = 5000;
 
-export function ToastProvider({ children }: { children: React.ReactNode }) {
+export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const idRef = useRef(0);
   const timersRef = useRef<Map<number, ReturnType<typeof setTimeout>>>(new Map());

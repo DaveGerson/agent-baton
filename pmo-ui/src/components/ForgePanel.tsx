@@ -575,7 +575,7 @@ export function ForgePanel({ onBack, initialSignal, onApproved }: ForgePanelProp
             }}>
               <div style={{
                 height: '100%',
-                backgroundImage: 'repeating-linear-gradient(45deg, #ffc94a 0 10px, #ff8a3d 10px 20px)',
+                backgroundImage: `repeating-linear-gradient(45deg, ${T.butter} 0 10px, ${T.tangerine} 10px 20px)`,
                 animation: 'forge-bar 1.4s linear infinite',
                 width: '100%',
               }} />

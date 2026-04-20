@@ -34,7 +34,7 @@ function sourceLabel(sourceType: string): string {
 // Small presentational helpers
 // ---------------------------------------------------------------------------
 
-function Badge({ children, color }: { children: React.ReactNode; color: string }) {
+function Badge({ children, color }: { children: ReactNode; color: string }) {
   return (
     <span style={{
       display: 'inline-flex',

@@ -278,7 +278,7 @@ export function DataExport({ cards, health, filteredCards, onClose }: Props) {
 // Sub-components
 // ---------------------------------------------------------------------------
 
-function FieldGroup({ label, children }: { label: string; children: React.ReactNode }) {
+function FieldGroup({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div>
       <div style={{

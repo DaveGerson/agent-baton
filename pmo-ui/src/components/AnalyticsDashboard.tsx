@@ -281,7 +281,7 @@ function MetricCard({ label, value, color }: { label: string; value: string | nu
   );
 }
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
     <div style={{
       padding: 12,

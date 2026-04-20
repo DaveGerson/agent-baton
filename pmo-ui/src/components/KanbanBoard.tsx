@@ -487,7 +487,7 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
         display: 'flex',
         overflow: 'auto',
         padding: '12px 8px',
-        backgroundImage: 'radial-gradient(#d4a15a 1.2px, transparent 1.4px)',
+        backgroundImage: `radial-gradient(${T.crust} 1.2px, transparent 1.4px)`,
         backgroundSize: '14px 14px',
         backgroundColor: T.bg0,
       }}>
@@ -619,7 +619,7 @@ function FilterBtn({
   color,
   onClick,
 }: {
-  children: React.ReactNode;
+  children: ReactNode;
   active: boolean;
   color: string;
   onClick: () => void;

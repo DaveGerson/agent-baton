@@ -212,7 +212,7 @@ export function KanbanCard({ card, columnColor, onForge, onEditPlan, onMutateCar
         left: 8,
         right: 8,
         height: 3,
-        backgroundImage: 'radial-gradient(circle, #f3e4c2 1.5px, transparent 2px)',
+        backgroundImage: `radial-gradient(circle, ${T.bg3} 1.5px, transparent 2px)`,
         backgroundSize: '8px 3px',
         backgroundRepeat: 'repeat-x',
         pointerEvents: 'none',
