@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
-import type { DragEvent } from 'react';
+import type { DragEvent, KeyboardEvent } from 'react';
 import { T, FONTS, SHADOWS, FONT_SIZES } from '../styles/tokens';
-import type { ForgePlanResponse, ForgePlanPhase, ForgePlanStep } from '../api/types';
+import type { ForgePlanResponse, ForgePlanPhase, ForgePlanStep, ForgePlanGate } from '../api/types';
 import { agentDisplayName } from '../utils/agent-names';
 
 const AGENT_LIST = [
@@ -24,6 +24,12 @@ const AGENT_DESCRIPTIONS: Record<string, string> = {
   'data-engineer': 'Database schema, migrations, ETL pipelines',
 };
 
+const MODEL_LIST = ['sonnet', 'opus', 'haiku'] as const;
+type ModelOption = typeof MODEL_LIST[number];
+
+const GATE_TYPE_LIST = ['build', 'test', 'lint', 'custom'] as const;
+type GateType = typeof GATE_TYPE_LIST[number];
+
 // Agent role colors — warm kitchen palette
 const AGENT_COLORS: Record<string, string> = {
   'backend-engineer': T.blueberry,
@@ -35,9 +41,365 @@ const AGENT_COLORS: Record<string, string> = {
   'data-engineer': T.mintDark,
 };
 
+const MODEL_COLORS: Record<ModelOption, string> = {
+  sonnet: T.blueberry,
+  opus: T.cherry,
+  haiku: T.mint,
+};
+
 function agentColor(name: string): string {
   return AGENT_COLORS[name] ?? T.text2;
 }
+
+// ---------------------------------------------------------------------------
+// TagInput — type + Enter to add, X to remove
+// ---------------------------------------------------------------------------
+
+interface TagInputProps {
+  values: string[];
+  onChange: (values: string[]) => void;
+  placeholder?: string;
+  ariaLabel?: string;
+}
+
+function TagInput({ values, onChange, placeholder = 'Type and press Enter', ariaLabel }: TagInputProps) {
+  const [draft, setDraft] = useState('');
+
+  function commit() {
+    const trimmed = draft.trim();
+    if (trimmed && !values.includes(trimmed)) {
+      onChange([...values, trimmed]);
+    }
+    setDraft('');
+  }
+
+  function handleKeyDown(e: KeyboardEvent<HTMLInputElement>) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      commit();
+    } else if (e.key === 'Backspace' && draft === '' && values.length > 0) {
+      onChange(values.slice(0, -1));
+    }
+  }
+
+  function removeTag(idx: number) {
+    onChange(values.filter((_, i) => i !== idx));
+  }
+
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexWrap: 'wrap',
+        gap: 4,
+        padding: '4px 6px',
+        borderRadius: 6,
+        border: `1.5px solid ${T.borderSoft}`,
+        background: T.bg0,
+        minHeight: 32,
+        alignItems: 'center',
+        cursor: 'text',
+      }}
+      onClick={e => {
+        const input = (e.currentTarget as HTMLElement).querySelector('input');
+        input?.focus();
+      }}
+    >
+      {values.map((v, i) => (
+        <span
+          key={i}
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 3,
+            background: T.bg3,
+            border: `1px solid ${T.borderSoft}`,
+            borderRadius: 4,
+            padding: '1px 5px',
+            fontSize: FONT_SIZES.sm,
+            fontFamily: FONTS.mono,
+            color: T.text1,
+            lineHeight: 1.4,
+          }}
+        >
+          {v}
+          <button
+            type="button"
+            aria-label={`Remove ${v}`}
+            onClick={e => { e.stopPropagation(); removeTag(i); }}
+            style={{
+              background: 'none', border: 'none', cursor: 'pointer',
+              color: T.text3, padding: '0 1px', fontSize: 11, lineHeight: 1,
+              fontFamily: FONTS.body,
+            }}
+          >
+            {'\u00d7'}
+          </button>
+        </span>
+      ))}
+      <input
+        aria-label={ariaLabel}
+        value={draft}
+        onChange={e => setDraft(e.target.value)}
+        onKeyDown={handleKeyDown}
+        onBlur={commit}
+        placeholder={values.length === 0 ? placeholder : ''}
+        style={{
+          border: 'none',
+          outline: 'none',
+          background: 'transparent',
+          fontSize: FONT_SIZES.sm,
+          fontFamily: FONTS.mono,
+          color: T.text0,
+          flex: '1 1 80px',
+          minWidth: 60,
+        }}
+      />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// DependencySelect — multi-select checkboxes for step IDs
+// ---------------------------------------------------------------------------
+
+interface DependencySelectProps {
+  allStepIds: string[];
+  currentStepId: string;
+  selected: string[];
+  onChange: (ids: string[]) => void;
+}
+
+function DependencySelect({ allStepIds, currentStepId, selected, onChange }: DependencySelectProps) {
+  const eligible = allStepIds.filter(id => id !== currentStepId);
+
+  if (eligible.length === 0) {
+    return (
+      <span style={{ fontSize: FONT_SIZES.sm, color: T.text3, fontFamily: FONTS.body, fontStyle: 'italic' }}>
+        No other steps in this phase
+      </span>
+    );
+  }
+
+  function toggle(id: string) {
+    onChange(
+      selected.includes(id) ? selected.filter(s => s !== id) : [...selected, id],
+    );
+  }
+
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+      {eligible.map(id => {
+        const checked = selected.includes(id);
+        return (
+          <label
+            key={id}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 4,
+              cursor: 'pointer',
+              fontSize: FONT_SIZES.sm,
+              fontFamily: FONTS.mono,
+              color: checked ? T.text0 : T.text2,
+              background: checked ? T.bg3 : T.bg0,
+              border: `1.5px solid ${checked ? T.border : T.borderSoft}`,
+              borderRadius: 5,
+              padding: '2px 7px',
+              userSelect: 'none',
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={checked}
+              onChange={() => toggle(id)}
+              style={{ accentColor: T.cherry, width: 12, height: 12 }}
+            />
+            {id}
+          </label>
+        );
+      })}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// AdvancedFieldRow — labelled row inside the advanced accordion
+// ---------------------------------------------------------------------------
+
+function AdvancedFieldRow({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+      <div style={{
+        fontSize: FONT_SIZES.xs,
+        fontWeight: 800,
+        fontFamily: FONTS.body,
+        textTransform: 'uppercase',
+        letterSpacing: '0.1em',
+        color: T.text2,
+      }}>
+        {label}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// GateEditor — editable gate fields for a phase
+// ---------------------------------------------------------------------------
+
+interface GateEditorProps {
+  gate: ForgePlanGate | undefined;
+  onChange: (gate: ForgePlanGate | undefined) => void;
+}
+
+const DEFAULT_GATE: ForgePlanGate = {
+  gate_type: 'test',
+  command: '',
+  description: '',
+  fail_on: [],
+  approval_required: false,
+};
+
+function GateEditor({ gate, onChange }: GateEditorProps) {
+  const active = gate ?? DEFAULT_GATE;
+
+  function patch(partial: Partial<ForgePlanGate>) {
+    onChange({ ...active, ...partial });
+  }
+
+  const selectStyle = {
+    fontSize: FONT_SIZES.sm,
+    color: T.text0,
+    background: T.bg0,
+    border: `1.5px solid ${T.borderSoft}`,
+    borderRadius: 6,
+    padding: '4px 8px',
+    outline: 'none',
+    fontFamily: FONTS.body,
+    fontWeight: 600,
+    cursor: 'pointer',
+    width: '100%',
+  };
+
+  const inputStyle = {
+    width: '100%',
+    padding: '4px 8px',
+    borderRadius: 6,
+    border: `1.5px solid ${T.borderSoft}`,
+    background: T.bg0,
+    color: T.text0,
+    fontSize: FONT_SIZES.sm,
+    fontWeight: 600,
+    outline: 'none',
+    fontFamily: FONTS.mono,
+    boxSizing: 'border-box' as const,
+  };
+
+  return (
+    <div style={{
+      background: T.cherrySoft,
+      border: `1.5px solid ${T.border}`,
+      borderRadius: 10,
+      padding: '10px 14px',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 10,
+    }}>
+      <div style={{
+        fontSize: FONT_SIZES.xs,
+        fontWeight: 800,
+        fontFamily: FONTS.body,
+        textTransform: 'uppercase',
+        letterSpacing: '0.1em',
+        color: T.cherry,
+        marginBottom: 2,
+      }}>
+        Gate Configuration
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+        <AdvancedFieldRow label="Gate Type">
+          <select
+            value={active.gate_type}
+            onChange={e => patch({ gate_type: e.target.value as GateType })}
+            style={selectStyle}
+            aria-label="Gate type"
+          >
+            {GATE_TYPE_LIST.map(gt => (
+              <option key={gt} value={gt}>{gt}</option>
+            ))}
+          </select>
+        </AdvancedFieldRow>
+
+        <AdvancedFieldRow label="Command">
+          <input
+            value={active.command}
+            onChange={e => patch({ command: e.target.value })}
+            placeholder="e.g. npm test"
+            style={inputStyle}
+            aria-label="Gate command"
+          />
+        </AdvancedFieldRow>
+      </div>
+
+      <AdvancedFieldRow label="Description">
+        <input
+          value={active.description}
+          onChange={e => patch({ description: e.target.value })}
+          placeholder="What does this gate verify?"
+          style={inputStyle}
+          aria-label="Gate description"
+        />
+      </AdvancedFieldRow>
+
+      <label style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 7,
+        cursor: 'pointer',
+        fontSize: FONT_SIZES.sm,
+        fontFamily: FONTS.body,
+        fontWeight: 700,
+        color: T.text1,
+        userSelect: 'none',
+      }}>
+        <input
+          type="checkbox"
+          checked={active.approval_required ?? false}
+          onChange={e => patch({ approval_required: e.target.checked })}
+          style={{ accentColor: T.cherry, width: 14, height: 14 }}
+        />
+        Require human approval before proceeding
+      </label>
+
+      {/* Remove gate */}
+      <button
+        type="button"
+        onClick={() => onChange(undefined)}
+        style={{
+          alignSelf: 'flex-start',
+          padding: '3px 10px',
+          borderRadius: 6,
+          border: `1.5px solid ${T.border}`,
+          background: T.bg1,
+          color: T.text2,
+          fontSize: FONT_SIZES.sm,
+          fontWeight: 700,
+          cursor: 'pointer',
+          fontFamily: FONTS.body,
+        }}
+      >
+        Remove gate
+      </button>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Main PlanEditor
+// ---------------------------------------------------------------------------
 
 interface PlanEditorProps {
   plan: ForgePlanResponse;
@@ -58,6 +420,8 @@ export function PlanEditor({
 }: PlanEditorProps) {
   const [expandedPhase, setExpandedPhase] = useState<number | null>(0);
   const [editingStep, setEditingStep] = useState<string | null>(null);
+  const [expandedAdvanced, setExpandedAdvanced] = useState<Set<string>>(new Set());
+  const [expandedGateEditor, setExpandedGateEditor] = useState<Set<number>>(new Set());
   const [draftSaved, setDraftSaved] = useState(false);
   const [lastSaveTime, setLastSaveTime] = useState<string | null>(null);
   const [dragState, setDragState] = useState<{ phaseIdx: number; stepIdx: number } | null>(null);
@@ -158,6 +522,24 @@ export function PlanEditor({
       } as ForgePlanPhase],
     });
     setExpandedPhase(newPhaseId);
+  }
+
+  function toggleAdvanced(stepId: string) {
+    setExpandedAdvanced(prev => {
+      const next = new Set(prev);
+      if (next.has(stepId)) next.delete(stepId);
+      else next.add(stepId);
+      return next;
+    });
+  }
+
+  function toggleGateEditor(phaseIdx: number) {
+    setExpandedGateEditor(prev => {
+      const next = new Set(prev);
+      if (next.has(phaseIdx)) next.delete(phaseIdx);
+      else next.add(phaseIdx);
+      return next;
+    });
   }
 
   function handleDragStart(phaseIdx: number, stepIdx: number) {
@@ -310,6 +692,9 @@ export function PlanEditor({
       {/* Phase / course cards */}
       {plan.phases.map((phase, pi) => {
         const isExpanded = expandedPhase === pi;
+        const isGateEditorOpen = expandedGateEditor.has(pi);
+        const allStepIdsInPhase = phase.steps.map(s => s.step_id);
+
         return (
           <div
             key={phase.phase_id}
@@ -399,6 +784,25 @@ export function PlanEditor({
                   </span>
                 )}
               </div>
+
+              {/* Gate editor toggle */}
+              <button
+                aria-label={`${isGateEditorOpen ? 'Hide' : 'Edit'} gate for phase ${pi + 1}`}
+                aria-expanded={isGateEditorOpen}
+                onClick={() => toggleGateEditor(pi)}
+                title="Edit gate"
+                style={{
+                  background: isGateEditorOpen ? T.cherrySoft : 'none',
+                  border: `1px solid ${isGateEditorOpen ? T.border : 'transparent'}`,
+                  color: isGateEditorOpen ? T.cherry : T.text3,
+                  fontSize: 13, cursor: 'pointer', padding: '4px 8px',
+                  borderRadius: 6, fontFamily: FONTS.body, fontWeight: 700,
+                  transition: 'all 0.15s',
+                }}
+              >
+                {phase.gate ? 'gate' : '+ gate'}
+              </button>
+
               <button
                 aria-label={`Remove phase ${pi + 1}: ${phase.name}`}
                 onClick={() => removePhase(pi)}
@@ -424,6 +828,9 @@ export function PlanEditor({
                 const isDragging = dragState?.phaseIdx === pi && dragState?.stepIdx === si;
                 const isDropTarget = dropTarget?.phaseIdx === pi && dropTarget?.stepIdx === si && !isDragging;
                 const aColor = agentColor(step.agent_name);
+                const isAdvancedOpen = expandedAdvanced.has(step.step_id);
+                const model = (step.model ?? 'sonnet') as ModelOption;
+
                 return (
                   <div
                     key={step.step_id}
@@ -433,155 +840,287 @@ export function PlanEditor({
                     onDrop={e => handleDrop(e, pi, si)}
                     onDragEnd={handleDragEnd}
                     style={{
-                      display: 'flex', alignItems: 'flex-start', gap: 8, padding: '8px 14px',
                       borderBottom: si < phase.steps.length - 1 ? `1.5px dashed ${T.borderSoft}` : 'none',
                       borderTop: isDropTarget ? `2px solid ${T.cherry}` : undefined,
                       opacity: isDragging ? 0.45 : 1,
                       transition: 'opacity 0.1s',
                     }}
                   >
-                    {/* Drag handle */}
-                    <span
-                      aria-hidden="true"
-                      style={{ cursor: 'grab', color: T.text3, fontSize: 14, flexShrink: 0, lineHeight: 1, paddingTop: 4, userSelect: 'none' }}
-                      title="Drag to reorder"
-                    >
-                      {'⠿'}
-                    </span>
+                    {/* Primary step row */}
+                    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '8px 14px' }}>
+                      {/* Drag handle */}
+                      <span
+                        aria-hidden="true"
+                        style={{ cursor: 'grab', color: T.text3, fontSize: 14, flexShrink: 0, lineHeight: 1, paddingTop: 4, userSelect: 'none' }}
+                        title="Drag to reorder"
+                      >
+                        {'⠿'}
+                      </span>
 
-                    {/* Reorder buttons (keyboard fallback) */}
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 1, flexShrink: 0 }}>
-                      <button
-                        aria-label={`Move step ${si + 1} up`}
-                        onClick={() => moveStep(pi, si, -1)}
-                        disabled={si === 0}
-                        style={{
-                          background: 'none', border: 'none',
-                          color: si === 0 ? T.bg3 : T.text3,
-                          fontSize: 10, cursor: si === 0 ? 'default' : 'pointer',
-                          padding: 0, lineHeight: 1, minWidth: 22, minHeight: 22,
-                          display: 'flex', alignItems: 'center', justifyContent: 'center',
-                        }}
-                      >{'\u25b2'}</button>
-                      <button
-                        aria-label={`Move step ${si + 1} down`}
-                        onClick={() => moveStep(pi, si, 1)}
-                        disabled={si === phase.steps.length - 1}
-                        style={{
-                          background: 'none', border: 'none',
-                          color: si === phase.steps.length - 1 ? T.bg3 : T.text3,
-                          fontSize: 10, cursor: si === phase.steps.length - 1 ? 'default' : 'pointer',
-                          padding: 0, lineHeight: 1, minWidth: 22, minHeight: 22,
-                          display: 'flex', alignItems: 'center', justifyContent: 'center',
-                        }}
-                      >{'\u25bc'}</button>
-                    </div>
-
-                    {/* Step ID */}
-                    <span style={{
-                      fontFamily: FONTS.mono, fontSize: 11, color: T.text2,
-                      flexShrink: 0, paddingTop: 3,
-                    }}>
-                      {step.step_id}
-                    </span>
-
-                    {/* Step content */}
-                    <div style={{ flex: 1 }}>
-                      {editingStep === step.step_id ? (
-                        <input
-                          autoFocus
-                          value={step.task_description}
-                          onChange={e => updateStep(pi, si, s => ({ ...s, task_description: e.target.value }))}
-                          onBlur={() => setEditingStep(null)}
-                          onKeyDown={e => e.key === 'Enter' && setEditingStep(null)}
+                      {/* Reorder buttons (keyboard fallback) */}
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 1, flexShrink: 0 }}>
+                        <button
+                          aria-label={`Move step ${si + 1} up`}
+                          onClick={() => moveStep(pi, si, -1)}
+                          disabled={si === 0}
                           style={{
-                            width: '100%', padding: '4px 8px', borderRadius: 6,
-                            border: `2px solid ${T.cherry}`, background: T.bg3,
-                            color: T.text0, fontSize: 13, fontWeight: 600,
-                            outline: 'none', fontFamily: FONTS.body,
+                            background: 'none', border: 'none',
+                            color: si === 0 ? T.bg3 : T.text3,
+                            fontSize: 10, cursor: si === 0 ? 'default' : 'pointer',
+                            padding: 0, lineHeight: 1, minWidth: 22, minHeight: 22,
+                            display: 'flex', alignItems: 'center', justifyContent: 'center',
                           }}
-                        />
-                      ) : (
-                        <div
-                          onClick={() => setEditingStep(step.step_id)}
+                        >{'\u25b2'}</button>
+                        <button
+                          aria-label={`Move step ${si + 1} down`}
+                          onClick={() => moveStep(pi, si, 1)}
+                          disabled={si === phase.steps.length - 1}
                           style={{
-                            fontSize: 13, color: T.text0, fontWeight: 600,
-                            cursor: 'text', minHeight: 18, fontFamily: FONTS.body,
+                            background: 'none', border: 'none',
+                            color: si === phase.steps.length - 1 ? T.bg3 : T.text3,
+                            fontSize: 10, cursor: si === phase.steps.length - 1 ? 'default' : 'pointer',
+                            padding: 0, lineHeight: 1, minWidth: 22, minHeight: 22,
+                            display: 'flex', alignItems: 'center', justifyContent: 'center',
                           }}
-                          title="Click to edit"
-                        >
-                          {step.task_description || (
-                            <span style={{ color: T.text3, fontStyle: 'italic' }}>Click to add description</span>
-                          )}
-                        </div>
-                      )}
-                      {/* Dependency hint */}
-                      {step.depends_on && step.depends_on.length > 0 && (
-                        <div style={{
-                          fontFamily: FONTS.hand, fontSize: 14, color: T.text2,
-                          transform: 'rotate(-0.5deg)', display: 'inline-block', marginTop: 2,
-                        }}>
-                          after {step.depends_on.join(', ')}
-                        </div>
-                      )}
-                    </div>
+                        >{'\u25bc'}</button>
+                      </div>
 
-                    {/* Agent chip — dropdown when editing, badge when not */}
-                    {editingStep === step.step_id ? (
+                      {/* Step ID */}
+                      <span style={{
+                        fontFamily: FONTS.mono, fontSize: 11, color: T.text2,
+                        flexShrink: 0, paddingTop: 3,
+                      }}>
+                        {step.step_id}
+                      </span>
+
+                      {/* Step content */}
+                      <div style={{ flex: 1 }}>
+                        {editingStep === step.step_id ? (
+                          <input
+                            autoFocus
+                            value={step.task_description}
+                            onChange={e => updateStep(pi, si, s => ({ ...s, task_description: e.target.value }))}
+                            onBlur={() => setEditingStep(null)}
+                            onKeyDown={e => e.key === 'Enter' && setEditingStep(null)}
+                            style={{
+                              width: '100%', padding: '4px 8px', borderRadius: 6,
+                              border: `2px solid ${T.cherry}`, background: T.bg3,
+                              color: T.text0, fontSize: 13, fontWeight: 600,
+                              outline: 'none', fontFamily: FONTS.body,
+                            }}
+                          />
+                        ) : (
+                          <div
+                            onClick={() => setEditingStep(step.step_id)}
+                            style={{
+                              fontSize: 13, color: T.text0, fontWeight: 600,
+                              cursor: 'text', minHeight: 18, fontFamily: FONTS.body,
+                            }}
+                            title="Click to edit"
+                          >
+                            {step.task_description || (
+                              <span style={{ color: T.text3, fontStyle: 'italic' }}>Click to add description</span>
+                            )}
+                          </div>
+                        )}
+                        {/* Dependency hint */}
+                        {step.depends_on && step.depends_on.length > 0 && (
+                          <div style={{
+                            fontFamily: FONTS.hand, fontSize: 14, color: T.text2,
+                            transform: 'rotate(-0.5deg)', display: 'inline-block', marginTop: 2,
+                          }}>
+                            after {step.depends_on.join(', ')}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Model dropdown — always visible */}
                       <select
-                        value={step.agent_name}
-                        onChange={e => updateStep(pi, si, s => ({ ...s, agent_name: e.target.value }))}
+                        value={model}
+                        onChange={e => updateStep(pi, si, s => ({ ...s, model: e.target.value }))}
                         onClick={e => e.stopPropagation()}
+                        aria-label={`Model for step ${step.step_id}`}
                         style={{
-                          fontSize: 11,
-                          color: aColor,
+                          fontSize: 10,
+                          color: MODEL_COLORS[model] ?? T.text2,
                           background: T.bg3,
-                          border: `2px solid ${T.border}`,
+                          border: `1.5px solid ${T.border}`,
                           borderRadius: 6,
-                          padding: '3px 6px',
+                          padding: '3px 5px',
                           outline: 'none',
                           flexShrink: 0,
                           cursor: 'pointer',
                           fontFamily: FONTS.body,
-                          fontWeight: 700,
+                          fontWeight: 800,
+                          textTransform: 'uppercase',
+                          letterSpacing: '0.04em',
                         }}
                       >
-                        {AGENT_LIST.map(a => (
-                          <option key={a} value={a} title={AGENT_DESCRIPTIONS[a] || ''}>{agentDisplayName(a)}</option>
+                        {MODEL_LIST.map(m => (
+                          <option key={m} value={m}>{m}</option>
                         ))}
-                        {/* Preserve current value if it's not in the standard list */}
-                        {!AGENT_LIST.includes(step.agent_name as typeof AGENT_LIST[number]) && (
-                          <option value={step.agent_name} title={AGENT_DESCRIPTIONS[step.agent_name] || ''}>{agentDisplayName(step.agent_name)}</option>
-                        )}
                       </select>
-                    ) : (
-                      <span style={{
-                        fontSize: 11, color: aColor,
-                        background: T.bg2,
-                        border: `1.5px solid ${T.border}`,
-                        padding: '3px 8px',
-                        borderRadius: 999, whiteSpace: 'nowrap', flexShrink: 0,
-                        fontFamily: FONTS.body, fontWeight: 800,
-                        boxShadow: SHADOWS.sm,
-                      }}>
-                        {agentDisplayName(step.agent_name)}
-                      </span>
-                    )}
 
-                    {/* Remove step */}
-                    <button
-                      aria-label={`Remove step ${si + 1}: ${step.task_description.slice(0, 40)}`}
-                      onClick={() => removeStep(pi, si)}
-                      style={{
-                        background: 'none', border: `1px solid ${T.borderSoft}`,
-                        color: T.text3, fontSize: 12, cursor: 'pointer',
-                        padding: '1px 6px', flexShrink: 0, borderRadius: 4,
-                        fontFamily: FONTS.body,
-                      }}
-                      title="Remove step"
+                      {/* Agent chip — dropdown when editing, badge when not */}
+                      {editingStep === step.step_id ? (
+                        <select
+                          value={step.agent_name}
+                          onChange={e => updateStep(pi, si, s => ({ ...s, agent_name: e.target.value }))}
+                          onClick={e => e.stopPropagation()}
+                          style={{
+                            fontSize: 11,
+                            color: aColor,
+                            background: T.bg3,
+                            border: `2px solid ${T.border}`,
+                            borderRadius: 6,
+                            padding: '3px 6px',
+                            outline: 'none',
+                            flexShrink: 0,
+                            cursor: 'pointer',
+                            fontFamily: FONTS.body,
+                            fontWeight: 700,
+                          }}
+                        >
+                          {AGENT_LIST.map(a => (
+                            <option key={a} value={a} title={AGENT_DESCRIPTIONS[a] || ''}>{agentDisplayName(a)}</option>
+                          ))}
+                          {/* Preserve current value if it's not in the standard list */}
+                          {!AGENT_LIST.includes(step.agent_name as typeof AGENT_LIST[number]) && (
+                            <option value={step.agent_name} title={AGENT_DESCRIPTIONS[step.agent_name] || ''}>{agentDisplayName(step.agent_name)}</option>
+                          )}
+                        </select>
+                      ) : (
+                        <span style={{
+                          fontSize: 11, color: aColor,
+                          background: T.bg2,
+                          border: `1.5px solid ${T.border}`,
+                          padding: '3px 8px',
+                          borderRadius: 999, whiteSpace: 'nowrap', flexShrink: 0,
+                          fontFamily: FONTS.body, fontWeight: 800,
+                          boxShadow: SHADOWS.sm,
+                        }}>
+                          {agentDisplayName(step.agent_name)}
+                        </span>
+                      )}
+
+                      {/* Advanced toggle */}
+                      <button
+                        type="button"
+                        aria-label={`${isAdvancedOpen ? 'Hide' : 'Show'} advanced fields for step ${step.step_id}`}
+                        aria-expanded={isAdvancedOpen}
+                        aria-controls={`advanced-${step.step_id}`}
+                        onClick={() => toggleAdvanced(step.step_id)}
+                        style={{
+                          background: isAdvancedOpen ? T.bg3 : 'none',
+                          border: `1px solid ${isAdvancedOpen ? T.border : T.borderSoft}`,
+                          color: isAdvancedOpen ? T.text1 : T.text3,
+                          fontSize: FONT_SIZES.xs,
+                          fontWeight: 800,
+                          fontFamily: FONTS.body,
+                          textTransform: 'uppercase',
+                          letterSpacing: '0.06em',
+                          cursor: 'pointer',
+                          padding: '2px 7px',
+                          borderRadius: 5,
+                          flexShrink: 0,
+                          transition: 'all 0.15s',
+                        }}
+                      >
+                        {isAdvancedOpen ? 'hide' : 'adv'}
+                      </button>
+
+                      {/* Remove step */}
+                      <button
+                        aria-label={`Remove step ${si + 1}: ${step.task_description.slice(0, 40)}`}
+                        onClick={() => removeStep(pi, si)}
+                        style={{
+                          background: 'none', border: `1px solid ${T.borderSoft}`,
+                          color: T.text3, fontSize: 12, cursor: 'pointer',
+                          padding: '1px 6px', flexShrink: 0, borderRadius: 4,
+                          fontFamily: FONTS.body,
+                        }}
+                        title="Remove step"
+                      >
+                        {'\u00d7'}
+                      </button>
+                    </div>
+
+                    {/* Advanced accordion */}
+                    <div
+                      id={`advanced-${step.step_id}`}
+                      hidden={!isAdvancedOpen}
                     >
-                      {'\u00d7'}
-                    </button>
+                      <div style={{
+                        margin: '0 14px 10px',
+                        background: T.bg3,
+                        border: `1.5px solid ${T.borderSoft}`,
+                        borderRadius: 8,
+                        padding: '10px 12px',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 10,
+                        boxShadow: 'inset 2px 2px 0 0 rgba(0,0,0,0.06)',
+                      }}>
+                        <div style={{
+                          fontSize: FONT_SIZES.xs,
+                          fontWeight: 800,
+                          fontFamily: FONTS.body,
+                          textTransform: 'uppercase',
+                          letterSpacing: '0.1em',
+                          color: T.text3,
+                          marginBottom: 2,
+                        }}>
+                          Advanced
+                        </div>
+
+                        <AdvancedFieldRow label="Dependencies">
+                          <DependencySelect
+                            allStepIds={allStepIdsInPhase}
+                            currentStepId={step.step_id}
+                            selected={step.depends_on ?? []}
+                            onChange={ids => updateStep(pi, si, s => ({ ...s, depends_on: ids }))}
+                          />
+                        </AdvancedFieldRow>
+
+                        <AdvancedFieldRow label="Deliverables">
+                          <TagInput
+                            values={step.deliverables ?? []}
+                            onChange={vals => updateStep(pi, si, s => ({ ...s, deliverables: vals }))}
+                            placeholder="e.g. README.md"
+                            ariaLabel={`Deliverables for step ${step.step_id}`}
+                          />
+                        </AdvancedFieldRow>
+
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                          <AdvancedFieldRow label="Allowed Paths">
+                            <TagInput
+                              values={step.allowed_paths ?? []}
+                              onChange={vals => updateStep(pi, si, s => ({ ...s, allowed_paths: vals }))}
+                              placeholder="e.g. src/"
+                              ariaLabel={`Allowed paths for step ${step.step_id}`}
+                            />
+                          </AdvancedFieldRow>
+
+                          <AdvancedFieldRow label="Blocked Paths">
+                            <TagInput
+                              values={step.blocked_paths ?? []}
+                              onChange={vals => updateStep(pi, si, s => ({ ...s, blocked_paths: vals }))}
+                              placeholder="e.g. .env"
+                              ariaLabel={`Blocked paths for step ${step.step_id}`}
+                            />
+                          </AdvancedFieldRow>
+                        </div>
+
+                        <AdvancedFieldRow label="Context Files">
+                          <TagInput
+                            values={step.context_files ?? []}
+                            onChange={vals => updateStep(pi, si, s => ({ ...s, context_files: vals }))}
+                            placeholder="e.g. docs/architecture.md"
+                            ariaLabel={`Context files for step ${step.step_id}`}
+                          />
+                        </AdvancedFieldRow>
+                      </div>
+                    </div>
                   </div>
                 );
               })}
@@ -611,8 +1150,33 @@ export function PlanEditor({
                 </button>
               </div>
 
-              {/* Gate footer */}
-              {phase.gate && (
+              {/* Gate editor — shown when toggled */}
+              {isGateEditorOpen && (
+                <div style={{ padding: '6px 14px 10px' }}>
+                  <GateEditor
+                    gate={phase.gate}
+                    onChange={gate => updatePhase(pi, p => ({ ...p, gate }))}
+                  />
+                  {!phase.gate && (
+                    <button
+                      type="button"
+                      onClick={() => updatePhase(pi, p => ({ ...p, gate: { ...DEFAULT_GATE } }))}
+                      style={{
+                        marginTop: 8,
+                        padding: '4px 12px', borderRadius: 6,
+                        border: `2px dashed ${T.border}`, background: 'transparent',
+                        color: T.cherry, fontSize: 12, fontWeight: 700,
+                        cursor: 'pointer', fontFamily: FONTS.body,
+                      }}
+                    >
+                      + Enable gate for this phase
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {/* Gate footer — read-only summary when gate is set and editor is closed */}
+              {phase.gate && !isGateEditorOpen && (
                 <div style={{
                   background: T.cherrySoft,
                   borderTop: `1.5px dashed ${T.border}`,
@@ -708,6 +1272,10 @@ export function PlanEditor({
   );
 }
 
+// ---------------------------------------------------------------------------
+// StatChip
+// ---------------------------------------------------------------------------
+
 function StatChip({ label, value, valueColor }: { label: string; value: string; valueColor?: string }) {
   return (
     <div style={{
@@ -733,3 +1301,4 @@ function StatChip({ label, value, valueColor }: { label: string; value: string; 
     </div>
   );
 }
+

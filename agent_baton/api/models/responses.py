@@ -884,6 +884,25 @@ class ExecuteCardResponse(BaseModel):
     )
 
 
+class ForgePlanResponse(BaseModel):
+    """Response from POST /pmo/forge/plan.
+
+    Wraps the generated plan dict together with a ``session_id`` that
+    the frontend can use to subscribe to the SSE progress stream at
+    ``GET /pmo/forge/progress/{session_id}`` before or during plan
+    generation.
+    """
+
+    session_id: str = Field(
+        ...,
+        description="UUID that identifies this generation session.  Pass to the progress SSE endpoint.",
+    )
+    plan: dict = Field(
+        default_factory=dict,
+        description="The generated plan as a raw dict (MachinePlan.to_dict() shape).",
+    )
+
+
 # ---------------------------------------------------------------------------
 # External items responses
 # ---------------------------------------------------------------------------

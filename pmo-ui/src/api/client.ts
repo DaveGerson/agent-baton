@@ -9,6 +9,7 @@ import type {
   ForgeApproveResponse,
   ForgePlanBody,
   ForgePlanResponse,
+  ForgePlanWrappedResponse,
   InterviewResponse,
   RegenerateBody,
   AdoSearchResponse,
@@ -27,6 +28,8 @@ import type {
   ApprovalLogResponse,
   RequestReviewBody,
   RequestReviewResponse,
+  ExecutionControlResponse,
+  UpdatePlanResponse,
 } from './types';
 
 const BASE = '/api/v1/pmo';
@@ -73,8 +76,12 @@ export const api = {
   },
 
   // Forge
-  forgePlan(body: ForgePlanBody): Promise<ForgePlanResponse> {
+  forgePlan(body: ForgePlanBody): Promise<ForgePlanWrappedResponse> {
     return request('/forge/plan', { method: 'POST', body: JSON.stringify(body) });
+  },
+  /** Returns the URL for the SSE progress stream for a given session. */
+  forgeProgressUrl(sessionId: string): string {
+    return `${BASE}/forge/progress/${encodeURIComponent(sessionId)}`;
   },
   forgeApprove(body: ForgeApproveBody): Promise<ForgeApproveResponse> {
     return request('/forge/approve', { method: 'POST', body: JSON.stringify(body) });
@@ -111,6 +118,27 @@ export const api = {
     return request(`/execute/${encodeURIComponent(cardId)}`, {
       method: 'POST',
       body: JSON.stringify(body),
+    });
+  },
+  pauseExecution(cardId: string): Promise<ExecutionControlResponse> {
+    return request(`/execute/${encodeURIComponent(cardId)}/pause`, { method: 'POST' });
+  },
+  resumeExecution(cardId: string): Promise<ExecutionControlResponse> {
+    return request(`/execute/${encodeURIComponent(cardId)}/resume`, { method: 'POST' });
+  },
+  cancelExecution(cardId: string): Promise<ExecutionControlResponse> {
+    return request(`/execute/${encodeURIComponent(cardId)}/cancel`, { method: 'POST' });
+  },
+  retryStep(cardId: string, stepId: string): Promise<ExecutionControlResponse> {
+    return request(`/execute/${encodeURIComponent(cardId)}/retry-step`, {
+      method: 'POST',
+      body: JSON.stringify({ step_id: stepId }),
+    });
+  },
+  skipStep(cardId: string, stepId: string, reason: string): Promise<ExecutionControlResponse> {
+    return request(`/execute/${encodeURIComponent(cardId)}/skip-step`, {
+      method: 'POST',
+      body: JSON.stringify({ step_id: stepId, reason }),
     });
   },
 
@@ -163,6 +191,14 @@ export const api = {
     });
   },
 
+  // Plan update
+  updatePlan(cardId: string, plan: ForgePlanResponse): Promise<UpdatePlanResponse> {
+    return request(`/cards/${encodeURIComponent(cardId)}/plan`, {
+      method: 'POST',
+      body: JSON.stringify({ plan }),
+    });
+  },
+
   // Review workflow
   requestReview(cardId: string, body: RequestReviewBody): Promise<RequestReviewResponse> {
     return request(`/cards/${encodeURIComponent(cardId)}/request-review`, {
@@ -176,4 +212,4 @@ export const api = {
 };
 
 // Re-export types for convenience
-export type { PmoCard, PmoProject, ProgramHealth, PmoSignal, BoardResponse, PlanResponse, ForgePlanBody, ForgePlanResponse, ForgeApproveBody, ForgeApproveResponse, InterviewResponse, RegenerateBody, AdoSearchResponse, ExecuteCardBody, ExecuteCardResponse, ExternalItem, ExternalMapping, PendingGate, GateApproveBody, GateRejectBody, GateActionResponse, ConsolidationResult, MergeResponse, CreatePrResponse, ApprovalLogEntry, ApprovalLogResponse, RequestReviewBody, RequestReviewResponse };
+export type { PmoCard, PmoProject, ProgramHealth, PmoSignal, BoardResponse, PlanResponse, ForgePlanBody, ForgePlanResponse, ForgePlanWrappedResponse, ForgeApproveBody, ForgeApproveResponse, InterviewResponse, RegenerateBody, AdoSearchResponse, ExecuteCardBody, ExecuteCardResponse, ExternalItem, ExternalMapping, PendingGate, GateApproveBody, GateRejectBody, GateActionResponse, ConsolidationResult, MergeResponse, CreatePrResponse, ApprovalLogEntry, ApprovalLogResponse, RequestReviewBody, RequestReviewResponse, ExecutionControlResponse, UpdatePlanResponse };

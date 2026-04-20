@@ -98,6 +98,19 @@ export interface ForgePlanBody {
   priority?: number;
 }
 
+/** Wrapped response from POST /forge/plan — contains session_id for SSE progress tracking */
+export interface ForgePlanWrappedResponse {
+  session_id: string;
+  plan: ForgePlanResponse;
+}
+
+/** Event emitted by GET /api/v1/pmo/forge/progress/{sessionId} */
+export interface ForgeProgressEvent {
+  stage: 'analyzing' | 'routing' | 'sizing' | 'generating' | 'validating' | 'complete';
+  progress_pct: number;
+  message: string;
+}
+
 // ---------------------------------------------------------------------------
 // Forge-specific plan types (match raw MachinePlan.to_dict() output)
 // ---------------------------------------------------------------------------
@@ -119,6 +132,12 @@ export interface ForgePlanGate {
   command: string;
   description: string;
   fail_on: string[];
+  approval_required?: boolean;
+}
+
+export interface UpdatePlanResponse {
+  saved: true;
+  card_id: string;
 }
 
 export interface ForgePlanPhase {
@@ -339,4 +358,15 @@ export interface RequestReviewBody {
 export interface RequestReviewResponse {
   task_id: string;
   status: 'review_requested';
+}
+
+// ---------------------------------------------------------------------------
+// Execution control types
+// ---------------------------------------------------------------------------
+
+export interface ExecutionControlResponse {
+  status: string;
+  task_id: string;
+  step_id?: string;
+  message?: string;
 }

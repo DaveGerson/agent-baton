@@ -8,7 +8,7 @@ import { ConfirmDialog } from './ConfirmDialog';
 import { usePersistedState } from '../hooks/usePersistedState';
 import { T, SR_ONLY, FONTS, SHADOWS } from '../styles/tokens';
 import { useToast } from '../contexts/ToastContext';
-import type { PmoProject, PmoSignal, ForgePlanResponse, InterviewQuestion, InterviewAnswer } from '../api/types';
+import type { PmoProject, PmoSignal, ForgePlanResponse, ForgeProgressEvent, InterviewQuestion, InterviewAnswer } from '../api/types';
 
 interface ForgePanelProps {
   onBack: () => void;
@@ -76,6 +76,10 @@ export function ForgePanel({ onBack, initialSignal, onApproved }: ForgePanelProp
   const [showDraftBanner, setShowDraftBanner] = useState(false);
   const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
 
+  const [progressStage, setProgressStage] = useState<ForgeProgressEvent['stage'] | null>(null);
+  const [progressMessage, setProgressMessage] = useState<string>('');
+  const sseRef = useRef<EventSource | null>(null);
+
   const abortRef = useRef<AbortController | null>(null);
   const panelBodyRef = useRef<HTMLDivElement>(null);
   const selectedProject = projects.find(p => p.project_id === projectId);
@@ -94,7 +98,10 @@ export function ForgePanel({ onBack, initialSignal, onApproved }: ForgePanelProp
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    return () => { abortRef.current?.abort(); };
+    return () => {
+      abortRef.current?.abort();
+      sseRef.current?.close();
+    };
   }, []);
 
   // Shift focus to the panel body on every phase transition so keyboard
@@ -123,26 +130,72 @@ export function ForgePanel({ onBack, initialSignal, onApproved }: ForgePanelProp
     }
   }, [phase, projectId]);
 
+  function connectProgressSSE(sessionId: string) {
+    // Close any pre-existing SSE connection first.
+    sseRef.current?.close();
+    sseRef.current = null;
+
+    let es: EventSource;
+    try {
+      es = new EventSource(api.forgeProgressUrl(sessionId));
+    } catch {
+      // EventSource construction can fail in test environments — degrade gracefully.
+      return;
+    }
+
+    sseRef.current = es;
+
+    es.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data as string) as ForgeProgressEvent;
+        setProgressStage(data.stage);
+        setProgressMessage(data.message);
+        if (data.stage === 'complete') {
+          es.close();
+          sseRef.current = null;
+        }
+      } catch {
+        // Malformed SSE frame — ignore.
+      }
+    };
+
+    es.onerror = () => {
+      // Connection dropped — close and fall back to spinner (state is unchanged).
+      es.close();
+      sseRef.current = null;
+    };
+  }
+
   async function handleGenerate() {
     if (!description.trim() || !projectId) return;
     abortRef.current?.abort();
     abortRef.current = new AbortController();
     setPhase('generating');
     setGenerateError(null);
+    setProgressStage(null);
+    setProgressMessage('');
     try {
-      const result = await api.forgePlan({
+      const wrapped = await api.forgePlan({
         description: description.trim(),
         program: selectedProject?.program ?? '',
         project_id: projectId,
         task_type: taskType || undefined,
         priority,
       });
-      setPlan(result);
+      // Connect SSE stream if a session_id was returned.
+      if (wrapped.session_id) {
+        connectProgressSSE(wrapped.session_id);
+      }
+      setPlan(wrapped.plan);
       setPhase('preview');
     } catch (err) {
       if ((err as Error).name === 'AbortError') return;
       setGenerateError(err instanceof Error ? err.message : 'Generation failed');
       setPhase('intake');
+    } finally {
+      // Ensure SSE is closed once we leave the generating phase.
+      sseRef.current?.close();
+      sseRef.current = null;
     }
   }
 
@@ -366,6 +419,10 @@ export function ForgePanel({ onBack, initialSignal, onApproved }: ForgePanelProp
             <button
               onClick={() => {
                 abortRef.current?.abort();
+                sseRef.current?.close();
+                sseRef.current = null;
+                setProgressStage(null);
+                setProgressMessage('');
                 setPhase(phase === 'regenerating' ? 'preview' : 'intake');
               }}
               style={{
@@ -561,7 +618,7 @@ export function ForgePanel({ onBack, initialSignal, onApproved }: ForgePanelProp
           </div>
         )}
 
-        {/* GENERATING spinner */}
+        {/* GENERATING progress indicator */}
         {phase === 'generating' && (
           <div style={{
             maxWidth: 500, margin: '20px auto 0',
@@ -571,31 +628,40 @@ export function ForgePanel({ onBack, initialSignal, onApproved }: ForgePanelProp
             boxShadow: SHADOWS.lg,
             padding: '36px 24px',
             textAlign: 'center',
-            display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14,
+            display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 18,
           }}>
-            <span style={{ fontSize: 64, lineHeight: 1 }}>🏃</span>
+            <span style={{ fontSize: 64, lineHeight: 1 }}>{'👨\u200d🍳'}</span>
             <div style={{
-              fontFamily: FONTS.display, fontWeight: 900, fontSize: 30, color: T.text0,
+              fontFamily: FONTS.display, fontWeight: 900, fontSize: 28, color: T.text0,
             }}>
               heating up the pans…
             </div>
-            <div style={{
-              fontFamily: FONTS.hand, fontSize: 22, color: T.cherry,
-              transform: 'rotate(-1.5deg)', display: 'inline-block',
-            }}>
-              drafting your recipe, chef
-            </div>
-            {/* Progress bar */}
-            <div style={{
-              background: T.bg3, border: `2px solid ${T.border}`, borderRadius: 999,
-              height: 12, width: '80%', overflow: 'hidden',
-            }}>
+
+            {/* Step indicator — shown when SSE is active */}
+            {progressStage ? (
+              <ForgeStepIndicator stage={progressStage} />
+            ) : (
+              /* Fallback indeterminate bar when no SSE data yet */
               <div style={{
-                height: '100%',
-                backgroundImage: `repeating-linear-gradient(45deg, ${T.butter} 0 10px, ${T.tangerine} 10px 20px)`,
-                animation: 'forge-bar 1.4s linear infinite',
-                width: '100%',
-              }} />
+                background: T.bg3, border: `2px solid ${T.border}`, borderRadius: 999,
+                height: 12, width: '80%', overflow: 'hidden',
+              }}>
+                <div style={{
+                  height: '100%',
+                  backgroundImage: `repeating-linear-gradient(45deg, ${T.butter} 0 10px, ${T.tangerine} 10px 20px)`,
+                  animation: 'forge-bar 1.4s linear infinite',
+                  width: '100%',
+                }} />
+              </div>
+            )}
+
+            {/* Human-readable message from SSE event */}
+            <div style={{
+              fontFamily: FONTS.hand, fontSize: 18, color: T.cherry,
+              transform: 'rotate(-1deg)', display: 'inline-block',
+              minHeight: 28,
+            }}>
+              {progressMessage || 'drafting your recipe, chef'}
             </div>
           </div>
         )}
@@ -817,6 +883,132 @@ function FormField({
         {label}
       </label>
       {children}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ForgeStepIndicator — horizontal 5-step progress tracker
+// ---------------------------------------------------------------------------
+
+type ProgressStage = ForgeProgressEvent['stage'];
+
+const FORGE_STEPS: { stage: ProgressStage; label: string }[] = [
+  { stage: 'analyzing',  label: 'Analyzing'  },
+  { stage: 'routing',    label: 'Routing'    },
+  { stage: 'sizing',     label: 'Sizing'     },
+  { stage: 'generating', label: 'Generating' },
+  { stage: 'validating', label: 'Validating' },
+];
+
+const STAGE_ORDER: ProgressStage[] = [
+  'analyzing', 'routing', 'sizing', 'generating', 'validating', 'complete',
+];
+
+function ForgeStepIndicator({ stage }: { stage: ProgressStage }) {
+  const currentIdx = STAGE_ORDER.indexOf(stage);
+
+  return (
+    <div
+      role="list"
+      aria-label="Plan generation progress"
+      style={{
+        display: 'flex',
+        alignItems: 'flex-start',
+        gap: 0,
+        width: '100%',
+        maxWidth: 420,
+      }}
+    >
+      {FORGE_STEPS.map((step, i) => {
+        const stepIdx = STAGE_ORDER.indexOf(step.stage);
+        const isDone    = currentIdx > stepIdx;
+        const isCurrent = currentIdx === stepIdx;
+        const isLast    = i === FORGE_STEPS.length - 1;
+
+        const dotColor = isDone
+          ? T.mint
+          : isCurrent
+          ? T.cherry
+          : T.bg4;
+
+        const dotBorder = isDone || isCurrent ? T.border : T.borderSoft;
+
+        return (
+          <div
+            key={step.stage}
+            role="listitem"
+            aria-current={isCurrent ? 'step' : undefined}
+            style={{
+              flex: 1,
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              position: 'relative',
+            }}
+          >
+            {/* Connector line to the right */}
+            {!isLast && (
+              <div style={{
+                position: 'absolute',
+                top: 12,
+                left: '50%',
+                width: '100%',
+                height: 3,
+                background: isDone ? T.mint : T.bg4,
+                border: `1.5px solid ${isDone ? T.mintDark : T.borderSoft}`,
+                borderLeft: 'none',
+                borderRight: 'none',
+                zIndex: 0,
+              }} />
+            )}
+
+            {/* Dot */}
+            <div style={{
+              width: 24,
+              height: 24,
+              borderRadius: '50%',
+              background: dotColor,
+              border: `2.5px solid ${dotBorder}`,
+              boxShadow: isCurrent ? `0 0 0 4px ${T.cherrySoft}` : SHADOWS.sm,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              zIndex: 1,
+              position: 'relative',
+              animation: isCurrent ? 'pulse 1.2s ease-in-out infinite' : 'none',
+              flexShrink: 0,
+            }}>
+              {isDone && (
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+                  <polyline
+                    points="2,6 5,9 10,3"
+                    stroke={T.ink}
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              )}
+            </div>
+
+            {/* Label */}
+            <div style={{
+              marginTop: 6,
+              fontSize: 10,
+              fontWeight: isCurrent ? 800 : 600,
+              fontFamily: FONTS.body,
+              color: isDone ? T.mintDark : isCurrent ? T.cherry : T.text3,
+              textAlign: 'center',
+              letterSpacing: '0.04em',
+              textTransform: 'uppercase',
+              lineHeight: 1.2,
+            }}>
+              {step.label}
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
