@@ -134,10 +134,6 @@ class TestHeadlessConfig:
         cfg = HeadlessConfig()
         assert cfg.working_directory is None
 
-    def test_default_env_passthrough_contains_api_key(self) -> None:
-        cfg = HeadlessConfig()
-        assert "ANTHROPIC_API_KEY" in cfg.env_passthrough
-
     def test_default_env_passthrough_matches_module_default(self) -> None:
         cfg = HeadlessConfig()
         assert set(cfg.env_passthrough) == set(_DEFAULT_ENV_PASSTHROUGH)
@@ -150,7 +146,7 @@ class TestHeadlessConfig:
             max_retries=3,
             base_retry_delay=2.0,
             working_directory=Path("/tmp/work"),
-            env_passthrough=["ANTHROPIC_API_KEY", "AWS_PROFILE"],
+            env_passthrough=["CLAUDE_CODE_USE_BEDROCK", "AWS_PROFILE"],
         )
         data = cfg.to_dict()
         restored = HeadlessConfig.from_dict(data)

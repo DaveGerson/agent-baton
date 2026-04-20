@@ -34,7 +34,6 @@ from agent_baton.core.runtime.claude_launcher import (
 logger = logging.getLogger(__name__)
 
 _DEFAULT_ENV_PASSTHROUGH: list[str] = [
-    "ANTHROPIC_API_KEY",
     "CLAUDE_CODE_USE_BEDROCK",
     "CLAUDE_CODE_USE_VERTEX",
     "AWS_PROFILE",

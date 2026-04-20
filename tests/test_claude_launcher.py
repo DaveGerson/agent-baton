@@ -156,7 +156,7 @@ class TestClaudeCodeConfig:
             max_outcome_length=1000,
             prompt_file_threshold=65536,
             model_timeouts={"opus": 800.0, "sonnet": 400.0},
-            env_passthrough=["ANTHROPIC_API_KEY", "AWS_PROFILE"],
+            env_passthrough=["CLAUDE_CODE_USE_BEDROCK", "AWS_PROFILE"],
         )
         d = original.to_dict()
         restored = ClaudeCodeConfig.from_dict(d)
@@ -586,14 +586,14 @@ class TestClaudeCodeLauncherSecurity:
         """_build_env must never pass through non-whitelisted environment variables."""
         # Inject a sensitive variable that must NOT appear in the child env
         monkeypatch.setenv("SECRET_DB_PASSWORD", "hunter2")
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        monkeypatch.setenv("AWS_PROFILE", "my-profile")
         monkeypatch.setenv("HOME", "/home/testuser")
 
         launcher = _launcher(monkeypatch)
         env = launcher._build_env()
 
         # Whitelisted key must be present
-        assert env.get("ANTHROPIC_API_KEY") == "sk-test"
+        assert env.get("AWS_PROFILE") == "my-profile"
         # HOME is always forwarded
         assert "HOME" in env
 
