@@ -1054,13 +1054,47 @@ class ExecutionEngine:
         self._save_execution(state)
         # Track the new task_id so _load_execution() can find it by ID.
         self._task_id = state.task_id
-        # NOW mark as active — the execution row exists, so the active
+
+        # Verify the save succeeded by reading back from storage.  This
+        # catches silent failures (schema mismatches, disk full, etc.) that
+        # would otherwise leave a dangling active-task pointer.
+        if self._storage is not None:
+            try:
+                verify = self._storage.load_execution(state.task_id)
+                if verify is None:
+                    _log.error(
+                        "Execution state for task %r was NOT persisted to "
+                        "SQLite -- save_execution() returned no error but "
+                        "load_execution() returned None.  Subsequent CLI "
+                        "commands will fail with 'no execution state found'.",
+                        state.task_id,
+                    )
+                    raise RuntimeError(
+                        f"Failed to persist execution state for task "
+                        f"'{state.task_id}'. The save operation completed "
+                        f"without error but the state is not readable. "
+                        f"Check disk space and database integrity."
+                    )
+            except RuntimeError:
+                raise  # Re-raise the verification error
+            except Exception as exc:
+                _log.warning(
+                    "Post-save verification read failed for task %r: %s",
+                    state.task_id,
+                    exc,
+                )
+
+        # NOW mark as active -- the execution row exists, so the active
         # pointer won't dangle.  Write to both backends for resilience.
         if self._storage is not None:
             try:
                 self._storage.set_active_task(state.task_id)
-            except Exception:
-                pass
+            except Exception as exc:
+                _log.warning(
+                    "Failed to set active task in SQLite for task %s: %s",
+                    state.task_id,
+                    exc,
+                )
         if self._persistence is not None:
             try:
                 self._persistence.set_active()
