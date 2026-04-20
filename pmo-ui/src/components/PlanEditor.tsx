@@ -118,12 +118,12 @@ function TagInput({ values, onChange, placeholder = 'Type and press Enter', aria
       style={{
         display: 'flex',
         flexWrap: 'wrap',
-        gap: 4,
-        padding: '4px 6px',
-        borderRadius: 6,
+        gap: 6,
+        padding: '8px 10px',
+        borderRadius: 8,
         border: `1.5px solid ${T.borderSoft}`,
         background: T.bg0,
-        minHeight: 32,
+        minHeight: 38,
         alignItems: 'center',
         cursor: 'text',
       }}
@@ -141,9 +141,9 @@ function TagInput({ values, onChange, placeholder = 'Type and press Enter', aria
             gap: 3,
             background: T.bg3,
             border: `1px solid ${T.borderSoft}`,
-            borderRadius: 4,
-            padding: '1px 5px',
-            fontSize: FONT_SIZES.sm,
+            borderRadius: 6,
+            padding: '3px 8px',
+            fontSize: 13,
             fontFamily: FONTS.mono,
             color: T.text1,
             lineHeight: 1.4,
@@ -156,7 +156,7 @@ function TagInput({ values, onChange, placeholder = 'Type and press Enter', aria
             onClick={e => { e.stopPropagation(); removeTag(i); }}
             style={{
               background: 'none', border: 'none', cursor: 'pointer',
-              color: T.text3, padding: '0 1px', fontSize: 11, lineHeight: 1,
+              color: T.text3, padding: '0 2px', fontSize: 14, lineHeight: 1,
               fontFamily: FONTS.body,
             }}
           >
@@ -175,11 +175,12 @@ function TagInput({ values, onChange, placeholder = 'Type and press Enter', aria
           border: 'none',
           outline: 'none',
           background: 'transparent',
-          fontSize: FONT_SIZES.sm,
+          fontSize: 13,
           fontFamily: FONTS.mono,
           color: T.text0,
           flex: '1 1 80px',
           minWidth: 60,
+          padding: '2px 0',
         }}
       />
     </div>
@@ -218,18 +219,18 @@ function AutosizeTextarea({ value, onChange, ariaLabel, placeholder }: AutosizeT
       onChange={e => onChange(e.target.value)}
       style={{
         width: '100%',
-        padding: '6px 8px',
-        borderRadius: 6,
+        padding: '10px 12px',
+        borderRadius: 8,
         border: `1.5px solid ${T.borderSoft}`,
         background: T.bg0,
         color: T.text0,
-        fontSize: 13,
-        fontWeight: 600,
+        fontSize: 14,
+        fontWeight: 500,
         outline: 'none',
         fontFamily: FONTS.body,
+        lineHeight: 1.5,
         resize: 'none',
         overflow: 'hidden',
-        lineHeight: 1.5,
         boxSizing: 'border-box',
         display: 'block',
         transition: 'border-color 0.15s',
@@ -312,7 +313,7 @@ function AdvancedFieldRow({ label, children }: { label: string; children: React.
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
       <div style={{
-        fontSize: FONT_SIZES.xs,
+        fontSize: 12,
         fontWeight: 800,
         fontFamily: FONTS.body,
         textTransform: 'uppercase',
@@ -334,7 +335,7 @@ function FieldRow({ label, children }: { label: string; children: React.ReactNod
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
       <div style={{
-        fontSize: FONT_SIZES.xs,
+        fontSize: 12,
         fontWeight: 800,
         fontFamily: FONTS.body,
         textTransform: 'uppercase',
@@ -770,16 +771,16 @@ export function PlanEditor({
   const riskColor = plan.risk_level === 'LOW' ? T.mint : plan.risk_level === 'HIGH' ? T.cherry : T.butter;
 
   const sharedSelectStyle = {
-    fontSize: 10,
+    fontSize: 13,
     background: T.bg3,
     border: `1.5px solid ${T.border}`,
-    borderRadius: 6,
-    padding: '3px 5px',
+    borderRadius: 8,
+    padding: '6px 10px',
     outline: 'none',
     flexShrink: 0 as const,
     cursor: 'pointer',
     fontFamily: FONTS.body,
-    fontWeight: 800,
+    fontWeight: 700,
     textTransform: 'uppercase' as const,
     letterSpacing: '0.04em',
   };
@@ -1052,7 +1053,7 @@ export function PlanEditor({
                     }}
                   >
                     {/* ── Step header row ── */}
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '8px 14px 4px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 16px 6px' }}>
                       {/* Drag handle */}
                       <span
                         aria-hidden="true"
@@ -1092,8 +1093,8 @@ export function PlanEditor({
 
                       {/* Step ID */}
                       <span style={{
-                        fontFamily: FONTS.mono, fontSize: 11, color: T.text2,
-                        flexShrink: 0,
+                        fontFamily: FONTS.mono, fontSize: 14, color: T.text2,
+                        flexShrink: 0, fontWeight: 600,
                       }}>
                         {step.step_id}
                       </span>
