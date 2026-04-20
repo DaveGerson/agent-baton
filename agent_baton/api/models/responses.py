@@ -1319,3 +1319,36 @@ class ApprovalLogResponse(BaseModel):
         default_factory=list,
         description="Chronologically ordered approval log entries.",
     )
+
+
+# ---------------------------------------------------------------------------
+# Execution interrupt / step control responses
+# ---------------------------------------------------------------------------
+
+
+class ExecutionControlResponse(BaseModel):
+    """Confirmation of an execution interrupt or step-control action.
+
+    Returned by the pause, resume, cancel, retry-step, and skip-step
+    endpoints under ``POST /api/v1/pmo/execute/{card_id}/*``.
+    """
+
+    status: str = Field(
+        ...,
+        description=(
+            "New execution state: 'paused', 'running', 'cancelled', "
+            "'retried', or 'skipped'."
+        ),
+    )
+    task_id: str = Field(
+        ...,
+        description="Card/task ID the action was applied to.",
+    )
+    step_id: str = Field(
+        default="",
+        description="Step ID the action targeted (populated by retry-step and skip-step).",
+    )
+    message: str = Field(
+        default="",
+        description="Optional human-readable detail about the action taken.",
+    )
