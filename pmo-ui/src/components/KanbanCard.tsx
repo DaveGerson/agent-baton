@@ -9,6 +9,7 @@ import { useToast } from '../contexts/ToastContext';
 import { PlanPreview } from './PlanPreview';
 import { ExecutionProgress } from './ExecutionProgress';
 import { GateApprovalPanel } from './GateApprovalPanel';
+import { ChangelistPanel } from './ChangelistPanel';
 
 interface KanbanCardProps {
   card: PmoCard;
@@ -154,9 +155,11 @@ function KanbanCardImpl({ card, columnColor, onForge, onEditPlan, onMutateCard }
   const { showPlan, planData, planLoading, handleViewPlan } = usePlanPreview(card.card_id);
   const { execLoading, execResult, handleExecute, dismissExecResult } = useExecuteCard(card, toast, onMutateCard);
   const [showProgress, setShowProgress] = useState(false);
+  const [showChangelist, setShowChangelist] = useState(false);
   const [gateResolved, setGateResolved] = useState(false);
   const isHuman = card.column === 'awaiting_human';
   const isQueued = card.column === 'queued';
+  const isReview = card.column === 'review';
   const isActive = card.column === 'executing' || card.column === 'validating' || card.column === 'awaiting_human';
 
   // Stable tilt derived from card ID
@@ -285,6 +288,11 @@ function KanbanCardImpl({ card, columnColor, onForge, onEditPlan, onMutateCard }
           {card.risk_level && card.risk_level !== 'low' && (
             <Chip color={card.risk_level === 'high' ? T.red : T.yellow}>
               {card.risk_level}
+            </Chip>
+          )}
+          {isReview && card.consolidation_result && (
+            <Chip color={T.crust}>
+              {card.consolidation_result.files_changed.length} files
             </Chip>
           )}
         </div>
@@ -439,6 +447,17 @@ function KanbanCardImpl({ card, columnColor, onForge, onEditPlan, onMutateCard }
                 {execLoading ? 'Launching...' : '\u25B6 Execute'}
               </ActionButton>
             )}
+            {isReview && (
+              <ActionButton
+                onClick={e => { e.stopPropagation(); setShowChangelist(true); }}
+                title="Review consolidated changes before merging"
+                bg={T.crust + '33'}
+                border={`1.5px solid ${T.crust}`}
+                color={T.crustDark}
+              >
+                Review Changes
+              </ActionButton>
+            )}
             {isActive && (
               <ActionButton
                 onClick={e => { e.stopPropagation(); setShowProgress(true); }}
@@ -561,6 +580,15 @@ function KanbanCardImpl({ card, columnColor, onForge, onEditPlan, onMutateCard }
       {/* Execution progress modal */}
       {showProgress && (
         <ExecutionProgress card={card} onClose={() => setShowProgress(false)} />
+      )}
+
+      {/* Changelist review modal */}
+      {showChangelist && (
+        <ChangelistPanel
+          cardId={card.card_id}
+          onMerged={() => { setShowChangelist(false); onMutateCard?.(card.card_id, c => ({ ...c, column: 'deployed' })); }}
+          onClose={() => setShowChangelist(false)}
+        />
       )}
     </div>
   );

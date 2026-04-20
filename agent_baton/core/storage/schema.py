@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -374,6 +374,44 @@ ALTER TABLE step_results ADD COLUMN output_tokens         INTEGER NOT NULL DEFAU
 ALTER TABLE step_results ADD COLUMN model_id              TEXT NOT NULL DEFAULT '';
 ALTER TABLE step_results ADD COLUMN session_id            TEXT NOT NULL DEFAULT '';
 ALTER TABLE step_results ADD COLUMN step_started_at       TEXT NOT NULL DEFAULT '';
+""",
+    14: """
+-- v14: add role-based approval tables to central.db.
+--
+-- users       -- PMO user identity and role (creator, reviewer, approver, admin).
+--                Lives in central.db only; cross-project visibility by design.
+-- approval_log -- Immutable audit trail of every approve/reject/request_review
+--                action taken via the PMO API.  task_id ties each entry back to
+--                the originating execution; user_id ties it to a PMO user.
+--
+-- Both tables are CENTRAL-only (no project FK constraints) and use
+-- CREATE TABLE IF NOT EXISTS so the migration is idempotent when applied
+-- to a central.db that was already initialised from CENTRAL_SCHEMA_DDL.
+--
+-- NOTE: This migration is applied to BOTH project and central databases via
+-- ConnectionManager._run_migrations().  Project databases will acquire these
+-- tables too (harmless — they stay empty on the project side).  The
+-- authoritative data always lives in central.db.
+CREATE TABLE IF NOT EXISTS users (
+    user_id      TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL DEFAULT '',
+    email        TEXT NOT NULL DEFAULT '',
+    role         TEXT NOT NULL DEFAULT 'creator',
+    created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
+
+CREATE TABLE IF NOT EXISTS approval_log (
+    log_id     TEXT PRIMARY KEY,
+    task_id    TEXT NOT NULL,
+    phase_id   TEXT NOT NULL DEFAULT '',
+    user_id    TEXT NOT NULL DEFAULT 'local-user',
+    action     TEXT NOT NULL,
+    notes      TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_approval_log_task ON approval_log(task_id);
+CREATE INDEX IF NOT EXISTS idx_approval_log_user ON approval_log(user_id);
 """,
 }
 
@@ -1629,6 +1667,35 @@ CREATE TABLE IF NOT EXISTS feedback_responses (
     decided_at         TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_central_feedback_responses_task ON feedback_responses(project_id, task_id);
+
+-- ================================================================
+-- Role-based approval tables (central.db only — cross-project)
+-- ================================================================
+
+-- PMO user identity and role assignment.
+-- role: creator, reviewer, approver, admin
+CREATE TABLE IF NOT EXISTS users (
+    user_id      TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL DEFAULT '',
+    email        TEXT NOT NULL DEFAULT '',
+    role         TEXT NOT NULL DEFAULT 'creator',
+    created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_central_users_role ON users(role);
+
+-- Immutable audit log of every approval action (approve, reject,
+-- request_review, feedback) taken via the PMO API.
+CREATE TABLE IF NOT EXISTS approval_log (
+    log_id     TEXT PRIMARY KEY,
+    task_id    TEXT NOT NULL,
+    phase_id   TEXT NOT NULL DEFAULT '',
+    user_id    TEXT NOT NULL DEFAULT 'local-user',
+    action     TEXT NOT NULL,
+    notes      TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_central_approval_log_task ON approval_log(task_id);
+CREATE INDEX IF NOT EXISTS idx_central_approval_log_user ON approval_log(user_id);
 
 -- ================================================================
 -- Cross-project analytics views

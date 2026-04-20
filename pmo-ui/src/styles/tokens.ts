@@ -97,6 +97,12 @@ export const COLUMNS = [
     color: T.mint,
     desc: 'Out the window — complete, ADO synced',
   },
+  {
+    id: 'review' as const,
+    label: 'Plating Review',
+    color: T.crust,
+    desc: 'Expediter checks — consolidation ready for merge',
+  },
 ];
 
 export type ColumnId = typeof COLUMNS[number]['id'];
