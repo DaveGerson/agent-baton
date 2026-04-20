@@ -9,22 +9,25 @@ import { BohRulebook } from './BohRulebook';
 
 type RoomId = 'walk-in' | 'locker-room' | 'boss-office' | 'loading-dock' | 'tip-jar' | 'rulebook';
 
+type DataStatus = 'live' | 'mock';
+
 interface Room {
   id: RoomId;
   emoji: string;
   label: string;
   sub: string;
   accent: string;
+  status: DataStatus;
   component: () => JSX.Element;
 }
 
 const ROOMS: Room[] = [
-  { id: 'walk-in',      emoji: '🧊', label: 'The Walk-In',       sub: 'creds & models',     accent: T.blueberry, component: BohWalkIn      },
-  { id: 'locker-room',  emoji: '👥', label: 'Locker Room',        sub: 'the crew',           accent: T.cherry,    component: BohLockerRoom  },
-  { id: 'boss-office',  emoji: '💰', label: "Boss's Office",      sub: 'budgets & caps',     accent: T.butter,    component: BohBossOffice  },
-  { id: 'loading-dock', emoji: '🚚', label: 'Loading Dock',       sub: 'integrations',       accent: T.mint,      component: BohLoadingDock },
-  { id: 'tip-jar',      emoji: '🔔', label: 'The Tip Jar',        sub: 'notifications',      accent: T.tangerine, component: BohTipJar      },
-  { id: 'rulebook',     emoji: '📘', label: 'The Rulebook',       sub: 'house rules',        accent: T.crust,     component: BohRulebook    },
+  { id: 'walk-in',      emoji: '🧊', label: 'The Walk-In',       sub: 'creds & models',     accent: T.blueberry, status: 'mock', component: BohWalkIn      },
+  { id: 'locker-room',  emoji: '👥', label: 'Locker Room',        sub: 'the crew',           accent: T.cherry,    status: 'live', component: BohLockerRoom  },
+  { id: 'boss-office',  emoji: '💰', label: "Boss's Office",      sub: 'budgets & caps',     accent: T.butter,    status: 'mock', component: BohBossOffice  },
+  { id: 'loading-dock', emoji: '🚚', label: 'Loading Dock',       sub: 'integrations',       accent: T.mint,      status: 'live', component: BohLoadingDock },
+  { id: 'tip-jar',      emoji: '🔔', label: 'The Tip Jar',        sub: 'notifications',      accent: T.tangerine, status: 'mock', component: BohTipJar      },
+  { id: 'rulebook',     emoji: '📘', label: 'The Rulebook',       sub: 'house rules',        accent: T.crust,     status: 'live', component: BohRulebook    },
 ];
 
 function isLightAccent(accent: string): boolean {
@@ -152,8 +155,32 @@ export function BackOfHousePanel({ onBack }: BackOfHousePanelProps) {
                 }}
               >
                 <span style={{ fontSize: 15, flexShrink: 0 }}>{r.emoji}</span>
-                <span style={{ flex: 1, lineHeight: 1.2 }}>
-                  <div>{r.label}</div>
+                <span style={{ flex: 1, lineHeight: 1.2, minWidth: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                    <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {r.label}
+                    </span>
+                    <span style={{
+                      flexShrink: 0,
+                      fontFamily: FONTS.mono,
+                      fontWeight: 800,
+                      fontSize: 8,
+                      letterSpacing: '0.06em',
+                      textTransform: 'uppercase',
+                      padding: '1px 5px',
+                      borderRadius: 999,
+                      border: `1.5px solid ${active ? (light ? T.ink : T.cream) : T.border}`,
+                      background: r.status === 'live'
+                        ? (active ? 'rgba(0,0,0,0.15)' : T.mintSoft)
+                        : (active ? 'rgba(0,0,0,0.10)' : T.butterSoft),
+                      color: active
+                        ? (light ? T.ink : T.cream)
+                        : (r.status === 'live' ? T.mintDark : T.inkFaint),
+                      lineHeight: 1.6,
+                    }}>
+                      {r.status === 'live' ? 'LIVE' : 'MOCK'}
+                    </span>
+                  </div>
                   {active && (
                     <div style={{
                       fontFamily: FONTS.hand,

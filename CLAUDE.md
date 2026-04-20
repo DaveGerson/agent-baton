@@ -12,7 +12,7 @@ agents/            ← Distributable agent definitions (20 .md files)
 references/        ← Distributable reference docs (16 .md files)
 templates/         ← CLAUDE.md + settings.json + skills/ installed to targets
 scripts/           ← Install scripts + record_spec_audit_beads.py
-tests/             ← Test suite (~5719 tests, pytest)
+tests/             ← Test suite (~6202 tests, pytest)
 pmo-ui/            ← React/Vite PMO frontend (served at /pmo/)
 audit-reports/     ← Architecture audit documents (8 reports)
 proposals/         ← Design proposals and RFCs (6 documents)
@@ -36,7 +36,7 @@ See **[docs/orchestrator-usage.md](docs/orchestrator-usage.md)** for how to use 
 
 ```bash
 pip install -e ".[dev]"    # Install in editable mode
-pytest                     # Run tests (~5719 tests)
+pytest                     # Run tests (~6202 tests)
 scripts/install.sh         # Re-install globally after editing agents/references
 ```
 
@@ -51,6 +51,14 @@ Use `cymbal impact <symbol>` before changing high-fanout symbols.
 - **Trust engine records; don't re-verify.**
 - **Default to `baton execute run` for non-INTERACT phases.**
 - **Don't re-read files already summarized in plan.md or beads.**
+
+## Environment Variables
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `BATON_TASK_ID` | Target a specific execution in multi-task scenarios | auto-detected |
+| `BATON_APPROVAL_MODE` | PMO approval policy: `local` (self-approve) or `team` (different reviewer required) | `local` |
+| `ANTHROPIC_API_KEY` | Required for AI classification and Haiku classifier | (none) |
 
 ## Autonomous Incident Handling (MANDATORY)
 

@@ -370,3 +370,53 @@ export interface ExecutionControlResponse {
   step_id?: string;
   message?: string;
 }
+
+// ---------------------------------------------------------------------------
+// Agent registry types
+// ---------------------------------------------------------------------------
+
+export interface Agent {
+  name: string;
+  description: string;
+  model: string;
+  category: string;
+  color: string;
+  tools: string[];
+  base_name: string;
+  flavor: string | null;
+}
+
+export interface AgentsResponse {
+  count: number;
+  agents: Agent[];
+}
+
+// ---------------------------------------------------------------------------
+// Policy preset types
+// ---------------------------------------------------------------------------
+
+export interface PolicyPreset {
+  name: string;
+  label: string;
+  description: string;
+}
+
+export interface PoliciesResponse {
+  presets: PolicyPreset[];
+}
+
+// ---------------------------------------------------------------------------
+// Webhooks types
+// ---------------------------------------------------------------------------
+
+export interface Webhook {
+  id: string;
+  url: string;
+  events: string[];
+  active: boolean;
+  created_at?: string;
+}
+
+export interface WebhooksResponse {
+  webhooks: Webhook[];
+}

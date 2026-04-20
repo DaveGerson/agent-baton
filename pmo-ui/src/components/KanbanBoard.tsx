@@ -39,6 +39,7 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
   const [dateFrom, setDateFrom] = usePersistedState<string>('pmo:board-date-from', '');
   const [dateTo, setDateTo] = usePersistedState<string>('pmo:board-date-to', '');
   const [showAdvancedFilters, setShowAdvancedFilters] = usePersistedState<boolean>('pmo:board-adv-filters', false);
+  const [projectFilter, setProjectFilter] = usePersistedState<string>('pmo:board-project', 'all');
   const [openSignalCount, setOpenSignalCount] = useState(0);
   const [showAnalytics, setShowAnalytics] = useState(false);
   const [showExport, setShowExport] = useState(false);
@@ -57,6 +58,7 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
   }, []);
 
   const programs = Array.from(new Set(cards.map(c => c.program))).sort();
+  const projects = Array.from(new Set(cards.map(c => c.project_id))).sort();
 
   // Collect all agent names across all cards for the agent dropdown.
   const allAgents = Array.from(
@@ -68,6 +70,7 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
 
   const filtered = useMemo(() => cards
     .filter(c => filter === 'all' || c.program.toUpperCase() === filter.toUpperCase())
+    .filter(c => projectFilter === 'all' || c.project_id === projectFilter)
     .filter(c => {
       if (!search.trim()) return true;
       const q = search.toLowerCase();
@@ -95,7 +98,7 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
         if (created > end.getTime()) return false;
       }
       return true;
-    }), [cards, filter, search, riskFilter, agentFilter, dateFrom, dateTo]);
+    }), [cards, filter, projectFilter, search, riskFilter, agentFilter, dateFrom, dateTo]);
 
   const sorted = useMemo(() => [...filtered].sort((a, b) => {
     switch (sortBy) {
@@ -155,6 +158,26 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
             </FilterBtn>
           ))}
         </div>
+
+        <select
+          value={projectFilter}
+          onChange={e => setProjectFilter(e.target.value)}
+          aria-label="Filter by project"
+          style={{
+            fontSize: 11,
+            padding: '4px 6px',
+            borderRadius: 8,
+            border: `2px solid ${T.border}`,
+            background: projectFilter !== 'all' ? T.butterSoft : T.bg3,
+            color: T.text0,
+            fontFamily: FONTS.body,
+          }}
+        >
+          <option value="all">All Projects</option>
+          {projects.map(p => (
+            <option key={p} value={p}>{p}</option>
+          ))}
+        </select>
 
         <input
           type="search"
@@ -572,7 +595,7 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
                 }}>{col.desc}</div>
               </div>
 
-              {/* Cards */}
+              {/* Cards — column scrolls independently when there are many items */}
               <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 4, overflowY: 'auto', padding: '8px 6px 16px' }}>
                 {colCards.map(card => (
                   <KanbanCard key={card.card_id} card={card} columnColor={col.color} onForge={onCardForge} onEditPlan={onCardForge} onMutateCard={mutateCard} />

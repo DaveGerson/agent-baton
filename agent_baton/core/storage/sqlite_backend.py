@@ -567,10 +567,17 @@ class SqliteStorage:
         )
 
     def list_executions(self) -> list[str]:
-        """Return all task_ids in the executions table."""
+        """Return task_ids for plan-level executions (those with a plans row).
+
+        Sub-task dispatch records from the engine's internal step execution
+        exist in the executions table but have no corresponding plans row.
+        Excluding them here avoids silent skips in the PMO scanner.
+        """
         conn = self._conn()
         rows = conn.execute(
-            "SELECT task_id FROM executions ORDER BY started_at"
+            "SELECT task_id FROM executions"
+            " WHERE task_id IN (SELECT task_id FROM plans)"
+            " ORDER BY started_at"
         ).fetchall()
         return [r["task_id"] for r in rows]
 

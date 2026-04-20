@@ -152,6 +152,7 @@ function KanbanCardImpl({ card, columnColor, onForge, onEditPlan, onMutateCard }
   const [expanded, setExpanded] = useState(false);
   const [hovered, setHovered] = useState(false);
   const [pressed, setPressed] = useState(false);
+  const [showDetail, setShowDetail] = useState(false);
   const toast = useToast();
   const { showPlan, planData, planLoading, handleViewPlan } = usePlanPreview(card.card_id);
   const { execLoading, execResult, handleExecute, dismissExecResult } = useExecuteCard(card, toast, onMutateCard);
@@ -226,6 +227,7 @@ function KanbanCardImpl({ card, columnColor, onForge, onEditPlan, onMutateCard }
           setExpanded(!expanded);
         }
       }}
+      onDoubleClick={(e) => { e.stopPropagation(); setShowDetail(true); }}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => { setHovered(false); setPressed(false); }}
       onMouseDown={() => setPressed(true)}
@@ -641,6 +643,349 @@ function KanbanCardImpl({ card, columnColor, onForge, onEditPlan, onMutateCard }
           onClose={() => setShowChangelist(false)}
         />
       )}
+
+      {/* Full-screen detail modal */}
+      {showDetail && (
+        <CardDetailModal
+          card={card}
+          onClose={() => setShowDetail(false)}
+          onForge={onForge}
+          onEditPlan={onEditPlan}
+          onMutateCard={onMutateCard}
+        />
+      )}
+    </div>
+  );
+}
+
+// ----------------------------------------------------------------
+// CardDetailModal — full-screen overlay opened on double-click
+// ----------------------------------------------------------------
+interface CardDetailModalProps {
+  card: PmoCard;
+  onClose: () => void;
+  onForge?: (card: PmoCard) => void;
+  onEditPlan?: (card: PmoCard) => void;
+  onMutateCard?: (cardId: string, updater: (card: PmoCard) => PmoCard) => void;
+}
+
+function CardDetailModal({ card, onClose, onForge, onEditPlan, onMutateCard }: CardDetailModalProps) {
+  const [planData, setPlanData] = useState<ForgePlanResponse | null>(null);
+  const [planLoading, setPlanLoading] = useState(true);
+  const [execLoading, setExecLoading] = useState(false);
+  const [execResult, setExecResult] = useState<string | null>(null);
+  const [sendReviewLoading, setSendReviewLoading] = useState(false);
+  const [showProgress, setShowProgress] = useState(false);
+  const [showChangelist, setShowChangelist] = useState(false);
+  const toast = useToast();
+
+  const isQueued = card.column === 'queued';
+  const isActive = card.column === 'executing' || card.column === 'validating' || card.column === 'awaiting_human';
+  const isReview = card.column === 'review';
+
+  const approvalMode = (
+    document.querySelector('meta[name="baton-approval-mode"]')?.getAttribute('content') ?? 'local'
+  ) as 'local' | 'team';
+
+  // Fetch plan on mount
+  useEffect(() => {
+    let cancelled = false;
+    setPlanLoading(true);
+    api.getCardDetail(card.card_id)
+      .then(result => { if (!cancelled) setPlanData(result.plan); })
+      .catch(() => {})
+      .finally(() => { if (!cancelled) setPlanLoading(false); });
+    return () => { cancelled = true; };
+  }, [card.card_id]);
+
+  // Escape key closes modal
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape') onClose();
+    }
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [onClose]);
+
+  async function handleExecute(e: MouseEvent) {
+    e.stopPropagation();
+    if (card.column !== 'queued') {
+      setExecResult('Card is no longer queued — refresh to see its current state.');
+      toast.error('Card is no longer queued');
+      return;
+    }
+    setExecLoading(true);
+    setExecResult(null);
+    try {
+      const resp = await api.executeCard(card.card_id);
+      setExecResult(`Launched (PID ${resp.pid})`);
+      onMutateCard?.(card.card_id, c => ({ ...c, column: 'executing' }));
+      toast.success('Execution launched');
+    } catch (err) {
+      setExecResult(err instanceof Error ? err.message : 'Launch failed');
+      toast.error('Execution launch failed');
+    } finally {
+      setExecLoading(false);
+    }
+  }
+
+  async function handleSendForReview(e: MouseEvent) {
+    e.stopPropagation();
+    setSendReviewLoading(true);
+    try {
+      await api.requestReview(card.card_id, { notes: '' });
+      toast.success('Sent for review');
+      onMutateCard?.(card.card_id, c => ({ ...c, column: 'awaiting_review' as PmoCard['column'] }));
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to send for review');
+    } finally {
+      setSendReviewLoading(false);
+    }
+  }
+
+  const riskColor = card.risk_level === 'high' || card.risk_level === 'critical'
+    ? T.red
+    : card.risk_level === 'medium'
+    ? T.yellow
+    : T.text2;
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Detail view: ${card.title}`}
+      onClick={onClose}
+      style={{
+        position: 'fixed',
+        inset: 0,
+        zIndex: 1000,
+        background: 'rgba(42,26,16,0.55)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: 24,
+      }}
+    >
+      <div
+        onClick={e => e.stopPropagation()}
+        style={{
+          background: T.bg1,
+          borderRadius: 16,
+          border: `2px solid ${T.border}`,
+          boxShadow: SHADOWS.xl,
+          width: '100%',
+          maxWidth: 760,
+          maxHeight: '88vh',
+          display: 'flex',
+          flexDirection: 'column',
+          overflow: 'hidden',
+        }}
+      >
+        {/* Modal header */}
+        <div style={{
+          display: 'flex',
+          alignItems: 'flex-start',
+          gap: 10,
+          padding: '14px 18px 12px',
+          borderBottom: `2px solid ${T.border}`,
+          background: T.bg3,
+          flexShrink: 0,
+        }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{
+              fontFamily: FONTS.display,
+              fontWeight: 900,
+              fontSize: 20,
+              color: T.text0,
+              lineHeight: 1.2,
+              marginBottom: 6,
+            }}>
+              {card.title}
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <span style={{ fontSize: 10, color: T.text2, fontFamily: FONTS.mono }}>{card.project_id}</span>
+              <span style={{ fontSize: 10, color: T.text4 }}>·</span>
+              <span style={{ fontSize: 10, color: T.text2, fontFamily: FONTS.body }}>{card.program}</span>
+              {card.risk_level && card.risk_level !== 'low' && (
+                <>
+                  <span style={{ fontSize: 10, color: T.text4 }}>·</span>
+                  <span style={{
+                    fontSize: 10,
+                    fontWeight: 700,
+                    color: riskColor,
+                    fontFamily: FONTS.body,
+                    textTransform: 'uppercase',
+                  }}>
+                    {card.risk_level} risk
+                  </span>
+                </>
+              )}
+              <span style={{ fontSize: 10, color: T.text4 }}>·</span>
+              <span style={{ fontSize: 10, color: T.text2, fontFamily: FONTS.body }}>
+                {card.column.replace('_', ' ')}
+              </span>
+              {card.steps_total > 0 && (
+                <>
+                  <span style={{ fontSize: 10, color: T.text4 }}>·</span>
+                  <span style={{ fontSize: 10, color: T.text2, fontFamily: FONTS.mono }}>
+                    {card.steps_completed}/{card.steps_total} steps
+                  </span>
+                </>
+              )}
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            aria-label="Close detail view"
+            style={{
+              background: 'transparent',
+              border: `1.5px solid ${T.border}`,
+              borderRadius: 8,
+              color: T.text1,
+              fontSize: 16,
+              cursor: 'pointer',
+              padding: '2px 8px',
+              fontFamily: FONTS.body,
+              flexShrink: 0,
+            }}
+          >
+            {'\u00d7'}
+          </button>
+        </div>
+
+        {/* Actions row */}
+        <div style={{
+          display: 'flex',
+          gap: 6,
+          padding: '10px 18px',
+          borderBottom: `1.5px dashed ${T.borderSoft}`,
+          flexWrap: 'wrap',
+          flexShrink: 0,
+          background: T.bg1,
+        }}>
+          {isQueued && (
+            <ActionButton
+              onClick={handleExecute}
+              disabled={execLoading}
+              title="Launch autonomous execution for this card"
+              bg={T.mint + '22'}
+              border={`1.5px solid ${T.mint}`}
+              color={T.mint}
+            >
+              {execLoading ? 'Launching...' : '\u25B6 Execute'}
+            </ActionButton>
+          )}
+          {isQueued && approvalMode === 'team' && (
+            <ActionButton
+              onClick={handleSendForReview}
+              disabled={sendReviewLoading}
+              title="Send this plan for peer review before execution"
+              bg={T.blueberry + '18'}
+              border={`1.5px solid ${T.blueberry}`}
+              color={T.blueberry}
+            >
+              {sendReviewLoading ? 'Sending…' : 'Send for Review'}
+            </ActionButton>
+          )}
+          {isActive && (
+            <ActionButton
+              onClick={e => { e.stopPropagation(); setShowProgress(true); }}
+              title="Monitor execution progress in real time"
+              bg={T.butter + '33'}
+              border={`1.5px solid ${T.butter}`}
+              color={T.inkSoft}
+            >
+              Monitor
+            </ActionButton>
+          )}
+          {isReview && (
+            <ActionButton
+              onClick={e => { e.stopPropagation(); setShowChangelist(true); }}
+              title="Review consolidated changes before merging"
+              bg={T.crust + '33'}
+              border={`1.5px solid ${T.crust}`}
+              color={T.crustDark}
+            >
+              Review Changes
+            </ActionButton>
+          )}
+          {onForge && (
+            <ActionButton
+              onClick={e => { e.stopPropagation(); onForge(card); onClose(); }}
+              title="Open this card in the Forge for editing or re-planning"
+              bg={T.cherry + '18'}
+              border={`1.5px solid ${T.cherry}`}
+              color={T.cherry}
+            >
+              Re-forge
+            </ActionButton>
+          )}
+          {card.steps_total > 0 && onEditPlan && (
+            <ActionButton
+              onClick={e => { e.stopPropagation(); onEditPlan(card); onClose(); }}
+              title="Jump directly to the Forge plan editor for this card"
+              bg={T.blueberry + '18'}
+              border={`1.5px solid ${T.blueberry}`}
+              color={T.blueberry}
+            >
+              {'\u270e'} Edit Plan
+            </ActionButton>
+          )}
+          {execResult && (
+            <span style={{
+              fontSize: 10,
+              color: execResult.startsWith('Launched') ? T.mint : T.cherry,
+              fontFamily: FONTS.body,
+              alignSelf: 'center',
+            }}>
+              {execResult}
+            </span>
+          )}
+        </div>
+
+        {/* Plan body */}
+        <div style={{ flex: 1, overflowY: 'auto', padding: '14px 18px' }}>
+          {planLoading && (
+            <div style={{
+              fontSize: 12,
+              color: T.text3,
+              fontStyle: 'italic',
+              fontFamily: FONTS.body,
+              padding: '20px 0',
+              textAlign: 'center',
+            }}>
+              Loading plan…
+            </div>
+          )}
+          {!planLoading && planData && (
+            <PlanPreview plan={planData} />
+          )}
+          {!planLoading && !planData && (
+            <div style={{
+              fontSize: 12,
+              color: T.text3,
+              fontStyle: 'italic',
+              fontFamily: FONTS.body,
+              padding: '20px 0',
+              textAlign: 'center',
+            }}>
+              No plan available for this card.
+            </div>
+          )}
+        </div>
+
+        {/* Sub-modals spawned from the detail view */}
+        {showProgress && (
+          <ExecutionProgress card={card} onClose={() => setShowProgress(false)} />
+        )}
+        {showChangelist && (
+          <ChangelistPanel
+            cardId={card.card_id}
+            onMerged={() => { setShowChangelist(false); onMutateCard?.(card.card_id, c => ({ ...c, column: 'deployed' })); }}
+            onClose={() => setShowChangelist(false)}
+          />
+        )}
+      </div>
     </div>
   );
 }

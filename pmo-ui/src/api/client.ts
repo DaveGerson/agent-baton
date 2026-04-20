@@ -30,9 +30,16 @@ import type {
   RequestReviewResponse,
   ExecutionControlResponse,
   UpdatePlanResponse,
+  Agent,
+  AgentsResponse,
+  PolicyPreset,
+  PoliciesResponse,
+  Webhook,
+  WebhooksResponse,
 } from './types';
 
 const BASE = '/api/v1/pmo';
+const BASE_V1 = '/api/v1';
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const controller = new AbortController();
@@ -209,7 +216,79 @@ export const api = {
   getApprovalLog(cardId: string): Promise<ApprovalLogResponse> {
     return request(`/cards/${encodeURIComponent(cardId)}/approval-log`);
   },
+
+  // Agent registry
+  getAgents(): Promise<AgentsResponse> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10_000);
+    return fetch(`${BASE_V1}/agents`, { signal: controller.signal })
+      .then(res => {
+        clearTimeout(timeout);
+        if (!res.ok) throw new Error(`API ${res.status}`);
+        return res.json() as Promise<AgentsResponse>;
+      })
+      .catch(err => { clearTimeout(timeout); throw err; });
+  },
+
+  // Policy presets — no REST endpoint yet; returns hardcoded list
+  getPolicies(): Promise<PoliciesResponse> {
+    // Try a real endpoint first; fall back to a client-side constant if absent.
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5_000);
+    return fetch(`${BASE_V1}/policies`, { signal: controller.signal })
+      .then(res => {
+        clearTimeout(timeout);
+        if (!res.ok) throw new Error(`API ${res.status}`);
+        return res.json() as Promise<PoliciesResponse>;
+      })
+      .catch(() => {
+        clearTimeout(timeout);
+        // Offline fallback — names match the Python PolicyPreset registry.
+        return {
+          presets: [
+            { name: 'standard_dev',   label: 'Standard Dev',       description: 'Default preset for everyday engineering work. Balanced guardrails.' },
+            { name: 'data_analysis',  label: 'Data & Analytics',   description: 'Optimised for read-heavy exploration. Relaxed write-path restrictions.' },
+            { name: 'infrastructure', label: 'Infrastructure',      description: 'Strict path guards on /deploy and /infra. Gate required at each phase.' },
+            { name: 'regulated',      label: 'Regulated Domain',    description: 'Full audit trail. Requires SME + auditor review before gate passage.' },
+            { name: 'security',       label: 'Security Review',     description: 'Mandatory security scan gate. Blocks any .env write. Opus-only steps.' },
+          ] satisfies PoliciesResponse['presets'],
+        } as PoliciesResponse;
+      });
+  },
+
+  // Webhooks
+  getWebhooks(): Promise<WebhooksResponse> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5_000);
+    return fetch(`${BASE_V1}/webhooks`, { signal: controller.signal })
+      .then(res => {
+        clearTimeout(timeout);
+        if (!res.ok) throw new Error(`API ${res.status}`);
+        return res.json() as Promise<WebhooksResponse>;
+      })
+      .catch(err => { clearTimeout(timeout); throw err; });
+  },
+
+  /**
+   * HEAD-ping an endpoint path (relative to /api/v1/pmo).
+   * Resolves true if the server responds with a non-5xx status,
+   * false if the endpoint is absent or the request fails.
+   */
+  async checkEndpoint(path: string): Promise<boolean> {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5_000);
+      const res = await fetch(`${BASE}${path}`, {
+        method: 'HEAD',
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+      return res.status < 500;
+    } catch {
+      return false;
+    }
+  },
 };
 
 // Re-export types for convenience
-export type { PmoCard, PmoProject, ProgramHealth, PmoSignal, BoardResponse, PlanResponse, ForgePlanBody, ForgePlanResponse, ForgePlanWrappedResponse, ForgeApproveBody, ForgeApproveResponse, InterviewResponse, RegenerateBody, AdoSearchResponse, ExecuteCardBody, ExecuteCardResponse, ExternalItem, ExternalMapping, PendingGate, GateApproveBody, GateRejectBody, GateActionResponse, ConsolidationResult, MergeResponse, CreatePrResponse, ApprovalLogEntry, ApprovalLogResponse, RequestReviewBody, RequestReviewResponse, ExecutionControlResponse, UpdatePlanResponse };
+export type { PmoCard, PmoProject, ProgramHealth, PmoSignal, BoardResponse, PlanResponse, ForgePlanBody, ForgePlanResponse, ForgePlanWrappedResponse, ForgeApproveBody, ForgeApproveResponse, InterviewResponse, RegenerateBody, AdoSearchResponse, ExecuteCardBody, ExecuteCardResponse, ExternalItem, ExternalMapping, PendingGate, GateApproveBody, GateRejectBody, GateActionResponse, ConsolidationResult, MergeResponse, CreatePrResponse, ApprovalLogEntry, ApprovalLogResponse, RequestReviewBody, RequestReviewResponse, ExecutionControlResponse, UpdatePlanResponse, Agent, AgentsResponse, PolicyPreset, PoliciesResponse, Webhook, WebhooksResponse };

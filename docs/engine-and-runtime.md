@@ -49,7 +49,8 @@ core/engine/                          core/runtime/
   protocols.py  ExecutionDriver         context.py      ExecutionContext
   knowledge_resolver.py KnowledgeResolver  daemon.py    daemonize()
   knowledge_gap.py  parse/escalation    signals.py      SignalHandler
-                                        decisions.py    DecisionManager
+  plan_reviewer.py  PlanReviewer        decisions.py    DecisionManager
+  consolidator.py   CommitConsolidator
 ```
 
 ### Relationship Between Engine and Runtime
@@ -1381,7 +1382,64 @@ token bloat from unused MCP tool schemas.
 Default: no MCP servers inherited.  This is a deliberate design choice
 to prevent context window waste from tool schemas agents don't need.
 
-## 14. Async Sessions and Resource Management
+## 14. Post-Execution: Commit Consolidation
+
+### CommitConsolidator
+
+**Source:** `agent_baton/core/engine/consolidator.py` (lazily imported)
+
+After execution completes, the `CommitConsolidator` consolidates agent
+commits into a clean, mergeable history via cherry-pick rebase.
+
+**Process:**
+
+1. Topological sort of agent commits by dependency ordering.
+2. Cherry-pick each commit onto the feature branch in dependency order.
+3. Compute per-file diff stats and agent attribution after each pick.
+4. Detect conflicts and record them in the `ConsolidationResult`.
+
+**`ConsolidationResult`** (`models/execution.py`):
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `status` | str | `success`, `partial`, `failed` |
+| `attributions` | list[ChangelistFile] | Per-file diff stats with agent attribution |
+| `conflicts` | list[str] | Files with merge conflicts |
+| `error` | str | Error message if failed |
+
+**`ChangelistFile`** (`models/execution.py`):
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `path` | str | File path relative to repo root |
+| `agent_name` | str | Agent that modified the file |
+| `insertions` | int | Lines added |
+| `deletions` | int | Lines removed |
+| `status` | str | added, modified, deleted |
+
+The `ConsolidationResult` is stored on `ExecutionState.consolidation_result`
+and consumed by the PMO changelist/merge/PR API endpoints.
+
+### PlanReviewer
+
+**Source:** `agent_baton/core/engine/plan_reviewer.py`
+
+Post-generation plan quality review, wired into
+`IntelligentPlanner.create_plan()` at step 12c.5. Two review strategies:
+
+1. **Haiku review** -- cheap LLM call (~2000 tokens) analyzing plan
+   structure and returning JSON recommendations. Used for medium+
+   complexity plans when the Anthropic SDK is available.
+2. **Heuristic review** -- deterministic fallback using file-path
+   clustering and task-description analysis. Catches the most common
+   case: single-step work phases spanning 4+ files across 3+ directories.
+
+Recommendations include: step splitting, missing dependency edges, scope
+imbalance warnings, and same-agent team suggestions for coupled concerns.
+
+---
+
+## 15. Async Sessions and Resource Management
 
 ### Session Persistence
 
@@ -1420,7 +1478,7 @@ Token budget warnings: `_check_token_budget()` compares cumulative
 full=2M).  Warnings are logged and appended to step `deviations` for
 retrospective tracking.
 
-## 15. Intelligence and Cost Prediction
+## 16. Intelligence and Cost Prediction
 
 ### Team Cost Estimation
 
@@ -1461,6 +1519,8 @@ agents can self-regulate scope.
 | `ExecutionAction` | Instruction from engine to driving session |
 | `ActionType` | Enum: DISPATCH, GATE, COMPLETE, FAILED, WAIT, APPROVAL |
 | `SynthesisSpec` | Team output merge strategy (concatenate/merge_files/agent_synthesis) |
+| `ConsolidationResult` | Outcome of cherry-pick rebase (status, attributions, conflicts) |
+| `ChangelistFile` | Per-file diff stats with agent attribution |
 
 ### Team and Collaboration Models
 

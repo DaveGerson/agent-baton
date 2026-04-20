@@ -1,6 +1,9 @@
+import { useState, useEffect } from 'react';
 import { usePersistedState } from '../hooks/usePersistedState';
 import type { ReactNode } from 'react';
 import { T, FONTS, SHADOWS } from '../styles/tokens';
+import { api } from '../api/client';
+import type { PolicyPreset } from '../api/types';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -23,7 +26,6 @@ const KIND_COLORS: Record<RuleKind, string> = {
   git:        T.text2,
 };
 
-// For butter and mint pills the background is light — use ink text for contrast.
 const KIND_TEXT: Record<RuleKind, string> = {
   safety:     T.cream,
   path:       T.cream,
@@ -37,7 +39,7 @@ const INITIAL_RULES: Rule[] = [
   { label: 'Stop-at-error: halt the phase if ANY step fails',       on: true,  kind: 'safety'     },
   { label: 'Require taste-test before moving past a gate',          on: true,  kind: 'safety'     },
   { label: 'Block agents from writing to /deploy/**',               on: true,  kind: 'path'       },
-  { label: 'Block agents from writing to .env* files',              on: true,  kind: 'path'       },
+  { label: 'Block agents from writing to .env* files',             on: true,  kind: 'path'       },
   { label: 'Require human approval for P0 tickets',                 on: true,  kind: 'approval'   },
   { label: 'Allow auto-retry on cost spikes (max 2 retries)',       on: false, kind: 'cost'       },
   { label: 'Auto-swap to Opus when a step fails twice in a row',    on: true,  kind: 'escalation' },
@@ -184,10 +186,99 @@ function SectionHeader({ title, rightSlot }: {
   );
 }
 
+// ── Policy preset card ─────────────────────────────────────────────────────
+
+function PresetCard({ preset, isOffline }: { preset: PolicyPreset; isOffline: boolean }) {
+  return (
+    <div style={{
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 4,
+      padding: '10px 14px',
+      background: T.bg2,
+      border: `2px solid ${T.border}`,
+      borderRadius: 10,
+      boxShadow: SHADOWS.sm,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span style={{
+          fontFamily: FONTS.body,
+          fontWeight: 800,
+          fontSize: 13,
+          color: T.ink,
+          flex: 1,
+        }}>
+          {preset.label}
+        </span>
+        <span style={{
+          fontFamily: FONTS.mono,
+          fontSize: 9,
+          color: T.text3,
+          background: T.bg3,
+          border: `1px solid ${T.borderSoft}`,
+          borderRadius: 4,
+          padding: '1px 5px',
+          letterSpacing: '0.04em',
+        }}>
+          {preset.name}
+        </span>
+      </div>
+      <div style={{
+        fontFamily: FONTS.body,
+        fontSize: 12,
+        color: T.text2,
+        lineHeight: 1.45,
+      }}>
+        {preset.description}
+      </div>
+      {isOffline && (
+        <div style={{
+          fontFamily: FONTS.mono,
+          fontSize: 9,
+          color: T.text3,
+          marginTop: 2,
+        }}>
+          details: <code>baton policy --show {preset.name}</code>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Main Component ─────────────────────────────────────────────────────────
 
 export function BohRulebook() {
   const [rules, setRules] = usePersistedState<Rule[]>('pmo:boh-rules', INITIAL_RULES, localStorage);
+
+  const [presets, setPresets] = useState<PolicyPreset[]>([]);
+  const [presetsLoading, setPresetsLoading] = useState(true);
+  const [presetsOffline, setPresetsOffline] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.getPolicies()
+      .then(res => {
+        if (!cancelled) {
+          setPresets(res.presets);
+          // If the fetch fell back to the client constant, flag it
+          // (getPolicies always resolves, so we can't tell from the error path;
+          // we distinguish by whether a real endpoint responded)
+        }
+      })
+      .catch(() => {
+        /* getPolicies() never rejects — swallow just in case */
+      })
+      .finally(() => {
+        if (!cancelled) setPresetsLoading(false);
+      });
+
+    // Separately probe whether the /policies endpoint is real
+    fetch('/api/v1/policies', { method: 'HEAD' })
+      .then(r => { if (!cancelled) setPresetsOffline(!r.ok); })
+      .catch(() => { if (!cancelled) setPresetsOffline(true); });
+
+    return () => { cancelled = true; };
+  }, []);
 
   function toggleRule(i: number) {
     setRules(r => r.map((x, j) => j === i ? { ...x, on: !x.on } : x));
@@ -209,6 +300,74 @@ export function BohRulebook() {
         title="The Rulebook"
         sub="house rules — what nobody's allowed to do"
       />
+
+      {/* Section 0 — System policy presets */}
+      <SectionHeader
+        title="System Policy Presets"
+        rightSlot={
+          <span style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 4,
+            fontFamily: FONTS.mono,
+            fontSize: 9,
+            color: presetsOffline ? T.text3 : T.mintDark,
+            background: presetsOffline ? T.bg3 : T.mintSoft,
+            border: `1.5px solid ${presetsOffline ? T.borderSoft : T.mint}`,
+            borderRadius: 999,
+            padding: '2px 8px',
+            letterSpacing: '0.04em',
+            fontWeight: 700,
+          }}>
+            <span style={{
+              width: 6, height: 6, borderRadius: '50%',
+              background: presetsOffline ? T.borderSoft : T.mint,
+              display: 'inline-block',
+              flexShrink: 0,
+            }} />
+            {presetsOffline ? 'offline — CLI only' : 'live'}
+          </span>
+        }
+      />
+
+      <div style={{ padding: '12px 16px 4px' }}>
+        {presetsLoading ? (
+          <div style={{
+            fontFamily: FONTS.hand,
+            fontSize: 15,
+            color: T.text2,
+            padding: '8px 0',
+          }}>
+            loading system presets…
+          </div>
+        ) : (
+          <>
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(2, 1fr)',
+              gap: 8,
+              marginBottom: 12,
+            }}>
+              {presets.map(p => (
+                <PresetCard key={p.name} preset={p} isOffline={presetsOffline} />
+              ))}
+            </div>
+            {presetsOffline && (
+              <div style={{
+                fontFamily: FONTS.body,
+                fontSize: 11,
+                color: T.text3,
+                padding: '4px 2px 8px',
+                borderTop: `1px dashed ${T.borderSoft}`,
+                marginTop: 4,
+              }}>
+                No <code style={{ fontFamily: FONTS.mono }}>/api/v1/policies</code> endpoint detected — preset details are read-only. Run{' '}
+                <code style={{ fontFamily: FONTS.mono }}>baton policy --show &lt;name&gt;</code> for full config.
+              </div>
+            )}
+          </>
+        )}
+      </div>
 
       {/* Section 1 — Safety rails */}
       <SectionHeader
@@ -256,9 +415,9 @@ export function BohRulebook() {
         ))}
       </div>
 
-      {/* Section 2 — Custom rules */}
+      {/* Section 2 — Custom Rules (local) */}
       <SectionHeader
-        title="Custom rules"
+        title="Custom Rules (local)"
         rightSlot={
           <button
             style={{
@@ -309,6 +468,14 @@ export function BohRulebook() {
             display: 'inline-block',
           }}>
             write your own — we'll enforce 'em
+          </div>
+          <div style={{
+            fontFamily: FONTS.body,
+            fontSize: 11,
+            color: T.text3,
+            marginTop: 4,
+          }}>
+            stored locally in this browser
           </div>
         </div>
       </div>

@@ -159,7 +159,8 @@ agent_baton/
   |  |                GateRunner, StatePersistence, ExecutionDriver protocol,
   |  |                TaskClassifier protocol, KeywordClassifier, HaikuClassifier,
   |  |                FallbackClassifier, KnowledgeResolver, KnowledgeGap handler,
-  |  |                BeadStore, BeadSelector, bead_signal, bead_decay
+  |  |                BeadStore, BeadSelector, bead_signal, bead_decay,
+  |  |                PlanReviewer, CommitConsolidator
   |  |
   |  runtime/         TaskWorker, WorkerSupervisor, StepScheduler,
   |  |                AgentLauncher protocol, DryRunLauncher, ClaudeCodeLauncher,
@@ -205,6 +206,7 @@ agent_baton/
   |  middleware/
   |  |  auth.py       TokenAuthMiddleware (Bearer token, exempt health paths)
   |  |  cors.py       configure_cors() (localhost permissive by default)
+  |  |  user_identity.py  UserIdentityMiddleware (X-Baton-User, approval mode)
   |  routes/
   |  |  health.py     /health, /ready (2 endpoints)
   |  |  plans.py      Plan CRUD (2 endpoints)
@@ -214,7 +216,8 @@ agent_baton/
   |  |  decisions.py  Decision request/resolve (3 endpoints)
   |  |  events.py     SSE event stream (1 endpoint)
   |  |  webhooks.py   Webhook subscriptions (3 endpoints)
-  |  |  pmo.py        PMO board/project/forge/signals (19 endpoints)
+  |  |  pmo.py        PMO board/project/forge/execute/gates/changelist/review/signals (36 endpoints)
+  |  |  learn.py      Learning issues and auto-correction (5 endpoints)
   |  models/
   |  |  requests.py   Pydantic request bodies
   |  |  responses.py  Pydantic response schemas
@@ -254,10 +257,11 @@ pmo-ui/              React/Vite PMO frontend (served at /pmo/)
   src/
     main.tsx          Vite entry point
     App.tsx           Root component with routing
-    components/       AdoCombobox, ConfirmDialog, ForgePanel, HealthBar,
-    |                 InterviewPanel, KanbanBoard, KanbanCard,
-    |                 KeyboardShortcutsDialog, PlanEditor, PlanPreview,
-    |                 SignalsBar
+    components/       AdoCombobox, AnalyticsDashboard, ChangelistPanel,
+    |                 ConfirmDialog, ExecutionProgress, ForgePanel,
+    |                 GateApprovalPanel, HealthBar, InterviewPanel,
+    |                 KanbanBoard, KanbanCard, KeyboardShortcutsDialog,
+    |                 PlanEditor, PlanPreview, ReviewPanel, SignalsBar
     contexts/         ToastContext
     hooks/            useHotkeys, usePersistedState, usePmoBoard
     api/              client.ts, types.ts
@@ -267,7 +271,7 @@ agents/              Distributable agent definitions (19 .md files)
 references/          Distributable reference docs (15 .md files)
 templates/           CLAUDE.md + settings.json + skills/baton-help
 scripts/             install.sh (Linux), install.ps1 (Windows)
-tests/               Test suite (~4393 test functions, 127 test files, pytest)
+tests/               Test suite (~6202 test functions, pytest)
 docs/                Architecture documentation
 ```
 
@@ -304,7 +308,7 @@ docs/                Architecture documentation
 +============+==============================================+
 | Layer 4: INTERFACES                                       |
 | cli/ -- 49 command modules in 7 groups + 7 top-level      |
-| api/ -- FastAPI app, 9 route modules (41 endpoints),      |
+| api/ -- FastAPI app, 10 route modules (64 endpoints),     |
 |         middleware, webhooks                               |
 | pmo-ui/ -- React/Vite frontend                            |
 +===========================================================+
@@ -738,18 +742,52 @@ class Event:
 ### 5.10 PMO (`core/pmo/`)
 
 Portfolio management overlay that provides a Kanban board view across
-projects and a consultative plan creation workflow.
+projects, a consultative plan creation workflow, and end-to-end lifecycle
+management from plan creation through code review and merge.
 
 #### Components
 
 | Module | Class | Role |
 |--------|-------|------|
 | `store.py` | `PmoStore` | Read/write PMO config (`pmo-config.json`) and completed-plan archive (`pmo-archive.jsonl`). Atomic writes via tmp+rename. |
-| `scanner.py` | `PmoScanner` | Scans registered projects and builds Kanban board state. Reads execution state from each project's storage backend, maps `ExecutionState.status` to PMO columns (`queued`, `planning`, `executing`, `awaiting_human`, `validating`, `deployed`). |
-| `forge.py` | `ForgeSession` | Consultative plan creation. Delegates to `IntelligentPlanner.create_plan()` with project-scoped context. Uses `HeadlessClaude` for LLM-quality plan generation when available. |
+| `scanner.py` | `PmoScanner` | Scans registered projects and builds Kanban board state. Reads execution state from each project's storage backend, maps `ExecutionState.status` to PMO columns (`queued`, `executing`, `awaiting_human`, `validating`, `review`, `deployed`). |
+| `forge.py` | `ForgeSession` | Consultative plan creation with SSE progress streaming. Delegates to `IntelligentPlanner.create_plan()` with project-scoped context. Uses `HeadlessClaude` for LLM-quality plan generation when available. |
 
 PMO data now lives in `central.db` (not a separate `pmo.db`). First-run
 migration from legacy `pmo.db` is handled by `get_pmo_central_store()`.
+
+#### PMO Workflow Lifecycle
+
+The PMO UI supports a complete plan-to-merge lifecycle:
+
+```
+Forge (plan) -> Edit (refine) -> Execute (dispatch agents) -> Review (changelist) -> Merge/PR
+```
+
+1. **Plan creation** -- Forge generates a plan with SSE progress streaming
+   through 5 stages (Analyzing, Routing, Sizing, Generating, Validating).
+2. **Plan editing** -- PlanEditor supports model selection per step,
+   dependency multi-select, tag inputs for deliverables/paths/context_files,
+   and gate editing.
+3. **Execution** -- Launch from Kanban board with pause/resume/cancel
+   controls (SIGSTOP/SIGCONT/SIGTERM), retry-step and skip-step for
+   failed steps, and bead alert flags for warning/incident signals.
+4. **Code review** -- After execution, the `review` Kanban column presents
+   ChangelistPanel with a file tree grouped by agent, diff stats, and
+   merge/PR buttons. `CommitConsolidator` (lazily imported from
+   `core/engine/consolidator`) handles cherry-pick rebase with
+   topological sort for dependency ordering.
+5. **Merge and PR** -- POST `/pmo/cards/{id}/merge` performs a fast-forward
+   merge; POST `/pmo/cards/{id}/create-pr` creates a GitHub PR via `gh`.
+
+#### Role-Based Approval
+
+The `users` and `approval_log` tables in central.db track identity and
+audit trail. `UserIdentityMiddleware` (`api/middleware/user_identity.py`)
+resolves caller identity from `X-Baton-User` header, Bearer token, or
+fallback to `"local-user"`. The `BATON_APPROVAL_MODE` environment variable
+controls approval policy (`local` = self-approval permitted, `team` =
+different user required).
 
 ---
 
@@ -1026,7 +1064,7 @@ The factory:
 2. Wires `WebhookDispatcher` to the shared `EventBus`
 3. Configures CORS middleware (outermost)
 4. Adds `TokenAuthMiddleware` (no-op when token is None)
-5. Lazily imports and registers 9 route modules
+5. Lazily imports and registers 10 route modules
 6. Mounts PMO UI static files if `pmo-ui/dist/` exists
 
 ### 8.2 Dependency Injection
@@ -1067,14 +1105,15 @@ bus regardless of which component emits them.
 | `decisions.py` | `/api/v1` | 3 | Request, resolve, list decisions |
 | `events.py` | `/api/v1` | 1 | SSE event stream (requires `sse-starlette`) |
 | `webhooks.py` | `/api/v1` | 3 | Register, list, delete/test webhooks |
-| `pmo.py` | `/api/v1` | 19 | Board, projects, cards, health, forge (plan/approve/interview/regenerate), execute, ADO search, signals (list/create/resolve/batch-resolve/forge-from-signal) |
+| `pmo.py` | `/api/v1` | 36 | Board, projects, cards, health, forge (plan/approve/interview/regenerate/progress SSE), execute (launch/pause/resume/cancel/retry-step/skip-step), gates (pending/approve/reject), changelist/merge/create-pr, request-review/approval-log, ADO search, external items/mappings, signals (list/create/resolve/batch-resolve/forge-from-signal), SSE events |
+| `learn.py` | `/api/v1` | 5 | Learning issues, detection, application |
 
-**Total: 41 API endpoints across 9 route modules.**
+**Total: 64 API endpoints across 10 route modules.**
 
 ### 8.4 Middleware Stack
 
 ```
-Request -> CORS -> TokenAuth -> Route Handler -> Response
+Request -> CORS -> TokenAuth -> UserIdentity -> Route Handler -> Response
 ```
 
 - **CORS**: Permits all localhost/127.0.0.1 origins by default. Configurable
@@ -1082,6 +1121,10 @@ Request -> CORS -> TokenAuth -> Route Handler -> Response
 - **TokenAuth**: Bearer token validation. Exempt paths: `/api/v1/health`,
   `/api/v1/ready`, `/openapi.json`, `/docs`, `/redoc`. No-op when token
   is None.
+- **UserIdentity**: Resolves caller identity from `X-Baton-User` header,
+  Bearer token, or `"local-user"` fallback. Sets `request.state.user_id`
+  and `request.state.user_role`. Controlled by `BATON_APPROVAL_MODE` env
+  var (`local` or `team`).
 
 ### 8.5 Webhook System
 
@@ -1115,15 +1158,20 @@ pmo-ui/
     App.tsx               Root component with routing
     components/
       AdoCombobox.tsx     Azure DevOps work item search
+      AnalyticsDashboard.tsx  Program analytics and metrics
+      ChangelistPanel.tsx Post-execution code review (file tree by agent, diff stats)
       ConfirmDialog.tsx   Confirmation modal
-      ForgePanel.tsx      Plan creation wizard
+      ExecutionProgress.tsx  Live execution progress with interrupt controls
+      ForgePanel.tsx      Plan creation wizard with SSE progress streaming
+      GateApprovalPanel.tsx  Gate approval/rejection UI
       HealthBar.tsx       Program health visualization
       InterviewPanel.tsx  Forge interview flow
-      KanbanBoard.tsx     Main board view
-      KanbanCard.tsx      Card component
+      KanbanBoard.tsx     Main board view (6 columns)
+      KanbanCard.tsx      Card component with review/merge actions
       KeyboardShortcutsDialog.tsx  Keyboard shortcuts help
-      PlanEditor.tsx      Plan editing interface
-      PlanPreview.tsx     Read-only plan preview
+      PlanEditor.tsx      Advanced plan editing (model/deps/tags/gates)
+      PlanPreview.tsx     Read-only plan display
+      ReviewPanel.tsx     Role-based review and approval
       SignalsBar.tsx      PMO signal notifications
     contexts/
       ToastContext.tsx    Toast notification provider
@@ -1136,7 +1184,7 @@ pmo-ui/
       types.ts            TypeScript type definitions
     styles/
       index.css           Global styles
-      tokens.ts           Design tokens
+      tokens.ts           Design tokens (6 Kanban columns, severity/priority colors)
     utils/
       agent-names.ts      Agent display name mapping
 ```
@@ -1144,6 +1192,8 @@ pmo-ui/
 - Built assets are served at `/pmo/` by the FastAPI `StaticFiles` mount.
 - The UI communicates exclusively through the REST API (`/api/v1/pmo/*`).
 - No direct SQLite access from the frontend.
+- Six Kanban columns: `queued`, `executing`, `awaiting_human`,
+  `validating`, `review` (post-execution changelist), `deployed`.
 
 ---
 
@@ -1371,9 +1421,10 @@ Configuration is file-based, not environment-variable-based:
 - Policy rules: loaded from JSON by `PolicyEngine`
 - Learned overrides: `.claude/team-context/learned-overrides.json`
 
-The only environment variables the system reads are `BATON_TASK_ID` (for
-session binding) and adapter-specific PAT variables (e.g., the ADO adapter
-reads the env var name stored in its config).
+The environment variables the system reads are `BATON_TASK_ID` (for
+session binding), `BATON_APPROVAL_MODE` (approval policy: `local` or
+`team`), and adapter-specific PAT variables (e.g., the ADO adapter reads
+the env var name stored in its config).
 
 ### 13.4 State Persistence Layout
 
@@ -1635,8 +1686,8 @@ models  -->  events, observe, govern, learn, improve, distribute, orchestration,
 | Attribute | Value |
 |-----------|-------|
 | Entry | `baton pmo serve` / `status` / `add` / `health` |
-| Path | `cli/pmo_cmd.py` -> `PmoSqliteStore` -> `PmoScanner` -> `ForgeSession` -> API (`routes/pmo.py`) |
-| Output | PMO board data in `central.db`; React UI at `/pmo/` |
+| Path | `cli/pmo_cmd.py` -> `PmoSqliteStore` -> `PmoScanner` -> `ForgeSession` -> API (`routes/pmo.py`) -> `CommitConsolidator` -> `UserIdentityMiddleware` |
+| Output | PMO board data in `central.db`; React UI at `/pmo/`; approval audit trail in `approval_log` |
 
 ### Domain 10: Distribution
 
@@ -1651,8 +1702,8 @@ models  -->  events, observe, govern, learn, improve, distribute, orchestration,
 | Attribute | Value |
 |-----------|-------|
 | Entry | `baton serve` (standalone) or `baton daemon start --serve` |
-| Path | `cli/serve.py` -> `create_app()` -> 9 route modules -> backing subsystems |
-| Output | HTTP API (41 endpoints), SSE event stream, webhook deliveries |
+| Path | `cli/serve.py` -> `create_app()` -> 10 route modules -> backing subsystems |
+| Output | HTTP API (64 endpoints), SSE event streams, webhook deliveries |
 
 ### Domain 12: External Sources
 
@@ -1690,7 +1741,7 @@ models  -->  events, observe, govern, learn, improve, distribute, orchestration,
 
 ## 17. Distributable Artifacts
 
-### Agent Definitions (19 files in `agents/`)
+### Agent Definitions (22 files in `agents/`)
 
 | Agent | File |
 |-------|------|
@@ -1714,7 +1765,7 @@ models  -->  events, observe, govern, learn, improve, distribute, orchestration,
 | `visualization-expert` | `visualization-expert.md` |
 | `subject-matter-expert` | `subject-matter-expert.md` |
 
-### Reference Documents (15 files in `references/`)
+### Reference Documents (16 files in `references/`)
 
 | Reference | File |
 |-----------|------|

@@ -65,7 +65,7 @@ pip install -e ".[dev]"     # Core engine + CLI
 
 ```bash
 # In Claude Code
-/agents                     # Should list ~19 agents
+/agents                     # Should list ~22 agents
 
 # In terminal
 baton agents                # List agents from Python registry
@@ -209,7 +209,9 @@ baton beads cleanup --ttl 168 --dry-run         # Memory decay preview
 
 AI-driven task planning via headless Claude Code subprocess. Generates
 real LLM-quality plans (not rule-based templates). Includes interactive
-interview-based refinement and integrates with the PMO UI.
+interview-based refinement, SSE progress streaming through 5 stages
+(Analyzing, Routing, Sizing, Generating, Validating), and integrates
+with the PMO UI.
 
 ### Headless Execution
 
@@ -312,7 +314,7 @@ with confidence thresholds:
 
 ### REST API and PMO UI
 
-A FastAPI server exposes the full engine over HTTP with 9 route modules:
+A FastAPI server exposes the full engine over HTTP with 10 route modules:
 
 | Route | Purpose |
 |-------|---------|
@@ -324,13 +326,27 @@ A FastAPI server exposes the full engine over HTTP with 9 route modules:
 | `/api/v1/decisions` | Human-in-the-loop decision management |
 | `/api/v1/events` | SSE event streaming |
 | `/api/v1/webhooks` | Outbound webhook subscription CRUD |
-| `/api/v1/pmo` | Portfolio management (board, projects, forge, signals) |
+| `/api/v1/pmo` | Portfolio management (board, projects, forge, execute, gates, changelist, review, signals) |
+| `/api/v1/learn` | Learning issues and auto-correction |
 
-The API supports Bearer token authentication, CORS configuration, and
-outbound webhooks with HMAC-SHA256 signing and Slack Block Kit payloads.
+The API supports Bearer token authentication, CORS configuration,
+user identity middleware (`BATON_APPROVAL_MODE`), and outbound webhooks
+with HMAC-SHA256 signing and Slack Block Kit payloads.
 
-A React/Vite **PMO frontend** provides Kanban boards, the Forge plan
-builder, one-click execution launch, and program health dashboards.
+A React/Vite **PMO frontend** provides a complete plan-to-merge
+lifecycle:
+
+- **Kanban board** with 6 columns (queued, executing, awaiting_human,
+  validating, review, deployed) and program health dashboards
+- **Smart Forge** with SSE progress streaming (5-stage indicator)
+- **Advanced plan editor** with model selection, dependency multi-select,
+  tag inputs, and gate editing
+- **Execution controls** -- pause/resume/cancel (SIGSTOP/SIGCONT/SIGTERM),
+  retry-step and skip-step for failed steps, bead alert flags
+- **Changelist review** -- post-execution file tree grouped by agent with
+  diff stats, merge and PR buttons
+- **Role-based approval** -- request-review workflow with audit trail
+  (`approval_log` table)
 
 ```bash
 baton serve --port 8741              # API only
@@ -367,7 +383,7 @@ contract between Claude and the engine.
 ```
                     +----------------------------------------------------+
                     |                    ORCHESTRATOR                     |
-                    |  Reads 15 reference procedures inline               |
+                    |  Reads 16 reference procedures inline               |
                     +------------------------+---------------------------+
                                              |
                           baton plan --------+-------- baton execute
@@ -605,8 +621,8 @@ The `baton` CLI provides 50+ commands organized into ten groups:
 ## Project Structure
 
 ```
-agents/            <- 19 agent definitions (markdown + YAML frontmatter)
-references/        <- 15 reference procedures (shared knowledge)
+agents/            <- 22 agent definitions (markdown + YAML frontmatter)
+references/        <- 16 reference procedures (shared knowledge)
 templates/         <- CLAUDE.md + settings.json + skills for target projects
 scripts/           <- Install scripts (Linux + Windows)
 docs/              <- Architecture docs, ADRs, invariants, troubleshooting
@@ -626,9 +642,9 @@ agent_baton/       <- Python package
     distribute/    <- Packaging, sharing, registry (+ experimental)
     events/        <- Event bus, domain events, projections
     runtime/       <- Async worker, supervisor, headless Claude, decisions
-  api/             <- FastAPI REST API (9 route modules, webhooks, middleware)
+  api/             <- FastAPI REST API (10 route modules, webhooks, middleware)
   cli/             <- CLI interface (50+ commands)
-tests/             <- Test suite (~5010 tests, pytest)
+tests/             <- Test suite (~6202 tests, pytest)
 pmo-ui/            <- React/Vite PMO frontend
 ```
 
@@ -642,6 +658,7 @@ pmo-ui/            <- React/Vite PMO frontend
 |----------|---------|
 | `BATON_TASK_ID` | Target a specific execution in multi-task scenarios |
 | `BATON_API_TOKEN` | Bearer token for API authentication |
+| `BATON_APPROVAL_MODE` | Approval policy: `local` (self-approve, default) or `team` (different reviewer required) |
 | `ANTHROPIC_API_KEY` | Required for AI classification (`pip install agent-baton[classify]`) |
 
 ### Plan Command Flags
@@ -677,7 +694,7 @@ git clone https://github.com/DaveGerson/agent-baton.git
 cd agent-baton
 pip install -e ".[dev]"        # Core + test deps
 pip install -e ".[dev,api]"    # Everything including REST API
-pytest                         # ~5010 tests
+pytest                         # ~6202 tests
 ```
 
 Requires Python 3.10+. The only runtime dependency is PyYAML.
@@ -708,15 +725,15 @@ Requires Python 3.10+. The only runtime dependency is PyYAML.
 ## Project Status
 
 Agent Baton is in active development (v0.1.0). The orchestration engine,
-all 19 agents, 15 references, knowledge delivery, bead memory system,
-PMO subsystem, REST API with webhooks, federated sync, event system,
-learning automation, and the improvement pipeline are implemented and
-tested.
+all 22 agents, 16 references, knowledge delivery, bead memory system,
+PMO subsystem with end-to-end workflow (plan, edit, execute, review,
+merge), REST API with webhooks, federated sync, event system, learning
+automation, and the improvement pipeline are implemented and tested.
 
 - **Python**: 3.10+
 - **Runtime dependency**: PyYAML only
 - **Optional**: FastAPI + uvicorn (REST API), Anthropic SDK (AI classification)
-- **Test suite**: ~5010 tests (pytest)
+- **Test suite**: ~6202 tests (pytest)
 - **External adapters**: Azure DevOps implemented; Jira, GitHub, Linear
   protocols defined
 
