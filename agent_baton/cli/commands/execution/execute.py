@@ -87,11 +87,22 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         help="Path to plan.json (default: .claude/team-context/plan.json)",
     )
 
-    # baton execute next [--all] [--task-id ID]
+    # baton execute next [--all] [--terse] [--task-id ID]
     next_p = sub.add_parser("next", parents=[_task_id_parent],
                             help="Get the next action to perform")
     next_p.add_argument("--all", action="store_true", dest="all_actions",
                         help="Return all dispatchable actions (for parallel dispatch)")
+    next_p.add_argument(
+        "--terse",
+        action="store_true",
+        default=False,
+        help=(
+            "Terse mode: for DISPATCH actions, write the delegation_prompt to "
+            ".claude/team-context/current-dispatch.prompt.md and emit only a "
+            "Prompt-File pointer in stdout.  Reduces per-step token burn for "
+            "long plans.  Non-DISPATCH actions are unaffected."
+        ),
+    )
 
     # baton execute record --step ID --agent NAME [--status S] [--outcome O] [--tokens N] [--duration N] [--error E]
     p_record = sub.add_parser("record", parents=[_task_id_parent],
@@ -159,6 +170,17 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     p_team.add_argument("--outcome", default="", help="Summary of work done")
     p_team.add_argument("--files", default="", help="Comma-separated files changed")
 
+    # baton execute interact --step-id ID (--input TEXT | --done)
+    p_interact = sub.add_parser("interact", parents=[_task_id_parent],
+                                help="Provide input to an interactive step or signal it is done")
+    p_interact.add_argument("--step-id", required=True, dest="step_id",
+                            help="Step ID in 'interacting' status (e.g. 1.1)")
+    _interact_grp = p_interact.add_mutually_exclusive_group(required=True)
+    _interact_grp.add_argument("--input", dest="interact_input", default=None,
+                               help="Human input text to send to the agent")
+    _interact_grp.add_argument("--done", action="store_true", dest="interact_done",
+                               help="Signal that the interaction is complete")
+
     # baton execute run [--plan PATH] [--task-id ID] [--model MODEL] [--max-steps N] [--dry-run]
     p_run = sub.add_parser("run", parents=[_task_id_parent],
                            help="Autonomous execution loop (no Claude Code session needed)")
@@ -168,6 +190,8 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
                        help="Default model for dispatched agents (default: sonnet)")
     p_run.add_argument("--max-steps", type=int, default=50, dest="max_steps",
                        help="Safety limit: maximum steps before aborting (default: 50)")
+    p_run.add_argument("--token-budget", type=int, default=0, dest="token_budget",
+                       help="Soft token cap: stop dispatching new steps when exceeded (0 = use tier default)")
     p_run.add_argument("--dry-run", action="store_true", dest="dry_run",
                        help="Print actions without executing them")
 
@@ -188,6 +212,22 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
                               help="Cancel a running execution")
     p_cancel.add_argument("--reason", default="", help="Reason for cancellation")
 
+    # baton execute retry-gate --phase-id N [--task-id ID]
+    p_retry_gate = sub.add_parser("retry-gate", parents=[_task_id_parent],
+                                  help="Reset a failed gate back to pending for retry")
+    p_retry_gate.add_argument("--phase-id", type=int, required=True, dest="phase_id",
+                              help="Phase ID whose failed gate should be reset")
+
+    # baton execute fail --phase-id N [--task-id ID]
+    p_fail = sub.add_parser("fail", parents=[_task_id_parent],
+                            help="Permanently fail an execution that is in gate_failed status")
+    p_fail.add_argument("--phase-id", type=int, required=True, dest="phase_id",
+                        help="Phase ID of the failed gate (for confirmation output)")
+
+    # baton execute resume-budget [--task-id ID]
+    sub.add_parser("resume-budget", parents=[_task_id_parent],
+                   help="Clear budget_exceeded status so execution can continue")
+
     # baton execute list
     sub.add_parser("list", help="List all executions (active and completed)")
 
@@ -198,7 +238,22 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     return p
 
 
-def _print_action(action: dict) -> None:
+_DISPATCH_PROMPT_SIDECAR = ".claude/team-context/current-dispatch.prompt.md"
+
+
+def _write_dispatch_sidecar(prompt: str) -> str:
+    """Write *prompt* to the standard sidecar path and return the path string.
+
+    The directory is created if it does not already exist.  The file is always
+    overwritten so it always reflects the most-recently-dispatched step.
+    """
+    sidecar = Path(_DISPATCH_PROMPT_SIDECAR)
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.write_text(prompt, encoding="utf-8")
+    return _DISPATCH_PROMPT_SIDECAR
+
+
+def _print_action(action: dict, *, terse: bool = False) -> None:
     """Print an execution action in the structured text format that Claude Code parses.
 
     **PUBLIC API** -- This function defines the control protocol between the
@@ -280,22 +335,44 @@ def _print_action(action: dict) -> None:
 
     if atype == ActionType.DISPATCH.value:
         step_id = action.get('step_id', '')
+        step_type = action.get('step_type', '')
         print(f"ACTION: DISPATCH")
-        print(f"  Agent: {action.get('agent_name', '')}")
-        print(f"  Model: {action.get('agent_model', '')}")
-        print(f"  Step:  {step_id}")
-        if _is_team_member_id(step_id):
-            # Derive the parent step ID (e.g. "1.1.a" → "1.1") so the
-            # orchestrator knows which parent to reference in team-record.
-            parent_step_id = ".".join(step_id.split(".")[:2])
-            print(f"  Team-Step: yes")
-            print(f"  Parent-Step: {parent_step_id}")
-            print(f"  Record-With: baton execute team-record --step-id {parent_step_id} --member-id {step_id} ...")
-        print(f"  Message: {msg}")
-        print()
-        print("--- Delegation Prompt ---")
-        print(action.get("delegation_prompt", ""))
-        print("--- End Prompt ---")
+        if step_type == "automation":
+            # Automation steps have no agent or model — show command block only.
+            print(f"  Step:    {step_id}")
+            print(f"  Type:    automation")
+            print(f"  Command: {action.get('command', '')}")
+            print(f"  Message: {msg}")
+            print()
+            print("--- Command ---")
+            print(action.get("command", ""))
+            print("--- End Command ---")
+        else:
+            print(f"  Agent: {action.get('agent_name', '')}")
+            print(f"  Model: {action.get('agent_model', '')}")
+            print(f"  Step:  {step_id}")
+            if step_type:
+                print(f"  Type:  {step_type}")
+            if _is_team_member_id(step_id):
+                # Derive the parent step ID (e.g. "1.1.a" → "1.1") so the
+                # orchestrator knows which parent to reference in team-record.
+                parent_step_id = ".".join(step_id.split(".")[:2])
+                print(f"  Team-Step: yes")
+                print(f"  Parent-Step: {parent_step_id}")
+                print(f"  Record-With: baton execute team-record --step-id {parent_step_id} --member-id {step_id} ...")
+            if action.get("interactive"):
+                print(f"  Interactive: yes")
+                print(f"  Max-Turns: {action.get('interact_max_turns', 10)}")
+            print(f"  Message: {msg}")
+            if terse:
+                prompt = action.get("delegation_prompt", "")
+                sidecar_path = _write_dispatch_sidecar(prompt)
+                print(f"  Prompt-File: {sidecar_path}")
+            else:
+                print()
+                print("--- Delegation Prompt ---")
+                print(action.get("delegation_prompt", ""))
+                print("--- End Prompt ---")
 
     elif atype == ActionType.GATE.value:
         print(f"ACTION: GATE")
@@ -348,6 +425,24 @@ def _print_action(action: dict) -> None:
         print(f"ACTION: FAILED")
         print(f"  {action.get('summary', msg)}")
 
+    elif atype == ActionType.INTERACT.value:
+        step_id = action.get("interact_step_id", "")
+        agent = action.get("interact_agent_name", "")
+        turn = action.get("interact_turn", 0)
+        max_turns = action.get("interact_max_turns", 10)
+        print(f"ACTION: INTERACT")
+        print(f"  Step:    {step_id}")
+        print(f"  Agent:   {agent}")
+        print(f"  Turn:    {turn}/{max_turns}")
+        print(f"  Message: {msg}")
+        print()
+        print("--- Agent Output ---")
+        print(action.get("interact_prompt", ""))
+        print("--- End Output ---")
+        print()
+        print(f"Respond with: baton execute interact --step-id {step_id} --input \"<your input>\"")
+        print(f"Signal done:  baton execute interact --step-id {step_id} --done")
+
     else:
         print(f"ACTION: {atype}")
         print(f"  {msg}")
@@ -355,7 +450,7 @@ def _print_action(action: dict) -> None:
 
 def handler(args: argparse.Namespace) -> None:
     if args.subcommand is None:
-        validation_error("supply a subcommand: start, next, record, dispatched, gate, approve, feedback, amend, team-record, complete, status, resume, list, switch, cancel, run")
+        validation_error("supply a subcommand: start, next, record, dispatched, gate, approve, feedback, amend, team-record, interact, complete, status, resume, list, switch, cancel, run, retry-gate, fail, resume-budget")
 
     if args.subcommand == "list":
         _handle_list()
@@ -442,13 +537,8 @@ def handler(args: argparse.Namespace) -> None:
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
             sys.exit(1)
-        # Mark this as the active execution
-        try:
-            storage.set_active_task(task_id)
-        except Exception:
-            # Fallback to legacy persistence marker when storage is unavailable.
-            if engine._persistence is not None:
-                engine._persistence.set_active()
+        # engine.start() already calls set_active_task() post-save; no need
+        # to call it again here.
         if getattr(args, "output", "text") == "json":
             result = {"task_id": task_id, "action": action.to_dict()}
             print(json.dumps(result, indent=2))
@@ -457,6 +547,7 @@ def handler(args: argparse.Namespace) -> None:
             _print_action(action.to_dict())
 
     elif args.subcommand == "next":
+        terse = getattr(args, "terse", False)
         try:
             if getattr(args, "output", "text") == "json":
                 if args.all_actions:
@@ -469,6 +560,13 @@ def handler(args: argparse.Namespace) -> None:
                 else:
                     action = engine.next_action()
                     result = [action.to_dict()]
+                if terse:
+                    for item in result:
+                        if item.get("action_type") == ActionType.DISPATCH.value:
+                            prompt = item.get("delegation_prompt", "")
+                            sidecar_path = _write_dispatch_sidecar(prompt)
+                            item["delegation_prompt"] = sidecar_path
+                            item["prompt_file"] = sidecar_path
                 print(json.dumps(result, indent=2))
             elif args.all_actions:
                 actions = engine.next_actions()
@@ -481,7 +579,7 @@ def handler(args: argparse.Namespace) -> None:
                 print(json.dumps(result, indent=2))
             else:
                 action = engine.next_action()
-                _print_action(action.to_dict())
+                _print_action(action.to_dict(), terse=terse)
         except RuntimeError as exc:
             print(f"error: {exc}", file=sys.stderr)
             print("Recovery options:", file=sys.stderr)
@@ -621,6 +719,30 @@ def handler(args: argparse.Namespace) -> None:
         else:
             print(f"Team member recorded: {args.member_id} ({args.agent}) — {args.status}")
 
+    elif args.subcommand == "interact":
+        step_id = args.step_id
+        if getattr(args, "interact_done", False):
+            try:
+                engine.complete_interaction(step_id=step_id)
+            except (RuntimeError, ValueError) as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                sys.exit(1)
+            if getattr(args, "output", "text") == "json":
+                print(json.dumps({"status": "interaction_complete", "step_id": step_id}))
+            else:
+                print(f"Interaction completed: step {step_id}")
+        else:
+            input_text = getattr(args, "interact_input", None) or ""
+            try:
+                engine.provide_interact_input(step_id=step_id, input_text=input_text)
+            except (RuntimeError, ValueError) as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                sys.exit(1)
+            if getattr(args, "output", "text") == "json":
+                print(json.dumps({"status": "input_recorded", "step_id": step_id}))
+            else:
+                print(f"Interaction input recorded: step {step_id}")
+
     elif args.subcommand == "complete":
         summary = engine.complete()
         if getattr(args, "output", "text") == "json":
@@ -759,6 +881,36 @@ def handler(args: argparse.Namespace) -> None:
             if reason:
                 print(f"  Reason: {reason}")
 
+    elif args.subcommand == "retry-gate":
+        try:
+            engine.reset_gate_failed(phase_id=args.phase_id)
+        except ValueError as exc:
+            user_error(str(exc))
+        if getattr(args, "output", "text") == "json":
+            print(json.dumps({"status": "reset", "phase_id": args.phase_id}))
+        else:
+            print(f"Gate for phase {args.phase_id} reset to pending — run 'baton execute next' to retry.")
+
+    elif args.subcommand == "fail":
+        try:
+            engine.fail_gate(phase_id=args.phase_id)
+        except ValueError as exc:
+            user_error(str(exc))
+        if getattr(args, "output", "text") == "json":
+            print(json.dumps({"status": "failed", "phase_id": args.phase_id}))
+        else:
+            print(f"Execution permanently failed at phase {args.phase_id} gate.")
+
+    elif args.subcommand == "resume-budget":
+        try:
+            engine.resume_budget()
+        except ValueError as exc:
+            user_error(str(exc))
+        if getattr(args, "output", "text") == "json":
+            print(json.dumps({"status": "running", "message": "budget_exceeded cleared"}))
+        else:
+            print("Budget status cleared — execution resumed. Run 'baton execute next' to continue.")
+
 
 # ---------------------------------------------------------------------------
 # Policy engine construction
@@ -832,6 +984,7 @@ def _handle_run(args: argparse.Namespace) -> None:
     max_steps = args.max_steps
     dry_run = args.dry_run
     model_override = args.model
+    token_budget: int = getattr(args, "token_budget", 0)
 
     # Resolve or create the execution
     bus = EventBus()
@@ -844,7 +997,10 @@ def _handle_run(args: argparse.Namespace) -> None:
     # If no active execution, start from plan
     engine: ExecutionEngine | None = None
     if task_id:
-        engine = ExecutionEngine(bus=bus, task_id=task_id, storage=storage)
+        engine = ExecutionEngine(
+            bus=bus, task_id=task_id, storage=storage,
+            token_budget=token_budget or None,
+        )
         st = engine.status()
         if st and st.get("status") in ("running", "pending"):
             print(f"Resuming execution: {task_id}", file=sys.stderr)
@@ -872,6 +1028,7 @@ def _handle_run(args: argparse.Namespace) -> None:
             bus=bus, task_id=task_id, storage=storage,
             knowledge_resolver=knowledge_resolver,
             policy_engine=policy_engine,
+            token_budget=token_budget or None,
         )
         ContextManager(task_id=task_id).init_mission_log(
             plan.task_summary, risk_level=plan.risk_level
@@ -910,6 +1067,43 @@ def _handle_run(args: argparse.Namespace) -> None:
     steps_executed = 0
     action_dict = action.to_dict()
 
+    try:
+        _run_loop(
+            engine=engine,
+            launcher=launcher,
+            action_dict=action_dict,
+            max_steps=max_steps,
+            dry_run=dry_run,
+            model_override=model_override,
+            task_id=task_id,
+            steps_executed=steps_executed,
+        )
+    finally:
+        # Issue 3: clean up any launcher subprocesses that are still alive
+        # if the loop exits via CancelledError, KeyboardInterrupt, or sys.exit.
+        _cleanup = getattr(launcher, "cleanup", None)
+        if _cleanup is not None:
+            import asyncio as _asyncio
+            try:
+                _asyncio.run(_cleanup())
+            except Exception:
+                pass
+
+
+def _run_loop(
+    *,
+    engine: ExecutionEngine,
+    launcher: object,
+    action_dict: dict,
+    max_steps: int,
+    dry_run: bool,
+    model_override: str,
+    task_id: str | None,
+    steps_executed: int = 0,
+) -> None:
+    """Inner execution loop extracted so _handle_run can wrap it in try/finally."""
+    import subprocess as _subprocess
+
     while True:
         atype = action_dict.get("action_type", "")
 
@@ -935,61 +1129,103 @@ def _handle_run(args: argparse.Namespace) -> None:
             sys.exit(1)
 
         if atype == ActionType.DISPATCH.value:
-            agent_name = action_dict.get("agent_name", "")
             step_id = action_dict.get("step_id", "")
-            agent_model = action_dict.get("agent_model", model_override)
-            prompt = action_dict.get("delegation_prompt", "")
+            step_type = action_dict.get("step_type", "")
             msg = action_dict.get("message", "")
 
-            print(f"\n  [{step_id}] Dispatching {agent_name} (model={agent_model})...", file=sys.stderr)
-            if msg:
-                print(f"    {msg[:120]}", file=sys.stderr)
+            if step_type == "automation":
+                # ── Automation: run shell command directly, no LLM ───────
+                command = action_dict.get("command", "")
+                print(f"\n  [{step_id}] Running automation: {command[:80]}...", file=sys.stderr)
+                engine.mark_dispatched(step_id=step_id, agent_name="automation")
 
-            engine.mark_dispatched(step_id=step_id, agent_name=agent_name)
-
-            if dry_run:
-                print(f"  [DRY RUN] Would launch {agent_name} with {len(prompt)} char prompt", file=sys.stderr)
-                engine.record_step_result(
-                    step_id=step_id, agent_name=agent_name,
-                    status="complete", outcome="dry-run skip",
-                )
+                if dry_run:
+                    print(f"  [DRY RUN] Would run: {command}", file=sys.stderr)
+                    engine.record_step_result(
+                        step_id=step_id, agent_name="automation",
+                        status="complete", outcome="dry-run skip",
+                    )
+                else:
+                    import subprocess as _subprocess
+                    try:
+                        proc = _subprocess.run(
+                            command, shell=True, capture_output=True,
+                            text=True, timeout=300,
+                        )
+                        succeeded = proc.returncode == 0
+                        engine.record_step_result(
+                            step_id=step_id,
+                            agent_name="automation",
+                            status="complete" if succeeded else "failed",
+                            outcome=proc.stdout,
+                            error=proc.stderr if not succeeded else "",
+                        )
+                        status_marker = success("done") if succeeded else color_error("FAIL")
+                        print(f"  [{step_id}] {status_marker}", file=sys.stderr)
+                        if not succeeded:
+                            print(f"    Error: {proc.stderr[:200]}", file=sys.stderr)
+                    except _subprocess.TimeoutExpired:
+                        engine.record_step_result(
+                            step_id=step_id, agent_name="automation",
+                            status="failed",
+                            error=f"Automation command timed out after 300s: {command}",
+                        )
+                        print(f"  [{step_id}] {color_error('TIMEOUT')}", file=sys.stderr)
             else:
-                import asyncio as _asyncio
-                assert launcher is not None  # guarded by user_error above
-                result = _asyncio.run(launcher.launch(
-                    agent_name=agent_name,
-                    model=agent_model,
-                    prompt=prompt,
-                    step_id=step_id,
-                ))
-                engine.record_step_result(
-                    step_id=step_id,
-                    agent_name=agent_name,
-                    status=result.status,
-                    outcome=result.outcome,
-                    files_changed=result.files_changed,
-                    commit_hash=result.commit_hash,
-                    estimated_tokens=result.estimated_tokens,
-                    duration_seconds=result.duration_seconds,
-                    error=result.error,
-                )
-                status_marker = success("done") if result.status == "complete" else color_error("FAIL")
-                print(f"  [{step_id}] {status_marker} ({result.duration_seconds:.1f}s)", file=sys.stderr)
-                if result.error:
-                    print(f"    Error: {result.error[:200]}", file=sys.stderr)
+                # ── Agent dispatch: existing LLM path ────────────────────
+                agent_name = action_dict.get("agent_name", "")
+                agent_model = action_dict.get("agent_model", model_override)
+                prompt = action_dict.get("delegation_prompt", "")
 
-                # Log to mission log
-                log_status = "COMPLETE" if result.status == "complete" else "FAILED"
-                entry = MissionLogEntry(
-                    agent_name=agent_name,
-                    status=log_status,
-                    assignment=step_id,
-                    result=result.outcome[:200],
-                    files=result.files_changed,
-                    commit_hash=result.commit_hash,
-                    issues=[result.error] if result.error else [],
-                )
-                ContextManager(task_id=task_id).append_to_mission_log(entry)
+                print(f"\n  [{step_id}] Dispatching {agent_name} (model={agent_model})...", file=sys.stderr)
+                if msg:
+                    print(f"    {msg[:120]}", file=sys.stderr)
+
+                engine.mark_dispatched(step_id=step_id, agent_name=agent_name)
+
+                if dry_run:
+                    print(f"  [DRY RUN] Would launch {agent_name} with {len(prompt)} char prompt", file=sys.stderr)
+                    engine.record_step_result(
+                        step_id=step_id, agent_name=agent_name,
+                        status="complete", outcome="dry-run skip",
+                    )
+                else:
+                    import asyncio as _asyncio
+                    assert launcher is not None  # guarded by user_error above
+                    result = _asyncio.run(launcher.launch(
+                        agent_name=agent_name,
+                        model=agent_model,
+                        prompt=prompt,
+                        step_id=step_id,
+                    ))
+                    engine.record_step_result(
+                        step_id=step_id,
+                        agent_name=agent_name,
+                        status=result.status,
+                        outcome=result.outcome,
+                        files_changed=result.files_changed,
+                        commit_hash=result.commit_hash,
+                        estimated_tokens=result.estimated_tokens,
+                        duration_seconds=result.duration_seconds,
+                        error=result.error,
+                    )
+                    status_marker = success("done") if result.status == "complete" else color_error("FAIL")
+                    print(f"  [{step_id}] {status_marker} ({result.duration_seconds:.1f}s)", file=sys.stderr)
+                    if result.error:
+                        print(f"    Error: {result.error[:200]}", file=sys.stderr)
+
+                    # Log to mission log
+                    log_status = "COMPLETE" if result.status == "complete" else "FAILED"
+                    entry = MissionLogEntry(
+                        agent_name=agent_name,
+                        status=log_status,
+                        assignment=step_id,
+                        result=result.outcome[:200],
+                        files=result.files_changed,
+                        commit_hash=result.commit_hash,
+                        issues=[result.error] if result.error else [],
+                    )
+                    ContextManager(task_id=task_id).append_to_mission_log(entry)
 
             steps_executed += 1
 
@@ -1003,6 +1239,27 @@ def _handle_run(args: argparse.Namespace) -> None:
             if dry_run:
                 print(f"  [DRY RUN] Would run: {gate_cmd}", file=sys.stderr)
                 engine.record_gate_result(phase_id=phase_id, passed=True, output="dry-run skip")
+            elif gate_type == "ci":
+                # CI gate: dispatch GitHub Actions workflow and poll for completion.
+                # This is a long-running synchronous operation (up to 15 minutes)
+                # so we call it directly in the CLI process rather than spawning a
+                # subprocess — the subprocess would lose the polling context.
+                from agent_baton.core.engine.gates import run_github_actions_gate
+
+                workflow_name = gate_cmd.strip() or "ci.yml"
+                print(f"  [GATE] Dispatching CI workflow '{workflow_name}' and waiting...", file=sys.stderr)
+                result = run_github_actions_gate(workflow_name)
+                engine.record_gate_result(
+                    phase_id=phase_id,
+                    passed=result.passed,
+                    output=result.output,
+                    command=f"gh workflow run {workflow_name}",
+                    exit_code=None,
+                )
+                marker = success("PASS") if result.passed else color_error("FAIL")
+                print(f"  [GATE] {marker}", file=sys.stderr)
+                if not result.passed and result.output:
+                    print(f"    Output: {result.output[:200]}", file=sys.stderr)
             else:
                 try:
                     proc = _subprocess.run(
@@ -1014,13 +1271,21 @@ def _handle_run(args: argparse.Namespace) -> None:
                     if not passed and proc.stderr:
                         output += f"\n--- stderr ---\n{proc.stderr[-1000:]}"
                     engine.record_gate_result(
-                        phase_id=phase_id, passed=passed, output=output,
+                        phase_id=phase_id,
+                        passed=passed,
+                        output=output,
+                        command=gate_cmd,
+                        exit_code=proc.returncode,
                     )
                     marker = success("PASS") if passed else color_error("FAIL")
                     print(f"  [GATE] {marker}", file=sys.stderr)
                 except _subprocess.TimeoutExpired:
                     engine.record_gate_result(
-                        phase_id=phase_id, passed=False, output="Gate timed out after 300s",
+                        phase_id=phase_id,
+                        passed=False,
+                        output="Gate timed out after 300s",
+                        command=gate_cmd,
+                        exit_code=-1,
                     )
                     print(f"  [GATE] {color_error('TIMEOUT')}", file=sys.stderr)
 

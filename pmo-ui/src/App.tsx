@@ -1,14 +1,15 @@
 import { useState, useCallback, useMemo, useRef } from 'react';
 import { KanbanBoard } from './components/KanbanBoard';
 import { ForgePanel } from './components/ForgePanel';
+import { BackOfHousePanel } from './components/BackOfHousePanel';
 import { KeyboardShortcutsDialog } from './components/KeyboardShortcutsDialog';
 import { useHotkeys } from './hooks/useHotkeys';
 import { usePersistedState } from './hooks/usePersistedState';
-import { T, FONT_SIZES } from './styles/tokens';
+import { T, FONTS, SHADOWS } from './styles/tokens';
 import { ToastProvider } from './contexts/ToastContext';
 import type { PmoCard, PmoSignal } from './api/types';
 
-type View = 'kanban' | 'forge';
+type View = 'kanban' | 'forge' | 'boh';
 
 export default function App() {
   const [view, setView] = usePersistedState<View>('pmo:active-view', 'kanban');
@@ -35,7 +36,7 @@ export default function App() {
     setView('kanban');
   }
 
-  function handleCardForge(card: PmoCard) {
+  const handleCardForge = useCallback((card: PmoCard) => {
     const signal: PmoSignal = {
       signal_id: card.card_id,
       signal_type: 'reforge',
@@ -47,8 +48,11 @@ export default function App() {
       forge_task_id: card.card_id,
       source_project_id: card.project_id,
     };
+    // openForge is referenced via closure; it's a plain function but only
+    // calls setState, so it's safe to exclude from deps.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
     openForge(signal);
-  }
+  }, []);
 
   const toggleSignals = useCallback(() => setShowSignals(s => !s), []);
   const goForge = useCallback(() => openForge(), []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -64,9 +68,18 @@ export default function App() {
 
   useHotkeys(hotkeyBindings);
 
+  const NAV_TABS = [
+    { id: 'kanban' as const, label: 'The Rail',       emoji: '🥟' },
+    { id: 'forge'  as const, label: 'The Forge',      emoji: '🍳' },
+    { id: 'boh'    as const, label: 'Back of House',  emoji: '🚪' },
+  ];
+
   return (
     <ToastProvider>
-    <style>{`@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }`}</style>
+    <style>{`
+      @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+      @keyframes forge-bar { 0% { width: 15%; } 50% { width: 75%; } 100% { width: 95%; } }
+    `}</style>
     <div style={{
       height: '100vh',
       display: 'flex',
@@ -75,39 +88,42 @@ export default function App() {
       color: T.text0,
       overflow: 'hidden',
     }}>
-      {/* Top nav bar */}
+      {/* Top nav bar — kitchen style */}
       <nav
         aria-label="Main"
         style={{
           display: 'flex',
           alignItems: 'center',
-          gap: 10,
-          padding: '6px 14px',
-          borderBottom: `1px solid ${T.border}`,
-          background: T.bg1,
+          gap: 12,
+          padding: '0 14px',
+          borderBottom: `2px solid ${T.border}`,
+          background: T.ink,
           flexShrink: 0,
+          height: 46,
         }}
       >
-        {/* Brand */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        {/* Brand mark — pie emoji + name */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
           <div style={{
-            width: 22,
-            height: 22,
-            borderRadius: 4,
-            background: 'linear-gradient(135deg, #1e40af, #7c3aed)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            fontSize: 10,
-            fontWeight: 800,
-            color: '#fff',
-          }}>
-            B
-          </div>
+            width: 30, height: 30, borderRadius: '50%',
+            background: T.butter, border: `2px solid ${T.cream}`,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontSize: 15, boxShadow: SHADOWS.sm,
+          }}>🥧</div>
           <div>
-            <h1 style={{ fontSize: FONT_SIZES.sm, fontWeight: 700, letterSpacing: -0.3, margin: 0 }}>Baton PMO</h1>
-            <div style={{ fontSize: FONT_SIZES.xs, color: T.text3, letterSpacing: 0.5, textTransform: 'uppercase' }}>
-              Orchestration Board
+            <div style={{
+              fontFamily: FONTS.display,
+              fontWeight: 900, fontSize: 15, letterSpacing: -0.5,
+              color: T.cream, lineHeight: 1,
+            }}>
+              Baton PMO
+            </div>
+            <div style={{
+              fontFamily: FONTS.hand,
+              fontSize: 11, color: T.butter,
+              lineHeight: 1, transform: 'rotate(-1deg)', display: 'inline-block',
+            }}>
+              the kitchen's open
             </div>
           </div>
         </div>
@@ -116,49 +132,55 @@ export default function App() {
         <div
           role="tablist"
           aria-label="Views"
-          style={{ display: 'flex', gap: 2, marginLeft: 10 }}
+          style={{ display: 'flex', gap: 4, marginLeft: 6 }}
         >
-          {([
-            { id: 'kanban' as const, label: 'AI Kanban', icon: '\u25AB' },
-            { id: 'forge' as const, label: 'The Forge', icon: '\u2692' },
-          ]).map(tab => (
-            <button
-              key={tab.id}
-              role="tab"
-              aria-selected={view === tab.id}
-              aria-controls={`panel-${tab.id}`}
-              id={`tab-${tab.id}`}
-              onClick={() => {
-                if (tab.id === 'kanban') backToBoard();
-                else openForge();
-              }}
-              style={{
-                padding: '3px 10px',
-                borderRadius: 3,
-                border: 'none',
-                background: view === tab.id ? T.accent + '18' : 'transparent',
-                color: view === tab.id ? T.accent : T.text3,
-                fontSize: 9,
-                fontWeight: view === tab.id ? 700 : 500,
-                cursor: 'pointer',
-              }}
-            >
-              {tab.icon} {tab.label}
-            </button>
-          ))}
+          {NAV_TABS.map(tab => {
+            const active = view === tab.id;
+            return (
+              <button
+                key={tab.id}
+                role="tab"
+                aria-selected={active}
+                aria-controls={`panel-${tab.id}`}
+                id={`tab-${tab.id}`}
+                onClick={() => {
+                  if (tab.id === 'kanban') backToBoard();
+                  else if (tab.id === 'forge') openForge();
+                  else setView('boh');
+                }}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 5,
+                  padding: '5px 12px',
+                  borderRadius: 8,
+                  border: active ? `2px solid ${T.butter}` : '2px solid transparent',
+                  background: active ? T.butter : 'transparent',
+                  color: active ? T.ink : T.text4,
+                  fontFamily: FONTS.body,
+                  fontSize: 12, fontWeight: 800,
+                  cursor: 'pointer',
+                  letterSpacing: '.02em',
+                  transition: 'all 120ms',
+                }}
+              >
+                <span style={{ fontSize: 13 }}>{tab.emoji}</span>
+                {tab.label}
+              </button>
+            );
+          })}
         </div>
 
         <div style={{ flex: 1 }} />
 
         {/* Keyboard hint */}
-        <span style={{ fontSize: 9, color: T.text4, fontFamily: 'monospace' }}>
-          n=new&nbsp;&nbsp;s=signals&nbsp;&nbsp;esc=board&nbsp;&nbsp;?=help
+        <span style={{
+          fontFamily: FONTS.mono, fontSize: 9,
+          color: T.text4, letterSpacing: '.08em',
+        }}>
+          n=new · s=signals · esc=board · ?=help
         </span>
-        <div role="separator" aria-orientation="vertical" style={{ width: 1, height: 14, background: T.border }} />
-
-        {/* Version / status */}
-        <span style={{ fontSize: 9, color: T.text4, fontFamily: 'monospace' }}>
-          agent-baton pmo
+        <div role="separator" aria-orientation="vertical" style={{ width: 1, height: 18, background: T.inkSoft }} />
+        <span style={{ fontFamily: FONTS.mono, fontSize: 9, color: T.text2 }}>
+          agent-baton
         </span>
       </nav>
 
@@ -192,6 +214,15 @@ export default function App() {
             initialSignal={forgeSignal}
             onApproved={refreshBoard}
           />
+        </div>
+        <div
+          id="panel-boh"
+          role="tabpanel"
+          aria-labelledby="tab-boh"
+          aria-hidden={view !== 'boh'}
+          style={{ display: view === 'boh' ? 'block' : 'none', height: '100%' }}
+        >
+          <BackOfHousePanel onBack={backToBoard} />
         </div>
       </div>
     </div>

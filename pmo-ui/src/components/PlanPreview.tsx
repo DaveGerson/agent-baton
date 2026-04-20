@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { ForgePlanResponse } from '../api/types';
-import { T } from '../styles/tokens';
+import { T, FONTS, SHADOWS } from '../styles/tokens';
 import { agentDisplayName } from '../utils/agent-names';
 
 interface PlanPreviewProps {
@@ -17,24 +17,26 @@ export function PlanPreview({ plan, collapsible = false }: PlanPreviewProps) {
       <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
         {plan.task_summary && (
           <div style={{
-            fontSize: 9,
-            color: T.text2,
+            fontFamily: FONTS.hand,
+            fontSize: 14,
+            color: T.text1,
             padding: '4px 8px',
-            background: T.bg2,
-            borderRadius: 3,
-            borderLeft: `2px solid ${T.accent}`,
+            background: T.bg3,
+            borderRadius: 8,
+            borderLeft: `3px solid ${T.cherry}`,
             marginBottom: 2,
+            display: 'inline-block',
+            transform: 'rotate(-0.3deg)',
           }}>
-            {plan.task_summary}
+            "{plan.task_summary}"
           </div>
         )}
         {plan.phases.map((phase, pi) => {
           const isOpen = expandedPhase === pi;
           return (
             <div key={String(phase.phase_id)} style={{
-              border: `1px solid ${T.border}`,
-              borderRadius: 3,
-              overflow: 'hidden',
+              border: `1.5px solid ${T.border}`,
+              borderRadius: 8,
             }}>
               <div
                 role="button"
@@ -51,23 +53,53 @@ export function PlanPreview({ plan, collapsible = false }: PlanPreviewProps) {
                   alignItems: 'center',
                   gap: 5,
                   padding: '4px 8px',
-                  background: T.bg2,
+                  background: isOpen ? T.butterSoft : T.bg2,
                   cursor: 'pointer',
-                  borderBottom: isOpen ? `1px solid ${T.border}` : 'none',
+                  borderBottom: isOpen ? `1.5px solid ${T.border}` : 'none',
+                  borderRadius: isOpen ? '8px 8px 0 0' : 8,
                 }}
               >
-                <span style={{ fontSize: 9, color: T.text3, minWidth: 10 }}>
-                  {isOpen ? '▾' : '▸'}
+                {/* Phase number badge */}
+                <span style={{
+                  width: 18,
+                  height: 18,
+                  borderRadius: '50%',
+                  background: T.ink,
+                  color: T.cream,
+                  fontFamily: FONTS.display,
+                  fontWeight: 900,
+                  fontSize: 10,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  flexShrink: 0,
+                }}>
+                  {pi + 1}
                 </span>
-                <span style={{ fontSize: 9, fontWeight: 600, color: T.text0, flex: 1 }}>
-                  {pi + 1}. {phase.name}
+                <span style={{
+                  fontFamily: FONTS.display,
+                  fontWeight: 800,
+                  fontSize: 12,
+                  color: T.text0,
+                  flex: 1,
+                }}>
+                  {phase.name}
                 </span>
-                <span style={{ fontSize: 9, color: T.text3 }}>
+                <span style={{
+                  fontFamily: FONTS.mono,
+                  fontSize: 9,
+                  color: T.text2,
+                }}>
                   {phase.steps.length} steps
                 </span>
                 {phase.gate && (
-                  <span style={{ fontSize: 9, color: T.yellow }}>gate</span>
+                  <span style={{ fontSize: 9, color: T.cherry }}>
+                    👅 gate
+                  </span>
                 )}
+                <span style={{ fontSize: 9, color: T.text2, marginLeft: 2 }}>
+                  {isOpen ? '▾' : '▸'}
+                </span>
               </div>
               {isOpen && (
                 <div>
@@ -79,25 +111,43 @@ export function PlanPreview({ plan, collapsible = false }: PlanPreviewProps) {
                         alignItems: 'flex-start',
                         gap: 6,
                         padding: '4px 8px',
-                        borderBottom: si < phase.steps.length - 1 ? `1px solid ${T.border}` : 'none',
+                        borderBottom: si < phase.steps.length - 1
+                          ? `1px dashed ${T.borderSoft}`
+                          : 'none',
                       }}
                     >
-                      <span style={{ fontSize: 9, color: T.text4, minWidth: 14, flexShrink: 0 }}>
+                      <span style={{
+                        fontFamily: FONTS.mono,
+                        fontSize: 9,
+                        color: T.text3,
+                        minWidth: 14,
+                        flexShrink: 0,
+                      }}>
                         {si + 1}.
                       </span>
-                      <span style={{ fontSize: 9, color: T.text1, flex: 1, lineHeight: 1.4 }}>
+                      <span style={{
+                        fontFamily: FONTS.body,
+                        fontSize: 11,
+                        fontWeight: 600,
+                        color: T.text0,
+                        flex: 1,
+                        lineHeight: 1.4,
+                      }}>
                         {step.task_description}
                       </span>
                       {step.agent_name && (
                         <span style={{
+                          fontFamily: FONTS.body,
+                          fontWeight: 800,
                           fontSize: 9,
-                          color: T.cyan,
-                          background: T.cyan + '14',
-                          border: `1px solid ${T.cyan}22`,
-                          padding: '1px 4px',
-                          borderRadius: 3,
+                          color: T.blueberry,
+                          background: T.bg1,
+                          border: `1.5px solid ${T.border}`,
+                          padding: '1px 5px',
+                          borderRadius: 999,
                           whiteSpace: 'nowrap',
                           flexShrink: 0,
+                          boxShadow: SHADOWS.sm,
                         }}>
                           {agentDisplayName(step.agent_name)}
                         </span>
@@ -105,7 +155,13 @@ export function PlanPreview({ plan, collapsible = false }: PlanPreviewProps) {
                     </div>
                   ))}
                   {phase.steps.length === 0 && (
-                    <div style={{ fontSize: 9, color: T.text3, fontStyle: 'italic', padding: '4px 8px' }}>
+                    <div style={{
+                      fontFamily: FONTS.body,
+                      fontSize: 9,
+                      color: T.text3,
+                      fontStyle: 'italic',
+                      padding: '4px 8px',
+                    }}>
                       No steps.
                     </div>
                   )}
@@ -133,14 +189,27 @@ export function PlanPreview({ plan, collapsible = false }: PlanPreviewProps) {
       {plan.task_summary && (
         <div style={{
           padding: '8px 12px',
-          background: T.bg2,
-          borderRadius: 4,
-          borderLeft: `3px solid ${T.accent}`,
+          background: T.bg3,
+          borderRadius: 8,
+          borderLeft: `3px solid ${T.cherry}`,
         }}>
-          <div style={{ fontSize: 9, color: T.text3, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 3 }}>
+          <div style={{
+            fontFamily: FONTS.body,
+            fontWeight: 800,
+            fontSize: 9,
+            color: T.text2,
+            textTransform: 'uppercase',
+            letterSpacing: 0.5,
+            marginBottom: 3,
+          }}>
             Summary
           </div>
-          <div style={{ fontSize: 10, color: T.text1, lineHeight: 1.55 }}>
+          <div style={{
+            fontFamily: FONTS.body,
+            fontSize: 11,
+            color: T.text0,
+            lineHeight: 1.55,
+          }}>
             {plan.task_summary}
           </div>
         </div>
@@ -151,8 +220,9 @@ export function PlanPreview({ plan, collapsible = false }: PlanPreviewProps) {
         {plan.phases.map((phase, pi) => (
           <div key={String(phase.phase_id)} style={{
             background: T.bg1,
-            borderRadius: 4,
-            border: `1px solid ${T.border}`,
+            borderRadius: 12,
+            border: `2px solid ${T.border}`,
+            boxShadow: SHADOWS.sm,
             overflow: 'hidden',
           }}>
             {/* Phase header */}
@@ -161,35 +231,44 @@ export function PlanPreview({ plan, collapsible = false }: PlanPreviewProps) {
               alignItems: 'center',
               gap: 6,
               padding: '6px 10px',
-              background: T.bg2,
-              borderBottom: `1px solid ${T.border}`,
+              background: T.butter,
+              borderBottom: `2px solid ${T.border}`,
             }}>
               <div style={{
-                width: 16,
-                height: 16,
-                borderRadius: 3,
-                background: T.accent + '20',
-                border: `1px solid ${T.accent}33`,
+                width: 20,
+                height: 20,
+                borderRadius: '50%',
+                background: T.ink,
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
+                fontFamily: FONTS.display,
+                fontWeight: 900,
                 fontSize: 9,
-                fontWeight: 700,
-                color: T.accent,
+                color: T.butter,
                 flexShrink: 0,
               }}>
                 {pi + 1}
               </div>
               <div>
-                <div style={{ fontSize: 9, fontWeight: 700, color: T.text0 }}>{phase.name}</div>
+                <div style={{
+                  fontFamily: FONTS.display,
+                  fontWeight: 800,
+                  fontSize: 14,
+                  color: T.text0,
+                }}>
+                  {phase.name}
+                </div>
               </div>
               <span style={{
                 marginLeft: 'auto',
+                fontFamily: FONTS.mono,
                 fontSize: 9,
-                color: T.text3,
-                background: T.bg3,
-                padding: '1px 4px',
-                borderRadius: 3,
+                color: T.text2,
+                background: T.bg0,
+                border: `1.5px solid ${T.border}`,
+                padding: '1px 5px',
+                borderRadius: 4,
               }}>
                 {phase.steps.length} steps
               </span>
@@ -204,37 +283,49 @@ export function PlanPreview({ plan, collapsible = false }: PlanPreviewProps) {
                   alignItems: 'flex-start',
                   gap: 7,
                   padding: '5px 10px',
-                  borderBottom: si < phase.steps.length - 1 ? `1px solid ${T.border}` : 'none',
+                  borderBottom: si < phase.steps.length - 1
+                    ? `1px dashed ${T.borderSoft}`
+                    : 'none',
                 }}
               >
                 <div style={{
-                  width: 14,
-                  height: 14,
-                  borderRadius: 2,
+                  width: 16,
+                  height: 16,
+                  borderRadius: 3,
                   background: T.bg3,
+                  border: `1px solid ${T.border}`,
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
+                  fontFamily: FONTS.display,
+                  fontWeight: 900,
                   fontSize: 9,
-                  color: T.text3,
+                  color: T.text0,
                   flexShrink: 0,
                   marginTop: 1,
                 }}>
                   {si + 1}
                 </div>
                 <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: 9, color: T.text0, fontWeight: 500 }}>
+                  <div style={{
+                    fontFamily: FONTS.body,
+                    fontWeight: 600,
+                    fontSize: 11,
+                    color: T.text0,
+                  }}>
                     {step.task_description}
                   </div>
                 </div>
                 {step.agent_name && (
                   <span style={{
+                    fontFamily: FONTS.body,
+                    fontWeight: 800,
                     fontSize: 9,
-                    color: T.cyan,
-                    background: T.cyan + '14',
-                    border: `1px solid ${T.cyan}22`,
+                    color: T.blueberry,
+                    background: T.blueberrySoft,
+                    border: `1.5px solid ${T.border}`,
                     padding: '1px 5px',
-                    borderRadius: 3,
+                    borderRadius: 999,
                     whiteSpace: 'nowrap',
                     flexShrink: 0,
                   }}>
@@ -264,18 +355,31 @@ function StatTile({
   return (
     <div
       aria-label={`${label}: ${value}`}
-      style={{ padding: '6px 10px', background: T.bg2, borderRadius: 4, minWidth: 60 }}
+      style={{
+        padding: '6px 10px',
+        background: T.bg2,
+        borderRadius: 10,
+        border: `1.5px solid ${T.border}`,
+        boxShadow: SHADOWS.sm,
+        minWidth: 60,
+      }}
     >
-      <div style={{ fontSize: 9, color: T.text3, textTransform: 'uppercase', letterSpacing: 0.4 }}>
+      <div style={{
+        fontFamily: FONTS.body,
+        fontSize: 9,
+        color: T.text2,
+        textTransform: 'uppercase',
+        letterSpacing: 0.4,
+      }}>
         {label}
       </div>
       <div
         title={String(value)}
         style={{
-          fontSize: 13,
-          fontWeight: 700,
+          fontFamily: mono ? FONTS.mono : FONTS.display,
+          fontSize: 16,
+          fontWeight: 900,
           color: color ?? T.text0,
-          fontFamily: mono ? 'monospace' : 'inherit',
           marginTop: 1,
           whiteSpace: 'nowrap',
           overflow: 'hidden',

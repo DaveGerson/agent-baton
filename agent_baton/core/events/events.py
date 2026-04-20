@@ -750,3 +750,189 @@ def team_member_completed(
             "outcome": outcome,
         },
     )
+
+
+# ── Cost enforcement ─────────────────────────────────────────────────────────
+
+def budget_exceeded(
+    task_id: str,
+    tokens_used: int,
+    tokens_limit: int,
+    sequence: int = 0,
+) -> Event:
+    """Create an event indicating the execution has reached its token budget.
+
+    Published by :meth:`ExecutionEngine._check_token_budget` when enforcement
+    is active and the cumulative token count crosses the configured limit.
+    Consumers: webhook layer (delivers ``budget.exceeded`` to registered URLs),
+    telemetry recorder, and daemon monitoring hooks.
+
+    The engine sets ``state.status = "budget_exceeded"`` before publishing
+    this event.  No new dispatch actions will be issued until the operator
+    clears the status via ``baton execute resume-budget``.
+
+    Args:
+        task_id: The execution task identifier.
+        tokens_used: Cumulative estimated tokens consumed so far.
+        tokens_limit: The configured limit that was exceeded.
+        sequence: Event sequence number (0 = auto-assign).
+
+    Returns:
+        An :class:`Event` with topic ``"budget.exceeded"``.
+    """
+    return Event.create(
+        topic="budget.exceeded",
+        task_id=task_id,
+        sequence=sequence,
+        payload={
+            "tokens_used": tokens_used,
+            "tokens_limit": tokens_limit,
+        },
+    )
+
+
+# ── Pre-lifecycle hooks ──────────────────────────────────────────────────────
+# These events fire *before* the corresponding lifecycle transition, giving
+# subscribers a chance to observe (and potentially prepare for) upcoming work.
+
+def step_pre_dispatch(
+    task_id: str,
+    step_id: str,
+    agent_name: str,
+    model: str = "sonnet",
+    delegation_prompt: str = "",
+    sequence: int = 0,
+) -> Event:
+    """Create an event indicating an agent is about to be dispatched.
+
+    Published by the worker *before* ``step.dispatched``.  Subscribers can
+    use this to inject context, validate budgets, or log pre-dispatch state.
+    Unlike ``step.dispatched``, the agent has **not yet been spawned** when
+    this event fires.
+
+    Args:
+        task_id: The execution task identifier.
+        step_id: The plan step about to be dispatched.
+        agent_name: Resolved agent name.
+        model: The model that will be used for the agent session.
+        delegation_prompt: The prompt that will be sent to the agent.
+        sequence: Event sequence number (0 = auto-assign).
+
+    Returns:
+        An :class:`Event` with topic ``"step.pre_dispatch"``.
+    """
+    return Event.create(
+        topic="step.pre_dispatch",
+        task_id=task_id,
+        sequence=sequence,
+        payload={
+            "step_id": step_id,
+            "agent_name": agent_name,
+            "model": model,
+            "delegation_prompt": delegation_prompt,
+        },
+    )
+
+
+def phase_pre_start(
+    task_id: str,
+    phase_id: int,
+    phase_name: str = "",
+    step_count: int = 0,
+    sequence: int = 0,
+) -> Event:
+    """Create an event indicating a plan phase is about to start.
+
+    Published by the executor *before* ``phase.started``.  Subscribers can
+    use this for setup actions, resource allocation, or logging that must
+    happen before any steps in the phase are dispatched.
+
+    Args:
+        task_id: The execution task identifier.
+        phase_id: Numeric ID of the phase about to start.
+        phase_name: Human-readable phase name.
+        step_count: Number of steps in this phase.
+        sequence: Event sequence number (0 = auto-assign).
+
+    Returns:
+        An :class:`Event` with topic ``"phase.pre_start"``.
+    """
+    return Event.create(
+        topic="phase.pre_start",
+        task_id=task_id,
+        sequence=sequence,
+        payload={
+            "phase_id": phase_id,
+            "phase_name": phase_name,
+            "step_count": step_count,
+        },
+    )
+
+
+def task_completing(
+    task_id: str,
+    steps_completed: int = 0,
+    steps_failed: int = 0,
+    sequence: int = 0,
+) -> Event:
+    """Create an event indicating a task is about to be finalised.
+
+    Published by the executor at the start of ``complete()``, *before* the
+    state is set to ``"complete"`` and artefacts (trace, usage, retro) are
+    written.  Subscribers can use this for cleanup, final validation, or
+    pre-completion notifications.
+
+    Args:
+        task_id: The execution task identifier.
+        steps_completed: Number of steps completed so far.
+        steps_failed: Number of steps that failed.
+        sequence: Event sequence number (0 = auto-assign).
+
+    Returns:
+        An :class:`Event` with topic ``"task.completing"``.
+    """
+    return Event.create(
+        topic="task.completing",
+        task_id=task_id,
+        sequence=sequence,
+        payload={
+            "steps_completed": steps_completed,
+            "steps_failed": steps_failed,
+        },
+    )
+
+
+def gate_pre_check(
+    task_id: str,
+    phase_id: int,
+    gate_type: str,
+    command: str = "",
+    sequence: int = 0,
+) -> Event:
+    """Create an event indicating a QA gate check is about to begin.
+
+    Published by the worker at the start of ``_handle_gate()``, *before*
+    the gate is evaluated or auto-approved.  Subscribers can use this for
+    pre-gate setup (e.g. ensuring test fixtures are ready) or to log that
+    a gate check is imminent.
+
+    Args:
+        task_id: The execution task identifier.
+        phase_id: Numeric ID of the phase whose gate is being checked.
+        gate_type: Type of gate (e.g. ``"test"``, ``"lint"``, ``"review"``).
+        command: Shell command that will be run for the gate check.
+        sequence: Event sequence number (0 = auto-assign).
+
+    Returns:
+        An :class:`Event` with topic ``"gate.pre_check"``.
+    """
+    return Event.create(
+        topic="gate.pre_check",
+        task_id=task_id,
+        sequence=sequence,
+        payload={
+            "phase_id": phase_id,
+            "gate_type": gate_type,
+            "command": command,
+        },
+    )

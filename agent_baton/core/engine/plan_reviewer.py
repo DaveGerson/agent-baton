@@ -400,7 +400,9 @@ class PlanReviewer:
 
             if len(relevant_groups) >= _MIN_DIRS_FOR_SPLIT:
                 # Decide: parallel independent steps or same-agent team?
-                coupled = _detect_coupling(relevant_groups, task_summary)
+                # Use step description (not full task_summary) to avoid
+                # coupling keywords from unrelated items tainting the score.
+                coupled = _detect_coupling(relevant_groups, step.task_description)
 
                 if coupled:
                     # Coupled concerns → same-agent team with synthesis
@@ -590,7 +592,7 @@ _COUPLED_PAIRS: set[frozenset[str]] = {
 # Keywords in task descriptions that signal coupled work across layers
 _COUPLING_KEYWORDS = [
     "wire", "integrate", "connect", "plumb", "thread through",
-    "end-to-end", "e2e", "across", "propagate", "flow",
+    "end-to-end", "e2e", "propagate", "flow",
     "api change", "interface change", "contract", "protocol",
     "schema change", "model change",
 ]
@@ -635,10 +637,21 @@ def _detect_coupling(
                 break  # one file per group is enough
     shared_parent = any(count >= 2 for count in grandparents.values())
 
-    # Decision: coupled if 2+ signals fire, or if 1 strong signal
-    # (coupled pair) fires with 3+ groups
-    score = coupled_pair_count * 2 + keyword_hits + (1 if shared_parent else 0)
-    return score >= 2
+    # Decision: directory pairs alone don't indicate coupling — many bug-fix
+    # plans touch engine+runtime without the items being related.  Pairs only
+    # count when reinforced by integration keywords in the description.
+    # This prevents multi-bug-fix plans from being falsely coupled while
+    # still detecting genuine cross-layer integration work.
+    if keyword_hits == 0:
+        # No integration language → directories are just co-present, not coupled
+        return False
+    score = coupled_pair_count + keyword_hits + (1 if shared_parent else 0)
+    # When many concern groups are present (4+), a single keyword in a long
+    # multi-item description is likely incidental (applies to one item, not
+    # the whole step).  Require keyword density proportional to group count.
+    if len(group_names) >= 4 and keyword_hits < 2:
+        return False
+    return score >= 3
 
 
 # ---------------------------------------------------------------------------

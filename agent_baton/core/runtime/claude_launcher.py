@@ -47,23 +47,73 @@ from pathlib import Path
 from typing import Any
 
 from agent_baton.core.orchestration.registry import AgentRegistry
+from agent_baton.core.runtime._redaction import (
+    _REDACT_PATTERNS,
+    redact_sensitive as _redact_sensitive,
+)
 from agent_baton.core.runtime.launcher import LaunchResult
 from agent_baton.models.agent import AgentDefinition
 
 logger = logging.getLogger(__name__)
 
-_API_KEY_RE = re.compile(r"sk-ant-[A-Za-z0-9_-]+")
+# Keep the old name as an alias so any external callers do not break.
+_API_KEY_RE = _REDACT_PATTERNS[0][0]
+
+# ---------------------------------------------------------------------------
+# Prompt-cache optimisation flag detection
+# ---------------------------------------------------------------------------
+
+_EXCLUDE_FLAG = "--exclude-dynamic-system-prompt-sections"
+_exclude_flag_supported: bool | None = None  # None = not yet probed
+
+
+def _supports_exclude_flag() -> bool:
+    """Return True if the installed ``claude`` CLI supports
+    ``--exclude-dynamic-system-prompt-sections``.
+
+    The result is cached after the first call so we only probe once per
+    process lifetime.  The probe runs ``claude --print --help`` and checks
+    whether the flag name appears in the output; failure modes (binary not
+    found, timeout, non-zero exit) are treated as "not supported" so they
+    never block a dispatch.
+    """
+    global _exclude_flag_supported
+    if _exclude_flag_supported is not None:
+        return _exclude_flag_supported
+
+    claude_bin = shutil.which("claude")
+    if claude_bin is None:
+        _exclude_flag_supported = False
+        return False
+
+    try:
+        import subprocess  # noqa: PLC0415 — stdlib, intentional lazy import
+        result = subprocess.run(
+            [claude_bin, "--print", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        combined = result.stdout + result.stderr
+        _exclude_flag_supported = _EXCLUDE_FLAG in combined
+    except Exception:  # noqa: BLE001
+        _exclude_flag_supported = False
+
+    logger.debug(
+        "ClaudeCodeLauncher: %s is %s",
+        _EXCLUDE_FLAG,
+        "supported" if _exclude_flag_supported else "NOT supported",
+    )
+    return _exclude_flag_supported
 
 
 def _redact_stderr(text: str) -> str:
-    """Strip Anthropic API key patterns from error text.
+    """Backward-compatible alias for :func:`_redact_sensitive`.
 
-    Matches the ``sk-ant-`` prefix followed by alphanumeric characters,
-    hyphens, and underscores.  Applied to all error output before it is
-    stored in ``LaunchResult.error`` to prevent accidental key exposure
-    in logs, traces, and retrospectives.
+    Retained so that call sites outside this module that reference
+    ``_redact_stderr`` by name continue to work without modification.
     """
-    return _API_KEY_RE.sub("sk-ant-***REDACTED***", text)
+    return _redact_sensitive(text)
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +268,10 @@ class ClaudeCodeLauncher:
                 "commit_hash will be empty in LaunchResult."
             )
 
+        # Registry of active subprocesses for cleanup on shutdown.
+        # Set operations are safe without locks because asyncio is single-threaded.
+        self._active_processes: set[asyncio.subprocess.Process] = set()
+
     # ── Public API ───────────────────────────────────────────────────────────
 
     async def launch(
@@ -312,12 +366,22 @@ class ClaudeCodeLauncher:
         When *mcp_servers* is non-empty, ``--mcp-config`` is appended with
         the server names joined by commas.
         """
+        has_system_prompt = (
+            agent is not None
+            and bool(agent.instructions and agent.instructions.strip())
+        )
         cmd: list[str] = [
             self._claude_bin,
             "--print",
             "--model", model,
             "--output-format", "json",
         ]
+        # Improve cross-dispatch prompt-cache reuse by moving per-machine
+        # sections (cwd, env info, git status) out of the system prompt.
+        # The flag is documented as a no-op when --system-prompt is supplied,
+        # so we only add it when no custom system prompt will be injected.
+        if not has_system_prompt and _supports_exclude_flag():
+            cmd.append(_EXCLUDE_FLAG)
         if agent is not None:
             if agent.instructions and agent.instructions.strip():
                 cmd.extend(["--system-prompt", agent.instructions])
@@ -392,7 +456,8 @@ class ClaudeCodeLauncher:
         if parsed is not None:
             is_error: bool = bool(parsed.get("is_error", False))
             result_text: str = str(parsed.get("result", ""))
-            outcome = result_text[: self._config.max_outcome_length]
+            # A5: redact sensitive patterns from outcome before storage.
+            outcome = _redact_sensitive(result_text)[: self._config.max_outcome_length]
 
             # Token usage
             usage = parsed.get("usage", {}) or {}
@@ -411,11 +476,11 @@ class ClaudeCodeLauncher:
                 # Include both stderr and result_text so rate-limit
                 # detection works regardless of where the 429 appears.
                 if is_error and stderr_text:
-                    error = _redact_stderr(f"{stderr_text}\n{result_text}")
+                    error = _redact_sensitive(f"{stderr_text}\n{result_text}")
                 elif is_error:
-                    error = _redact_stderr(result_text)
+                    error = _redact_sensitive(result_text)
                 else:
-                    error = _redact_stderr(stderr_text) or f"exit code {exit_code}"
+                    error = _redact_sensitive(stderr_text) or f"exit code {exit_code}"
                 return LaunchResult(
                     step_id=step_id,
                     agent_name=agent_name,
@@ -436,7 +501,8 @@ class ClaudeCodeLauncher:
             )
 
         # --- Raw text fallback -----------------------------------------------
-        outcome = stdout_text[: self._config.max_outcome_length]
+        # A5: redact sensitive patterns from raw stdout before storage.
+        outcome = _redact_sensitive(stdout_text)[: self._config.max_outcome_length]
 
         # Estimate tokens from raw output length (1 token ≈ 4 chars).
         # stdout_text is used (not truncated outcome) to keep the estimate
@@ -452,7 +518,7 @@ class ClaudeCodeLauncher:
                 outcome=outcome,
                 duration_seconds=elapsed,
                 estimated_tokens=raw_estimated_tokens,
-                error=_redact_stderr(stderr_text) or f"exit code {exit_code}",
+                error=_redact_sensitive(stderr_text) or f"exit code {exit_code}",
             )
 
         return LaunchResult(
@@ -567,6 +633,7 @@ class ClaudeCodeLauncher:
                 error=f"Failed to start claude subprocess: {exc}",
             )
 
+        self._active_processes.add(process)
         try:
             if prompt_stdin is not None:
                 stdout, stderr = await asyncio.wait_for(
@@ -592,6 +659,8 @@ class ClaudeCodeLauncher:
                 duration_seconds=elapsed,
                 error=f"Agent timed out after {timeout:.0f}s",
             )
+        finally:
+            self._active_processes.discard(process)
 
         elapsed = time.monotonic() - start
         exit_code = process.returncode if process.returncode is not None else -1
@@ -603,3 +672,47 @@ class ClaudeCodeLauncher:
             agent_name=agent_name,
             elapsed=elapsed,
         )
+
+    async def cleanup(self) -> None:
+        """Terminate all active subprocesses registered in ``_active_processes``.
+
+        Called during graceful shutdown (e.g. SIGTERM) to ensure that child
+        ``claude`` processes started with ``start_new_session=True`` are not
+        orphaned.  For each process:
+
+        1. Send ``SIGTERM`` via ``process.terminate()``.
+        2. Wait up to 5 seconds for the process to exit.
+        3. If still running, escalate to ``SIGKILL`` via ``process.kill()``.
+
+        Safe to call multiple times or when the set is empty.
+        """
+        if not self._active_processes:
+            return
+
+        processes = list(self._active_processes)
+        logger.info(
+            "ClaudeCodeLauncher.cleanup(): terminating %d active subprocess(es)",
+            len(processes),
+        )
+        for process in processes:
+            try:
+                process.terminate()
+            except ProcessLookupError:
+                # Process already exited between the snapshot and terminate().
+                self._active_processes.discard(process)
+                continue
+
+            try:
+                await asyncio.wait_for(process.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "ClaudeCodeLauncher.cleanup(): PID %s did not exit after SIGTERM, sending SIGKILL",
+                    process.pid,
+                )
+                try:
+                    process.kill()
+                    await process.wait()
+                except ProcessLookupError:
+                    pass
+            finally:
+                self._active_processes.discard(process)

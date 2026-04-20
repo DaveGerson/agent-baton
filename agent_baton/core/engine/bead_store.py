@@ -114,7 +114,7 @@ class BeadStore:
                     """,
                     (
                         bead.bead_id,
-                        bead.task_id,
+                        bead.task_id or None,  # empty string → NULL (project-scoped bead)
                         bead.step_id,
                         bead.agent_name,
                         bead.bead_type,
@@ -152,7 +152,7 @@ class BeadStore:
                     """,
                     (
                         bead.bead_id,
-                        bead.task_id,
+                        bead.task_id or None,  # empty string → NULL (project-scoped bead)
                         bead.step_id,
                         bead.agent_name,
                         bead.bead_type,
@@ -601,7 +601,7 @@ class BeadStore:
 
         return Bead(
             bead_id=row["bead_id"],
-            task_id=row["task_id"],
+            task_id=row["task_id"] or "",  # NULL in DB → empty string in model (project-scoped)
             step_id=row["step_id"],
             agent_name=row["agent_name"],
             bead_type=row["bead_type"],

@@ -792,6 +792,132 @@ The learn subsystem's outputs are consumed by the engine's planner:
 
 ---
 
+### 2.5 Honest Current State and Learning Cycle Pipeline
+
+**Last updated:** 2026-04-17
+
+This section documents what each learn-subsystem component actually does
+today, which parts are deprecated, and how the replacement pipeline works.
+
+#### Component Status
+
+**PerformanceScorer** — Working. Computes per-agent `first_pass_rate`,
+`retry_rate`, `gate_pass_rate`, `negative_mentions`, and `knowledge_gaps_cited`
+by reading `usage-log.jsonl` or the SQLite backend. These are rate calculations
+across all historical records with no statistical significance test: an agent
+with 3 uses and 2 failures shows a 67% failure rate with the same weight as
+an agent with 50 uses and 33 failures.
+
+**PatternLearner** — Working. Groups completed tasks by `sequencing_mode` and
+identifies the most common agent combination per group. The `evidence_strength`
+score (formerly called "confidence") is a heuristic ramp, not a statistically
+validated confidence interval. Minimum sample requirement: `min_sample_size`
+records (default 3) before a group is considered.
+
+**BudgetTuner** — Working. Reads usage records and compares actual token
+consumption to the nominal midpoint of the current budget tier. Suggestions
+are output to `budget-recommendations.json` — they are proposals, not
+decisions.
+
+**ImprovementLoop** — Working. Calls `TriggerEvaluator`, then `Recommender`
+(which aggregates PerformanceScorer, PatternLearner, BudgetTuner outputs),
+classifies each recommendation as auto-applicable or escalated, and persists
+an `ImprovementReport`. Auto-apply guardrails: prompt changes never auto-apply;
+budget upgrades never auto-apply; routing reductions never auto-apply; all
+others only if `risk == "low"` and `evidence_strength >= threshold`.
+
+**LearnedOverrides** — Working. Persists operational corrections (agent flavor
+mismatches, gate command adjustments) to `learned-overrides.json`. Applied
+automatically on the next execution without going through the full pipeline.
+
+**ExperimentManager** (`agent_baton/core/improve/experiments.py`) —
+**DEPRECATED.** The module recorded before/after metrics but never ran
+concurrent A/B groups. Do not add new callers. The replacement is
+before/after scorecard comparison across learning cycles (see Pipeline
+below).
+
+**PromptEvolutionEngine** (`agent_baton/core/improve/evolution.py`) —
+**DEPRECATED.** Was a template-based rule engine that matched scorecard
+thresholds to canned suggestion strings. Suggestions were generic, not
+derived from actual retrospective content. Do not add new callers. The
+replacement is the `learning-analyst` agent (D2).
+
+#### Evidence Strength vs. Confidence
+
+Across the codebase, fields previously named `confidence` have been
+relabeled to `evidence_strength` (or equivalent) to avoid implying
+statistical validation. The formula is a heuristic:
+
+```
+evidence_strength = min(1.0, (sample_size / 15) * success_rate)
+```
+
+The default threshold for acting on a pattern is 0.35 (reduced from 0.7).
+In the CLI, patterns are displayed as "Seen N times, X% success rate"
+rather than as a numeric confidence score.
+
+#### The Learning Cycle Pipeline
+
+The learning system is being refactored from inline analysis code into a
+repeatable baton execution plan template at:
+
+```
+templates/learning-cycle-plan.json
+```
+
+| Phase | Agent | What It Does |
+|-------|-------|-------------|
+| COLLECT | test-engineer | SQL queries gather scorecards, pattern data, retrospective summaries, and knowledge gaps from the last N executions. Writes a data bundle to the team-context directory. |
+| ANALYZE | learning-analyst | Reads the collected data bundle. Identifies patterns and failures with specific evidence citations. |
+| PROPOSE | learning-analyst | Outputs actionable recommendations. Each proposal names the specific agent, the specific failure mode, and the specific change. |
+| REVIEW | (APPROVAL gate) | Human reviews proposals before anything is applied. |
+| APPLY | backend-engineer | Writes approved changes to `learned-overrides.json`, agent definition files, or knowledge packs. |
+| DOCUMENT | documentation-architect | Records what changed, why, and what outcome is expected as a retrospective entry. |
+
+Operational corrections (routing mismatches, gate command fixes) bypass
+the pipeline and go directly to the `LearnedOverrides` auto-apply path.
+
+#### Triggering a Learning Cycle
+
+**Manual trigger:**
+
+```bash
+baton learn run-cycle             # create the plan and print it
+baton learn run-cycle --run       # create and execute immediately
+baton learn run-cycle --dry-run   # print the baton execute run command without executing
+```
+
+**Counter-based trigger:**
+
+`TriggerEvaluator` tracks completed executions since the last learning
+cycle. When the count reaches the threshold (configurable via
+`LEARNING_TRIGGER_COUNT` env var, default 10), `baton execute status`
+reports:
+
+```
+Learning cycle recommended (N executions since last cycle)
+```
+
+The cycle does NOT run automatically — this is a flag, not an auto-trigger.
+The operator or daemon runs it explicitly.
+
+#### Capabilities Summary
+
+| Capability | Status | Notes |
+|-----------|--------|-------|
+| Track per-agent success/failure rates | Working | PerformanceScorer |
+| Identify common agent sequences | Working | PatternLearner |
+| Suggest budget tier adjustments | Working | BudgetTuner |
+| Auto-apply safe operational corrections | Working | LearnedOverrides |
+| Human-reviewed proposal pipeline | Working | ProposalManager |
+| Statistical significance tests | Not present | Not planned |
+| Concurrent A/B experiments | Not present | ExperimentManager deprecated |
+| Template-based prompt suggestions | Deprecated | PromptEvolutionEngine deprecated |
+| Agent-driven retrospective analysis | In progress | learning-analyst agent (D2) |
+| Repeatable learning cycle template | In progress | templates/learning-cycle-plan.json (D2) |
+
+---
+
 ## 3. Improve Subsystem
 
 **Package:** `agent_baton.core.improve`

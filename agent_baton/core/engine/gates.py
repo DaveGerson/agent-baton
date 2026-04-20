@@ -8,6 +8,11 @@ type has specific pass/fail semantics:
   output (warnings are tolerated).
 - **spec**: delegates to ``SpecValidator`` for structural validation.
 - **review**: advisory only -- always passes regardless of output.
+- **ci**: triggers a CI provider workflow and polls for completion.
+  Currently supports GitHub Actions only.  Requires ``GITHUB_TOKEN`` env var
+  with ``checks:read`` and ``actions:write`` scopes.  Falls back to
+  ``DecisionManager`` escalation when the token is absent or the network
+  is unreachable.
 
 The ``GateRunner`` is stateless; each method operates on its arguments
 without side effects.  Gate evaluation results are recorded by the
@@ -16,12 +21,18 @@ without side effects.  Gate evaluation results are recorded by the
 from __future__ import annotations
 
 import logging
+import os
+import time
 from datetime import datetime, timezone
-
 from agent_baton.core.govern.spec_validator import SpecValidator
 from agent_baton.models.execution import ActionType, ExecutionAction, GateResult, PlanGate
 
 logger = logging.getLogger(__name__)
+
+# Default polling timeout for CI gates (seconds).
+_CI_DEFAULT_TIMEOUT_SECONDS = 900  # 15 minutes
+# Polling interval when waiting for a CI run to finish (seconds).
+_CI_POLL_INTERVAL_SECONDS = 30
 
 
 # Patterns that indicate lint errors (as opposed to warnings).
@@ -86,6 +97,7 @@ class GateRunner:
             "spec": "Validate agent output against the declared specification.",
             "review": "Advisory code review by the reviewer agent (never blocks).",
             "approval": "Human approval checkpoint — execution pauses for review.",
+            "ci": "Trigger CI pipeline and wait for completion (GitHub Actions).",
         }
         return descriptions.get(gate.gate_type, f"Run '{gate.gate_type}' gate check.")
 
@@ -229,6 +241,27 @@ class GateRunner:
                 checked_at=checked_at,
             )
 
+        if gate_type == "ci":
+            # CI gate: command_output is expected to carry pre-parsed CI output
+            # (e.g. from ci_gate.run_ci_gate).  If it contains a recognised
+            # pass marker the gate passes; if a fail marker is present it fails.
+            # When the output is raw (called directly via evaluate_output with
+            # subprocess output), fall back to exit_code semantics so the gate
+            # is still useful without the full CI integration.
+            passed = _parse_ci_output(command_output, exit_code)
+            logger.info(
+                "Gate 'ci': %s (exit_code=%d)",
+                "PASS" if passed else "FAIL",
+                exit_code,
+            )
+            return GateResult(
+                phase_id=0,
+                gate_type=gate_type,
+                passed=passed,
+                output=command_output,
+                checked_at=checked_at,
+            )
+
         # Unknown gate type — fall back to exit_code check.
         passed = exit_code == 0
         logger.warning(
@@ -261,6 +294,7 @@ class GateRunner:
             - 'test': run pytest
             - 'lint': compile-check (lightweight lint proxy)
             - 'review': advisory code review (no command)
+            - 'ci': GitHub Actions workflow dispatch + poll
         """
         return {
             "build": PlanGate(
@@ -287,4 +321,221 @@ class GateRunner:
                 description="Code review by reviewer agent",
                 fail_on=[],
             ),
+            "ci": PlanGate(
+                gate_type="ci",
+                command="",
+                description="Trigger CI pipeline and wait for completion (GitHub Actions).",
+                fail_on=["failure", "cancelled"],
+            ),
         }
+
+
+# ---------------------------------------------------------------------------
+# CI gate helpers
+# ---------------------------------------------------------------------------
+
+# Markers in CI output text that indicate a completed-passing run.
+_CI_PASS_MARKERS = ("conclusion: success", "status: completed", "PASS", "All checks passed")
+# Markers that indicate a completed-failing run.
+_CI_FAIL_MARKERS = ("conclusion: failure", "conclusion: cancelled", "FAIL", "checks failed")
+
+
+def _parse_ci_output(output: str, exit_code: int) -> bool:
+    """Determine CI gate pass/fail from captured output and exit code.
+
+    Checks for well-known pass/fail marker strings in *output* before
+    falling back to *exit_code*.  This allows both the full GitHub Actions
+    integration (which injects structured markers) and a simple shell
+    command (which communicates purely via exit code) to work through the
+    same code path.
+
+    Args:
+        output: Captured stdout/stderr from the CI gate command or the
+            GitHub Actions poller in ``ci_gate.py``.
+        exit_code: Process exit code; 0 means success when no markers
+            are found.
+
+    Returns:
+        ``True`` when the CI run passed, ``False`` otherwise.
+    """
+    lower = output.lower()
+    for marker in _CI_PASS_MARKERS:
+        if marker.lower() in lower:
+            return True
+    for marker in _CI_FAIL_MARKERS:
+        if marker.lower() in lower:
+            return False
+    # No structured markers found — fall back to exit code.
+    return exit_code == 0
+
+
+def run_github_actions_gate(
+    workflow_name: str,
+    *,
+    repo: str = "",
+    ref: str = "HEAD",
+    timeout_seconds: int = _CI_DEFAULT_TIMEOUT_SECONDS,
+    poll_interval: int = _CI_POLL_INTERVAL_SECONDS,
+) -> GateResult:
+    """Dispatch a GitHub Actions workflow and poll until completion.
+
+    Requires the ``gh`` CLI to be installed and authenticated, or a valid
+    ``GITHUB_TOKEN`` environment variable.  When the token is absent or the
+    network is unreachable the gate returns a ``passed=False`` result with
+    an ``escalate`` marker so the caller can route to ``DecisionManager``.
+
+    Gate configuration keys (from ``PlanGate.command``)::
+
+        {"gate_type": "ci", "command": "workflow_name", "ci_provider": "github"}
+
+    Args:
+        workflow_name: The GitHub Actions workflow file name or ID (e.g.
+            ``"ci.yml"``).
+        repo: ``"owner/repo"`` string.  When empty, inferred from ``gh``
+            context.
+        ref: Branch or SHA to run the workflow on (default: ``"HEAD"``).
+        timeout_seconds: Maximum seconds to wait before timing out.
+        poll_interval: Seconds between status polls.
+
+    Returns:
+        A :class:`GateResult` with ``gate_type="ci"``.  The ``output``
+        field contains the CI run URL on success, or an error description
+        with ``"[escalate]"`` prefix when the token is missing.
+    """
+    checked_at = datetime.now(timezone.utc).isoformat()
+
+    github_token = os.environ.get("GITHUB_TOKEN", "")
+    if not github_token:
+        msg = (
+            "[escalate] GITHUB_TOKEN not set. "
+            "Cannot dispatch GitHub Actions workflow without credentials. "
+            "Use 'baton execute approve' to manually approve this gate."
+        )
+        logger.warning("CI gate: %s", msg)
+        return GateResult(
+            phase_id=0,
+            gate_type="ci",
+            passed=False,
+            output=msg,
+            checked_at=checked_at,
+        )
+
+    try:
+        import subprocess  # noqa: PLC0415
+
+        # Build gh workflow run command.
+        cmd = ["gh", "workflow", "run", workflow_name]
+        if repo:
+            cmd += ["--repo", repo]
+        if ref and ref != "HEAD":
+            cmd += ["--ref", ref]
+
+        logger.info("CI gate: dispatching workflow '%s'", workflow_name)
+        dispatch_result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env={**os.environ, "GITHUB_TOKEN": github_token},
+        )
+        if dispatch_result.returncode != 0:
+            err = dispatch_result.stderr.strip() or dispatch_result.stdout.strip()
+            return GateResult(
+                phase_id=0,
+                gate_type="ci",
+                passed=False,
+                output=f"Workflow dispatch failed: {err}",
+                checked_at=checked_at,
+            )
+
+        # Poll for completion.
+        deadline = time.monotonic() + timeout_seconds
+        run_url = ""
+        while time.monotonic() < deadline:
+            time.sleep(poll_interval)
+
+            list_cmd = ["gh", "run", "list", "--workflow", workflow_name, "--limit", "1", "--json", "status,conclusion,url"]
+            if repo:
+                list_cmd += ["--repo", repo]
+
+            poll_result = subprocess.run(
+                list_cmd,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env={**os.environ, "GITHUB_TOKEN": github_token},
+            )
+            if poll_result.returncode != 0:
+                logger.debug("CI gate poll error: %s", poll_result.stderr.strip())
+                continue
+
+            import json  # noqa: PLC0415
+            try:
+                runs = json.loads(poll_result.stdout)
+            except json.JSONDecodeError:
+                continue
+
+            if not runs:
+                continue
+
+            latest = runs[0]
+            status = latest.get("status", "")
+            conclusion = latest.get("conclusion", "")
+            run_url = latest.get("url", "")
+
+            logger.debug("CI gate poll: status=%s conclusion=%s", status, conclusion)
+
+            if status == "completed":
+                passed = conclusion == "success"
+                marker = "conclusion: success" if passed else f"conclusion: {conclusion}"
+                output = f"{marker}\nRun URL: {run_url}"
+                logger.info(
+                    "CI gate: completed — conclusion=%s passed=%s url=%s",
+                    conclusion, passed, run_url,
+                )
+                return GateResult(
+                    phase_id=0,
+                    gate_type="ci",
+                    passed=passed,
+                    output=output,
+                    checked_at=datetime.now(timezone.utc).isoformat(),
+                )
+
+        # Timed out.
+        timeout_msg = (
+            f"[escalate] CI gate timed out after {timeout_seconds}s "
+            f"waiting for workflow '{workflow_name}' to complete."
+            + (f"\nRun URL: {run_url}" if run_url else "")
+        )
+        logger.warning("CI gate: %s", timeout_msg)
+        return GateResult(
+            phase_id=0,
+            gate_type="ci",
+            passed=False,
+            output=timeout_msg,
+            checked_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+    except FileNotFoundError:
+        msg = (
+            "[escalate] 'gh' CLI not found. "
+            "Install the GitHub CLI or use 'baton execute approve' to manually approve this gate."
+        )
+        logger.warning("CI gate: %s", msg)
+        return GateResult(
+            phase_id=0,
+            gate_type="ci",
+            passed=False,
+            output=msg,
+            checked_at=checked_at,
+        )
+    except Exception as exc:  # noqa: BLE001
+        msg = f"[escalate] CI gate error: {exc}"
+        logger.warning("CI gate: %s", msg)
+        return GateResult(
+            phase_id=0,
+            gate_type="ci",
+            passed=False,
+            output=msg,
+            checked_at=checked_at,
+        )

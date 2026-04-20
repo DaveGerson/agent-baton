@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useId } from 'react';
+import type { KeyboardEvent } from 'react';
 import { api } from '../api/client';
-import { T } from '../styles/tokens';
+import { T, FONTS, SHADOWS } from '../styles/tokens';
 import type { AdoWorkItem } from '../api/types';
 
 interface AdoComboboxProps {
@@ -56,7 +57,7 @@ export function AdoCombobox({ onSelect, inputId }: AdoComboboxProps) {
     onSelect(item);
   }
 
-  function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+  function handleKeyDown(e: KeyboardEvent<HTMLInputElement>) {
     if (!open || items.length === 0) return;
     if (e.key === 'ArrowDown') {
       e.preventDefault();
@@ -90,15 +91,23 @@ export function AdoCombobox({ onSelect, inputId }: AdoComboboxProps) {
         onKeyDown={handleKeyDown}
         placeholder="Search ADO work items..."
         style={{
-          width: '100%', padding: '6px 8px', borderRadius: 4,
-          border: `1px solid ${T.border}`, background: T.bg1,
-          color: T.text0, fontSize: 10, outline: 'none',
+          width: '100%',
+          padding: '9px 11px',
+          borderRadius: 10,
+          border: `2px solid ${T.border}`,
+          background: T.bg3,
+          color: T.text0,
+          fontFamily: FONTS.body,
+          fontSize: 13,
+          fontWeight: 600,
+          outline: 'none',
+          boxShadow: 'inset 2px 2px 0 0 rgba(0,0,0,.06)',
         }}
       />
       {loading && (
         <div
           aria-live="polite"
-          style={{ position: 'absolute', right: 8, top: 7, fontSize: 9, color: T.text3 }}
+          style={{ position: 'absolute', right: 8, top: 10, fontFamily: FONTS.hand, fontSize: 14, color: T.text2 }}
         >
           Searching...
         </div>
@@ -118,12 +127,12 @@ export function AdoCombobox({ onSelect, inputId }: AdoComboboxProps) {
             right: 0,
             marginTop: 2,
             background: T.bg1,
-            border: `1px solid ${T.border}`,
-            borderRadius: 4,
+            border: `2px solid ${T.border}`,
+            borderRadius: 12,
             maxHeight: 200,
-            overflow: 'auto',
+            overflow: 'hidden',
             zIndex: 10,
-            boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+            boxShadow: SHADOWS.lg,
           }}
         >
           {searchError ? (
@@ -131,7 +140,7 @@ export function AdoCombobox({ onSelect, inputId }: AdoComboboxProps) {
               role="option"
               aria-selected={false}
               aria-disabled="true"
-              style={{ padding: '8px 10px', fontSize: 9, color: T.red }}
+              style={{ padding: '8px 12px', fontFamily: FONTS.body, fontSize: 13, fontWeight: 600, color: T.cherry, background: T.cherrySoft }}
             >
               Search failed — try again
             </li>
@@ -144,24 +153,30 @@ export function AdoCombobox({ onSelect, inputId }: AdoComboboxProps) {
                 aria-selected={idx === activeIndex}
                 onClick={() => handleSelect(item)}
                 style={{
-                  padding: '6px 8px',
+                  padding: '8px 12px',
                   cursor: 'pointer',
-                  borderBottom: `1px solid ${T.border}`,
-                  background: idx === activeIndex ? T.bg2 : 'transparent',
+                  borderBottom: `1px dashed ${T.borderSoft}`,
+                  background: idx === activeIndex ? T.butter : 'transparent',
+                  borderLeft: idx === activeIndex ? `2px solid ${T.border}` : '2px solid transparent',
+                  fontFamily: FONTS.body,
+                  fontSize: 13,
+                  fontWeight: 600,
+                  color: T.text0,
                 }}
                 onMouseEnter={() => setActiveIndex(idx)}
                 onMouseLeave={() => setActiveIndex(-1)}
               >
                 <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                  <span style={{ fontSize: 9, color: T.text3, fontFamily: 'monospace' }}>{item.id}</span>
-                  <span style={{ fontSize: 9, color: T.text0, fontWeight: 500 }}>{item.title}</span>
+                  <span style={{ fontSize: 10, color: T.text2, fontFamily: FONTS.mono }}>{item.id}</span>
+                  <span style={{ fontSize: 13, color: T.text0, fontWeight: 600, fontFamily: FONTS.body }}>{item.title}</span>
                   <span style={{
                     fontSize: 9, color: T.accent, background: T.accent + '14',
                     border: `1px solid ${T.accent}22`, padding: '0 4px',
                     borderRadius: 2, marginLeft: 'auto',
+                    fontFamily: FONTS.body,
                   }}>{item.type}</span>
                 </div>
-                <div style={{ fontSize: 9, color: T.text3, marginTop: 1 }}>
+                <div style={{ fontSize: 10, color: T.text2, marginTop: 1, fontFamily: FONTS.mono }}>
                   {item.program} · {item.owner} · {item.priority}
                 </div>
               </li>

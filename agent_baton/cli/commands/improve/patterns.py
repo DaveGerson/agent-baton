@@ -2,7 +2,12 @@
 
 Patterns capture recurring agent sequencing strategies that correlate
 with successful outcomes. The pattern learner analyses the usage log
-and identifies high-confidence templates for the planner to reuse.
+and identifies templates for the planner to reuse.
+
+Note: the ``confidence`` field on each pattern is an internal heuristic
+ranking signal (formula: ``min(1.0, (sample_size / 15) * success_rate)``).
+It is NOT a statistically validated confidence interval. The CLI displays
+"Seen N times, X% success rate" rather than the raw score.
 
 Delegates to:
     agent_baton.core.learn.pattern_learner.PatternLearner
@@ -59,12 +64,20 @@ def handler(args: argparse.Namespace) -> None:
         print("Sequencing Recommendations:")
         print()
         for tt in task_types:
+            # Find the best pattern to show sample_size and success_rate directly
+            tt_patterns = [p for p in patterns if p.task_type == tt]
+            tt_patterns.sort(key=lambda p: p.confidence, reverse=True)
             result = learner.recommend_sequencing(tt)
             if result is not None:
-                agents, confidence = result
+                agents, _score = result
+                best = tt_patterns[0] if tt_patterns else None
                 print(f"  {tt}")
-                print(f"    Agents:     {', '.join(agents)}")
-                print(f"    Confidence: {confidence:.0%}")
+                print(f"    Agents:  {', '.join(agents)}")
+                if best is not None:
+                    print(
+                        f"    Evidence: seen {best.sample_size} time(s), "
+                        f"{best.success_rate:.0%} success rate"
+                    )
                 print()
         return
 
@@ -115,11 +128,6 @@ def handler(args: argparse.Namespace) -> None:
 # Formatting helpers
 # ---------------------------------------------------------------------------
 
-def _confidence_bar(confidence: float, width: int = 10) -> str:
-    filled = round(confidence * width)
-    return "[" + "=" * filled + " " * (width - filled) + "]"
-
-
 def _print_patterns(patterns: list, min_confidence: float) -> None:
     shown = [p for p in patterns if p.confidence >= min_confidence]
     if not shown:
@@ -129,13 +137,15 @@ def _print_patterns(patterns: list, min_confidence: float) -> None:
     print()
 
     for p in shown:
-        bar = _confidence_bar(p.confidence)
         agents_str = ", ".join(p.recommended_agents) if p.recommended_agents else "(none)"
         print(f"  {p.pattern_id}")
         print(f"    Task type:  {p.task_type}")
         print(f"    Stack:      {p.stack or 'any'}")
-        print(f"    Confidence: {p.confidence:.0%} {bar}")
-        print(f"    Success:    {p.success_rate:.0%}  |  Samples: {p.sample_size}  |  Avg tokens: {p.avg_token_cost:,}")
+        print(
+            f"    Evidence:   seen {p.sample_size} time(s), "
+            f"{p.success_rate:.0%} success rate"
+        )
+        print(f"    Avg tokens: {p.avg_token_cost:,}")
         print(f"    Template:   {p.recommended_template}")
         print(f"    Agents:     {agents_str}")
         print()

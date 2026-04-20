@@ -120,6 +120,40 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         action="store_true",
         help="Output a skeleton plan.json template for hand-editing",
     )
+    p.add_argument(
+        "--save-as-template",
+        dest="save_as_template",
+        default=None,
+        metavar="NAME",
+        help=(
+            "Save the generated plan's phase/step structure as a reusable "
+            "template named NAME in .claude/plan-templates/NAME.json"
+        ),
+    )
+    p.add_argument(
+        "--from-template",
+        dest="from_template",
+        default=None,
+        metavar="NAME",
+        help=(
+            "Load a saved plan template by NAME from .claude/plan-templates/ "
+            "and instantiate it with the provided task description"
+        ),
+    )
+    p.add_argument(
+        "--skip-init",
+        dest="skip_init",
+        action="store_true",
+        help=(
+            "Skip talent-builder auto-initiation even when .claude/agents/ is "
+            "empty. Uses bundled generic agents instead."
+        ),
+    )
+    p.add_argument(
+        "--verbose",
+        action="store_true",
+        help="When --save is set, print the full plan markdown to stdout (default: compact summary only)",
+    )
     return p
 
 
@@ -323,13 +357,37 @@ def handler(args: argparse.Namespace) -> None:
         )
         md_path.write_text(plan.to_markdown(), encoding="utf-8")
         _persist_plan_to_db(ctx_dir, plan)
-        print(f"Plan saved: {ctx.plan_json_path} and {ctx.plan_path}")
-        print(f"  (also copied to {json_path} for backward compat)")
-        print()
-        print("Next: baton execute start")
 
-    if args.explain:
-        print(planner.explain_plan(plan))
+        if args.explain:
+            explanation_path = ctx_dir / "explanation.md"
+            explanation_path.write_text(planner.explain_plan(plan), encoding="utf-8")
+            print(f"Plan saved: {json_path}")
+            print(f"Plan markdown: {md_path}")
+            n_phases = len(plan.phases)
+            n_steps = plan.total_steps
+            print(
+                f"Task ID: {plan.task_id} | Risk: {plan.risk_level} | "
+                f"Budget: {plan.budget_tier} | Phases: {n_phases} | Steps: {n_steps}"
+            )
+            print(f"Plan explanation: {explanation_path}")
+            print("Next: baton execute start")
+        elif getattr(args, "verbose", False):
+            print(f"Plan saved: {ctx.plan_json_path} and {ctx.plan_path}")
+            print(f"  (also copied to {json_path} for backward compat)")
+            print()
+            print(plan.to_markdown())
+            print()
+            print("Next: baton execute start")
+        else:
+            print(f"Plan saved: {json_path}")
+            print(f"Plan markdown: {md_path}")
+            n_phases = len(plan.phases)
+            n_steps = plan.total_steps
+            print(
+                f"Task ID: {plan.task_id} | Risk: {plan.risk_level} | "
+                f"Budget: {plan.budget_tier} | Phases: {n_phases} | Steps: {n_steps}"
+            )
+            print("Next: baton execute start")
         return
 
     if args.json:

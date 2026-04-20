@@ -559,6 +559,87 @@ class TestIncrementalResultWriters:
         assert loaded is not None
         assert loaded.step_results[0].outcome == "v2"
 
+    def test_dispatched_then_complete_via_save_step_result(
+        self, store: SqliteStorage, simple_state: ExecutionState
+    ) -> None:
+        """Exact split-brain scenario: dispatched row followed by complete row.
+
+        Previously this would raise UNIQUE constraint if the INSERT in
+        save_execution wasn't idempotent.  Now save_step_result uses
+        INSERT OR REPLACE, and save_execution also uses INSERT OR REPLACE
+        for step_results, so re-recording a step is always safe.
+        """
+        store.save_execution(simple_state)
+
+        # Step 1: mark step as dispatched (simulates `baton execute dispatched`)
+        dispatched = StepResult(
+            step_id="1.1",
+            agent_name="backend-engineer--python",
+            status="dispatched",
+            outcome="",
+        )
+        store.save_step_result(simple_state.task_id, dispatched)
+
+        # Verify dispatched is persisted.
+        mid = store.load_execution(simple_state.task_id)
+        assert mid is not None
+        assert mid.step_results[0].status == "dispatched"
+
+        # Step 2: record completion (simulates `baton execute record --status complete`)
+        # This must NOT raise UNIQUE constraint failure.
+        complete = StepResult(
+            step_id="1.1",
+            agent_name="backend-engineer--python",
+            status="complete",
+            outcome="Implementation done",
+        )
+        store.save_step_result(simple_state.task_id, complete)
+
+        # Verify final state is complete, not dispatched.
+        final = store.load_execution(simple_state.task_id)
+        assert final is not None
+        assert len(final.step_results) == 1, "must have exactly one row per step_id"
+        assert final.step_results[0].status == "complete"
+        assert final.step_results[0].outcome == "Implementation done"
+
+    def test_save_execution_dispatched_then_complete_is_idempotent(
+        self, store: SqliteStorage, simple_state: ExecutionState
+    ) -> None:
+        """save_execution with INSERT OR REPLACE handles duplicate step_ids safely.
+
+        Simulates: save_execution writes dispatched row, then save_execution
+        is called again with the same step_id at complete status.  The
+        DELETE + INSERT OR REPLACE pattern must not raise UNIQUE constraint.
+        """
+        store.save_execution(simple_state)
+
+        # First full-state save: step 1.1 is dispatched.
+        simple_state.step_results = [
+            StepResult(
+                step_id="1.1",
+                agent_name="backend-engineer--python",
+                status="dispatched",
+                outcome="",
+            )
+        ]
+        store.save_execution(simple_state)
+
+        # Second full-state save: step 1.1 is now complete.
+        simple_state.step_results = [
+            StepResult(
+                step_id="1.1",
+                agent_name="backend-engineer--python",
+                status="complete",
+                outcome="Done",
+            )
+        ]
+        # Must not raise.
+        store.save_execution(simple_state)
+
+        loaded = store.load_execution(simple_state.task_id)
+        assert loaded is not None
+        assert loaded.step_results[0].status == "complete"
+
     def test_save_gate_result(
         self, store: SqliteStorage, simple_state: ExecutionState
     ) -> None:

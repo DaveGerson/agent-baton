@@ -109,7 +109,7 @@ class DataArchiver:
         *,
         dry_run: bool = False,
     ) -> dict[str, int]:
-        """Remove files older than retention_days.
+        """Remove files older than retention_days and vacuum database.
 
         Args:
             retention_days: Keep files newer than this many days.
@@ -138,6 +138,8 @@ class DataArchiver:
                 self._root / "telemetry.jsonl",
                 max_lines=10_000,
             )
+            # Vacuum the central database to reclaim space from deleted items
+            self._vacuum_db(self._root / "baton.db")
 
         return counts
 
@@ -162,16 +164,37 @@ class DataArchiver:
                 f"{self._fmt_size(size)}"
             )
 
+        db_path = self._root / "baton.db"
+        if db_path.exists():
+            db_size = db_path.stat().st_size
+            lines.append(f"  baton.db: {self._fmt_size(db_size)} (will be vacuumed)")
+
         if total_files == 0:
-            lines.append("  Nothing to clean up.")
+            lines.append("\n  Nothing to clean up (besides DB vacuum).")
         else:
             lines.append("")
             lines.append(
-                f"  Total: {total_files} item(s), "
+                f"  Total cleanup: {total_files} item(s), "
                 f"{self._fmt_size(total_bytes)}"
             )
 
         return "\n".join(lines)
+
+    # ── Database vacuum ───────────────────────────────────────────────────
+
+    @staticmethod
+    def _vacuum_db(path: Path) -> None:
+        """Run VACUUM on a SQLite database to reclaim space."""
+        if not path.exists():
+            return
+        import sqlite3
+        try:
+            conn = sqlite3.connect(path)
+            conn.execute("VACUUM")
+            conn.close()
+        except Exception:
+            # Silent fail -- vacuum is optimization, don't break cleanup
+            pass
 
     # ── JSONL rotation ─────────────────────────────────────────────────────
 

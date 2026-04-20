@@ -185,9 +185,10 @@ class ConnectionManager:
                 try:
                     conn.execute(stmt)
                 except sqlite3.OperationalError as exc:
-                    if "duplicate column name" in str(exc).lower():
+                    msg = str(exc).lower()
+                    if "duplicate column name" in msg or "no such table" in msg:
                         _log.debug(
-                            "Migration v%d: skipping already-present column "
+                            "Migration v%d: skipping inapplicable statement "
                             "(%s) — statement: %.120s",
                             v,
                             exc,

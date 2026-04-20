@@ -1,9 +1,18 @@
-"""Tests for agent_baton.core.improve.experiments.ExperimentManager."""
+"""Tests for agent_baton.core.improve.experiments.ExperimentManager.
+
+ExperimentManager is deprecated (D7). These tests are retained for
+backward-compatibility coverage until the learning-cycle pipeline replaces it.
+"""
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 
 import pytest
+
+# Suppress DeprecationWarning for the deprecated ExperimentManager across
+# this entire test module.
+pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 
 from agent_baton.core.improve.experiments import ExperimentManager
 from agent_baton.models.improvement import Recommendation

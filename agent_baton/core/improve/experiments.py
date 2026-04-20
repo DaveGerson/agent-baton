@@ -1,6 +1,19 @@
 """ExperimentManager -- creates experiments from applied recommendations,
 records samples, and evaluates outcomes.
 
+.. deprecated::
+    ``ExperimentManager`` is deprecated and will be removed in a future release.
+
+    **Replacement:** Use the learning-cycle pipeline template
+    (``templates/learning-cycle-plan.json``) which performs before/after
+    scorecard comparison across learning cycles via the ``baton learn run-cycle``
+    command.  The full learning cycle (COLLECT→ANALYZE→PROPOSE→REVIEW→APPLY→DOCUMENT)
+    supersedes the experiment concept.
+
+    Do not add new callers to this module.  Existing callers in
+    ``ImprovementLoop`` are retained for backward compatibility until the
+    learning-cycle pipeline is proven in production.
+
 Experiments are the validation mechanism for the improvement loop.  When a
 recommendation is auto-applied, an experiment is created to track whether
 the change actually improved the target metric.  The experiment collects
@@ -16,6 +29,9 @@ Evaluation methodology:
 * **Inconclusive**: change within +/-5% (not enough signal to decide).
 * When baseline is 0, absolute thresholds are used instead.
 
+Note: this is before/after metric comparison, NOT concurrent A/B testing.
+There are no statistical significance tests.
+
 Safety constraints:
 
 * Maximum 2 active experiments per agent -- prevents compounding changes
@@ -30,6 +46,7 @@ from __future__ import annotations
 
 import json
 import uuid
+import warnings
 from pathlib import Path
 
 from agent_baton.models.improvement import Experiment, Recommendation
@@ -50,6 +67,14 @@ class ExperimentManager:
     """
 
     def __init__(self, improvements_dir: Path | None = None) -> None:
+        warnings.warn(
+            "ExperimentManager is deprecated. Use the learning-cycle pipeline "
+            "template ('baton learn run-cycle') instead. "
+            "This class will be removed once the learning-cycle pipeline is "
+            "proven in production.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self._dir = (improvements_dir or _DEFAULT_DIR).resolve()
         self._experiments_dir = self._dir / "experiments"
 

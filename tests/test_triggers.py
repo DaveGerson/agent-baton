@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -451,3 +452,270 @@ class TestImprovementLoopForce:
 
         assert report.skipped is True
         assert "Not enough new data" in report.reason
+
+
+# ---------------------------------------------------------------------------
+# TriggerEvaluatorWithStorage — reading from StorageBackend
+# ---------------------------------------------------------------------------
+
+def _write_tasks(tc_dir: Path, count: int) -> None:
+    """Write *count* task records to the JSONL usage log in *tc_dir*."""
+    logger = UsageLogger(tc_dir / "usage-log.jsonl")
+    for i in range(count):
+        logger.log(_task(f"t{i}"))
+
+
+class TestTriggerEvaluatorWithStorage:
+    """Tests for TriggerEvaluator reading from StorageBackend."""
+
+    def test_reads_from_storage_when_provided(self, tmp_path: Path):
+        """_read_records returns storage data, not JSONL data."""
+        tc_dir = tmp_path / "team-context"
+        tc_dir.mkdir(parents=True)
+
+        # JSONL has 0 records.
+        # Storage returns 5 records — evaluator must use storage.
+        storage_records = [_task(f"s{i}") for i in range(5)]
+        storage = MagicMock()
+        storage.read_usage.return_value = storage_records
+
+        config = TriggerConfig(min_tasks_before_analysis=3, analysis_interval_tasks=3)
+        ev = TriggerEvaluator(config=config, team_context_root=tc_dir, storage=storage)
+
+        assert ev.should_analyze() is True
+        storage.read_usage.assert_called()
+
+    def test_falls_back_to_jsonl_when_storage_raises(self, tmp_path: Path):
+        """When storage.read_usage() raises, fall back to JSONL."""
+        tc_dir = tmp_path / "team-context"
+        tc_dir.mkdir(parents=True)
+
+        # JSONL has 5 records.
+        _write_tasks(tc_dir, 5)
+
+        storage = MagicMock()
+        storage.read_usage.side_effect = Exception("db unavailable")
+
+        config = TriggerConfig(min_tasks_before_analysis=3, analysis_interval_tasks=3)
+        ev = TriggerEvaluator(config=config, team_context_root=tc_dir, storage=storage)
+
+        # Falls back to JSONL — 5 records present so trigger fires.
+        assert ev.should_analyze() is True
+
+    def test_stale_watermark_auto_resets(self, tmp_path: Path):
+        """Watermark > total records triggers auto-reset to 0."""
+        tc_dir = tmp_path / "team-context"
+        tc_dir.mkdir(parents=True)
+
+        # Write a stale watermark of 100 into the state file.
+        state_path = tc_dir / "improvement-trigger-state.json"
+        state_path.write_text(
+            json.dumps({"last_analyzed_count": 100, "last_analyzed_at": "2024-01-01T00:00:00+00:00"}),
+            encoding="utf-8",
+        )
+
+        # Storage returns only 5 records (< watermark of 100).
+        storage_records = [_task(f"s{i}") for i in range(5)]
+        storage = MagicMock()
+        storage.read_usage.return_value = storage_records
+
+        config = TriggerConfig(min_tasks_before_analysis=3, analysis_interval_tasks=3)
+        ev = TriggerEvaluator(config=config, team_context_root=tc_dir, storage=storage)
+
+        # Watermark reset → 5 new tasks >= interval of 3 → should trigger.
+        assert ev.should_analyze() is True
+
+        # State file must have been reset to 0.
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        assert state["last_analyzed_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# TriggerEvaluatorIssueSignal — learning issue supplementary trigger
+# ---------------------------------------------------------------------------
+
+class TestTriggerEvaluatorIssueSignal:
+    """Tests for learning-issue-based trigger enrichment."""
+
+    def _evaluator_with_watermark(
+        self,
+        tc_dir: Path,
+        task_count: int,
+        watermark_count: int,
+        last_analyzed_at: str,
+        config: TriggerConfig,
+        **kwargs,
+    ) -> TriggerEvaluator:
+        """Helper: write tasks to JSONL, persist a state file, return evaluator."""
+        _write_tasks(tc_dir, task_count)
+        state_path = tc_dir / "improvement-trigger-state.json"
+        state_path.write_text(
+            json.dumps({
+                "last_analyzed_count": watermark_count,
+                "last_analyzed_at": last_analyzed_at,
+            }),
+            encoding="utf-8",
+        )
+        return TriggerEvaluator(config=config, team_context_root=tc_dir, **kwargs)
+
+    def test_new_issues_trigger_analysis(self, tmp_path: Path):
+        """Open issues updated after watermark timestamp trigger analysis."""
+        tc_dir = tmp_path / "team-context"
+        tc_dir.mkdir(parents=True)
+
+        config = TriggerConfig(min_tasks_before_analysis=3, analysis_interval_tasks=3)
+        watermark_ts = "2024-01-01T00:00:00+00:00"
+
+        # 5 tasks in JSONL, watermark count = 5 (0 new tasks, below interval).
+        # One open issue with last_seen AFTER the watermark timestamp.
+        issue = MagicMock()
+        issue.last_seen = "2025-06-01T10:00:00+00:00"
+
+        ledger = MagicMock()
+        ledger.get_open_issues.return_value = [issue]
+
+        ev = self._evaluator_with_watermark(
+            tc_dir, task_count=5, watermark_count=5,
+            last_analyzed_at=watermark_ts, config=config, ledger=ledger,
+        )
+
+        assert ev.should_analyze() is True
+
+    def test_old_issues_do_not_trigger(self, tmp_path: Path):
+        """Issues with last_seen before watermark don't trigger."""
+        tc_dir = tmp_path / "team-context"
+        tc_dir.mkdir(parents=True)
+
+        config = TriggerConfig(min_tasks_before_analysis=3, analysis_interval_tasks=3)
+        watermark_ts = "2025-06-01T12:00:00+00:00"
+
+        # Issue last_seen is BEFORE the watermark timestamp.
+        issue = MagicMock()
+        issue.last_seen = "2024-01-01T00:00:00+00:00"
+
+        ledger = MagicMock()
+        ledger.get_open_issues.return_value = [issue]
+
+        ev = self._evaluator_with_watermark(
+            tc_dir, task_count=5, watermark_count=5,
+            last_analyzed_at=watermark_ts, config=config, ledger=ledger,
+        )
+
+        assert ev.should_analyze() is False
+
+    def test_ledger_error_is_non_fatal(self, tmp_path: Path):
+        """Ledger error doesn't crash, returns False."""
+        tc_dir = tmp_path / "team-context"
+        tc_dir.mkdir(parents=True)
+
+        config = TriggerConfig(min_tasks_before_analysis=3, analysis_interval_tasks=3)
+        watermark_ts = "2024-01-01T00:00:00+00:00"
+
+        ledger = MagicMock()
+        ledger.get_open_issues.side_effect = RuntimeError("ledger offline")
+
+        ev = self._evaluator_with_watermark(
+            tc_dir, task_count=5, watermark_count=5,
+            last_analyzed_at=watermark_ts, config=config, ledger=ledger,
+        )
+
+        # Must not raise; no other signal crosses threshold → False.
+        assert ev.should_analyze() is False
+
+
+# ---------------------------------------------------------------------------
+# TriggerEvaluatorBeadSignal — bead supplementary trigger
+# ---------------------------------------------------------------------------
+
+class TestTriggerEvaluatorBeadSignal:
+    """Tests for bead-based trigger enrichment."""
+
+    def _evaluator_with_watermark(
+        self,
+        tc_dir: Path,
+        task_count: int,
+        watermark_count: int,
+        last_analyzed_at: str,
+        config: TriggerConfig,
+        **kwargs,
+    ) -> TriggerEvaluator:
+        """Helper: write tasks to JSONL, persist a state file, return evaluator."""
+        _write_tasks(tc_dir, task_count)
+        state_path = tc_dir / "improvement-trigger-state.json"
+        state_path.write_text(
+            json.dumps({
+                "last_analyzed_count": watermark_count,
+                "last_analyzed_at": last_analyzed_at,
+            }),
+            encoding="utf-8",
+        )
+        return TriggerEvaluator(config=config, team_context_root=tc_dir, **kwargs)
+
+    def test_beads_trigger_analysis(self, tmp_path: Path):
+        """3+ beads created after watermark trigger analysis."""
+        tc_dir = tmp_path / "team-context"
+        tc_dir.mkdir(parents=True)
+
+        config = TriggerConfig(min_tasks_before_analysis=3, analysis_interval_tasks=3)
+        watermark_ts = "2024-01-01T00:00:00+00:00"
+
+        # 3 beads all created after the watermark timestamp.
+        beads = []
+        for _ in range(3):
+            b = MagicMock()
+            b.created_at = "2025-06-01T10:00:00+00:00"
+            beads.append(b)
+
+        bead_store = MagicMock()
+        bead_store.query.return_value = beads
+
+        ev = self._evaluator_with_watermark(
+            tc_dir, task_count=5, watermark_count=5,
+            last_analyzed_at=watermark_ts, config=config, bead_store=bead_store,
+        )
+
+        assert ev.should_analyze() is True
+
+    def test_beads_below_threshold_do_not_trigger(self, tmp_path: Path):
+        """Fewer than 3 beads after watermark don't trigger."""
+        tc_dir = tmp_path / "team-context"
+        tc_dir.mkdir(parents=True)
+
+        config = TriggerConfig(min_tasks_before_analysis=3, analysis_interval_tasks=3)
+        watermark_ts = "2024-01-01T00:00:00+00:00"
+
+        # Only 2 beads created after the watermark timestamp.
+        beads = []
+        for _ in range(2):
+            b = MagicMock()
+            b.created_at = "2025-06-01T10:00:00+00:00"
+            beads.append(b)
+
+        bead_store = MagicMock()
+        bead_store.query.return_value = beads
+
+        ev = self._evaluator_with_watermark(
+            tc_dir, task_count=5, watermark_count=5,
+            last_analyzed_at=watermark_ts, config=config, bead_store=bead_store,
+        )
+
+        assert ev.should_analyze() is False
+
+    def test_bead_store_error_is_non_fatal(self, tmp_path: Path):
+        """bead_store.query() error doesn't crash, returns False."""
+        tc_dir = tmp_path / "team-context"
+        tc_dir.mkdir(parents=True)
+
+        config = TriggerConfig(min_tasks_before_analysis=3, analysis_interval_tasks=3)
+        watermark_ts = "2024-01-01T00:00:00+00:00"
+
+        bead_store = MagicMock()
+        bead_store.query.side_effect = OSError("bead store unavailable")
+
+        ev = self._evaluator_with_watermark(
+            tc_dir, task_count=5, watermark_count=5,
+            last_analyzed_at=watermark_ts, config=config, bead_store=bead_store,
+        )
+
+        # Must not raise; no other signal crosses threshold → False.
+        assert ev.should_analyze() is False

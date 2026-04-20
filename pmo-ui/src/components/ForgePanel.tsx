@@ -1,11 +1,12 @@
 import { useState, useEffect, useRef } from 'react';
+import type { ReactNode, CSSProperties } from 'react';
 import { api } from '../api/client';
 import { PlanEditor } from './PlanEditor';
 import { InterviewPanel } from './InterviewPanel';
 import { AdoCombobox } from './AdoCombobox';
 import { ConfirmDialog } from './ConfirmDialog';
 import { usePersistedState } from '../hooks/usePersistedState';
-import { T, SR_ONLY } from '../styles/tokens';
+import { T, SR_ONLY, FONTS, SHADOWS } from '../styles/tokens';
 import { useToast } from '../contexts/ToastContext';
 import type { PmoProject, PmoSignal, ForgePlanResponse, InterviewQuestion, InterviewAnswer } from '../api/types';
 
@@ -254,27 +255,32 @@ export function ForgePanel({ onBack, initialSignal, onApproved }: ForgePanelProp
   };
 
   return (
-    <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', background: T.bg0, fontFamily: FONTS.body }}>
       {/* Header */}
       <div style={{
-        display: 'flex', alignItems: 'center', gap: 8,
-        padding: '7px 14px', borderBottom: `1px solid ${T.border}`,
+        display: 'flex', alignItems: 'center', gap: 10,
+        padding: '8px 16px', borderBottom: `2px solid ${T.border}`,
         background: T.bg1, flexShrink: 0,
       }}>
         <button onClick={handleBack} style={{
-          padding: '3px 8px', borderRadius: 3, border: `1px solid ${T.border}`,
-          background: 'transparent', color: T.text2, fontSize: 9, cursor: 'pointer',
+          padding: '4px 10px', borderRadius: 6, border: `2px solid ${T.border}`,
+          background: 'transparent', color: T.text1, fontSize: 11, fontWeight: 700,
+          cursor: 'pointer', fontFamily: FONTS.body, boxShadow: SHADOWS.sm,
         }}>{'\u2190'} Board</button>
-        <div style={{ width: 1, height: 14, background: T.border }} />
-        <span style={{ fontSize: 11, fontWeight: 700, color: T.text0 }}>The Forge</span>
-        <span style={{ fontSize: 9, color: T.text3 }}>{phaseLabel[phase]}</span>
+        <div style={{ width: 2, height: 16, background: T.borderSoft }} />
+        <span style={{ fontSize: 13, fontWeight: 900, color: T.text0, fontFamily: FONTS.display }}>The Forge</span>
+        <span style={{
+          fontSize: 12, color: T.text2, fontFamily: FONTS.hand,
+          transform: 'rotate(-0.5deg)', display: 'inline-block',
+        }}>{phaseLabel[phase]}</span>
         {initialSignal && (
           <span
             title={`Signal: ${initialSignal.title} (${initialSignal.signal_id})`}
             style={{
-              padding: '1px 6px', borderRadius: 3, fontSize: 9, fontWeight: 600,
-              color: T.red, background: T.red + '14', border: `1px solid ${T.red}22`,
+              padding: '2px 8px', borderRadius: 4, fontSize: 11, fontWeight: 700,
+              color: T.cherry, background: T.cherrySoft, border: `2px solid ${T.cherry}`,
               maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              fontFamily: FONTS.body,
             }}
           >
             from signal: {initialSignal.title.length > 40 ? initialSignal.title.slice(0, 40) + '\u2026' : initialSignal.title}
@@ -283,8 +289,9 @@ export function ForgePanel({ onBack, initialSignal, onApproved }: ForgePanelProp
         <div style={{ flex: 1 }} />
         {phase === 'preview' && (
           <button onClick={() => setPhase('intake')} style={{
-            padding: '3px 8px', borderRadius: 3, border: `1px solid ${T.border}`,
-            background: 'transparent', color: T.text2, fontSize: 9, cursor: 'pointer',
+            padding: '4px 10px', borderRadius: 6, border: `2px solid ${T.border}`,
+            background: 'transparent', color: T.text1, fontSize: 11, fontWeight: 700,
+            cursor: 'pointer', fontFamily: FONTS.body, boxShadow: SHADOWS.sm,
           }}>{'\u2190'} Edit Intake</button>
         )}
       </div>
@@ -293,7 +300,7 @@ export function ForgePanel({ onBack, initialSignal, onApproved }: ForgePanelProp
       <div
         ref={panelBodyRef}
         tabIndex={-1}
-        style={{ flex: 1, overflow: 'auto', padding: 16, outline: 'none' }}
+        style={{ flex: 1, overflow: 'auto', padding: 20, outline: 'none', background: T.bg0 }}
       >
         {/* Generation status — always in DOM for screen reader announcements */}
         <div
@@ -320,13 +327,16 @@ export function ForgePanel({ onBack, initialSignal, onApproved }: ForgePanelProp
         >
         {generateError && (
           <div style={{
-            fontSize: 9,
-            color: T.red,
-            padding: '5px 8px',
-            background: T.red + '12',
-            borderRadius: 4,
-            marginBottom: 10,
-            maxWidth: 640,
+            fontSize: 12,
+            color: T.cherry,
+            padding: '8px 12px',
+            background: T.cherrySoft,
+            borderRadius: 8,
+            marginBottom: 14,
+            maxWidth: 660,
+            border: `2px solid ${T.cherry}`,
+            fontFamily: FONTS.body,
+            fontWeight: 600,
           }}>
             {generateError}
           </div>
@@ -335,20 +345,22 @@ export function ForgePanel({ onBack, initialSignal, onApproved }: ForgePanelProp
 
         {/* Cancel button during generation phases */}
         {(phase === 'generating' || phase === 'regenerating') && (
-          <div style={{ marginBottom: 10, maxWidth: 640 }}>
+          <div style={{ marginBottom: 14, maxWidth: 660 }}>
             <button
               onClick={() => {
                 abortRef.current?.abort();
                 setPhase(phase === 'regenerating' ? 'preview' : 'intake');
               }}
               style={{
-                padding: '4px 12px',
-                borderRadius: 3,
-                border: `1px solid ${T.border}`,
+                padding: '5px 14px',
+                borderRadius: 8,
+                border: `2px solid ${T.cherry}`,
                 background: 'transparent',
-                color: T.text2,
-                fontSize: 9,
+                color: T.cherry,
+                fontSize: 12,
+                fontWeight: 700,
                 cursor: 'pointer',
+                fontFamily: FONTS.body,
               }}
             >
               Cancel
@@ -358,141 +370,222 @@ export function ForgePanel({ onBack, initialSignal, onApproved }: ForgePanelProp
 
         {/* INTAKE */}
         {(phase === 'intake' || phase === 'generating') && (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, maxWidth: 640 }}>
-            <div style={{ fontSize: 9, fontWeight: 700, color: T.accent, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-              Define the Work
-            </div>
-
-            {/* ADO Import */}
-            <FormField label="Import from ADO" htmlFor="forge-ado-search">
-              <AdoCombobox
-                inputId="forge-ado-search"
-                onSelect={item => {
-                  setDescription(item.description || item.title);
-                }}
-              />
-            </FormField>
-
-            {/* Project selector */}
-            <FormField label="Project *" htmlFor="forge-project">
-              {projectsLoading ? (
-                <div style={{ fontSize: 9, color: T.text3, padding: 4 }}>Loading projects...</div>
-              ) : projects.length === 0 ? (
-                <div style={{ fontSize: 9, color: T.yellow, padding: 4 }}>
-                  No projects registered. Use <code>baton pmo add</code> to register one.
+          <div style={{ maxWidth: 660 }}>
+            {/* Recipe card with slight tilt */}
+            <div style={{
+              background: T.bg1,
+              border: `3px solid ${T.border}`,
+              borderRadius: 18,
+              boxShadow: SHADOWS.lg,
+              transform: 'rotate(-0.4deg)',
+              overflow: 'hidden',
+            }}>
+              {/* Card header */}
+              <div style={{
+                background: T.cherry,
+                padding: '18px 22px',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 4,
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                  <span style={{ fontSize: 32, lineHeight: 1 }}>{'👨\u200d🍳'}</span>
+                  <div>
+                    <div style={{
+                      fontFamily: FONTS.hand,
+                      fontSize: 20,
+                      color: T.cherrySoft,
+                      transform: 'rotate(-2deg)',
+                      display: 'inline-block',
+                      marginBottom: 2,
+                    }}>
+                      what're we cookin', chef?
+                    </div>
+                    <div style={{
+                      fontFamily: FONTS.display,
+                      fontWeight: 900,
+                      fontSize: 30,
+                      color: T.cream,
+                      lineHeight: 1.1,
+                    }}>
+                      Fire up a new recipe
+                    </div>
+                  </div>
                 </div>
-              ) : (
-                <select
-                  id="forge-project"
-                  value={projectId}
-                  onChange={e => setProjectId(e.target.value)}
-                  style={selectStyle}
-                >
-                  {projects.map(p => (
-                    <option key={p.project_id} value={p.project_id}>{p.name} ({p.program})</option>
-                  ))}
-                </select>
-              )}
-            </FormField>
-
-            <div style={{ display: 'flex', gap: 8 }}>
-              <FormField label="Task Type" htmlFor="forge-task-type" style={{ flex: 1 }}>
-                <select
-                  id="forge-task-type"
-                  value={taskType}
-                  onChange={e => setTaskType(e.target.value)}
-                  style={selectStyle}
-                >
-                  {TASK_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
-                </select>
-              </FormField>
-              <FormField label="Priority" htmlFor="forge-priority" style={{ flex: 1 }}>
-                <select
-                  id="forge-priority"
-                  value={priority}
-                  onChange={e => setPriority(Number(e.target.value))}
-                  style={selectStyle}
-                >
-                  {PRIORITIES.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
-                </select>
-              </FormField>
-            </div>
-
-            <FormField label="Task Description *" htmlFor="forge-description">
-              <textarea
-                id="forge-description"
-                aria-required="true"
-                aria-describedby="forge-description-hint"
-                value={description}
-                onChange={e => setDescription(e.target.value)}
-                placeholder="Describe the work: what needs to be built, fixed, or analyzed."
-                rows={9}
-                style={{
-                  width: '100%', padding: '8px 10px', borderRadius: 4,
-                  border: `1px solid ${T.border}`, background: T.bg1,
-                  color: T.text0, fontSize: 10, lineHeight: 1.55,
-                  outline: 'none', resize: 'vertical', fontFamily: 'inherit',
-                }}
-              />
-              <div
-                id="forge-description-hint"
-                style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9, color: T.text3, marginTop: 3 }}
-              >
-                <span>Required. Describe the task in detail.</span>
-                <span style={{
-                  color: description.length > 4000 ? T.red : description.length > 3000 ? T.yellow : T.text3,
-                  fontFamily: 'monospace',
-                }}>
-                  {description.length} / 4000
-                </span>
               </div>
-            </FormField>
 
-            <button
-              onClick={handleGenerate}
-              disabled={phase === 'generating' || !description.trim() || description.trim().length < 20 || !projectId}
-              aria-describedby={generateError ? 'forge-generate-error' : undefined}
-              style={{
-                alignSelf: 'flex-start', padding: '7px 20px', borderRadius: 4,
-                border: 'none',
-                background: phase === 'generating' || !description.trim() || description.trim().length < 20 || !projectId ? T.bg3 : `linear-gradient(135deg, ${T.accent}, #2563eb)`,
-                color: '#fff', fontSize: 10, fontWeight: 700,
-                cursor: phase === 'generating' || !description.trim() || description.trim().length < 20 || !projectId ? 'not-allowed' : 'pointer',
-                opacity: phase === 'generating' || !description.trim() || description.trim().length < 20 || !projectId ? 0.6 : 1,
-              }}
-            >
-              {phase === 'generating' ? 'Generating...' : 'Generate Plan \u2192'}
-            </button>
+              {/* Form body */}
+              <div style={{
+                padding: 22,
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 14,
+                background: T.bg1,
+              }}>
+                {/* ADO Import */}
+                <FormField label="Import from ADO" htmlFor="forge-ado-search">
+                  <AdoCombobox
+                    inputId="forge-ado-search"
+                    onSelect={item => {
+                      setDescription(item.description || item.title);
+                    }}
+                  />
+                </FormField>
+
+                {/* Project selector */}
+                <FormField label="Project *" htmlFor="forge-project">
+                  {projectsLoading ? (
+                    <div style={{ fontSize: 12, color: T.text3, padding: 4, fontFamily: FONTS.body }}>Loading projects...</div>
+                  ) : projects.length === 0 ? (
+                    <div style={{ fontSize: 12, color: T.butter, padding: 4, fontFamily: FONTS.body }}>
+                      No projects registered. Use <code>baton pmo add</code> to register one.
+                    </div>
+                  ) : (
+                    <select
+                      id="forge-project"
+                      value={projectId}
+                      onChange={e => setProjectId(e.target.value)}
+                      style={selectStyle}
+                    >
+                      {projects.map(p => (
+                        <option key={p.project_id} value={p.project_id}>{p.name} ({p.program})</option>
+                      ))}
+                    </select>
+                  )}
+                </FormField>
+
+                <div style={{ display: 'flex', gap: 10 }}>
+                  <FormField label="Task Type" htmlFor="forge-task-type" style={{ flex: 1 }}>
+                    <select
+                      id="forge-task-type"
+                      value={taskType}
+                      onChange={e => setTaskType(e.target.value)}
+                      style={selectStyle}
+                    >
+                      {TASK_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+                    </select>
+                  </FormField>
+                  <FormField label="Priority" htmlFor="forge-priority" style={{ flex: 1 }}>
+                    <select
+                      id="forge-priority"
+                      value={priority}
+                      onChange={e => setPriority(Number(e.target.value))}
+                      style={selectStyle}
+                    >
+                      {PRIORITIES.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
+                    </select>
+                  </FormField>
+                </div>
+
+                <FormField label="Task Description *" htmlFor="forge-description">
+                  <textarea
+                    id="forge-description"
+                    aria-required="true"
+                    aria-describedby="forge-description-hint"
+                    value={description}
+                    onChange={e => setDescription(e.target.value)}
+                    placeholder="Describe the work: what needs to be built, fixed, or analyzed."
+                    rows={9}
+                    style={{
+                      width: '100%', padding: '9px 11px', borderRadius: 8,
+                      border: `2px solid ${T.border}`, background: T.bg3,
+                      color: T.text0, fontSize: 13, fontWeight: 600, lineHeight: 1.55,
+                      outline: 'none', resize: 'vertical', fontFamily: FONTS.body,
+                      boxShadow: 'inset 2px 2px 0 0 rgba(0,0,0,.06)',
+                      boxSizing: 'border-box',
+                    }}
+                  />
+                  <div
+                    id="forge-description-hint"
+                    style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 4 }}
+                  >
+                    <span style={{ fontFamily: FONTS.hand, fontSize: 14, color: T.text2, transform: 'rotate(-0.5deg)', display: 'inline-block' }}>
+                      Required. Describe the task in detail.
+                    </span>
+                    <span style={{
+                      fontFamily: FONTS.mono,
+                      fontSize: 12,
+                      color: description.length > 4000 ? T.cherry : description.length > 3000 ? T.butter : T.text3,
+                    }}>
+                      {description.length} / 4000
+                    </span>
+                  </div>
+                </FormField>
+
+                {/* Footer row */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
+                  <button
+                    onClick={handleGenerate}
+                    disabled={phase === 'generating' || !description.trim() || description.trim().length < 20 || !projectId}
+                    aria-describedby={generateError ? 'forge-generate-error' : undefined}
+                    style={{
+                      padding: '14px 22px', borderRadius: 12,
+                      border: `3px solid ${T.border}`,
+                      background: (phase === 'generating' || !description.trim() || description.trim().length < 20 || !projectId) ? T.bg3 : T.cherry,
+                      color: (phase === 'generating' || !description.trim() || description.trim().length < 20 || !projectId) ? T.text3 : T.cream,
+                      fontSize: 14, fontWeight: 800,
+                      cursor: (phase === 'generating' || !description.trim() || description.trim().length < 20 || !projectId) ? 'not-allowed' : 'pointer',
+                      opacity: (phase === 'generating' || !description.trim() || description.trim().length < 20 || !projectId) ? 0.6 : 1,
+                      fontFamily: FONTS.body,
+                      boxShadow: (phase === 'generating' || !description.trim() || description.trim().length < 20 || !projectId) ? 'none' : SHADOWS.md,
+                    }}
+                  >
+                    {phase === 'generating' ? 'Drafting...' : 'Draft the recipe \u2192'}
+                  </button>
+                  <span style={{
+                    fontFamily: FONTS.hand, fontSize: 15, color: T.text2,
+                    transform: 'rotate(-0.5deg)', display: 'inline-block', maxWidth: 300,
+                  }}>
+                    we'll draft the recipe — you can tweak before it hits the rail
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* GENERATING spinner */}
+        {phase === 'generating' && (
+          <div style={{
+            maxWidth: 500, margin: '20px auto 0',
+            background: T.bg1,
+            border: `3px solid ${T.border}`,
+            borderRadius: 18,
+            boxShadow: SHADOWS.lg,
+            padding: '36px 24px',
+            textAlign: 'center',
+            display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14,
+          }}>
+            <span style={{ fontSize: 64, lineHeight: 1 }}>🏃</span>
+            <div style={{
+              fontFamily: FONTS.display, fontWeight: 900, fontSize: 30, color: T.text0,
+            }}>
+              heating up the pans…
+            </div>
+            <div style={{
+              fontFamily: FONTS.hand, fontSize: 22, color: T.cherry,
+              transform: 'rotate(-1.5deg)', display: 'inline-block',
+            }}>
+              drafting your recipe, chef
+            </div>
+            {/* Progress bar */}
+            <div style={{
+              background: T.bg3, border: `2px solid ${T.border}`, borderRadius: 999,
+              height: 12, width: '80%', overflow: 'hidden',
+            }}>
+              <div style={{
+                height: '100%',
+                backgroundImage: `repeating-linear-gradient(45deg, ${T.butter} 0 10px, ${T.tangerine} 10px 20px)`,
+                animation: 'forge-bar 1.4s linear infinite',
+                width: '100%',
+              }} />
+            </div>
           </div>
         )}
 
         {/* PREVIEW */}
         {phase === 'preview' && plan && (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <span style={{ fontSize: 12, fontWeight: 700, color: T.text0 }}>Plan Ready</span>
-              <div style={{ display: 'flex', gap: 6 }}>
-                <button
-                  onClick={handleApprove}
-                  disabled={saving}
-                  aria-describedby={saveError ? 'forge-save-error' : undefined}
-                  style={{
-                    padding: '5px 16px', borderRadius: 4, border: 'none',
-                    background: `linear-gradient(135deg, ${T.green}, #059669)`,
-                    color: '#fff', fontSize: 9, fontWeight: 700,
-                    cursor: saving ? 'not-allowed' : 'pointer',
-                    opacity: saving ? 0.6 : 1,
-                  }}
-                >{saving ? 'Queuing\u2026' : 'Approve & Queue'}</button>
-                <button onClick={handleStartRegenerate} disabled={regenLoading} style={{
-                  padding: '5px 14px', borderRadius: 4,
-                  border: `1px solid ${T.yellow}44`, background: 'transparent',
-                  color: T.yellow, fontSize: 9, fontWeight: 600,
-                  cursor: regenLoading ? 'not-allowed' : 'pointer',
-                  opacity: regenLoading ? 0.6 : 1,
-                }}>{regenLoading ? 'Loading...' : 'Regenerate'}</button>
-              </div>
-            </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 18, maxWidth: 900, margin: '0 auto' }}>
 
             {/* Draft restore banner */}
             {showDraftBanner && (
@@ -500,28 +593,29 @@ export function ForgePanel({ onBack, initialSignal, onApproved }: ForgePanelProp
                 role="status"
                 aria-label="Draft available"
                 style={{
-                  display: 'flex', alignItems: 'center', gap: 8,
-                  padding: '6px 10px', borderRadius: 4,
-                  background: T.accent + '12',
-                  border: `1px solid ${T.accent}33`,
-                  fontSize: 9,
+                  display: 'flex', alignItems: 'center', gap: 10,
+                  padding: '8px 14px', borderRadius: 8,
+                  background: T.butterSoft,
+                  border: `2px solid ${T.butter}`,
+                  fontSize: 12, fontFamily: FONTS.body,
                 }}
               >
-                <span style={{ color: T.text1, flex: 1 }}>Draft available from a previous session.</span>
+                <span style={{ color: T.text0, flex: 1, fontWeight: 600 }}>Draft available from a previous session.</span>
                 <button
                   onClick={handleRestoreDraft}
                   style={{
-                    padding: '2px 8px', borderRadius: 3, border: `1px solid ${T.accent}55`,
-                    background: T.accent + '20', color: T.accent,
-                    fontSize: 9, fontWeight: 600, cursor: 'pointer',
+                    padding: '3px 10px', borderRadius: 6, border: `2px solid ${T.border}`,
+                    background: T.butter, color: T.ink,
+                    fontSize: 11, fontWeight: 700, cursor: 'pointer',
+                    fontFamily: FONTS.body, boxShadow: SHADOWS.sm,
                   }}
                 >Restore</button>
                 <button
                   onClick={handleDismissDraft}
                   style={{
-                    padding: '2px 8px', borderRadius: 3, border: `1px solid ${T.border}`,
-                    background: 'transparent', color: T.text3,
-                    fontSize: 9, cursor: 'pointer',
+                    padding: '3px 10px', borderRadius: 6, border: `2px solid ${T.border}`,
+                    background: 'transparent', color: T.text2,
+                    fontSize: 11, fontWeight: 600, cursor: 'pointer', fontFamily: FONTS.body,
                   }}
                 >Dismiss</button>
               </div>
@@ -534,7 +628,11 @@ export function ForgePanel({ onBack, initialSignal, onApproved }: ForgePanelProp
               aria-atomic="true"
             >
               {saveError && (
-                <div style={{ fontSize: 9, color: T.red, padding: '5px 8px', background: T.red + '12', borderRadius: 4 }}>
+                <div style={{
+                  fontSize: 12, color: T.cherry, padding: '8px 12px',
+                  background: T.cherrySoft, borderRadius: 8,
+                  border: `2px solid ${T.cherry}`, fontFamily: FONTS.body, fontWeight: 600,
+                }}>
                   {saveError}
                 </div>
               )}
@@ -542,26 +640,33 @@ export function ForgePanel({ onBack, initialSignal, onApproved }: ForgePanelProp
 
             <PlanEditor
               plan={plan}
-              onPlanChange={setPlan}
+              onPlanChange={(p) => setPlan(p)}
               onDraftSave={() => setShowDraftBanner(false)}
               projectId={projectId}
+              onBack={() => setPhase('intake')}
+              onApprove={handleApprove}
+              saving={saving}
+              onStartRegenerate={handleStartRegenerate}
+              regenLoading={regenLoading}
             />
           </div>
         )}
 
         {/* REGENERATING */}
         {phase === 'regenerating' && (
-          <div>
+          <div style={{ maxWidth: 700, margin: '0 auto' }}>
             <button
               onClick={() => setPhase('preview')}
               style={{
                 background: 'none',
                 border: 'none',
                 color: T.text2,
-                fontSize: 9,
+                fontSize: 12,
                 cursor: 'pointer',
                 padding: '4px 0',
-                marginBottom: 6,
+                marginBottom: 10,
+                fontFamily: FONTS.body,
+                fontWeight: 700,
               }}
             >
               {'\u2190'} Back to Plan
@@ -578,7 +683,6 @@ export function ForgePanel({ onBack, initialSignal, onApproved }: ForgePanelProp
         {phase === 'saved' && (
           <SavedPhase
             savePath={savePath}
-            plan={plan}
             onNewPlan={() => { setPhase('intake'); setDescription(''); setPlan(null); }}
             onBack={onBack}
           />
@@ -599,87 +703,70 @@ export function ForgePanel({ onBack, initialSignal, onApproved }: ForgePanelProp
 }
 
 function SavedPhase({
-  savePath, plan, onNewPlan, onBack,
+  savePath, onNewPlan, onBack,
 }: {
   savePath: string | null;
-  plan: ForgePlanResponse | null;
   onNewPlan: () => void;
   onBack: () => void;
 }) {
-  const [execLoading, setExecLoading] = useState(false);
-  const [execResult, setExecResult] = useState<string | null>(null);
-
-  async function handleExecute() {
-    if (!plan) return;
-    setExecLoading(true);
-    setExecResult(null);
-    try {
-      const resp = await api.executeCard(plan.task_id);
-      setExecResult(`Execution launched (PID ${resp.pid})`);
-    } catch (err) {
-      setExecResult(err instanceof Error ? err.message : 'Launch failed');
-    } finally {
-      setExecLoading(false);
-    }
-  }
-
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12, paddingTop: 40 }}>
+    <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 40 }}>
       <div style={{
-        width: 48, height: 48, borderRadius: '50%',
-        background: T.green + '20', border: `2px solid ${T.green}`,
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        fontSize: 22, color: T.green,
-      }}>{'\u2713'}</div>
-      <div style={{ fontSize: 14, fontWeight: 700, color: T.green }}>Plan Saved & Queued</div>
-      {savePath && (
-        <div style={{ fontSize: 9, color: T.text3, fontFamily: 'monospace' }} title={savePath}>
-          {savePath.includes('/') ? savePath.split('/').pop() : savePath}
+        background: T.bg1,
+        border: `3px solid ${T.border}`,
+        borderRadius: 18,
+        boxShadow: SHADOWS.lg,
+        padding: '30px 24px',
+        textAlign: 'center',
+        display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14,
+        maxWidth: 480, width: '100%',
+      }}>
+        <span style={{ fontSize: 64, lineHeight: 1 }}>😄</span>
+        <div style={{
+          fontFamily: FONTS.display, fontWeight: 900, fontSize: 32, color: T.mint,
+        }}>
+          Clipped to the rail!
         </div>
-      )}
+        <div style={{
+          fontFamily: FONTS.hand, fontSize: 20, color: T.cherry,
+          transform: 'rotate(-1deg)', display: 'inline-block',
+        }}>
+          recipe's filed, chefs got it, dinner's on
+        </div>
 
-      {/* Execution launch */}
-      <button
-        onClick={handleExecute}
-        disabled={execLoading || !plan || execResult?.startsWith('Execution launched')}
-        style={{
-          padding: '7px 24px', borderRadius: 4, border: 'none',
-          background: (execLoading || execResult?.startsWith('Execution launched')) ? T.bg3 : `linear-gradient(135deg, ${T.green}, #059669)`,
-          color: '#fff', fontSize: 11, fontWeight: 700,
-          cursor: execLoading ? 'not-allowed' : 'pointer',
-          opacity: execLoading ? 0.6 : 1,
-        }}
-      >
-        {execLoading ? 'Launching...' : '\u25B6 Start Execution'}
-      </button>
-
-      <div
-        role="status"
-        aria-live="polite"
-        aria-atomic="true"
-      >
-        {execResult && (
+        {savePath && (
           <div style={{
-            fontSize: 9,
-            color: execResult.startsWith('Execution launched') ? T.green : T.red,
-            padding: '4px 10px',
-            background: execResult.startsWith('Execution launched') ? T.green + '12' : T.red + '12',
-            borderRadius: 4,
-          }}>
-            {execResult}
+            fontFamily: FONTS.mono, fontSize: 11, color: T.text2,
+            background: T.bg3,
+            border: `1.5px dashed ${T.borderSoft}`,
+            borderRadius: 6,
+            padding: '6px 10px',
+            display: 'inline-block',
+            wordBreak: 'break-all',
+          }} title={savePath}>
+            {savePath.includes('/') ? savePath.split('/').pop() : savePath}
           </div>
         )}
-      </div>
 
-      <div style={{ display: 'flex', gap: 8 }}>
-        <button onClick={onNewPlan} style={{
-          padding: '5px 14px', borderRadius: 4, border: `1px solid ${T.border}`,
-          background: 'transparent', color: T.text2, fontSize: 9, cursor: 'pointer',
-        }}>New Plan</button>
-        <button onClick={onBack} style={{
-          padding: '5px 14px', borderRadius: 4, border: 'none',
-          background: T.accent, color: '#fff', fontSize: 9, fontWeight: 600, cursor: 'pointer',
-        }}>Back to Board</button>
+        <div style={{ fontSize: 10, color: T.text2, maxWidth: 340, textAlign: 'center', lineHeight: 1.5 }}>
+          The plan is now in the Queued column on the board. Open the card there
+          and press <strong>Execute</strong> to start it.
+        </div>
+
+        <div style={{ display: 'flex', gap: 10 }}>
+          <button onClick={onNewPlan} style={{
+            padding: '8px 18px', borderRadius: 10,
+            border: `2px solid ${T.border}`,
+            background: T.bg1, color: T.text1, fontSize: 12, fontWeight: 700,
+            cursor: 'pointer', fontFamily: FONTS.body, boxShadow: SHADOWS.sm,
+          }}>Another recipe</button>
+          <button onClick={onBack} style={{
+            padding: '8px 18px', borderRadius: 10,
+            border: `3px solid ${T.border}`,
+            background: T.cherry, color: T.cream, fontSize: 12, fontWeight: 800,
+            cursor: 'pointer', fontFamily: FONTS.body, boxShadow: SHADOWS.md,
+          }}>Back to Board</button>
+        </div>
       </div>
     </div>
   );
@@ -692,15 +779,19 @@ function FormField({
   htmlFor,
 }: {
   label: string;
-  children: React.ReactNode;
-  style?: React.CSSProperties;
+  children: ReactNode;
+  style?: CSSProperties;
   htmlFor?: string;
 }) {
   return (
     <div style={style}>
       <label
         htmlFor={htmlFor}
-        style={{ fontSize: 9, color: T.text2, display: 'block', marginBottom: 4 }}
+        style={{
+          fontFamily: FONTS.body, fontSize: 11, fontWeight: 800,
+          textTransform: 'uppercase', letterSpacing: '0.08em',
+          color: T.text1, display: 'block', marginBottom: 5,
+        }}
       >
         {label}
       </label>
@@ -709,8 +800,10 @@ function FormField({
   );
 }
 
-const selectStyle: React.CSSProperties = {
-  width: '100%', padding: '6px 8px', borderRadius: 4,
-  border: `1px solid ${T.border}`, background: T.bg1,
-  color: T.text0, fontSize: 10, outline: 'none',
+const selectStyle: CSSProperties = {
+  width: '100%', padding: '9px 11px', borderRadius: 8,
+  border: `2px solid ${T.border}`, background: T.bg3,
+  color: T.text0, fontSize: 13, fontWeight: 600, outline: 'none',
+  fontFamily: FONTS.body,
+  boxShadow: 'inset 2px 2px 0 0 rgba(0,0,0,.06)',
 };

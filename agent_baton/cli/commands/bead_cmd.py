@@ -4,6 +4,7 @@ Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
 
 Subcommands
 -----------
+create   Create a bead manually (task-independent or task-scoped).
 list     List beads with optional filters (--type, --status, --task, --tag).
 show     Show a single bead as JSON.
 ready    List open beads whose blocked_by dependencies are all satisfied.
@@ -19,7 +20,9 @@ All subcommands degrade gracefully when the bead store is unavailable
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -42,6 +45,24 @@ def _get_bead_store():
     db = _DEFAULT_DB_PATH.resolve()
     if not db.exists():
         return None
+    return BeadStore(db)
+
+
+def _get_or_create_bead_store():
+    """Resolve the BeadStore, creating the parent directory and DB if needed.
+
+    Unlike :func:`_get_bead_store`, this helper is used by the ``create``
+    subcommand which must work even when no ``baton execute start`` has been
+    run yet.  It ensures the ``.claude/team-context/`` directory exists before
+    constructing the store so that a fresh project does not fail with
+    ``FileNotFoundError``.
+
+    Returns a :class:`~agent_baton.core.engine.bead_store.BeadStore` instance.
+    """
+    from agent_baton.core.engine.bead_store import BeadStore
+
+    db = _DEFAULT_DB_PATH.resolve()
+    db.parent.mkdir(parents=True, exist_ok=True)
     return BeadStore(db)
 
 
@@ -73,6 +94,70 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         help="Inspect and manage Bead memory (agent discoveries, decisions, warnings)",
     )
     sub = p.add_subparsers(dest="beads_cmd", metavar="SUBCOMMAND")
+
+    # -- create --------------------------------------------------------------
+    create_p = sub.add_parser("create", help="Create a bead manually")
+    create_p.add_argument(
+        "--type",
+        dest="bead_type",
+        metavar="TYPE",
+        required=True,
+        choices=["discovery", "decision", "warning", "outcome", "planning"],
+        help="Bead type: discovery, decision, warning, outcome, planning",
+    )
+    create_p.add_argument(
+        "--content",
+        dest="content",
+        metavar="TEXT",
+        required=True,
+        help="The bead text (insight, decision, or warning)",
+    )
+    create_p.add_argument(
+        "--task-id",
+        dest="task_id",
+        metavar="TASK_ID",
+        default=None,
+        help="Task ID to scope this bead (defaults to $BATON_TASK_ID env var; "
+             "omit for a project-scoped bead)",
+    )
+    create_p.add_argument(
+        "--step-id",
+        dest="step_id",
+        metavar="STEP_ID",
+        default="",
+        help="Step ID within the execution (optional)",
+    )
+    create_p.add_argument(
+        "--agent",
+        dest="agent_name",
+        metavar="AGENT",
+        default="orchestrator",
+        help="Agent name to record as the bead author (default: orchestrator)",
+    )
+    create_p.add_argument(
+        "--tag",
+        dest="tags",
+        metavar="TAG",
+        action="append",
+        default=None,
+        help="Semantic tag (repeatable)",
+    )
+    create_p.add_argument(
+        "--file",
+        dest="files",
+        metavar="FILE",
+        action="append",
+        default=None,
+        help="Affected file path (repeatable)",
+    )
+    create_p.add_argument(
+        "--confidence",
+        dest="confidence",
+        metavar="LEVEL",
+        choices=["none", "low", "partial", "medium", "high"],
+        default="medium",
+        help="Confidence level (default: medium)",
+    )
 
     # -- list ----------------------------------------------------------------
     list_p = sub.add_parser("list", help="List beads with optional filters")
@@ -135,11 +220,11 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     close_p = sub.add_parser("close", help="Close a bead with a summary")
     close_p.add_argument("bead_id", metavar="BEAD_ID", help="Bead ID to close")
     close_p.add_argument(
-        "--summary",
+        "--summary", "--note",
         dest="summary",
         metavar="TEXT",
         default="",
-        help="Compacted summary of the bead's outcome",
+        help="Compacted summary of the bead's outcome (alias: --note)",
     )
 
     # -- link ----------------------------------------------------------------
@@ -250,11 +335,12 @@ def handler(args: argparse.Namespace) -> None:
     """Dispatch to the appropriate beads subcommand handler."""
     cmd = getattr(args, "beads_cmd", None)
     if cmd is None:
-        print("Usage: baton beads <subcommand>  [list|show|ready|close|link]")
+        print("Usage: baton beads <subcommand>  [create|list|show|ready|close|link|cleanup|promote|graph]")
         print("Run `baton beads --help` for details.")
         return
 
     dispatch = {
+        "create": _handle_create,
         "list": _handle_list,
         "show": _handle_show,
         "ready": _handle_ready,
@@ -274,6 +360,59 @@ def handler(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 # Subcommand handlers
 # ---------------------------------------------------------------------------
+
+
+def _handle_create(args: argparse.Namespace) -> None:
+    """Create a bead manually via the CLI.
+
+    Project-scoped beads (no ``--task-id`` and no ``$BATON_TASK_ID``) are
+    written with ``task_id=""`` which the store converts to NULL in the
+    database, bypassing the executions FK constraint.  Task-scoped beads
+    require a matching executions row only when foreign-key enforcement is
+    active (it is OFF by default in SQLite unless explicitly enabled).
+    """
+    from datetime import datetime, timezone
+
+    from agent_baton.models.bead import Bead
+
+    # Resolve task_id: CLI flag > env var > project-scoped (empty string).
+    task_id: str = args.task_id or os.environ.get("BATON_TASK_ID", "") or ""
+
+    content: str = args.content
+    bead_id: str = f"bd-{hashlib.sha256(content.encode()).hexdigest()[:4]}"
+
+    # Determine scope based on whether we have a task_id.
+    scope = "task" if task_id else "project"
+
+    created_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    bead = Bead(
+        bead_id=bead_id,
+        task_id=task_id,
+        step_id=args.step_id,
+        agent_name=args.agent_name,
+        bead_type=args.bead_type,
+        content=content,
+        confidence=args.confidence,
+        scope=scope,
+        tags=args.tags or [],
+        affected_files=args.files or [],
+        status="open",
+        created_at=created_at,
+        source="manual",
+    )
+
+    store = _get_or_create_bead_store()
+    result = store.write(bead)
+    if not result:
+        print(
+            f"error: failed to write bead — check that baton.db schema is up to date.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    scope_label = f"task={task_id}" if task_id else "project-scoped"
+    print(f"Created bead {bead_id} [{args.bead_type}] ({scope_label}).")
 
 
 def _handle_list(args: argparse.Namespace) -> None:

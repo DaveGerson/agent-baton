@@ -15,6 +15,13 @@ following the comms-protocols template.  It handles three prompt types:
 The class is stateless; every method operates purely on its arguments.
 Knowledge sections are built lazily -- inline documents are loaded from
 disk only when the attachment delivery is ``inline``.
+
+Session-level knowledge deduplication is supported via the
+``delivered_knowledge`` parameter on ``build_delegation_prompt``.  When
+provided, docs that were already inlined in a prior step are downgraded to
+reference delivery.  After building the prompt the caller is responsible
+for persisting the updated ``delivered_knowledge`` dict back to
+``ExecutionState``.
 """
 from __future__ import annotations
 
@@ -34,22 +41,27 @@ from agent_baton.models.execution import (
 )
 from agent_baton.models.knowledge import KnowledgeAttachment
 
-_KNOWLEDGE_GAPS_LINE = (
-    "If you lack context, output `KNOWLEDGE_GAP: <description>` with "
-    "`CONFIDENCE: none|low|partial` and stop. Do not guess on HIGH/CRITICAL risk tasks."
+# Agents report knowledge gaps, discoveries, decisions, design choices, and
+# conflicts using structured signals appended to their outcome text. Consolidated
+# into a single compact block to minimize per-dispatch token overhead.
+# Order: KNOWLEDGE_GAP first (a gap blocks progress), then BEAD signals (outputs),
+# then DESIGN_CHOICE / CONFLICT (escalations).
+# Full signal reference: references/signals.md
+_SIGNALS_BLOCK = (
+    "## Signals (append to outcome as needed)\n"
+    "- `KNOWLEDGE_GAP: <desc>` + `CONFIDENCE: none|low|partial` — STOP if blocked on HIGH/CRITICAL risk.\n"
+    "- `BEAD_DISCOVERY: <what>` / `BEAD_DECISION: <what> CHOSE: <x> BECAUSE: <y>` / `BEAD_WARNING: <risk>`\n"
+    "- `BEAD_FEEDBACK: <bead-id> useful|misleading|outdated` (rate prior discoveries above)\n"
+    "- `DESIGN_CHOICE: <desc>` + `OPTION_A/B` + `RECOMMENDATION` — only for decisions that materially change outcome.\n"
+    "- `CONFLICT: <what> PARTIES: <steps> RECOMMENDATION: <resolution>` — only for genuine disagreement with prior work."
 )
 
-# Bead signal protocol — agents append these lines to their outcome text to
-# record structured memory for downstream agents.
-# Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
-_BEAD_SIGNALS_LINE = (
-    "Report discoveries and decisions using structured signals:\n"
-    "  BEAD_DISCOVERY: <what you found>\n"
-    "  BEAD_DECISION: <what you decided> CHOSE: <choice> BECAUSE: <rationale>\n"
-    "  BEAD_WARNING: <what might cause problems>\n"
-    "Rate prior discoveries injected above (if any) to improve future selection:\n"
-    "  BEAD_FEEDBACK: <bead-id> useful|misleading|outdated"
-)
+# Retained for backward compatibility with any external callers; prefer _SIGNALS_BLOCK.
+# All three constants now point to the same consolidated block — the prompt
+# builder only emits _SIGNALS_BLOCK once, so legacy reads still see the content.
+_KNOWLEDGE_GAPS_LINE = _SIGNALS_BLOCK
+_BEAD_SIGNALS_LINE = _SIGNALS_BLOCK
+_FLAG_SIGNALS_LINE = _SIGNALS_BLOCK
 
 # Success criteria by task type — shown in the delegation prompt to make the
 # definition of done concrete.  Selected by the caller via the task_type arg.
@@ -155,6 +167,71 @@ class PromptDispatcher:
         return f"Retrieve via: `Read {attachment.path}`"
 
     @staticmethod
+    def _attachment_dedup_key(attachment: "KnowledgeAttachment") -> str:
+        """Return the session-dedup key for an attachment.
+
+        Mirrors ``KnowledgeResolver._dedup_key``: prefer source path, fall back
+        to ``{pack_name}::{document_name}``.
+        """
+        if attachment.path:
+            return attachment.path
+        return f"{attachment.pack_name or ''}::{attachment.document_name}"
+
+    def _apply_session_dedup(
+        self,
+        attachments: "list[KnowledgeAttachment]",
+        current_step_id: str,
+        delivered_knowledge: "dict[str, str]",
+    ) -> "list[KnowledgeAttachment]":
+        """Apply session-level dedup to a list of attachments.
+
+        For each attachment:
+        - If it is from the ``"explicit"`` source layer, leave it unchanged
+          (explicit user attachments always inline regardless of prior delivery).
+        - If its dedup key is in *delivered_knowledge*, downgrade delivery to
+          ``"reference"`` and append a note to the grounding indicating which
+          prior step delivered it inline.
+        - Otherwise, if the attachment would be inlined, record the key in
+          *delivered_knowledge* (mutates the dict in-place) so future steps
+          can detect it.
+
+        Returns a new list with (potentially modified) attachments.
+        """
+        result: list[KnowledgeAttachment] = []
+        for att in attachments:
+            key = self._attachment_dedup_key(att)
+            if att.source == "explicit":
+                # Explicit layer: never downgrade; record if inline.
+                if att.delivery == "inline":
+                    delivered_knowledge.setdefault(key, current_step_id)
+                result.append(att)
+                continue
+
+            prior_step = delivered_knowledge.get(key)
+            if prior_step is not None and att.delivery == "inline":
+                # Downgrade: build a reference attachment with a retrieval note.
+                note = (
+                    f"(previously delivered inline in step {prior_step}"
+                    f" — re-read from: {att.path})"
+                )
+                new_grounding = f"{att.grounding} {note}".strip() if att.grounding else note
+                att = KnowledgeAttachment(
+                    source=att.source,
+                    pack_name=att.pack_name,
+                    document_name=att.document_name,
+                    path=att.path,
+                    delivery="reference",
+                    retrieval=att.retrieval,
+                    grounding=new_grounding,
+                    token_estimate=att.token_estimate,
+                )
+            elif att.delivery == "inline":
+                # First time inlined — record it.
+                delivered_knowledge.setdefault(key, current_step_id)
+            result.append(att)
+        return result
+
+    @staticmethod
     def _build_prior_beads_section(prior_beads: list) -> str:
         """Render the ``## Prior Discoveries`` section from a list of beads.
 
@@ -218,6 +295,7 @@ class PromptDispatcher:
         task_summary: str = "",
         task_type: str = "",
         prior_beads: "list | None" = None,
+        delivered_knowledge: "dict[str, str] | None" = None,
     ) -> str:
         """Build a complete delegation prompt for an agent.
 
@@ -231,12 +309,20 @@ class PromptDispatcher:
                 user's original words unmodified.
             task_type: Task type key (e.g. "bug-fix", "new-feature") used to
                 select the Success Criteria text.  Defaults to "" (no criteria shown).
+            delivered_knowledge: Session-level dedup map (doc-key → step_id).
+                Docs present in this map are downgraded from inline to reference
+                delivery in the knowledge section.  The dict is mutated in-place:
+                any doc that ends up inlined in THIS dispatch is added to it so
+                the caller can persist the updated state.
 
         Returns:
             A formatted markdown delegation prompt ready to pass to the Agent tool.
         """
         role = step.agent_name
-        project_line = project_description or task_summary or "this project"
+        # Use a short fallback rather than the full task_summary — task_summary is
+        # rendered canonically in the Intent section below, and duplicating it in
+        # the opening sentence inflates the prompt on every DISPATCH (token burn).
+        project_line = project_description or "this project"
 
         logger.debug(
             "Building delegation prompt for step %s: agent=%s task_type=%s "
@@ -270,8 +356,20 @@ class PromptDispatcher:
         # Shared context block
         shared_context_block = shared_context.strip() if shared_context.strip() else "_No shared context provided._"
 
+        # Session-level knowledge deduplication.
+        # For each attachment that would be inlined, check whether it was already
+        # delivered inline in a prior step.  If so, downgrade it to reference.
+        # Explicit (layer-1) attachments are never downgraded.
+        # After building the section, mark newly-inlined docs in the dict so the
+        # caller can persist the update back to ExecutionState.
+        knowledge_attachments = list(step.knowledge)
+        if delivered_knowledge is not None:
+            knowledge_attachments = self._apply_session_dedup(
+                knowledge_attachments, step.step_id, delivered_knowledge
+            )
+
         # Knowledge section (empty string when no attachments)
-        knowledge_section = self._build_knowledge_section(step.knowledge)
+        knowledge_section = self._build_knowledge_section(knowledge_attachments)
 
         article = "an" if role[0:1] in "aeiouAEIOU" else "a"
         parts = [
@@ -279,8 +377,6 @@ class PromptDispatcher:
             "",
             "## Shared Context",
             shared_context_block,
-            "",
-            "Read `CLAUDE.md` for project conventions.",
             "",
         ]
 
@@ -345,9 +441,7 @@ class PromptDispatcher:
                 "",
             ]
 
-        parts.append(_KNOWLEDGE_GAPS_LINE)
-        parts.append("")
-        parts.append(_BEAD_SIGNALS_LINE)
+        parts.append(_SIGNALS_BLOCK)
         parts.append("")
 
         # Previous Step Output — only when there is actual handoff content
@@ -362,6 +456,255 @@ class PromptDispatcher:
         parts += [
             "Log non-obvious decisions under a **Decisions** heading. "
             "If you deviate from the plan, explain under a **Deviations** heading.",
+        ]
+
+        return "\n".join(parts)
+
+    def build_continuation_prompt(
+        self,
+        step: "PlanStep",
+        interaction_history: "list",
+        *,
+        shared_context: str = "",
+        task_summary: str = "",
+    ) -> str:
+        """Build a continuation delegation prompt for an interactive step re-dispatch.
+
+        Called when a step in ``interact_dispatched`` status is re-dispatched so
+        the agent can respond to human input.  Includes the full interaction
+        history using a sliding window: the last 3 turns in full detail, earlier
+        turns condensed to one-line summaries.
+
+        The prompt ends with instructions for the ``INTERACT_COMPLETE`` signal so
+        the agent can signal when it is done without waiting for a human ``--done``.
+
+        Args:
+            step: The PlanStep being re-dispatched.
+            interaction_history: List of :class:`InteractionTurn` objects
+                accumulated so far.
+            shared_context: Pre-built context string (plan's ``shared_context``).
+            task_summary: High-level task description (shown in Intent section).
+
+        Returns:
+            A formatted markdown delegation prompt ready to pass to the Agent tool.
+        """
+        from agent_baton.models.execution import InteractionTurn  # avoid circular at module level
+
+        role = step.agent_name
+        project_line = task_summary or "this project"
+        article = "an" if role[0:1] in "aeiouAEIOU" else "a"
+        shared_context_block = shared_context.strip() or "_No shared context provided._"
+
+        # Build the sliding-window interaction history section.
+        # Last 3 turns in full; earlier turns as one-line summaries.
+        _WINDOW = 3
+        history_lines: list[str] = ["## Interaction History", ""]
+
+        if interaction_history:
+            older = interaction_history[:-_WINDOW] if len(interaction_history) > _WINDOW else []
+            recent = interaction_history[-_WINDOW:] if len(interaction_history) > _WINDOW else interaction_history
+
+            if older:
+                history_lines.append(
+                    f"_Earlier turns ({len(older)} summarised):_"
+                )
+                for turn in older:
+                    snippet = turn.content[:100].replace("\n", " ")
+                    if len(turn.content) > 100:
+                        snippet += "…"
+                    history_lines.append(
+                        f"- Turn {turn.turn_number} [{turn.role}]: {snippet}"
+                    )
+                history_lines.append("")
+
+            for turn in recent:
+                label = "Agent" if turn.role == "agent" else "Human"
+                history_lines.append(f"### Turn {turn.turn_number} — {label}")
+                history_lines.append(turn.content)
+                history_lines.append("")
+
+        history_section = "\n".join(history_lines)
+
+        turn_count = len(interaction_history)
+
+        parts = [
+            f"You are {article} {role} working on {project_line}.",
+            "",
+            "## Shared Context",
+            shared_context_block,
+            "",
+        ]
+
+        if task_summary.strip():
+            parts += [
+                "## Intent",
+                task_summary.strip(),
+                "",
+            ]
+
+        parts += [
+            f"## Your Task (Step {step.step_id} — Continuation, Turn {turn_count + 1})",
+            step.task_description.strip(),
+            "",
+            history_section,
+            "",
+            "## Instructions",
+            "Continue the interaction above, responding to the latest human input.",
+            "When you are done and no further turns are needed, output the following",
+            "signal on its own line at the end of your response:",
+            "",
+            "    INTERACT_COMPLETE",
+            "",
+            "If you still need another round of input, do NOT output INTERACT_COMPLETE",
+            "and end your response normally.",
+            "",
+            _KNOWLEDGE_GAPS_LINE,
+            "",
+            _BEAD_SIGNALS_LINE,
+            "",
+            "Log non-obvious decisions under a **Decisions** heading. "
+            "If you deviate from the plan, explain under a **Deviations** heading.",
+        ]
+
+        return "\n".join(parts)
+
+    def build_consultation_prompt(
+        self,
+        step: PlanStep,
+        *,
+        flag_context: str = "",
+        original_outcome: str = "",
+        task_summary: str = "",
+        prior_beads: "list | None" = None,
+    ) -> str:
+        """Build a lightweight consultation prompt for specialist agent dispatch.
+
+        Targets ~3-5K tokens input.  Includes the agent role preamble, the
+        structured flag context describing the obstacle, relevant excerpts from
+        the blocked agent's output, precedent beads (if any), and resolution
+        instructions.
+
+        Intentionally excludes the full shared_context document, knowledge pack
+        attachments, handoff chain, context_files list, path enforcement, and
+        success criteria — all of which are irrelevant for a focused specialist
+        consultation.
+
+        Args:
+            step: The consulting PlanStep (``step.agent_name`` is the specialist).
+            flag_context: Structured description of the obstacle (e.g. from
+                ``flag.to_consultation_description()``).  Optional — Layer 1
+                callers may omit it when no flag context exists yet.
+            original_outcome: What the blocked agent produced (last 2000 chars
+                are extracted here).  Optional.
+            task_summary: One-line mission context.
+            prior_beads: Precedent decision beads for similar past choices.
+
+        Returns:
+            A focused markdown delegation prompt ready to pass to the Agent tool.
+        """
+        role = step.agent_name
+        project_line = task_summary or "this project"
+        article = "an" if role[0:1] in "aeiouAEIOU" else "a"
+
+        # Truncate original_outcome to last 2000 chars to keep the prompt lean.
+        outcome_excerpt = ""
+        if original_outcome.strip():
+            outcome_excerpt = original_outcome.strip()[-2000:]
+
+        parts = [
+            f"You are {article} {role} consulting on {project_line}.",
+            "",
+        ]
+
+        if task_summary.strip():
+            parts += [
+                "## Mission Context",
+                task_summary.strip(),
+                "",
+            ]
+
+        parts += [
+            f"## Your Consultation Task (Step {step.step_id})",
+            step.task_description.strip(),
+            "",
+        ]
+
+        if flag_context.strip():
+            parts += [
+                "## Obstacle / Flag",
+                flag_context.strip(),
+                "",
+            ]
+
+        if outcome_excerpt:
+            parts += [
+                "## Relevant Agent Output (excerpt)",
+                outcome_excerpt,
+                "",
+            ]
+
+        # Insert Prior Discoveries section when precedent beads are available.
+        if prior_beads:
+            prior_section = self._build_prior_beads_section(prior_beads)
+            if prior_section:
+                parts.append(prior_section)
+                parts.append("")
+
+        parts += [
+            "## Resolution Instructions",
+            "Provide a focused, actionable recommendation. Use one of these signals:",
+            "- `FLAG_RESOLVED: <your recommendation>` — you have a clear answer.",
+            "- `ESCALATE_TO_INTERACT: <reason>` — human judgement is needed.",
+            "- `KNOWLEDGE_GAP: <description>` with `CONFIDENCE: none|low|partial`"
+            " — critical information is missing.",
+            "",
+            "Keep your response under 500 tokens.",
+        ]
+
+        return "\n".join(parts)
+
+    def build_task_prompt(
+        self,
+        step: PlanStep,
+        *,
+        task_summary: str = "",
+    ) -> str:
+        """Build a minimal prompt for task-runner agents executing bespoke skill instructions.
+
+        Targets ~1-3K tokens input.  Passes the step's ``task_description``
+        verbatim — the caller is responsible for embedding the bespoke skill
+        instructions there.
+
+        Intentionally excludes shared context, knowledge packs, beads, handoff
+        chain, context files, deliverables, path enforcement, and success
+        criteria.
+
+        Args:
+            step: The task PlanStep (``step.task_description`` contains bespoke
+                skill instructions).
+            task_summary: One-line mission context.
+
+        Returns:
+            A minimal markdown delegation prompt ready to pass to the Agent tool.
+        """
+        parts = [
+            "You are a task runner. Follow these instructions exactly.",
+            "",
+        ]
+
+        if task_summary.strip():
+            parts += [
+                f"**Context:** {task_summary.strip()}",
+                "",
+            ]
+
+        parts += [
+            f"## Task Instructions (Step {step.step_id})",
+            step.task_description.strip(),
+            "",
+            "## Output Format",
+            "Report what you did, the result, and whether it succeeded.",
+            "Keep your response under 500 tokens.",
         ]
 
         return "\n".join(parts)
@@ -449,6 +792,8 @@ class PromptDispatcher:
             _KNOWLEDGE_GAPS_LINE,
             "",
             _BEAD_SIGNALS_LINE,
+            "",
+            _FLAG_SIGNALS_LINE,
             "",
             "Log non-obvious decisions under a **Decisions** heading. "
             "If you deviate from the plan, explain under a **Deviations** heading.",

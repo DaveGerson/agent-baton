@@ -1,6 +1,8 @@
-import { useState, useEffect, useRef } from 'react';
+import { memo, useState, useEffect, useRef } from 'react';
+import type { ReactNode, MouseEvent } from 'react';
 import type { PmoCard, ForgePlanResponse } from '../api/types';
 import { T, PRIORITY_COLOR, programColor } from '../styles/tokens';
+import { FONTS, SHADOWS } from '../styles/tokens';
 import { api } from '../api/client';
 import { agentDisplayName } from '../utils/agent-names';
 import { useToast } from '../contexts/ToastContext';
@@ -16,19 +18,21 @@ interface KanbanCardProps {
   onMutateCard?: (cardId: string, updater: (card: PmoCard) => PmoCard) => void;
 }
 
-function Chip({ children, color = T.text2 }: { children: React.ReactNode; color?: string }) {
+function Chip({ children, color = T.text2 }: { children: ReactNode; color?: string }) {
   return (
     <span style={{
       display: 'inline-flex',
       alignItems: 'center',
       gap: 3,
       padding: '1px 6px',
-      borderRadius: 3,
+      borderRadius: 999,
       fontSize: 9,
       fontWeight: 600,
       color,
-      background: color + '14',
-      border: `1px solid ${color}22`,
+      background: color + '22',
+      border: `1.5px solid ${color}`,
+      boxShadow: `1.5px 1.5px 0 0 ${T.border}`,
+      fontFamily: FONTS.body,
       whiteSpace: 'nowrap',
     }}>
       {children}
@@ -48,6 +52,7 @@ function Pips({ done, total, color }: { done: number; total: number; color: stri
             height: 6,
             borderRadius: 1,
             background: i < done ? color : T.bg3,
+            border: `1px solid ${T.border}`,
           }}
         />
       ))}
@@ -70,7 +75,7 @@ function usePlanPreview(cardId: string) {
   const [planData, setPlanData] = useState<ForgePlanResponse | null>(null);
   const [planLoading, setPlanLoading] = useState(false);
 
-  async function handleViewPlan(e: React.MouseEvent) {
+  async function handleViewPlan(e: MouseEvent) {
     e.stopPropagation();
     if (showPlan) {
       setShowPlan(false);
@@ -93,7 +98,7 @@ function usePlanPreview(cardId: string) {
 }
 
 function useExecuteCard(
-  cardId: string,
+  card: PmoCard,
   toast: ReturnType<typeof useToast>,
   onMutateCard?: (cardId: string, updater: (card: PmoCard) => PmoCard) => void,
 ) {
@@ -105,15 +110,24 @@ function useExecuteCard(
     return () => { if (execTimerRef.current) clearTimeout(execTimerRef.current); };
   }, []);
 
-  async function handleExecute(e: React.MouseEvent) {
+  async function handleExecute(e: MouseEvent) {
     e.stopPropagation();
     if (execTimerRef.current) clearTimeout(execTimerRef.current);
+    // Stale-state guard: SSE may have moved the card out of 'queued' between
+    // render and click. Bail early so we show a clear message instead of a
+    // generic 409 from the backend.
+    if (card.column !== 'queued') {
+      setExecResult('Card is no longer queued — refresh to see its current state.');
+      toast.error('Card is no longer queued');
+      execTimerRef.current = setTimeout(() => setExecResult(null), 8000);
+      return;
+    }
     setExecLoading(true);
     setExecResult(null);
     try {
-      const resp = await api.executeCard(cardId);
+      const resp = await api.executeCard(card.card_id);
       setExecResult(`Launched (PID ${resp.pid})`);
-      onMutateCard?.(cardId, c => ({ ...c, column: 'executing' }));
+      onMutateCard?.(card.card_id, c => ({ ...c, column: 'executing' }));
       toast.success('Execution launched');
     } catch (err) {
       setExecResult(err instanceof Error ? err.message : 'Launch failed');
@@ -124,7 +138,7 @@ function useExecuteCard(
     }
   }
 
-  function dismissExecResult(e: React.MouseEvent) {
+  function dismissExecResult(e: MouseEvent) {
     e.stopPropagation();
     setExecResult(null);
   }
@@ -132,30 +146,44 @@ function useExecuteCard(
   return { execLoading, execResult, handleExecute, dismissExecResult };
 }
 
-export function KanbanCard({ card, columnColor, onForge, onEditPlan, onMutateCard }: KanbanCardProps) {
+function KanbanCardImpl({ card, columnColor, onForge, onEditPlan, onMutateCard }: KanbanCardProps) {
   const [expanded, setExpanded] = useState(false);
+  const [hovered, setHovered] = useState(false);
+  const [pressed, setPressed] = useState(false);
   const toast = useToast();
   const { showPlan, planData, planLoading, handleViewPlan } = usePlanPreview(card.card_id);
-  const { execLoading, execResult, handleExecute, dismissExecResult } = useExecuteCard(card.card_id, toast, onMutateCard);
+  const { execLoading, execResult, handleExecute, dismissExecResult } = useExecuteCard(card, toast, onMutateCard);
   const [showProgress, setShowProgress] = useState(false);
   const [gateResolved, setGateResolved] = useState(false);
   const isHuman = card.column === 'awaiting_human';
   const isQueued = card.column === 'queued';
   const isActive = card.column === 'executing' || card.column === 'validating' || card.column === 'awaiting_human';
 
+  // Stable tilt derived from card ID
+  const tilt = (card.card_id.charCodeAt(0) % 5) * 0.4 - 1;
+
   function handleGateResolved(result: 'approve' | 'reject') {
     setGateResolved(true);
-    // Optimistically update the column so the card moves off awaiting_human.
-    if (onMutateCard) {
-      onMutateCard(card.card_id, c => ({
-        ...c,
-        column: result === 'approve' ? 'executing' : 'executing',
-      }));
+    // On approve, optimistically move to executing so the card visibly leaves
+    // awaiting_human. On reject, leave the column alone — the backend decides
+    // the next state (typically back to queued for re-planning) and the SSE
+    // update will deliver it. Hiding the gate panel is handled by gateResolved.
+    if (result === 'approve' && onMutateCard) {
+      onMutateCard(card.card_id, c => ({ ...c, column: 'executing' }));
     }
   }
   const priorityColor = PRIORITY_COLOR[card.priority] ?? T.text2;
 
-  const borderColor = isHuman ? T.orange + '55' : expanded ? columnColor + '55' : T.border;
+  // Compute card transform and shadow based on interaction state
+  const cardTransform = pressed
+    ? `translate(2px,2px) rotate(${tilt}deg)`
+    : hovered
+      ? `translate(-1px,-1px) rotate(${tilt}deg)`
+      : `rotate(${tilt}deg)`;
+  const cardShadow = pressed ? 'none' : hovered ? SHADOWS.lg : SHADOWS.md;
+  const cardBorder = isHuman
+    ? `2px solid ${T.tangerine}`
+    : `2px solid ${T.border}`;
 
   return (
     <div
@@ -170,33 +198,43 @@ export function KanbanCard({ card, columnColor, onForge, onEditPlan, onMutateCar
           setExpanded(!expanded);
         }
       }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => { setHovered(false); setPressed(false); }}
+      onMouseDown={() => setPressed(true)}
+      onMouseUp={() => setPressed(false)}
       style={{
+        position: 'relative',
         background: T.bg1,
-        borderRadius: 4,
-        border: `1px solid ${borderColor}`,
+        borderRadius: 12,
+        border: cardBorder,
         cursor: 'pointer',
         overflow: 'hidden',
-        transition: 'border-color 0.15s',
-        boxShadow: isHuman ? `0 0 8px ${T.orange}10` : 'none',
-      }}
-      onMouseEnter={e => {
-        if (!expanded) {
-          (e.currentTarget as HTMLDivElement).style.borderColor = columnColor + '66';
-        }
-      }}
-      onMouseLeave={e => {
-        if (!expanded) {
-          (e.currentTarget as HTMLDivElement).style.borderColor = borderColor;
-        }
+        transition: 'transform 0.12s ease, box-shadow 0.12s ease',
+        boxShadow: cardShadow,
+        transform: cardTransform,
       }}
     >
-      <div style={{ padding: '7px 8px 6px' }}>
+      {/* Perforated top edge — ticket stub feel */}
+      <div style={{
+        position: 'absolute',
+        top: 0,
+        left: 8,
+        right: 8,
+        height: 3,
+        backgroundImage: `radial-gradient(circle, ${T.bg3} 1.5px, transparent 2px)`,
+        backgroundSize: '8px 3px',
+        backgroundRepeat: 'repeat-x',
+        pointerEvents: 'none',
+      }} />
+
+      <div style={{ padding: '10px 8px 6px' }}>
         {/* Title row */}
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 4, marginBottom: 3 }}>
           <ProgramDot program={card.program} size={6} />
           <div style={{
-            fontSize: 12,
-            fontWeight: 600,
+            fontSize: 16,
+            fontWeight: 800,
+            fontFamily: FONTS.display,
             color: T.text0,
             lineHeight: 1.25,
             flex: 1,
@@ -229,14 +267,14 @@ export function KanbanCard({ card, columnColor, onForge, onEditPlan, onMutateCar
           {card.external_id ? (
             <span
               title={`ADO: ${card.external_id} — internal: ${card.card_id}`}
-              style={{ fontSize: 9, color: T.text2, fontFamily: 'monospace', fontWeight: 600 }}
+              style={{ fontSize: 9, color: T.text2, fontFamily: FONTS.mono, fontWeight: 600 }}
             >
               {card.external_id}
             </span>
           ) : (
             <span
               title={card.card_id}
-              style={{ fontSize: 9, color: T.text4, fontFamily: 'monospace' }}
+              style={{ fontSize: 9, color: T.text2, fontFamily: FONTS.mono }}
             >
               {card.card_id.slice(0, 8)}
             </span>
@@ -257,7 +295,7 @@ export function KanbanCard({ card, columnColor, onForge, onEditPlan, onMutateCar
             {card.steps_total <= 12 && (
               <Pips done={card.steps_completed} total={card.steps_total} color={columnColor} />
             )}
-            <span style={{ fontSize: 9, color: T.text3 }}>
+            <span style={{ fontSize: 9, color: T.text3, fontFamily: FONTS.mono }}>
               {card.steps_completed}/{card.steps_total}
             </span>
           </div>
@@ -266,18 +304,20 @@ export function KanbanCard({ card, columnColor, onForge, onEditPlan, onMutateCar
         {/* Current phase / error */}
         {card.current_phase && !card.error && (
           <div style={{
-            fontSize: 9,
-            color: isHuman ? T.orange : T.text2,
-            lineHeight: 1.2,
+            fontSize: 14,
+            color: isHuman ? T.tangerine : T.text1,
+            lineHeight: 1.3,
             marginTop: 2,
-            padding: '2px 4px',
-            background: T.bg2,
+            padding: '3px 6px',
+            background: T.bg3,
             borderRadius: 2,
-            borderLeft: `2px solid ${isHuman ? T.orange : columnColor}`,
+            borderLeft: `1.5px solid ${T.borderSoft}`,
+            fontFamily: FONTS.hand,
+            transform: 'rotate(-0.5deg)',
           }}>
-            {card.current_phase.length > 65
+            &ldquo;{card.current_phase.length > 65
               ? card.current_phase.slice(0, 65) + '…'
-              : card.current_phase}
+              : card.current_phase}&rdquo;
           </div>
         )}
         {card.error && (
@@ -287,63 +327,72 @@ export function KanbanCard({ card, columnColor, onForge, onEditPlan, onMutateCar
             lineHeight: 1.2,
             marginTop: 2,
             padding: '2px 4px',
-            background: T.bg2,
+            background: T.bg3,
             borderRadius: 2,
-            borderLeft: `2px solid ${T.red}`,
+            borderLeft: `1.5px solid ${T.red}`,
           }}>
             {card.error.length > 80 ? card.error.slice(0, 80) + '…' : card.error}
           </div>
         )}
 
         {/* Footer */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 5 }}>
-          <span style={{ fontSize: 9, color: T.text3 }}>{card.project_id}</span>
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 4,
+          marginTop: 6,
+          paddingTop: 5,
+          borderTop: `1.5px dashed ${T.borderSoft}`,
+        }}>
+          <span style={{ fontSize: 9, color: T.text3, fontFamily: FONTS.mono }}>{card.project_id}</span>
           {card.agents.length > 0 && (
             <>
               <span style={{ fontSize: 9, color: T.text4 }}>·</span>
-              <span style={{ fontSize: 9, color: T.text3 }}>
+              <span style={{ fontSize: 9, color: T.text3, fontFamily: FONTS.body }}>
                 {card.agents.slice(0, 2).map(agentDisplayName).join(', ')}
                 {card.agents.length > 2 && ` +${card.agents.length - 2}`}
               </span>
             </>
           )}
           <div style={{ flex: 1 }} />
-          <span style={{ fontSize: 9, color: T.text4 }}>{fmtTime(card.updated_at)}</span>
+          <span style={{ fontSize: 9, color: T.text2, fontFamily: FONTS.mono }}>{fmtTime(card.updated_at)}</span>
         </div>
       </div>
 
       {/* Expanded detail */}
       {expanded && (
         <div style={{
-          borderTop: `1px solid ${T.border}`,
+          borderTop: `1.5px dashed ${T.borderSoft}`,
           padding: '6px 8px',
-          background: T.bg2,
+          background: T.bg3,
         }}>
           <div style={{ display: 'flex', gap: 8, marginBottom: 4 }}>
             <div>
-              <span style={{ fontSize: 9, color: T.text3 }}>Program: </span>
-              <span style={{ fontSize: 9, color: T.text0, fontWeight: 600 }}>{card.program}</span>
+              <span style={{ fontSize: 9, color: T.text3, fontFamily: FONTS.body }}>Program: </span>
+              <span style={{ fontSize: 9, color: T.text0, fontWeight: 600, fontFamily: FONTS.body }}>{card.program}</span>
             </div>
             <div>
-              <span style={{ fontSize: 9, color: T.text3 }}>Gates passed: </span>
-              <span style={{ fontSize: 9, color: T.text0, fontWeight: 600 }}>{card.gates_passed}</span>
+              <span style={{ fontSize: 9, color: T.text3, fontFamily: FONTS.body }}>Gates passed: </span>
+              <span style={{ fontSize: 9, color: T.text0, fontWeight: 600, fontFamily: FONTS.body }}>{card.gates_passed}</span>
             </div>
           </div>
 
           {/* Full untruncated phase/error text — only shown when expanded */}
           {card.current_phase && !card.error && card.current_phase.length > 65 && (
             <div style={{
-              fontSize: 9,
-              color: isHuman ? T.orange : T.text2,
+              fontSize: 14,
+              color: isHuman ? T.tangerine : T.text1,
               lineHeight: 1.4,
               marginBottom: 6,
               padding: '4px 6px',
               background: T.bg1,
               borderRadius: 2,
-              borderLeft: `2px solid ${isHuman ? T.orange : T.accent}`,
+              borderLeft: `1.5px solid ${T.borderSoft}`,
+              fontFamily: FONTS.hand,
+              transform: 'rotate(-0.5deg)',
               wordBreak: 'break-word',
             }}>
-              {card.current_phase}
+              &ldquo;{card.current_phase}&rdquo;
             </div>
           )}
           {card.error && card.error.length > 80 && (
@@ -355,7 +404,7 @@ export function KanbanCard({ card, columnColor, onForge, onEditPlan, onMutateCar
               padding: '4px 6px',
               background: T.bg1,
               borderRadius: 2,
-              borderLeft: `2px solid ${T.red}`,
+              borderLeft: `1.5px solid ${T.red}`,
               wordBreak: 'break-word',
             }}>
               {card.error}
@@ -364,103 +413,74 @@ export function KanbanCard({ card, columnColor, onForge, onEditPlan, onMutateCar
           {card.agents.length > 0 && (
             <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap', marginBottom: 6 }}>
               {card.agents.map(a => (
-                <Chip key={a} color={T.cyan}>{agentDisplayName(a)}</Chip>
+                <Chip key={a} color={T.blueberry}>{agentDisplayName(a)}</Chip>
               ))}
             </div>
           )}
 
           {/* Actions row */}
-          <div style={{ display: 'flex', gap: 4, marginTop: 4, paddingTop: 4, borderTop: `1px solid ${T.border}` }}>
+          <div style={{
+            display: 'flex',
+            gap: 4,
+            marginTop: 4,
+            paddingTop: 4,
+            borderTop: `1.5px dashed ${T.borderSoft}`,
+            flexWrap: 'wrap',
+          }}>
             {isQueued && (
-              <button
+              <ActionButton
                 onClick={handleExecute}
                 disabled={execLoading}
-                style={{
-                  padding: '3px 9px',
-                  borderRadius: 3,
-                  border: `1px solid ${T.green}44`,
-                  background: `linear-gradient(135deg, ${T.green}18, ${T.green}0c)`,
-                  color: T.green,
-                  fontSize: 9,
-                  fontWeight: 600,
-                  cursor: execLoading ? 'not-allowed' : 'pointer',
-                  opacity: execLoading ? 0.6 : 1,
-                }}
                 title="Launch autonomous execution for this card"
+                bg={T.mint + '22'}
+                border={`1.5px solid ${T.mint}`}
+                color={T.mint}
               >
                 {execLoading ? 'Launching...' : '\u25B6 Execute'}
-              </button>
+              </ActionButton>
             )}
             {isActive && (
-              <button
+              <ActionButton
                 onClick={e => { e.stopPropagation(); setShowProgress(true); }}
-                style={{
-                  padding: '3px 9px',
-                  borderRadius: 3,
-                  border: `1px solid ${T.yellow}44`,
-                  background: T.yellow + '12',
-                  color: T.yellow,
-                  fontSize: 9,
-                  fontWeight: 600,
-                  cursor: 'pointer',
-                }}
                 title="Monitor execution progress in real time"
+                bg={T.butter + '33'}
+                border={`1.5px solid ${T.butter}`}
+                color={T.inkSoft}
               >
                 Monitor
-              </button>
+              </ActionButton>
             )}
             {onForge && (
-              <button
+              <ActionButton
                 onClick={e => { e.stopPropagation(); onForge(card); }}
-                style={{
-                  padding: '3px 9px',
-                  borderRadius: 3,
-                  border: `1px solid ${T.accent}44`,
-                  background: T.accent + '12',
-                  color: T.accent,
-                  fontSize: 9,
-                  fontWeight: 600,
-                  cursor: 'pointer',
-                }}
                 title="Open this card in the Forge for editing or re-planning"
+                bg={T.cherry + '18'}
+                border={`1.5px solid ${T.cherry}`}
+                color={T.cherry}
               >
                 Re-forge
-              </button>
+              </ActionButton>
             )}
             {card.steps_total > 0 && onEditPlan && (
-              <button
+              <ActionButton
                 onClick={e => { e.stopPropagation(); onEditPlan(card); }}
-                style={{
-                  padding: '3px 9px',
-                  borderRadius: 3,
-                  border: `1px solid ${T.accent}33`,
-                  background: T.accent + '15',
-                  color: T.accent,
-                  fontSize: 9,
-                  fontWeight: 600,
-                  cursor: 'pointer',
-                }}
                 title="Jump directly to the Forge plan editor for this card"
+                bg={T.blueberry + '18'}
+                border={`1.5px solid ${T.blueberry}`}
+                color={T.blueberry}
               >
                 {'\u270e'} Edit Plan
-              </button>
+              </ActionButton>
             )}
-            <button
+            <ActionButton
               onClick={handleViewPlan}
-              style={{
-                padding: '3px 9px',
-                borderRadius: 3,
-                border: `1px solid ${T.green}44`,
-                background: showPlan ? T.green + '18' : T.green + '0c',
-                color: T.green,
-                fontSize: 9,
-                fontWeight: 600,
-                cursor: 'pointer',
-              }}
               title="View the execution plan for this card"
+              bg={showPlan ? T.blueberry + '28' : T.blueberry + '18'}
+              border={`1.5px solid ${T.blueberry}`}
+              color={T.blueberry}
             >
               {showPlan ? 'Hide Plan' : 'View Plan'}
-            </button>
+            </ActionButton>
           </div>
 
           {/* Gate approval panel — only visible when card is awaiting human input */}
@@ -478,14 +498,15 @@ export function KanbanCard({ card, columnColor, onForge, onEditPlan, onMutateCar
                 alignItems: 'center',
                 gap: 4,
                 fontSize: 9,
-                color: execResult.startsWith('Launched') ? T.green : T.red,
-                padding: '3px 6px',
+                color: execResult.startsWith('Launched') ? T.mint : T.cherry,
+                padding: '4px 8px',
                 marginTop: 4,
-                background: T.bg1,
-                borderRadius: 3,
+                background: execResult.startsWith('Launched') ? T.mintSoft : T.cherrySoft,
+                borderRadius: 8,
+                border: '1.5px solid currentColor',
               }}
             >
-              <span style={{ flex: 1 }}>{execResult}</span>
+              <span style={{ flex: 1, fontFamily: FONTS.body }}>{execResult}</span>
               <button
                 aria-label="Dismiss execution result"
                 onClick={dismissExecResult}
@@ -513,14 +534,14 @@ export function KanbanCard({ card, columnColor, onForge, onEditPlan, onMutateCar
                 marginTop: 6,
                 maxHeight: 300,
                 overflowY: 'auto',
-                borderRadius: 4,
-                border: `1px solid ${T.border}`,
-                background: T.bg1,
+                borderRadius: 8,
+                border: `1.5px dashed ${T.borderSoft}`,
+                background: T.bg3,
                 padding: 6,
               }}
             >
               {planLoading && (
-                <div style={{ fontSize: 9, color: T.text3, fontStyle: 'italic', padding: 8 }}>
+                <div style={{ fontSize: 9, color: T.text3, fontStyle: 'italic', padding: 8, fontFamily: FONTS.body }}>
                   Loading plan…
                 </div>
               )}
@@ -528,7 +549,7 @@ export function KanbanCard({ card, columnColor, onForge, onEditPlan, onMutateCar
                 <PlanPreview plan={planData} collapsible />
               )}
               {!planLoading && !planData && (
-                <div style={{ fontSize: 9, color: T.text3, fontStyle: 'italic', padding: 8 }}>
+                <div style={{ fontSize: 9, color: T.text3, fontStyle: 'italic', padding: 8, fontFamily: FONTS.body }}>
                   No plan available for this card.
                 </div>
               )}
@@ -544,6 +565,61 @@ export function KanbanCard({ card, columnColor, onForge, onEditPlan, onMutateCar
     </div>
   );
 }
+
+// ----------------------------------------------------------------
+// ActionButton — shared button style for the expanded actions row
+// ----------------------------------------------------------------
+interface ActionButtonProps {
+  children: ReactNode;
+  onClick: (e: MouseEvent) => void;
+  title?: string;
+  disabled?: boolean;
+  bg: string;
+  border: string;
+  color: string;
+}
+
+function ActionButton({ children, onClick, title, disabled, bg, border, color }: ActionButtonProps) {
+  const [hov, setHov] = useState(false);
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+      onMouseEnter={() => setHov(true)}
+      onMouseLeave={() => setHov(false)}
+      style={{
+        padding: '3px 9px',
+        borderRadius: 8,
+        border,
+        background: bg,
+        color,
+        fontSize: 9,
+        fontWeight: 600,
+        fontFamily: FONTS.body,
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        opacity: disabled ? 0.6 : 1,
+        boxShadow: hov && !disabled ? SHADOWS.md : SHADOWS.sm,
+        transform: hov && !disabled ? 'translate(-1px,-1px)' : 'none',
+        transition: 'transform 0.1s ease, box-shadow 0.1s ease',
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+// Memoized so that a mutation to one card (e.g. SSE update, gate approval)
+// doesn't force all sibling cards on the board to reconcile. Cards are
+// uniquely identified by card_id; when the parent creates a new `filtered`
+// array each render, same-identity card objects still skip re-render.
+export const KanbanCard = memo(KanbanCardImpl, (prev, next) => (
+  prev.card === next.card
+  && prev.columnColor === next.columnColor
+  && prev.onForge === next.onForge
+  && prev.onEditPlan === next.onEditPlan
+  && prev.onMutateCard === next.onMutateCard
+));
 
 function fmtTime(iso: string): string {
   try {

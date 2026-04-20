@@ -20,6 +20,10 @@ logger = logging.getLogger(__name__)
 # Delivery thresholds
 _DOC_TOKEN_CAP_DEFAULT = 8_000
 _STEP_TOKEN_BUDGET_DEFAULT = 32_000
+# Default on-disk size limit for inline delivery (bytes).  Documents whose
+# source file exceeds this size are forced to reference delivery, regardless
+# of their token estimate.  User-explicit attachments (Layer 1) are exempt.
+_INLINE_BYTE_THRESHOLD_DEFAULT = 2_048
 
 # Priority ordering: higher index = lower priority
 _PRIORITY_ORDER = {"high": 0, "normal": 1, "low": 2}
@@ -85,7 +89,8 @@ class KnowledgeResolver:
     Runs a 4-layer pipeline — explicit, agent-declared, planner-matched (strict),
     planner-matched (relevance fallback) — with deduplication across layers.
     Produces KnowledgeAttachment objects with inline/reference delivery decisions
-    governed by a per-step token budget and per-doc token cap.
+    governed by a per-step token budget, per-doc token cap, and an on-disk byte
+    size threshold.
 
     Args:
         registry: Loaded KnowledgeRegistry to resolve packs and documents from.
@@ -98,6 +103,14 @@ class KnowledgeResolver:
         doc_token_cap: Maximum token size for a document to be eligible for
             inline delivery. Documents larger than this are always referenced.
             Defaults to 8,000.
+        inline_byte_threshold: Maximum on-disk file size (bytes) for inline
+            delivery. Documents whose source file exceeds this size are forced to
+            reference delivery regardless of token estimate.  Defaults to 2,048.
+            User-explicit attachments (source="explicit", Layer 1) are exempt
+            from this threshold so that ``--knowledge`` / ``--knowledge-pack``
+            flags always inline regardless of document size.
+            Pass ``2**30`` (or any very large value) to restore the old
+            behaviour of inlining everything regardless of size.
     """
 
     def __init__(
@@ -108,12 +121,14 @@ class KnowledgeResolver:
         rag_available: bool = False,
         step_token_budget: int = _STEP_TOKEN_BUDGET_DEFAULT,
         doc_token_cap: int = _DOC_TOKEN_CAP_DEFAULT,
+        inline_byte_threshold: int = _INLINE_BYTE_THRESHOLD_DEFAULT,
     ) -> None:
         self._registry = registry
         self._agent_registry = agent_registry
         self._rag_available = rag_available
         self._step_token_budget = step_token_budget
         self._doc_token_cap = doc_token_cap
+        self._inline_byte_threshold = inline_byte_threshold
 
     # ------------------------------------------------------------------
     # Public API
@@ -128,12 +143,19 @@ class KnowledgeResolver:
         risk_level: str = "LOW",
         explicit_packs: list[str] | None = None,
         explicit_docs: list[str] | None = None,
+        already_delivered: dict[str, str] | None = None,
     ) -> list[KnowledgeAttachment]:
         """Resolve knowledge attachments for a single plan step.
 
         Runs the 4-layer pipeline in order. Documents encountered in earlier
         layers are skipped in later layers (deduplication by source_path,
         falling back to doc name + pack name).
+
+        Session-level deduplication: if *already_delivered* is provided, any
+        doc whose dedup key appears in that dict will be forced to
+        ``delivery="reference"`` with a note pointing back to the step where
+        it was first inlined — **unless** the doc is from the explicit layer
+        (layer 1), which always inlines regardless of prior delivery.
 
         Args:
             agent_name: Name of the agent being dispatched.
@@ -142,17 +164,23 @@ class KnowledgeResolver:
             risk_level: Risk classification of the plan (LOW/MEDIUM/HIGH/CRITICAL).
             explicit_packs: Pack names explicitly passed via --knowledge-pack.
             explicit_docs: Document file paths explicitly passed via --knowledge.
+            already_delivered: Mapping of doc-key → step_id for docs already
+                inlined in this execution run.  Docs in this map (that are not
+                from the explicit layer) are downgraded to reference delivery.
 
         Returns:
             Ordered list of KnowledgeAttachment objects with delivery decisions
             applied. Priority within each layer is high → normal → low.
         """
+        prior: dict[str, str] = already_delivered or {}
+
         # Mutable per-resolve state
         seen: set[str] = set()           # dedup keys: "{pack_name}::{doc_name}"
         remaining_budget = self._step_token_budget
         attachments: list[KnowledgeAttachment] = []
 
         # --- Layer 1: Explicit -----------------------------------------------
+        # Explicit (user-supplied) docs always inline — never downgraded.
         layer1_docs = self._resolve_explicit_layer(
             explicit_packs or [], explicit_docs or []
         )
@@ -174,7 +202,8 @@ class KnowledgeResolver:
                 continue
             seen.add(key)
             attachment, remaining_budget = self._make_attachment(
-                doc, pack_name, source, remaining_budget
+                doc, pack_name, source, remaining_budget,
+                prior_step_id=prior.get(key),
             )
             attachments.append(attachment)
 
@@ -187,7 +216,8 @@ class KnowledgeResolver:
                 continue
             seen.add(key)
             attachment, remaining_budget = self._make_attachment(
-                doc, pack_name, source, remaining_budget
+                doc, pack_name, source, remaining_budget,
+                prior_step_id=prior.get(key),
             )
             attachments.append(attachment)
 
@@ -203,7 +233,8 @@ class KnowledgeResolver:
                     continue
                 seen.add(key)
                 attachment, remaining_budget = self._make_attachment(
-                    doc, pack_name, source, remaining_budget
+                    doc, pack_name, source, remaining_budget,
+                    prior_step_id=prior.get(key),
                 )
                 attachments.append(attachment)
 
@@ -368,10 +399,14 @@ class KnowledgeResolver:
         pack_name: str | None,
         source: str,
         remaining_budget: int,
+        *,
+        prior_step_id: str | None = None,
     ) -> tuple[KnowledgeAttachment, int]:
         """Apply delivery decision and return (attachment, updated_remaining_budget).
 
         Delivery rules:
+        - prior_step_id is set (session dedup, non-explicit layer): reference
+          with a note pointing to the prior inline delivery step.
         - token_estimate <= 0:                           reference (unestimated)
         - token_estimate > doc_token_cap:                reference (over per-doc cap)
         - token_estimate <= remaining_budget:            inline (fits budget)
@@ -381,6 +416,51 @@ class KnowledgeResolver:
         rag_available=True, otherwise "file".
         """
         estimate = doc.token_estimate
+        grounding = _make_grounding(doc, pack_name)
+
+        # Session-level deduplication: doc was already inlined in a prior step.
+        # Force reference delivery and annotate the grounding with a retrieval note.
+        if prior_step_id is not None:
+            path_hint = _doc_path(doc)
+            dedup_note = (
+                f"(previously delivered inline in step {prior_step_id}"
+                f" — re-read from: {path_hint})"
+            )
+            grounding = f"{grounding} {dedup_note}".strip()
+            retrieval = "mcp-rag" if self._rag_available else "file"
+            return KnowledgeAttachment(
+                source=source,
+                pack_name=pack_name,
+                document_name=doc.name,
+                path=path_hint,
+                delivery="reference",
+                retrieval=retrieval,
+                grounding=grounding,
+                token_estimate=estimate,
+            ), remaining_budget
+
+        # Byte-size threshold check (skipped for explicit/user-forced attachments).
+        # We check on-disk file size first — it's a cheap stat() call and catches
+        # large docs before the token-budget accounting even runs.
+        if source != "explicit" and self._inline_byte_threshold < 2 ** 30:
+            _file_size: int | None = None
+            if doc.source_path is not None:
+                try:
+                    _file_size = doc.source_path.stat().st_size
+                except OSError:
+                    pass
+            if _file_size is not None and _file_size > self._inline_byte_threshold:
+                retrieval = "mcp-rag" if self._rag_available else "file"
+                return KnowledgeAttachment(
+                    source=source,
+                    pack_name=pack_name,
+                    document_name=doc.name,
+                    path=_doc_path(doc),
+                    delivery="reference",
+                    retrieval=retrieval,
+                    grounding=grounding,
+                    token_estimate=estimate,
+                ), remaining_budget
 
         if estimate <= 0 or estimate > self._doc_token_cap:
             delivery = "reference"
@@ -391,7 +471,6 @@ class KnowledgeResolver:
             delivery = "reference"
 
         retrieval = "mcp-rag" if (self._rag_available and delivery == "reference") else "file"
-        grounding = _make_grounding(doc, pack_name)
 
         attachment = KnowledgeAttachment(
             source=source,

@@ -1,52 +1,38 @@
-"""Prompt evolution engine -- data-driven agent prompt improvement proposals.
+"""Prompt evolution engine -- template-based agent prompt improvement proposals.
 
-The evolution engine is the most impactful -- and most carefully guarded --
-component of the improvement layer.  It analyses agent scorecards to
-identify underperformers and generates specific, actionable prompt
-modification proposals.
+.. deprecated::
+    ``PromptEvolutionEngine`` is deprecated and will be removed in a future
+    release.
 
-Evolution strategy:
+    **Replacement:** Use the ``learning-analyst`` agent dispatched via the
+    learning-cycle pipeline (``baton learn run-cycle``).  The agent reads
+    actual retrospectives and execution traces to produce specific,
+    evidence-cited recommendations — rather than matching scorecard thresholds
+    to generic canned suggestion strings.
 
-Proposals are generated based on a cascade of quantitative and qualitative
-signals, each contributing specific suggestions:
+    Do not add new callers to this module.
 
-1. **First-pass rate < 0.5** (``"needs-improvement"`` health):
+**What this module actually does** (honest description):
 
-   - "Add more specific instructions for common failure modes"
-   - "Include negative examples (what NOT to do)"
+A rule engine that matches scorecard thresholds to pre-written suggestion
+strings.  It does NOT read retrospective content or execution traces — it
+only reads numeric scorecard fields and maps them to template sentences.
+Suggestions like "Add more specific instructions for common failure modes"
+are generated whenever ``first_pass_rate < 0.5``, regardless of what the
+actual failure mode was.
 
-2. **First-pass rate 0.5 -- 0.8** (``"adequate"`` health):
-
-   - "Review retry patterns in retrospectives for recurring issues"
-
-3. **Retry rate > 1.0**:
-
-   - "Tighten acceptance criteria in the agent's output format section"
-
-4. **Gate pass rate < 0.7**:
-
-   - "Add quality checklist to the agent's prompt"
-
-5. **Negative retrospective mentions**:
-
-   - "Read retrospective 'What Didn't Work' entries and address failures"
-
-6. **Knowledge gaps cited**:
-
-   - "Create or update knowledge pack to fill cited gaps"
-   - "Add 'Before Starting' section pointing to relevant knowledge packs"
-
-Safety guardrails:
+Safety guardrails (retained):
 
 * Prompt changes are ALWAYS classified as ``risk="high"`` and
   ``auto_applicable=False`` in the recommendation pipeline.  They are never
-  auto-applied -- always escalated to human review.
+  auto-applied — always escalated to human review.
 * :class:`~agent_baton.core.improve.vcs.AgentVersionControl` creates a
   timestamped backup before any modification.
-* Rollback is automatic on detected degradation via the experiment system.
 
 """
 from __future__ import annotations
+
+import warnings
 
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -130,6 +116,15 @@ class PromptEvolutionEngine:
         registry: AgentRegistry | None = None,
         proposals_dir: Path | None = None,
     ) -> None:
+        warnings.warn(
+            "PromptEvolutionEngine is deprecated. Use the 'learning-analyst' agent "
+            "dispatched via 'baton learn run-cycle' instead. This class generates "
+            "generic template suggestions and does not read actual retrospective "
+            "content. It will be removed once the learning-cycle pipeline is proven "
+            "in production.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self._scorer = scorer or PerformanceScorer()
         self._retro = retro_engine or RetrospectiveEngine()
         self._vcs = vcs or AgentVersionControl()

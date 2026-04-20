@@ -103,6 +103,8 @@ _DEFAULT_AGENTS: dict[str, list[str]] = {
     "documentation": ["architect", "talent-builder", "code-reviewer"],
     "migration": ["architect", "backend-engineer", "test-engineer", "code-reviewer", "auditor"],
     "test": ["test-engineer"],
+    # E3 — fallback for unknown/generic tasks: default four-phase roster
+    "generic": ["architect", "backend-engineer", "test-engineer", "code-reviewer"],
 }
 
 # Phase templates by task type
@@ -117,6 +119,8 @@ _PHASE_NAMES: dict[str, list[str]] = {
     "documentation": ["Research", "Draft", "Review"],
     "migration": ["Design", "Implement", "Test", "Review"],
     "test": ["Implement", "Review"],
+    # E3 — fallback phases for generic/unknown task types
+    "generic": ["Investigate", "Implement", "Test", "Review"],
 }
 
 _DEFAULT_PHASE_NAMES: list[str] = ["Design", "Implement", "Test", "Review"]
@@ -164,6 +168,55 @@ _CROSS_CONCERN_SIGNALS: dict[str, list[str]] = {
         "review", "code quality", "audit",
     ],
 }
+
+
+# ---------------------------------------------------------------------------
+# Step type assignment — maps agent role to default step_type
+# ---------------------------------------------------------------------------
+# Unknown agents fall through to "developing" (the safe default).
+# test-engineer gets an override to "developing" when the task is building
+# test infrastructure rather than running validation.
+
+_AGENT_STEP_TYPE: dict[str, str] = {
+    "architect": "planning",
+    "ai-systems-architect": "planning",
+    "code-reviewer": "reviewing",
+    "security-reviewer": "reviewing",
+    "auditor": "reviewing",
+    "test-engineer": "testing",
+    "task-runner": "task",
+}
+
+# Keywords that flip test-engineer's step_type back to "developing"
+# (building test infrastructure, not running tests).
+_TEST_ENGINEER_DEVELOPING_KEYWORDS = ("create", "build", "scaffold")
+
+
+def _step_type_for_agent(agent_name: str, task_description: str = "") -> str:
+    """Return the appropriate step_type for a given agent role.
+
+    Uses ``_AGENT_STEP_TYPE`` for the lookup with ``"developing"`` as the
+    default.  ``test-engineer`` is overridden to ``"developing"`` when the
+    task description contains build/scaffold keywords (i.e. the step is
+    building test infrastructure, not running tests).
+
+    Args:
+        agent_name: Full agent name (may include ``--`` variant suffix).
+        task_description: Task description text used for the test-engineer
+            override check.  Optional — defaults to ``""``.
+
+    Returns:
+        One of the step_type strings defined in ``_AGENT_STEP_TYPE``, or
+        ``"developing"`` for unknown agents.
+    """
+    base = agent_name.split("--")[0]
+    step_type = _AGENT_STEP_TYPE.get(base, "developing")
+    # Override: test-engineer building test infrastructure → developing
+    if base == "test-engineer" and step_type == "testing":
+        lower_desc = task_description.lower()
+        if any(kw in lower_desc for kw in _TEST_ENGINEER_DEVELOPING_KEYWORDS):
+            step_type = "developing"
+    return step_type
 
 
 # ---------------------------------------------------------------------------
@@ -1153,7 +1206,39 @@ class IntelligentPlanner:
                             step.context_files.append(path)
                             existing.add(path)
 
+        # 13d. E7 — Dependency detection: scan task summary for references to
+        # prior task outputs and attach their outcome beads as knowledge context.
+        depends_on_task_id: str | None = None
+        if self._bead_store is not None:
+            depends_on_task_id = self._detect_task_dependency(task_summary)
+            if depends_on_task_id is not None:
+                logger.info(
+                    "E7 dependency detected: task_id=%s depends on prior task %s",
+                    task_id,
+                    depends_on_task_id,
+                )
+                self._attach_prior_task_beads(
+                    plan_phases, depends_on_task_id
+                )
+
         # 14. Shared context
+        # A3: Derive classification_signals (JSON) and classification_confidence
+        # from the DataClassifier result when available.
+        _classification_signals: str | None = None
+        _classification_confidence: float | None = None
+        if classification is not None:
+            _classification_signals = json.dumps(
+                {
+                    "signals": classification.signals_found,
+                    "risk_level": classification.risk_level.value,
+                    "guardrail_preset": classification.guardrail_preset,
+                    "explanation": classification.explanation,
+                }
+            )
+            # ClassificationResult.confidence is "high" | "low" (string).
+            # Map to float so callers can order/threshold numerically.
+            _classification_confidence = 1.0 if classification.confidence == "high" else 0.5
+
         tmp_plan = MachinePlan(
             task_id=task_id,
             task_summary=task_summary,
@@ -1178,6 +1263,9 @@ class IntelligentPlanner:
                 else (stack_profile.language if stack_profile else None)
             ),
             foresight_insights=list(self._last_foresight_insights),
+            depends_on_task=depends_on_task_id,
+            classification_signals=_classification_signals,
+            classification_confidence=_classification_confidence,
         )
         # 16. Team cost estimation — look up historical cost data for team steps.
         self._last_team_cost_estimates: dict[str, int] = {}
@@ -1522,11 +1610,14 @@ class IntelligentPlanner:
                     )
                     if not has_review and plan_phases:
                         # Build a minimal review phase using the last agent.
+                        # Use max existing phase_id + 1 to avoid duplicate IDs.
                         last_agent = "code-reviewer"
                         if plan_phases[-1].steps:
                             last_agent = plan_phases[-1].steps[-1].agent_name
+                        next_id = max(p.phase_id for p in plan_phases) + 1
                         review_phase = self._build_phases_for_names(
-                            ["Review"], [last_agent], "Review bead-flagged concerns"
+                            ["Review"], [last_agent], "Review bead-flagged concerns",
+                            start_phase_id=next_id,
                         )
                         plan_phases.extend(review_phase)
 
@@ -1549,6 +1640,131 @@ class IntelligentPlanner:
                 )
 
         return plan_phases
+
+    # ------------------------------------------------------------------
+    # Private helpers — E7 dependency detection
+    # ------------------------------------------------------------------
+
+    # Regex patterns that signal "this task builds on / continues prior work".
+    # Group 1 (when present) captures a candidate task_id token.
+    _DEP_PATTERNS: list[re.Pattern] = [
+        re.compile(
+            r"\bbased on(?:\s+(?:task|the\s+results?\s+of|output\s+of))?\s+([a-z0-9][-a-z0-9]{6,})",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\bbuilding on(?:\s+(?:task|the\s+results?\s+of|output\s+of))?\s+([a-z0-9][-a-z0-9]{6,})",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\bcontinuing(?:\s+(?:from|the\s+work\s+of|task))?\s+([a-z0-9][-a-z0-9]{6,})",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\bfollows?\s+(?:from\s+)?(?:task\s+)?([a-z0-9][-a-z0-9]{6,})",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\bdepends?\s+on\s+(?:task\s+)?([a-z0-9][-a-z0-9]{6,})",
+            re.IGNORECASE,
+        ),
+        # Explicit "task: TASK_ID" or "task ID: TASK_ID" notation
+        re.compile(
+            r"\btask[-_\s]?id\s*[=:]\s*([a-z0-9][-a-z0-9]{6,})",
+            re.IGNORECASE,
+        ),
+    ]
+
+    def _detect_task_dependency(self, task_summary: str) -> str | None:
+        """Scan *task_summary* for references to a prior task_id.
+
+        Applies :attr:`_DEP_PATTERNS` to find phrases like "based on task X",
+        "building on Y", "depends on Z", etc.  When a candidate token is
+        found it is validated against the bead store: if no beads exist for
+        that task_id the match is discarded (avoids false positives from
+        generic English phrases).
+
+        Returns the matched task_id string, or ``None`` when no credible
+        dependency is detected.
+
+        Requires ``self._bead_store`` to be set; callers must guard before
+        calling this method.
+        """
+        for pattern in self._DEP_PATTERNS:
+            m = pattern.search(task_summary)
+            if m:
+                candidate = m.group(1)
+                # Validate: must have at least one bead in the store for this task.
+                try:
+                    beads = self._bead_store.query(task_id=candidate, limit=1)
+                    if beads:
+                        return candidate
+                except Exception:
+                    pass
+        return None
+
+    def _attach_prior_task_beads(
+        self,
+        plan_phases: list,
+        prior_task_id: str,
+        max_beads: int = 5,
+    ) -> None:
+        """Attach outcome beads from *prior_task_id* as shared context to all steps.
+
+        Retrieves up to *max_beads* beads from the prior task (preferring
+        ``decision`` and ``outcome`` types) and appends a summary of their
+        content to each step's ``task_description`` as a "Prior context:"
+        block.  This ensures agents in the new plan are aware of what the
+        prior task produced without manual copy-paste.
+
+        Silently no-ops if the bead store is unavailable or returns no beads.
+
+        Args:
+            plan_phases: The plan phases to enrich in place.
+            prior_task_id: Task ID whose outcome beads to pull.
+            max_beads: Cap on how many beads to attach.
+        """
+        try:
+            # Prefer decision and outcome beads — highest signal for downstream work
+            beads = self._bead_store.query(
+                task_id=prior_task_id,
+                bead_type="decision",
+                limit=max_beads,
+            )
+            if len(beads) < max_beads:
+                outcome_beads = self._bead_store.query(
+                    task_id=prior_task_id,
+                    bead_type="outcome",
+                    limit=max_beads - len(beads),
+                )
+                # Deduplicate by bead_id
+                existing_ids = {b.bead_id for b in beads}
+                beads += [b for b in outcome_beads if b.bead_id not in existing_ids]
+            # Fall back to any bead type if we still have nothing
+            if not beads:
+                beads = self._bead_store.query(task_id=prior_task_id, limit=max_beads)
+        except Exception:
+            return
+
+        if not beads:
+            return
+
+        prior_context_lines = [
+            f"Prior task context (from {prior_task_id}):",
+        ]
+        for bead in beads[:max_beads]:
+            snippet = (bead.content or "").replace("\n", " ").strip()
+            if len(snippet) > 200:
+                snippet = snippet[:197] + "..."
+            prior_context_lines.append(f"  - [{bead.bead_type}] {snippet}")
+
+        prior_context_block = "\n".join(prior_context_lines)
+
+        for phase in plan_phases:
+            for step in phase.steps:
+                step.task_description = (
+                    f"{step.task_description}\n\n{prior_context_block}"
+                )
 
     # ------------------------------------------------------------------
     # Private helpers — task ID and type inference
@@ -1680,13 +1896,13 @@ class IntelligentPlanner:
             steps: list[PlanStep] = []
             for step_idx, agent_base in enumerate(st["agents"], start=1):
                 routed_name: str = agent_route_map.get(agent_base) or agent_base
+                _desc = self._step_description(phase_name, routed_name, st["text"])
                 steps.append(
                     PlanStep(
                         step_id=f"{idx}.{step_idx}",
                         agent_name=routed_name,
-                        task_description=self._step_description(
-                            phase_name, routed_name, st["text"],
-                        ),
+                        task_description=_desc,
+                        step_type=_step_type_for_agent(routed_name, _desc),
                     )
                 )
 
@@ -1907,13 +2123,13 @@ class IntelligentPlanner:
         if not agents:
             for phase in phases:
                 if not phase.steps:
+                    _desc = self._step_description(phase.name, "backend-engineer", task_summary)
                     phase.steps.append(
                         PlanStep(
                             step_id=f"{phase.phase_id}.1",
                             agent_name="backend-engineer",
-                            task_description=self._step_description(
-                                phase.name, "backend-engineer", task_summary
-                            ),
+                            task_description=_desc,
+                            step_type=_step_type_for_agent("backend-engineer", _desc),
                         )
                     )
             return phases
@@ -1989,38 +2205,45 @@ class IntelligentPlanner:
         for phase, agent in sorted(assigned, key=lambda x: x[0].phase_id):
             step_number = len(phase.steps) + 1
             step_id = f"{phase.phase_id}.{step_number}"
+            _desc = self._step_description(phase.name, agent, task_summary)
             phase.steps.append(
                 PlanStep(
                     step_id=step_id,
                     agent_name=agent,
-                    task_description=self._step_description(
-                        phase.name, agent, task_summary
-                    ),
+                    task_description=_desc,
+                    step_type=_step_type_for_agent(agent, _desc),
                 )
             )
 
         # Guarantee every phase has at least one step
         for phase in phases:
             if not phase.steps:
+                _desc = self._step_description(phase.name, agents[0], task_summary)
                 phase.steps.append(
                     PlanStep(
                         step_id=f"{phase.phase_id}.1",
                         agent_name=agents[0],
-                        task_description=self._step_description(
-                            phase.name, agents[0], task_summary
-                        ),
+                        task_description=_desc,
+                        step_type=_step_type_for_agent(agents[0], _desc),
                     )
                 )
 
         return phases
 
     def _build_phases_for_names(
-        self, phase_names: list[str], agents: list[str], task_summary: str = ""
+        self, phase_names: list[str], agents: list[str], task_summary: str = "",
+        start_phase_id: int = 1,
     ) -> list[PlanPhase]:
-        """Build PlanPhase objects for a list of names, distributing agents."""
+        """Build PlanPhase objects for a list of names, distributing agents.
+
+        Args:
+            start_phase_id: First phase_id to assign.  Callers appending to
+                an existing plan should pass ``max_existing_id + 1`` to avoid
+                duplicate phase_id values.
+        """
         phases: list[PlanPhase] = [
             PlanPhase(phase_id=idx, name=name, steps=[])
-            for idx, name in enumerate(phase_names, start=1)
+            for idx, name in enumerate(phase_names, start=start_phase_id)
         ]
         return self._assign_agents_to_phases(phases, agents, task_summary)
 
@@ -2052,13 +2275,13 @@ class IntelligentPlanner:
                 )
             steps: list[PlanStep] = []
             for step_idx, agent in enumerate(phase_agents, start=1):
+                _desc = self._step_description(name, agent, task_summary)
                 steps.append(
                     PlanStep(
                         step_id=f"{idx}.{step_idx}",
                         agent_name=agent,
-                        task_description=self._step_description(
-                            name, agent, task_summary
-                        ),
+                        task_description=_desc,
+                        step_type=_step_type_for_agent(agent, _desc),
                     )
                 )
             phases.append(PlanPhase(phase_id=idx, name=name, steps=steps, gate=gate))

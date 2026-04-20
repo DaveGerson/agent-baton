@@ -7,7 +7,15 @@ Two formatters are provided:
 
 - :func:`format_generic` — the default; just wraps ``event.to_dict()``.
 - :func:`format_slack` — Slack Block Kit layout for ``human.decision_needed``
-  events so that operators get a rich, actionable notification in Slack.
+  events so that operators get a readable notification in Slack with CLI
+  instructions for responding.
+
+Note on interactivity: Slack Block Kit action buttons are intentionally
+omitted.  There is no callback endpoint to receive button payloads, so
+buttons would appear clickable but do nothing.  When real Slack interactivity
+is needed, add a proper Slack app manifest, OAuth flow, and callback endpoint
+first, then re-introduce the ``actions`` block.  Until then, operators
+respond via ``baton execute approve`` or ``baton decide`` in the CLI.
 """
 from __future__ import annotations
 
@@ -37,10 +45,12 @@ def format_slack(event: Event) -> dict:
     - A header with the decision type.
     - A section with the decision summary.
     - A list of available options (as bullet points).
-    - A context block with task ID and timestamp.
-    - Action buttons — one per option — for interactive Slack apps that
-      implement the ``interactions_endpoint`` (the button payloads carry the
-      ``request_id`` and ``option`` values).
+    - A context block with task ID, request ID, and timestamp.
+    - A CLI instructions block telling the operator how to respond.
+
+    Action buttons are deliberately excluded — no callback endpoint exists.
+    Operators respond via ``baton execute approve`` or ``baton decide`` in
+    the CLI.
 
     For events other than ``human.decision_needed`` this falls back to a
     minimal text attachment carrying the raw event dict.
@@ -131,18 +141,20 @@ def format_slack(event: Event) -> dict:
         }
     )
 
-    # Action buttons — one per option (capped at 5, Slack's limit per block)
-    if options:
-        buttons = [
-            {
-                "type": "button",
-                "text": {"type": "plain_text", "text": opt, "emoji": False},
-                "value": f"{request_id}::{opt}",
-                "action_id": f"decision_{idx}",
-            }
-            for idx, opt in enumerate(options[:5])
-        ]
-        blocks.append({"type": "actions", "elements": buttons})
+    # CLI instructions — how to respond without Slack interactivity.
+    cli_instructions = (
+        f"`baton execute approve --phase-id <N> --result approve`  "
+        f"or  `baton decide --request-id {request_id} --choice <option>`"
+    )
+    blocks.append(
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*To respond, run in your terminal:*\n{cli_instructions}",
+            },
+        }
+    )
 
     return {
         "text": f"Decision required for task `{event.task_id}`: {decision_type}",

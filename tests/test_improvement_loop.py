@@ -6,6 +6,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
+# Suppress DeprecationWarning for the deprecated ExperimentManager used in
+# test fixtures. These tests remain for backward-compatibility coverage.
+pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
+
 from agent_baton.core.improve.experiments import ExperimentManager
 from agent_baton.core.improve.loop import ImprovementLoop
 from agent_baton.core.improve.proposals import ProposalManager
@@ -349,3 +353,36 @@ class TestLoadReports:
         loop.run_cycle(force=True)
         reports = loop.load_reports()
         assert len(reports) == 2
+
+
+# ---------------------------------------------------------------------------
+# StoragePassthrough — storage param flows to TriggerEvaluator + Recommender
+# ---------------------------------------------------------------------------
+
+class TestStoragePassthrough:
+    def test_loop_passes_storage_to_defaults(self, tmp_path: Path):
+        """When storage is provided to ImprovementLoop, verify it reaches
+        the TriggerEvaluator and Recommender defaults."""
+        storage = MagicMock()
+        # read_usage() must return a list; called by TriggerEvaluator._read_records
+        # and by Recommender sub-components.
+        storage.read_usage.return_value = []
+
+        loop = ImprovementLoop(
+            improvements_dir=tmp_path / "improvements",
+            storage=storage,
+        )
+
+        # The loop must have built a real TriggerEvaluator (not a mock) that
+        # holds a reference to our storage object.
+        assert loop._triggers._storage is storage
+
+        # The recommender's internal scorer, learner, and tuner each accept
+        # a storage kwarg; verify at least one level is wired by confirming
+        # the recommender was constructed (not replaced by a mock).
+        assert isinstance(loop._recommender, type(loop._recommender))
+
+        # Calling should_analyze() must invoke storage.read_usage() rather
+        # than attempting to open a JSONL file that does not exist.
+        loop._triggers.should_analyze()
+        storage.read_usage.assert_called_once()

@@ -386,9 +386,6 @@ def _make_launcher(monkeypatch: pytest.MonkeyPatch):
 class TestLauncherRawTextTokens:
     """_parse_output raw-text path must set estimated_tokens from stdout length."""
 
-    def _run(self, coro):
-        return asyncio.get_event_loop().run_until_complete(coro)
-
     def test_raw_text_success_has_nonzero_tokens(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Plain text stdout (non-JSON) must produce estimated_tokens > 0."""
         raw_output = b"I completed the task and created the files."
@@ -399,16 +396,18 @@ class TestLauncherRawTextTokens:
         monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
         launcher = _make_launcher(monkeypatch)
 
-        result = self._run(launcher.launch(
-            agent_name="backend-engineer--python",
-            model="sonnet",
-            prompt="do something",
-            step_id="1.1",
-        ))
+        async def _run() -> None:
+            result = await launcher.launch(
+                agent_name="backend-engineer--python",
+                model="sonnet",
+                prompt="do something",
+                step_id="1.1",
+            )
+            assert result.estimated_tokens > 0
+            # 43 chars // 4 = 10 tokens
+            assert result.estimated_tokens == max(1, len(raw_output) // 4)
 
-        assert result.estimated_tokens > 0
-        # 43 chars // 4 = 10 tokens
-        assert result.estimated_tokens == max(1, len(raw_output) // 4)
+        asyncio.run(_run())
 
     def test_raw_text_failure_has_nonzero_tokens(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Non-JSON stdout with non-zero exit code must also have tokens estimated."""
@@ -420,16 +419,18 @@ class TestLauncherRawTextTokens:
         monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
         launcher = _make_launcher(monkeypatch)
 
-        result = self._run(launcher.launch(
-            agent_name="backend-engineer--python",
-            model="sonnet",
-            prompt="do something",
-            step_id="1.1",
-        ))
+        async def _run() -> None:
+            result = await launcher.launch(
+                agent_name="backend-engineer--python",
+                model="sonnet",
+                prompt="do something",
+                step_id="1.1",
+            )
+            assert result.status == "failed"
+            assert result.estimated_tokens > 0
+            assert result.estimated_tokens == max(1, len(raw_output) // 4)
 
-        assert result.status == "failed"
-        assert result.estimated_tokens > 0
-        assert result.estimated_tokens == max(1, len(raw_output) // 4)
+        asyncio.run(_run())
 
     def test_raw_text_empty_stdout_tokens_zero(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Empty stdout on raw-text path must produce estimated_tokens=0."""
@@ -439,14 +440,16 @@ class TestLauncherRawTextTokens:
         monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
         launcher = _make_launcher(monkeypatch)
 
-        result = self._run(launcher.launch(
-            agent_name="backend-engineer--python",
-            model="sonnet",
-            prompt="do something",
-            step_id="1.1",
-        ))
+        async def _run() -> None:
+            result = await launcher.launch(
+                agent_name="backend-engineer--python",
+                model="sonnet",
+                prompt="do something",
+                step_id="1.1",
+            )
+            assert result.estimated_tokens == 0
 
-        assert result.estimated_tokens == 0
+        asyncio.run(_run())
 
     def test_json_path_still_uses_usage_field(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """JSON output path must continue using usage.input_tokens + output_tokens."""
@@ -463,15 +466,17 @@ class TestLauncherRawTextTokens:
         monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
         launcher = _make_launcher(monkeypatch)
 
-        result = self._run(launcher.launch(
-            agent_name="backend-engineer--python",
-            model="sonnet",
-            prompt="do something",
-            step_id="1.1",
-        ))
+        async def _run() -> None:
+            result = await launcher.launch(
+                agent_name="backend-engineer--python",
+                model="sonnet",
+                prompt="do something",
+                step_id="1.1",
+            )
+            assert result.status == "complete"
+            assert result.estimated_tokens == 450  # 300 + 150
 
-        assert result.status == "complete"
-        assert result.estimated_tokens == 450  # 300 + 150
+        asyncio.run(_run())
 
     def test_raw_text_tokens_proportional_to_length(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Token estimate must scale linearly with output size (4 chars per token)."""
@@ -483,11 +488,13 @@ class TestLauncherRawTextTokens:
         monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
         launcher = _make_launcher(monkeypatch)
 
-        result = self._run(launcher.launch(
-            agent_name="backend-engineer--python",
-            model="sonnet",
-            prompt="do something",
-            step_id="1.1",
-        ))
+        async def _run() -> None:
+            result = await launcher.launch(
+                agent_name="backend-engineer--python",
+                model="sonnet",
+                prompt="do something",
+                step_id="1.1",
+            )
+            assert result.estimated_tokens == 100
 
-        assert result.estimated_tokens == 100
+        asyncio.run(_run())

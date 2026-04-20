@@ -18,18 +18,20 @@ import asyncio
 import json
 import logging
 import os
-import re
 import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from agent_baton.core.runtime._redaction import redact_sensitive as _redact_sensitive
 from agent_baton.models.execution import MachinePlan
+from agent_baton.core.runtime.claude_launcher import (
+    _EXCLUDE_FLAG,
+    _supports_exclude_flag,
+)
 
 logger = logging.getLogger(__name__)
-
-_API_KEY_RE = re.compile(r"sk-ant-[A-Za-z0-9_-]+")
 
 _DEFAULT_ENV_PASSTHROUGH: list[str] = [
     "ANTHROPIC_API_KEY",
@@ -144,6 +146,11 @@ class HeadlessClaude:
             "--model", effective_model,
             "--output-format", "json",
         ]
+        # Improve prompt-cache reuse by moving per-machine dynamic sections
+        # out of the system prompt.  HeadlessClaude never injects a custom
+        # --system-prompt, so the flag is always applicable when supported.
+        if _supports_exclude_flag():
+            cmd.append(_EXCLUDE_FLAG)
 
         use_stdin = len(prompt.encode()) > 131_072
         if not use_stdin:
@@ -276,8 +283,10 @@ class HeadlessClaude:
             )
 
         elapsed = time.monotonic() - start
-        stderr_text = _API_KEY_RE.sub("sk-ant-***REDACTED***", stderr.decode(errors="replace").strip())
-        stdout_text = stdout.decode(errors="replace").strip()
+        # A5: apply full redaction suite to both stderr and stdout before
+        # any persistence path (result.output, result.error).
+        stderr_text = _redact_sensitive(stderr.decode(errors="replace").strip())
+        stdout_text = _redact_sensitive(stdout.decode(errors="replace").strip())
         exit_code = process.returncode if process.returncode is not None else -1
 
         # Try JSON parse (claude --output-format json)

@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 13
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -171,6 +171,210 @@ ALTER TABLE learning_issues ADD COLUMN project_id TEXT;
 -- upsert that does not fire the CASCADE.  No ALTER TABLE is required.
 SELECT 1;
 """,
+    9: """
+-- v9: add step_type taxonomy columns to plan_steps and step_results.
+-- step_type classifies what kind of work a step performs (developing,
+-- planning, testing, reviewing, consulting, task, automation) so the
+-- engine can route each step through the appropriate execution path.
+-- command holds the shell command for automation steps (no LLM dispatch).
+-- All existing rows default to 'developing' / '' which preserves
+-- existing behaviour unchanged.
+--
+-- NOTE: FK constraints are intentionally omitted from this migration
+-- because it is applied to BOTH project and central databases via
+-- ConnectionManager._run_migrations().  Fresh project DBs get FKs
+-- from PROJECT_SCHEMA_DDL directly.
+ALTER TABLE plan_steps ADD COLUMN step_type TEXT NOT NULL DEFAULT 'developing';
+ALTER TABLE plan_steps ADD COLUMN command TEXT NOT NULL DEFAULT '';
+ALTER TABLE step_results ADD COLUMN step_type TEXT NOT NULL DEFAULT 'developing';
+""",
+    10: """
+-- v10: Phase A compliance and identity columns (A2, A3, A4, A6).
+--
+-- A2 — Decision source and identity on gate_results and approval_results.
+--   decision_source: who/what made this decision (human, daemon_auto, api, policy_auto)
+--   actor: best-available identity string ($USER@$HOSTNAME or "daemon")
+--   rationale: structured rationale for approval decisions
+--
+-- A3 — Persist ClassificationResult signals/confidence on plans.
+--   classification_signals: JSON blob from ClassificationResult.to_dict()
+--   classification_confidence: 0.0–1.0 confidence score
+--
+-- A4 — Persist interaction_turns (multi-turn INTERACT exchanges).
+--   A new interaction_turns table stores each InteractionTurn individually.
+--   A new feedback_responses table stores each FeedbackResult individually.
+--
+-- A6 — Gate command traceability on gate_results.
+--   command: the shell command that was run
+--   exit_code: subprocess return code (NULL for manual/human gates)
+--
+-- NOTE: FK constraints are intentionally omitted from this migration
+-- because it is applied to BOTH project and central databases via
+-- ConnectionManager._run_migrations().  Fresh project DBs get FKs
+-- from PROJECT_SCHEMA_DDL directly.
+
+-- A6: gate traceability
+ALTER TABLE gate_results ADD COLUMN command TEXT NOT NULL DEFAULT '';
+ALTER TABLE gate_results ADD COLUMN exit_code INTEGER;
+
+-- A2: decision identity on gate_results
+ALTER TABLE gate_results ADD COLUMN decision_source TEXT NOT NULL DEFAULT '';
+ALTER TABLE gate_results ADD COLUMN actor TEXT NOT NULL DEFAULT '';
+
+-- A2: decision identity + rationale on approval_results
+ALTER TABLE approval_results ADD COLUMN decision_source TEXT NOT NULL DEFAULT '';
+ALTER TABLE approval_results ADD COLUMN actor TEXT NOT NULL DEFAULT '';
+ALTER TABLE approval_results ADD COLUMN rationale TEXT NOT NULL DEFAULT '';
+
+-- A3: classification signals on plans
+ALTER TABLE plans ADD COLUMN classification_signals TEXT;
+ALTER TABLE plans ADD COLUMN classification_confidence REAL;
+
+-- A4: interaction turns table
+CREATE TABLE IF NOT EXISTS interaction_turns (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id      TEXT NOT NULL,
+    step_id      TEXT NOT NULL,
+    turn_number  INTEGER NOT NULL DEFAULT 0,
+    role         TEXT NOT NULL,
+    content      TEXT NOT NULL DEFAULT '',
+    timestamp    TEXT NOT NULL DEFAULT '',
+    source       TEXT NOT NULL DEFAULT 'human'
+);
+CREATE INDEX IF NOT EXISTS idx_interaction_turns_task ON interaction_turns(task_id);
+CREATE INDEX IF NOT EXISTS idx_interaction_turns_step ON interaction_turns(task_id, step_id);
+
+-- A4: feedback responses table
+CREATE TABLE IF NOT EXISTS feedback_responses (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id            TEXT NOT NULL,
+    phase_id           INTEGER NOT NULL,
+    question_id        TEXT NOT NULL,
+    chosen_index       INTEGER NOT NULL DEFAULT 0,
+    chosen_option      TEXT NOT NULL DEFAULT '',
+    dispatched_step_id TEXT NOT NULL DEFAULT '',
+    decided_at         TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_feedback_responses_task ON feedback_responses(task_id);
+""",
+    11: """
+-- v11: relax beads.task_id to nullable.
+--
+-- Motivation: beads created via `baton beads create` (manual / CLI) do not
+-- have a corresponding executions row, so the FK constraint on task_id
+-- fires and rejects the INSERT.  Making task_id nullable lets project-scoped
+-- beads (task_id IS NULL) bypass the FK check under SQLite MATCH SIMPLE
+-- semantics (the default), while task-scoped beads (task_id IS NOT NULL)
+-- continue to be validated normally.
+--
+-- SQLite does not support DROP NOT NULL via ALTER TABLE.  The only safe
+-- approach is a table rebuild.  The migration uses the standard SQLite
+-- sequence: rename → create-new → insert-from-old → drop-old → re-index.
+--
+-- NOTE: This migration is applied to BOTH project and central databases.
+-- The central beads table also carries task_id as a non-nullable column so
+-- the same rebuild is required there.  Central beads have no FK constraint
+-- (by design — see the v4 note), so only the NOT NULL relaxation matters.
+
+-- Step 1: rename old table
+ALTER TABLE beads RENAME TO _beads_old_v10;
+
+-- Step 2: create new table with task_id nullable
+CREATE TABLE beads (
+    bead_id          TEXT PRIMARY KEY,
+    task_id          TEXT,
+    step_id          TEXT NOT NULL,
+    agent_name       TEXT NOT NULL,
+    bead_type        TEXT NOT NULL,
+    content          TEXT NOT NULL DEFAULT '',
+    confidence       TEXT NOT NULL DEFAULT 'medium',
+    scope            TEXT NOT NULL DEFAULT 'step',
+    tags             TEXT NOT NULL DEFAULT '[]',
+    affected_files   TEXT NOT NULL DEFAULT '[]',
+    status           TEXT NOT NULL DEFAULT 'open',
+    created_at       TEXT NOT NULL,
+    closed_at        TEXT NOT NULL DEFAULT '',
+    summary          TEXT NOT NULL DEFAULT '',
+    links            TEXT NOT NULL DEFAULT '[]',
+    source           TEXT NOT NULL DEFAULT 'agent-signal',
+    token_estimate   INTEGER NOT NULL DEFAULT 0,
+    quality_score    REAL    NOT NULL DEFAULT 0.0,
+    retrieval_count  INTEGER NOT NULL DEFAULT 0
+);
+
+-- Step 3: copy data (empty-string task_id → NULL for project-scope beads)
+INSERT INTO beads SELECT
+    bead_id,
+    CASE WHEN task_id = '' THEN NULL ELSE task_id END,
+    step_id, agent_name, bead_type, content, confidence, scope,
+    tags, affected_files, status, created_at, closed_at, summary,
+    links, source, token_estimate,
+    COALESCE(quality_score, 0.0),
+    COALESCE(retrieval_count, 0)
+FROM _beads_old_v10;
+
+-- Step 4: drop old table
+DROP TABLE _beads_old_v10;
+
+-- Step 5: recreate indexes
+CREATE INDEX IF NOT EXISTS idx_beads_task   ON beads(task_id);
+CREATE INDEX IF NOT EXISTS idx_beads_agent  ON beads(agent_name);
+CREATE INDEX IF NOT EXISTS idx_beads_type   ON beads(bead_type);
+CREATE INDEX IF NOT EXISTS idx_beads_status ON beads(status);
+""",
+    12: """
+-- v12: add updated_at to step_results for bi-directional split-brain reconciliation.
+--
+-- When a crash leaves SQLite and the file fallback with divergent step states,
+-- the reconciler needs a reliable "which write happened later?" signal.
+-- updated_at (ISO 8601 UTC) is set on every status mutation so the reconciler
+-- can compare timestamps across both backends and always pick the newer write,
+-- regardless of direction (SQLite newer OR file newer).
+--
+-- Fallback: rows with an empty updated_at string (pre-v12 data) continue to be
+-- resolved by the existing status-rank logic so existing databases are not
+-- affected.
+--
+-- NOTE: FK constraints are intentionally omitted from this migration because
+-- it is applied to BOTH project and central databases via
+-- ConnectionManager._run_migrations().  Fresh project DBs get FKs from
+-- PROJECT_SCHEMA_DDL directly.
+ALTER TABLE step_results ADD COLUMN updated_at TEXT NOT NULL DEFAULT '';
+""",
+    13: """
+-- v13: add real per-step token accounting columns to step_results.
+--
+-- The engine previously used a char/4 heuristic for estimated_tokens, which
+-- was off by 2-3 orders of magnitude (real spend ~2.56B tokens vs ~3,344
+-- estimated).  These columns hold the actual values sourced from the Claude
+-- Code session JSONL files (~/.claude/projects/<slug>/<session_id>.jsonl).
+--
+-- Fields:
+--   input_tokens          -- sum of input_tokens across assistant turns
+--   cache_read_tokens     -- sum of cache_read_input_tokens
+--   cache_creation_tokens -- sum of cache_creation_input_tokens
+--   output_tokens         -- sum of output_tokens
+--   model_id              -- exact model string (e.g. "claude-sonnet-4-6")
+--   session_id            -- Claude Code session UUID used to scan
+--   step_started_at       -- ISO 8601 dispatch time (lower bound for scan)
+--
+-- All default to 0/"" so existing databases are not affected.
+-- estimated_tokens is preserved for backward compat and is set to
+-- input_tokens + cache_read_tokens + output_tokens when real data is present,
+-- or the char/4 heuristic when it is not.
+--
+-- NOTE: FK constraints are intentionally omitted from this migration because
+-- it is applied to BOTH project and central databases via
+-- ConnectionManager._run_migrations().  Fresh project DBs get FKs from
+-- PROJECT_SCHEMA_DDL directly.
+ALTER TABLE step_results ADD COLUMN input_tokens          INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE step_results ADD COLUMN cache_read_tokens     INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE step_results ADD COLUMN cache_creation_tokens INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE step_results ADD COLUMN output_tokens         INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE step_results ADD COLUMN model_id              TEXT NOT NULL DEFAULT '';
+ALTER TABLE step_results ADD COLUMN session_id            TEXT NOT NULL DEFAULT '';
+ALTER TABLE step_results ADD COLUMN step_started_at       TEXT NOT NULL DEFAULT '';
+""",
 }
 
 # =====================================================================
@@ -215,6 +419,8 @@ CREATE TABLE IF NOT EXISTS plans (
     explicit_knowledge_docs    TEXT NOT NULL DEFAULT '[]',
     intervention_level         TEXT NOT NULL DEFAULT 'low',
     task_type                  TEXT,
+    classification_signals     TEXT,
+    classification_confidence  REAL,
     FOREIGN KEY (task_id) REFERENCES executions(task_id) ON DELETE CASCADE
 );
 
@@ -247,6 +453,8 @@ CREATE TABLE IF NOT EXISTS plan_steps (
     blocked_paths         TEXT NOT NULL DEFAULT '[]',
     context_files         TEXT NOT NULL DEFAULT '[]',
     knowledge_attachments TEXT NOT NULL DEFAULT '[]',
+    step_type             TEXT NOT NULL DEFAULT 'developing',
+    command               TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (task_id, step_id),
     FOREIGN KEY (task_id, phase_id) REFERENCES plan_phases(task_id, phase_id) ON DELETE CASCADE
 );
@@ -283,6 +491,8 @@ CREATE TABLE IF NOT EXISTS step_results (
     error             TEXT NOT NULL DEFAULT '',
     completed_at      TEXT NOT NULL DEFAULT '',
     deviations        TEXT NOT NULL DEFAULT '[]',
+    step_type         TEXT NOT NULL DEFAULT 'developing',
+    updated_at        TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (task_id, step_id),
     FOREIGN KEY (task_id) REFERENCES executions(task_id) ON DELETE CASCADE
 );
@@ -304,25 +514,32 @@ CREATE TABLE IF NOT EXISTS team_step_results (
 
 -- GATE_RESULTS
 CREATE TABLE IF NOT EXISTS gate_results (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_id     TEXT NOT NULL,
-    phase_id    INTEGER NOT NULL,
-    gate_type   TEXT NOT NULL,
-    passed      INTEGER NOT NULL,
-    output      TEXT NOT NULL DEFAULT '',
-    checked_at  TEXT NOT NULL DEFAULT '',
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id          TEXT NOT NULL,
+    phase_id         INTEGER NOT NULL,
+    gate_type        TEXT NOT NULL,
+    passed           INTEGER NOT NULL,
+    output           TEXT NOT NULL DEFAULT '',
+    checked_at       TEXT NOT NULL DEFAULT '',
+    command          TEXT NOT NULL DEFAULT '',
+    exit_code        INTEGER,
+    decision_source  TEXT NOT NULL DEFAULT '',
+    actor            TEXT NOT NULL DEFAULT '',
     FOREIGN KEY (task_id) REFERENCES executions(task_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_gate_results_task ON gate_results(task_id);
 
 -- APPROVAL_RESULTS
 CREATE TABLE IF NOT EXISTS approval_results (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_id     TEXT NOT NULL,
-    phase_id    INTEGER NOT NULL,
-    result      TEXT NOT NULL,
-    feedback    TEXT NOT NULL DEFAULT '',
-    decided_at  TEXT NOT NULL DEFAULT '',
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id          TEXT NOT NULL,
+    phase_id         INTEGER NOT NULL,
+    result           TEXT NOT NULL,
+    feedback         TEXT NOT NULL DEFAULT '',
+    decided_at       TEXT NOT NULL DEFAULT '',
+    decision_source  TEXT NOT NULL DEFAULT '',
+    actor            TEXT NOT NULL DEFAULT '',
+    rationale        TEXT NOT NULL DEFAULT '',
     FOREIGN KEY (task_id) REFERENCES executions(task_id) ON DELETE CASCADE
 );
 
@@ -591,9 +808,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_learning_issues_type_target_open
 
 -- BEADS (Inspired by Steve Yegge's Beads agent memory system, beads-ai/beads-cli)
 -- Discrete units of structured memory produced by agents during execution.
+-- task_id is nullable: NULL means project-scoped bead (no execution parent).
+-- Task-scoped beads (task_id IS NOT NULL) are validated by the FK constraint
+-- under SQLite MATCH SIMPLE semantics (NULL bypasses the FK check).
 CREATE TABLE IF NOT EXISTS beads (
     bead_id          TEXT PRIMARY KEY,
-    task_id          TEXT NOT NULL,
+    task_id          TEXT,
     step_id          TEXT NOT NULL,
     agent_name       TEXT NOT NULL,
     bead_type        TEXT NOT NULL,
@@ -626,6 +846,39 @@ CREATE TABLE IF NOT EXISTS bead_tags (
     FOREIGN KEY (bead_id) REFERENCES beads(bead_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_bead_tags_tag ON bead_tags(tag);
+
+-- INTERACTION_TURNS (A4: persist multi-turn INTERACT exchanges)
+-- Each row is one turn in a multi-turn agent interaction step.
+-- Persisted incrementally — rows are inserted as turns arrive and
+-- never deleted (append-only audit record).
+CREATE TABLE IF NOT EXISTS interaction_turns (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id      TEXT NOT NULL,
+    step_id      TEXT NOT NULL,
+    turn_number  INTEGER NOT NULL DEFAULT 0,
+    role         TEXT NOT NULL,
+    content      TEXT NOT NULL DEFAULT '',
+    timestamp    TEXT NOT NULL DEFAULT '',
+    source       TEXT NOT NULL DEFAULT 'human',
+    FOREIGN KEY (task_id) REFERENCES executions(task_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_interaction_turns_task ON interaction_turns(task_id);
+CREATE INDEX IF NOT EXISTS idx_interaction_turns_step ON interaction_turns(task_id, step_id);
+
+-- FEEDBACK_RESPONSES (A4: persist FeedbackResult per question answer)
+-- Each row records a user's answer to a single FeedbackQuestion.
+CREATE TABLE IF NOT EXISTS feedback_responses (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id            TEXT NOT NULL,
+    phase_id           INTEGER NOT NULL,
+    question_id        TEXT NOT NULL,
+    chosen_index       INTEGER NOT NULL DEFAULT 0,
+    chosen_option      TEXT NOT NULL DEFAULT '',
+    dispatched_step_id TEXT NOT NULL DEFAULT '',
+    decided_at         TEXT NOT NULL DEFAULT '',
+    FOREIGN KEY (task_id) REFERENCES executions(task_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_feedback_responses_task ON feedback_responses(task_id);
 """
 
 # =====================================================================
@@ -924,6 +1177,8 @@ CREATE TABLE IF NOT EXISTS plans (
     explicit_knowledge_docs    TEXT NOT NULL DEFAULT '[]',
     intervention_level         TEXT NOT NULL DEFAULT 'low',
     task_type                  TEXT,
+    classification_signals     TEXT,
+    classification_confidence  REAL,
     PRIMARY KEY (project_id, task_id)
 );
 CREATE INDEX IF NOT EXISTS idx_central_plans_risk ON plans(risk_level);
@@ -957,6 +1212,8 @@ CREATE TABLE IF NOT EXISTS plan_steps (
     blocked_paths         TEXT NOT NULL DEFAULT '[]',
     context_files         TEXT NOT NULL DEFAULT '[]',
     knowledge_attachments TEXT NOT NULL DEFAULT '[]',
+    step_type             TEXT NOT NULL DEFAULT 'developing',
+    command               TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (project_id, task_id, step_id)
 );
 CREATE INDEX IF NOT EXISTS idx_central_steps_agent ON plan_steps(agent_name);
@@ -991,6 +1248,8 @@ CREATE TABLE IF NOT EXISTS step_results (
     error             TEXT NOT NULL DEFAULT '',
     completed_at      TEXT NOT NULL DEFAULT '',
     deviations        TEXT NOT NULL DEFAULT '[]',
+    step_type         TEXT NOT NULL DEFAULT 'developing',
+    updated_at        TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (project_id, task_id, step_id)
 );
 CREATE INDEX IF NOT EXISTS idx_central_step_results_status ON step_results(status);
@@ -1010,25 +1269,32 @@ CREATE TABLE IF NOT EXISTS team_step_results (
 );
 
 CREATE TABLE IF NOT EXISTS gate_results (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    project_id  TEXT NOT NULL,
-    task_id     TEXT NOT NULL,
-    phase_id    INTEGER NOT NULL,
-    gate_type   TEXT NOT NULL,
-    passed      INTEGER NOT NULL,
-    output      TEXT NOT NULL DEFAULT '',
-    checked_at  TEXT NOT NULL DEFAULT ''
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id       TEXT NOT NULL,
+    task_id          TEXT NOT NULL,
+    phase_id         INTEGER NOT NULL,
+    gate_type        TEXT NOT NULL,
+    passed           INTEGER NOT NULL,
+    output           TEXT NOT NULL DEFAULT '',
+    checked_at       TEXT NOT NULL DEFAULT '',
+    command          TEXT NOT NULL DEFAULT '',
+    exit_code        INTEGER,
+    decision_source  TEXT NOT NULL DEFAULT '',
+    actor            TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_central_gate_task ON gate_results(project_id, task_id);
 
 CREATE TABLE IF NOT EXISTS approval_results (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    project_id  TEXT NOT NULL,
-    task_id     TEXT NOT NULL,
-    phase_id    INTEGER NOT NULL,
-    result      TEXT NOT NULL,
-    feedback    TEXT NOT NULL DEFAULT '',
-    decided_at  TEXT NOT NULL DEFAULT ''
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id       TEXT NOT NULL,
+    task_id          TEXT NOT NULL,
+    phase_id         INTEGER NOT NULL,
+    result           TEXT NOT NULL,
+    feedback         TEXT NOT NULL DEFAULT '',
+    decided_at       TEXT NOT NULL DEFAULT '',
+    decision_source  TEXT NOT NULL DEFAULT '',
+    actor            TEXT NOT NULL DEFAULT '',
+    rationale        TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_central_approval_task ON approval_results(project_id, task_id);
 
@@ -1257,10 +1523,11 @@ CREATE TABLE IF NOT EXISTS shared_context (
 );
 
 -- BEADS (mirror — Inspired by Steve Yegge's Beads agent memory system, beads-ai/beads-cli)
+-- task_id is nullable: NULL = project-scoped bead with no execution parent.
 CREATE TABLE IF NOT EXISTS beads (
     project_id       TEXT NOT NULL,
     bead_id          TEXT NOT NULL,
-    task_id          TEXT NOT NULL,
+    task_id          TEXT,
     step_id          TEXT NOT NULL,
     agent_name       TEXT NOT NULL,
     bead_type        TEXT NOT NULL,
@@ -1319,6 +1586,35 @@ CREATE INDEX IF NOT EXISTS idx_central_learning_issues_status
     ON learning_issues(status);
 CREATE INDEX IF NOT EXISTS idx_central_learning_issues_project
     ON learning_issues(project_id);
+
+-- INTERACTION_TURNS (mirror — A4: multi-turn INTERACT exchanges)
+CREATE TABLE IF NOT EXISTS interaction_turns (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id   TEXT NOT NULL,
+    task_id      TEXT NOT NULL,
+    step_id      TEXT NOT NULL,
+    turn_number  INTEGER NOT NULL DEFAULT 0,
+    role         TEXT NOT NULL,
+    content      TEXT NOT NULL DEFAULT '',
+    timestamp    TEXT NOT NULL DEFAULT '',
+    source       TEXT NOT NULL DEFAULT 'human'
+);
+CREATE INDEX IF NOT EXISTS idx_central_interaction_turns_task ON interaction_turns(project_id, task_id);
+CREATE INDEX IF NOT EXISTS idx_central_interaction_turns_step ON interaction_turns(project_id, task_id, step_id);
+
+-- FEEDBACK_RESPONSES (mirror — A4: FeedbackResult per question answer)
+CREATE TABLE IF NOT EXISTS feedback_responses (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id         TEXT NOT NULL,
+    task_id            TEXT NOT NULL,
+    phase_id           INTEGER NOT NULL,
+    question_id        TEXT NOT NULL,
+    chosen_index       INTEGER NOT NULL DEFAULT 0,
+    chosen_option      TEXT NOT NULL DEFAULT '',
+    dispatched_step_id TEXT NOT NULL DEFAULT '',
+    decided_at         TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_central_feedback_responses_task ON feedback_responses(project_id, task_id);
 
 -- ================================================================
 -- Cross-project analytics views

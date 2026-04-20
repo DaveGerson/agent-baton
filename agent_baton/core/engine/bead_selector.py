@@ -16,8 +16,14 @@ dispatch prompt.  Relevance is determined by three tiers:
 3. **Cross-phase** — beads from other phases.  Lower priority but still
    useful when the budget allows.
 
-Within each tier, beads are ranked by type priority (warnings first, then
-discoveries, then decisions) and by quality_score (tiebreaker, higher is better).
+Within each tier, beads are ranked by:
+
+1. Scope preference: ``task``-scoped beads rank above ``phase`` and ``step``.
+2. Type priority: ``decision`` and ``warning`` rank above ``discovery``,
+   ``outcome``, and ``planning``.
+3. Content similarity: keyword-overlap score between the bead content+tags
+   and the current step description (TF-IDF-style term frequency).
+4. Quality score as final tiebreaker (higher is better).
 
 The entire selection must fit within *token_budget* and is capped at
 *max_beads* regardless.
@@ -25,6 +31,8 @@ The entire selection must fit within *token_budget* and is capped at
 from __future__ import annotations
 
 import logging
+import math
+import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -38,23 +46,97 @@ _log = logging.getLogger(__name__)
 _FALLBACK_TOKEN_ESTIMATE = 75
 
 # Type priority within a tier — lower value = higher priority.
+# decision and warning are most useful for downstream agents per spec C1.
 _TYPE_PRIORITY: dict[str, int] = {
     "warning": 0,
-    "discovery": 1,
-    "decision": 2,
+    "decision": 1,
+    "discovery": 2,
     "outcome": 3,
     "planning": 4,
 }
+
+# Scope preference — lower value = higher priority.
+_SCOPE_PRIORITY: dict[str, int] = {
+    "task": 0,
+    "project": 1,
+    "phase": 2,
+    "step": 3,
+}
+
+# Stop-words to exclude from keyword extraction.
+_STOP_WORDS: frozenset[str] = frozenset(
+    {
+        "a", "an", "and", "are", "as", "at", "be", "been", "by", "do",
+        "for", "from", "has", "have", "in", "is", "it", "its", "of",
+        "on", "or", "that", "the", "this", "to", "was", "will", "with",
+    }
+)
 
 
 def _type_priority(bead: "Bead") -> int:
     return _TYPE_PRIORITY.get(bead.bead_type, 99)
 
 
+def _scope_priority(bead: "Bead") -> int:
+    return _SCOPE_PRIORITY.get(getattr(bead, "scope", "step"), 99)
+
+
 def _quality_priority(bead: "Bead") -> float:
     """Return a sort key for quality_score — higher score = lower key value."""
     score = getattr(bead, "quality_score", 0.0)
     return -score  # negate so highest scores sort first
+
+
+def _tokenize(text: str) -> list[str]:
+    """Split text into lowercase alpha tokens, excluding stop-words."""
+    tokens = re.findall(r"[a-z]+", text.lower())
+    return [t for t in tokens if t not in _STOP_WORDS and len(t) > 1]
+
+
+def _term_frequencies(tokens: list[str]) -> dict[str, float]:
+    """Return normalized term-frequency dict (TF) for a token list."""
+    if not tokens:
+        return {}
+    counts: dict[str, int] = {}
+    for t in tokens:
+        counts[t] = counts.get(t, 0) + 1
+    total = len(tokens)
+    return {t: c / total for t, c in counts.items()}
+
+
+def _content_similarity(query_tf: dict[str, float], bead: "Bead") -> float:
+    """Return a cosine-style overlap score between *query_tf* and bead content.
+
+    The bead document is built from its content text plus all its tags
+    (tags have double weight so targeted retrieval works).  Both document
+    and query are represented as TF vectors; the score is the dot product
+    of normalized vectors (cosine similarity approximation without IDF,
+    which is expensive to maintain across a variable corpus).
+
+    Returns a value in [0.0, 1.0].  Returns 0.0 when either side is empty.
+    """
+    if not query_tf:
+        return 0.0
+
+    content_text = getattr(bead, "content", "")
+    tags: list[str] = getattr(bead, "tags", [])
+    # Tags are weighted double — join them twice with content tokens.
+    tag_text = " ".join(tags) + " " + " ".join(tags)
+    bead_tokens = _tokenize(content_text + " " + tag_text)
+    bead_tf = _term_frequencies(bead_tokens)
+
+    if not bead_tf:
+        return 0.0
+
+    # Dot product of the two TF vectors.
+    dot = sum(query_tf.get(t, 0.0) * bead_tf.get(t, 0.0) for t in query_tf)
+
+    # Normalize by the product of L2 norms.
+    query_norm = math.sqrt(sum(v * v for v in query_tf.values()))
+    bead_norm = math.sqrt(sum(v * v for v in bead_tf.values()))
+    if query_norm == 0 or bead_norm == 0:
+        return 0.0
+    return dot / (query_norm * bead_norm)
 
 
 class BeadSelector:
@@ -72,7 +154,7 @@ class BeadSelector:
         current_step: "PlanStep",
         plan: "MachinePlan",
         token_budget: int = 4096,
-        max_beads: int = 5,
+        max_beads: int = 10,
     ) -> "list[Bead]":
         """Return the top beads to include in the next delegation prompt.
 
@@ -106,15 +188,21 @@ class BeadSelector:
     ) -> "list[Bead]":
         task_id = plan.task_id
 
-        # Gather all open beads for this task.
+        # Gather all open beads for this task — pull from ALL completed phases.
         all_beads = bead_store.query(task_id=task_id, status="open", limit=500)
         if not all_beads:
             return []
 
-        # Build a lookup: step_id -> bead list.
-        by_step: dict[str, list["Bead"]] = {}
-        for bead in all_beads:
-            by_step.setdefault(bead.step_id, []).append(bead)
+        # Build query TF vector from the current step description + agent name.
+        step_text = " ".join(
+            filter(None, [
+                getattr(current_step, "description", ""),
+                getattr(current_step, "agent", ""),
+                getattr(current_step, "agent_name", ""),
+            ])
+        )
+        query_tokens = _tokenize(step_text)
+        query_tf = _term_frequencies(query_tokens)
 
         # Compute tier membership for each bead.
         dep_chain_step_ids = self._dependency_chain(current_step, plan)
@@ -129,9 +217,20 @@ class BeadSelector:
             else:
                 tier_beads[2].append(bead)
 
-        # Sort within each tier: type priority ASC, quality DESC.
+        # Sort within each tier using a composite key:
+        #   1. scope priority  (task > project > phase > step)
+        #   2. type priority   (decision/warning > discovery > outcome > planning)
+        #   3. content similarity DESC (negated so higher similarity sorts first)
+        #   4. quality score DESC
         for tier in tier_beads.values():
-            tier.sort(key=lambda b: (_type_priority(b), _quality_priority(b)))
+            tier.sort(
+                key=lambda b: (
+                    _scope_priority(b),
+                    _type_priority(b),
+                    -_content_similarity(query_tf, b),
+                    _quality_priority(b),
+                )
+            )
 
         # Merge tiers in priority order and apply budget/cap constraints.
         selected: list["Bead"] = []

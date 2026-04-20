@@ -87,16 +87,31 @@ class ImprovementLoop:
         improvements_dir: Path | None = None,
         bead_store=None,
         maintainer_spawner=None,
+        storage=None,
+        ledger=None,
     ) -> None:
         self._dir = (improvements_dir or _DEFAULT_DIR).resolve()
         self._reports_dir = self._dir / "reports"
 
-        self._triggers = trigger_evaluator or TriggerEvaluator()
-        self._recommender = recommender or Recommender()
+        self._triggers = trigger_evaluator or TriggerEvaluator(
+            storage=storage,
+            bead_store=bead_store,
+            ledger=ledger,
+        )
+        self._recommender = recommender or Recommender(storage=storage)
         self._proposals = proposal_manager or ProposalManager(self._dir)
-        self._experiments = experiment_manager or ExperimentManager(self._dir)
+        # ExperimentManager is deprecated (D7). Suppress the warning here because
+        # ImprovementLoop is a grandfathered internal caller. New code should use
+        # the learning-cycle pipeline instead.
+        if experiment_manager is not None:
+            self._experiments = experiment_manager
+        else:
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                self._experiments = ExperimentManager(self._dir)
         self._rollbacks = rollback_manager or RollbackManager(improvements_dir=self._dir)
-        self._scorer = scorer or PerformanceScorer()
+        self._scorer = scorer or PerformanceScorer(storage=storage)
         self._config = config or ImprovementConfig()
         self._bead_store = bead_store  # F12: passed to scorer for bead quality metrics
         self._maintainer_spawner = maintainer_spawner  # Injected for tests; None = default

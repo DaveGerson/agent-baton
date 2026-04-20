@@ -666,6 +666,10 @@ class ReadyResponse(BaseModel):
         default=0,
         description="Number of unresolved human decisions blocking execution.",
     )
+    reason: str = Field(
+        default="",
+        description="Human-readable explanation when ready=False. Empty string when ready=True.",
+    )
 
 
 class WebhookResponse(BaseModel):
