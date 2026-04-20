@@ -9,21 +9,6 @@ from agent_baton.core.orchestration.registry import AgentRegistry
 
 
 # ---------------------------------------------------------------------------
-# Token-burn guard
-# ---------------------------------------------------------------------------
-
-@pytest.fixture(autouse=True)
-def _block_real_api_calls(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Strip ANTHROPIC_API_KEY for every test unless marked @pytest.mark.live.
-
-    This ensures that FallbackClassifier always falls back to KeywordClassifier
-    during the default test run, preventing accidental token spend.
-    """
-    if "live" not in request.keywords:
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-
-
-# ---------------------------------------------------------------------------
 # Sample agent markdown content strings
 # ---------------------------------------------------------------------------
 

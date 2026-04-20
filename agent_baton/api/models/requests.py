@@ -335,9 +335,9 @@ class ExecuteCardRequest(BaseModel):
     field overrides the default agent model for all dispatched steps.
     """
 
-    model: str = Field(
+    model: Optional[Literal["opus", "sonnet", "haiku"]] = Field(
         default="sonnet",
-        description="Default model for dispatched agents (e.g. 'opus', 'sonnet').",
+        description="Default model for dispatched agents.",
     )
     dry_run: bool = Field(
         default=False,

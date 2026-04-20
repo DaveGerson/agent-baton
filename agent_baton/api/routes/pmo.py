@@ -253,6 +253,7 @@ class _ExecutionDetailResponse(BaseModel):
 async def get_card_execution(
     card_id: str,
     scanner: PmoScanner = Depends(get_pmo_scanner),
+    store: PmoStore = Depends(get_pmo_store),
 ) -> _ExecutionDetailResponse:
     """Return execution progress events for a card.
 
@@ -261,7 +262,6 @@ async def get_card_execution(
     Reads the event log for the card's task_id and returns step-level
     events for the execution progress monitor in the PMO UI.
     """
-    from pathlib import Path
     from datetime import datetime, timezone
 
     try:
@@ -269,7 +269,7 @@ async def get_card_execution(
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Card '{card_id}' not found.")
 
-    project_path = Path(card.project_id) if Path(card.project_id).is_dir() else None
+    project_path = _resolve_project_path(card, store)
     events: list[_StepEvent] = []
     started_at = card.created_at
     status = card.column
@@ -597,9 +597,9 @@ async def stream_forge_progress(
 
     async def event_generator():
         # Wait briefly for the producer to register its queue (race-safe).
-        deadline = asyncio.get_event_loop().time() + 5.0
+        deadline = asyncio.get_running_loop().time() + 5.0
         while session_id not in _forge_progress_queues:
-            if asyncio.get_event_loop().time() >= deadline:
+            if asyncio.get_running_loop().time() >= deadline:
                 yield {
                     "event": "forge_progress",
                     "data": json.dumps(
@@ -708,7 +708,7 @@ async def forge_plan(
         _publish_forge_progress(queue, "sizing", 50, "Sizing budget...")
         _publish_forge_progress(queue, "generating", 75, "Generating plan...")
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
             plan = await loop.run_in_executor(
                 None,

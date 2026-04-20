@@ -98,7 +98,7 @@ export const api = {
     return request(`/signals/${encodeURIComponent(id)}/resolve`, { method: 'POST' });
   },
   batchResolveSignals(ids: string[]): Promise<{ resolved: string[]; count: number }> {
-    return request('/signals/batch/resolve', { method: 'POST', body: JSON.stringify({ ids }) });
+    return request('/signals/batch/resolve', { method: 'POST', body: JSON.stringify({ signal_ids: ids }) });
   },
   // Forge interview & regeneration
   forgeInterview(body: { plan: ForgePlanResponse; feedback?: string }): Promise<InterviewResponse> {

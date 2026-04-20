@@ -8,6 +8,7 @@ import { useToast } from '../contexts/ToastContext';
 interface ReviewPanelProps {
   cardId: string;
   card: PmoCard;
+  phaseId?: number;
   onApproved?: () => void;
   onRejected?: () => void;
   onClose?: () => void;
@@ -21,7 +22,7 @@ interface ReviewPanelProps {
  * - Approve / Request Changes / Reject actions (with notes/feedback textareas)
  * - Approval history timeline fetched from GET /api/v1/pmo/cards/{card_id}/approval-log
  */
-export function ReviewPanel({ cardId, card, onApproved, onRejected, onClose }: ReviewPanelProps) {
+export function ReviewPanel({ cardId, card, phaseId = 0, onApproved, onRejected, onClose }: ReviewPanelProps) {
   const toast = useToast();
 
   // Approval log
@@ -74,7 +75,7 @@ export function ReviewPanel({ cardId, card, onApproved, onRejected, onClose }: R
     e.stopPropagation();
     setApproveLoading(true);
     try {
-      await api.approveGate(cardId, { phase_id: 0, notes: approveNotes.trim() || undefined });
+      await api.approveGate(cardId, { phase_id: phaseId, notes: approveNotes.trim() || undefined });
       setConfirmed({ text: 'Tasted and approved — send it out!', kind: 'approve' });
       toast.success('Approved');
       onApproved?.();
@@ -111,7 +112,7 @@ export function ReviewPanel({ cardId, card, onApproved, onRejected, onClose }: R
     }
     setRejectLoading(true);
     try {
-      await api.rejectGate(cardId, { phase_id: 0, reason: rejectReason.trim() });
+      await api.rejectGate(cardId, { phase_id: phaseId, reason: rejectReason.trim() });
       setConfirmed({ text: 'Rejected — dish pulled from service.', kind: 'reject' });
       toast.success('Rejected');
       onRejected?.();

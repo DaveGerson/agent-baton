@@ -145,7 +145,10 @@ export function ForgePanel({ onBack, initialSignal, onApproved }: ForgePanelProp
 
     sseRef.current = es;
 
-    es.onmessage = (event) => {
+    // The backend emits named SSE events (`event: "forge_progress"`).
+    // `onmessage` only fires for the default unnamed `message` type, so
+    // named events must be subscribed to via addEventListener.
+    es.addEventListener('forge_progress', (event) => {
       try {
         const data = JSON.parse(event.data as string) as ForgeProgressEvent;
         setProgressStage(data.stage);
@@ -157,7 +160,7 @@ export function ForgePanel({ onBack, initialSignal, onApproved }: ForgePanelProp
       } catch {
         // Malformed SSE frame — ignore.
       }
-    };
+    });
 
     es.onerror = () => {
       // Connection dropped — close and fall back to spinner (state is unchanged).
@@ -287,7 +290,9 @@ export function ForgePanel({ onBack, initialSignal, onApproved }: ForgePanelProp
       if (approvalMode === 'team') {
         // In team mode, immediately request review so the card moves to
         // awaiting_review rather than sitting in queued without a reviewer.
-        api.requestReview(result.path, { notes: '' }).catch(() => {
+        // Use plan.task_id (the card ID) — result.path is a filesystem path,
+        // not a valid card identifier for the review endpoint.
+        api.requestReview(plan.task_id, { notes: '' }).catch(() => {
           // Non-fatal — the card is saved; review can be requested from the board.
         });
         toast.success('Plan saved — sent for team review');

@@ -57,9 +57,9 @@ def _make_planner(tmp_path: Path) -> IntelligentPlanner:
     return IntelligentPlanner(team_context_root=tmp_path)
 
 
-def _make_engine(tmp_path: Path) -> ExecutionEngine:
+def _make_engine(tmp_path: Path, max_gate_retries: int = 3) -> ExecutionEngine:
     """Return a fresh ExecutionEngine rooted at tmp_path."""
-    return ExecutionEngine(team_context_root=tmp_path)
+    return ExecutionEngine(team_context_root=tmp_path, max_gate_retries=max_gate_retries)
 
 
 def _record_dispatch(
@@ -793,7 +793,11 @@ class TestGateFailure:
     def test_failed_gate_produces_failed_action(
         self, tmp_path: Path, plan: MachinePlan
     ) -> None:
-        engine = _make_engine(tmp_path)
+        # The engine supports gate retries (max_gate_retries=3).  A single gate
+        # failure sets status to "gate_failed" and re-issues a GATE action so
+        # the caller can retry.  Only after exhausting all retries does the
+        # engine return ActionType.FAILED.
+        engine = _make_engine(tmp_path, max_gate_retries=1)
         self._advance_to_first_gate(engine, plan)
         action = engine.next_action()
         assert action.action_type == ActionType.FAILED
@@ -801,11 +805,13 @@ class TestGateFailure:
     def test_state_status_is_failed_after_gate_failure(
         self, tmp_path: Path, plan: MachinePlan
     ) -> None:
+        # With the default max_gate_retries=3 a single failure leaves the
+        # execution in "gate_failed" (retry-capable) rather than "failed".
         engine = _make_engine(tmp_path)
         self._advance_to_first_gate(engine, plan)
         engine.next_action()
         state = engine._load_state()
-        assert state.status == "failed"
+        assert state.status == "gate_failed"
 
     def test_gate_failure_recorded_in_state(
         self, tmp_path: Path, plan: MachinePlan
