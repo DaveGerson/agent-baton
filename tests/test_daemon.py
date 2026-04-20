@@ -43,7 +43,7 @@ def _step(step_id: str = "1.1", agent: str = "backend") -> PlanStep:
 
 
 def _gate(gate_type: str = "test") -> PlanGate:
-    return PlanGate(gate_type=gate_type, command="pytest")
+    return PlanGate(gate_type=gate_type)
 
 
 def _phase(phase_id: int = 0, steps=None, gate=None) -> PlanPhase:
