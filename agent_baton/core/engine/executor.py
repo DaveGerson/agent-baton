@@ -444,34 +444,54 @@ class ExecutionEngine:
         from a previous run), it is discarded and ``None`` is returned so
         the caller can fail gracefully rather than silently resuming the
         wrong execution.
+
+        File-persistence fallback is attempted whenever SQLite either raises
+        an exception OR returns ``None`` (which happens when ``save_execution``
+        previously failed and the row was never written — e.g. due to a schema
+        mismatch on an older ``baton.db``).  The file fallback is the source
+        of truth in that split-brain scenario.
         """
         if self._storage is not None:
+            state: ExecutionState | None = None
+            sqlite_failed = False
             try:
                 task_id = self._task_id
                 if task_id:
-                    return self._storage.load_execution(task_id)
-                active = self._storage.get_active_task()
-                if active:
-                    return self._storage.load_execution(active)
-                return None
+                    state = self._storage.load_execution(task_id)
+                else:
+                    active = self._storage.get_active_task()
+                    if active:
+                        state = self._storage.load_execution(active)
             except Exception as e:
                 _log.warning(
                     "SQLite load failed, falling back to file persistence: %s", e
                 )
-                if self._persistence is not None:
-                    state = self._persistence.load()
-                    # Discard if the file belongs to a different task so we
-                    # never resume the wrong execution via a stale file.
-                    if state is not None and self._task_id and state.task_id != self._task_id:
-                        _log.warning(
-                            "File state task_id %r does not match requested %r — "
-                            "discarding stale file state",
-                            state.task_id,
-                            self._task_id,
-                        )
-                        return None
-                    return state
-                return None
+                sqlite_failed = True
+
+            # Fall back to file persistence when:
+            #   (a) SQLite raised an exception, OR
+            #   (b) SQLite returned None (row absent — e.g. save_execution failed
+            #       on a schema-mismatched baton.db and only the file was written).
+            if state is None and self._persistence is not None:
+                if not sqlite_failed:
+                    _log.debug(
+                        "SQLite returned no execution state for task %r; "
+                        "checking file persistence for split-brain recovery",
+                        self._task_id,
+                    )
+                file_state = self._persistence.load()
+                # Discard if the file belongs to a different task so we
+                # never resume the wrong execution via a stale file.
+                if file_state is not None and self._task_id and file_state.task_id != self._task_id:
+                    _log.warning(
+                        "File state task_id %r does not match requested %r — "
+                        "discarding stale file state",
+                        file_state.task_id,
+                        self._task_id,
+                    )
+                    return None
+                return file_state
+            return state
         else:
             state = self._persistence.load()
             # In file mode the persistence path is already namespaced to
@@ -1054,13 +1074,47 @@ class ExecutionEngine:
         self._save_execution(state)
         # Track the new task_id so _load_execution() can find it by ID.
         self._task_id = state.task_id
-        # NOW mark as active — the execution row exists, so the active
+
+        # Verify the save succeeded by reading back from storage.  This
+        # catches silent failures (schema mismatches, disk full, etc.) that
+        # would otherwise leave a dangling active-task pointer.
+        if self._storage is not None:
+            try:
+                verify = self._storage.load_execution(state.task_id)
+                if verify is None:
+                    _log.error(
+                        "Execution state for task %r was NOT persisted to "
+                        "SQLite -- save_execution() returned no error but "
+                        "load_execution() returned None.  Subsequent CLI "
+                        "commands will fail with 'no execution state found'.",
+                        state.task_id,
+                    )
+                    raise RuntimeError(
+                        f"Failed to persist execution state for task "
+                        f"'{state.task_id}'. The save operation completed "
+                        f"without error but the state is not readable. "
+                        f"Check disk space and database integrity."
+                    )
+            except RuntimeError:
+                raise  # Re-raise the verification error
+            except Exception as exc:
+                _log.warning(
+                    "Post-save verification read failed for task %r: %s",
+                    state.task_id,
+                    exc,
+                )
+
+        # NOW mark as active -- the execution row exists, so the active
         # pointer won't dangle.  Write to both backends for resilience.
         if self._storage is not None:
             try:
                 self._storage.set_active_task(state.task_id)
-            except Exception:
-                pass
+            except Exception as exc:
+                _log.warning(
+                    "Failed to set active task in SQLite for task %s: %s",
+                    state.task_id,
+                    exc,
+                )
         if self._persistence is not None:
             try:
                 self._persistence.set_active()
@@ -2698,9 +2752,10 @@ class ExecutionEngine:
             limit = thresholds.get(state.plan.budget_tier, 500_000)
 
         if total > limit:
+            tier = state.plan.budget_tier or "standard"
             warning = (
                 f"Token budget exceeded: {total:,} tokens used, "
-                f"limit is {limit:,}"
+                f"limit is {limit:,} ({tier} tier)"
             )
             if self._enforce_token_budget and state.status not in (
                 "complete", "failed", "budget_exceeded"

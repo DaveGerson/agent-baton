@@ -246,6 +246,50 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
 _DISPATCH_PROMPT_SIDECAR = ".claude/team-context/current-dispatch.prompt.md"
 
 
+def _resolve_context_root() -> Path:
+    """Resolve the team-context root to an absolute path anchored at the project root.
+
+    Walks up from ``Path.cwd()`` looking for a directory that contains
+    ``.claude/team-context/``.  This makes all CLI subcommands immune to
+    CWD changes (e.g. ``cd pmo-ui && baton execute gate ...`` still finds
+    the correct ``baton.db``).
+
+    If no ancestor directory contains the marker, falls back to
+    ``Path.cwd() / ".claude/team-context"`` (the legacy behaviour) so that
+    ``baton execute start`` can still bootstrap a fresh project.
+
+    Returns:
+        An absolute ``Path`` to the ``.claude/team-context/`` directory.
+    """
+    import subprocess
+
+    # Fastest path: ask git for the repo root.
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            git_root = Path(result.stdout.strip())
+            ctx = git_root / ".claude" / "team-context"
+            if ctx.is_dir():
+                return ctx.resolve()
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+
+    # Fallback: walk up the directory tree.
+    cwd = Path.cwd()
+    for ancestor in [cwd, *cwd.parents]:
+        candidate = ancestor / ".claude" / "team-context"
+        if candidate.is_dir():
+            return candidate.resolve()
+
+    # Last resort: relative to CWD (allows bootstrap of fresh project).
+    return (cwd / ".claude" / "team-context").resolve()
+
+
 def _write_dispatch_sidecar(prompt: str) -> str:
     """Write *prompt* to the standard sidecar path and return the path string.
 
@@ -485,7 +529,7 @@ def handler(args: argparse.Namespace) -> None:
     # Resolve task_id: explicit flag → BATON_TASK_ID env var → SQLite active_task →
     #   file active-task-id.txt → None (legacy flat file)
     task_id = getattr(args, "task_id", None)
-    context_root = Path(".claude/team-context").resolve()
+    context_root = _resolve_context_root()
     if task_id is None:
         task_id = os.environ.get("BATON_TASK_ID")
     if task_id is None and args.subcommand != "start":
@@ -501,9 +545,7 @@ def handler(args: argparse.Namespace) -> None:
                     "SQLite active-task lookup failed, falling back to file: %s", _exc
                 )
         if task_id is None:
-            task_id = StatePersistence.get_active_task_id(
-                Path(".claude/team-context")
-            )
+            task_id = StatePersistence.get_active_task_id(context_root)
 
     bus = EventBus()
     storage = get_project_storage(context_root)
@@ -1000,7 +1042,7 @@ def _handle_run(args: argparse.Namespace) -> None:
     import subprocess as _subprocess
 
     plan_path = Path(args.plan)
-    context_root = Path(".claude/team-context").resolve()
+    context_root = _resolve_context_root()
     max_steps = args.max_steps
     dry_run = args.dry_run
     model_override = args.model
@@ -1359,7 +1401,7 @@ def _run_loop(
 
 def _handle_list() -> None:
     """Print a table of all known executions with status and worker info."""
-    context_root = Path(".claude/team-context")
+    context_root = _resolve_context_root()
 
     # Collect task IDs from file backend (namespaced dirs)
     file_task_ids = StatePersistence.list_executions(context_root)
@@ -1488,7 +1530,7 @@ def _handle_list() -> None:
 
 def _handle_switch(task_id: str) -> None:
     """Switch the active execution to the given task ID."""
-    context_root = Path(".claude/team-context")
+    context_root = _resolve_context_root()
     sp = StatePersistence(context_root, task_id=task_id)
 
     # Check whether the execution exists in either backend
