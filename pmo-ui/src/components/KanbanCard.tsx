@@ -472,6 +472,18 @@ function KanbanCardImpl({ card, columnColor, onForge, onEditPlan, onMutateCard }
                 {execLoading ? 'Launching...' : '\u25B6 Execute'}
               </ActionButton>
             )}
+            {isQueued && approvalMode === 'team' && (
+              <ActionButton
+                onClick={handleSendForReview}
+                disabled={sendReviewLoading}
+                title="Send this plan for peer review before execution"
+                bg={T.blueberry + '18'}
+                border={`1.5px solid ${T.blueberry}`}
+                color={T.blueberry}
+              >
+                {sendReviewLoading ? 'Sending…' : 'Send for Review'}
+              </ActionButton>
+            )}
             {isReview && (
               <ActionButton
                 onClick={e => { e.stopPropagation(); setShowChangelist(true); }}
@@ -530,6 +542,20 @@ function KanbanCardImpl({ card, columnColor, onForge, onEditPlan, onMutateCard }
           {/* Gate approval panel — only visible when card is awaiting human input */}
           {isHuman && !gateResolved && (
             <GateApprovalPanel card={card} onResolved={handleGateResolved} />
+          )}
+
+          {/* Review panel — visible when card is awaiting peer review */}
+          {isAwaitingReview && !reviewResolved && (
+            <ReviewPanel
+              cardId={card.card_id}
+              card={card}
+              onApproved={() => {
+                setReviewResolved(true);
+                onMutateCard?.(card.card_id, c => ({ ...c, column: 'queued' }));
+              }}
+              onRejected={() => setReviewResolved(true)}
+              onClose={() => setReviewResolved(true)}
+            />
           )}
 
           {/* Execution result */}
