@@ -1,4 +1,4 @@
-import { memo, useState, useEffect, useRef } from 'react';
+import { memo, useState, useEffect } from 'react';
 import type { ReactNode, MouseEvent } from 'react';
 import type { PmoCard, ForgePlanResponse } from '../api/types';
 import { T, PRIORITY_COLOR, programColor } from '../styles/tokens';
@@ -10,7 +10,6 @@ import { PlanPreview } from './PlanPreview';
 import { ExecutionProgress } from './ExecutionProgress';
 import { GateApprovalPanel } from './GateApprovalPanel';
 import { ChangelistPanel } from './ChangelistPanel';
-import { ReviewPanel } from './ReviewPanel';
 
 interface KanbanCardProps {
   card: PmoCard;
@@ -72,139 +71,16 @@ function ProgramDot({ program, size = 7 }: { program: string; size?: number }) {
   );
 }
 
-function usePlanPreview(cardId: string) {
-  const [showPlan, setShowPlan] = useState(false);
-  const [planData, setPlanData] = useState<ForgePlanResponse | null>(null);
-  const [planLoading, setPlanLoading] = useState(false);
-
-  async function handleViewPlan(e: MouseEvent) {
-    e.stopPropagation();
-    if (showPlan) {
-      setShowPlan(false);
-      return;
-    }
-    setShowPlan(true);
-    if (planData) return;
-    setPlanLoading(true);
-    try {
-      const result = await api.getCardDetail(cardId);
-      setPlanData(result.plan);
-    } catch {
-      // silent
-    } finally {
-      setPlanLoading(false);
-    }
-  }
-
-  return { showPlan, planData, planLoading, handleViewPlan };
-}
-
-function useExecuteCard(
-  card: PmoCard,
-  toast: ReturnType<typeof useToast>,
-  onMutateCard?: (cardId: string, updater: (card: PmoCard) => PmoCard) => void,
-) {
-  const [execLoading, setExecLoading] = useState(false);
-  const [execResult, setExecResult] = useState<string | null>(null);
-  const execTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  useEffect(() => {
-    return () => { if (execTimerRef.current) clearTimeout(execTimerRef.current); };
-  }, []);
-
-  async function handleExecute(e: MouseEvent) {
-    e.stopPropagation();
-    if (execTimerRef.current) clearTimeout(execTimerRef.current);
-    // Stale-state guard: SSE may have moved the card out of 'queued' between
-    // render and click. Bail early so we show a clear message instead of a
-    // generic 409 from the backend.
-    if (card.column !== 'queued') {
-      setExecResult('Card is no longer queued — refresh to see its current state.');
-      toast.error('Card is no longer queued');
-      execTimerRef.current = setTimeout(() => setExecResult(null), 8000);
-      return;
-    }
-    setExecLoading(true);
-    setExecResult(null);
-    try {
-      const resp = await api.executeCard(card.card_id);
-      setExecResult(`Launched (PID ${resp.pid})`);
-      onMutateCard?.(card.card_id, c => ({ ...c, column: 'executing' }));
-      toast.success('Execution launched');
-    } catch (err) {
-      setExecResult(err instanceof Error ? err.message : 'Launch failed');
-      toast.error('Execution launch failed');
-    } finally {
-      setExecLoading(false);
-      execTimerRef.current = setTimeout(() => setExecResult(null), 8000);
-    }
-  }
-
-  function dismissExecResult(e: MouseEvent) {
-    e.stopPropagation();
-    setExecResult(null);
-  }
-
-  return { execLoading, execResult, handleExecute, dismissExecResult };
-}
-
 function KanbanCardImpl({ card, columnColor, onForge, onEditPlan, onMutateCard }: KanbanCardProps) {
-  const [expanded, setExpanded] = useState(false);
   const [hovered, setHovered] = useState(false);
   const [pressed, setPressed] = useState(false);
   const [showDetail, setShowDetail] = useState(false);
-  const toast = useToast();
-  const { showPlan, planData, planLoading, handleViewPlan } = usePlanPreview(card.card_id);
-  const { execLoading, execResult, handleExecute, dismissExecResult } = useExecuteCard(card, toast, onMutateCard);
-  const [showProgress, setShowProgress] = useState(false);
-  const [showChangelist, setShowChangelist] = useState(false);
-  const [gateResolved, setGateResolved] = useState(false);
-  const [reviewResolved, setReviewResolved] = useState(false);
-  const [sendReviewLoading, setSendReviewLoading] = useState(false);
-  const isIntake = card.column === 'intake';
+
   const isHuman = card.column === 'awaiting_human';
-  const isQueued = card.column === 'queued';
   const isReview = card.column === 'review';
-  const isAwaitingReview = card.column === 'awaiting_review' as string;
-  const isActive = card.column === 'executing' || card.column === 'validating' || card.column === 'awaiting_human';
-
-  // Approval mode: read from meta tag injected by the server, fallback to 'local'.
-  // The meta tag <meta name="baton-approval-mode" content="team|local"> is set
-  // by the backend template; if absent we default to 'local' (no team review required).
-  const approvalMode = (
-    document.querySelector('meta[name="baton-approval-mode"]')?.getAttribute('content') ?? 'local'
-  ) as 'local' | 'team';
-
-  async function handleSendForReview(e: MouseEvent) {
-    e.stopPropagation();
-    setSendReviewLoading(true);
-    try {
-      await api.requestReview(card.card_id, { notes: '' });
-      toast.success('Sent for review');
-      onMutateCard?.(card.card_id, c => ({ ...c, column: 'awaiting_review' as PmoCard['column'] }));
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to send for review');
-    } finally {
-      setSendReviewLoading(false);
-    }
-  }
-
-  // Stable tilt derived from card ID
+  const priorityColor = PRIORITY_COLOR[card.priority] ?? T.text2;
   const tilt = (card.card_id.charCodeAt(0) % 5) * 0.4 - 1;
 
-  function handleGateResolved(result: 'approve' | 'reject') {
-    setGateResolved(true);
-    // On approve, optimistically move to executing so the card visibly leaves
-    // awaiting_human. On reject, leave the column alone — the backend decides
-    // the next state (typically back to queued for re-planning) and the SSE
-    // update will deliver it. Hiding the gate panel is handled by gateResolved.
-    if (result === 'approve' && onMutateCard) {
-      onMutateCard(card.card_id, c => ({ ...c, column: 'executing' }));
-    }
-  }
-  const priorityColor = PRIORITY_COLOR[card.priority] ?? T.text2;
-
-  // Compute card transform and shadow based on interaction state
   const cardTransform = pressed
     ? `translate(2px,2px) rotate(${tilt}deg)`
     : hovered
@@ -219,16 +95,14 @@ function KanbanCardImpl({ card, columnColor, onForge, onEditPlan, onMutateCard }
     <div
       role="button"
       tabIndex={0}
-      aria-expanded={expanded}
-      aria-label={`${card.title}. ${card.column.replace('_', ' ')}. ${card.steps_completed} of ${card.steps_total} steps complete. Press Enter to ${expanded ? 'collapse' : 'expand'} details.`}
-      onClick={() => setExpanded(!expanded)}
+      aria-label={`${card.title}. ${card.column.replace('_', ' ')}. ${card.steps_completed} of ${card.steps_total} steps complete. Press Enter to open details.`}
+      onClick={() => setShowDetail(true)}
       onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();
-          setExpanded(!expanded);
+          setShowDetail(true);
         }
       }}
-      onDoubleClick={(e) => { e.stopPropagation(); setShowDetail(true); }}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => { setHovered(false); setPressed(false); }}
       onMouseDown={() => setPressed(true)}
@@ -276,25 +150,10 @@ function KanbanCardImpl({ card, columnColor, onForge, onEditPlan, onMutateCard }
           }}>
             {card.title}
           </div>
-          <span
-            aria-hidden="true"
-            style={{
-              fontSize: 10,
-              color: T.text3,
-              flexShrink: 0,
-              marginTop: 1,
-              transition: 'transform 0.15s',
-              transform: expanded ? 'rotate(180deg)' : 'rotate(0deg)',
-              display: 'inline-block',
-            }}
-          >
-            {'▾'}
-          </span>
         </div>
 
         {/* Meta row */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 3, flexWrap: 'wrap', marginBottom: 3 }}>
-          {/* BO-01: show ADO external ID when available; fall back to abbreviated internal ID */}
           {card.external_id ? (
             <span
               title={`ADO: ${card.external_id} — internal: ${card.card_id}`}
@@ -395,257 +254,6 @@ function KanbanCardImpl({ card, columnColor, onForge, onEditPlan, onMutateCard }
         </div>
       </div>
 
-      {/* Expanded detail */}
-      {expanded && (
-        <div style={{
-          borderTop: `1.5px dashed ${T.borderSoft}`,
-          padding: '6px 8px',
-          background: T.bg3,
-        }}>
-          <div style={{ display: 'flex', gap: 8, marginBottom: 4 }}>
-            <div>
-              <span style={{ fontSize: 9, color: T.text3, fontFamily: FONTS.body }}>Program: </span>
-              <span style={{ fontSize: 9, color: T.text0, fontWeight: 600, fontFamily: FONTS.body }}>{card.program}</span>
-            </div>
-            <div>
-              <span style={{ fontSize: 9, color: T.text3, fontFamily: FONTS.body }}>Gates passed: </span>
-              <span style={{ fontSize: 9, color: T.text0, fontWeight: 600, fontFamily: FONTS.body }}>{card.gates_passed}</span>
-            </div>
-          </div>
-
-          {/* Full untruncated phase/error text — only shown when expanded */}
-          {card.current_phase && !card.error && card.current_phase.length > 65 && (
-            <div style={{
-              fontSize: 14,
-              color: isHuman ? T.tangerine : T.text1,
-              lineHeight: 1.4,
-              marginBottom: 6,
-              padding: '4px 6px',
-              background: T.bg1,
-              borderRadius: 2,
-              borderLeft: `1.5px solid ${T.borderSoft}`,
-              fontFamily: FONTS.hand,
-              transform: 'rotate(-0.5deg)',
-              wordBreak: 'break-word',
-            }}>
-              &ldquo;{card.current_phase}&rdquo;
-            </div>
-          )}
-          {card.error && card.error.length > 80 && (
-            <div style={{
-              fontSize: 9,
-              color: T.red,
-              lineHeight: 1.4,
-              marginBottom: 6,
-              padding: '4px 6px',
-              background: T.bg1,
-              borderRadius: 2,
-              borderLeft: `1.5px solid ${T.red}`,
-              wordBreak: 'break-word',
-            }}>
-              {card.error}
-            </div>
-          )}
-          {card.agents.length > 0 && (
-            <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap', marginBottom: 6 }}>
-              {card.agents.map(a => (
-                <Chip key={a} color={T.blueberry}>{agentDisplayName(a)}</Chip>
-              ))}
-            </div>
-          )}
-
-          {/* Actions row */}
-          <div style={{
-            display: 'flex',
-            gap: 4,
-            marginTop: 4,
-            paddingTop: 4,
-            borderTop: `1.5px dashed ${T.borderSoft}`,
-            flexWrap: 'wrap',
-          }}>
-            {isQueued && (
-              <ActionButton
-                onClick={handleExecute}
-                disabled={execLoading}
-                title="Launch autonomous execution for this card"
-                bg={T.mint + '22'}
-                border={`1.5px solid ${T.mint}`}
-                color={T.mint}
-              >
-                {execLoading ? 'Launching...' : '\u25B6 Execute'}
-              </ActionButton>
-            )}
-            {isQueued && approvalMode === 'team' && (
-              <ActionButton
-                onClick={handleSendForReview}
-                disabled={sendReviewLoading}
-                title="Send this plan for peer review before execution"
-                bg={T.blueberry + '18'}
-                border={`1.5px solid ${T.blueberry}`}
-                color={T.blueberry}
-              >
-                {sendReviewLoading ? 'Sending…' : 'Send for Review'}
-              </ActionButton>
-            )}
-            {isReview && (
-              <ActionButton
-                onClick={e => { e.stopPropagation(); setShowChangelist(true); }}
-                title="Review consolidated changes before merging"
-                bg={T.crust + '33'}
-                border={`1.5px solid ${T.crust}`}
-                color={T.crustDark}
-              >
-                Review Changes
-              </ActionButton>
-            )}
-            {isActive && (
-              <ActionButton
-                onClick={e => { e.stopPropagation(); setShowProgress(true); }}
-                title="Monitor execution progress in real time"
-                bg={T.butter + '33'}
-                border={`1.5px solid ${T.butter}`}
-                color={T.inkSoft}
-              >
-                Monitor
-              </ActionButton>
-            )}
-            {onForge && (
-              <ActionButton
-                onClick={e => { e.stopPropagation(); onForge(card); }}
-                title={isIntake ? 'Open the Forge to create a plan for this item' : 'Open this card in the Forge for editing or re-planning'}
-                bg={T.cherry + '18'}
-                border={`1.5px solid ${T.cherry}`}
-                color={T.cherry}
-              >
-                {isIntake ? 'Forge Plan' : 'Re-forge'}
-              </ActionButton>
-            )}
-            {card.steps_total > 0 && onEditPlan && (
-              <ActionButton
-                onClick={e => { e.stopPropagation(); onEditPlan(card); }}
-                title="Jump directly to the Forge plan editor for this card"
-                bg={T.blueberry + '18'}
-                border={`1.5px solid ${T.blueberry}`}
-                color={T.blueberry}
-              >
-                {'\u270e'} Edit Plan
-              </ActionButton>
-            )}
-            <ActionButton
-              onClick={handleViewPlan}
-              title="View the execution plan for this card"
-              bg={showPlan ? T.blueberry + '28' : T.blueberry + '18'}
-              border={`1.5px solid ${T.blueberry}`}
-              color={T.blueberry}
-            >
-              {showPlan ? 'Hide Plan' : 'View Plan'}
-            </ActionButton>
-          </div>
-
-          {/* Gate approval panel — only visible when card is awaiting human input */}
-          {isHuman && !gateResolved && (
-            <GateApprovalPanel card={card} onResolved={handleGateResolved} />
-          )}
-
-          {/* Review panel — visible when card is awaiting peer review */}
-          {isAwaitingReview && !reviewResolved && (
-            <ReviewPanel
-              cardId={card.card_id}
-              card={card}
-              onApproved={() => {
-                setReviewResolved(true);
-                onMutateCard?.(card.card_id, c => ({ ...c, column: 'queued' }));
-              }}
-              onRejected={() => setReviewResolved(true)}
-              onClose={() => setReviewResolved(true)}
-            />
-          )}
-
-          {/* Execution result */}
-          {execResult && (
-            <div
-              role="status"
-              aria-live="polite"
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 4,
-                fontSize: 9,
-                color: execResult.startsWith('Launched') ? T.mint : T.cherry,
-                padding: '4px 8px',
-                marginTop: 4,
-                background: execResult.startsWith('Launched') ? T.mintSoft : T.cherrySoft,
-                borderRadius: 8,
-                border: '1.5px solid currentColor',
-              }}
-            >
-              <span style={{ flex: 1, fontFamily: FONTS.body }}>{execResult}</span>
-              <button
-                aria-label="Dismiss execution result"
-                onClick={dismissExecResult}
-                style={{
-                  background: 'none',
-                  border: 'none',
-                  color: T.text3,
-                  fontSize: 10,
-                  cursor: 'pointer',
-                  padding: '0 2px',
-                  lineHeight: 1,
-                  flexShrink: 0,
-                }}
-              >
-                {'\u00d7'}
-              </button>
-            </div>
-          )}
-
-          {/* Plan preview — inline expandable list */}
-          {showPlan && (
-            <div
-              onClick={e => e.stopPropagation()}
-              style={{
-                marginTop: 6,
-                maxHeight: 300,
-                overflowY: 'auto',
-                borderRadius: 8,
-                border: `1.5px dashed ${T.borderSoft}`,
-                background: T.bg3,
-                padding: 6,
-              }}
-            >
-              {planLoading && (
-                <div style={{ fontSize: 9, color: T.text3, fontStyle: 'italic', padding: 8, fontFamily: FONTS.body }}>
-                  Loading plan…
-                </div>
-              )}
-              {!planLoading && planData && (
-                <PlanPreview plan={planData} collapsible />
-              )}
-              {!planLoading && !planData && (
-                <div style={{ fontSize: 9, color: T.text3, fontStyle: 'italic', padding: 8, fontFamily: FONTS.body }}>
-                  No plan available for this card.
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Execution progress modal */}
-      {showProgress && (
-        <ExecutionProgress card={card} onClose={() => setShowProgress(false)} />
-      )}
-
-      {/* Changelist review modal */}
-      {showChangelist && (
-        <ChangelistPanel
-          cardId={card.card_id}
-          onMerged={() => { setShowChangelist(false); onMutateCard?.(card.card_id, c => ({ ...c, column: 'deployed' })); }}
-          onClose={() => setShowChangelist(false)}
-        />
-      )}
-
-      {/* Full-screen detail modal */}
       {showDetail && (
         <CardDetailModal
           card={card}
@@ -693,10 +301,6 @@ function CardDetailModal({ card, onClose, onForge, onEditPlan, onMutateCard }: C
   const isReview = col === 'review';
   const isDeployed = col === 'deployed';
   const isActive = isExecuting || isValidating || isAwaitingHuman;
-
-  const approvalMode = (
-    document.querySelector('meta[name="baton-approval-mode"]')?.getAttribute('content') ?? 'local'
-  ) as 'local' | 'team';
 
   // Determine which tabs are available for this column
   const availableTabs: DetailTab[] = ['overview', 'plan'];
@@ -938,23 +542,23 @@ function CardDetailModal({ card, onClose, onForge, onEditPlan, onMutateCard }: C
             </ActionButton>
           )}
 
-          {/* queued */}
+          {/* queued (On Deck) — send for manager review; edit plan */}
           {isQueued && (
             <>
               <ActionButton
-                onClick={handleExecute}
-                disabled={execLoading}
-                title="Launch autonomous execution for this card"
-                bg={T.mint + '22'}
-                border={`1.5px solid ${T.mint}`}
-                color={T.mint}
+                onClick={handleSendForReview}
+                disabled={sendReviewLoading}
+                title="Send this plan for manager review before execution"
+                bg={T.tangerine + '18'}
+                border={`1.5px solid ${T.tangerine}`}
+                color={T.tangerine}
               >
-                {execLoading ? 'Launching...' : '\u25B6 Execute'}
+                {sendReviewLoading ? 'Sending…' : 'Send for Review'}
               </ActionButton>
               {onEditPlan && (
                 <ActionButton
                   onClick={e => { e.stopPropagation(); onEditPlan(card); onClose(); }}
-                  title="Edit the plan before executing"
+                  title="Edit the plan before sending for review"
                   bg={T.blueberry + '18'}
                   border={`1.5px solid ${T.blueberry}`}
                   color={T.blueberry}
@@ -962,32 +566,32 @@ function CardDetailModal({ card, onClose, onForge, onEditPlan, onMutateCard }: C
                   {'\u270e'} Edit Plan
                 </ActionButton>
               )}
-              {approvalMode === 'team' && (
-                <ActionButton
-                  onClick={handleSendForReview}
-                  disabled={sendReviewLoading}
-                  title="Send this plan for peer review before execution"
-                  bg={T.tangerine + '18'}
-                  border={`1.5px solid ${T.tangerine}`}
-                  color={T.tangerine}
-                >
-                  {sendReviewLoading ? 'Sending…' : 'Send for Review'}
-                </ActionButton>
-              )}
             </>
           )}
 
-          {/* awaiting_human */}
+          {/* awaiting_human (Pick Up) — approve & execute, or review details */}
           {isAwaitingHuman && !gateResolved && (
-            <ActionButton
-              onClick={e => { e.stopPropagation(); setActiveTab('execution'); }}
-              title="Review gate context and approve or reject"
-              bg={T.tangerine + '22'}
-              border={`1.5px solid ${T.tangerine}`}
-              color={T.tangerine}
-            >
-              Review Gate
-            </ActionButton>
+            <>
+              <ActionButton
+                onClick={handleExecute}
+                disabled={execLoading}
+                title="Approve this plan and launch execution"
+                bg={T.mint + '22'}
+                border={`1.5px solid ${T.mint}`}
+                color={T.mint}
+              >
+                {execLoading ? 'Launching...' : '\u25B6 Approve & Execute'}
+              </ActionButton>
+              <ActionButton
+                onClick={e => { e.stopPropagation(); setActiveTab('execution'); }}
+                title="Review gate context before deciding"
+                bg={T.tangerine + '22'}
+                border={`1.5px solid ${T.tangerine}`}
+                color={T.tangerine}
+              >
+                Review Details
+              </ActionButton>
+            </>
           )}
 
           {/* executing */}
