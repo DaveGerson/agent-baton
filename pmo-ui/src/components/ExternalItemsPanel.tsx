@@ -6,6 +6,7 @@
  * AnalyticsDashboard.  Opens from the KanbanBoard toolbar.
  */
 import { useState, useEffect, useCallback } from 'react';
+import type { ReactNode } from 'react';
 import { T, FONTS, SHADOWS } from '../styles/tokens';
 import { api } from '../api/client';
 import type { ExternalItem, ExternalMapping } from '../api/types';
@@ -17,7 +18,7 @@ import type { ExternalItem, ExternalMapping } from '../api/types';
 const SOURCE_META: Record<string, { label: string; color: string }> = {
   ado:    { label: 'ADO',    color: T.accent },
   github: { label: 'GitHub', color: T.purple },
-  jira:   { label: 'Jira',   color: T.cyan },
+  jira:   { label: 'Jira',   color: T.cherry },
   linear: { label: 'Linear', color: T.green },
 };
 
@@ -70,7 +71,7 @@ function TypeChip({ type }: { type: string }) {
   const color =
     lower === 'bug'   ? T.red :
     lower === 'epic'  ? T.purple :
-    lower === 'story' ? T.cyan :
+    lower === 'story' ? T.blueberry :
     T.text2;
   return <Badge color={color}>{type || 'item'}</Badge>;
 }

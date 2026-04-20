@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import type { ReactNode, MouseEvent } from 'react';
 import type { PmoCard, ForgePlanResponse } from '../api/types';
 import { T, PRIORITY_COLOR, programColor } from '../styles/tokens';
 import { FONTS, SHADOWS } from '../styles/tokens';
@@ -17,7 +18,7 @@ interface KanbanCardProps {
   onMutateCard?: (cardId: string, updater: (card: PmoCard) => PmoCard) => void;
 }
 
-function Chip({ children, color = T.text2 }: { children: React.ReactNode; color?: string }) {
+function Chip({ children, color = T.text2 }: { children: ReactNode; color?: string }) {
   return (
     <span style={{
       display: 'inline-flex',
@@ -74,7 +75,7 @@ function usePlanPreview(cardId: string) {
   const [planData, setPlanData] = useState<ForgePlanResponse | null>(null);
   const [planLoading, setPlanLoading] = useState(false);
 
-  async function handleViewPlan(e: React.MouseEvent) {
+  async function handleViewPlan(e: MouseEvent) {
     e.stopPropagation();
     if (showPlan) {
       setShowPlan(false);
@@ -109,7 +110,7 @@ function useExecuteCard(
     return () => { if (execTimerRef.current) clearTimeout(execTimerRef.current); };
   }, []);
 
-  async function handleExecute(e: React.MouseEvent) {
+  async function handleExecute(e: MouseEvent) {
     e.stopPropagation();
     if (execTimerRef.current) clearTimeout(execTimerRef.current);
     setExecLoading(true);
@@ -128,7 +129,7 @@ function useExecuteCard(
     }
   }
 
-  function dismissExecResult(e: React.MouseEvent) {
+  function dismissExecResult(e: MouseEvent) {
     e.stopPropagation();
     setExecResult(null);
   }
@@ -403,7 +404,7 @@ export function KanbanCard({ card, columnColor, onForge, onEditPlan, onMutateCar
           {card.agents.length > 0 && (
             <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap', marginBottom: 6 }}>
               {card.agents.map(a => (
-                <Chip key={a} color={T.cyan}>{agentDisplayName(a)}</Chip>
+                <Chip key={a} color={T.blueberry}>{agentDisplayName(a)}</Chip>
               ))}
             </div>
           )}
@@ -560,8 +561,8 @@ export function KanbanCard({ card, columnColor, onForge, onEditPlan, onMutateCar
 // ActionButton — shared button style for the expanded actions row
 // ----------------------------------------------------------------
 interface ActionButtonProps {
-  children: React.ReactNode;
-  onClick: (e: React.MouseEvent) => void;
+  children: ReactNode;
+  onClick: (e: MouseEvent) => void;
   title?: string;
   disabled?: boolean;
   bg: string;

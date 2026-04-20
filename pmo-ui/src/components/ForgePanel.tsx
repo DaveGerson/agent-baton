@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import type { ReactNode, CSSProperties } from 'react';
 import { api } from '../api/client';
 import { PlanEditor } from './PlanEditor';
 import { InterviewPanel } from './InterviewPanel';
@@ -830,8 +831,8 @@ function FormField({
   htmlFor,
 }: {
   label: string;
-  children: React.ReactNode;
-  style?: React.CSSProperties;
+  children: ReactNode;
+  style?: CSSProperties;
   htmlFor?: string;
 }) {
   return (
@@ -851,7 +852,7 @@ function FormField({
   );
 }
 
-const selectStyle: React.CSSProperties = {
+const selectStyle: CSSProperties = {
   width: '100%', padding: '9px 11px', borderRadius: 8,
   border: `2px solid ${T.border}`, background: T.bg3,
   color: T.text0, fontSize: 13, fontWeight: 600, outline: 'none',

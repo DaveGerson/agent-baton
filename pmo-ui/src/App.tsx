@@ -5,7 +5,7 @@ import { BackOfHousePanel } from './components/BackOfHousePanel';
 import { KeyboardShortcutsDialog } from './components/KeyboardShortcutsDialog';
 import { useHotkeys } from './hooks/useHotkeys';
 import { usePersistedState } from './hooks/usePersistedState';
-import { T, FONTS } from './styles/tokens';
+import { T, FONTS, SHADOWS } from './styles/tokens';
 import { ToastProvider } from './contexts/ToastContext';
 import type { PmoCard, PmoSignal } from './api/types';
 
@@ -105,7 +105,7 @@ export default function App() {
             width: 30, height: 30, borderRadius: '50%',
             background: T.butter, border: `2px solid ${T.cream}`,
             display: 'flex', alignItems: 'center', justifyContent: 'center',
-            fontSize: 15, boxShadow: '2px 2px 0 0 #000',
+            fontSize: 15, boxShadow: SHADOWS.sm,
           }}>🥧</div>
           <div>
             <div style={{
@@ -171,12 +171,12 @@ export default function App() {
         {/* Keyboard hint */}
         <span style={{
           fontFamily: FONTS.mono, fontSize: 9,
-          color: '#c9a97a', letterSpacing: '.08em',
+          color: T.text4, letterSpacing: '.08em',
         }}>
           n=new · s=signals · esc=board · ?=help
         </span>
-        <div role="separator" aria-orientation="vertical" style={{ width: 1, height: 18, background: '#5b3a23' }} />
-        <span style={{ fontFamily: FONTS.mono, fontSize: 9, color: '#8a6a4f' }}>
+        <div role="separator" aria-orientation="vertical" style={{ width: 1, height: 18, background: T.inkSoft }} />
+        <span style={{ fontFamily: FONTS.mono, fontSize: 9, color: T.text2 }}>
           agent-baton
         </span>
       </nav>

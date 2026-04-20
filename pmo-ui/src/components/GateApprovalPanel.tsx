@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import type { MouseEvent, CSSProperties } from 'react';
 import { api } from '../api/client';
 import type { PmoCard } from '../api/types';
 import { T, FONTS, SHADOWS } from '../styles/tokens';
@@ -46,7 +47,7 @@ export function GateApprovalPanel({ card, onResolved }: GateApprovalPanelProps) 
   // Result confirmation message shown after action.
   const [confirmed, setConfirmed] = useState<string | null>(null);
 
-  async function loadContext(e: React.MouseEvent) {
+  async function loadContext(e: MouseEvent) {
     e.stopPropagation();
     if (contextLoaded) return;
     setContextLoading(true);
@@ -70,7 +71,7 @@ export function GateApprovalPanel({ card, onResolved }: GateApprovalPanelProps) 
     }
   }
 
-  async function handleApprove(e: React.MouseEvent) {
+  async function handleApprove(e: MouseEvent) {
     e.stopPropagation();
     if (phaseId === null) {
       toast.error('Gate context not loaded — expand review first');
@@ -92,7 +93,7 @@ export function GateApprovalPanel({ card, onResolved }: GateApprovalPanelProps) 
     }
   }
 
-  async function handleReject(e: React.MouseEvent) {
+  async function handleReject(e: MouseEvent) {
     e.stopPropagation();
     if (!reason.trim()) {
       toast.error('A rejection reason is required');
@@ -334,7 +335,7 @@ export function GateApprovalPanel({ card, onResolved }: GateApprovalPanelProps) 
   );
 }
 
-function _approveBtn(disabled = false): React.CSSProperties {
+function _approveBtn(disabled = false): CSSProperties {
   return {
     padding: '4px 11px',
     borderRadius: 10,
@@ -350,7 +351,7 @@ function _approveBtn(disabled = false): React.CSSProperties {
   };
 }
 
-function _rejectBtn(disabled = false): React.CSSProperties {
+function _rejectBtn(disabled = false): CSSProperties {
   return {
     padding: '4px 11px',
     borderRadius: 10,
@@ -366,7 +367,7 @@ function _rejectBtn(disabled = false): React.CSSProperties {
   };
 }
 
-function _cancelBtn(): React.CSSProperties {
+function _cancelBtn(): CSSProperties {
   return {
     padding: '4px 11px',
     borderRadius: 10,
@@ -380,7 +381,7 @@ function _cancelBtn(): React.CSSProperties {
   };
 }
 
-function _textareaStyle(): React.CSSProperties {
+function _textareaStyle(): CSSProperties {
   return {
     background: T.bg3,
     border: `2px solid ${T.border}`,

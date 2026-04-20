@@ -123,7 +123,7 @@ export function InterviewPanel({ questions, onSubmit, onCancel, loading }: Inter
                         padding: '5px 12px', borderRadius: 999,
                         border: `1.5px solid ${T.border}`,
                         background: isSelected ? T.mint : T.bg2,
-                        color: isSelected ? '#fff' : T.text1,
+                        color: isSelected ? T.cream : T.text1,
                         fontSize: 12, fontWeight: 800, cursor: 'pointer',
                         fontFamily: FONTS.body,
                         boxShadow: isSelected ? SHADOWS.sm : 'none',

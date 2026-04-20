@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
+import type { DragEvent } from 'react';
 import { T, FONTS, SHADOWS, FONT_SIZES } from '../styles/tokens';
 import type { ForgePlanResponse, ForgePlanPhase, ForgePlanStep } from '../api/types';
 import { agentDisplayName } from '../utils/agent-names';
@@ -164,7 +165,7 @@ export function PlanEditor({
     setDropTarget(null);
   }
 
-  function handleDragOver(e: React.DragEvent, phaseIdx: number, stepIdx: number) {
+  function handleDragOver(e: DragEvent, phaseIdx: number, stepIdx: number) {
     e.preventDefault();
     if (!dragState || dragState.phaseIdx !== phaseIdx) return;
     if (dropTarget?.phaseIdx !== phaseIdx || dropTarget?.stepIdx !== stepIdx) {
@@ -172,7 +173,7 @@ export function PlanEditor({
     }
   }
 
-  function handleDrop(e: React.DragEvent, phaseIdx: number, targetIdx: number) {
+  function handleDrop(e: DragEvent, phaseIdx: number, targetIdx: number) {
     e.preventDefault();
     if (!dragState || dragState.phaseIdx !== phaseIdx) {
       setDragState(null);

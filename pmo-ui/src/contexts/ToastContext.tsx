@@ -1,4 +1,5 @@
 import { createContext, useContext, useState, useCallback, useRef } from 'react';
+import type { ReactNode } from 'react';
 import { T } from '../styles/tokens';
 
 type ToastType = 'success' | 'error' | 'info';
