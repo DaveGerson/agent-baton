@@ -2698,9 +2698,10 @@ class ExecutionEngine:
             limit = thresholds.get(state.plan.budget_tier, 500_000)
 
         if total > limit:
+            tier = state.plan.budget_tier or "standard"
             warning = (
                 f"Token budget exceeded: {total:,} tokens used, "
-                f"limit is {limit:,}"
+                f"limit is {limit:,} ({tier} tier)"
             )
             if self._enforce_token_budget and state.status not in (
                 "complete", "failed", "budget_exceeded"

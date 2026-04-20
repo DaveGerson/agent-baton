@@ -23,6 +23,9 @@ import type {
   ConsolidationResult,
   MergeResponse,
   CreatePrResponse,
+  ApprovalLogResponse,
+  RequestReviewBody,
+  RequestReviewResponse,
 } from './types';
 
 const BASE = '/api/v1/pmo';
@@ -158,7 +161,18 @@ export const api = {
       body: JSON.stringify(params),
     });
   },
+
+  // Review workflow
+  requestReview(cardId: string, body: RequestReviewBody): Promise<RequestReviewResponse> {
+    return request(`/cards/${encodeURIComponent(cardId)}/request-review`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  },
+  getApprovalLog(cardId: string): Promise<ApprovalLogResponse> {
+    return request(`/cards/${encodeURIComponent(cardId)}/approval-log`);
+  },
 };
 
 // Re-export types for convenience
-export type { PmoCard, PmoProject, ProgramHealth, PmoSignal, BoardResponse, PlanResponse, ForgePlanBody, ForgePlanResponse, ForgeApproveBody, ForgeApproveResponse, InterviewResponse, RegenerateBody, AdoSearchResponse, ExecuteCardBody, ExecuteCardResponse, ExternalItem, ExternalMapping, PendingGate, GateApproveBody, GateRejectBody, GateActionResponse, ConsolidationResult, MergeResponse, CreatePrResponse };
+export type { PmoCard, PmoProject, ProgramHealth, PmoSignal, BoardResponse, PlanResponse, ForgePlanBody, ForgePlanResponse, ForgeApproveBody, ForgeApproveResponse, InterviewResponse, RegenerateBody, AdoSearchResponse, ExecuteCardBody, ExecuteCardResponse, ExternalItem, ExternalMapping, PendingGate, GateApproveBody, GateRejectBody, GateActionResponse, ConsolidationResult, MergeResponse, CreatePrResponse, ApprovalLogEntry, ApprovalLogResponse, RequestReviewBody, RequestReviewResponse };

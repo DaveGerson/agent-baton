@@ -312,3 +312,31 @@ export interface CreatePrResponse {
   pr_url: string;
   pr_number: number;
 }
+
+// ---------------------------------------------------------------------------
+// Review / approval log types
+// ---------------------------------------------------------------------------
+
+export interface ApprovalLogEntry {
+  log_id: string;
+  task_id: string;
+  phase_id: string;
+  user_id: string;
+  action: 'approve' | 'reject' | 'request_review' | 'feedback';
+  notes: string;
+  created_at: string;
+}
+
+export interface ApprovalLogResponse {
+  entries: ApprovalLogEntry[];
+}
+
+export interface RequestReviewBody {
+  reviewer_id?: string;
+  notes: string;
+}
+
+export interface RequestReviewResponse {
+  task_id: string;
+  status: 'review_requested';
+}
