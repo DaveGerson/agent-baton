@@ -4,7 +4,7 @@ import { ForgePanel } from './components/ForgePanel';
 import { KeyboardShortcutsDialog } from './components/KeyboardShortcutsDialog';
 import { useHotkeys } from './hooks/useHotkeys';
 import { usePersistedState } from './hooks/usePersistedState';
-import { T, FONT_SIZES } from './styles/tokens';
+import { T, FONTS } from './styles/tokens';
 import { ToastProvider } from './contexts/ToastContext';
 import type { PmoCard, PmoSignal } from './api/types';
 
@@ -64,9 +64,17 @@ export default function App() {
 
   useHotkeys(hotkeyBindings);
 
+  const NAV_TABS = [
+    { id: 'kanban' as const, label: 'The Rail', emoji: '🥟' },
+    { id: 'forge' as const,  label: 'The Forge', emoji: '🍳' },
+  ];
+
   return (
     <ToastProvider>
-    <style>{`@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }`}</style>
+    <style>{`
+      @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+      @keyframes forge-bar { 0% { width: 15%; } 50% { width: 75%; } 100% { width: 95%; } }
+    `}</style>
     <div style={{
       height: '100vh',
       display: 'flex',
@@ -75,39 +83,42 @@ export default function App() {
       color: T.text0,
       overflow: 'hidden',
     }}>
-      {/* Top nav bar */}
+      {/* Top nav bar — kitchen style */}
       <nav
         aria-label="Main"
         style={{
           display: 'flex',
           alignItems: 'center',
-          gap: 10,
-          padding: '6px 14px',
-          borderBottom: `1px solid ${T.border}`,
-          background: T.bg1,
+          gap: 12,
+          padding: '0 14px',
+          borderBottom: `2px solid ${T.border}`,
+          background: T.ink,
           flexShrink: 0,
+          height: 46,
         }}
       >
-        {/* Brand */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        {/* Brand mark — pie emoji + name */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
           <div style={{
-            width: 22,
-            height: 22,
-            borderRadius: 4,
-            background: 'linear-gradient(135deg, #1e40af, #7c3aed)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            fontSize: 10,
-            fontWeight: 800,
-            color: '#fff',
-          }}>
-            B
-          </div>
+            width: 30, height: 30, borderRadius: '50%',
+            background: T.butter, border: `2px solid ${T.cream}`,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontSize: 15, boxShadow: '2px 2px 0 0 #000',
+          }}>🥧</div>
           <div>
-            <h1 style={{ fontSize: FONT_SIZES.sm, fontWeight: 700, letterSpacing: -0.3, margin: 0 }}>Baton PMO</h1>
-            <div style={{ fontSize: FONT_SIZES.xs, color: T.text3, letterSpacing: 0.5, textTransform: 'uppercase' }}>
-              Orchestration Board
+            <div style={{
+              fontFamily: FONTS.display,
+              fontWeight: 900, fontSize: 15, letterSpacing: -0.5,
+              color: T.cream, lineHeight: 1,
+            }}>
+              Baton PMO
+            </div>
+            <div style={{
+              fontFamily: FONTS.hand,
+              fontSize: 11, color: T.butter,
+              lineHeight: 1, transform: 'rotate(-1deg)', display: 'inline-block',
+            }}>
+              the kitchen's open
             </div>
           </div>
         </div>
@@ -116,49 +127,54 @@ export default function App() {
         <div
           role="tablist"
           aria-label="Views"
-          style={{ display: 'flex', gap: 2, marginLeft: 10 }}
+          style={{ display: 'flex', gap: 4, marginLeft: 6 }}
         >
-          {([
-            { id: 'kanban' as const, label: 'AI Kanban', icon: '\u25AB' },
-            { id: 'forge' as const, label: 'The Forge', icon: '\u2692' },
-          ]).map(tab => (
-            <button
-              key={tab.id}
-              role="tab"
-              aria-selected={view === tab.id}
-              aria-controls={`panel-${tab.id}`}
-              id={`tab-${tab.id}`}
-              onClick={() => {
-                if (tab.id === 'kanban') backToBoard();
-                else openForge();
-              }}
-              style={{
-                padding: '3px 10px',
-                borderRadius: 3,
-                border: 'none',
-                background: view === tab.id ? T.accent + '18' : 'transparent',
-                color: view === tab.id ? T.accent : T.text3,
-                fontSize: 9,
-                fontWeight: view === tab.id ? 700 : 500,
-                cursor: 'pointer',
-              }}
-            >
-              {tab.icon} {tab.label}
-            </button>
-          ))}
+          {NAV_TABS.map(tab => {
+            const active = view === tab.id;
+            return (
+              <button
+                key={tab.id}
+                role="tab"
+                aria-selected={active}
+                aria-controls={`panel-${tab.id}`}
+                id={`tab-${tab.id}`}
+                onClick={() => {
+                  if (tab.id === 'kanban') backToBoard();
+                  else openForge();
+                }}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 5,
+                  padding: '5px 12px',
+                  borderRadius: 8,
+                  border: active ? `2px solid ${T.butter}` : '2px solid transparent',
+                  background: active ? T.butter : 'transparent',
+                  color: active ? T.ink : T.text4,
+                  fontFamily: FONTS.body,
+                  fontSize: 12, fontWeight: 800,
+                  cursor: 'pointer',
+                  letterSpacing: '.02em',
+                  transition: 'all 120ms',
+                }}
+              >
+                <span style={{ fontSize: 13 }}>{tab.emoji}</span>
+                {tab.label}
+              </button>
+            );
+          })}
         </div>
 
         <div style={{ flex: 1 }} />
 
         {/* Keyboard hint */}
-        <span style={{ fontSize: 9, color: T.text4, fontFamily: 'monospace' }}>
-          n=new&nbsp;&nbsp;s=signals&nbsp;&nbsp;esc=board&nbsp;&nbsp;?=help
+        <span style={{
+          fontFamily: FONTS.mono, fontSize: 9,
+          color: '#c9a97a', letterSpacing: '.08em',
+        }}>
+          n=new · s=signals · esc=board · ?=help
         </span>
-        <div role="separator" aria-orientation="vertical" style={{ width: 1, height: 14, background: T.border }} />
-
-        {/* Version / status */}
-        <span style={{ fontSize: 9, color: T.text4, fontFamily: 'monospace' }}>
-          agent-baton pmo
+        <div role="separator" aria-orientation="vertical" style={{ width: 1, height: 18, background: '#5b3a23' }} />
+        <span style={{ fontFamily: FONTS.mono, fontSize: 9, color: '#8a6a4f' }}>
+          agent-baton
         </span>
       </nav>
 

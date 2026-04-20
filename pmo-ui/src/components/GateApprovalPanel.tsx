@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { api } from '../api/client';
 import type { PmoCard } from '../api/types';
-import { T } from '../styles/tokens';
+import { T, FONTS, SHADOWS } from '../styles/tokens';
 import { useToast } from '../contexts/ToastContext';
 
 interface GateApprovalPanelProps {
@@ -120,18 +120,20 @@ export function GateApprovalPanel({ card, onResolved }: GateApprovalPanelProps) 
 
   // After confirmation, show a read-only banner instead of the forms.
   if (confirmed) {
+    const isApproved = confirmed.startsWith('Approved');
     return (
       <div
         onClick={e => e.stopPropagation()}
         style={{
           marginTop: 6,
-          padding: '6px 8px',
-          borderRadius: 3,
-          background: T.bg3,
-          border: `1px solid ${T.border}`,
-          fontSize: 9,
-          color: confirmed.startsWith('Approved') ? T.green : T.red,
-          fontWeight: 600,
+          padding: '7px 10px',
+          borderRadius: 8,
+          background: isApproved ? T.mintSoft : T.cherrySoft,
+          border: `1.5px solid ${isApproved ? T.mint : T.cherry}`,
+          fontSize: 13,
+          color: isApproved ? T.mint : T.cherry,
+          fontWeight: 800,
+          fontFamily: FONTS.body,
         }}
       >
         {confirmed}
@@ -144,23 +146,34 @@ export function GateApprovalPanel({ card, onResolved }: GateApprovalPanelProps) 
 
   return (
     <div onClick={e => e.stopPropagation()} style={{ marginTop: 6 }}>
-      {/* Header row */}
+      {/* Header row — "Ding! Pick up, chef!" */}
       <div style={{
         display: 'flex',
         alignItems: 'center',
         gap: 6,
         marginBottom: 5,
-        padding: '4px 6px',
-        borderRadius: 3,
-        background: T.orange + '14',
-        border: `1px solid ${T.orange}33`,
+        padding: '5px 8px',
+        borderRadius: 10,
+        background: T.butter,
+        border: `1.5px solid ${T.tangerine}`,
       }}>
-        <span style={{ fontSize: 9, fontWeight: 700, color: T.orange }}>
-          Awaiting Approval
+        <span style={{
+          fontFamily: FONTS.display,
+          fontWeight: 900,
+          fontSize: 15,
+          color: T.ink,
+        }}>
+          🛎 Ding! Pick up, chef!
         </span>
         {card.current_phase && (
-          <span style={{ fontSize: 9, color: T.text2 }}>
-            — {card.current_phase}
+          <span style={{
+            fontSize: 14,
+            color: T.text1,
+            fontFamily: FONTS.hand,
+            transform: 'rotate(-.5deg)',
+            display: 'inline-block',
+          }}>
+            "{card.current_phase}"
           </span>
         )}
         <div style={{ flex: 1 }} />
@@ -168,12 +181,14 @@ export function GateApprovalPanel({ card, onResolved }: GateApprovalPanelProps) 
           onClick={loadContext}
           disabled={contextLoading || contextLoaded}
           style={{
-            padding: '2px 7px',
-            borderRadius: 3,
-            border: `1px solid ${T.border}`,
-            background: T.bg3,
-            color: contextLoaded ? T.text3 : T.text1,
-            fontSize: 9,
+            padding: '3px 9px',
+            borderRadius: 6,
+            border: `1.5px solid ${T.border}`,
+            background: contextLoaded ? T.mintSoft : T.bg3,
+            color: contextLoaded ? T.mint : T.text1,
+            fontSize: 10,
+            fontWeight: 800,
+            fontFamily: FONTS.body,
             cursor: contextLoaded ? 'default' : 'pointer',
             opacity: contextLoading ? 0.6 : 1,
           }}
@@ -182,45 +197,57 @@ export function GateApprovalPanel({ card, onResolved }: GateApprovalPanelProps) 
         </button>
       </div>
 
-      {/* Approval context markdown (read-only display) */}
+      {/* Approval context display — "Prep log" */}
       {contextLoaded && approvalContext && (
-        <div style={{
-          marginBottom: 6,
-          maxHeight: 180,
-          overflowY: 'auto',
-          padding: '5px 7px',
-          borderRadius: 3,
-          background: T.bg1,
-          border: `1px solid ${T.border}`,
-          fontSize: 9,
-          color: T.text1,
-          lineHeight: 1.5,
-          whiteSpace: 'pre-wrap',
-          fontFamily: 'monospace',
-        }}>
-          {approvalContext}
+        <div style={{ marginBottom: 6 }}>
+          <div style={{
+            fontSize: 9,
+            fontWeight: 800,
+            textTransform: 'uppercase',
+            letterSpacing: 0.5,
+            color: T.text1,
+            fontFamily: FONTS.body,
+            marginBottom: 3,
+          }}>
+            Prep log
+          </div>
+          <div style={{
+            maxHeight: 180,
+            overflowY: 'auto',
+            padding: '6px 8px',
+            borderRadius: 8,
+            background: T.bg3,
+            border: `1.5px dashed ${T.borderSoft}`,
+            fontSize: 9,
+            color: T.text1,
+            lineHeight: 1.5,
+            whiteSpace: 'pre-wrap',
+            fontFamily: FONTS.mono,
+          }}>
+            {approvalContext}
+          </div>
         </div>
       )}
 
       {/* Action buttons */}
       {activeForm === 'none' && (
-        <div style={{ display: 'flex', gap: 4 }}>
+        <div style={{ display: 'flex', gap: 5 }}>
           {canApprove && (
             <button
               onClick={e => { e.stopPropagation(); setActiveForm('approve'); }}
-              style={_btnStyle(T.green)}
+              style={_approveBtn(false)}
               title="Approve this phase and allow execution to continue"
             >
-              Approve
+              Fire it — approved 🔥
             </button>
           )}
           {canReject && (
             <button
               onClick={e => { e.stopPropagation(); setActiveForm('reject'); }}
-              style={_btnStyle(T.red)}
+              style={_rejectBtn(false)}
               title="Reject this phase and stop execution"
             >
-              Reject
+              Send it back
             </button>
           )}
         </div>
@@ -228,8 +255,15 @@ export function GateApprovalPanel({ card, onResolved }: GateApprovalPanelProps) 
 
       {/* Approve sub-form */}
       {activeForm === 'approve' && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <label style={{ fontSize: 9, color: T.text2 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+          <label style={{
+            fontSize: 9,
+            fontWeight: 800,
+            textTransform: 'uppercase',
+            letterSpacing: 0.5,
+            color: T.text1,
+            fontFamily: FONTS.body,
+          }}>
             Notes (optional)
           </label>
           <textarea
@@ -237,20 +271,20 @@ export function GateApprovalPanel({ card, onResolved }: GateApprovalPanelProps) 
             onChange={e => setNotes(e.target.value)}
             onClick={e => e.stopPropagation()}
             rows={2}
-            placeholder="Optional reviewer notes…"
+            placeholder="any notes for the next course?"
             style={_textareaStyle()}
           />
-          <div style={{ display: 'flex', gap: 4 }}>
+          <div style={{ display: 'flex', gap: 5 }}>
             <button
               onClick={handleApprove}
               disabled={approveLoading}
-              style={_btnStyle(T.green, approveLoading)}
+              style={_approveBtn(approveLoading)}
             >
-              {approveLoading ? 'Approving…' : 'Confirm Approve'}
+              {approveLoading ? 'Approving…' : 'Fire it — approved 🔥'}
             </button>
             <button
               onClick={e => { e.stopPropagation(); setActiveForm('none'); }}
-              style={_btnStyle(T.text3)}
+              style={_cancelBtn()}
             >
               Cancel
             </button>
@@ -260,8 +294,15 @@ export function GateApprovalPanel({ card, onResolved }: GateApprovalPanelProps) 
 
       {/* Reject sub-form */}
       {activeForm === 'reject' && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <label style={{ fontSize: 9, color: T.red }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+          <label style={{
+            fontSize: 9,
+            fontWeight: 800,
+            textTransform: 'uppercase',
+            letterSpacing: 0.5,
+            color: T.cherry,
+            fontFamily: FONTS.body,
+          }}>
             Reason for rejection (required)
           </label>
           <textarea
@@ -269,20 +310,20 @@ export function GateApprovalPanel({ card, onResolved }: GateApprovalPanelProps) 
             onChange={e => setReason(e.target.value)}
             onClick={e => e.stopPropagation()}
             rows={2}
-            placeholder="Explain why this phase is being rejected…"
+            placeholder="what went wrong in the kitchen?"
             style={_textareaStyle()}
           />
-          <div style={{ display: 'flex', gap: 4 }}>
+          <div style={{ display: 'flex', gap: 5 }}>
             <button
               onClick={handleReject}
               disabled={rejectLoading || !reason.trim()}
-              style={_btnStyle(T.red, rejectLoading || !reason.trim())}
+              style={_rejectBtn(rejectLoading || !reason.trim())}
             >
-              {rejectLoading ? 'Rejecting…' : 'Confirm Reject'}
+              {rejectLoading ? 'Rejecting…' : 'Send it back'}
             </button>
             <button
               onClick={e => { e.stopPropagation(); setActiveForm('none'); }}
-              style={_btnStyle(T.text3)}
+              style={_cancelBtn()}
             >
               Cancel
             </button>
@@ -293,30 +334,62 @@ export function GateApprovalPanel({ card, onResolved }: GateApprovalPanelProps) 
   );
 }
 
-function _btnStyle(color: string, disabled = false): React.CSSProperties {
+function _approveBtn(disabled = false): React.CSSProperties {
   return {
-    padding: '3px 9px',
-    borderRadius: 3,
-    border: `1px solid ${color}44`,
-    background: color + '14',
-    color,
-    fontSize: 9,
-    fontWeight: 600,
+    padding: '4px 11px',
+    borderRadius: 10,
+    border: `2px solid ${T.border}`,
+    background: T.mint,
+    color: T.ink,
+    fontSize: 12,
+    fontWeight: 800,
+    fontFamily: FONTS.body,
     cursor: disabled ? 'not-allowed' : 'pointer',
     opacity: disabled ? 0.5 : 1,
+    boxShadow: disabled ? 'none' : SHADOWS.sm,
+  };
+}
+
+function _rejectBtn(disabled = false): React.CSSProperties {
+  return {
+    padding: '4px 11px',
+    borderRadius: 10,
+    border: `2px solid ${T.border}`,
+    background: T.cherry,
+    color: T.cream,
+    fontSize: 12,
+    fontWeight: 800,
+    fontFamily: FONTS.body,
+    cursor: disabled ? 'not-allowed' : 'pointer',
+    opacity: disabled ? 0.5 : 1,
+    boxShadow: disabled ? 'none' : SHADOWS.sm,
+  };
+}
+
+function _cancelBtn(): React.CSSProperties {
+  return {
+    padding: '4px 11px',
+    borderRadius: 10,
+    border: `2px dashed ${T.borderSoft}`,
+    background: 'transparent',
+    color: T.text2,
+    fontSize: 12,
+    fontWeight: 700,
+    fontFamily: FONTS.body,
+    cursor: 'pointer',
   };
 }
 
 function _textareaStyle(): React.CSSProperties {
   return {
-    background: T.bg1,
-    border: `1px solid ${T.border}`,
-    borderRadius: 3,
+    background: T.bg3,
+    border: `2px solid ${T.border}`,
+    borderRadius: 8,
     color: T.text0,
-    fontSize: 9,
-    padding: '4px 6px',
+    fontSize: 10,
+    padding: '5px 8px',
     resize: 'vertical',
-    fontFamily: 'inherit',
+    fontFamily: FONTS.body,
     outline: 'none',
   };
 }

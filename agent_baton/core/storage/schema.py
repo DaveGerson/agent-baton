@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -340,6 +340,40 @@ CREATE INDEX IF NOT EXISTS idx_beads_status ON beads(status);
 -- ConnectionManager._run_migrations().  Fresh project DBs get FKs from
 -- PROJECT_SCHEMA_DDL directly.
 ALTER TABLE step_results ADD COLUMN updated_at TEXT NOT NULL DEFAULT '';
+""",
+    13: """
+-- v13: add real per-step token accounting columns to step_results.
+--
+-- The engine previously used a char/4 heuristic for estimated_tokens, which
+-- was off by 2-3 orders of magnitude (real spend ~2.56B tokens vs ~3,344
+-- estimated).  These columns hold the actual values sourced from the Claude
+-- Code session JSONL files (~/.claude/projects/<slug>/<session_id>.jsonl).
+--
+-- Fields:
+--   input_tokens          -- sum of input_tokens across assistant turns
+--   cache_read_tokens     -- sum of cache_read_input_tokens
+--   cache_creation_tokens -- sum of cache_creation_input_tokens
+--   output_tokens         -- sum of output_tokens
+--   model_id              -- exact model string (e.g. "claude-sonnet-4-6")
+--   session_id            -- Claude Code session UUID used to scan
+--   step_started_at       -- ISO 8601 dispatch time (lower bound for scan)
+--
+-- All default to 0/"" so existing databases are not affected.
+-- estimated_tokens is preserved for backward compat and is set to
+-- input_tokens + cache_read_tokens + output_tokens when real data is present,
+-- or the char/4 heuristic when it is not.
+--
+-- NOTE: FK constraints are intentionally omitted from this migration because
+-- it is applied to BOTH project and central databases via
+-- ConnectionManager._run_migrations().  Fresh project DBs get FKs from
+-- PROJECT_SCHEMA_DDL directly.
+ALTER TABLE step_results ADD COLUMN input_tokens          INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE step_results ADD COLUMN cache_read_tokens     INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE step_results ADD COLUMN cache_creation_tokens INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE step_results ADD COLUMN output_tokens         INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE step_results ADD COLUMN model_id              TEXT NOT NULL DEFAULT '';
+ALTER TABLE step_results ADD COLUMN session_id            TEXT NOT NULL DEFAULT '';
+ALTER TABLE step_results ADD COLUMN step_started_at       TEXT NOT NULL DEFAULT '';
 """,
 }
 

@@ -1,6 +1,6 @@
 import { useMemo } from 'react';
 import type { PmoCard, ProgramHealth } from '../api/types';
-import { T, FONT_SIZES, programColor, SR_ONLY } from '../styles/tokens';
+import { T, FONT_SIZES, FONTS, SHADOWS, programColor, SR_ONLY } from '../styles/tokens';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -35,7 +35,7 @@ export function AnalyticsDashboard({ cards, health, onClose }: Props) {
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'center',
-      background: 'rgba(0,0,0,0.6)',
+      background: 'rgba(42,26,16,.6)',
     }} onClick={onClose}>
       <div
         onClick={(e) => e.stopPropagation()}
@@ -45,9 +45,10 @@ export function AnalyticsDashboard({ cards, health, onClose }: Props) {
           display: 'flex',
           flexDirection: 'column',
           background: T.bg1,
-          border: `1px solid ${T.border}`,
-          borderRadius: 8,
+          border: `3px solid ${T.border}`,
+          borderRadius: 18,
           overflow: 'hidden',
+          boxShadow: SHADOWS.xl,
         }}
       >
         {/* Header */}
@@ -55,25 +56,55 @@ export function AnalyticsDashboard({ cards, health, onClose }: Props) {
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
-          padding: '10px 16px',
-          borderBottom: `1px solid ${T.border}`,
+          padding: '12px 18px',
+          borderBottom: `2px solid ${T.border}`,
+          background: T.blueberry,
           flexShrink: 0,
         }}>
-          <h2 style={{ fontSize: FONT_SIZES.lg, fontWeight: 700, color: T.text0, margin: 0 }}>
-            Portfolio Analytics
-          </h2>
+          <div>
+            <div style={{
+              fontSize: 9,
+              fontWeight: 800,
+              textTransform: 'uppercase',
+              letterSpacing: 1.5,
+              color: T.cream,
+              fontFamily: FONTS.body,
+              opacity: 0.75,
+              marginBottom: 2,
+            }}>
+              THE BOOKS · closing out
+            </div>
+            <h2 style={{
+              fontSize: FONT_SIZES.lg,
+              fontWeight: 900,
+              color: T.cream,
+              margin: 0,
+              fontFamily: FONTS.display,
+            }}>
+              Portfolio Analytics
+            </h2>
+          </div>
           <button
             onClick={onClose}
             aria-label="Close analytics"
             style={{
-              background: 'none',
+              background: T.cherry,
               border: 'none',
-              color: T.text3,
-              fontSize: 16,
+              color: T.cream,
+              fontSize: 14,
               cursor: 'pointer',
+              width: 28,
+              height: 28,
+              borderRadius: 6,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              fontWeight: 800,
+              boxShadow: SHADOWS.sm,
+              fontFamily: FONTS.body,
             }}
           >
-            \u2715
+            ✕
           </button>
         </div>
 
@@ -82,10 +113,10 @@ export function AnalyticsDashboard({ cards, health, onClose }: Props) {
 
           {/* Summary Cards Row */}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10 }}>
-            <MetricCard label="Total Plans" value={stats.totalPlans} color={T.accent} />
-            <MetricCard label="Success Rate" value={`${stats.successRate}%`} color={T.green} />
-            <MetricCard label="Active" value={stats.activePlans} color={T.yellow} />
-            <MetricCard label="Blocked / Failed" value={stats.blockedOrFailed} color={T.red} />
+            <MetricCard label="Total Plans" value={stats.totalPlans} color={T.cherry} />
+            <MetricCard label="Success Rate" value={`${stats.successRate}%`} color={T.mint} />
+            <MetricCard label="Active" value={stats.activePlans} color={T.butter} />
+            <MetricCard label="Blocked / Failed" value={stats.blockedOrFailed} color={T.cherry} />
           </div>
 
           {/* Column Distribution */}
@@ -106,7 +137,7 @@ export function AnalyticsDashboard({ cards, health, onClose }: Props) {
             </div>
             <div style={{ display: 'flex', gap: 12, marginTop: 6, flexWrap: 'wrap' }}>
               {stats.columnDistribution.map(({ column, count, color }) => (
-                <span key={column} style={{ fontSize: FONT_SIZES.xs, display: 'flex', alignItems: 'center', gap: 4 }}>
+                <span key={column} style={{ fontSize: FONT_SIZES.xs, display: 'flex', alignItems: 'center', gap: 4, fontFamily: FONTS.body }}>
                   <span style={{ width: 8, height: 8, borderRadius: 2, background: color, display: 'inline-block' }} />
                   <span style={{ color: T.text2 }}>{column}</span>
                   <span style={{ color: T.text0, fontWeight: 600 }}>{count}</span>
@@ -128,7 +159,7 @@ export function AnalyticsDashboard({ cards, health, onClose }: Props) {
                       background: programColor(p.program),
                       flexShrink: 0,
                     }} />
-                    <span style={{ fontSize: FONT_SIZES.sm, color: T.text1, width: 100, flexShrink: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    <span style={{ fontSize: FONT_SIZES.sm, color: T.text1, width: 100, flexShrink: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontFamily: FONTS.body }}>
                       {p.program}
                     </span>
                     <div style={{ flex: 1, height: 6, borderRadius: 3, background: T.bg3, overflow: 'hidden' }}>
@@ -140,10 +171,10 @@ export function AnalyticsDashboard({ cards, health, onClose }: Props) {
                         transition: 'width 0.3s ease',
                       }} />
                     </div>
-                    <span style={{ fontSize: FONT_SIZES.xs, color: T.text2, width: 35, textAlign: 'right', flexShrink: 0 }}>
+                    <span style={{ fontSize: FONT_SIZES.xs, color: T.text2, width: 35, textAlign: 'right', flexShrink: 0, fontFamily: FONTS.mono }}>
                       {p.completion_pct}%
                     </span>
-                    <span style={{ fontSize: FONT_SIZES.xs, color: T.text3, width: 80, textAlign: 'right', flexShrink: 0 }}>
+                    <span style={{ fontSize: FONT_SIZES.xs, color: T.text3, width: 80, textAlign: 'right', flexShrink: 0, fontFamily: FONTS.body }}>
                       {p.completed}/{p.total_plans} done
                     </span>
                   </div>
@@ -157,11 +188,11 @@ export function AnalyticsDashboard({ cards, health, onClose }: Props) {
             <Section title="Agent Utilization">
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 60px 60px 60px 60px', gap: '2px 8px', fontSize: FONT_SIZES.xs }}>
                 {/* Header */}
-                <span style={{ color: T.text3, fontWeight: 600 }}>Agent</span>
-                <span style={{ color: T.text3, fontWeight: 600, textAlign: 'right' }}>Tasks</span>
-                <span style={{ color: T.text3, fontWeight: 600, textAlign: 'right' }}>Success</span>
-                <span style={{ color: T.text3, fontWeight: 600, textAlign: 'right' }}>Failed</span>
-                <span style={{ color: T.text3, fontWeight: 600, textAlign: 'right' }}>Rate</span>
+                <span style={{ color: T.text3, fontWeight: 600, fontFamily: FONTS.body }}>Agent</span>
+                <span style={{ color: T.text3, fontWeight: 600, textAlign: 'right', fontFamily: FONTS.body }}>Tasks</span>
+                <span style={{ color: T.text3, fontWeight: 600, textAlign: 'right', fontFamily: FONTS.body }}>Success</span>
+                <span style={{ color: T.text3, fontWeight: 600, textAlign: 'right', fontFamily: FONTS.body }}>Failed</span>
+                <span style={{ color: T.text3, fontWeight: 600, textAlign: 'right', fontFamily: FONTS.body }}>Rate</span>
                 {/* Rows */}
                 {stats.agents.map((a) => (
                   <AgentRow key={a.agent} metric={a} />
@@ -187,10 +218,11 @@ export function AnalyticsDashboard({ cards, health, onClose }: Props) {
                     color,
                     fontSize: FONT_SIZES.sm,
                     fontWeight: 700,
+                    fontFamily: FONTS.body,
                   }}>
                     {count}
                   </span>
-                  <span style={{ fontSize: FONT_SIZES.xs, color: T.text2, textTransform: 'capitalize' }}>{level}</span>
+                  <span style={{ fontSize: FONT_SIZES.xs, color: T.text2, textTransform: 'capitalize', fontFamily: FONTS.body }}>{level}</span>
                 </div>
               ))}
             </div>
@@ -202,19 +234,23 @@ export function AnalyticsDashboard({ cards, health, onClose }: Props) {
           display: 'flex',
           justifyContent: 'flex-end',
           padding: '8px 16px',
-          borderTop: `1px solid ${T.border}`,
+          borderTop: `2px solid ${T.border}`,
+          background: T.bg0,
           flexShrink: 0,
         }}>
           <button
             onClick={onClose}
             style={{
-              padding: '4px 14px',
-              borderRadius: 4,
-              border: `1px solid ${T.border}`,
-              background: T.bg3,
-              color: T.text1,
+              padding: '5px 16px',
+              borderRadius: 8,
+              border: `2px solid ${T.border}`,
+              background: T.cherry,
+              color: T.cream,
               fontSize: FONT_SIZES.sm,
+              fontWeight: 800,
+              fontFamily: FONTS.body,
               cursor: 'pointer',
+              boxShadow: SHADOWS.sm,
             }}
           >
             Close
@@ -233,12 +269,13 @@ function MetricCard({ label, value, color }: { label: string; value: string | nu
   return (
     <div style={{
       padding: '10px 12px',
-      borderRadius: 6,
-      background: T.bg2,
-      border: `1px solid ${T.border}`,
+      borderRadius: 8,
+      background: T.bg0,
+      border: `2px solid ${T.border}`,
+      boxShadow: SHADOWS.sm,
     }}>
-      <div style={{ fontSize: 20, fontWeight: 700, color, letterSpacing: -0.5 }}>{value}</div>
-      <div style={{ fontSize: FONT_SIZES.xs, color: T.text3, marginTop: 2 }}>{label}</div>
+      <div style={{ fontSize: 20, fontWeight: 900, color, letterSpacing: -0.5, fontFamily: FONTS.display }}>{value}</div>
+      <div style={{ fontSize: FONT_SIZES.xs, color: T.text3, marginTop: 2, fontFamily: FONTS.body }}>{label}</div>
     </div>
   );
 }
@@ -247,11 +284,19 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   return (
     <div style={{
       padding: 12,
-      borderRadius: 6,
-      background: T.bg2,
-      border: `1px solid ${T.border}`,
+      borderRadius: 8,
+      background: T.bg0,
+      border: `2px solid ${T.border}`,
     }}>
-      <h3 style={{ fontSize: FONT_SIZES.sm, fontWeight: 600, color: T.text1, margin: '0 0 8px' }}>{title}</h3>
+      <h3 style={{
+        fontSize: FONT_SIZES.sm,
+        fontWeight: 900,
+        color: T.text0,
+        margin: '0 0 8px',
+        fontFamily: FONTS.display,
+      }}>
+        {title}
+      </h3>
       {children}
     </div>
   );
@@ -260,11 +305,11 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 function AgentRow({ metric }: { metric: AgentMetric }) {
   return (
     <>
-      <span style={{ color: T.cyan, fontWeight: 500 }}>{metric.agent}</span>
-      <span style={{ color: T.text1, textAlign: 'right' }}>{metric.dispatched}</span>
-      <span style={{ color: T.green, textAlign: 'right' }}>{metric.success}</span>
-      <span style={{ color: metric.failed > 0 ? T.red : T.text3, textAlign: 'right' }}>{metric.failed}</span>
-      <span style={{ color: metric.rate >= 80 ? T.green : metric.rate >= 50 ? T.yellow : T.red, textAlign: 'right', fontWeight: 600 }}>
+      <span style={{ color: T.blueberry, fontWeight: 600, fontFamily: FONTS.body }}>{metric.agent}</span>
+      <span style={{ color: T.text1, textAlign: 'right', fontFamily: FONTS.mono }}>{metric.dispatched}</span>
+      <span style={{ color: T.mint, textAlign: 'right', fontFamily: FONTS.mono }}>{metric.success}</span>
+      <span style={{ color: metric.failed > 0 ? T.cherry : T.text3, textAlign: 'right', fontFamily: FONTS.mono }}>{metric.failed}</span>
+      <span style={{ color: metric.rate >= 80 ? T.mint : metric.rate >= 50 ? T.butter : T.cherry, textAlign: 'right', fontWeight: 600, fontFamily: FONTS.mono }}>
         {metric.rate}%
       </span>
     </>
@@ -277,10 +322,10 @@ function AgentRow({ metric }: { metric: AgentMetric }) {
 
 const COLUMN_COLORS: Record<string, string> = {
   queued: T.text2,
-  executing: T.yellow,
-  awaiting_human: T.orange,
-  validating: T.purple,
-  deployed: T.green,
+  executing: T.butter,
+  awaiting_human: T.tangerine,
+  validating: T.blueberry,
+  deployed: T.mint,
 };
 
 function computeStats(cards: PmoCard[], health: Record<string, ProgramHealth>) {
@@ -332,10 +377,10 @@ function computeStats(cards: PmoCard[], health: Record<string, ProgramHealth>) {
     riskCounts[level] = (riskCounts[level] ?? 0) + 1;
   }
   const RISK_COLORS: Record<string, string> = {
-    critical: T.red,
-    high: T.orange,
-    medium: T.yellow,
-    low: T.green,
+    critical: T.cherry,
+    high: T.tangerine,
+    medium: T.butter,
+    low: T.mint,
   };
   const riskDistribution = ['critical', 'high', 'medium', 'low']
     .filter(level => (riskCounts[level] ?? 0) > 0)

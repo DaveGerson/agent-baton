@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
-import { T, FONT_SIZES } from '../styles/tokens';
+import { T, FONTS, SHADOWS, FONT_SIZES } from '../styles/tokens';
 import type { ForgePlanResponse, ForgePlanPhase, ForgePlanStep } from '../api/types';
 import { agentDisplayName } from '../utils/agent-names';
 
@@ -23,14 +23,38 @@ const AGENT_DESCRIPTIONS: Record<string, string> = {
   'data-engineer': 'Database schema, migrations, ETL pipelines',
 };
 
+// Agent role colors — warm kitchen palette
+const AGENT_COLORS: Record<string, string> = {
+  'backend-engineer': T.blueberry,
+  'frontend-engineer': T.tangerine,
+  'test-engineer': T.mint,
+  'architect': T.crust,
+  'security-reviewer': T.cherry,
+  'devops-engineer': T.butter,
+  'data-engineer': T.mintDark,
+};
+
+function agentColor(name: string): string {
+  return AGENT_COLORS[name] ?? T.text2;
+}
+
 interface PlanEditorProps {
   plan: ForgePlanResponse;
   onPlanChange: (plan: ForgePlanResponse) => void;
   onDraftSave?: () => void;
   projectId: string;
+  /** Passed from ForgePanel so the action bar can trigger back/approve/regen */
+  onBack?: () => void;
+  onApprove?: () => void;
+  saving?: boolean;
+  onStartRegenerate?: () => void;
+  regenLoading?: boolean;
 }
 
-export function PlanEditor({ plan, onPlanChange, onDraftSave, projectId }: PlanEditorProps) {
+export function PlanEditor({
+  plan, onPlanChange, onDraftSave, projectId,
+  onBack, onApprove, saving, onStartRegenerate, regenLoading,
+}: PlanEditorProps) {
   const [expandedPhase, setExpandedPhase] = useState<number | null>(0);
   const [editingStep, setEditingStep] = useState<string | null>(null);
   const [draftSaved, setDraftSaved] = useState(false);
@@ -173,75 +197,137 @@ export function PlanEditor({ plan, onPlanChange, onDraftSave, projectId }: PlanE
     setDropTarget(null);
   }
 
+  const riskColor = plan.risk_level === 'LOW' ? T.mint : plan.risk_level === 'HIGH' ? T.cherry : T.butter;
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-      {/* Stats bar */}
-      <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-        <Stat label="Phases" value={String(plan.phases.length)} />
-        <Stat label="Steps" value={String(totalSteps)} />
-        <Stat label="Gates" value={String(gateCount)} color={T.yellow} />
-        <Stat label="Risk" value={plan.risk_level} color={plan.risk_level === 'LOW' ? T.green : T.red} />
-        <div style={{ flex: 1 }} />
-        <button
-          onClick={handleSaveDraft}
-          aria-label="Save draft to local storage"
-          style={{
-            display: 'flex', alignItems: 'center', gap: 4,
-            padding: '3px 10px', borderRadius: 4,
-            background: T.green + '15',
-            color: T.green,
-            border: `1px solid ${T.green}33`,
-            fontSize: FONT_SIZES.xs, fontWeight: 600, cursor: 'pointer',
-          }}
-        >
-          {isDirty && (
-            <span
-              aria-label="unsaved changes"
-              style={{
-                width: 4, height: 4, borderRadius: '50%',
-                background: '#f97316', flexShrink: 0,
-                display: 'inline-block',
-              }}
-            />
-          )}
-          {draftSaved ? 'Saved \u2713' : 'Save Draft'}
-        </button>
-        {lastSaveTime && (
-          <span style={{ fontSize: FONT_SIZES.xs, color: T.text3, fontStyle: 'italic' }}>
-            Draft saved at {lastSaveTime}
-          </span>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 18, fontFamily: FONTS.body }}>
+
+      {/* Recipe card header */}
+      <div style={{
+        position: 'relative',
+        background: T.bg2,
+        backgroundImage: 'repeating-linear-gradient(0deg, transparent 0 28px, #c9a97a44 28px 29px)',
+        border: `3px solid ${T.border}`,
+        borderRadius: 18,
+        boxShadow: SHADOWS.lg,
+        padding: '22px 22px 18px',
+      }}>
+        {/* Red ribbon tag */}
+        <div style={{
+          position: 'absolute', top: -10, left: 30,
+          background: T.cherry, color: T.cream,
+          fontSize: 11, fontWeight: 800, fontFamily: FONTS.body,
+          textTransform: 'uppercase', letterSpacing: '0.08em',
+          borderRadius: 6, padding: '4px 14px',
+          boxShadow: SHADOWS.sm, transform: 'rotate(-2deg)',
+          border: `2px solid ${T.border}`,
+        }}>
+          RECIPE CARD
+        </div>
+
+        {/* Back link — top right */}
+        {onBack && (
+          <button
+            onClick={onBack}
+            style={{
+              position: 'absolute', top: 14, right: 16,
+              background: 'none', border: 'none',
+              color: T.text2, fontSize: 12, fontWeight: 700,
+              cursor: 'pointer', fontFamily: FONTS.body,
+            }}
+          >
+            {'\u2190'} Back
+          </button>
         )}
+
+        <div style={{ marginTop: 10 }}>
+          <div style={{
+            fontFamily: FONTS.body, fontSize: 10, fontWeight: 800,
+            textTransform: 'uppercase', letterSpacing: '0.12em',
+            color: T.cherry, marginBottom: 4,
+          }}>
+            FROM THE KITCHEN OF
+          </div>
+          <div style={{
+            fontFamily: FONTS.display, fontWeight: 900, fontSize: 38,
+            letterSpacing: '-0.02em', color: T.text0, lineHeight: 1.1,
+          }}>
+            {plan.task_summary || 'Untitled Recipe'}
+          </div>
+          {plan.task_summary && (
+            <div style={{
+              fontFamily: FONTS.hand, fontSize: 22, color: T.cherry,
+              transform: 'rotate(-0.8deg)', display: 'inline-block', marginTop: 4,
+            }}>
+              "{plan.task_summary}"
+            </div>
+          )}
+        </div>
+
+        {/* Stats row */}
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', marginTop: 16 }}>
+          <StatChip label="Phases" value={String(plan.phases.length)} valueColor={T.blueberry} />
+          <StatChip label="Steps" value={String(totalSteps)} valueColor={T.text0} />
+          <StatChip label="Gates" value={String(gateCount)} valueColor={T.butter} />
+          <StatChip label="Risk" value={plan.risk_level} valueColor={riskColor} />
+          <div style={{ flex: 1 }} />
+          {/* Save draft button */}
+          <button
+            onClick={handleSaveDraft}
+            aria-label="Save draft to local storage"
+            style={{
+              display: 'flex', alignItems: 'center', gap: 5,
+              padding: '10px 14px', borderRadius: 10,
+              background: draftSaved ? T.mintSoft : T.bg1,
+              color: draftSaved ? T.mintDark : T.text1,
+              border: `2px solid ${T.border}`,
+              fontSize: FONT_SIZES.sm, fontWeight: 700, cursor: 'pointer',
+              fontFamily: FONTS.body, boxShadow: SHADOWS.sm,
+              transition: 'background 0.2s',
+            }}
+          >
+            {isDirty && (
+              <span
+                aria-label="unsaved changes"
+                style={{
+                  width: 6, height: 6, borderRadius: '50%',
+                  background: T.tangerine, flexShrink: 0,
+                  display: 'inline-block',
+                }}
+              />
+            )}
+            {draftSaved ? 'Saved \u2713' : 'Save Draft'}
+          </button>
+          {lastSaveTime && (
+            <span style={{ fontSize: FONT_SIZES.xs, color: T.text3, fontFamily: FONTS.hand, fontStyle: 'italic' }}>
+              saved at {lastSaveTime}
+            </span>
+          )}
+        </div>
       </div>
 
-      {/* Summary */}
-      {plan.task_summary && (
-        <div style={{
-          padding: '8px 12px',
-          background: T.bg2,
-          borderRadius: 4,
-          borderLeft: `3px solid ${T.accent}`,
-        }}>
-          <div style={{ fontSize: 9, color: T.text3, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 3 }}>Summary</div>
-          <div style={{ fontSize: 10, color: T.text1, lineHeight: 1.55 }}>{plan.task_summary}</div>
-        </div>
-      )}
-
-      {/* Phases */}
+      {/* Phase / course cards */}
       {plan.phases.map((phase, pi) => {
         const isExpanded = expandedPhase === pi;
         return (
-          <div key={phase.phase_id} style={{
-            background: T.bg1,
-            borderRadius: 4,
-            border: `1px solid ${T.border}`,
-            overflow: 'hidden',
-          }}>
-            {/* Phase header — button separated from toggle to avoid nested-interactive */}
+          <div
+            key={phase.phase_id}
+            style={{
+              background: T.bg1,
+              borderRadius: 14,
+              border: `2px solid ${T.border}`,
+              boxShadow: SHADOWS.md,
+              overflow: 'hidden',
+              transform: `rotate(${pi % 2 === 0 ? -0.35 : 0.25}deg)`,
+            }}
+          >
+            {/* Course header — acts as toggle */}
             <div style={{
               display: 'flex',
               alignItems: 'center',
-              background: T.bg2,
-              borderBottom: isExpanded ? `1px solid ${T.border}` : 'none',
+              background: isExpanded ? T.butter : T.bg2,
+              borderBottom: isExpanded ? `2px solid ${T.border}` : 'none',
+              transition: 'background 0.15s',
             }}>
               <div
                 role="button"
@@ -259,36 +345,67 @@ export function PlanEditor({ plan, onPlanChange, onDraftSave, projectId }: PlanE
                 style={{
                   display: 'flex',
                   alignItems: 'center',
-                  gap: 6,
-                  padding: '6px 10px',
+                  gap: 10,
+                  padding: '10px 14px',
                   flex: 1,
                   cursor: 'pointer',
                 }}
               >
+                {/* Course number badge */}
                 <div style={{
-                  width: 16, height: 16, borderRadius: 3,
-                  background: T.accent + '20', border: `1px solid ${T.accent}33`,
+                  width: 34, height: 34, borderRadius: '50%',
+                  background: T.ink, color: T.butter,
+                  fontFamily: FONTS.display, fontWeight: 900, fontSize: 16,
                   display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  fontSize: 9, fontWeight: 700, color: T.accent, flexShrink: 0,
+                  flexShrink: 0, border: `2px solid ${T.border}`,
                 }}>
                   {pi + 1}
                 </div>
                 <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: 9, fontWeight: 700, color: T.text0 }}>{phase.name}</div>
+                  <div style={{
+                    fontFamily: FONTS.body, fontWeight: 800, fontSize: 10,
+                    textTransform: 'uppercase', letterSpacing: '0.12em', color: T.cherry,
+                    marginBottom: 1,
+                  }}>
+                    COURSE {String(pi + 1).padStart(2, '0')}
+                  </div>
+                  <div style={{
+                    fontFamily: FONTS.display, fontWeight: 900, fontSize: 22, color: T.text0,
+                  }}>
+                    {phase.name}
+                  </div>
                 </div>
-                <span style={{ fontSize: 9, color: T.text3, background: T.bg3, padding: '1px 4px', borderRadius: 3 }}>
+                {/* Step count chip */}
+                <span style={{
+                  padding: '3px 10px', borderRadius: 999,
+                  background: T.bg0, border: `1.5px solid ${T.border}`,
+                  fontFamily: FONTS.body, fontWeight: 800, fontSize: 11, color: T.text1,
+                  whiteSpace: 'nowrap',
+                }}>
                   {phase.steps.length} steps
                 </span>
+                {/* Gate chip */}
                 {phase.gate && (
-                  <span style={{ fontSize: 9, color: T.yellow, background: T.yellow + '14', border: `1px solid ${T.yellow}22`, padding: '1px 4px', borderRadius: 3 }}>
-                    gate
+                  <span style={{
+                    padding: '3px 10px', borderRadius: 999,
+                    background: T.cherry, color: T.cream,
+                    fontFamily: FONTS.body, fontWeight: 800, fontSize: 10,
+                    textTransform: 'uppercase', letterSpacing: '0.06em',
+                    border: `1.5px solid ${T.border}`,
+                    whiteSpace: 'nowrap',
+                  }}>
+                    {'👅'} taste test
                   </span>
                 )}
               </div>
               <button
                 aria-label={`Remove phase ${pi + 1}: ${phase.name}`}
                 onClick={() => removePhase(pi)}
-                style={{ background: 'none', border: 'none', color: T.text3, fontSize: 10, cursor: 'pointer', padding: '0 8px' }}
+                style={{
+                  background: 'none', border: 'none', color: T.text3,
+                  fontSize: 16, cursor: 'pointer', padding: '0 12px',
+                  fontFamily: FONTS.body,
+                }}
                 title="Remove phase"
               >
                 {'\u00d7'}
@@ -305,172 +422,313 @@ export function PlanEditor({ plan, onPlanChange, onDraftSave, projectId }: PlanE
               {phase.steps.map((step, si) => {
                 const isDragging = dragState?.phaseIdx === pi && dragState?.stepIdx === si;
                 const isDropTarget = dropTarget?.phaseIdx === pi && dropTarget?.stepIdx === si && !isDragging;
+                const aColor = agentColor(step.agent_name);
                 return (
-                <div
-                  key={step.step_id}
-                  draggable
-                  onDragStart={() => handleDragStart(pi, si)}
-                  onDragOver={e => handleDragOver(e, pi, si)}
-                  onDrop={e => handleDrop(e, pi, si)}
-                  onDragEnd={handleDragEnd}
-                  style={{
-                    display: 'flex', alignItems: 'flex-start', gap: 6, padding: '5px 10px',
-                    borderBottom: si < phase.steps.length - 1 ? `1px solid ${T.border}` : 'none',
-                    borderTop: isDropTarget ? `2px solid ${T.accent}` : undefined,
-                    opacity: isDragging ? 0.45 : 1,
-                    transition: 'opacity 0.1s',
-                  }}
-                >
-                  {/* Drag handle */}
-                  <span
-                    aria-hidden="true"
-                    style={{ cursor: 'grab', color: T.text3, fontSize: 11, flexShrink: 0, lineHeight: 1, paddingTop: 4, userSelect: 'none' }}
-                    title="Drag to reorder"
+                  <div
+                    key={step.step_id}
+                    draggable
+                    onDragStart={() => handleDragStart(pi, si)}
+                    onDragOver={e => handleDragOver(e, pi, si)}
+                    onDrop={e => handleDrop(e, pi, si)}
+                    onDragEnd={handleDragEnd}
+                    style={{
+                      display: 'flex', alignItems: 'flex-start', gap: 8, padding: '8px 14px',
+                      borderBottom: si < phase.steps.length - 1 ? `1.5px dashed ${T.borderSoft}` : 'none',
+                      borderTop: isDropTarget ? `2px solid ${T.cherry}` : undefined,
+                      opacity: isDragging ? 0.45 : 1,
+                      transition: 'opacity 0.1s',
+                    }}
                   >
-                    {'⠿'}
-                  </span>
-
-                  {/* Reorder buttons (keyboard fallback) */}
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 1, flexShrink: 0 }}>
-                    <button
-                      aria-label={`Move step ${si + 1} up`}
-                      onClick={() => moveStep(pi, si, -1)}
-                      disabled={si === 0}
-                      style={{ background: 'none', border: 'none', color: si === 0 ? T.bg3 : T.text3, fontSize: 9, cursor: si === 0 ? 'default' : 'pointer', padding: 0, lineHeight: 1, minWidth: 24, minHeight: 24, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-                    >{'\u25b2'}</button>
-                    <button
-                      aria-label={`Move step ${si + 1} down`}
-                      onClick={() => moveStep(pi, si, 1)}
-                      disabled={si === phase.steps.length - 1}
-                      style={{ background: 'none', border: 'none', color: si === phase.steps.length - 1 ? T.bg3 : T.text3, fontSize: 9, cursor: si === phase.steps.length - 1 ? 'default' : 'pointer', padding: 0, lineHeight: 1, minWidth: 24, minHeight: 24, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-                    >{'\u25bc'}</button>
-                  </div>
-
-                  {/* Step content */}
-                  <div style={{ flex: 1 }}>
-                    {editingStep === step.step_id ? (
-                      <input
-                        autoFocus
-                        value={step.task_description}
-                        onChange={e => updateStep(pi, si, s => ({ ...s, task_description: e.target.value }))}
-                        onBlur={() => setEditingStep(null)}
-                        onKeyDown={e => e.key === 'Enter' && setEditingStep(null)}
-                        style={{
-                          width: '100%', padding: '2px 4px', borderRadius: 3,
-                          border: `1px solid ${T.accent}`, background: T.bg2,
-                          color: T.text0, fontSize: 9, outline: 'none',
-                        }}
-                      />
-                    ) : (
-                      <div
-                        onClick={() => setEditingStep(step.step_id)}
-                        style={{ fontSize: 9, color: T.text0, fontWeight: 500, cursor: 'text', minHeight: 16 }}
-                        title="Click to edit"
-                      >
-                        {step.task_description || (
-                          <span style={{ color: T.text3, fontStyle: 'italic' }}>Click to add description</span>
-                        )}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Agent chip — dropdown when editing, badge when not */}
-                  {editingStep === step.step_id ? (
-                    <select
-                      value={step.agent_name}
-                      onChange={e => updateStep(pi, si, s => ({ ...s, agent_name: e.target.value }))}
-                      onClick={e => e.stopPropagation()}
-                      style={{
-                        fontSize: 9,
-                        color: T.cyan,
-                        background: T.bg3,
-                        border: `1px solid ${T.cyan}44`,
-                        borderRadius: 3,
-                        padding: '1px 4px',
-                        outline: 'none',
-                        flexShrink: 0,
-                        cursor: 'pointer',
-                      }}
+                    {/* Drag handle */}
+                    <span
+                      aria-hidden="true"
+                      style={{ cursor: 'grab', color: T.text3, fontSize: 14, flexShrink: 0, lineHeight: 1, paddingTop: 4, userSelect: 'none' }}
+                      title="Drag to reorder"
                     >
-                      {AGENT_LIST.map(a => (
-                        <option key={a} value={a} title={AGENT_DESCRIPTIONS[a] || ''}>{agentDisplayName(a)}</option>
-                      ))}
-                      {/* Preserve current value if it's not in the standard list */}
-                      {!AGENT_LIST.includes(step.agent_name as typeof AGENT_LIST[number]) && (
-                        <option value={step.agent_name} title={AGENT_DESCRIPTIONS[step.agent_name] || ''}>{agentDisplayName(step.agent_name)}</option>
-                      )}
-                    </select>
-                  ) : (
-                    <span style={{
-                      fontSize: 9, color: T.cyan, background: T.cyan + '14',
-                      border: `1px solid ${T.cyan}22`, padding: '1px 5px',
-                      borderRadius: 3, whiteSpace: 'nowrap', flexShrink: 0,
-                    }}>
-                      {agentDisplayName(step.agent_name)}
+                      {'⠿'}
                     </span>
-                  )}
 
-                  {/* Remove step */}
-                  <button
-                    aria-label={`Remove step ${si + 1}: ${step.task_description.slice(0, 40)}`}
-                    onClick={() => removeStep(pi, si)}
-                    style={{ background: 'none', border: 'none', color: T.text3, fontSize: 10, cursor: 'pointer', padding: '0 2px', flexShrink: 0 }}
-                    title="Remove step"
-                  >
-                    {'\u00d7'}
-                  </button>
-                </div>
+                    {/* Reorder buttons (keyboard fallback) */}
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 1, flexShrink: 0 }}>
+                      <button
+                        aria-label={`Move step ${si + 1} up`}
+                        onClick={() => moveStep(pi, si, -1)}
+                        disabled={si === 0}
+                        style={{
+                          background: 'none', border: 'none',
+                          color: si === 0 ? T.bg3 : T.text3,
+                          fontSize: 10, cursor: si === 0 ? 'default' : 'pointer',
+                          padding: 0, lineHeight: 1, minWidth: 22, minHeight: 22,
+                          display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        }}
+                      >{'\u25b2'}</button>
+                      <button
+                        aria-label={`Move step ${si + 1} down`}
+                        onClick={() => moveStep(pi, si, 1)}
+                        disabled={si === phase.steps.length - 1}
+                        style={{
+                          background: 'none', border: 'none',
+                          color: si === phase.steps.length - 1 ? T.bg3 : T.text3,
+                          fontSize: 10, cursor: si === phase.steps.length - 1 ? 'default' : 'pointer',
+                          padding: 0, lineHeight: 1, minWidth: 22, minHeight: 22,
+                          display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        }}
+                      >{'\u25bc'}</button>
+                    </div>
+
+                    {/* Step ID */}
+                    <span style={{
+                      fontFamily: FONTS.mono, fontSize: 11, color: T.text2,
+                      flexShrink: 0, paddingTop: 3,
+                    }}>
+                      {step.step_id}
+                    </span>
+
+                    {/* Step content */}
+                    <div style={{ flex: 1 }}>
+                      {editingStep === step.step_id ? (
+                        <input
+                          autoFocus
+                          value={step.task_description}
+                          onChange={e => updateStep(pi, si, s => ({ ...s, task_description: e.target.value }))}
+                          onBlur={() => setEditingStep(null)}
+                          onKeyDown={e => e.key === 'Enter' && setEditingStep(null)}
+                          style={{
+                            width: '100%', padding: '4px 8px', borderRadius: 6,
+                            border: `2px solid ${T.cherry}`, background: T.bg3,
+                            color: T.text0, fontSize: 13, fontWeight: 600,
+                            outline: 'none', fontFamily: FONTS.body,
+                          }}
+                        />
+                      ) : (
+                        <div
+                          onClick={() => setEditingStep(step.step_id)}
+                          style={{
+                            fontSize: 13, color: T.text0, fontWeight: 600,
+                            cursor: 'text', minHeight: 18, fontFamily: FONTS.body,
+                          }}
+                          title="Click to edit"
+                        >
+                          {step.task_description || (
+                            <span style={{ color: T.text3, fontStyle: 'italic' }}>Click to add description</span>
+                          )}
+                        </div>
+                      )}
+                      {/* Dependency hint */}
+                      {step.depends_on && step.depends_on.length > 0 && (
+                        <div style={{
+                          fontFamily: FONTS.hand, fontSize: 14, color: T.text2,
+                          transform: 'rotate(-0.5deg)', display: 'inline-block', marginTop: 2,
+                        }}>
+                          after {step.depends_on.join(', ')}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Agent chip — dropdown when editing, badge when not */}
+                    {editingStep === step.step_id ? (
+                      <select
+                        value={step.agent_name}
+                        onChange={e => updateStep(pi, si, s => ({ ...s, agent_name: e.target.value }))}
+                        onClick={e => e.stopPropagation()}
+                        style={{
+                          fontSize: 11,
+                          color: aColor,
+                          background: T.bg3,
+                          border: `2px solid ${T.border}`,
+                          borderRadius: 6,
+                          padding: '3px 6px',
+                          outline: 'none',
+                          flexShrink: 0,
+                          cursor: 'pointer',
+                          fontFamily: FONTS.body,
+                          fontWeight: 700,
+                        }}
+                      >
+                        {AGENT_LIST.map(a => (
+                          <option key={a} value={a} title={AGENT_DESCRIPTIONS[a] || ''}>{agentDisplayName(a)}</option>
+                        ))}
+                        {/* Preserve current value if it's not in the standard list */}
+                        {!AGENT_LIST.includes(step.agent_name as typeof AGENT_LIST[number]) && (
+                          <option value={step.agent_name} title={AGENT_DESCRIPTIONS[step.agent_name] || ''}>{agentDisplayName(step.agent_name)}</option>
+                        )}
+                      </select>
+                    ) : (
+                      <span style={{
+                        fontSize: 11, color: aColor,
+                        background: T.bg2,
+                        border: `1.5px solid ${T.border}`,
+                        padding: '3px 8px',
+                        borderRadius: 999, whiteSpace: 'nowrap', flexShrink: 0,
+                        fontFamily: FONTS.body, fontWeight: 800,
+                        boxShadow: SHADOWS.sm,
+                      }}>
+                        {agentDisplayName(step.agent_name)}
+                      </span>
+                    )}
+
+                    {/* Remove step */}
+                    <button
+                      aria-label={`Remove step ${si + 1}: ${step.task_description.slice(0, 40)}`}
+                      onClick={() => removeStep(pi, si)}
+                      style={{
+                        background: 'none', border: `1px solid ${T.borderSoft}`,
+                        color: T.text3, fontSize: 12, cursor: 'pointer',
+                        padding: '1px 6px', flexShrink: 0, borderRadius: 4,
+                        fontFamily: FONTS.body,
+                      }}
+                      title="Remove step"
+                    >
+                      {'\u00d7'}
+                    </button>
+                  </div>
                 );
               })}
 
-              {/* CJ-12: empty phase placeholder */}
+              {/* Empty phase placeholder */}
               {phase.steps.length === 0 && (
-                <div style={{ padding: '8px 12px', fontSize: 9, color: T.text3, fontStyle: 'italic' }}>
-                  No steps. Add a step or remove this phase.
+                <div style={{
+                  padding: '10px 14px', fontSize: 12, color: T.text3,
+                  fontStyle: 'italic', fontFamily: FONTS.hand,
+                }}>
+                  No steps yet. Add a step or remove this course.
                 </div>
               )}
 
               {/* Add step button */}
-              <div style={{ padding: '4px 10px' }}>
+              <div style={{ padding: '6px 14px' }}>
                 <button
                   onClick={() => addStep(pi)}
                   style={{
-                    padding: '2px 8px', borderRadius: 3,
-                    border: `1px dashed ${T.border}`, background: 'transparent',
-                    color: T.text3, fontSize: 9, cursor: 'pointer',
+                    padding: '4px 12px', borderRadius: 6,
+                    border: `2px dashed ${T.border}`, background: 'transparent',
+                    color: T.text2, fontSize: 12, fontWeight: 700,
+                    cursor: 'pointer', fontFamily: FONTS.body,
                   }}
                 >
                   + Add step
                 </button>
               </div>
+
+              {/* Gate footer */}
+              {phase.gate && (
+                <div style={{
+                  background: T.cherrySoft,
+                  borderTop: `1.5px dashed ${T.border}`,
+                  padding: '8px 14px',
+                }}>
+                  <div style={{
+                    fontFamily: FONTS.hand, fontSize: 17, color: T.text0,
+                    transform: 'rotate(-0.7deg)', display: 'inline-block',
+                  }}>
+                    "{phase.gate.description}"
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         );
       })}
+
+      {/* Add phase button */}
       <button
         onClick={addPhase}
         style={{
-          padding: '4px 12px',
-          borderRadius: 4,
-          border: `1px dashed ${T.border}`,
+          padding: '8px 16px',
+          borderRadius: 10,
+          border: `2px dashed ${T.border}`,
           background: 'transparent',
-          color: T.text3,
-          fontSize: 9,
+          color: T.text2,
+          fontSize: 13,
+          fontWeight: 700,
           cursor: 'pointer',
           width: '100%',
+          fontFamily: FONTS.body,
         }}
       >
-        + Add Phase
+        + Add Course
       </button>
+
+      {/* Action bar — sticky bottom */}
+      {(onApprove || onStartRegenerate) && (
+        <div style={{
+          position: 'sticky', bottom: 0,
+          background: T.bg1,
+          border: `3px solid ${T.border}`,
+          borderRadius: 14,
+          boxShadow: SHADOWS.lg,
+          padding: '12px 18px',
+          display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap',
+        }}>
+          <div style={{
+            fontFamily: FONTS.hand, fontSize: 20, color: T.mintDark,
+            transform: 'rotate(-1deg)', display: 'inline-block', flex: 1,
+          }}>
+            looks good? fire it →
+          </div>
+          {onStartRegenerate && (
+            <button
+              onClick={onStartRegenerate}
+              disabled={regenLoading}
+              style={{
+                padding: '10px 18px', borderRadius: 10,
+                border: `2px solid ${T.border}`,
+                background: T.butter, color: T.ink,
+                fontSize: 13, fontWeight: 800,
+                cursor: regenLoading ? 'not-allowed' : 'pointer',
+                opacity: regenLoading ? 0.6 : 1,
+                fontFamily: FONTS.body, boxShadow: SHADOWS.sm,
+              }}
+            >
+              {regenLoading ? 'Loading...' : 'Ask me some questions'}
+            </button>
+          )}
+          {onApprove && (
+            <button
+              onClick={onApprove}
+              disabled={saving}
+              style={{
+                padding: '10px 22px', borderRadius: 10,
+                border: `3px solid ${T.border}`,
+                background: saving ? T.bg3 : T.cherry, color: saving ? T.text3 : T.cream,
+                fontSize: 13, fontWeight: 800,
+                cursor: saving ? 'not-allowed' : 'pointer',
+                opacity: saving ? 0.6 : 1,
+                fontFamily: FONTS.body,
+                boxShadow: saving ? 'none' : SHADOWS.md,
+              }}
+            >
+              {saving ? 'Queuing\u2026' : 'Approve & fire the pass'}
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
-function Stat({ label, value, color }: { label: string; value: string; color?: string }) {
+function StatChip({ label, value, valueColor }: { label: string; value: string; valueColor?: string }) {
   return (
-    <div style={{ padding: '4px 8px', background: T.bg2, borderRadius: 4 }}>
-      <div style={{ fontSize: 9, color: T.text3, textTransform: 'uppercase' }}>{label}</div>
-      <div style={{ fontSize: FONT_SIZES.md, fontWeight: 700, color: color ?? T.text0, fontFamily: 'monospace' }}>{value}</div>
+    <div style={{
+      padding: '10px 12px',
+      background: T.bg1,
+      borderRadius: 10,
+      border: `2px solid ${T.border}`,
+      boxShadow: SHADOWS.sm,
+    }}>
+      <div style={{
+        fontFamily: FONTS.body, fontWeight: 800, fontSize: 10,
+        textTransform: 'uppercase', letterSpacing: '0.06em', color: T.text2,
+        marginBottom: 2,
+      }}>
+        {label}
+      </div>
+      <div style={{
+        fontFamily: FONTS.display, fontWeight: 900, fontSize: 22,
+        color: valueColor ?? T.text0,
+      }}>
+        {value}
+      </div>
     </div>
   );
 }

@@ -20,6 +20,10 @@ logger = logging.getLogger(__name__)
 # Delivery thresholds
 _DOC_TOKEN_CAP_DEFAULT = 8_000
 _STEP_TOKEN_BUDGET_DEFAULT = 32_000
+# Default on-disk size limit for inline delivery (bytes).  Documents whose
+# source file exceeds this size are forced to reference delivery, regardless
+# of their token estimate.  User-explicit attachments (Layer 1) are exempt.
+_INLINE_BYTE_THRESHOLD_DEFAULT = 2_048
 
 # Priority ordering: higher index = lower priority
 _PRIORITY_ORDER = {"high": 0, "normal": 1, "low": 2}
@@ -85,7 +89,8 @@ class KnowledgeResolver:
     Runs a 4-layer pipeline — explicit, agent-declared, planner-matched (strict),
     planner-matched (relevance fallback) — with deduplication across layers.
     Produces KnowledgeAttachment objects with inline/reference delivery decisions
-    governed by a per-step token budget and per-doc token cap.
+    governed by a per-step token budget, per-doc token cap, and an on-disk byte
+    size threshold.
 
     Args:
         registry: Loaded KnowledgeRegistry to resolve packs and documents from.
@@ -98,6 +103,14 @@ class KnowledgeResolver:
         doc_token_cap: Maximum token size for a document to be eligible for
             inline delivery. Documents larger than this are always referenced.
             Defaults to 8,000.
+        inline_byte_threshold: Maximum on-disk file size (bytes) for inline
+            delivery. Documents whose source file exceeds this size are forced to
+            reference delivery regardless of token estimate.  Defaults to 2,048.
+            User-explicit attachments (source="explicit", Layer 1) are exempt
+            from this threshold so that ``--knowledge`` / ``--knowledge-pack``
+            flags always inline regardless of document size.
+            Pass ``2**30`` (or any very large value) to restore the old
+            behaviour of inlining everything regardless of size.
     """
 
     def __init__(
@@ -108,12 +121,14 @@ class KnowledgeResolver:
         rag_available: bool = False,
         step_token_budget: int = _STEP_TOKEN_BUDGET_DEFAULT,
         doc_token_cap: int = _DOC_TOKEN_CAP_DEFAULT,
+        inline_byte_threshold: int = _INLINE_BYTE_THRESHOLD_DEFAULT,
     ) -> None:
         self._registry = registry
         self._agent_registry = agent_registry
         self._rag_available = rag_available
         self._step_token_budget = step_token_budget
         self._doc_token_cap = doc_token_cap
+        self._inline_byte_threshold = inline_byte_threshold
 
     # ------------------------------------------------------------------
     # Public API
@@ -423,6 +438,29 @@ class KnowledgeResolver:
                 grounding=grounding,
                 token_estimate=estimate,
             ), remaining_budget
+
+        # Byte-size threshold check (skipped for explicit/user-forced attachments).
+        # We check on-disk file size first — it's a cheap stat() call and catches
+        # large docs before the token-budget accounting even runs.
+        if source != "explicit" and self._inline_byte_threshold < 2 ** 30:
+            _file_size: int | None = None
+            if doc.source_path is not None:
+                try:
+                    _file_size = doc.source_path.stat().st_size
+                except OSError:
+                    pass
+            if _file_size is not None and _file_size > self._inline_byte_threshold:
+                retrieval = "mcp-rag" if self._rag_available else "file"
+                return KnowledgeAttachment(
+                    source=source,
+                    pack_name=pack_name,
+                    document_name=doc.name,
+                    path=_doc_path(doc),
+                    delivery="reference",
+                    retrieval=retrieval,
+                    grounding=grounding,
+                    token_estimate=estimate,
+                ), remaining_budget
 
         if estimate <= 0 or estimate > self._doc_token_cap:
             delivery = "reference"

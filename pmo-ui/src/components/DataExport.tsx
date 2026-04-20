@@ -1,6 +1,6 @@
 import { useState, useCallback } from 'react';
 import type { PmoCard, ProgramHealth } from '../api/types';
-import { T, FONT_SIZES } from '../styles/tokens';
+import { T, FONTS, SHADOWS } from '../styles/tokens';
 import { useToast } from '../contexts/ToastContext';
 
 // ---------------------------------------------------------------------------
@@ -69,15 +69,16 @@ export function DataExport({ cards, health, filteredCards, onClose }: Props) {
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'center',
-      background: 'rgba(0,0,0,0.6)',
+      background: 'rgba(42,26,16,.6)',
     }} onClick={onClose}>
       <div
         onClick={(e) => e.stopPropagation()}
         style={{
-          width: 400,
+          width: 480,
           background: T.bg1,
-          border: `1px solid ${T.border}`,
-          borderRadius: 8,
+          border: `3px solid ${T.border}`,
+          borderRadius: 18,
+          boxShadow: SHADOWS.lg,
           overflow: 'hidden',
         }}
       >
@@ -85,28 +86,62 @@ export function DataExport({ cards, health, filteredCards, onClose }: Props) {
         <div style={{
           display: 'flex',
           alignItems: 'center',
-          justifyContent: 'space-between',
-          padding: '10px 16px',
-          borderBottom: `1px solid ${T.border}`,
+          padding: '16px 20px',
+          borderBottom: `3px solid ${T.border}`,
+          background: T.crust,
+          position: 'relative',
         }}>
-          <h2 style={{ fontSize: FONT_SIZES.lg, fontWeight: 700, color: T.text0, margin: 0 }}>
-            Export Data
-          </h2>
+          <span style={{ fontSize: 40, marginRight: 12, lineHeight: 1 }}>🥡</span>
+          <div style={{ flex: 1 }}>
+            <div style={{
+              fontFamily: FONTS.display,
+              fontWeight: 900,
+              fontSize: 26,
+              color: T.ink,
+              lineHeight: 1.1,
+            }}>
+              Takeout
+            </div>
+            <div style={{
+              fontFamily: FONTS.hand,
+              fontSize: 18,
+              color: T.inkSoft,
+              transform: 'rotate(-1.5deg)',
+              display: 'inline-block',
+              marginTop: 2,
+            }}>
+              wrap it up to go
+            </div>
+          </div>
           <button
             onClick={onClose}
             aria-label="Close export dialog"
-            style={{ background: 'none', border: 'none', color: T.text3, fontSize: 16, cursor: 'pointer' }}
+            style={{
+              position: 'absolute',
+              top: 12,
+              right: 14,
+              background: 'none',
+              border: `1.5px solid ${T.border}`,
+              borderRadius: 6,
+              color: T.ink,
+              fontSize: 16,
+              cursor: 'pointer',
+              lineHeight: 1,
+              padding: '2px 7px',
+            }}
           >
-            \u2715
+            ✕
           </button>
         </div>
 
-        <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 14 }}>
+        {/* Body */}
+        <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 16 }}>
+
           {/* Format selection */}
           <FieldGroup label="Format">
-            <div style={{ display: 'flex', gap: 6 }}>
+            <div style={{ display: 'flex', gap: 8 }}>
               {(['csv', 'json', 'markdown'] as ExportFormat[]).map((f) => (
-                <ToggleButton
+                <FormatButton
                   key={f}
                   active={format === f}
                   onClick={() => setFormat(f)}
@@ -119,13 +154,13 @@ export function DataExport({ cards, health, filteredCards, onClose }: Props) {
           {/* Scope selection */}
           {filteredCards && filteredCards.length !== cards.length && (
             <FieldGroup label="Scope">
-              <div style={{ display: 'flex', gap: 6 }}>
-                <ToggleButton
+              <div style={{ display: 'flex', gap: 8 }}>
+                <ScopeButton
                   active={scope === 'all'}
                   onClick={() => setScope('all')}
                   label={`All (${cards.length})`}
                 />
-                <ToggleButton
+                <ScopeButton
                   active={scope === 'filtered'}
                   onClick={() => setScope('filtered')}
                   label={`Filtered (${filteredCards.length})`}
@@ -135,29 +170,58 @@ export function DataExport({ cards, health, filteredCards, onClose }: Props) {
           )}
 
           {/* Include health toggle */}
-          <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
-            <input
-              type="checkbox"
-              checked={includeHealth}
-              onChange={(e) => setIncludeHealth(e.target.checked)}
-              style={{ accentColor: T.accent }}
-            />
-            <span style={{ fontSize: FONT_SIZES.sm, color: T.text1 }}>Include program health data</span>
-          </label>
+          <div style={{
+            background: T.bg3,
+            border: `1.5px dashed ${T.border}`,
+            borderRadius: 10,
+            padding: '10px 12px',
+          }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={includeHealth}
+                onChange={(e) => setIncludeHealth(e.target.checked)}
+                style={{ accentColor: T.cherry, width: 15, height: 15 }}
+              />
+              <div>
+                <div style={{
+                  fontFamily: FONTS.body,
+                  fontWeight: 700,
+                  fontSize: 13,
+                  color: T.text0,
+                }}>
+                  Include program health data
+                </div>
+                <div style={{
+                  fontFamily: FONTS.hand,
+                  fontSize: 13,
+                  color: T.text2,
+                  marginTop: 1,
+                }}>
+                  makes a bigger bag
+                </div>
+              </div>
+            </label>
+          </div>
 
           {/* Preview */}
           <div style={{
-            padding: 8,
-            borderRadius: 4,
-            background: T.bg2,
-            border: `1px solid ${T.border}`,
-            fontSize: FONT_SIZES.xs,
-            color: T.text3,
+            background: T.ink,
+            color: T.mintSoft,
+            borderRadius: 10,
+            padding: '10px 12px',
+            fontFamily: FONTS.mono,
+            fontSize: 11,
+            lineHeight: 1.6,
           }}>
-            {targetCards.length} cards
-            {includeHealth ? ` + ${Object.keys(health).length} programs` : ''}
-            {' \u2192 '}
-            {format === 'csv' ? '.csv spreadsheet' : format === 'json' ? '.json structured data' : '.md report'}
+            <span style={{ color: T.butter }}>$ pec export</span>
+            <span style={{ color: T.mintSoft }}>
+              {' '}--format {format}
+              {scope === 'filtered' && filteredCards ? ` --scope filtered` : ''}
+              {includeHealth ? ' --include-health' : ''}
+              {` # ${targetCards.length} card${targetCards.length !== 1 ? 's' : ''}`}
+              {includeHealth ? ` + ${Object.keys(health).length} programs` : ''}
+            </span>
           </div>
         </div>
 
@@ -166,18 +230,21 @@ export function DataExport({ cards, health, filteredCards, onClose }: Props) {
           display: 'flex',
           justifyContent: 'flex-end',
           gap: 8,
-          padding: '8px 16px',
-          borderTop: `1px solid ${T.border}`,
+          padding: '12px 16px',
+          borderTop: `2px solid ${T.border}`,
+          background: T.bg3,
         }}>
           <button
             onClick={onClose}
             style={{
-              padding: '5px 14px',
-              borderRadius: 4,
-              border: `1px solid ${T.border}`,
-              background: T.bg3,
+              padding: '6px 16px',
+              borderRadius: 10,
+              border: `2px dashed ${T.borderSoft}`,
+              background: 'none',
               color: T.text1,
-              fontSize: FONT_SIZES.sm,
+              fontFamily: FONTS.body,
+              fontWeight: 800,
+              fontSize: 13,
               cursor: 'pointer',
             }}
           >
@@ -186,17 +253,19 @@ export function DataExport({ cards, health, filteredCards, onClose }: Props) {
           <button
             onClick={handleExport}
             style={{
-              padding: '5px 14px',
-              borderRadius: 4,
-              border: 'none',
-              background: T.accent,
-              color: '#fff',
-              fontSize: FONT_SIZES.sm,
-              fontWeight: 600,
+              padding: '6px 16px',
+              borderRadius: 10,
+              border: `2px solid ${T.border}`,
+              background: T.cherry,
+              color: T.cream,
+              fontFamily: FONTS.body,
+              fontWeight: 800,
+              fontSize: 13,
               cursor: 'pointer',
+              boxShadow: SHADOWS.sm,
             }}
           >
-            Export
+            Pack it up →
           </button>
         </div>
       </div>
@@ -211,28 +280,72 @@ export function DataExport({ cards, health, filteredCards, onClose }: Props) {
 function FieldGroup({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div>
-      <div style={{ fontSize: FONT_SIZES.xs, color: T.text3, marginBottom: 4, fontWeight: 600 }}>{label}</div>
+      <div style={{
+        fontFamily: FONTS.body,
+        fontWeight: 800,
+        textTransform: 'uppercase',
+        fontSize: 11,
+        letterSpacing: '.08em',
+        color: T.text1,
+        marginBottom: 8,
+      }}>
+        {label}
+      </div>
       {children}
     </div>
   );
 }
 
-function ToggleButton({ active, onClick, label }: { active: boolean; onClick: () => void; label: string }) {
+function FormatButton({ active, onClick, label }: { active: boolean; onClick: () => void; label: string }) {
   return (
     <button
       onClick={onClick}
       style={{
-        padding: '4px 12px',
-        borderRadius: 4,
-        border: `1px solid ${active ? T.accent : T.border}`,
-        background: active ? T.accent + '20' : T.bg3,
-        color: active ? T.accent : T.text2,
-        fontSize: FONT_SIZES.sm,
-        fontWeight: active ? 600 : 400,
+        padding: '10px 14px',
+        borderRadius: 10,
+        border: `2px solid ${T.border}`,
+        background: active ? T.mintSoft : T.bg3,
+        boxShadow: active ? SHADOWS.sm : 'none',
+        transform: active ? 'translate(-1px, -1px)' : 'none',
         cursor: 'pointer',
+        transition: 'all 0.1s',
       }}
     >
-      {label}
+      <span style={{
+        fontFamily: FONTS.display,
+        fontWeight: 900,
+        fontSize: 16,
+        color: T.text0,
+      }}>
+        {label}
+      </span>
+    </button>
+  );
+}
+
+function ScopeButton({ active, onClick, label }: { active: boolean; onClick: () => void; label: string }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        padding: '6px 12px',
+        borderRadius: 10,
+        border: `2px solid ${T.border}`,
+        background: active ? T.mintSoft : T.bg3,
+        boxShadow: active ? SHADOWS.sm : 'none',
+        transform: active ? 'translate(-1px, -1px)' : 'none',
+        cursor: 'pointer',
+        transition: 'all 0.1s',
+      }}
+    >
+      <span style={{
+        fontFamily: FONTS.display,
+        fontWeight: 900,
+        fontSize: 13,
+        color: T.text0,
+      }}>
+        {label}
+      </span>
     </button>
   );
 }

@@ -2,14 +2,13 @@ import { useState, useEffect, useLayoutEffect } from 'react';
 import { KanbanCard } from './KanbanCard';
 import { HealthBar } from './HealthBar';
 import { SignalsBar } from './SignalsBar';
-import { InteractionQueue } from './InteractionQueue';
 import { AnalyticsDashboard } from './AnalyticsDashboard';
 import { DataExport } from './DataExport';
 import { ExternalItemsPanel } from './ExternalItemsPanel';
 import { usePmoBoard } from '../hooks/usePmoBoard';
 import type { ConnectionMode } from '../hooks/usePmoBoard';
 import { usePersistedState } from '../hooks/usePersistedState';
-import { T, COLUMNS, SR_ONLY } from '../styles/tokens';
+import { T, COLUMNS, SR_ONLY, FONTS, SHADOWS } from '../styles/tokens';
 import { api } from '../api/client';
 import type { PmoCard, PmoSignal } from '../api/types';
 
@@ -19,13 +18,11 @@ interface KanbanBoardProps {
   onCardForge: (card: PmoCard) => void;
   showSignals: boolean;
   onToggleSignals: () => void;
-  showInteractions: boolean;
-  onToggleInteractions: () => void;
   /** Called once on mount with the board's refresh function so parent can trigger it. */
   onRefreshReady?: (refresh: () => void) => void;
 }
 
-export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSignals, onToggleSignals, showInteractions, onToggleInteractions, onRefreshReady }: KanbanBoardProps) {
+export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSignals, onToggleSignals, onRefreshReady }: KanbanBoardProps) {
   const { cards, health, loading, error, lastUpdated, connectionMode, mutateCard, refresh } = usePmoBoard();
 
   // Register the refresh callback with the parent once on mount.
@@ -120,7 +117,7 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
   }
 
   return (
-    <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', background: T.bg0, fontFamily: FONTS.body }}>
       <HealthBar
         health={health}
         activeProgram={filter === 'all' ? null : filter}
@@ -132,13 +129,13 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
         display: 'flex',
         alignItems: 'center',
         gap: 6,
-        padding: '6px 14px',
-        borderBottom: `1px solid ${T.border}`,
+        padding: '8px 14px',
+        borderBottom: `2px solid ${T.border}`,
         background: T.bg1,
         flexShrink: 0,
       }}>
         {/* Program filters */}
-        <div style={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
           <FilterBtn
             active={filter === 'all'}
             color={T.accent}
@@ -165,14 +162,15 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
           placeholder="Search cards..."
           aria-label="Search cards"
           style={{
-            fontSize: 9,
-            padding: '3px 8px',
-            borderRadius: 3,
-            border: `1px solid ${T.border}`,
-            background: T.bg1,
+            fontSize: 11,
+            padding: '4px 10px',
+            borderRadius: 8,
+            border: `2px solid ${T.border}`,
+            background: T.bg3,
             color: T.text0,
             outline: 'none',
             width: 140,
+            fontFamily: FONTS.body,
           }}
         />
 
@@ -181,12 +179,13 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
           onChange={e => setSortBy(e.target.value)}
           aria-label="Sort cards"
           style={{
-            fontSize: 9,
-            padding: '3px 6px',
-            borderRadius: 3,
-            border: `1px solid ${T.border}`,
-            background: T.bg1,
+            fontSize: 11,
+            padding: '4px 6px',
+            borderRadius: 8,
+            border: `2px solid ${T.border}`,
+            background: T.bg3,
             color: T.text0,
+            fontFamily: FONTS.body,
           }}
         >
           <option value="priority">Priority</option>
@@ -204,17 +203,19 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
           aria-expanded={showAdvancedFilters}
           aria-controls="advanced-filter-bar"
           style={{
-            padding: '2px 7px',
-            borderRadius: 3,
-            border: `1px solid ${(showAdvancedFilters || hasAdvancedFilters) ? T.accent + '66' : T.border}`,
-            background: (showAdvancedFilters || hasAdvancedFilters) ? T.accent + '15' : 'transparent',
-            color: (showAdvancedFilters || hasAdvancedFilters) ? T.accent : T.text3,
-            fontSize: 9,
-            fontWeight: 600,
+            padding: '3px 10px',
+            borderRadius: 999,
+            border: `1.5px solid ${T.border}`,
+            background: (showAdvancedFilters || hasAdvancedFilters) ? T.butter : 'transparent',
+            color: T.text0,
+            fontSize: 11,
+            fontWeight: 800,
             cursor: 'pointer',
             display: 'flex',
             alignItems: 'center',
             gap: 4,
+            fontFamily: FONTS.body,
+            boxShadow: SHADOWS.sm,
           }}
         >
           Filters
@@ -225,11 +226,11 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
                 display: 'inline-flex',
                 alignItems: 'center',
                 justifyContent: 'center',
-                minWidth: 14,
-                height: 14,
-                borderRadius: 7,
-                background: T.accent,
-                color: '#fff',
+                minWidth: 16,
+                height: 16,
+                borderRadius: 8,
+                background: T.cherry,
+                color: T.cream,
                 fontSize: 9,
                 fontWeight: 700,
                 padding: '0 3px',
@@ -248,17 +249,19 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
             onClick={onToggleSignals}
             aria-pressed={showSignals}
             style={{
-              padding: '2px 7px',
-              borderRadius: 3,
-              border: `1px solid ${showSignals ? T.red + '66' : T.border}`,
-              background: showSignals ? T.red + '15' : 'transparent',
-              color: showSignals ? T.red : T.text3,
-              fontSize: 9,
-              fontWeight: 600,
+              padding: '3px 10px',
+              borderRadius: 999,
+              border: `1.5px solid ${T.border}`,
+              background: showSignals ? T.cherry : 'transparent',
+              color: showSignals ? T.cream : T.text0,
+              fontSize: 11,
+              fontWeight: 800,
               cursor: 'pointer',
               display: 'flex',
               alignItems: 'center',
               gap: 4,
+              fontFamily: FONTS.body,
+              boxShadow: SHADOWS.sm,
             }}
           >
             Signals
@@ -269,14 +272,15 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
                   display: 'inline-flex',
                   alignItems: 'center',
                   justifyContent: 'center',
-                  minWidth: 14,
-                  height: 14,
-                  borderRadius: 7,
-                  background: T.red,
-                  color: '#fff',
+                  minWidth: 16,
+                  height: 16,
+                  borderRadius: 8,
+                  background: T.cherry,
+                  color: T.cream,
                   fontSize: 9,
                   fontWeight: 700,
                   padding: '0 3px',
+                  border: `1px solid ${T.border}`,
                 }}
               >
                 {openSignalCount}
@@ -292,14 +296,15 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
         <button
           onClick={() => setShowAnalytics(true)}
           style={{
-            padding: '2px 7px',
-            borderRadius: 3,
-            border: `1px solid ${T.border}`,
+            padding: '3px 10px',
+            borderRadius: 10,
+            border: `2px dashed ${T.border}`,
             background: 'transparent',
-            color: T.text3,
-            fontSize: 9,
-            fontWeight: 600,
+            color: T.text1,
+            fontSize: 11,
+            fontWeight: 800,
             cursor: 'pointer',
+            fontFamily: FONTS.body,
           }}
         >
           Analytics
@@ -307,14 +312,15 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
         <button
           onClick={() => setShowExport(true)}
           style={{
-            padding: '2px 7px',
-            borderRadius: 3,
-            border: `1px solid ${T.border}`,
+            padding: '3px 10px',
+            borderRadius: 10,
+            border: `2px dashed ${T.border}`,
             background: 'transparent',
-            color: T.text3,
-            fontSize: 9,
-            fontWeight: 600,
+            color: T.text1,
+            fontSize: 11,
+            fontWeight: 800,
             cursor: 'pointer',
+            fontFamily: FONTS.body,
           }}
         >
           Export
@@ -322,14 +328,15 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
         <button
           onClick={() => setShowExternalItems(true)}
           style={{
-            padding: '2px 7px',
-            borderRadius: 3,
-            border: `1px solid ${T.border}`,
+            padding: '3px 10px',
+            borderRadius: 10,
+            border: `2px dashed ${T.border}`,
             background: 'transparent',
-            color: T.text3,
-            fontSize: 9,
-            fontWeight: 600,
+            color: T.text1,
+            fontSize: 11,
+            fontWeight: 800,
             cursor: 'pointer',
+            fontFamily: FONTS.body,
           }}
           title="View linked ADO, GitHub, Jira, and Linear items"
         >
@@ -339,7 +346,7 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
         <div style={{ flex: 1 }} />
 
         {/* Status indicators */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 9 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11, fontFamily: FONTS.body }}>
           {awaitingHuman > 0 && (
             <div
               role="status"
@@ -348,33 +355,49 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
                 display: 'flex',
                 alignItems: 'center',
                 gap: 3,
-                padding: '2px 6px',
-                borderRadius: 3,
-                background: T.orange + '15',
-                border: `1px solid ${T.orange}33`,
+                padding: '2px 8px',
+                borderRadius: 999,
+                background: T.tangerineSoft,
+                border: `1.5px solid ${T.border}`,
+                boxShadow: SHADOWS.sm,
               }}
             >
               <div
                 aria-hidden="true"
                 style={{
-                  width: 5,
-                  height: 5,
+                  width: 6,
+                  height: 6,
                   borderRadius: '50%',
-                  background: T.orange,
+                  background: T.tangerine,
                   animation: 'pulse 1.5s infinite',
                 }}
               />
-              <span aria-hidden="true" style={{ color: T.orange, fontWeight: 600 }}>{awaitingHuman} awaiting</span>
+              <span aria-hidden="true" style={{ color: T.text0, fontWeight: 700, fontSize: 11 }}>{awaitingHuman} awaiting</span>
             </div>
           )}
-          <span style={{ color: T.text3 }}>
-            {executing > 0 && `${executing} executing · `}
+          {executing > 0 && (
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 3,
+                padding: '2px 8px',
+                borderRadius: 999,
+                background: T.butterSoft,
+                border: `1.5px solid ${T.border}`,
+                boxShadow: SHADOWS.sm,
+              }}
+            >
+              <span style={{ color: T.text0, fontWeight: 700, fontSize: 11 }}>{executing} baking</span>
+            </div>
+          )}
+          <span style={{ color: T.text2, fontSize: 11 }}>
             {filtered.length < cards.length
-              ? <><span style={{ color: T.accent, fontWeight: 600 }}>{filtered.length}</span>{` / ${cards.length} plans`}</>
+              ? <><span style={{ color: T.cherry, fontWeight: 700 }}>{filtered.length}</span>{` / ${cards.length} plans`}</>
               : `${cards.length} plans`}
           </span>
           {lastUpdated && (
-            <span style={{ color: T.text4, fontSize: 9 }}>
+            <span style={{ color: T.text4, fontSize: 10, fontFamily: FONTS.mono }}>
               {fmtTime(lastUpdated.toISOString())}
             </span>
           )}
@@ -382,7 +405,7 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
             role="status"
             aria-live="polite"
             aria-atomic="true"
-            style={{ color: T.text3, fontSize: 9 }}
+            style={{ color: T.text3, fontSize: 10, fontFamily: FONTS.mono }}
           >
             {loading ? 'Refreshing board data…' : ''}
           </span>
@@ -392,14 +415,16 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
         <button
           onClick={onNewPlan}
           style={{
-            padding: '3px 11px',
-            borderRadius: 3,
-            border: 'none',
-            background: `linear-gradient(135deg, ${T.accent}, #2563eb)`,
-            color: '#fff',
-            fontSize: 9,
-            fontWeight: 700,
+            padding: '5px 14px',
+            borderRadius: 10,
+            border: `2px solid ${T.border}`,
+            background: T.cherry,
+            color: T.cream,
+            fontSize: 12,
+            fontWeight: 800,
             cursor: 'pointer',
+            fontFamily: FONTS.body,
+            boxShadow: SHADOWS.sm,
           }}
         >
           + New Plan
@@ -442,11 +467,13 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
       <div role="alert" aria-live="assertive" aria-atomic="true">
         {error && (
           <div style={{
-            padding: '5px 14px',
-            background: T.red + '15',
-            borderBottom: `1px solid ${T.red}33`,
-            fontSize: 9,
-            color: T.red,
+            padding: '6px 14px',
+            background: T.cherrySoft,
+            borderBottom: `2px solid ${T.border}`,
+            fontSize: 11,
+            color: T.cherry,
+            fontFamily: FONTS.body,
+            fontWeight: 700,
           }}>
             {error} — retrying every {connectionMode === 'sse' ? '15' : '5'}s. Check that the backend is running (baton pmo serve).
           </div>
@@ -454,70 +481,104 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
       </div>
 
       {/* Kanban columns */}
-      <div style={{ flex: 1, display: 'flex', overflow: 'auto', padding: '10px 6px' }}>
-        {COLUMNS.map(col => {
+      <div style={{
+        flex: 1,
+        display: 'flex',
+        overflow: 'auto',
+        padding: '12px 8px',
+        backgroundImage: 'radial-gradient(#d4a15a 1.2px, transparent 1.4px)',
+        backgroundSize: '14px 14px',
+        backgroundColor: T.bg0,
+      }}>
+        {COLUMNS.map((col) => {
           const colCards = sorted.filter(c => c.column === col.id);
+          const isBlueberry = col.id === 'validating';
+          const headerTextColor = isBlueberry ? T.cream : T.ink;
+          const colEmoji = colStationEmoji(col.id);
           return (
             <section
               key={col.id}
               aria-labelledby={`col-${col.id}-heading`}
               style={{
                 flex: 1,
-                minWidth: 170,
-                maxWidth: 240,
+                minWidth: 175,
+                maxWidth: 245,
                 display: 'flex',
                 flexDirection: 'column',
-                margin: '0 3px',
+                margin: '0 4px',
+                background: T.bg1,
+                borderRadius: 8,
+                border: `1.5px solid ${T.borderSoft}`,
+                overflow: 'hidden',
               }}
             >
               {/* Column header */}
               <div style={{
-                padding: '5px 8px',
-                marginBottom: 5,
-                borderRadius: 4,
-                background: T.bg2,
-                borderBottom: `2px solid ${col.color}30`,
+                height: 52,
+                padding: '0 10px',
+                background: col.color,
+                borderBottom: `2px solid ${T.border}`,
                 flexShrink: 0,
+                display: 'flex',
+                flexDirection: 'column',
+                justifyContent: 'center',
+                gap: 2,
               }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                  <div aria-hidden="true" style={{ width: 6, height: 6, borderRadius: 2, background: col.color }} />
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span aria-hidden="true" style={{ fontSize: 16 }}>{colEmoji}</span>
                   <h2
                     id={`col-${col.id}-heading`}
-                    style={{ fontSize: 11, fontWeight: 700, color: T.text0, flex: 1, margin: 0 }}
+                    style={{
+                      fontSize: 18,
+                      fontWeight: 900,
+                      color: headerTextColor,
+                      flex: 1,
+                      margin: 0,
+                      fontFamily: FONTS.display,
+                      lineHeight: 1,
+                    }}
                   >
                     {col.label}
                   </h2>
                   <span style={{
-                    fontSize: 9,
+                    fontSize: 11,
                     fontWeight: 700,
-                    color: T.text3,
-                    background: T.bg3,
-                    padding: '1px 4px',
-                    borderRadius: 3,
+                    color: T.ink,
+                    background: T.creamSoft,
+                    padding: '1px 6px',
+                    borderRadius: 999,
+                    border: `1.5px solid ${T.border}`,
+                    fontFamily: FONTS.mono,
                   }}>
                     {colCards.length}
                   </span>
                 </div>
-                <div style={{ fontSize: 9, color: T.text3, marginTop: 1 }}>{col.desc}</div>
+                <div style={{
+                  fontSize: 13,
+                  color: headerTextColor,
+                  fontFamily: FONTS.hand,
+                  fontStyle: 'italic',
+                  transform: 'rotate(-0.5deg)',
+                  opacity: 0.85,
+                  lineHeight: 1,
+                }}>{col.desc}</div>
               </div>
 
               {/* Cards */}
-              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 4, overflowY: 'auto', paddingBottom: 16 }}>
+              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 4, overflowY: 'auto', padding: '8px 6px 16px' }}>
                 {colCards.map(card => (
                   <KanbanCard key={card.card_id} card={card} columnColor={col.color} onForge={onCardForge} onEditPlan={onCardForge} onMutateCard={mutateCard} />
                 ))}
                 {colCards.length === 0 && (
                   <div style={{
-                    padding: '14px 8px',
+                    padding: '20px 8px',
                     textAlign: 'center',
-                    fontSize: 9,
-                    color: T.text4,
-                    fontStyle: 'italic',
-                    border: `1px dashed ${T.border}`,
-                    borderRadius: 4,
+                    fontSize: 18,
+                    color: T.text2,
+                    fontFamily: FONTS.hand,
                     lineHeight: 1.4,
                   }}>
-                    {columnEmptyText(col.id)}
+                    nothin' cookin' 😴
                   </div>
                 )}
               </div>
@@ -540,14 +601,14 @@ export function KanbanBoard({ onNewPlan, onSignalToForge, onCardForge, showSigna
   );
 }
 
-function columnEmptyText(colId: string): string {
+function colStationEmoji(colId: string): string {
   switch (colId) {
-    case 'queued': return 'No plans ready to execute. Create one in The Forge.';
-    case 'executing': return 'No active executions.';
-    case 'awaiting_human': return 'No decisions required.';
-    case 'validating': return 'No plans under validation.';
-    case 'deployed': return 'No completed plans yet.';
-    default: return 'Empty';
+    case 'queued': return '🥟';
+    case 'executing': return '🔥';
+    case 'awaiting_human': return '🛎';
+    case 'validating': return '👅';
+    case 'deployed': return '🍽';
+    default: return '🍴';
   }
 }
 
@@ -566,14 +627,16 @@ function FilterBtn({
     <button
       onClick={onClick}
       style={{
-        padding: '2px 7px',
-        borderRadius: 3,
-        border: `1px solid ${active ? color + '66' : T.border}`,
-        background: active ? color + '15' : 'transparent',
-        color: active ? color : T.text3,
-        fontSize: 9,
-        fontWeight: 600,
+        padding: '3px 10px',
+        borderRadius: 999,
+        border: `1.5px solid ${T.border}`,
+        background: active ? color : 'transparent',
+        color: active ? T.cream : T.text0,
+        fontSize: 11,
+        fontWeight: 800,
         cursor: 'pointer',
+        fontFamily: FONTS.body,
+        boxShadow: active ? SHADOWS.sm : undefined,
       }}
     >
       {children}
@@ -585,8 +648,8 @@ function ConnectionIndicator({ mode }: { mode: ConnectionMode }) {
   const isLive = mode === 'sse';
   const isConnecting = mode === 'connecting';
 
-  const dotColor = isLive ? T.green : isConnecting ? T.yellow : T.text3;
-  const label = isLive ? 'Live' : isConnecting ? 'Connecting' : 'Reconnecting';
+  const dotColor = isLive ? T.mint : isConnecting ? T.butter : T.text3;
+  const label = isLive ? 'Live' : isConnecting ? 'Connecting' : 'Polling';
   const title = isLive
     ? 'Real-time updates via SSE'
     : isConnecting
@@ -602,25 +665,25 @@ function ConnectionIndicator({ mode }: { mode: ConnectionMode }) {
       style={{
         display: 'flex',
         alignItems: 'center',
-        gap: 3,
-        padding: '2px 5px',
-        borderRadius: 3,
-        border: `1px solid ${dotColor}33`,
-        background: dotColor + '10',
+        gap: 4,
+        padding: '2px 7px',
+        borderRadius: 999,
+        border: `1.5px solid ${T.border}`,
+        background: T.bg3,
       }}
     >
       <div
         aria-hidden="true"
         style={{
-          width: 5,
-          height: 5,
+          width: 6,
+          height: 6,
           borderRadius: '50%',
           background: dotColor,
           animation: isLive ? 'none' : isConnecting ? 'pulse 1.5s infinite' : 'none',
           flexShrink: 0,
         }}
       />
-      <span aria-hidden="true" style={{ fontSize: 9, color: dotColor, fontWeight: 600 }}>{label}</span>
+      <span aria-hidden="true" style={{ fontSize: 10, color: T.text1, fontWeight: 700, fontFamily: FONTS.mono }}>{label}</span>
     </div>
   );
 }
@@ -661,20 +724,22 @@ function AdvancedFilterBar({
   const hasAny = riskFilter !== 'all' || agentFilter !== '' || dateFrom !== '' || dateTo !== '';
 
   const inputStyle = {
-    fontSize: 9,
-    padding: '3px 6px',
-    borderRadius: 3,
-    border: `1px solid ${T.border}`,
-    background: T.bg1,
+    fontSize: 11,
+    padding: '4px 8px',
+    borderRadius: 8,
+    border: `2px solid ${T.border}`,
+    background: T.bg3,
     color: T.text0,
     outline: 'none',
+    fontFamily: FONTS.body,
   } as const;
 
   const labelStyle = {
-    fontSize: 9,
-    color: T.text3,
-    fontWeight: 600,
+    fontSize: 11,
+    color: T.text1,
+    fontWeight: 700,
     whiteSpace: 'nowrap' as const,
+    fontFamily: FONTS.body,
   };
 
   return (
@@ -687,9 +752,9 @@ function AdvancedFilterBar({
         alignItems: 'center',
         flexWrap: 'wrap',
         gap: 8,
-        padding: '6px 14px',
-        borderBottom: `1px solid ${T.border}`,
-        background: T.bg2,
+        padding: '8px 14px',
+        borderBottom: `2px solid ${T.border}`,
+        background: T.bg1,
         flexShrink: 0,
       }}
     >
@@ -774,7 +839,7 @@ function AdvancedFilterBar({
             onChange={e => onDateFromChange(e.target.value)}
             max={dateTo || undefined}
             aria-label="Created from date"
-            style={{ ...inputStyle, colorScheme: 'dark' }}
+            style={{ ...inputStyle, colorScheme: 'light' }}
           />
         </label>
         <label style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
@@ -785,7 +850,7 @@ function AdvancedFilterBar({
             onChange={e => onDateToChange(e.target.value)}
             min={dateFrom || undefined}
             aria-label="Created to date"
-            style={{ ...inputStyle, colorScheme: 'dark' }}
+            style={{ ...inputStyle, colorScheme: 'light' }}
           />
         </label>
       </fieldset>
@@ -798,14 +863,16 @@ function AdvancedFilterBar({
             onClick={onClear}
             aria-label="Clear all advanced filters"
             style={{
-              padding: '2px 7px',
-              borderRadius: 3,
-              border: `1px solid ${T.border}`,
+              padding: '3px 10px',
+              borderRadius: 999,
+              border: `1.5px solid ${T.border}`,
               background: 'transparent',
-              color: T.text3,
-              fontSize: 9,
-              fontWeight: 600,
+              color: T.text1,
+              fontSize: 11,
+              fontWeight: 800,
               cursor: 'pointer',
+              fontFamily: FONTS.body,
+              boxShadow: SHADOWS.sm,
             }}
           >
             Clear filters

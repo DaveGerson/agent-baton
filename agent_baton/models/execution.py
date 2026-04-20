@@ -792,7 +792,24 @@ class StepResult:
         outcome: Free-text summary of what the agent accomplished.
         files_changed: Filesystem paths created or modified.
         commit_hash: Git commit SHA for this step's work.
-        estimated_tokens: Estimated token consumption.
+        estimated_tokens: Estimated token consumption (real if session
+            data available; char/4 heuristic otherwise).
+        input_tokens: Sum of input_tokens across all assistant turns in
+            the session window for this step.  0 when real data is
+            unavailable (legacy or pre-session-scan steps).
+        cache_read_tokens: Sum of cache_read_input_tokens for this step.
+        cache_creation_tokens: Sum of cache_creation_input_tokens for
+            this step.
+        output_tokens: Sum of output_tokens for this step.
+        model_id: Exact model string (e.g. ``"claude-opus-4-7"``) from
+            the most common non-synthetic model observed in the session
+            window.  Empty when real data is unavailable.
+        session_id: Claude Code session UUID used to source the real
+            token counts.  Set at ``mark_dispatched`` time from
+            ``$CLAUDE_SESSION_ID``.  Empty when not available.
+        step_started_at: ISO 8601 timestamp set when the step is
+            dispatched.  Used as the lower bound when scanning the
+            session JSONL for this step's token data.
         duration_seconds: Wall-clock execution time.
         retries: Number of retry attempts.
         error: Error message if the step failed.
@@ -809,6 +826,15 @@ class StepResult:
     files_changed: list[str] = field(default_factory=list)
     commit_hash: str = ""
     estimated_tokens: int = 0
+    # Real per-step token fields (populated by session JSONL scanner).
+    # All default to 0/"" so existing states deserialize without error.
+    input_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
+    output_tokens: int = 0
+    model_id: str = ""
+    session_id: str = ""
+    step_started_at: str = ""
     duration_seconds: float = 0.0
     retries: int = 0
     error: str = ""
@@ -828,6 +854,13 @@ class StepResult:
             "files_changed": self.files_changed,
             "commit_hash": self.commit_hash,
             "estimated_tokens": self.estimated_tokens,
+            "input_tokens": self.input_tokens,
+            "cache_read_tokens": self.cache_read_tokens,
+            "cache_creation_tokens": self.cache_creation_tokens,
+            "output_tokens": self.output_tokens,
+            "model_id": self.model_id,
+            "session_id": self.session_id,
+            "step_started_at": self.step_started_at,
             "duration_seconds": self.duration_seconds,
             "retries": self.retries,
             "error": self.error,

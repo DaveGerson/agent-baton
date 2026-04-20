@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { T, SR_ONLY } from '../styles/tokens';
+import { T, SR_ONLY, FONTS, SHADOWS } from '../styles/tokens';
 import type { InterviewQuestion, InterviewAnswer } from '../api/types';
 
 interface InterviewPanelProps {
@@ -26,80 +26,122 @@ export function InterviewPanel({ questions, onSubmit, onCancel, loading }: Inter
   const answeredCount = Object.values(answers).filter(v => v.trim()).length;
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14, fontFamily: FONTS.body }}>
+
+      {/* Header card */}
       <div style={{
-        fontSize: 9,
-        fontWeight: 700,
-        color: T.yellow,
-        textTransform: 'uppercase',
-        letterSpacing: 0.5,
+        background: T.butter,
+        border: `3px solid ${T.border}`,
+        borderRadius: 14,
+        boxShadow: SHADOWS.md,
+        padding: '16px 20px',
+        display: 'flex', alignItems: 'center', gap: 14,
       }}>
-        Refinement Questions
-      </div>
-      <div style={{ fontSize: 9, color: T.text3 }}>
-        Answer what you can — unanswered questions use sensible defaults.
+        <span style={{ fontSize: 36, lineHeight: 1 }}>{'🛎'}</span>
+        <div>
+          <div style={{
+            fontFamily: FONTS.body, fontWeight: 800, fontSize: 10,
+            textTransform: 'uppercase', letterSpacing: '0.12em',
+            color: T.text1, marginBottom: 2,
+          }}>
+            A few questions from the pass
+          </div>
+          <div style={{
+            fontFamily: FONTS.display, fontWeight: 900, fontSize: 26, color: T.text0, lineHeight: 1.1,
+          }}>
+            Help us sharpen the recipe
+          </div>
+          <div style={{ fontSize: 12, color: T.text2, marginTop: 3, fontFamily: FONTS.body }}>
+            Answer what you can — unanswered questions use sensible defaults.
+          </div>
+        </div>
       </div>
 
+      {/* Question cards */}
       {questions.map((q, i) => (
         <div key={q.id} style={{
           background: T.bg1,
-          borderRadius: 4,
-          border: `1px solid ${T.border}`,
-          padding: 10,
+          borderRadius: 12,
+          border: `2px solid ${T.border}`,
+          boxShadow: SHADOWS.md,
+          padding: '14px 16px',
         }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 4 }}>
+          {/* Question header */}
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: 8 }}>
+            {/* Question number badge */}
             <div style={{
-              width: 16, height: 16, borderRadius: '50%',
-              background: T.yellow + '20',
+              width: 26, height: 26, borderRadius: '50%',
+              background: T.cherry, color: T.cream,
+              fontFamily: FONTS.display, fontWeight: 900, fontSize: 13,
               display: 'flex', alignItems: 'center', justifyContent: 'center',
-              fontSize: 9, fontWeight: 700, color: T.yellow, flexShrink: 0,
+              flexShrink: 0, border: `2px solid ${T.border}`,
             }}>
               {i + 1}
             </div>
-            <span style={{ fontSize: 9, fontWeight: 600, color: T.text0 }}>{q.question}</span>
+            <span style={{
+              fontFamily: FONTS.display, fontWeight: 800, fontSize: 17, color: T.text0,
+              lineHeight: 1.25, paddingTop: 2,
+            }}>
+              {q.question}
+            </span>
           </div>
+
+          {/* Context / hint */}
           {q.context && (
-            <div style={{ fontSize: 9, color: T.text3, marginBottom: 6, marginLeft: 20 }}>
-              {q.context}
+            <div style={{
+              fontFamily: FONTS.hand, fontSize: 15, color: T.text2,
+              transform: 'rotate(-0.3deg)', display: 'inline-block',
+              marginBottom: 10, marginLeft: 36,
+            }}>
+              "{q.context}"
             </div>
           )}
 
+          {/* Answer input */}
           {q.answer_type === 'choice' && q.choices ? (
-            <fieldset style={{ border: 'none', padding: 0, margin: '0 0 0 20px' }}>
+            <fieldset style={{ border: 'none', padding: 0, margin: '0 0 0 36px' }}>
               <legend style={{
-                fontSize: 9,
-                fontWeight: 600,
+                fontSize: 11,
+                fontWeight: 700,
                 color: T.text3,
-                marginBottom: 4,
+                marginBottom: 6,
                 padding: 0,
+                fontFamily: FONTS.body,
               }}>
                 Select an answer for: {q.question}
               </legend>
-              <div role="radiogroup" style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                {q.choices.map(choice => (
-                  <button
-                    key={choice}
-                    role="radio"
-                    aria-checked={answers[q.id] === choice}
-                    onClick={() => setAnswer(q.id, choice)}
-                    style={{
-                      padding: '3px 8px', borderRadius: 3,
-                      border: `1px solid ${answers[q.id] === choice ? T.accent + '66' : T.border}`,
-                      background: answers[q.id] === choice ? T.accent + '15' : 'transparent',
-                      color: answers[q.id] === choice ? T.accent : T.text2,
-                      fontSize: 9, fontWeight: 600, cursor: 'pointer',
-                    }}
-                  >
-                    {choice}
-                  </button>
-                ))}
+              <div role="radiogroup" style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                {q.choices.map(choice => {
+                  const isSelected = answers[q.id] === choice;
+                  return (
+                    <button
+                      key={choice}
+                      role="radio"
+                      aria-checked={isSelected}
+                      onClick={() => setAnswer(q.id, choice)}
+                      style={{
+                        padding: '5px 12px', borderRadius: 999,
+                        border: `1.5px solid ${T.border}`,
+                        background: isSelected ? T.mint : T.bg2,
+                        color: isSelected ? '#fff' : T.text1,
+                        fontSize: 12, fontWeight: 800, cursor: 'pointer',
+                        fontFamily: FONTS.body,
+                        boxShadow: isSelected ? SHADOWS.sm : 'none',
+                        transition: 'background 0.15s',
+                      }}
+                    >
+                      {choice}
+                    </button>
+                  );
+                })}
                 <button
                   onClick={() => setAnswer(q.id, '')}
                   aria-label="Skip this question"
                   style={{
-                    padding: '3px 8px', borderRadius: 3,
-                    border: `1px solid ${T.border}`, background: 'transparent',
-                    color: T.text3, fontSize: 9, cursor: 'pointer',
+                    padding: '5px 12px', borderRadius: 999,
+                    border: `1.5px solid ${T.border}`, background: 'transparent',
+                    color: T.text3, fontSize: 12, fontWeight: 700,
+                    cursor: 'pointer', fontFamily: FONTS.body,
                   }}
                 >
                   skip
@@ -107,7 +149,7 @@ export function InterviewPanel({ questions, onSubmit, onCancel, loading }: Inter
               </div>
             </fieldset>
           ) : (
-            <div style={{ marginLeft: 20 }}>
+            <div style={{ marginLeft: 36 }}>
               <label
                 htmlFor={`interview-answer-${q.id}`}
                 style={SR_ONLY}
@@ -121,9 +163,12 @@ export function InterviewPanel({ questions, onSubmit, onCancel, loading }: Inter
                 onChange={e => setAnswer(q.id, e.target.value)}
                 placeholder="Type your answer..."
                 style={{
-                  width: '100%', padding: '4px 8px', borderRadius: 3,
-                  border: `1px solid ${T.border}`, background: T.bg2,
-                  color: T.text0, fontSize: 9, outline: 'none',
+                  width: '100%', padding: '9px 11px', borderRadius: 8,
+                  border: `2px solid ${T.border}`, background: T.bg3,
+                  color: T.text0, fontSize: 13, fontWeight: 600,
+                  outline: 'none', fontFamily: FONTS.body,
+                  boxShadow: 'inset 2px 2px 0 0 rgba(0,0,0,.06)',
+                  boxSizing: 'border-box',
                 }}
               />
             </div>
@@ -131,16 +176,21 @@ export function InterviewPanel({ questions, onSubmit, onCancel, loading }: Inter
         </div>
       ))}
 
-      <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+      {/* Action row */}
+      <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
         <button
           onClick={handleSubmit}
           disabled={loading}
           style={{
-            padding: '6px 16px', borderRadius: 4, border: 'none',
-            background: loading ? T.bg3 : `linear-gradient(135deg, ${T.yellow}, #d97706)`,
-            color: '#fff', fontSize: 9, fontWeight: 700,
+            padding: '10px 22px', borderRadius: 10,
+            border: `3px solid ${T.border}`,
+            background: loading ? T.bg3 : T.cherry,
+            color: loading ? T.text3 : T.cream,
+            fontSize: 13, fontWeight: 800,
             cursor: loading ? 'not-allowed' : 'pointer',
             opacity: loading ? 0.6 : 1,
+            fontFamily: FONTS.body,
+            boxShadow: loading ? 'none' : SHADOWS.md,
           }}
         >
           {loading
@@ -152,9 +202,11 @@ export function InterviewPanel({ questions, onSubmit, onCancel, loading }: Inter
         <button
           onClick={onCancel}
           style={{
-            padding: '5px 10px', borderRadius: 4,
-            border: `1px solid ${T.border}`, background: 'transparent',
-            color: T.text2, fontSize: 9, cursor: 'pointer',
+            padding: '9px 18px', borderRadius: 10,
+            border: `2px solid ${T.border}`, background: 'transparent',
+            color: T.text1, fontSize: 12, fontWeight: 700,
+            cursor: 'pointer', fontFamily: FONTS.body,
+            boxShadow: SHADOWS.sm,
           }}
         >
           Back to Plan
