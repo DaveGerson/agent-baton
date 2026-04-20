@@ -7,6 +7,7 @@ import { api } from '../api/client';
 import { agentDisplayName } from '../utils/agent-names';
 import { useToast } from '../contexts/ToastContext';
 import { PlanPreview } from './PlanPreview';
+import { PlanEditor } from './PlanEditor';
 import { ExecutionProgress } from './ExecutionProgress';
 import { GateApprovalPanel } from './GateApprovalPanel';
 import { ChangelistPanel } from './ChangelistPanel';
@@ -201,7 +202,29 @@ function KanbanCardImpl({ card, columnColor, onForge, onEditPlan, onMutateCard }
         )}
 
         {/* Current phase / error */}
-        {card.current_phase && !card.error && (
+        {card.column === 'executing' && card.steps_total > 0 && card.steps_completed === card.steps_total && (
+          <div style={{
+            fontSize: 10,
+            color: T.text3,
+            fontStyle: 'italic',
+            fontFamily: FONTS.body,
+            marginTop: 2,
+          }}>
+            (completing...)
+          </div>
+        )}
+        {card.column === 'executing' && !card.current_phase && !(card.steps_total > 0 && card.steps_completed === card.steps_total) && (
+          <div style={{
+            fontSize: 10,
+            color: T.text3,
+            fontStyle: 'italic',
+            fontFamily: FONTS.body,
+            marginTop: 2,
+          }}>
+            (awaiting dispatch...)
+          </div>
+        )}
+        {card.current_phase && !card.error && !(card.column === 'executing' && card.steps_total > 0 && card.steps_completed === card.steps_total) && (
           <div style={{
             fontSize: 14,
             color: isHuman ? T.tangerine : T.text1,
@@ -450,14 +473,22 @@ function CardDetailModal({ card, onClose, onForge, onEditPlan, onMutateCard }: C
           flexShrink: 0,
         }}>
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{
-              fontFamily: FONTS.display,
-              fontWeight: 900,
-              fontSize: 22,
-              color: T.text0,
-              lineHeight: 1.2,
-              marginBottom: 8,
-            }}>
+            <div
+              title={card.title}
+              style={{
+                fontFamily: FONTS.display,
+                fontWeight: 900,
+                fontSize: 18,
+                color: T.text0,
+                lineHeight: 1.2,
+                marginBottom: 8,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                display: '-webkit-box',
+                WebkitLineClamp: 2,
+                WebkitBoxOrient: 'vertical',
+              }}
+            >
               {card.title}
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
@@ -821,7 +852,10 @@ function CardDetailModal({ card, onClose, onForge, onEditPlan, onMutateCard }: C
                   Loading plan…
                 </div>
               )}
-              {!planLoading && planData && (
+              {!planLoading && planData && (isIntake || isQueued) && (
+                <PlanEditor plan={planData} onPlanChange={setPlanData} projectId={card.project_id} />
+              )}
+              {!planLoading && planData && !isIntake && !isQueued && (
                 <PlanPreview plan={planData} />
               )}
               {!planLoading && !planData && (
