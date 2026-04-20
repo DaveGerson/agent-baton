@@ -61,3 +61,6 @@ agent_baton = ["_bundled_agents/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "live: marks tests that make real Anthropic API calls (requires ANTHROPIC_API_KEY; deselect with '-m not live')",
+]
