@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
@@ -47,6 +49,8 @@ from agent_baton.api.models.requests import (
     RegenerateRequest,
     RegisterProjectRequest,
     RequestReviewRequest,
+    RetryStepRequest,
+    SkipStepRequest,
 )
 from agent_baton.api.models.responses import (
     AdoSearchResponse,
@@ -56,9 +60,11 @@ from agent_baton.api.models.responses import (
     ChangelistResponse,
     CreatePrResponse,
     ExecuteCardResponse,
+    ExecutionControlResponse,
     ExternalItemResponse,
     ExternalMappingResponse,
     ForgeApproveResponse,
+    ForgePlanResponse,
     GateActionResponse,
     InterviewQuestionResponse,
     InterviewResponse,
@@ -77,6 +83,24 @@ from agent_baton.core.pmo.store import PmoStore
 from agent_baton.models.pmo import PmoProject, PmoSignal
 
 router = APIRouter()
+
+# ---------------------------------------------------------------------------
+# Forge progress SSE registry
+# ---------------------------------------------------------------------------
+
+# Maps session_id -> asyncio.Queue of forge progress event dicts.
+# Entries are created by forge_plan and consumed by stream_forge_progress.
+# Queues are sentinel-terminated (None) when generation completes.
+_forge_progress_queues: dict[str, asyncio.Queue[dict[str, Any] | None]] = {}
+
+_FORGE_STAGES = [
+    ("analyzing",   0,   "Analyzing codebase..."),
+    ("routing",     25,  "Selecting agents..."),
+    ("sizing",      50,  "Sizing budget..."),
+    ("generating",  75,  "Generating plan..."),
+    ("validating",  90,  "Validating plan..."),
+    ("complete",    100, "Plan ready"),
+]
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +253,7 @@ class _ExecutionDetailResponse(BaseModel):
 async def get_card_execution(
     card_id: str,
     scanner: PmoScanner = Depends(get_pmo_scanner),
+    store: PmoStore = Depends(get_pmo_store),
 ) -> _ExecutionDetailResponse:
     """Return execution progress events for a card.
 
@@ -237,7 +262,6 @@ async def get_card_execution(
     Reads the event log for the card's task_id and returns step-level
     events for the execution progress monitor in the PMO UI.
     """
-    from pathlib import Path
     from datetime import datetime, timezone
 
     try:
@@ -245,7 +269,7 @@ async def get_card_execution(
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Card '{card_id}' not found.")
 
-    project_path = Path(card.project_id) if Path(card.project_id).is_dir() else None
+    project_path = _resolve_project_path(card, store)
     events: list[_StepEvent] = []
     started_at = card.created_at
     status = card.column
@@ -528,17 +552,115 @@ async def stream_pmo_events(
     return EventSourceResponse(event_generator())
 
 
+@router.get(
+    "/pmo/forge/progress/{session_id}",
+    summary="Stream forge plan-generation progress over SSE",
+    response_description="Server-Sent Event stream of forge progress payloads.",
+    response_class=EventSourceResponse,
+    tags=["pmo"],
+)
+async def stream_forge_progress(
+    session_id: str,
+    request: Request,
+) -> EventSourceResponse:
+    """Open a Server-Sent Events stream for forge plan-generation progress.
+
+    GET /api/v1/pmo/forge/progress/{session_id}
+    Accept: text/event-stream
+
+    Streams best-effort cosmetic progress events emitted by the
+    corresponding ``POST /pmo/forge/plan`` request.  The frontend
+    obtains the ``session_id`` from the forge plan response and
+    connects to this endpoint before or immediately after calling
+    ``POST /pmo/forge/plan``.
+
+    Each SSE frame carries a ``forge_progress`` event with data:
+
+    .. code-block:: json
+
+        {"stage": "analyzing", "progress_pct": 0, "message": "Analyzing codebase..."}
+
+    The stream closes automatically after the ``complete`` event
+    (``progress_pct: 100``) or when the client disconnects.  If the
+    ``session_id`` is unknown the stream sends a single ``error``
+    event and closes.
+
+    Args:
+        session_id: UUID returned by ``POST /pmo/forge/plan``.
+        request: Injected by FastAPI; used to detect client disconnection.
+
+    Returns:
+        A streaming ``EventSourceResponse`` yielding SSE frames with
+        ``event`` set to ``"forge_progress"`` and ``data`` as a JSON
+        object.
+    """
+
+    async def event_generator():
+        # Wait briefly for the producer to register its queue (race-safe).
+        deadline = asyncio.get_running_loop().time() + 5.0
+        while session_id not in _forge_progress_queues:
+            if asyncio.get_running_loop().time() >= deadline:
+                yield {
+                    "event": "forge_progress",
+                    "data": json.dumps(
+                        {"stage": "error", "progress_pct": 0, "message": "Unknown session_id"}
+                    ),
+                }
+                return
+            await asyncio.sleep(0.1)
+
+        queue = _forge_progress_queues[session_id]
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=30.0)
+                except asyncio.TimeoutError:
+                    yield {"comment": "keepalive"}
+                    continue
+
+                if item is None:
+                    # Sentinel — generation complete, close the stream.
+                    break
+
+                yield {
+                    "event": "forge_progress",
+                    "data": json.dumps(item),
+                }
+
+                if item.get("progress_pct") == 100:
+                    break
+        finally:
+            _forge_progress_queues.pop(session_id, None)
+
+    return EventSourceResponse(event_generator())
+
+
 # ---------------------------------------------------------------------------
 # Forge (plan creation + approval)
 # ---------------------------------------------------------------------------
 
 
-@router.post("/pmo/forge/plan", response_model=dict, status_code=201)
+def _publish_forge_progress(
+    queue: asyncio.Queue[dict[str, Any] | None],
+    stage: str,
+    progress_pct: int,
+    message: str,
+) -> None:
+    """Push a forge progress event onto *queue* (non-blocking, best-effort)."""
+    try:
+        queue.put_nowait({"stage": stage, "progress_pct": progress_pct, "message": message})
+    except asyncio.QueueFull:
+        pass  # cosmetic feedback — drop silently if queue is full
+
+
+@router.post("/pmo/forge/plan", response_model=ForgePlanResponse, status_code=201)
 async def forge_plan(
     req: CreateForgeRequest,
     forge: ForgeSession = Depends(get_forge_session),
     store: PmoStore = Depends(get_pmo_store),
-) -> dict:
+) -> ForgePlanResponse:
     """Create a plan via IntelligentPlanner for the given project.
 
     POST /api/v1/pmo/forge/plan
@@ -547,6 +669,10 @@ async def forge_plan(
     before approval.  It is NOT saved to disk at this stage -- call
     ``POST /pmo/forge/approve`` to persist it.
 
+    A ``session_id`` is also returned so the frontend can subscribe to
+    ``GET /pmo/forge/progress/{session_id}`` for real-time progress
+    events during the (potentially slow) plan generation step.
+
     Args:
         req: Validated request body with description, program,
             project_id, and optional task_type/priority.
@@ -554,7 +680,8 @@ async def forge_plan(
         store: Injected PMO store singleton (to verify project exists).
 
     Returns:
-        The generated plan as a raw dict (201 Created).
+        A ``ForgePlanResponse`` with ``session_id`` and the generated
+        ``plan`` dict (201 Created).
 
     Raises:
         HTTPException 400: If the description or parameters are
@@ -569,23 +696,49 @@ async def forge_plan(
             detail=f"Project '{req.project_id}' not found.",
         )
 
-    try:
-        plan = forge.create_plan(
-            description=req.description,
-            program=req.program,
-            project_id=req.project_id,
-            task_type=req.task_type,
-            priority=req.priority,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Plan creation failed: {exc}",
-        ) from exc
+    session_id = uuid.uuid4().hex
+    # maxsize=32 is generous for 6 events — prevents unbounded growth if the
+    # SSE client never connects.
+    queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=32)
+    _forge_progress_queues[session_id] = queue
 
-    return plan.to_dict()
+    try:
+        _publish_forge_progress(queue, "analyzing", 0, "Analyzing codebase...")
+        _publish_forge_progress(queue, "routing", 25, "Selecting agents...")
+        _publish_forge_progress(queue, "sizing", 50, "Sizing budget...")
+        _publish_forge_progress(queue, "generating", 75, "Generating plan...")
+
+        loop = asyncio.get_running_loop()
+        try:
+            plan = await loop.run_in_executor(
+                None,
+                lambda: forge.create_plan(
+                    description=req.description,
+                    program=req.program,
+                    project_id=req.project_id,
+                    task_type=req.task_type,
+                    priority=req.priority,
+                ),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Plan creation failed: {exc}",
+            ) from exc
+
+        _publish_forge_progress(queue, "validating", 90, "Validating plan...")
+        _publish_forge_progress(queue, "complete", 100, "Plan ready")
+
+    finally:
+        # Sentinel: tells the SSE stream to close after draining remaining events.
+        try:
+            queue.put_nowait(None)
+        except asyncio.QueueFull:
+            pass
+
+    return ForgePlanResponse(session_id=session_id, plan=plan.to_dict())
 
 
 @router.post("/pmo/forge/approve", response_model=ForgeApproveResponse, status_code=200)
@@ -854,6 +1007,438 @@ async def execute_card(
         status="launched",
         model=req.model,
         dry_run=req.dry_run,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Execution interrupt controls
+# ---------------------------------------------------------------------------
+
+
+def _resolve_worker_context(
+    card_id: str,
+    scanner: PmoScanner,
+    store: PmoStore,
+) -> tuple:
+    """Shared helper: resolve a card to its project root and context root.
+
+    Returns ``(card, project_root, context_root)``.
+
+    Raises:
+        HTTPException 404: Card or project not found.
+    """
+    from pathlib import Path
+
+    try:
+        card, _ = scanner.find_card(card_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Card '{card_id}' not found.")
+
+    project_root = _resolve_project_path(card, store)
+    if project_root is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Project path for card '{card_id}' could not be resolved.",
+        )
+
+    context_root = project_root / ".claude" / "team-context"
+    return card, project_root, context_root
+
+
+@router.post(
+    "/pmo/execute/{card_id}/pause",
+    response_model=ExecutionControlResponse,
+    summary="Pause a running execution by sending SIGSTOP to its worker",
+    tags=["pmo"],
+)
+async def pause_execution(
+    card_id: str,
+    scanner: PmoScanner = Depends(get_pmo_scanner),
+    store: PmoStore = Depends(get_pmo_store),
+    bus: EventBus = Depends(get_bus),
+) -> ExecutionControlResponse:
+    """Pause a running execution worker with SIGSTOP.
+
+    POST /api/v1/pmo/execute/{card_id}/pause
+
+    Locates the ``worker.pid`` file for the card's execution directory,
+    sends ``SIGSTOP`` to suspend the worker process without terminating it,
+    and publishes a ``task.paused`` event so the PMO board updates via SSE.
+
+    The worker can be resumed at any point with the ``/resume`` endpoint.
+
+    Args:
+        card_id: The task ID of the card whose worker should be paused.
+        scanner: Injected ``PmoScanner`` singleton.
+        store: Injected PMO store singleton.
+        bus: The shared ``EventBus`` (for SSE event emission).
+
+    Returns:
+        ``{"status": "paused", "task_id": "<id>"}``
+
+    Raises:
+        HTTPException 404: If the card, project, or PID file cannot be found.
+        HTTPException 409: If the process is not running or cannot be signalled.
+    """
+    from agent_baton.core.runtime.supervisor import WorkerSupervisor
+    from agent_baton.models.events import Event
+
+    card, project_root, context_root = _resolve_worker_context(card_id, scanner, store)
+
+    supervisor = WorkerSupervisor(team_context_root=context_root, task_id=card_id)
+    try:
+        pid = supervisor.pause_worker(card_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (ProcessLookupError, PermissionError, OSError) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Could not pause worker for card '{card_id}': {exc}",
+        ) from exc
+
+    try:
+        bus.publish(Event.create(
+            topic="task.paused",
+            task_id=card_id,
+            payload={"pid": pid},
+        ))
+    except Exception:
+        pass  # SSE emission is best-effort.
+
+    return ExecutionControlResponse(
+        status="paused",
+        task_id=card_id,
+        message=f"Sent SIGSTOP to worker process {pid}.",
+    )
+
+
+@router.post(
+    "/pmo/execute/{card_id}/resume",
+    response_model=ExecutionControlResponse,
+    summary="Resume a paused execution by sending SIGCONT to its worker",
+    tags=["pmo"],
+)
+async def resume_execution(
+    card_id: str,
+    scanner: PmoScanner = Depends(get_pmo_scanner),
+    store: PmoStore = Depends(get_pmo_store),
+    bus: EventBus = Depends(get_bus),
+) -> ExecutionControlResponse:
+    """Resume a previously paused execution worker with SIGCONT.
+
+    POST /api/v1/pmo/execute/{card_id}/resume
+
+    Sends ``SIGCONT`` to the suspended worker process and publishes a
+    ``task.resumed`` event so the PMO board updates via SSE.
+
+    Args:
+        card_id: The task ID of the card whose worker should be resumed.
+        scanner: Injected ``PmoScanner`` singleton.
+        store: Injected PMO store singleton.
+        bus: The shared ``EventBus`` (for SSE event emission).
+
+    Returns:
+        ``{"status": "running", "task_id": "<id>"}``
+
+    Raises:
+        HTTPException 404: If the card, project, or PID file cannot be found.
+        HTTPException 409: If the process cannot be signalled.
+    """
+    from agent_baton.core.runtime.supervisor import WorkerSupervisor
+    from agent_baton.models.events import Event
+
+    card, project_root, context_root = _resolve_worker_context(card_id, scanner, store)
+
+    supervisor = WorkerSupervisor(team_context_root=context_root, task_id=card_id)
+    try:
+        pid = supervisor.resume_worker(card_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (ProcessLookupError, PermissionError, OSError) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Could not resume worker for card '{card_id}': {exc}",
+        ) from exc
+
+    try:
+        bus.publish(Event.create(
+            topic="task.resumed",
+            task_id=card_id,
+            payload={"pid": pid},
+        ))
+    except Exception:
+        pass
+
+    return ExecutionControlResponse(
+        status="running",
+        task_id=card_id,
+        message=f"Sent SIGCONT to worker process {pid}.",
+    )
+
+
+@router.post(
+    "/pmo/execute/{card_id}/cancel",
+    response_model=ExecutionControlResponse,
+    summary="Cancel a running execution by sending SIGTERM to its worker",
+    tags=["pmo"],
+)
+async def cancel_execution(
+    card_id: str,
+    scanner: PmoScanner = Depends(get_pmo_scanner),
+    store: PmoStore = Depends(get_pmo_store),
+    bus: EventBus = Depends(get_bus),
+) -> ExecutionControlResponse:
+    """Cancel a running execution worker with SIGTERM.
+
+    POST /api/v1/pmo/execute/{card_id}/cancel
+
+    Sends ``SIGTERM`` to the worker process (which triggers the worker's
+    graceful shutdown path) and publishes a ``task.cancelled`` event so
+    the PMO board updates via SSE.
+
+    Args:
+        card_id: The task ID of the card whose worker should be cancelled.
+        scanner: Injected ``PmoScanner`` singleton.
+        store: Injected PMO store singleton.
+        bus: The shared ``EventBus`` (for SSE event emission).
+
+    Returns:
+        ``{"status": "cancelled", "task_id": "<id>"}``
+
+    Raises:
+        HTTPException 404: If the card, project, or PID file cannot be found.
+        HTTPException 409: If the process cannot be signalled.
+    """
+    from agent_baton.core.runtime.supervisor import WorkerSupervisor
+    from agent_baton.models.events import Event
+
+    card, project_root, context_root = _resolve_worker_context(card_id, scanner, store)
+
+    supervisor = WorkerSupervisor(team_context_root=context_root, task_id=card_id)
+    try:
+        pid = supervisor.cancel_worker(card_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (ProcessLookupError, PermissionError, OSError) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Could not cancel worker for card '{card_id}': {exc}",
+        ) from exc
+
+    try:
+        bus.publish(Event.create(
+            topic="task.cancelled",
+            task_id=card_id,
+            payload={"pid": pid},
+        ))
+    except Exception:
+        pass
+
+    return ExecutionControlResponse(
+        status="cancelled",
+        task_id=card_id,
+        message=f"Sent SIGTERM to worker process {pid}.",
+    )
+
+
+@router.post(
+    "/pmo/execute/{card_id}/retry-step",
+    response_model=ExecutionControlResponse,
+    summary="Reset a failed step to pending so it will be re-dispatched",
+    tags=["pmo"],
+)
+async def retry_step(
+    card_id: str,
+    req: RetryStepRequest,
+    scanner: PmoScanner = Depends(get_pmo_scanner),
+    store: PmoStore = Depends(get_pmo_store),
+) -> ExecutionControlResponse:
+    """Reset a failed step back to pending for re-dispatch.
+
+    POST /api/v1/pmo/execute/{card_id}/retry-step
+
+    Removes the failed ``StepResult`` for the specified step from the
+    execution state and saves the updated state.  On the next loop
+    iteration the execution engine will see the step as un-recorded and
+    re-dispatch it.
+
+    This endpoint is intended for use when execution has stopped due to
+    a failed step and the operator wants to give the step another
+    attempt without restarting the entire task.
+
+    Args:
+        card_id: The task ID of the card (URL path parameter).
+        req: Request body containing ``step_id``.
+        scanner: Injected ``PmoScanner`` singleton.
+        store: Injected PMO store singleton.
+
+    Returns:
+        ``{"status": "retried", "task_id": "<id>", "step_id": "<step_id>"}``
+
+    Raises:
+        HTTPException 404: If the card, project, execution state, or step
+            cannot be found.
+        HTTPException 409: If the step is not currently in ``"failed"``
+            status.
+        HTTPException 500: If the storage layer fails to save the updated
+            state.
+    """
+    from agent_baton.core.storage import detect_backend, get_project_storage
+
+    card, project_root, context_root = _resolve_worker_context(card_id, scanner, store)
+
+    try:
+        backend = detect_backend(context_root)
+        storage = get_project_storage(context_root, backend=backend)
+        state = storage.load_execution(card_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to load execution state: {exc}",
+        ) from exc
+
+    if state is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No execution state found for card '{card_id}'.",
+        )
+
+    # Locate the step result to be retried.
+    target = next(
+        (r for r in state.step_results if r.step_id == req.step_id),
+        None,
+    )
+    if target is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Step '{req.step_id}' not found in execution state for card '{card_id}'.",
+        )
+    if target.status != "failed":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Step '{req.step_id}' has status '{target.status}' and cannot be retried. "
+                "Only steps in 'failed' status may be reset."
+            ),
+        )
+
+    # Remove the failed result so the engine treats the step as pending.
+    state.step_results = [r for r in state.step_results if r.step_id != req.step_id]
+
+    try:
+        storage.save_execution(state)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to save updated execution state: {exc}",
+        ) from exc
+
+    return ExecutionControlResponse(
+        status="retried",
+        task_id=card_id,
+        step_id=req.step_id,
+        message=f"Step '{req.step_id}' reset to pending; it will be re-dispatched on next loop.",
+    )
+
+
+@router.post(
+    "/pmo/execute/{card_id}/skip-step",
+    response_model=ExecutionControlResponse,
+    summary="Mark a failed step as skipped so execution can continue past it",
+    tags=["pmo"],
+)
+async def skip_step(
+    card_id: str,
+    req: SkipStepRequest,
+    scanner: PmoScanner = Depends(get_pmo_scanner),
+    store: PmoStore = Depends(get_pmo_store),
+) -> ExecutionControlResponse:
+    """Mark a step as skipped so execution advances past it.
+
+    POST /api/v1/pmo/execute/{card_id}/skip-step
+
+    Upserts a ``StepResult`` with ``status="skipped"`` for the specified
+    step and saves the updated execution state.  The execution engine
+    treats a skipped step as complete for dependency-resolution purposes,
+    allowing the phase to advance.
+
+    Args:
+        card_id: The task ID of the card (URL path parameter).
+        req: Request body containing ``step_id`` and optional ``reason``.
+        scanner: Injected ``PmoScanner`` singleton.
+        store: Injected PMO store singleton.
+
+    Returns:
+        ``{"status": "skipped", "task_id": "<id>", "step_id": "<step_id>"}``
+
+    Raises:
+        HTTPException 404: If the card, project, or execution state cannot
+            be found.
+        HTTPException 409: If the step is already in ``"complete"`` status
+            (skipping a completed step would silently discard its output).
+        HTTPException 500: If the storage layer fails to save the updated
+            state.
+    """
+    from datetime import datetime, timezone
+    from agent_baton.core.storage import detect_backend, get_project_storage
+    from agent_baton.models.execution import StepResult
+
+    card, project_root, context_root = _resolve_worker_context(card_id, scanner, store)
+
+    try:
+        backend = detect_backend(context_root)
+        storage = get_project_storage(context_root, backend=backend)
+        state = storage.load_execution(card_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to load execution state: {exc}",
+        ) from exc
+
+    if state is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No execution state found for card '{card_id}'.",
+        )
+
+    # Guard: refuse to skip a step that has already completed successfully.
+    existing = next(
+        (r for r in state.step_results if r.step_id == req.step_id),
+        None,
+    )
+    if existing is not None and existing.status == "complete":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Step '{req.step_id}' is already in 'complete' status and cannot be skipped."
+            ),
+        )
+
+    # Remove any existing result for this step (failed/dispatched) and insert
+    # a new skipped result so the engine sees it as resolved.
+    state.step_results = [r for r in state.step_results if r.step_id != req.step_id]
+    skipped_result = StepResult(
+        step_id=req.step_id,
+        agent_name="operator",
+        status="skipped",
+        outcome=req.reason or "Skipped by operator via PMO UI.",
+        completed_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+    state.step_results.append(skipped_result)
+
+    try:
+        storage.save_execution(state)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to save updated execution state: {exc}",
+        ) from exc
+
+    return ExecutionControlResponse(
+        status="skipped",
+        task_id=card_id,
+        step_id=req.step_id,
+        message=req.reason or "Skipped by operator via PMO UI.",
     )
 
 

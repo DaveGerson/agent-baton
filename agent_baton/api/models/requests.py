@@ -335,9 +335,9 @@ class ExecuteCardRequest(BaseModel):
     field overrides the default agent model for all dispatched steps.
     """
 
-    model: str = Field(
+    model: Optional[Literal["opus", "sonnet", "haiku"]] = Field(
         default="sonnet",
-        description="Default model for dispatched agents (e.g. 'opus', 'sonnet').",
+        description="Default model for dispatched agents.",
     )
     dry_run: bool = Field(
         default=False,
@@ -607,4 +607,44 @@ class RequestReviewRequest(BaseModel):
     notes: str = Field(
         default="",
         description="Context or instructions for the reviewer.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Execution interrupt / step control requests
+# ---------------------------------------------------------------------------
+
+
+class RetryStepRequest(BaseModel):
+    """Request body for ``POST /api/v1/pmo/execute/{card_id}/retry-step``.
+
+    Resets a failed step back to ``"pending"`` so the execution engine
+    will re-dispatch it on its next loop iteration.  Use this when
+    execution has stopped due to a failed step and you want to give the
+    step another chance without restarting the entire task.
+    """
+
+    step_id: str = Field(
+        ...,
+        min_length=1,
+        description="Step ID to reset (e.g. '1.2').  Must currently be in 'failed' status.",
+    )
+
+
+class SkipStepRequest(BaseModel):
+    """Request body for ``POST /api/v1/pmo/execute/{card_id}/skip-step``.
+
+    Marks a failed step as ``"skipped"`` so execution can advance past it
+    without retrying.  A mandatory ``reason`` is captured in the step
+    result so the skip is self-documenting in the audit log.
+    """
+
+    step_id: str = Field(
+        ...,
+        min_length=1,
+        description="Step ID to skip (e.g. '1.2').  Must currently be in 'failed' or 'dispatched' status.",
+    )
+    reason: str = Field(
+        default="",
+        description="Human-readable explanation for why this step is being skipped.",
     )

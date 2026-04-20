@@ -12,6 +12,9 @@ build/
 *.egg
 
 
+# Test artifacts from mock db_path leaking into BeadStore constructor
+<MagicMock*
+
 # Claude Code runtime state (regenerated per session)
 .claude/*
 .claude/agents/*

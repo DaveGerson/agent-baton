@@ -980,9 +980,10 @@ class TestConnectionManagerMigrationIdempotency:
         conn.commit()
         conn.close()
 
-        # Inject a migration that references a non-existent table — a real
-        # schema error that must not be silently ignored.
-        bad_ddl = "ALTER TABLE nonexistent_table ADD COLUMN foo TEXT;"
+        # Inject a migration with a genuine SQL syntax error — this must not
+        # be silently ignored (only "duplicate column name" and "no such table"
+        # are skipped for idempotency; syntax errors are always real failures).
+        bad_ddl = "NOT VALID SQL STATEMENT;"
         from agent_baton.core.storage import schema as schema_mod
         original_migrations = schema_mod.MIGRATIONS.copy()
         schema_mod.MIGRATIONS[2] = bad_ddl
@@ -996,7 +997,7 @@ class TestConnectionManagerMigrationIdempotency:
             mgr._schema_ddl = ""
             mgr._schema_version = 2
 
-            with pytest.raises(sqlite3.OperationalError, match="nonexistent_table"):
+            with pytest.raises(sqlite3.OperationalError, match="syntax error"):
                 # We need to call _run_migrations directly because
                 # _ensure_schema sees _schema_version already exists and
                 # goes into the migration branch.

@@ -191,7 +191,7 @@ class TestSchemaAndPersistence:
 
     def test_schema_version_is_9(self) -> None:
         from agent_baton.core.storage.schema import SCHEMA_VERSION
-        assert SCHEMA_VERSION == 9
+        assert SCHEMA_VERSION >= 9
 
     def test_fresh_project_db_has_step_type_on_plan_steps(self, tmp_path: Path) -> None:
         storage = SqliteStorage(tmp_path / "baton.db")

@@ -452,9 +452,12 @@ class TestForgePlan:
                 "project_id": "forge-proj2",
             },
         ).json()
+        # Response is now ForgePlanResponse: {"session_id": ..., "plan": {...}}
+        assert "session_id" in body
+        assert "plan" in body
         # MachinePlan.to_dict() always has task_id and task_summary
-        assert "task_id" in body
-        assert "task_summary" in body
+        assert "task_id" in body["plan"]
+        assert "task_summary" in body["plan"]
 
     def test_unknown_project_returns_404(self, client: TestClient) -> None:
         r = client.post(

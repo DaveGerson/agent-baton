@@ -385,7 +385,9 @@ class ExecutionEngine:
         if storage is not None:
             try:
                 from agent_baton.core.engine.bead_store import BeadStore
-                self._bead_store = BeadStore(storage.db_path)
+                _bead_db = storage.db_path
+                if isinstance(_bead_db, Path):
+                    self._bead_store = BeadStore(_bead_db)
             except Exception as _bead_init_exc:
                 _log.debug(
                     "BeadStore init skipped (non-fatal): %s", _bead_init_exc
@@ -992,8 +994,23 @@ class ExecutionEngine:
         # not exist until _save_execution() below.  Setting active before save
         # creates a dangling reference that causes "no active execution state"
         # errors if anything fails between here and save.
+        #
+        # When _storage is present (SQLite mode), the CLI always constructs the
+        # engine with task_id=plan.task_id so set_task_id() would be a no-op.
+        # When _storage is absent (file-only mode), we preserve the legacy
+        # flat-file path for backward compatibility with crash-recovery tooling.
+        # Use set_task_id() only in storage mode to repair _state_path when the
+        # engine was (rarely) constructed without an explicit task_id.
         if self._persistence is not None:
-            self._persistence._task_id = plan.task_id
+            if self._storage is not None:
+                # Storage mode: use set_task_id() so _state_path is recomputed
+                # for the dual-write fallback.  The CLI always passes task_id at
+                # construction time, so this is typically a no-op.
+                self._persistence.set_task_id(plan.task_id)
+            else:
+                # File-only mode: bare mutation preserves the existing _state_path
+                # so crash-recovery can still locate the flat execution-state.json.
+                self._persistence._task_id = plan.task_id
 
         # Wire the materialized-view subscriber now that we know the task_id.
         # One subscriber per engine instance; replace any previous one.
@@ -1075,34 +1092,54 @@ class ExecutionEngine:
         # Track the new task_id so _load_execution() can find it by ID.
         self._task_id = state.task_id
 
-        # Verify the save succeeded by reading back from storage.  This
-        # catches silent failures (schema mismatches, disk full, etc.) that
-        # would otherwise leave a dangling active-task pointer.
+        # Verify the save succeeded by reading back from at least one backend.
+        # Only raise if BOTH SQLite and the file fallback have no state — a
+        # SQLite-only miss is acceptable when _save_execution() fell back to
+        # file persistence (e.g. on a schema-mismatched baton.db).
         if self._storage is not None:
+            sqlite_verify: ExecutionState | None = None
             try:
-                verify = self._storage.load_execution(state.task_id)
-                if verify is None:
+                sqlite_verify = self._storage.load_execution(state.task_id)
+            except Exception as exc:
+                _log.warning(
+                    "Post-save SQLite verification read failed for task %r: %s",
+                    state.task_id,
+                    exc,
+                )
+
+            if sqlite_verify is None:
+                # SQLite has no row; check whether the file fallback is intact.
+                file_verify: ExecutionState | None = None
+                if self._persistence is not None:
+                    file_verify = self._persistence.load()
+                    # Validate the file belongs to this task.
+                    if file_verify is not None and file_verify.task_id != state.task_id:
+                        file_verify = None
+
+                if file_verify is None:
+                    # Neither backend has the state — hard failure.
                     _log.error(
                         "Execution state for task %r was NOT persisted to "
-                        "SQLite -- save_execution() returned no error but "
-                        "load_execution() returned None.  Subsequent CLI "
-                        "commands will fail with 'no execution state found'.",
+                        "either SQLite or the file fallback after start(). "
+                        "Subsequent CLI commands will fail with "
+                        "'no execution state found'.",
                         state.task_id,
                     )
                     raise RuntimeError(
                         f"Failed to persist execution state for task "
-                        f"'{state.task_id}'. The save operation completed "
-                        f"without error but the state is not readable. "
+                        f"'{state.task_id}'. Both the SQLite backend and the "
+                        f"file fallback have no state after save. "
                         f"Check disk space and database integrity."
                     )
-            except RuntimeError:
-                raise  # Re-raise the verification error
-            except Exception as exc:
-                _log.warning(
-                    "Post-save verification read failed for task %r: %s",
-                    state.task_id,
-                    exc,
-                )
+                else:
+                    _log.warning(
+                        "Execution state for task %r is in the file fallback "
+                        "only (SQLite row absent). This is caused by a "
+                        "schema-mismatched baton.db. Run 'baton migrate' to "
+                        "bring the database schema current so subsequent saves "
+                        "go to SQLite.",
+                        state.task_id,
+                    )
 
         # NOW mark as active -- the execution row exists, so the active
         # pointer won't dangle.  Write to both backends for resilience.

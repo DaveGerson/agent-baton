@@ -362,6 +362,98 @@ class WorkerSupervisor:
 
         return results
 
+    # ── Worker signal management ─────────────────────────────────────────────
+
+    @staticmethod
+    def _read_pid(pid_path: Path) -> int | None:
+        """Read and return the PID from *pid_path*, or None on failure."""
+        try:
+            return int(pid_path.read_text().strip())
+        except (ValueError, OSError):
+            return None
+
+    @staticmethod
+    def _send_signal(pid: int, sig: int) -> None:
+        """Send *sig* to *pid*.
+
+        Raises:
+            ProcessLookupError: Process does not exist.
+            PermissionError: Caller lacks permission to signal the process.
+        """
+        os.kill(pid, sig)
+
+    def pause_worker(self, task_id: str) -> int:
+        """Send SIGSTOP to the worker process for *task_id*.
+
+        Locates the PID from the execution directory's ``worker.pid`` file
+        and sends SIGSTOP to suspend the process.
+
+        Args:
+            task_id: The execution task ID whose worker should be paused.
+
+        Returns:
+            The PID that was signalled.
+
+        Raises:
+            FileNotFoundError: No PID file found for this task.
+            ProcessLookupError: Process does not exist (already dead).
+            PermissionError: Caller lacks permission to signal the process.
+        """
+        pid_path = self._root / "executions" / task_id / "worker.pid"
+        pid = self._read_pid(pid_path)
+        if pid is None:
+            raise FileNotFoundError(
+                f"No worker PID file found for task '{task_id}' at {pid_path}."
+            )
+        self._send_signal(pid, signal.SIGSTOP)
+        return pid
+
+    def resume_worker(self, task_id: str) -> int:
+        """Send SIGCONT to the worker process for *task_id*.
+
+        Args:
+            task_id: The execution task ID whose worker should be resumed.
+
+        Returns:
+            The PID that was signalled.
+
+        Raises:
+            FileNotFoundError: No PID file found for this task.
+            ProcessLookupError: Process does not exist.
+            PermissionError: Caller lacks permission to signal the process.
+        """
+        pid_path = self._root / "executions" / task_id / "worker.pid"
+        pid = self._read_pid(pid_path)
+        if pid is None:
+            raise FileNotFoundError(
+                f"No worker PID file found for task '{task_id}' at {pid_path}."
+            )
+        self._send_signal(pid, signal.SIGCONT)
+        return pid
+
+    def cancel_worker(self, task_id: str) -> int:
+        """Send SIGTERM to the worker process for *task_id*.
+
+        Args:
+            task_id: The execution task ID whose worker should be cancelled.
+
+        Returns:
+            The PID that was signalled.
+
+        Raises:
+            FileNotFoundError: No PID file found for this task.
+            ProcessLookupError: Process does not exist.
+            PermissionError: Caller lacks permission to signal the process.
+        """
+        pid_path = self._root / "executions" / task_id / "worker.pid"
+        pid = self._read_pid(pid_path)
+        if pid is None:
+            raise FileNotFoundError(
+                f"No worker PID file found for task '{task_id}' at {pid_path}."
+            )
+        self._send_signal(pid, signal.SIGTERM)
+        return pid
+
     # ── Internal helpers ────────────────────────────────────────────────────
 
     def _write_pid(self) -> None:

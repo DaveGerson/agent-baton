@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import type { PmoCard } from '../api/types';
+import { api } from '../api/client';
 import { T, FONT_SIZES, SR_ONLY, FONTS, SHADOWS } from '../styles/tokens';
 import { useBodyScrollLock } from '../hooks/useBodyScrollLock';
 
@@ -14,6 +15,8 @@ interface StepEvent {
   status?: string;
   timestamp: string;
   message?: string;
+  bead_type?: string;   // 'warning' | 'incident' for flag alerts
+  description?: string; // bead description
 }
 
 interface ExecutionDetail {
@@ -23,6 +26,12 @@ interface ExecutionDetail {
   steps: StepEvent[];
   started_at: string;
   elapsed_seconds: number;
+}
+
+interface FlagAlert {
+  id: string;
+  severity: 'warning' | 'incident';
+  description: string;
 }
 
 interface Props {
@@ -39,6 +48,10 @@ export function ExecutionProgress({ card, onClose }: Props) {
   const [detail, setDetail] = useState<ExecutionDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [autoScroll, setAutoScroll] = useState(true);
+  const [controlError, setControlError] = useState<string | null>(null);
+  const [controlPending, setControlPending] = useState<string | null>(null); // 'pause'|'resume'|'cancel'
+  const [dismissedFlags, setDismissedFlags] = useState<Set<string>>(new Set());
+  const [skipPrompt, setSkipPrompt] = useState<{ stepId: string; reason: string } | null>(null);
   const logRef = useRef<HTMLDivElement>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval>>();
 
@@ -72,13 +85,104 @@ export function ExecutionProgress({ card, onClose }: Props) {
     }
   }, [detail?.steps.length, autoScroll]);
 
-  const isTerminal = card.column === 'deployed' || (detail?.status === 'complete') || (detail?.status === 'failed');
+  const execStatus = detail?.status;
+  const isTerminal =
+    card.column === 'deployed' ||
+    execStatus === 'complete' ||
+    execStatus === 'failed' ||
+    execStatus === 'cancelled';
+  const isRunning = execStatus === 'running' || execStatus === 'executing';
+  const isPaused = execStatus === 'paused';
+
+  // Derive flag alerts from bead-type events
+  const flagAlerts: FlagAlert[] = (detail?.steps ?? [])
+    .filter((s) => s.bead_type === 'warning' || s.bead_type === 'incident')
+    .map((s) => ({
+      id: `${s.step_id}-${s.timestamp}`,
+      severity: s.bead_type as 'warning' | 'incident',
+      description: s.description ?? s.message ?? s.event_type,
+    }))
+    .filter((f) => !dismissedFlags.has(f.id));
+
+  // ---------------------------------------------------------------------------
+  // Control handlers
+  // ---------------------------------------------------------------------------
+
+  async function handlePause() {
+    setControlPending('pause');
+    setControlError(null);
+    try {
+      await api.pauseExecution(card.card_id);
+      await fetchDetail();
+    } catch (err) {
+      setControlError(err instanceof Error ? err.message : 'Pause failed');
+    } finally {
+      setControlPending(null);
+    }
+  }
+
+  async function handleResume() {
+    setControlPending('resume');
+    setControlError(null);
+    try {
+      await api.resumeExecution(card.card_id);
+      await fetchDetail();
+    } catch (err) {
+      setControlError(err instanceof Error ? err.message : 'Resume failed');
+    } finally {
+      setControlPending(null);
+    }
+  }
+
+  async function handleCancel() {
+    if (!window.confirm(`Cancel execution of "${card.title}"? This cannot be undone.`)) return;
+    setControlPending('cancel');
+    setControlError(null);
+    try {
+      await api.cancelExecution(card.card_id);
+      await fetchDetail();
+    } catch (err) {
+      setControlError(err instanceof Error ? err.message : 'Cancel failed');
+    } finally {
+      setControlPending(null);
+    }
+  }
+
+  async function handleRetry(stepId: string) {
+    setControlError(null);
+    try {
+      await api.retryStep(card.card_id, stepId);
+      await fetchDetail();
+    } catch (err) {
+      setControlError(err instanceof Error ? err.message : 'Retry failed');
+    }
+  }
+
+  async function handleSkipSubmit() {
+    if (!skipPrompt) return;
+    const { stepId, reason } = skipPrompt;
+    if (!reason.trim()) return;
+    setSkipPrompt(null);
+    setControlError(null);
+    try {
+      await api.skipStep(card.card_id, stepId, reason.trim());
+      await fetchDetail();
+    } catch (err) {
+      setControlError(err instanceof Error ? err.message : 'Skip failed');
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Helpers
+  // ---------------------------------------------------------------------------
 
   function statusColor(status: string | undefined): string {
     if (!status) return T.text2;
     if (status === 'complete') return T.mint;
     if (status === 'failed') return T.cherry;
-    if (status === 'running') return T.butter;
+    if (status === 'cancelled') return T.cherry;
+    if (status === 'running' || status === 'executing') return T.butter;
+    if (status === 'paused') return T.mint;
     return T.text2;
   }
 
@@ -111,11 +215,19 @@ export function ExecutionProgress({ card, onClose }: Props) {
     : '0%';
 
   const progressBg =
-    detail?.status === 'failed'
+    execStatus === 'failed' || execStatus === 'cancelled'
       ? T.cherry
-      : detail?.status === 'complete' || isTerminal
+      : execStatus === 'complete' || isTerminal
         ? T.mint
-        : `repeating-linear-gradient(45deg, ${T.butter} 0 8px, ${T.tangerine} 8px 16px)`;
+        : isPaused
+          ? T.mint
+          : `repeating-linear-gradient(45deg, ${T.butter} 0 8px, ${T.tangerine} 8px 16px)`;
+
+  const dotColor = isTerminal
+    ? (execStatus === 'failed' || execStatus === 'cancelled' ? T.cherry : T.mint)
+    : isPaused
+      ? T.mint
+      : T.butter;
 
   return (
     <div
@@ -157,10 +269,8 @@ export function ExecutionProgress({ card, onClose }: Props) {
             width: 10,
             height: 10,
             borderRadius: '50%',
-            background: isTerminal
-              ? (detail?.status === 'failed' ? T.cherry : T.mint)
-              : T.butter,
-            animation: isTerminal ? undefined : 'pulse 2s ease-in-out infinite',
+            background: dotColor,
+            animation: (!isTerminal && !isPaused) ? 'pulse 2s ease-in-out infinite' : undefined,
             flexShrink: 0,
           }} />
           <div style={{ flex: 1, minWidth: 0 }}>
@@ -184,6 +294,36 @@ export function ExecutionProgress({ card, onClose }: Props) {
               {detail && ` · ${formatElapsed(detail.elapsed_seconds)}`}
             </div>
           </div>
+
+          {/* Execution control buttons */}
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexShrink: 0 }}>
+            {isRunning && (
+              <ControlButton
+                label="Pause"
+                color={T.butter}
+                disabled={controlPending !== null || isTerminal}
+                loading={controlPending === 'pause'}
+                onClick={handlePause}
+              />
+            )}
+            {isPaused && (
+              <ControlButton
+                label="Resume"
+                color={T.mint}
+                disabled={controlPending !== null || isTerminal}
+                loading={controlPending === 'resume'}
+                onClick={handleResume}
+              />
+            )}
+            <ControlButton
+              label="Cancel"
+              color={T.cherry}
+              disabled={controlPending !== null || isTerminal}
+              loading={controlPending === 'cancel'}
+              onClick={handleCancel}
+            />
+          </div>
+
           <button
             onClick={onClose}
             aria-label="Close execution progress"
@@ -203,6 +343,93 @@ export function ExecutionProgress({ card, onClose }: Props) {
             ×
           </button>
         </div>
+
+        {/* Control error banner */}
+        {controlError && (
+          <div style={{
+            padding: '6px 16px',
+            background: T.cherrySoft,
+            borderBottom: `2px solid ${T.cherry}`,
+            fontFamily: FONTS.body,
+            fontSize: FONT_SIZES.sm,
+            color: T.cherryDark,
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            flexShrink: 0,
+          }}>
+            <span>{controlError}</span>
+            <button
+              onClick={() => setControlError(null)}
+              style={{
+                background: 'none',
+                border: 'none',
+                color: T.cherryDark,
+                cursor: 'pointer',
+                fontWeight: 700,
+                fontSize: 13,
+                padding: '0 4px',
+              }}
+              aria-label="Dismiss error"
+            >
+              ×
+            </button>
+          </div>
+        )}
+
+        {/* Flag alert banners */}
+        {flagAlerts.length > 0 && (
+          <div style={{ flexShrink: 0 }}>
+            {flagAlerts.map((flag) => (
+              <div
+                key={flag.id}
+                style={{
+                  padding: '6px 16px',
+                  background: flag.severity === 'incident' ? T.cherrySoft : T.butterSoft,
+                  borderBottom: `2px solid ${flag.severity === 'incident' ? T.cherry : T.butter}`,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  fontFamily: FONTS.body,
+                  fontSize: FONT_SIZES.sm,
+                }}
+              >
+                <span style={{
+                  fontWeight: 800,
+                  color: flag.severity === 'incident' ? T.cherry : T.crustDark,
+                  flexShrink: 0,
+                }}>
+                  {flag.severity === 'incident' ? 'Incident' : 'Warning'}
+                </span>
+                <span style={{
+                  flex: 1,
+                  color: flag.severity === 'incident' ? T.cherryDark : T.text0,
+                  minWidth: 0,
+                }}>
+                  {flag.description}
+                </span>
+                <button
+                  onClick={() => setDismissedFlags((prev) => new Set([...prev, flag.id]))}
+                  aria-label="Acknowledge alert"
+                  style={{
+                    background: 'none',
+                    border: `1.5px solid ${flag.severity === 'incident' ? T.cherry : T.butter}`,
+                    borderRadius: 6,
+                    color: flag.severity === 'incident' ? T.cherry : T.crustDark,
+                    fontFamily: FONTS.body,
+                    fontWeight: 700,
+                    fontSize: FONT_SIZES.xs,
+                    cursor: 'pointer',
+                    padding: '1px 7px',
+                    flexShrink: 0,
+                  }}
+                >
+                  Acknowledge
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
 
         {/* Phase / progress section */}
         <div style={{
@@ -265,6 +492,83 @@ export function ExecutionProgress({ card, onClose }: Props) {
           </div>
         </div>
 
+        {/* Skip reason prompt */}
+        {skipPrompt && (
+          <div style={{
+            padding: '10px 16px',
+            background: T.bg3,
+            borderBottom: `2px solid ${T.border}`,
+            flexShrink: 0,
+          }}>
+            <div style={{
+              fontFamily: FONTS.body,
+              fontWeight: 800,
+              fontSize: FONT_SIZES.sm,
+              color: T.text0,
+              marginBottom: 6,
+            }}>
+              Skip reason for step <span style={{ fontFamily: FONTS.mono, color: T.blueberry }}>{skipPrompt.stepId}</span>
+            </div>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <input
+                autoFocus
+                value={skipPrompt.reason}
+                onChange={(e) => setSkipPrompt({ ...skipPrompt, reason: e.target.value })}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') handleSkipSubmit();
+                  if (e.key === 'Escape') setSkipPrompt(null);
+                }}
+                placeholder="Enter reason..."
+                style={{
+                  flex: 1,
+                  fontFamily: FONTS.body,
+                  fontSize: FONT_SIZES.sm,
+                  padding: '4px 8px',
+                  border: `2px solid ${T.border}`,
+                  borderRadius: 6,
+                  background: T.bg1,
+                  color: T.text0,
+                  outline: 'none',
+                }}
+              />
+              <button
+                onClick={handleSkipSubmit}
+                disabled={!skipPrompt.reason.trim()}
+                style={{
+                  padding: '4px 12px',
+                  border: `2px solid ${T.tangerine}`,
+                  borderRadius: 6,
+                  background: T.tangerineSoft,
+                  color: T.text0,
+                  fontFamily: FONTS.body,
+                  fontWeight: 800,
+                  fontSize: FONT_SIZES.sm,
+                  cursor: skipPrompt.reason.trim() ? 'pointer' : 'not-allowed',
+                  opacity: skipPrompt.reason.trim() ? 1 : 0.5,
+                }}
+              >
+                Skip
+              </button>
+              <button
+                onClick={() => setSkipPrompt(null)}
+                style={{
+                  padding: '4px 10px',
+                  border: `2px solid ${T.border}`,
+                  borderRadius: 6,
+                  background: T.bg1,
+                  color: T.text2,
+                  fontFamily: FONTS.body,
+                  fontWeight: 700,
+                  fontSize: FONT_SIZES.sm,
+                  cursor: 'pointer',
+                }}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Event log */}
         <div
           ref={logRef}
@@ -321,53 +625,75 @@ export function ExecutionProgress({ card, onClose }: Props) {
             </div>
           )}
 
-          {detail?.steps.map((step, i) => (
-            <div
-              key={`${step.step_id}-${i}`}
-              style={{
-                display: 'flex',
-                gap: 8,
-                padding: '5px 16px',
-                fontSize: FONT_SIZES.sm,
-                color: T.text1,
-                lineHeight: 1.5,
-              }}
-            >
-              <span style={{
-                color: eventIconColor(step.event_type, step.status),
-                flexShrink: 0,
-                width: 16,
-                textAlign: 'center',
-              }}>
-                {eventIcon(step.event_type)}
-              </span>
-              <span style={{
-                color: T.text2,
-                flexShrink: 0,
-                width: 60,
-                fontFamily: FONTS.mono,
-                fontSize: 10,
-              }}>
-                {new Date(step.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
-              </span>
-              <span style={{ flex: 1, minWidth: 0 }}>
+          {detail?.steps.map((step, i) => {
+            const isFailed = step.event_type === 'step.failed';
+            return (
+              <div
+                key={`${step.step_id}-${i}`}
+                style={{
+                  display: 'flex',
+                  gap: 8,
+                  padding: '5px 16px',
+                  fontSize: FONT_SIZES.sm,
+                  color: T.text1,
+                  lineHeight: 1.5,
+                  alignItems: 'flex-start',
+                  background: isFailed ? `${T.cherrySoft}55` : undefined,
+                }}
+              >
                 <span style={{
-                  fontFamily: FONTS.body,
-                  fontWeight: 800,
-                  color: T.blueberry,
+                  color: eventIconColor(step.event_type, step.status),
+                  flexShrink: 0,
+                  width: 16,
+                  textAlign: 'center',
+                  paddingTop: 1,
                 }}>
-                  {step.agent ?? step.step_id}
+                  {eventIcon(step.event_type)}
                 </span>
-                {' '}
-                <span style={{ fontFamily: FONTS.body, color: T.text2 }}>
-                  {step.event_type.replace(/\./g, ' ')}
+                <span style={{
+                  color: T.text2,
+                  flexShrink: 0,
+                  width: 60,
+                  fontFamily: FONTS.mono,
+                  fontSize: 10,
+                  paddingTop: 2,
+                }}>
+                  {new Date(step.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
                 </span>
-                {step.message && (
-                  <span style={{ color: T.text0 }}> — {step.message}</span>
+                <span style={{ flex: 1, minWidth: 0 }}>
+                  <span style={{
+                    fontFamily: FONTS.body,
+                    fontWeight: 800,
+                    color: T.blueberry,
+                  }}>
+                    {step.agent ?? step.step_id}
+                  </span>
+                  {' '}
+                  <span style={{ fontFamily: FONTS.body, color: T.text2 }}>
+                    {step.event_type.replace(/\./g, ' ')}
+                  </span>
+                  {step.message && (
+                    <span style={{ color: T.text0 }}> — {step.message}</span>
+                  )}
+                </span>
+                {/* Step-level controls on failed steps */}
+                {isFailed && (
+                  <div style={{ display: 'flex', gap: 4, flexShrink: 0, alignItems: 'center' }}>
+                    <StepControlButton
+                      label="Retry"
+                      color={T.butter}
+                      onClick={() => handleRetry(step.step_id)}
+                    />
+                    <StepControlButton
+                      label="Skip"
+                      color={T.tangerine}
+                      onClick={() => setSkipPrompt({ stepId: step.step_id, reason: '' })}
+                    />
+                  </div>
                 )}
-              </span>
-            </div>
-          ))}
+              </div>
+            );
+          })}
         </div>
 
         {/* Footer */}
@@ -384,9 +710,17 @@ export function ExecutionProgress({ card, onClose }: Props) {
             fontFamily: FONTS.hand,
             fontStyle: isTerminal ? 'normal' : 'italic',
             fontSize: 14,
-            color: isTerminal ? T.mint : T.text2,
+            color: isTerminal
+              ? (execStatus === 'cancelled' ? T.cherry : T.mint)
+              : isPaused
+                ? T.butter
+                : T.text2,
           }}>
-            {isTerminal ? 'Execution complete' : 'Polling every 3s'}
+            {isTerminal
+              ? (execStatus === 'cancelled' ? 'Execution cancelled' : 'Execution complete')
+              : isPaused
+                ? 'Paused — resume when ready'
+                : 'Polling every 3s'}
           </span>
           <button
             onClick={onClose}
@@ -433,5 +767,62 @@ function StatChip({ label, value, color }: { label: string; value: string; color
       <span style={{ color: T.text2 }}>{label}:</span>
       <span style={{ color }}>{value}</span>
     </span>
+  );
+}
+
+interface ControlButtonProps {
+  label: string;
+  color: string;
+  disabled?: boolean;
+  loading?: boolean;
+  onClick: () => void;
+}
+
+function ControlButton({ label, color, disabled, loading, onClick }: ControlButtonProps) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      aria-label={label}
+      style={{
+        padding: '2px 10px',
+        border: `1.5px solid ${color}`,
+        borderRadius: 6,
+        background: 'none',
+        color,
+        fontFamily: FONTS.body,
+        fontWeight: 700,
+        fontSize: 11,
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        opacity: disabled ? 0.45 : 1,
+        lineHeight: 1.5,
+        transition: 'opacity 0.15s',
+      }}
+    >
+      {loading ? '...' : label}
+    </button>
+  );
+}
+
+function StepControlButton({ label, color, onClick }: { label: string; color: string; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      aria-label={label}
+      style={{
+        padding: '1px 7px',
+        border: `1.5px solid ${color}`,
+        borderRadius: 5,
+        background: 'none',
+        color,
+        fontFamily: FONTS.body,
+        fontWeight: 700,
+        fontSize: FONT_SIZES.xs,
+        cursor: 'pointer',
+        lineHeight: 1.5,
+      }}
+    >
+      {label}
+    </button>
   );
 }
