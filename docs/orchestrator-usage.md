@@ -28,7 +28,7 @@ loop:
     break
 ```
 
-**Headless execution:** For autonomous execution, use `baton execute run`.
+**Headless execution (default):** Use `baton execute run` — it drives the full loop to completion automatically. Switch to the manual `baton execute next` loop only for INTERACT gates, APPROVAL checkpoints, or debugging.
 
 **Depth limit:** The orchestrator MUST run at the top level of a conversation. It cannot be dispatched as a subagent due to Claude Code's nesting limits.
 
@@ -36,3 +36,41 @@ loop:
 **Team steps:** Use `baton execute team-record` for parallel completions.
 
 See `references/baton-engine.md` for the full CLI reference.
+
+---
+
+## Token Reduction — Standard Operating Procedures
+
+Apply these in every baton session to control cost:
+
+**Rule 1: Headless by default**
+```bash
+baton execute run   # ← default (not baton execute next)
+```
+
+**Rule 2: Real token tracking on every `record` call**
+```bash
+baton execute record --step 1.1 --agent backend-engineer \
+  --status complete --outcome "..." \
+  --session-id "$CLAUDE_SESSION_ID" \
+  --step-started-at "2026-04-19T13:00:00Z"
+```
+
+**Rule 3: Terse dispatch output**
+```bash
+baton execute next --terse   # full prompt written to current-dispatch.prompt.md
+```
+
+**Rule 4: Compact plan summary only**
+`baton plan --save` emits a 4-line summary. Never add `--verbose` unless you need to inspect the full plan in context.
+
+**Rule 5: Trust knowledge dedup — don't re-inject manually**
+The dispatcher tracks `delivered_knowledge` across dispatches. Docs already inlined in step 1.x are downgraded to reference in step 1.y automatically.
+
+**Rule 6: File-references over inline output**
+Pass file paths rather than re-reading and inlining content. Engine-recorded results don't need re-verification.
+
+**Rule 7: Check real spend after significant sessions**
+```bash
+baton usage   # shows Real tokens vs Estimated
+```
