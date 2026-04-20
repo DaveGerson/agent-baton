@@ -536,6 +536,12 @@ class TaskWorker:
                     passed=passed,
                     output=f"Human decision: {resolved.status}",
                 )
+                # A human rejection is final — don't allow engine retry loop.
+                if not passed:
+                    try:
+                        self._engine.fail_gate(phase_id)
+                    except Exception:
+                        pass
                 return
 
             # Check shutdown before sleeping.
