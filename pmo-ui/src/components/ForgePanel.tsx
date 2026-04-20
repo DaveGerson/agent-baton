@@ -207,6 +207,13 @@ export function ForgePanel({ onBack, initialSignal, onApproved }: ForgePanelProp
     setShowDraftBanner(false);
   }
 
+  // Approval mode: read from meta tag injected by the server, fallback to 'local'.
+  // The meta tag <meta name="baton-approval-mode" content="team|local"> is set
+  // by the backend template; if absent we default to 'local' (direct to queue).
+  const approvalMode = (
+    document.querySelector('meta[name="baton-approval-mode"]')?.getAttribute('content') ?? 'local'
+  ) as 'local' | 'team';
+
   async function handleApprove() {
     if (!plan) return;
     setSaving(true);
@@ -224,9 +231,19 @@ export function ForgePanel({ onBack, initialSignal, onApproved }: ForgePanelProp
         });
       }
 
+      if (approvalMode === 'team') {
+        // In team mode, immediately request review so the card moves to
+        // awaiting_review rather than sitting in queued without a reviewer.
+        api.requestReview(result.path, { notes: '' }).catch(() => {
+          // Non-fatal — the card is saved; review can be requested from the board.
+        });
+        toast.success('Plan saved — sent for team review');
+      } else {
+        toast.success('Plan approved & queued');
+      }
+
       setSavePath(result.path);
       setPhase('saved');
-      toast.success('Plan approved & queued');
 
       // PMO-UX-006: trigger an immediate board refresh so the new card appears
       // without waiting for the next poll cycle.
@@ -683,6 +700,7 @@ export function ForgePanel({ onBack, initialSignal, onApproved }: ForgePanelProp
         {phase === 'saved' && (
           <SavedPhase
             savePath={savePath}
+            approvalMode={approvalMode}
             onNewPlan={() => { setPhase('intake'); setDescription(''); setPlan(null); }}
             onBack={onBack}
           />
@@ -703,12 +721,14 @@ export function ForgePanel({ onBack, initialSignal, onApproved }: ForgePanelProp
 }
 
 function SavedPhase({
-  savePath, onNewPlan, onBack,
+  savePath, approvalMode, onNewPlan, onBack,
 }: {
   savePath: string | null;
+  approvalMode: 'local' | 'team';
   onNewPlan: () => void;
   onBack: () => void;
 }) {
+  const isTeam = approvalMode === 'team';
   return (
     <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 40 }}>
       <div style={{
@@ -721,17 +741,17 @@ function SavedPhase({
         display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14,
         maxWidth: 480, width: '100%',
       }}>
-        <span style={{ fontSize: 64, lineHeight: 1 }}>😄</span>
+        <span style={{ fontSize: 64, lineHeight: 1 }}>{isTeam ? '👀' : '😄'}</span>
         <div style={{
           fontFamily: FONTS.display, fontWeight: 900, fontSize: 32, color: T.mint,
         }}>
-          Clipped to the rail!
+          {isTeam ? 'Sent for review!' : 'Clipped to the rail!'}
         </div>
         <div style={{
           fontFamily: FONTS.hand, fontSize: 20, color: T.cherry,
           transform: 'rotate(-1deg)', display: 'inline-block',
         }}>
-          recipe's filed, chefs got it, dinner's on
+          {isTeam ? 'waiting on the tasting panel before it hits the rail' : "recipe's filed, chefs got it, dinner's on"}
         </div>
 
         {savePath && (
@@ -749,8 +769,9 @@ function SavedPhase({
         )}
 
         <div style={{ fontSize: 10, color: T.text2, maxWidth: 340, textAlign: 'center', lineHeight: 1.5 }}>
-          The plan is now in the Queued column on the board. Open the card there
-          and press <strong>Execute</strong> to start it.
+          {isTeam
+            ? 'The plan is awaiting peer review. A reviewer can approve or request changes from the board card.'
+            : 'The plan is now in the Queued column on the board. Open the card there and press Execute to start it.'}
         </div>
 
         <div style={{ display: 'flex', gap: 10 }}>

@@ -585,6 +585,7 @@ def handler(args: argparse.Namespace) -> None:
         policy_engine = _build_policy_engine()
 
         engine = ExecutionEngine(
+            team_context_root=context_root,
             bus=bus,
             task_id=task_id,
             storage=storage,
@@ -594,7 +595,7 @@ def handler(args: argparse.Namespace) -> None:
         ContextManager(task_id=task_id).init_mission_log(plan.task_summary, risk_level=plan.risk_level)
         try:
             action = engine.start(plan)
-        except ValueError as exc:
+        except (ValueError, RuntimeError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             sys.exit(1)
         # engine.start() already calls set_active_task() post-save; no need
@@ -1060,6 +1061,7 @@ def _handle_run(args: argparse.Namespace) -> None:
     engine: ExecutionEngine | None = None
     if task_id:
         engine = ExecutionEngine(
+            team_context_root=context_root,
             bus=bus, task_id=task_id, storage=storage,
             token_budget=token_budget or None,
         )
@@ -1087,6 +1089,7 @@ def _handle_run(args: argparse.Namespace) -> None:
         knowledge_resolver = _build_knowledge_resolver(plan)
         policy_engine = _build_policy_engine()
         engine = ExecutionEngine(
+            team_context_root=context_root,
             bus=bus, task_id=task_id, storage=storage,
             knowledge_resolver=knowledge_resolver,
             policy_engine=policy_engine,

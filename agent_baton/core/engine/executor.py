@@ -987,13 +987,16 @@ class ExecutionEngine:
 
         # Track the task_id for subsequent load/save calls.
         self._task_id = plan.task_id
-        # Update file-based persistence's task_id so save() targets the right
-        # directory, but do NOT set_active_task() yet — the execution row does
-        # not exist until _save_execution() below.  Setting active before save
-        # creates a dangling reference that causes "no active execution state"
-        # errors if anything fails between here and save.
+        # Update file-based persistence so save() targets the right namespaced
+        # directory.  Use set_task_id() rather than bare _task_id mutation so
+        # that _state_path is also recomputed — otherwise the dual-write
+        # fallback would save to the wrong (legacy flat-file) path.
+        # Do NOT set_active_task() yet — the execution row does not exist until
+        # _save_execution() below.  Setting active before save creates a
+        # dangling reference that causes "no active execution state" errors if
+        # anything fails between here and save.
         if self._persistence is not None:
-            self._persistence._task_id = plan.task_id
+            self._persistence.set_task_id(plan.task_id)
 
         # Wire the materialized-view subscriber now that we know the task_id.
         # One subscriber per engine instance; replace any previous one.

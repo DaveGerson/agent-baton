@@ -67,6 +67,19 @@ class StatePersistence:
     def task_id(self) -> str | None:
         return self._task_id
 
+    def set_task_id(self, task_id: str) -> None:
+        """Update the task ID and recompute the state path atomically.
+
+        This must be called instead of directly mutating ``_task_id``
+        because ``_state_path`` is derived from ``task_id`` at construction
+        time and must stay consistent.  The executor calls this during
+        ``start()`` when the plan's ``task_id`` is bound to the engine.
+        """
+        self._task_id = task_id
+        self._state_path = (
+            self._root / _EXECUTIONS_DIR / task_id / _STATE_FILENAME
+        )
+
     def save(self, state: ExecutionState) -> None:
         """Atomically write state to disk (tmp + rename).
 
