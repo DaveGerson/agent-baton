@@ -158,10 +158,34 @@ function KanbanCardImpl({ card, columnColor, onForge, onEditPlan, onMutateCard }
   const [showProgress, setShowProgress] = useState(false);
   const [showChangelist, setShowChangelist] = useState(false);
   const [gateResolved, setGateResolved] = useState(false);
+  const [reviewResolved, setReviewResolved] = useState(false);
+  const [sendReviewLoading, setSendReviewLoading] = useState(false);
   const isHuman = card.column === 'awaiting_human';
   const isQueued = card.column === 'queued';
   const isReview = card.column === 'review';
+  const isAwaitingReview = card.column === 'awaiting_review' as string;
   const isActive = card.column === 'executing' || card.column === 'validating' || card.column === 'awaiting_human';
+
+  // Approval mode: read from meta tag injected by the server, fallback to 'local'.
+  // The meta tag <meta name="baton-approval-mode" content="team|local"> is set
+  // by the backend template; if absent we default to 'local' (no team review required).
+  const approvalMode = (
+    document.querySelector('meta[name="baton-approval-mode"]')?.getAttribute('content') ?? 'local'
+  ) as 'local' | 'team';
+
+  async function handleSendForReview(e: MouseEvent) {
+    e.stopPropagation();
+    setSendReviewLoading(true);
+    try {
+      await api.requestReview(card.card_id, { notes: '' });
+      toast.success('Sent for review');
+      onMutateCard?.(card.card_id, c => ({ ...c, column: 'awaiting_review' as PmoCard['column'] }));
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to send for review');
+    } finally {
+      setSendReviewLoading(false);
+    }
+  }
 
   // Stable tilt derived from card ID
   const tilt = (card.card_id.charCodeAt(0) % 5) * 0.4 - 1;
