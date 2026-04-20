@@ -1209,6 +1209,8 @@ class ExecutionEngine:
         estimated_tokens: int = 0,
         duration_seconds: float = 0.0,
         error: str = "",
+        session_id: str = "",
+        step_started_at: str = "",
     ) -> None:
         """Record the result of a step execution.
 
@@ -1320,6 +1322,32 @@ class ExecutionEngine:
         if effective_tokens == 0 and status not in ("dispatched",) and state.plan is not None:
             effective_tokens = _estimate_tokens_for_step(state.plan, step_id)
 
+        # ── Real token accounting via session JSONL scanner ───────────────────
+        # When the caller supplies a session_id and step_started_at, scan the
+        # Claude Code session JSONL for actual token usage in this step's window.
+        # Falls back to char/4 heuristic (effective_tokens) when unavailable.
+        real_input = 0
+        real_cache_read = 0
+        real_cache_creation = 0
+        real_output = 0
+        real_model = ""
+        _sid = session_id or ""
+        _started = step_started_at or ""
+        if _sid and _started and status not in ("dispatched",):
+            try:
+                from agent_baton.core.observe.jsonl_scanner import scan_session
+                _scan = scan_session(_sid, _started)
+                if _scan.turns_scanned > 0:
+                    real_input = _scan.input_tokens
+                    real_cache_read = _scan.cache_read_tokens
+                    real_cache_creation = _scan.cache_creation_tokens
+                    real_output = _scan.output_tokens
+                    real_model = _scan.model_id
+                    # Override heuristic with real total when available.
+                    effective_tokens = real_input + real_cache_read + real_output
+            except Exception as _scan_exc:  # noqa: BLE001
+                _log.debug("JSONL scanner failed (non-fatal): %s", _scan_exc)
+
         result = StepResult(
             step_id=step_id,
             agent_name=agent_name,
@@ -1333,6 +1361,13 @@ class ExecutionEngine:
             completed_at=_utcnow(),
             deviations=self._extract_deviations(outcome),
             updated_at=_utcnow(),
+            input_tokens=real_input,
+            cache_read_tokens=real_cache_read,
+            cache_creation_tokens=real_cache_creation,
+            output_tokens=real_output,
+            model_id=real_model,
+            session_id=_sid,
+            step_started_at=_started,
         )
         # Replace any existing result for this step_id (e.g. a prior
         # "dispatched" row written by mark_dispatched) instead of appending.
@@ -1753,6 +1788,27 @@ class ExecutionEngine:
         """
         return state.plan.risk_level.upper() in _HIGH_RISK_LEVELS
 
+    @staticmethod
+    def _should_consolidate(state: "ExecutionState") -> bool:
+        """Return True when commit consolidation should be attempted.
+
+        Consolidation is warranted when:
+        - At least one step recorded a commit hash (there are commits to
+          consolidate).
+        - No steps failed (a clean execution is required; partial failures
+          produce an unpredictable commit set).
+        - The plan's git_strategy is not ``"none"`` (consolidation is only
+          meaningful for strategies that actually create commits).
+        """
+        has_commits = any(
+            sr.commit_hash
+            for sr in state.step_results
+            if sr.status == "complete"
+        )
+        has_failures = bool(state.failed_step_ids)
+        git_strategy = getattr(state.plan, "git_strategy", "commit-per-agent")
+        return has_commits and not has_failures and git_strategy != "none"
+
     def _build_compliance_entries(
         self, state: "ExecutionState"
     ) -> list[ComplianceEntry]:
@@ -1839,6 +1895,42 @@ class ExecutionEngine:
             except Exception as exc:
                 _log.warning(
                     "SQLite trace save failed (non-fatal): %s", exc
+                )
+
+        # Consolidate agent commits onto the feature branch (best-effort).
+        # Must run after trace recording but before retrospective so that
+        # the consolidation_result is persisted and visible to the PMO API.
+        if self._should_consolidate(state):
+            try:
+                from agent_baton.core.engine.consolidator import CommitConsolidator
+                _consolidator = CommitConsolidator(working_directory=self._root.parent)
+                _consolidation_result = _consolidator.consolidate(state)
+                state.consolidation_result = _consolidation_result
+                self._save_execution(state)
+                if _consolidation_result.status == "success":
+                    from agent_baton.models.events import Event
+                    self._publish(Event.create(
+                        topic="task.consolidated",
+                        task_id=state.task_id,
+                        payload={
+                            "final_head": _consolidation_result.final_head,
+                            "files_changed": len(_consolidation_result.files_changed),
+                            "commits_rebased": len(_consolidation_result.rebased_commits),
+                        },
+                    ))
+                elif _consolidation_result.status == "conflict":
+                    from agent_baton.models.events import Event
+                    self._publish(Event.create(
+                        topic="task.consolidation_conflict",
+                        task_id=state.task_id,
+                        payload={
+                            "conflict_step_id": _consolidation_result.conflict_step_id,
+                            "conflict_files": _consolidation_result.conflict_files,
+                        },
+                    ))
+            except Exception as _consolidation_exc:
+                _log.warning(
+                    "Commit consolidation skipped (non-fatal): %s", _consolidation_exc
                 )
 
         # Build and log usage record.

@@ -10,8 +10,40 @@ Delegates to:
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 from agent_baton.core.observe.usage import UsageLogger
+
+
+def _query_real_tokens() -> tuple[int, int]:
+    """Return (real_total, steps_with_real_data) from SQLite step_results.
+
+    Queries the local baton.db for steps that have real token data
+    (input_tokens > 0).  Returns (0, 0) when the DB is absent or the
+    column doesn't exist yet.
+    """
+    db = Path(".claude/team-context/baton.db")
+    if not db.exists():
+        return 0, 0
+    try:
+        import sqlite3
+        conn = sqlite3.connect(str(db), timeout=5.0)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT
+                SUM(input_tokens + cache_read_tokens + output_tokens) AS real_total,
+                COUNT(*) AS steps_with_real
+            FROM step_results
+            WHERE input_tokens > 0
+            """
+        ).fetchone()
+        conn.close()
+        if row and row["real_total"] is not None:
+            return int(row["real_total"]), int(row["steps_with_real"])
+    except Exception:  # noqa: BLE001
+        pass
+    return 0, 0
 
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
@@ -79,9 +111,16 @@ def handler(args: argparse.Namespace) -> None:
         print("No usage records found.")
         return
 
+    real_total, real_steps = _query_real_tokens()
+
     print(f"Usage Summary ({total} task{'s' if total != 1 else ''}):")
     print(f"  Total agents used:     {stats['total_agents_used']}")
-    print(f"  Estimated tokens:      {stats['total_estimated_tokens']:,}")
+    if real_total > 0:
+        print(f"  Real tokens:           {real_total:,}  ({real_steps} steps with real data)")
+        print(f"  Estimated tokens:      {stats['total_estimated_tokens']:,}  (heuristic; may differ from real)")
+    else:
+        print(f"  Estimated tokens:      {stats['total_estimated_tokens']:,}")
+        print("  Real tokens:           (none yet — pass --session-id to baton execute record)")
     print(f"  Avg agents/task:       {stats['avg_agents_per_task']}")
     print(f"  Avg retries/task:      {stats['avg_retries_per_task']}")
 
