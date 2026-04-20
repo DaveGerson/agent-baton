@@ -1,6 +1,7 @@
 import { useState, useCallback, useMemo, useRef } from 'react';
 import { KanbanBoard } from './components/KanbanBoard';
 import { ForgePanel } from './components/ForgePanel';
+import { BackOfHousePanel } from './components/BackOfHousePanel';
 import { KeyboardShortcutsDialog } from './components/KeyboardShortcutsDialog';
 import { useHotkeys } from './hooks/useHotkeys';
 import { usePersistedState } from './hooks/usePersistedState';
@@ -8,7 +9,7 @@ import { T, FONTS } from './styles/tokens';
 import { ToastProvider } from './contexts/ToastContext';
 import type { PmoCard, PmoSignal } from './api/types';
 
-type View = 'kanban' | 'forge';
+type View = 'kanban' | 'forge' | 'boh';
 
 export default function App() {
   const [view, setView] = usePersistedState<View>('pmo:active-view', 'kanban');
@@ -65,8 +66,9 @@ export default function App() {
   useHotkeys(hotkeyBindings);
 
   const NAV_TABS = [
-    { id: 'kanban' as const, label: 'The Rail', emoji: '🥟' },
-    { id: 'forge' as const,  label: 'The Forge', emoji: '🍳' },
+    { id: 'kanban' as const, label: 'The Rail',       emoji: '🥟' },
+    { id: 'forge'  as const, label: 'The Forge',      emoji: '🍳' },
+    { id: 'boh'    as const, label: 'Back of House',  emoji: '🚪' },
   ];
 
   return (
@@ -140,7 +142,8 @@ export default function App() {
                 id={`tab-${tab.id}`}
                 onClick={() => {
                   if (tab.id === 'kanban') backToBoard();
-                  else openForge();
+                  else if (tab.id === 'forge') openForge();
+                  else setView('boh');
                 }}
                 style={{
                   display: 'flex', alignItems: 'center', gap: 5,
@@ -208,6 +211,15 @@ export default function App() {
             initialSignal={forgeSignal}
             onApproved={refreshBoard}
           />
+        </div>
+        <div
+          id="panel-boh"
+          role="tabpanel"
+          aria-labelledby="tab-boh"
+          aria-hidden={view !== 'boh'}
+          style={{ display: view === 'boh' ? 'block' : 'none', height: '100%' }}
+        >
+          <BackOfHousePanel onBack={backToBoard} />
         </div>
       </div>
     </div>
