@@ -36,18 +36,25 @@ from agent_baton.api.models.requests import (
     ApproveForgeRequest,
     BatchResolveRequest,
     CreateForgeRequest,
+    CreatePrRequest,
     CreateSignalRequest,
     ExecuteCardRequest,
     ForgeSignalRequest,
     GateApproveRequest,
     GateRejectRequest,
     InterviewRequest,
+    MergeCardRequest,
     RegenerateRequest,
     RegisterProjectRequest,
+    RequestReviewRequest,
 )
 from agent_baton.api.models.responses import (
     AdoSearchResponse,
     AdoWorkItemResponse,
+    ApprovalLogEntry,
+    ApprovalLogResponse,
+    ChangelistResponse,
+    CreatePrResponse,
     ExecuteCardResponse,
     ExternalItemResponse,
     ExternalMappingResponse,
@@ -55,6 +62,7 @@ from agent_baton.api.models.responses import (
     GateActionResponse,
     InterviewQuestionResponse,
     InterviewResponse,
+    MergeResponse,
     PendingGateResponse,
     PmoBoardResponse,
     PmoCardDetailResponse,
@@ -1113,9 +1121,11 @@ async def list_pending_gates(
 async def approve_gate(
     task_id: str,
     req: GateApproveRequest,
+    request: Request,
     scanner: PmoScanner = Depends(get_pmo_scanner),
     store: PmoStore = Depends(get_pmo_store),
     bus: EventBus = Depends(get_bus),
+    central: object = Depends(get_central_store),
 ) -> GateActionResponse:
     """Record a human approval decision for a paused execution.
 
@@ -1124,14 +1134,17 @@ async def approve_gate(
     Equivalent to running ``baton execute approve --phase-id N --result approve``
     from the CLI.  After recording the decision the execution engine advances
     to the next phase and an SSE ``gate.approved`` event is published so the
-    PMO board updates in real time.
+    PMO board updates in real time.  The decision is also written to the
+    ``approval_log`` table in central.db for cross-project audit visibility.
 
     Args:
         task_id: The task ID of the paused execution (URL path parameter).
         req: Validated request body with ``phase_id`` and optional ``notes``.
+        request: Injected FastAPI request (provides request.state.user_id).
         scanner: Injected ``PmoScanner`` singleton.
         store: Injected PMO store singleton (used to resolve the project path).
         bus: The shared ``EventBus`` (for SSE event emission).
+        central: Injected ``CentralStore`` for writing to approval_log.
 
     Returns:
         ``GateActionResponse`` confirming the approval was recorded.
@@ -1141,8 +1154,11 @@ async def approve_gate(
         HTTPException 409: If the task is not in ``awaiting_human`` state.
         HTTPException 500: If the engine fails to record the approval.
     """
+    import uuid
+    from datetime import datetime, timezone
     from agent_baton.core.storage import detect_backend, get_project_storage
     from agent_baton.core.engine.executor import ExecutionEngine
+    from agent_baton.core.storage.central import CentralStore
     from agent_baton.models.events import Event
 
     card, project_root = _locate_awaiting_card(task_id, scanner, store)
@@ -1164,6 +1180,28 @@ async def approve_gate(
         )
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    # Write approval_log entry (best-effort — never block the response).
+    user_id: str = getattr(request.state, "user_id", "local-user")
+    try:
+        central_store: CentralStore = central  # type: ignore[assignment]
+        central_store.execute(
+            """
+            INSERT INTO approval_log (log_id, task_id, phase_id, user_id, action, notes, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(uuid.uuid4()),
+                task_id,
+                str(req.phase_id),
+                user_id,
+                "approve",
+                req.notes or "",
+                datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            ),
+        )
+    except Exception:
+        pass
 
     # Emit SSE event so the PMO board refreshes without polling.
     try:
@@ -1192,9 +1230,11 @@ async def approve_gate(
 async def reject_gate(
     task_id: str,
     req: GateRejectRequest,
+    request: Request,
     scanner: PmoScanner = Depends(get_pmo_scanner),
     store: PmoStore = Depends(get_pmo_store),
     bus: EventBus = Depends(get_bus),
+    central: object = Depends(get_central_store),
 ) -> GateActionResponse:
     """Record a human rejection decision for a paused execution.
 
@@ -1202,14 +1242,17 @@ async def reject_gate(
 
     Equivalent to running ``baton execute approve --phase-id N --result reject``
     from the CLI.  The execution is marked as failed and an SSE
-    ``gate.rejected`` event is published.
+    ``gate.rejected`` event is published.  The decision is also written to the
+    ``approval_log`` table in central.db for cross-project audit visibility.
 
     Args:
         task_id: The task ID of the paused execution (URL path parameter).
         req: Validated request body with ``phase_id`` and required ``reason``.
+        request: Injected FastAPI request (provides request.state.user_id).
         scanner: Injected ``PmoScanner`` singleton.
         store: Injected PMO store singleton (used to resolve the project path).
         bus: The shared ``EventBus`` (for SSE event emission).
+        central: Injected ``CentralStore`` for writing to approval_log.
 
     Returns:
         ``GateActionResponse`` confirming the rejection was recorded.
@@ -1219,8 +1262,11 @@ async def reject_gate(
         HTTPException 409: If the task is not in ``awaiting_human`` state.
         HTTPException 500: If the engine fails to record the rejection.
     """
+    import uuid
+    from datetime import datetime, timezone
     from agent_baton.core.storage import detect_backend, get_project_storage
     from agent_baton.core.engine.executor import ExecutionEngine
+    from agent_baton.core.storage.central import CentralStore
     from agent_baton.models.events import Event
 
     card, project_root = _locate_awaiting_card(task_id, scanner, store)
@@ -1242,6 +1288,28 @@ async def reject_gate(
         )
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    # Write approval_log entry (best-effort — never block the response).
+    user_id: str = getattr(request.state, "user_id", "local-user")
+    try:
+        central_store: CentralStore = central  # type: ignore[assignment]
+        central_store.execute(
+            """
+            INSERT INTO approval_log (log_id, task_id, phase_id, user_id, action, notes, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(uuid.uuid4()),
+                task_id,
+                str(req.phase_id),
+                user_id,
+                "reject",
+                req.reason,
+                datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            ),
+        )
+    except Exception:
+        pass
 
     # Emit SSE event so the PMO board refreshes.
     try:
@@ -1699,6 +1767,509 @@ async def get_external_item_mappings(
         )
         for m in mapping_rows
     ]
+
+
+# ---------------------------------------------------------------------------
+# Changelist / merge / PR endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/pmo/cards/{card_id}/changelist",
+    response_model=ChangelistResponse,
+    summary="Return the consolidation changelist for a card",
+    tags=["pmo"],
+)
+async def get_card_changelist(
+    card_id: str,
+    scanner: PmoScanner = Depends(get_pmo_scanner),
+    store: PmoStore = Depends(get_pmo_store),
+) -> ChangelistResponse:
+    """Return the consolidation result (changelist) for a completed card.
+
+    GET /api/v1/pmo/cards/{card_id}/changelist
+
+    Loads the execution state for the card's task_id and returns the
+    ``consolidation_result`` recorded by ``CommitConsolidator`` when the
+    task completed.
+
+    Args:
+        card_id: The task ID of the card (URL path parameter).
+        scanner: Injected ``PmoScanner`` singleton.
+        store: Injected PMO store singleton.
+
+    Returns:
+        A ``ChangelistResponse`` mirroring the ``ConsolidationResult`` fields.
+
+    Raises:
+        HTTPException 404: If the card, project, or consolidation result is
+            not found.
+    """
+    from pathlib import Path
+    from agent_baton.core.storage import detect_backend, get_project_storage
+
+    try:
+        card, _ = scanner.find_card(card_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Card '{card_id}' not found.")
+
+    project_root = _resolve_project_path(card, store)
+    if project_root is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Project path for card '{card_id}' could not be resolved.",
+        )
+
+    context_root = project_root / ".claude" / "team-context"
+    try:
+        backend = detect_backend(context_root)
+        storage = get_project_storage(context_root, backend=backend)
+        state = storage.load_execution(card_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to load execution state: {exc}",
+        ) from exc
+
+    if state is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No execution state found for card '{card_id}'.",
+        )
+
+    cr = state.consolidation_result
+    if cr is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"No consolidation result for card '{card_id}'. "
+                "The task may not have completed yet or git_strategy is 'none'."
+            ),
+        )
+
+    return ChangelistResponse(
+        status=cr.status,
+        final_head=cr.final_head,
+        base_commit=cr.base_commit,
+        files_changed=cr.files_changed,
+        total_insertions=cr.total_insertions,
+        total_deletions=cr.total_deletions,
+        rebased_commits=list(cr.rebased_commits),
+        attributions=[a.to_dict() for a in cr.attributions],
+        conflict_files=cr.conflict_files,
+        conflict_step_id=cr.conflict_step_id,
+        skipped_steps=cr.skipped_steps,
+        started_at=cr.started_at,
+        completed_at=cr.completed_at,
+        error=cr.error,
+    )
+
+
+@router.post(
+    "/pmo/cards/{card_id}/merge",
+    response_model=MergeResponse,
+    summary="Fast-forward merge a consolidated card onto the base branch",
+    tags=["pmo"],
+)
+async def merge_card(
+    card_id: str,
+    req: MergeCardRequest,
+    scanner: PmoScanner = Depends(get_pmo_scanner),
+    store: PmoStore = Depends(get_pmo_store),
+    bus: EventBus = Depends(get_bus),
+) -> MergeResponse:
+    """Perform a fast-forward merge for a card whose commits are consolidated.
+
+    POST /api/v1/pmo/cards/{card_id}/merge
+
+    The cherry-picks were already applied to the feature branch by
+    ``CommitConsolidator.consolidate()``.  This endpoint records the
+    current HEAD as the merge commit, removes agent worktrees, and
+    publishes a ``card.merged`` event.
+
+    Args:
+        card_id: The task ID of the card (URL path parameter).
+        req: Optional merge options (``force`` flag).
+        scanner: Injected ``PmoScanner`` singleton.
+        store: Injected PMO store singleton.
+        bus: The shared ``EventBus`` (for SSE event emission).
+
+    Returns:
+        A ``MergeResponse`` with the merge commit hash and cleaned worktrees.
+
+    Raises:
+        HTTPException 404: If the card, project, or execution state is missing.
+        HTTPException 409: If the consolidation status is not ``'success'``
+            and ``force`` is False.
+        HTTPException 500: If the git or cleanup operation fails.
+    """
+    import subprocess
+    import shutil
+    from agent_baton.core.storage import detect_backend, get_project_storage
+    from agent_baton.models.events import Event
+
+    try:
+        card, _ = scanner.find_card(card_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Card '{card_id}' not found.")
+
+    project_root = _resolve_project_path(card, store)
+    if project_root is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Project path for card '{card_id}' could not be resolved.",
+        )
+
+    context_root = project_root / ".claude" / "team-context"
+    try:
+        backend = detect_backend(context_root)
+        storage = get_project_storage(context_root, backend=backend)
+        state = storage.load_execution(card_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to load execution state: {exc}",
+        ) from exc
+
+    if state is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No execution state found for card '{card_id}'.",
+        )
+
+    cr = state.consolidation_result
+    if cr is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No consolidation result for card '{card_id}'.",
+        )
+
+    if not req.force and cr.status != "success":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Consolidation status is '{cr.status}', not 'success'. "
+                "Resolve conflicts before merging, or pass force=true to override."
+            ),
+        )
+
+    # The cherry-picks already landed the commits; resolve HEAD as merge_commit.
+    git_bin = shutil.which("git")
+    if git_bin is None:
+        raise HTTPException(status_code=500, detail="git binary not found on PATH.")
+
+    try:
+        proc = subprocess.run(
+            [git_bin, "rev-parse", "HEAD"],
+            cwd=str(project_root),
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=True,
+        )
+        merge_commit = proc.stdout.strip()
+    except subprocess.CalledProcessError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to resolve HEAD: {exc.stderr.strip()}",
+        ) from exc
+
+    # Clean up agent worktrees.
+    cleaned_worktrees: list[str] = []
+    try:
+        from agent_baton.core.engine.consolidator import CommitConsolidator
+        _consolidator = CommitConsolidator(working_directory=project_root)
+        cleaned_worktrees = _consolidator.cleanup_worktrees(state)
+    except Exception as exc:
+        # Non-fatal: log and continue — worktrees can be cleaned manually.
+        import logging
+        logging.getLogger(__name__).warning(
+            "Worktree cleanup failed for card '%s' (non-fatal): %s", card_id, exc
+        )
+
+    # Publish card.merged event so the PMO board updates via SSE.
+    try:
+        bus.publish(Event.create(
+            topic="card.merged",
+            task_id=card_id,
+            payload={
+                "merge_commit": merge_commit,
+                "cleaned_worktrees": cleaned_worktrees,
+            },
+        ))
+    except Exception:
+        pass  # SSE emission is best-effort.
+
+    return MergeResponse(
+        merge_commit=merge_commit,
+        cleaned_worktrees=cleaned_worktrees,
+    )
+
+
+@router.post(
+    "/pmo/cards/{card_id}/create-pr",
+    response_model=CreatePrResponse,
+    status_code=201,
+    summary="Create a GitHub pull request for a consolidated card",
+    tags=["pmo"],
+)
+async def create_card_pr(
+    card_id: str,
+    req: CreatePrRequest,
+    scanner: PmoScanner = Depends(get_pmo_scanner),
+    store: PmoStore = Depends(get_pmo_store),
+) -> CreatePrResponse:
+    """Open a GitHub pull request for the card's consolidated branch.
+
+    POST /api/v1/pmo/cards/{card_id}/create-pr
+
+    Invokes ``gh pr create`` in the project root.  If ``body`` is omitted
+    the engine builds a description from the plan summary and step outcomes.
+
+    Args:
+        card_id: The task ID of the card (URL path parameter).
+        req: PR title, optional body, and base branch.
+        scanner: Injected ``PmoScanner`` singleton.
+        store: Injected PMO store singleton.
+
+    Returns:
+        A ``CreatePrResponse`` with the PR URL and numeric PR number
+        (201 Created).
+
+    Raises:
+        HTTPException 404: If the card or project cannot be found.
+        HTTPException 500: If ``gh pr create`` fails or returns unexpected
+            output.
+    """
+    import re
+    import subprocess
+    import shutil
+    from agent_baton.core.storage import detect_backend, get_project_storage
+
+    try:
+        card, _ = scanner.find_card(card_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Card '{card_id}' not found.")
+
+    project_root = _resolve_project_path(card, store)
+    if project_root is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Project path for card '{card_id}' could not be resolved.",
+        )
+
+    # Build PR body from plan + step outcomes when the caller omits it.
+    pr_body = req.body
+    if not pr_body:
+        try:
+            context_root = project_root / ".claude" / "team-context"
+            backend = detect_backend(context_root)
+            storage = get_project_storage(context_root, backend=backend)
+            state = storage.load_execution(card_id)
+            if state is not None:
+                lines: list[str] = [
+                    f"## {state.plan.task_summary}",
+                    "",
+                    "### Step outcomes",
+                ]
+                for sr in state.step_results:
+                    status_icon = "+" if sr.status == "complete" else "x"
+                    lines.append(
+                        f"- [{status_icon}] **{sr.step_id}** ({sr.agent_name}): "
+                        f"{sr.outcome or sr.status}"
+                    )
+                pr_body = "\n".join(lines)
+        except Exception:
+            pr_body = f"Automated PR for task {card_id}."
+
+    gh_bin = shutil.which("gh")
+    if gh_bin is None:
+        raise HTTPException(
+            status_code=500,
+            detail="gh CLI not found on PATH. Install the GitHub CLI to use this endpoint.",
+        )
+
+    cmd = [
+        gh_bin, "pr", "create",
+        "--title", req.title,
+        "--body", pr_body,
+        "--base", req.base_branch,
+    ]
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(project_root),
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to invoke gh CLI: {exc}",
+        ) from exc
+
+    if proc.returncode != 0:
+        raise HTTPException(
+            status_code=500,
+            detail=f"gh pr create failed: {proc.stderr.strip() or proc.stdout.strip()}",
+        )
+
+    # gh pr create prints the PR URL on stdout (e.g. https://github.com/org/repo/pull/42).
+    pr_url = proc.stdout.strip().splitlines()[-1].strip()
+    match = re.search(r"/pull/(\d+)", pr_url)
+    if not match:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not parse PR number from gh output: {pr_url!r}",
+        )
+    pr_number = int(match.group(1))
+
+    return CreatePrResponse(pr_url=pr_url, pr_number=pr_number)
+
+
+# ---------------------------------------------------------------------------
+# Role-based approval endpoints
+# ---------------------------------------------------------------------------
+
+_APPROVAL_ENV = __import__("os").environ.get("BATON_APPROVAL_MODE", "local").lower()
+
+
+@router.post(
+    "/pmo/cards/{card_id}/request-review",
+    response_model=dict,
+    status_code=201,
+    summary="Request peer review for a card",
+    tags=["pmo"],
+)
+async def request_card_review(
+    card_id: str,
+    req: RequestReviewRequest,
+    request: Request,
+    bus: EventBus = Depends(get_bus),
+    central: object = Depends(get_central_store),
+) -> dict:
+    """Submit a card for peer review before approval.
+
+    POST /api/v1/pmo/cards/{card_id}/request-review
+
+    Writes an ``approval_log`` entry with ``action="request_review"`` and
+    publishes a ``card.review_requested`` SSE event so the PMO board can
+    reflect the pending review state in real time.
+
+    Args:
+        card_id: Task ID of the card to submit for review.
+        req: Optional target reviewer_id and reviewer notes.
+        request: Injected FastAPI request (provides request.state.user_id).
+        bus: Shared ``EventBus`` for SSE emission.
+        central: Injected ``CentralStore`` for writing to approval_log.
+
+    Returns:
+        ``{"logged": true, "log_id": "<uuid>", "card_id": "<card_id>"}``
+        (201 Created).
+    """
+    import uuid
+    from datetime import datetime, timezone
+    from agent_baton.core.storage.central import CentralStore
+    from agent_baton.models.events import Event
+
+    user_id: str = getattr(request.state, "user_id", "local-user")
+    log_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    store: CentralStore = central  # type: ignore[assignment]
+    notes = req.notes or ""
+    if req.reviewer_id:
+        notes = f"Requested reviewer: {req.reviewer_id}. {notes}".strip()
+
+    try:
+        store.execute(
+            """
+            INSERT INTO approval_log (log_id, task_id, phase_id, user_id, action, notes, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (log_id, card_id, "", user_id, "request_review", notes, now),
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to write approval log: {exc}",
+        ) from exc
+
+    try:
+        bus.publish(Event.create(
+            topic="card.review_requested",
+            task_id=card_id,
+            payload={
+                "user_id": user_id,
+                "reviewer_id": req.reviewer_id,
+                "notes": notes,
+                "log_id": log_id,
+            },
+        ))
+    except Exception:
+        pass  # SSE emission is best-effort.
+
+    return {"logged": True, "log_id": log_id, "card_id": card_id}
+
+
+@router.get(
+    "/pmo/cards/{card_id}/approval-log",
+    response_model=ApprovalLogResponse,
+    summary="Return the approval audit log for a card",
+    tags=["pmo"],
+)
+async def get_card_approval_log(
+    card_id: str,
+    central: object = Depends(get_central_store),
+) -> ApprovalLogResponse:
+    """Return all approval log entries for a card, newest first.
+
+    GET /api/v1/pmo/cards/{card_id}/approval-log
+
+    Reads from the ``approval_log`` table in central.db filtered by
+    ``task_id``.  Returns an empty list when no entries exist.
+
+    Args:
+        card_id: Task ID of the card to look up (URL path parameter).
+        central: Injected ``CentralStore`` for querying approval_log.
+
+    Returns:
+        An ``ApprovalLogResponse`` with entries ordered newest-first.
+    """
+    from agent_baton.core.storage.central import CentralStore
+
+    store: CentralStore = central  # type: ignore[assignment]
+
+    try:
+        rows = store.query(
+            """
+            SELECT log_id, task_id, phase_id, user_id, action, notes, created_at
+            FROM approval_log
+            WHERE task_id = ?
+            ORDER BY created_at DESC
+            """,
+            (card_id,),
+        )
+    except Exception:
+        # approval_log table may not exist on old central.db — return empty.
+        return ApprovalLogResponse(entries=[])
+
+    entries = [
+        ApprovalLogEntry(
+            log_id=row["log_id"],
+            task_id=row["task_id"],
+            phase_id=row.get("phase_id", ""),
+            user_id=row.get("user_id", "local-user"),
+            action=row["action"],
+            notes=row.get("notes", ""),
+            created_at=row.get("created_at", ""),
+        )
+        for row in rows
+    ]
+    return ApprovalLogResponse(entries=entries)
 
 
 # ---------------------------------------------------------------------------

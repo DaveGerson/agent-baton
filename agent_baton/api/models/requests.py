@@ -531,3 +531,80 @@ class RecordFeedbackRequest(BaseModel):
         ge=0,
         description="Zero-based index into the question's options list.",
     )
+
+
+# ---------------------------------------------------------------------------
+# Changelist / merge / PR requests
+# ---------------------------------------------------------------------------
+
+
+class MergeCardRequest(BaseModel):
+    """Request body for ``POST /api/v1/pmo/cards/{card_id}/merge``.
+
+    Performs a fast-forward merge of the consolidated commits onto the
+    base branch.  The cherry-picks already landed the commits during
+    consolidation, so this operation is typically a no-op merge commit
+    followed by worktree cleanup.
+
+    The ``force`` flag bypasses the ``status == 'success'`` consolidation
+    guard, useful for operator-level overrides when the UI shows a stale
+    state.
+    """
+
+    force: bool = Field(
+        default=False,
+        description=(
+            "When True, bypass the consolidation-status guard and attempt the "
+            "merge even if the consolidation result is not 'success'."
+        ),
+    )
+
+
+class CreatePrRequest(BaseModel):
+    """Request body for ``POST /api/v1/pmo/cards/{card_id}/create-pr``.
+
+    Invokes ``gh pr create`` to open a pull request for the consolidated
+    branch.  The description is built from the plan summary and step
+    outcomes; the caller may override any field.
+    """
+
+    title: str = Field(
+        ...,
+        min_length=1,
+        description="Pull request title.",
+    )
+    body: str = Field(
+        default="",
+        description=(
+            "PR body markdown.  When empty the engine generates a description "
+            "from the plan summary and step outcomes."
+        ),
+    )
+    base_branch: str = Field(
+        default="main",
+        min_length=1,
+        description="Target branch the PR will merge into.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Approval / review requests
+# ---------------------------------------------------------------------------
+
+
+class RequestReviewRequest(BaseModel):
+    """Request body for ``POST /api/v1/pmo/cards/{card_id}/request-review``.
+
+    Submits a card for peer review before it can be approved.  The optional
+    ``reviewer_id`` targets a specific PMO user; omitting it broadcasts to
+    all users with the ``reviewer`` or ``approver`` role.
+    """
+
+    reviewer_id: Optional[str] = Field(
+        default=None,
+        description="PMO user_id of the intended reviewer.  Omit to broadcast.",
+    )
+    notes: str = Field(
+        default="",
+        description="Context or instructions for the reviewer.",
+    )

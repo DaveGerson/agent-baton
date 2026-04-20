@@ -116,6 +116,10 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     p_record.add_argument("--error", default="", help="Error message if failed")
     p_record.add_argument("--files", default="", help="Comma-separated files changed")
     p_record.add_argument("--commit", default="", help="Commit hash")
+    p_record.add_argument("--session-id", default="", dest="session_id",
+                          help="Claude Code session UUID ($CLAUDE_SESSION_ID) for real token accounting")
+    p_record.add_argument("--step-started-at", default="", dest="step_started_at",
+                          help="ISO 8601 UTC timestamp when this step was dispatched (lower bound for JSONL scan)")
 
     # baton execute dispatched --step ID --agent NAME
     dispatched_p = sub.add_parser("dispatched", parents=[_task_id_parent],
@@ -128,8 +132,8 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
                             help="Record a QA gate result")
     p_gate.add_argument("--phase-id", type=int, required=True, help="Phase ID")
     p_gate.add_argument("--result", required=True, choices=["pass", "fail"], help="Gate result")
-    p_gate.add_argument("--gate-output", default="", dest="gate_output",
-                        help="Gate command output (use --gate-output; --output is reserved for format)")
+    p_gate.add_argument("--gate-output", "--notes", default="", dest="gate_output",
+                        help="Gate command output or notes (--notes is accepted as an alias; --output is reserved for format)")
 
     # baton execute approve --phase-id N --result approve|reject|approve-with-feedback [--feedback TEXT]
     p_approve = sub.add_parser("approve", parents=[_task_id_parent],
@@ -138,7 +142,8 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     p_approve.add_argument("--result", required=True,
                            choices=["approve", "reject", "approve-with-feedback"],
                            help="Approval decision")
-    p_approve.add_argument("--feedback", default="", help="Feedback text (for approve-with-feedback)")
+    p_approve.add_argument("--feedback", "--notes", default="", dest="feedback",
+                           help="Feedback or notes text (for approve-with-feedback; --notes is accepted as an alias)")
 
     # baton execute feedback --phase-id N --question-id ID --chosen-index N
     p_feedback = sub.add_parser("feedback", parents=[_task_id_parent],
@@ -373,25 +378,38 @@ def _print_action(action: dict, *, terse: bool = False) -> None:
                 print("--- Delegation Prompt ---")
                 print(action.get("delegation_prompt", ""))
                 print("--- End Prompt ---")
+            print()
+            agent_name = action.get('agent_name', '')
+            print("When complete, record the result:")
+            print(f"  baton execute record --step {step_id} --agent {agent_name} --status complete --outcome \"summary\"")
+            print(f"  baton execute record --step {step_id} --agent {agent_name} --status failed --error \"what went wrong\"")
 
     elif atype == ActionType.GATE.value:
+        phase_id = action.get('phase_id', '')
         print(f"ACTION: GATE")
         print(f"  Type:    {action.get('gate_type', '')}")
-        print(f"  Phase:   {action.get('phase_id', '')}")
+        print(f"  Phase:   {phase_id}")
         print(f"  Command: {action.get('gate_command', '')}")
         print(f"  Message: {msg}")
+        print()
+        print("To record gate result:")
+        print(f"  baton execute gate --phase-id {phase_id} --result pass")
+        print(f"  baton execute gate --phase-id {phase_id} --result fail --gate-output \"failure details\"")
 
     elif atype == ActionType.APPROVAL.value:
+        phase_id = action.get('phase_id', '')
         print(f"ACTION: APPROVAL")
-        print(f"  Phase:   {action.get('phase_id', '')}")
+        print(f"  Phase:   {phase_id}")
         print(f"  Message: {msg}")
         print()
         print("--- Approval Context ---")
         print(action.get("approval_context", ""))
         print("--- End Context ---")
         print()
-        options = action.get("approval_options", ["approve", "reject", "approve-with-feedback"])
-        print(f"Options: {', '.join(options)}")
+        print("To respond:")
+        print(f"  baton execute approve --phase-id {phase_id} --result approve")
+        print(f"  baton execute approve --phase-id {phase_id} --result reject --feedback \"reason\"")
+        print(f"  baton execute approve --phase-id {phase_id} --result approve-with-feedback --feedback \"notes\"")
 
     elif atype == ActionType.FEEDBACK.value:
         print(f"ACTION: FEEDBACK")
@@ -612,6 +630,8 @@ def handler(args: argparse.Namespace) -> None:
                 estimated_tokens=args.tokens,
                 duration_seconds=args.duration,
                 error=args.error,
+                session_id=getattr(args, "session_id", ""),
+                step_started_at=getattr(args, "step_started_at", ""),
             )
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)

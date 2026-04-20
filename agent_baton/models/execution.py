@@ -1099,6 +1099,139 @@ class GateResult:
         return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
 
 
+# ---------------------------------------------------------------------------
+# Consolidation models (cherry-pick rebase of agent commits)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class FileAttribution:
+    """Per-file change attribution to a specific step.
+
+    Populated by ``CommitConsolidator._diff_stats()`` after each
+    cherry-pick and stored in ``ConsolidationResult.attributions``.
+
+    Attributes:
+        file_path: Repository-relative path of the changed file.
+        step_id: Step that produced this change.
+        agent_name: Agent that executed the step.
+        insertions: Lines added.
+        deletions: Lines removed.
+    """
+
+    file_path: str
+    step_id: str
+    agent_name: str
+    insertions: int = 0
+    deletions: int = 0
+
+    def to_dict(self) -> dict:
+        return {
+            "file_path": self.file_path,
+            "step_id": self.step_id,
+            "agent_name": self.agent_name,
+            "insertions": self.insertions,
+            "deletions": self.deletions,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> FileAttribution:
+        return cls(
+            file_path=data.get("file_path", ""),
+            step_id=data.get("step_id", ""),
+            agent_name=data.get("agent_name", ""),
+            insertions=data.get("insertions", 0),
+            deletions=data.get("deletions", 0),
+        )
+
+
+@dataclass
+class ConsolidationResult:
+    """Outcome of rebasing agent commits onto the feature branch.
+
+    Stored on ``ExecutionState.consolidation_result`` after
+    ``CommitConsolidator.consolidate()`` completes (or partially
+    completes on conflict).
+
+    Attributes:
+        status: Overall outcome — ``"success"``, ``"partial"``, or
+            ``"conflict"``.
+        rebased_commits: Ordered list of dicts with keys ``step_id``,
+            ``agent_name``, ``original_hash``, ``new_hash`` — one entry
+            per successfully cherry-picked commit.
+        final_head: HEAD SHA after consolidation (empty on conflict).
+        base_commit: HEAD SHA recorded before the first cherry-pick.
+        files_changed: Deduplicated list of all repository-relative paths
+            touched across all rebased commits.
+        total_insertions: Sum of inserted lines across all rebased commits.
+        total_deletions: Sum of deleted lines across all rebased commits.
+        attributions: Per-file attribution records linking each change to a
+            step and agent.
+        conflict_files: Paths that triggered a merge conflict (non-empty
+            only when ``status == "conflict"``).
+        conflict_step_id: The step whose cherry-pick produced a conflict.
+        skipped_steps: Step IDs whose commits had no hash recorded and were
+            therefore skipped by the consolidator.
+        started_at: ISO 8601 timestamp at consolidation start.
+        completed_at: ISO 8601 timestamp at consolidation end.
+        error: Exception message if an unexpected error terminated
+            consolidation early.
+    """
+
+    status: str = "success"          # success | partial | conflict
+    rebased_commits: list[dict] = field(default_factory=list)
+    final_head: str = ""
+    base_commit: str = ""
+    files_changed: list[str] = field(default_factory=list)
+    total_insertions: int = 0
+    total_deletions: int = 0
+    attributions: list[FileAttribution] = field(default_factory=list)
+    conflict_files: list[str] = field(default_factory=list)
+    conflict_step_id: str = ""
+    skipped_steps: list[str] = field(default_factory=list)
+    started_at: str = ""
+    completed_at: str = ""
+    error: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "status": self.status,
+            "rebased_commits": list(self.rebased_commits),
+            "final_head": self.final_head,
+            "base_commit": self.base_commit,
+            "files_changed": self.files_changed,
+            "total_insertions": self.total_insertions,
+            "total_deletions": self.total_deletions,
+            "attributions": [a.to_dict() for a in self.attributions],
+            "conflict_files": self.conflict_files,
+            "conflict_step_id": self.conflict_step_id,
+            "skipped_steps": self.skipped_steps,
+            "started_at": self.started_at,
+            "completed_at": self.completed_at,
+            "error": self.error,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> ConsolidationResult:
+        return cls(
+            status=data.get("status", "success"),
+            rebased_commits=list(data.get("rebased_commits", [])),
+            final_head=data.get("final_head", ""),
+            base_commit=data.get("base_commit", ""),
+            files_changed=data.get("files_changed", []),
+            total_insertions=data.get("total_insertions", 0),
+            total_deletions=data.get("total_deletions", 0),
+            attributions=[
+                FileAttribution.from_dict(a) for a in data.get("attributions", [])
+            ],
+            conflict_files=data.get("conflict_files", []),
+            conflict_step_id=data.get("conflict_step_id", ""),
+            skipped_steps=data.get("skipped_steps", []),
+            started_at=data.get("started_at", ""),
+            completed_at=data.get("completed_at", ""),
+            error=data.get("error", ""),
+        )
+
+
 @dataclass
 class ExecutionState:
     """Persistent state of a running execution, saved between CLI calls.
@@ -1124,6 +1257,9 @@ class ExecutionState:
         completed_at: ISO 8601 completion time, if finished.
         pending_gaps: Unresolved knowledge gap signals.
         resolved_decisions: Resolved gaps injected on re-dispatch.
+        consolidation_result: Result of the commit consolidation pass run
+            at execution completion.  ``None`` when consolidation has not
+            yet been attempted or is not applicable.
     """
 
     task_id: str
@@ -1144,6 +1280,10 @@ class ExecutionState:
     # it was first delivered inline.  Empty on fresh starts; absent in older
     # state files (graceful default applied in from_dict).
     delivered_knowledge: dict[str, str] = field(default_factory=dict)
+    # Populated by CommitConsolidator.consolidate() at execution completion.
+    # None until consolidation is attempted; absent in older state files
+    # (graceful default applied in from_dict).
+    consolidation_result: ConsolidationResult | None = None
 
     def __post_init__(self) -> None:
         if not self.started_at:
@@ -1203,10 +1343,16 @@ class ExecutionState:
             "pending_gaps": [g.to_dict() for g in self.pending_gaps],
             "resolved_decisions": [d.to_dict() for d in self.resolved_decisions],
             "delivered_knowledge": dict(self.delivered_knowledge),
+            "consolidation_result": (
+                self.consolidation_result.to_dict()
+                if self.consolidation_result is not None
+                else None
+            ),
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> ExecutionState:
+        cr_data = data.get("consolidation_result")
         return cls(
             task_id=data["task_id"],
             plan=MachinePlan.from_dict(data["plan"]),
@@ -1223,6 +1369,7 @@ class ExecutionState:
             pending_gaps=[KnowledgeGapSignal.from_dict(g) for g in data.get("pending_gaps", [])],
             resolved_decisions=[ResolvedDecision.from_dict(d) for d in data.get("resolved_decisions", [])],
             delivered_knowledge=dict(data.get("delivered_knowledge", {})),
+            consolidation_result=ConsolidationResult.from_dict(cr_data) if cr_data is not None else None,
         )
 
 

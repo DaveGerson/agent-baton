@@ -616,6 +616,7 @@ function colStationEmoji(colId: string): string {
     case 'awaiting_human': return '🛎';
     case 'validating': return '👅';
     case 'deployed': return '🍽';
+    case 'review': return '🔍';
     default: return '🍴';
   }
 }

@@ -1181,3 +1181,141 @@ class RecordFeedbackResponse(BaseModel):
         default_factory=list,
         description="Next batch of dispatchable actions after the plan amendment.",
     )
+
+
+# ---------------------------------------------------------------------------
+# Changelist / merge / PR responses
+# ---------------------------------------------------------------------------
+
+
+class ChangelistResponse(BaseModel):
+    """Consolidation result returned by ``GET /pmo/cards/{card_id}/changelist``.
+
+    Mirrors the fields of ``ConsolidationResult`` so the PMO UI can render
+    a per-file changelist, attribute changes to agents, and surface any
+    conflicts before the operator triggers a merge.
+
+    Returned by ``GET /api/v1/pmo/cards/{card_id}/changelist``.
+    """
+
+    status: str = Field(
+        ...,
+        description="Consolidation outcome: 'success', 'partial', or 'conflict'.",
+    )
+    final_head: str = Field(
+        default="",
+        description="HEAD SHA after consolidation (empty on conflict or partial).",
+    )
+    base_commit: str = Field(
+        default="",
+        description="HEAD SHA recorded before the first cherry-pick.",
+    )
+    files_changed: list[str] = Field(
+        default_factory=list,
+        description="Deduplicated list of repository-relative paths touched.",
+    )
+    total_insertions: int = Field(
+        default=0,
+        description="Sum of inserted lines across all rebased commits.",
+    )
+    total_deletions: int = Field(
+        default=0,
+        description="Sum of deleted lines across all rebased commits.",
+    )
+    rebased_commits: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Ordered list of rebased commit records, each with "
+            "step_id, agent_name, original_hash, and new_hash."
+        ),
+    )
+    attributions: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Per-file attribution records (file_path, step_id, agent_name, insertions, deletions).",
+    )
+    conflict_files: list[str] = Field(
+        default_factory=list,
+        description="Paths with unresolved conflicts (non-empty only when status='conflict').",
+    )
+    conflict_step_id: str = Field(
+        default="",
+        description="Step ID whose cherry-pick triggered the conflict.",
+    )
+    skipped_steps: list[str] = Field(
+        default_factory=list,
+        description="Step IDs that completed but recorded no commit hash.",
+    )
+    started_at: str = Field(default="", description="ISO 8601 consolidation start timestamp.")
+    completed_at: str = Field(default="", description="ISO 8601 consolidation end timestamp.")
+    error: str = Field(
+        default="",
+        description="Error message when consolidation terminated unexpectedly.",
+    )
+
+
+class MergeResponse(BaseModel):
+    """Confirmation of a successful card merge.
+
+    Returned by ``POST /api/v1/pmo/cards/{card_id}/merge``.
+
+    ``merge_commit`` is the HEAD SHA after the merge operation.
+    ``cleaned_worktrees`` lists worktree paths that were removed during
+    post-merge cleanup.
+    """
+
+    merge_commit: str = Field(
+        ...,
+        description="HEAD SHA after the merge (new commit or existing HEAD on fast-forward).",
+    )
+    cleaned_worktrees: list[str] = Field(
+        default_factory=list,
+        description="Worktree directories removed during post-merge cleanup.",
+    )
+
+
+class CreatePrResponse(BaseModel):
+    """Confirmation of a successfully created pull request.
+
+    Returned by ``POST /api/v1/pmo/cards/{card_id}/create-pr``.
+
+    ``pr_url`` is the full HTTPS URL to the pull request on GitHub (or
+    whichever host ``gh`` is configured against).  ``pr_number`` is the
+    numeric PR identifier extracted from that URL for convenience.
+    """
+
+    pr_url: str = Field(..., description="Full URL of the created pull request.")
+    pr_number: int = Field(..., description="Numeric pull request identifier.")
+
+
+# ---------------------------------------------------------------------------
+# Approval log responses
+# ---------------------------------------------------------------------------
+
+
+class ApprovalLogEntry(BaseModel):
+    """A single entry from the approval_log table.
+
+    Returned as an element of ``ApprovalLogResponse``.  Each entry records
+    one approval action (approve, reject, request_review, feedback) taken
+    against a card phase.
+    """
+
+    log_id: str = Field(..., description="Unique log entry identifier.")
+    task_id: str = Field(..., description="Task ID of the card this action applies to.")
+    phase_id: str = Field(default="", description="Phase ID the action targets.")
+    user_id: str = Field(default="local-user", description="PMO user who performed the action.")
+    action: str = Field(..., description="Action taken: approve, reject, request_review, feedback.")
+    notes: str = Field(default="", description="Reviewer notes or rejection reason.")
+    created_at: str = Field(default="", description="ISO 8601 timestamp of the action.")
+
+
+class ApprovalLogResponse(BaseModel):
+    """All approval log entries for a card.
+
+    Returned by ``GET /api/v1/pmo/cards/{card_id}/approval-log``.
+    """
+
+    entries: list[ApprovalLogEntry] = Field(
+        default_factory=list,
+        description="Chronologically ordered approval log entries.",
+    )
