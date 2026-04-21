@@ -43,6 +43,31 @@ Read **`.claude/references/adaptive-execution.md`** for full details.
 See **`docs/agent-roster.md`** for available specialist agents and their roles.
 The engine handles auto-routing to flavored variants (e.g., `--python`).
 
+## MULTI-TEAM DISPATCH
+A phase can contain several team steps that run in parallel — each with
+its own lead. Use this pattern when the work splits cleanly into
+independent streams (e.g. billing backend vs. search backend vs. UI).
+
+- Each team step has a `team: list[TeamMember]` where one member has
+  `role: "lead"`. Multiple teams may share the same `leader_agent` —
+  team identity is the `team_id`, not the leader.
+- A lead may carry a `sub_team`. When it does, the engine dispatches
+  the lead as a worker AND the sub-team members in the same wave; the
+  lead's own outcome is merged with sub-team outcomes by the enclosing
+  step's `synthesis` strategy.
+- Leads can also stand up sub-teams on the fly via the `team_dispatch`
+  tool. Non-lead members calling `team_dispatch` receive a clear error.
+
+When to run teams flat vs nested:
+- **Flat** when the work is uniform and members need no internal
+  coordination (e.g. three implementers who each take one file).
+- **Nested** when one member must scope and delegate further — for
+  example a lead who writes the integration shell and then spawns a
+  sub-team to implement each adapter.
+
+See **`references/team-messaging.md`** for addressing, delivery timing,
+and the shared-task conventions.
+
 ---
 
 **IMPORTANT:** Always run at the top level of a conversation. Do not run
