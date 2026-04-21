@@ -414,7 +414,7 @@ CREATE INDEX IF NOT EXISTS idx_approval_log_task ON approval_log(task_id);
 CREATE INDEX IF NOT EXISTS idx_approval_log_user ON approval_log(user_id);
 """,
     15: """
--- v15: add teams registry for multi-team orchestration.
+-- v15: multi-team orchestration — teams registry + sub_team/synthesis columns.
 --
 -- A Team is a stable identity for a coordinated group of agents.  Multiple
 -- teams per leader are explicitly allowed: team_id is the identity, not
@@ -422,6 +422,11 @@ CREATE INDEX IF NOT EXISTS idx_approval_log_user ON approval_log(user_id);
 --
 -- Nested teams: parent_team_id points to the enclosing team when a lead
 -- carves out a sub-team via the team_dispatch tool.
+--
+-- team_members gains two JSON-blob columns so nested sub_teams and the
+-- optional synthesis spec survive a storage round-trip.  Legacy rows
+-- default to '[]' / '' — behavior is preserved for plans that never use
+-- the new fields.
 --
 -- NOTE: FK constraints are intentionally omitted from this migration because
 -- it is applied to BOTH project and central databases via
@@ -440,6 +445,9 @@ CREATE TABLE IF NOT EXISTS teams (
 );
 CREATE INDEX IF NOT EXISTS idx_teams_leader ON teams(task_id, leader_agent);
 CREATE INDEX IF NOT EXISTS idx_teams_parent ON teams(task_id, parent_team_id);
+
+ALTER TABLE team_members ADD COLUMN sub_team  TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE team_members ADD COLUMN synthesis TEXT NOT NULL DEFAULT '';
 """,
 }
 
@@ -538,6 +546,8 @@ CREATE TABLE IF NOT EXISTS team_members (
     model          TEXT NOT NULL DEFAULT 'sonnet',
     depends_on     TEXT NOT NULL DEFAULT '[]',
     deliverables   TEXT NOT NULL DEFAULT '[]',
+    sub_team       TEXT NOT NULL DEFAULT '[]',
+    synthesis      TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (task_id, step_id, member_id),
     FOREIGN KEY (task_id, step_id) REFERENCES plan_steps(task_id, step_id) ON DELETE CASCADE
 );

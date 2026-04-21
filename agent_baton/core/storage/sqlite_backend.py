@@ -1884,13 +1884,22 @@ def _upsert_plan(conn: sqlite3.Connection, plan: "MachinePlan") -> None:  # noqa
             )
 
             for member in step.team:
+                # Persist sub_team and synthesis as JSON blobs so nested
+                # teams and the per-lead synthesis spec survive a round-trip.
+                sub_team_json = json.dumps(
+                    [m.to_dict() for m in member.sub_team]
+                )
+                synthesis_json = (
+                    json.dumps(member.synthesis.to_dict())
+                    if member.synthesis is not None else ""
+                )
                 conn.execute(
                     """
                     INSERT INTO team_members
                         (task_id, step_id, member_id, agent_name,
                          role, task_description, model,
-                         depends_on, deliverables)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         depends_on, deliverables, sub_team, synthesis)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         plan.task_id,
@@ -1902,6 +1911,8 @@ def _upsert_plan(conn: sqlite3.Connection, plan: "MachinePlan") -> None:  # noqa
                         member.model,
                         json.dumps(member.depends_on),
                         json.dumps(member.deliverables),
+                        sub_team_json,
+                        synthesis_json,
                     ),
                 )
 
@@ -1980,8 +1991,27 @@ def _load_plan_struct(
 
         steps: list[PlanStep] = []
         for sr in steps_by_phase.get(pr["phase_id"], []):
-            team = [
-                TeamMember(
+            team = []
+            for mr in members_by_step.get(sr["step_id"], []):
+                # sub_team / synthesis are schema v15 additions — read
+                # defensively so older DBs without these columns still work.
+                try:
+                    sub_team_raw = mr["sub_team"] or "[]"
+                except (IndexError, KeyError):
+                    sub_team_raw = "[]"
+                try:
+                    synth_raw = mr["synthesis"] or ""
+                except (IndexError, KeyError):
+                    synth_raw = ""
+                sub_team_list = [
+                    TeamMember.from_dict(d)
+                    for d in json.loads(sub_team_raw or "[]")
+                ]
+                synthesis_obj = None
+                if synth_raw:
+                    from agent_baton.models.execution import SynthesisSpec
+                    synthesis_obj = SynthesisSpec.from_dict(json.loads(synth_raw))
+                team.append(TeamMember(
                     member_id=mr["member_id"],
                     agent_name=mr["agent_name"],
                     role=mr["role"],
@@ -1989,9 +2019,9 @@ def _load_plan_struct(
                     model=mr["model"],
                     depends_on=json.loads(mr["depends_on"]),
                     deliverables=json.loads(mr["deliverables"]),
-                )
-                for mr in members_by_step.get(sr["step_id"], [])
-            ]
+                    sub_team=sub_team_list,
+                    synthesis=synthesis_obj,
+                ))
             raw_ka = sr["knowledge_attachments"] if "knowledge_attachments" in sr.keys() else "[]"
             steps.append(
                 PlanStep(

@@ -1257,13 +1257,36 @@ class ExecutionEngine:
 
         actions: list[ExecutionAction] = []
         for step in phase_obj.steps:
-            if step.step_id in occupied:
+            # Team steps can be re-entered while still in dispatched state
+            # when the team_dispatch tool has added new sub-team members
+            # mid-flight; _team_dispatch_action handles the "nothing ready"
+            # case by returning WAIT.
+            is_in_flight_team = (
+                step.team
+                and step.step_id in dispatched
+                and step.step_id not in completed
+                and step.step_id not in state.failed_step_ids
+            )
+            if step.step_id in occupied and not is_in_flight_team:
                 continue
             if step.depends_on and not all(
                 dep in completed for dep in step.depends_on
             ):
                 continue
-            actions.append(self._dispatch_action(step, state))
+            # Team steps route through _team_dispatch_action so nested
+            # sub-teams are expanded and the team_registry is populated.
+            if step.team:
+                team_action = self._team_dispatch_action(step, state)
+                # Skip the WAIT result when the step is already in flight —
+                # it adds nothing and would confuse batch callers.
+                if (
+                    is_in_flight_team
+                    and team_action.action_type == ActionType.WAIT
+                ):
+                    continue
+                actions.append(team_action)
+            else:
+                actions.append(self._dispatch_action(step, state))
 
         return actions
 
