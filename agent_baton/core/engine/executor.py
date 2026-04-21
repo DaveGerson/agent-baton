@@ -393,6 +393,20 @@ class ExecutionEngine:
                     "BeadStore init skipped (non-fatal): %s", _bead_init_exc
                 )
 
+        # ── Team registry (schema v15, multi-team orchestration) ────────────
+        # Same lifecycle and graceful-degradation semantics as _bead_store.
+        self._team_registry = None
+        if storage is not None:
+            try:
+                from agent_baton.core.engine.team_registry import TeamRegistry
+                _teams_db = storage.db_path
+                if isinstance(_teams_db, Path):
+                    self._team_registry = TeamRegistry(_teams_db)
+            except Exception as _tr_init_exc:
+                _log.debug(
+                    "TeamRegistry init skipped (non-fatal): %s", _tr_init_exc
+                )
+
     # ── Storage routing helpers ──────────────────────────────────────────────
 
     def _save_execution(self, state: ExecutionState) -> None:
@@ -2527,10 +2541,15 @@ class ExecutionEngine:
         )
         parent.member_results.append(member_result)
 
-        # Check if all team members are done.
+        # Check if all team members are done.  For nested teams the
+        # expected set includes the lead AND every recursively-flattened
+        # sub-team member.
         plan_step = self._find_step(state, step_id)
         if plan_step and plan_step.team:
-            all_member_ids = {m.member_id for m in plan_step.team}
+            all_member_ids = {
+                m.member_id
+                for m in self._flatten_team_members(plan_step.team)
+            }
             completed_ids = {
                 m.member_id for m in parent.member_results
                 if m.status == "complete"
@@ -4216,41 +4235,118 @@ class ExecutionEngine:
                 },
             )
 
+    @staticmethod
+    def _flatten_team_members(team: "list") -> "list":
+        """Recursively flatten a team into a list of all members (leads + nested).
+
+        A lead with a ``sub_team`` contributes itself AND all recursively
+        flattened sub-team members.  A plain implementer contributes just itself.
+        Order is preserved as a depth-first walk so the return list always has
+        every descendent appearing after its ancestors.
+        """
+        out: list = []
+        for m in team:
+            out.append(m)
+            if m.sub_team:
+                out.extend(ExecutionEngine._flatten_team_members(m.sub_team))
+        return out
+
+    @staticmethod
+    def _find_team_member(team: "list", member_id: str):
+        """Locate a team member by ``member_id`` anywhere in the nested tree."""
+        for m in team:
+            if m.member_id == member_id:
+                return m
+            if m.sub_team:
+                found = ExecutionEngine._find_team_member(m.sub_team, member_id)
+                if found is not None:
+                    return found
+        return None
+
     def _team_dispatch_action(
         self, step: PlanStep, state: ExecutionState,
     ) -> ExecutionAction:
-        """Build a DISPATCH action with parallel_actions for each team member."""
+        """Build a DISPATCH action with parallel_actions for each team member.
+
+        Nested teams: when a ``role == "lead"`` member carries a non-empty
+        ``sub_team`` the lead is dispatched as a normal worker AND its
+        sub-team members are dispatched alongside.  A child :class:`Team`
+        registry entry is created on first dispatch so the step has a
+        stable team identity.  The lead's own outcome and the sub-team
+        outcomes are merged by the enclosing step's ``synthesis`` strategy.
+        """
         dispatcher = PromptDispatcher()
 
-        # Build team overview for context.
+        # Flat team overview (top-level members only — nested teams have
+        # their own internal coordination).
         team_overview = ", ".join(
             f"{m.agent_name} ({m.role})" for m in step.team
         )
 
-        # Find completed member IDs (if any members already recorded).
+        # Find recorded member IDs across the whole nested tree.
         parent = state.get_step_result(step.step_id)
-        completed_members = set()
+        completed_members: set[str] = set()
+        occupied_members: set[str] = set()
         if parent:
-            completed_members = {
-                m.member_id for m in parent.member_results
-                if m.status == "complete"
-            }
+            for mr in parent.member_results:
+                if mr.status == "complete":
+                    completed_members.add(mr.member_id)
+                # Any recorded member (complete / failed / dispatched) is
+                # occupied — we never re-dispatch.
+                occupied_members.add(mr.member_id)
 
+        # Register the top-level team once on first dispatch so other
+        # subsystems (team_board, lookups) can find it.
+        if self._team_registry is not None and step.team:
+            leader = next((m for m in step.team if m.role == "lead"), None)
+            self._team_registry.create_team(
+                task_id=state.task_id,
+                team_id=f"team-{step.step_id}",
+                step_id=step.step_id,
+                leader_agent=leader.agent_name if leader else "",
+                leader_member_id=leader.member_id if leader else "",
+            )
+
+        # Flatten nested teams into one dispatchable list.  A lead with
+        # sub_team is added FIRST, followed by its sub-team members — this
+        # matches the "lead runs as worker AND coordinator" contract.
+        flat_members = self._flatten_team_members(step.team)
+
+        # Walk each flat member and emit a DISPATCH if it is ready.
         member_actions: list[ExecutionAction] = []
-        for member in step.team:
-            if member.member_id in completed_members:
+        for member in flat_members:
+            if member.member_id in occupied_members:
                 continue
-            # Check member-level dependencies.
+
+            # Member-level dependency check.
             if member.depends_on and not all(
                 dep in completed_members for dep in member.depends_on
             ):
                 continue
 
-            # F3 Forward Relay: inject prior beads into team member prompts
+            # Register the child team for leads with a sub_team on first
+            # dispatch of that lead.
+            if (
+                member.role == "lead"
+                and member.sub_team
+                and self._team_registry is not None
+            ):
+                self._team_registry.create_team(
+                    task_id=state.task_id,
+                    team_id=f"{step.step_id}::{member.member_id}",
+                    step_id=member.member_id,
+                    leader_agent=member.agent_name,
+                    leader_member_id=member.member_id,
+                    parent_team_id=f"team-{step.step_id}",
+                )
+
+            # F3 Forward Relay: inject prior beads into team member prompts.
             _team_beads: list = []
             if self._bead_store:
                 try:
-                    from agent_baton.core.engine.bead_selector import BeadSelector as _TBS
+                    from agent_baton.core.engine.bead_selector import (
+                        BeadSelector as _TBS,
+                    )
                     _team_beads = _TBS().select(
                         self._bead_store, step, state.plan,
                     )
@@ -4266,7 +4362,10 @@ class ExecutionEngine:
             )
             member_actions.append(ExecutionAction(
                 action_type=ActionType.DISPATCH,
-                message=f"Team member '{member.agent_name}' ({member.role}) for step {step.step_id}.",
+                message=(
+                    f"Team member '{member.agent_name}' ({member.role}) "
+                    f"for step {step.step_id}."
+                ),
                 agent_name=member.agent_name,
                 agent_model=member.model,
                 delegation_prompt=prompt,

@@ -24,9 +24,10 @@ from agent_baton.models.knowledge import (
 from agent_baton.models.parallel import ResourceLimits
 from agent_baton.models.taxonomy import ForesightInsight
 
-# Matches team-member IDs of the form N.N.x  (e.g. "1.1.a", "2.3.b").
+# Matches team-member IDs of the form N.N.x and nested forms N.N.x.y...
+# (e.g. "1.1.a", "2.3.b", "1.1.a.b" for nested sub-team members).
 # Used in ExecutionAction.to_dict() to set the is_team_member flag.
-_TEAM_MEMBER_ID_RE = re.compile(r'^\d+\.\d+\.[a-z]+$')
+_TEAM_MEMBER_ID_RE = re.compile(r'^\d+\.\d+(?:\.[a-z]+)+$')
 
 
 # ---------------------------------------------------------------------------
