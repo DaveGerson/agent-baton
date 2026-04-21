@@ -250,6 +250,87 @@ class BeadSelector:
 
         return selected
 
+    def select_for_team_member(
+        self,
+        bead_store: "BeadStore",
+        current_step: "PlanStep",
+        plan: "MachinePlan",
+        *,
+        team_id: str,
+        member_id: str,
+        token_budget: int = 4096,
+        max_beads: int = 10,
+    ) -> "list[Bead]":
+        """Team-aware extension of :meth:`select`.
+
+        Returns the union of:
+
+        1. The standard :meth:`select` result (dependency-chain, same-phase,
+           and cross-phase agent-signal beads).
+        2. Open ``task`` beads scoped to *team_id* that are unclaimed or
+           claimed by *member_id*.
+        3. Unread ``message`` beads addressed to *member_id* or broadcast
+           to *team_id* (not yet acked by *member_id*).
+
+        The team-board beads are not budget-constrained by the same logic
+        as the agent-signal beads — they always fit (they are bounded by
+        how many messages and tasks the team has produced), but the
+        *max_beads* cap still applies to the combined result.
+
+        The existing :meth:`select` signature and call sites are
+        unchanged.
+        """
+        try:
+            base = self.select(
+                bead_store, current_step, plan,
+                token_budget=token_budget, max_beads=max_beads,
+            )
+        except Exception as exc:
+            _log.debug("select_for_team_member: base select failed: %s", exc)
+            base = []
+
+        # Layer team-board beads on top of the base selection.
+        try:
+            from agent_baton.core.engine.team_board import TeamBoard
+            board = TeamBoard(bead_store)
+            messages = board.unread_messages_for_member(
+                task_id=plan.task_id,
+                team_id=team_id,
+                member_id=member_id,
+            )
+            tasks = board.open_tasks_for_team(
+                task_id=plan.task_id,
+                team_id=team_id,
+                member_id=member_id,
+            )
+        except Exception as exc:
+            _log.debug(
+                "select_for_team_member: team-board enrichment failed: %s",
+                exc,
+            )
+            return base
+
+        # Base select() pulls every open bead including team-board types;
+        # strip those so the team-board filter (ack + claim) is the only
+        # source of truth for message/task visibility.
+        filtered_base = [
+            b for b in base
+            if b.bead_type not in ("message", "task", "message_ack")
+        ]
+
+        # Prepend team-board beads — they are the most recent/relevant
+        # context for this specific member.  Base entries follow.
+        seen: set[str] = set()
+        result: list = []
+        for bead in list(messages) + list(tasks) + list(filtered_base):
+            if bead.bead_id in seen:
+                continue
+            seen.add(bead.bead_id)
+            result.append(bead)
+            if len(result) >= max_beads:
+                break
+        return result
+
     @staticmethod
     def _dependency_chain(
         current_step: "PlanStep", plan: "MachinePlan"
