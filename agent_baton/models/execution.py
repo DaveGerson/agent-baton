@@ -24,9 +24,10 @@ from agent_baton.models.knowledge import (
 from agent_baton.models.parallel import ResourceLimits
 from agent_baton.models.taxonomy import ForesightInsight
 
-# Matches team-member IDs of the form N.N.x  (e.g. "1.1.a", "2.3.b").
+# Matches team-member IDs of the form N.N.x and nested forms N.N.x.y...
+# (e.g. "1.1.a", "2.3.b", "1.1.a.b" for nested sub-team members).
 # Used in ExecutionAction.to_dict() to set the is_team_member flag.
-_TEAM_MEMBER_ID_RE = re.compile(r'^\d+\.\d+\.[a-z]+$')
+_TEAM_MEMBER_ID_RE = re.compile(r'^\d+\.\d+(?:\.[a-z]+)+$')
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +149,12 @@ class TeamMember:
         model: LLM model to use.
         depends_on: Other ``member_id`` values that must complete first.
         deliverables: Expected output artifacts.
+        sub_team: Nested team the lead coordinates.  Non-empty only when
+            ``role == "lead"``; enforced by :meth:`validate`.  The lead is
+            still dispatched as a worker — its own outcome is merged with
+            sub-team outcomes by the enclosing step's ``synthesis``.
+        synthesis: How the lead's own outcome is merged with sub-team
+            outcomes.  Meaningful only when ``sub_team`` is non-empty.
     """
 
     member_id: str                          # e.g. "1.1.a"
@@ -157,9 +164,20 @@ class TeamMember:
     model: str = "sonnet"
     depends_on: list[str] = field(default_factory=list)   # other member_ids
     deliverables: list[str] = field(default_factory=list)
+    sub_team: list[TeamMember] = field(default_factory=list)  # nested team
+    synthesis: SynthesisSpec | None = None  # merge strategy iff sub_team non-empty
+
+    def validate(self) -> None:
+        """Raise ``ValueError`` when the member carries a ``sub_team`` but is
+        not a lead.  Sub-teams may only be attached to ``role == "lead"``."""
+        if self.sub_team and self.role != "lead":
+            raise ValueError(
+                f"TeamMember {self.member_id!r} has a sub_team but role={self.role!r}; "
+                "only role='lead' members may carry a sub_team."
+            )
 
     def to_dict(self) -> dict:
-        return {
+        d: dict = {
             "member_id": self.member_id,
             "agent_name": self.agent_name,
             "role": self.role,
@@ -168,9 +186,15 @@ class TeamMember:
             "depends_on": self.depends_on,
             "deliverables": self.deliverables,
         }
+        if self.sub_team:
+            d["sub_team"] = [m.to_dict() for m in self.sub_team]
+        if self.synthesis is not None:
+            d["synthesis"] = self.synthesis.to_dict()
+        return d
 
     @classmethod
     def from_dict(cls, data: dict) -> TeamMember:
+        synth_data = data.get("synthesis")
         return cls(
             member_id=data["member_id"],
             agent_name=data["agent_name"],
@@ -179,6 +203,8 @@ class TeamMember:
             model=data.get("model", "sonnet"),
             depends_on=data.get("depends_on", []),
             deliverables=data.get("deliverables", []),
+            sub_team=[cls.from_dict(m) for m in data.get("sub_team", [])],
+            synthesis=SynthesisSpec.from_dict(synth_data) if synth_data else None,
         )
 
 

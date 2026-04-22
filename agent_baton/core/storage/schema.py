@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -413,6 +413,42 @@ CREATE TABLE IF NOT EXISTS approval_log (
 CREATE INDEX IF NOT EXISTS idx_approval_log_task ON approval_log(task_id);
 CREATE INDEX IF NOT EXISTS idx_approval_log_user ON approval_log(user_id);
 """,
+    15: """
+-- v15: multi-team orchestration — teams registry + sub_team/synthesis columns.
+--
+-- A Team is a stable identity for a coordinated group of agents.  Multiple
+-- teams per leader are explicitly allowed: team_id is the identity, not
+-- leader_agent (no UNIQUE constraint on leader_agent).
+--
+-- Nested teams: parent_team_id points to the enclosing team when a lead
+-- carves out a sub-team via the team_dispatch tool.
+--
+-- team_members gains two JSON-blob columns so nested sub_teams and the
+-- optional synthesis spec survive a storage round-trip.  Legacy rows
+-- default to '[]' / '' — behavior is preserved for plans that never use
+-- the new fields.
+--
+-- NOTE: FK constraints are intentionally omitted from this migration because
+-- it is applied to BOTH project and central databases via
+-- ConnectionManager._run_migrations().  Fresh project DBs get FKs from
+-- PROJECT_SCHEMA_DDL directly.
+CREATE TABLE IF NOT EXISTS teams (
+    task_id          TEXT NOT NULL,
+    team_id          TEXT NOT NULL,
+    step_id          TEXT NOT NULL,
+    parent_team_id   TEXT NOT NULL DEFAULT '',
+    leader_agent     TEXT NOT NULL,
+    leader_member_id TEXT NOT NULL,
+    status           TEXT NOT NULL DEFAULT 'active',
+    created_at       TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (task_id, team_id)
+);
+CREATE INDEX IF NOT EXISTS idx_teams_leader ON teams(task_id, leader_agent);
+CREATE INDEX IF NOT EXISTS idx_teams_parent ON teams(task_id, parent_team_id);
+
+ALTER TABLE team_members ADD COLUMN sub_team  TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE team_members ADD COLUMN synthesis TEXT NOT NULL DEFAULT '';
+""",
 }
 
 # =====================================================================
@@ -510,6 +546,8 @@ CREATE TABLE IF NOT EXISTS team_members (
     model          TEXT NOT NULL DEFAULT 'sonnet',
     depends_on     TEXT NOT NULL DEFAULT '[]',
     deliverables   TEXT NOT NULL DEFAULT '[]',
+    sub_team       TEXT NOT NULL DEFAULT '[]',
+    synthesis      TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (task_id, step_id, member_id),
     FOREIGN KEY (task_id, step_id) REFERENCES plan_steps(task_id, step_id) ON DELETE CASCADE
 );
@@ -924,6 +962,26 @@ CREATE TABLE IF NOT EXISTS feedback_responses (
     FOREIGN KEY (task_id) REFERENCES executions(task_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_feedback_responses_task ON feedback_responses(task_id);
+
+-- TEAMS (v15: multi-team orchestration registry)
+-- A Team is a stable identity for a coordinated group of agents.  Multiple
+-- teams may share the same leader_agent — team_id is the identity, not the
+-- leader.  Nested sub-teams carved out by a lead via team_dispatch set
+-- parent_team_id to the enclosing team.
+CREATE TABLE IF NOT EXISTS teams (
+    task_id          TEXT NOT NULL,
+    team_id          TEXT NOT NULL,
+    step_id          TEXT NOT NULL,
+    parent_team_id   TEXT NOT NULL DEFAULT '',
+    leader_agent     TEXT NOT NULL,
+    leader_member_id TEXT NOT NULL,
+    status           TEXT NOT NULL DEFAULT 'active',
+    created_at       TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (task_id, team_id),
+    FOREIGN KEY (task_id) REFERENCES executions(task_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_teams_leader ON teams(task_id, leader_agent);
+CREATE INDEX IF NOT EXISTS idx_teams_parent ON teams(task_id, parent_team_id);
 """
 
 # =====================================================================

@@ -20,6 +20,43 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 
+# Recognized bead_type values.
+#
+# The original agent-signal types (discovery, decision, warning, outcome,
+# planning) are joined by three team-coordination types introduced for
+# multi-team orchestration (schema v15):
+#
+# - ``task``         — a work item on the shared team board.  ``open`` with no
+#                      ``claimed_by=X`` tag means unclaimed; a ``claimed_by=X``
+#                      tag marks the claimer; status=closed means completed.
+# - ``message``      — a one-shot communication from one member or team to
+#                      another, delivered to the recipient's next dispatch.
+# - ``message_ack``  — marks a ``message`` bead as read, suppressing
+#                      re-delivery.  Keyed by tag ``ack_of=<message_bead_id>``
+#                      plus ``from_member=<recipient_member_id>``.
+#
+# The addressing tags ride on the existing ``bead_tags`` index so no schema
+# change is required on the beads table.
+AGENT_SIGNAL_BEAD_TYPES: frozenset[str] = frozenset({
+    "discovery", "decision", "warning", "outcome", "planning",
+})
+TEAM_BOARD_BEAD_TYPES: frozenset[str] = frozenset({
+    "task", "message", "message_ack",
+})
+KNOWN_BEAD_TYPES: frozenset[str] = AGENT_SIGNAL_BEAD_TYPES | TEAM_BOARD_BEAD_TYPES
+
+
+def is_known_bead_type(bead_type: str) -> bool:
+    """Return True when *bead_type* is a recognized value.
+
+    Callers that need strict validation (e.g. ``team_board`` wrappers) can
+    check this before writing.  Unknown types are still accepted by
+    :class:`BeadStore` — recognition here is advisory and serves as a
+    catalog of well-known vocabulary.
+    """
+    return bead_type in KNOWN_BEAD_TYPES
+
+
 def _generate_bead_id(
     task_id: str,
     step_id: str,
@@ -118,8 +155,10 @@ class Bead:
         step_id: Step within the execution, or ``"planning"`` for beads
             created during plan generation.
         agent_name: Agent that generated this bead.
-        bead_type: ``"discovery"`` | ``"decision"`` | ``"warning"``
-            | ``"outcome"`` | ``"planning"``.
+        bead_type: Agent-signal types — ``"discovery"`` | ``"decision"``
+            | ``"warning"`` | ``"outcome"`` | ``"planning"``.  Team-board
+            types introduced in schema v15 — ``"task"`` | ``"message"``
+            | ``"message_ack"``.  See :data:`KNOWN_BEAD_TYPES`.
         content: The actual insight, discovery, or decision text.
         confidence: ``"high"`` | ``"medium"`` | ``"low"``.
         scope: ``"step"`` | ``"phase"`` | ``"task"`` | ``"project"``.
