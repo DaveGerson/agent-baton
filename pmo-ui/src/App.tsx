@@ -3,6 +3,9 @@ import { KanbanBoard } from './components/KanbanBoard';
 import { ForgePanel } from './components/ForgePanel';
 import { BackOfHousePanel } from './components/BackOfHousePanel';
 import { SpecsPanel } from './components/SpecsPanel';
+import { AgentWorkforceView } from './views/AgentWorkforceView';
+import { BeadGraphView } from './views/BeadGraphView';
+import { BeadTimelineView } from './views/BeadTimelineView';
 import { KeyboardShortcutsDialog } from './components/KeyboardShortcutsDialog';
 import { useHotkeys } from './hooks/useHotkeys';
 import { usePersistedState } from './hooks/usePersistedState';
@@ -10,7 +13,8 @@ import { T, FONTS, SHADOWS } from './styles/tokens';
 import { ToastProvider } from './contexts/ToastContext';
 import type { PmoCard, PmoSignal } from './api/types';
 
-type View = 'kanban' | 'forge' | 'boh' | 'specs';
+type View = 'kanban' | 'forge' | 'boh' | 'specs' | 'workforce' | 'beads';
+type BeadsSubView = 'graph' | 'timeline';
 
 export default function App() {
   const [view, setView] = usePersistedState<View>('pmo:active-view', 'kanban');
@@ -70,10 +74,11 @@ export default function App() {
   useHotkeys(hotkeyBindings);
 
   const NAV_TABS = [
-    { id: 'kanban' as const, label: 'The Rail',       emoji: '🥟' },
-    { id: 'forge'  as const, label: 'The Forge',      emoji: '🍳' },
-    { id: 'specs'  as const, label: 'Specs',          emoji: '📋' },
-    { id: 'boh'    as const, label: 'Back of House',  emoji: '🚪' },
+    { id: 'kanban'    as const, label: 'The Rail',       emoji: '🥟' },
+    { id: 'forge'     as const, label: 'The Forge',      emoji: '🍳' },
+    { id: 'specs'     as const, label: 'Specs',          emoji: '📋' },
+    { id: 'workforce' as const, label: 'Workforce',      emoji: '📡' },
+    { id: 'boh'       as const, label: 'Back of House',  emoji: '🚪' },
   ];
 
   return (
@@ -225,6 +230,15 @@ export default function App() {
           style={{ display: view === 'specs' ? 'block' : 'none', height: '100%' }}
         >
           <SpecsPanel onBack={backToBoard} />
+        </div>
+        <div
+          id="panel-workforce"
+          role="tabpanel"
+          aria-labelledby="tab-workforce"
+          aria-hidden={view !== 'workforce'}
+          style={{ display: view === 'workforce' ? 'block' : 'none', height: '100%' }}
+        >
+          <AgentWorkforceView onBack={backToBoard} />
         </div>
         <div
           id="panel-boh"
