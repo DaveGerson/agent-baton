@@ -95,11 +95,14 @@ class StackProfile:
     command selection.  ``languages`` contains every language detected
     across root and subdirectories (in detection order, deduplicated)
     so callers (e.g. the planner) can emit gates for multi-stack repos.
+    ``frameworks`` mirrors ``languages``: every framework hint surfaced
+    by FRAMEWORK_SIGNALS, regardless of where it lives.
     """
     language: str | None = None
     framework: str | None = None
     detected_files: list[str] = field(default_factory=list)
     languages: list[str] = field(default_factory=list)
+    frameworks: list[str] = field(default_factory=list)
 
 
 class AgentRouter:
@@ -140,16 +143,59 @@ class AgentRouter:
                     continue
                 scan_dirs.append(grandchild)
 
-        # Check framework signals first (more specific)
+        # Check framework signals first (more specific).
+        #
+        # Priority rules (parallel to PACKAGE_SIGNALS / bd-5a7c, fixes bd-75e8):
+        # 1. Gather ALL framework matches across scan_dirs; record every
+        #    (language, framework) pair into ``profile.languages`` and
+        #    ``profile.frameworks`` so multi-stack repos (Python backend +
+        #    Next.js frontend) don't lose information.
+        # 2. Root-level framework signals win for ``profile.language`` /
+        #    ``profile.framework``.  A subdir-level framework match (e.g.
+        #    ``pmo-ui/next.config.js``) MUST NOT clobber a root signal
+        #    (e.g. ``manage.py`` at root).
+        # 3. When no root framework signal exists, fall back to the first
+        #    subdir match (insertion order of FRAMEWORK_SIGNALS, then
+        #    scan_dir order).
+        def _add_lang(lang: str) -> None:
+            if lang not in profile.languages:
+                profile.languages.append(lang)
+
+        def _add_framework(fw: str) -> None:
+            if fw not in profile.frameworks:
+                profile.frameworks.append(fw)
+
+        root_framework_lang: str | None = None
+        root_framework: str | None = None
+        subdir_framework_lang: str | None = None
+        subdir_framework: str | None = None
         for filename, (lang, framework) in FRAMEWORK_SIGNALS.items():
             for scan_dir in scan_dirs:
-                if (scan_dir / filename).exists():
-                    profile.language = lang
-                    profile.framework = framework
-                    rel = str((scan_dir / filename).relative_to(root))
-                    if rel not in profile.detected_files:
-                        profile.detected_files.append(rel)
-                    break
+                candidate = scan_dir / filename
+                if not candidate.exists():
+                    continue
+                _add_lang(lang)
+                _add_framework(framework)
+                rel = str(candidate.relative_to(root))
+                if rel not in profile.detected_files:
+                    profile.detected_files.append(rel)
+                if scan_dir == root:
+                    if root_framework_lang is None:
+                        root_framework_lang = lang
+                        root_framework = framework
+                elif subdir_framework_lang is None:
+                    subdir_framework_lang = lang
+                    subdir_framework = framework
+
+        if root_framework_lang is not None:
+            # Root-level framework signal — authoritative for primary language.
+            profile.language = root_framework_lang
+            profile.framework = root_framework
+        # Note: a subdir-only framework signal is NOT applied here.  We let
+        # the PACKAGE_SIGNALS pass below establish the primary language
+        # first (so a Python root beats a Next.js subdir), then fall back
+        # to ``subdir_framework_lang`` only if no package signal claimed
+        # the language.
 
         # Check package manager signals.
         #
@@ -241,13 +287,51 @@ class AgentRouter:
                             profile.detected_files.append(rel)
                         break
 
-        # Scan for .csproj / .sln (glob patterns across all scan_dirs)
-        for scan_dir in scan_dirs:
-            if any(scan_dir.glob("*.csproj")) or any(scan_dir.glob("*.sln")):
-                profile.language = "csharp"
-                if "*.csproj" not in profile.detected_files:
-                    profile.detected_files.append("*.csproj")
-                break
+        # Subdir framework fallback (bd-75e8): if no package signal or root
+        # framework signal claimed the primary language, take the first
+        # subdir-level framework match.  This preserves the prior behaviour
+        # for repos like ``my-next-app/`` placed inside an empty parent dir,
+        # while keeping a Python-root + JS-subdir repo correctly classified
+        # as Python.
+        if profile.language is None and subdir_framework_lang is not None:
+            profile.language = subdir_framework_lang
+            profile.framework = subdir_framework
+        elif (
+            profile.framework is None
+            and subdir_framework is not None
+            and profile.language == subdir_framework_lang
+        ):
+            # Same language at root + framework hint in subdir → adopt the
+            # framework hint (e.g. JS root + subdir/next.config.js → react).
+            profile.framework = subdir_framework
+
+        # Scan for .csproj / .sln (glob patterns).
+        #
+        # Priority rules (parallel to PACKAGE_SIGNALS / bd-5a7c, fixes bd-fb2d):
+        # 1. Surface every csharp signal seen anywhere (vendored sub-repos,
+        #    sample projects, etc.) into ``profile.languages`` so multi-stack
+        #    repos remain visible to downstream callers.
+        # 2. Only let csharp overwrite ``profile.language`` when the .csproj /
+        #    .sln lives at the repo ROOT.  A vendored ``vendor/foo.csproj``
+        #    inside a Python repo MUST NOT clobber Python as the primary
+        #    language.
+        csharp_at_root = (
+            any(root.glob("*.csproj")) or any(root.glob("*.sln"))
+        )
+        csharp_anywhere = csharp_at_root
+        if not csharp_anywhere:
+            for scan_dir in scan_dirs:
+                if scan_dir == root:
+                    continue
+                if any(scan_dir.glob("*.csproj")) or any(scan_dir.glob("*.sln")):
+                    csharp_anywhere = True
+                    break
+        if csharp_anywhere:
+            _add_lang("csharp")
+            if "*.csproj" not in profile.detected_files:
+                profile.detected_files.append("*.csproj")
+        if csharp_at_root:
+            profile.language = "csharp"
 
         # Vite + React: vite.config.ts/js alongside a package.json that
         # lists "react" as a dependency.  Only override when the current
