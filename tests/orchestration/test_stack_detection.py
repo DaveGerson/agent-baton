@@ -200,3 +200,88 @@ def test_javascript_stack_still_yields_node_gates(tmp_path: Path) -> None:
     build_gate = planner._default_gate("Implement", stack=stack)
     assert build_gate is not None
     assert "tsc" in build_gate.command
+
+
+# ---------------------------------------------------------------------------
+# bd-75e8 / bd-fb2d: FRAMEWORK_SIGNALS + csharp glob root-priority regressions
+# ---------------------------------------------------------------------------
+
+
+def test_root_python_beats_subdir_next_config_js(tmp_path: Path) -> None:
+    """bd-75e8: Python at root + subdir/next.config.js → Python primary.
+
+    Before the fix, FRAMEWORK_SIGNALS unconditionally clobbered
+    profile.language with the first matching subdir signal, so a Python
+    backend with a Next.js frontend in pmo-ui/ was misdetected as
+    JavaScript/React.
+    """
+    _write(tmp_path / "pyproject.toml", "[project]\nname='app'\n")
+    _write(tmp_path / "pmo-ui" / "next.config.js", "module.exports = {};\n")
+    profile = _detect(tmp_path)
+    assert profile.language == "python", (
+        f"Root pyproject.toml must beat subdir next.config.js; got "
+        f"{profile.language!r} (files={profile.detected_files})"
+    )
+    # Subdir framework hint should still be discoverable for routing.
+    assert "react" in profile.frameworks
+    assert "javascript" in profile.languages
+
+
+def test_root_python_beats_vendored_csproj(tmp_path: Path) -> None:
+    """bd-fb2d: Python at root + vendored/foo.csproj → Python primary.
+
+    Before the fix, the .csproj glob walked every scan_dir and
+    unconditionally overwrote profile.language = "csharp" when any vendored
+    sample/sub-repo contained a .csproj.
+    """
+    _write(tmp_path / "pyproject.toml", "[project]\nname='app'\n")
+    _write(tmp_path / "vendored" / "foo.csproj", "<Project/>\n")
+    profile = _detect(tmp_path)
+    assert profile.language == "python", (
+        f"Root pyproject.toml must beat vendored .csproj; got "
+        f"{profile.language!r} (files={profile.detected_files})"
+    )
+    # csharp should still be visible as a secondary language.
+    assert "csharp" in profile.languages
+
+
+def test_root_csproj_wins_over_subdir_package_json(tmp_path: Path) -> None:
+    """A real .NET repo (root .csproj) + subdir/package.json → csharp."""
+    _write(tmp_path / "MyApp.csproj", "<Project/>\n")
+    _write(tmp_path / "frontend" / "package.json", '{"name":"f"}\n')
+    profile = _detect(tmp_path)
+    assert profile.language == "csharp", (
+        f"Root .csproj must keep csharp as primary; got {profile.language!r}"
+    )
+    assert "csharp" in profile.languages
+
+
+def test_multi_stack_python_root_js_subdir_dotnet_vendored(tmp_path: Path) -> None:
+    """Python at root + JS subdir + vendored .NET → primary=python, all three
+    languages surfaced in profile.languages."""
+    _write(tmp_path / "pyproject.toml", "[project]\nname='app'\n")
+    _write(tmp_path / "frontend" / "package.json", '{"name":"f"}\n')
+    _write(tmp_path / "frontend" / "next.config.js", "module.exports = {};\n")
+    _write(tmp_path / "vendored" / "sample.csproj", "<Project/>\n")
+    profile = _detect(tmp_path)
+    assert profile.language == "python"
+    assert "python" in profile.languages
+    assert "javascript" in profile.languages
+    assert "csharp" in profile.languages
+    # And the framework hint from the subdir survives.
+    assert "react" in profile.frameworks
+
+
+def test_root_framework_signal_beats_subdir_framework(tmp_path: Path) -> None:
+    """Root manage.py (Django) + subdir next.config.js → django wins.
+
+    Direct bd-75e8 regression: even when the FRAMEWORK_SIGNALS dict order
+    would visit next.config.js before manage.py, root must win.
+    """
+    _write(tmp_path / "manage.py", "# django\n")
+    _write(tmp_path / "ui" / "next.config.js", "module.exports = {};\n")
+    profile = _detect(tmp_path)
+    assert profile.language == "python"
+    assert profile.framework == "django"
+    # Subdir framework still recorded.
+    assert "react" in profile.frameworks
