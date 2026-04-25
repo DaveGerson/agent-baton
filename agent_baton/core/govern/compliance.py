@@ -18,15 +18,339 @@ Typical usage in the execution engine:
    the report and ``save()`` writes it to disk.
 4. The auditor agent reviews the report and sets ``auditor_verdict``.
 
+F0.3 additions:
+- ``AuditorVerdict`` enum replacing free-text verdict strings.
+- ``parse_auditor_verdict()`` backward-compat mapper for existing logs.
+- ``ComplianceChainWriter`` for appending hash-chained entries to
+  ``compliance-audit.jsonl``.
+- ``verify_chain()`` and ``rechain()`` helpers consumed by the CLI.
 """
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
+from typing import Any
 
 from agent_baton.models.usage import TaskUsageRecord
 from agent_baton.models.enums import RiskLevel
+
+
+# ---------------------------------------------------------------------------
+# F0.3 — AuditorVerdict enum
+# ---------------------------------------------------------------------------
+
+class AuditorVerdict(str, Enum):
+    """Machine-enforceable auditor verdicts.
+
+    Values
+    ------
+    APPROVE
+        The task is safe to ship as-is.
+    APPROVE_WITH_CONCERNS
+        Approved, but auditor has recorded concerns that should be tracked.
+    REQUEST_CHANGES
+        The task needs revisions before it can ship.
+    VETO
+        The task is blocked.  Executor refuses to advance HIGH/CRITICAL phases
+        unless overridden with ``--force`` (which emits an Override audit row).
+    """
+
+    APPROVE = "APPROVE"
+    APPROVE_WITH_CONCERNS = "APPROVE_WITH_CONCERNS"
+    REQUEST_CHANGES = "REQUEST_CHANGES"
+    VETO = "VETO"
+
+    @property
+    def blocks_execution(self) -> bool:
+        """Return True when this verdict blocks HIGH/CRITICAL phase advance."""
+        return self == AuditorVerdict.VETO
+
+
+# Backward-compat mapping from old free-text verdicts to the enum.
+_LEGACY_VERDICT_MAP: dict[str, AuditorVerdict] = {
+    "ship": AuditorVerdict.APPROVE,
+    "approved": AuditorVerdict.APPROVE,
+    "approve": AuditorVerdict.APPROVE,
+    "ship with notes": AuditorVerdict.APPROVE_WITH_CONCERNS,
+    "approve with concerns": AuditorVerdict.APPROVE_WITH_CONCERNS,
+    "revise": AuditorVerdict.REQUEST_CHANGES,
+    "request changes": AuditorVerdict.REQUEST_CHANGES,
+    "block": AuditorVerdict.VETO,
+    "veto": AuditorVerdict.VETO,
+}
+
+
+def parse_auditor_verdict(raw: str) -> AuditorVerdict | None:
+    """Parse a raw verdict string into an ``AuditorVerdict``.
+
+    Handles both canonical enum values and the legacy free-text strings
+    (``"SHIP"``, ``"SHIP WITH NOTES"``, ``"REVISE"``, ``"BLOCK"``).
+
+    Args:
+        raw: Raw string from the auditor agent or a stored report.
+
+    Returns:
+        The matching ``AuditorVerdict``, or ``None`` if unrecognised.
+    """
+    if not raw:
+        return None
+    normalised = raw.strip().lower()
+    if normalised in _LEGACY_VERDICT_MAP:
+        return _LEGACY_VERDICT_MAP[normalised]
+    try:
+        return AuditorVerdict(raw.strip().upper())
+    except ValueError:
+        return None
+
+
+def extract_verdict_from_text(text: str) -> AuditorVerdict | None:
+    """Extract an ``AuditorVerdict`` from agent output text.
+
+    The auditor agent is instructed to emit a fenced JSON block::
+
+        ```json
+        {"verdict": "VETO", "rationale": "..."}
+        ```
+
+    This function parses that block.  Falls back to legacy free-text
+    scanning if no fenced block is found.
+
+    Args:
+        text: Raw agent output string.
+
+    Returns:
+        The parsed ``AuditorVerdict``, or ``None`` if not found.
+    """
+    # Look for fenced JSON block: ```json ... ``` or ``` ... ```
+    fence_pattern = re.compile(
+        r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL | re.IGNORECASE
+    )
+    for match in fence_pattern.finditer(text):
+        try:
+            obj = json.loads(match.group(1))
+            if isinstance(obj, dict) and "verdict" in obj:
+                verdict = parse_auditor_verdict(str(obj["verdict"]))
+                if verdict is not None:
+                    return verdict
+        except (json.JSONDecodeError, ValueError):
+            continue
+
+    # Fallback: scan for known verdict strings in text.
+    # Sort by descending key length so multi-word keys ("ship with notes")
+    # are matched before their shorter prefixes ("ship").
+    text_upper = text.upper()
+    for key in sorted(_LEGACY_VERDICT_MAP, key=lambda k: -len(k)):
+        if key.upper() in text_upper:
+            return _LEGACY_VERDICT_MAP[key]
+    return None
+
+
+# ---------------------------------------------------------------------------
+# F0.3 — Hash-chain compliance log writer
+# ---------------------------------------------------------------------------
+
+_GENESIS_HASH = "0" * 64
+
+
+def _entry_hash(entry: dict[str, Any]) -> str:
+    """Compute SHA-256 over the canonical JSON of an entry (sans hash fields)."""
+    clean = {k: v for k, v in entry.items() if k not in ("prev_hash", "entry_hash")}
+    canonical = json.dumps(clean, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+class ComplianceChainWriter:
+    """Append hash-chained entries to ``compliance-audit.jsonl``.
+
+    Each entry in the log includes:
+    - ``prev_hash``: SHA-256 of the previous entry (genesis = ``"0" * 64``).
+    - ``entry_hash``: SHA-256 of this entry's canonical JSON (excluding hash fields).
+
+    This makes the log tamper-evident: modifying any past entry breaks all
+    subsequent hashes, detectable by ``verify_chain()``.
+
+    Args:
+        log_path: Path to the JSONL log file.  Created on first write.
+    """
+
+    _DEFAULT_PATH = Path(".claude/team-context/compliance-audit.jsonl")
+
+    def __init__(self, log_path: Path | None = None) -> None:
+        self._path = (log_path or self._DEFAULT_PATH).resolve()
+
+    @property
+    def log_path(self) -> Path:
+        return self._path
+
+    def _last_hash(self) -> str:
+        """Return the entry_hash of the last line, or genesis hash."""
+        if not self._path.exists():
+            return _GENESIS_HASH
+        last_line = ""
+        with self._path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                stripped = line.strip()
+                if stripped:
+                    last_line = stripped
+        if not last_line:
+            return _GENESIS_HASH
+        try:
+            obj = json.loads(last_line)
+            return obj.get("entry_hash", _GENESIS_HASH)
+        except (json.JSONDecodeError, KeyError):
+            return _GENESIS_HASH
+
+    def append(self, entry: dict[str, Any]) -> dict[str, Any]:
+        """Append a hash-chained entry to the log.
+
+        Args:
+            entry: Arbitrary dict of audit data (must not contain
+                ``prev_hash`` or ``entry_hash`` — these are injected here).
+
+        Returns:
+            The entry as written (with ``prev_hash`` and ``entry_hash``).
+        """
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        prev_hash = self._last_hash()
+        entry = {**entry, "prev_hash": prev_hash}
+        entry["entry_hash"] = _entry_hash(entry)
+        with self._path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, separators=(",", ":")) + "\n")
+        return entry
+
+    def append_override(
+        self,
+        task_id: str,
+        actor: str,
+        justification: str,
+        overridden_verdict: str,
+    ) -> dict[str, Any]:
+        """Record a ``--force`` override audit row.
+
+        Args:
+            task_id: The task being force-advanced.
+            actor: Identity performing the override.
+            justification: Reason supplied via ``--force``.
+            overridden_verdict: The verdict that was overridden.
+
+        Returns:
+            The written audit entry.
+        """
+        return self.append({
+            "entry_type": "Override",
+            "task_id": task_id,
+            "actor": actor,
+            "justification": justification,
+            "overridden_verdict": overridden_verdict,
+            "timestamp": datetime.now().isoformat(),
+        })
+
+
+def verify_chain(log_path: Path) -> tuple[bool, str]:
+    """Walk the compliance-audit.jsonl chain and verify integrity.
+
+    Args:
+        log_path: Path to the JSONL log file.
+
+    Returns:
+        A tuple ``(ok, message)`` where ``ok`` is ``True`` when the chain
+        is intact and ``message`` describes the first divergence if not.
+    """
+    if not log_path.exists():
+        return True, "Log does not exist — nothing to verify."
+
+    prev_hash = _GENESIS_HASH
+    line_number = 0
+    with log_path.open("r", encoding="utf-8") as fh:
+        for raw_line in fh:
+            raw_line = raw_line.strip()
+            if not raw_line:
+                continue
+            line_number += 1
+            try:
+                entry = json.loads(raw_line)
+            except json.JSONDecodeError as exc:
+                return False, f"Line {line_number}: JSON parse error — {exc}"
+
+            stored_prev = entry.get("prev_hash", "")
+            stored_hash = entry.get("entry_hash", "")
+
+            if stored_prev != prev_hash:
+                return (
+                    False,
+                    f"Line {line_number}: prev_hash mismatch "
+                    f"(expected {prev_hash!r}, got {stored_prev!r})",
+                )
+
+            recomputed = _entry_hash(entry)
+            if recomputed != stored_hash:
+                return (
+                    False,
+                    f"Line {line_number}: entry_hash mismatch "
+                    f"(expected {recomputed!r}, got {stored_hash!r})",
+                )
+
+            prev_hash = stored_hash
+
+    return True, f"Chain intact — {line_number} entries verified."
+
+
+def rechain(log_path: Path, out_path: Path | None = None) -> int:
+    """One-time migration: read an existing log and write a hashed version.
+
+    Reads all entries from ``log_path``, strips any existing hash fields,
+    recomputes the full chain, and writes the result to ``out_path`` (or
+    atomically replaces ``log_path`` if ``out_path`` is ``None``).
+
+    Args:
+        log_path: Path to the existing (possibly un-hashed) JSONL log.
+        out_path: Destination path.  Defaults to an atomic swap of ``log_path``.
+
+    Returns:
+        Number of entries rechained.
+    """
+    if not log_path.exists():
+        return 0
+
+    entries: list[dict[str, Any]] = []
+    with log_path.open("r", encoding="utf-8") as fh:
+        for raw in fh:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                entry = json.loads(raw)
+                # Strip old hash fields so we recompute cleanly
+                entry.pop("prev_hash", None)
+                entry.pop("entry_hash", None)
+                entries.append(entry)
+            except json.JSONDecodeError:
+                continue
+
+    # Compute chain
+    dest = out_path or log_path.with_suffix(".rechained.jsonl")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    prev_hash = _GENESIS_HASH
+    count = 0
+    with dest.open("w", encoding="utf-8") as fh:
+        for entry in entries:
+            entry["prev_hash"] = prev_hash
+            entry["entry_hash"] = _entry_hash(entry)
+            fh.write(json.dumps(entry, separators=(",", ":")) + "\n")
+            prev_hash = entry["entry_hash"]
+            count += 1
+
+    # Atomic swap when writing back to the same path
+    if out_path is None:
+        dest.replace(log_path)
+
+    return count
 
 
 @dataclass
@@ -89,10 +413,25 @@ class ComplianceReport:
     classification: str = ""  # guardrail preset applied
     timestamp: str = ""
     entries: list[ComplianceEntry] = field(default_factory=list)
-    auditor_verdict: str = ""  # "SHIP", "SHIP WITH NOTES", "REVISE", "BLOCK"
+    auditor_verdict: str = ""  # canonical: AuditorVerdict value; legacy: "SHIP" etc.
     auditor_notes: str = ""
     total_gates_passed: int = 0
     total_gates_failed: int = 0
+
+    @property
+    def parsed_verdict(self) -> AuditorVerdict | None:
+        """Return the ``AuditorVerdict`` enum parsed from ``auditor_verdict``.
+
+        Maps legacy free-text values (``"SHIP"``, ``"BLOCK"``, etc.) to the
+        canonical enum.  Returns ``None`` when the verdict is empty or unknown.
+        """
+        return parse_auditor_verdict(self.auditor_verdict)
+
+    @property
+    def blocks_execution(self) -> bool:
+        """True when the verdict is ``VETO`` and execution must halt."""
+        v = self.parsed_verdict
+        return v is not None and v.blocks_execution
 
     def to_markdown(self) -> str:
         """Render as audit-ready markdown."""

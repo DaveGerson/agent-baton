@@ -1,0 +1,49 @@
+# Migration Spec Template
+spec_id: ""
+task_type: migration
+template_id: migration
+title: "<Migration: short description>"
+
+## Migration Type
+migration_type: schema    # schema | data | infrastructure | dependency
+
+## Current State
+from_state: |
+  <Describe what is being migrated from>
+
+## Target State
+to_state: |
+  <Describe the migration target>
+
+## Migration Steps
+steps:
+  - order: 1
+    description: "<Step description>"
+    reversible: true
+
+## Rollback Plan
+rollback: |
+  <Describe how to roll back if migration fails>
+
+## Data Safety
+data_backup_required: true
+backup_procedure: |
+  <Describe backup procedure>
+
+## Zero-Downtime Strategy
+zero_downtime: false
+downtime_window: "<Expected downtime window if any>"
+
+## Validation Gates
+gates:
+  - "<Gate 1: e.g. row count matches>"
+  - "<Gate 2: e.g. smoke test passes>"
+
+## Effort Estimate
+effort: M
+
+## Score
+score:
+  clarity: 0.0
+  testability: 0.0
+  risk_coverage: 0.0
