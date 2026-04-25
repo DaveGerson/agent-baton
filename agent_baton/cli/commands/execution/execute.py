@@ -1115,12 +1115,25 @@ def _build_knowledge_resolver(plan: MachinePlan):
     """
     try:
         from agent_baton.core.engine.knowledge_resolver import KnowledgeResolver
+        from agent_baton.core.engine.knowledge_telemetry import KnowledgeTelemetryStore
         from agent_baton.core.orchestration.knowledge_registry import KnowledgeRegistry
 
         registry = KnowledgeRegistry()
         registry.load_default_paths()
 
-        return KnowledgeResolver(registry)
+        # Wire F0.4 lifecycle telemetry (bd-a313).  Defaults to ~/.baton/central.db.
+        # KnowledgeTelemetryStore manages its own connection; failures inside the
+        # resolver are swallowed so dispatch is never blocked.
+        try:
+            telemetry = KnowledgeTelemetryStore()
+        except Exception as tel_exc:
+            _log.debug(
+                "KnowledgeTelemetryStore construction failed (non-fatal): %s",
+                tel_exc,
+            )
+            telemetry = None
+
+        return KnowledgeResolver(registry, telemetry=telemetry)
     except Exception as exc:
         _log.debug(
             "KnowledgeResolver construction failed (non-fatal): %s", exc
