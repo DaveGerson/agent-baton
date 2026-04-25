@@ -286,6 +286,14 @@ class ComplianceChainWriter:
             redacted = default_redactor().redact_payload(entry)
             if isinstance(redacted, dict):
                 entry = redacted
+            else:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "redact_payload returned %s instead of dict; writing "
+                    "UN-REDACTED entry to compliance chain. This is a bug "
+                    "in the redactor — fix immediately.",
+                    type(redacted).__name__,
+                )
         with _flock_path(self._path):
             # Re-read under the lock so we never use a stale cached hash.
             prev_hash = self._last_hash()

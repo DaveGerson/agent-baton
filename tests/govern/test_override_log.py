@@ -355,3 +355,36 @@ def test_cli_list_show_export_roundtrip(
     just_map = {r["override_id"]: r["justification"] for r in csv_rows}
     assert just_map[a] == "reason-a"
     assert just_map[b] == "reason-b"
+
+
+def test_record_override_strips_argv0_basename(
+    db_path: Path, chain_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """argv[0] absolute paths must NOT leak $HOME / install paths into the row."""
+    from agent_baton.cli import _override_helper
+
+    monkeypatch.setattr(_override_helper, "_resolve_db_path", lambda: db_path)
+    real_log = OverrideLog(db_path=db_path, chain_log_path=chain_path)
+    monkeypatch.setattr(
+        "agent_baton.core.govern.override_log.OverrideLog",
+        lambda db_path=None: real_log,
+    )
+
+    leaky_argv0 = "/home/secret-user/.local/bin/baton"
+    oid = _override_helper.record_override(
+        flag="--force",
+        justification="ship",
+        command="baton execute gate",
+        argv=[leaky_argv0, "execute", "gate", "--force"],
+        interactive=False,
+    )
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT args_json FROM governance_overrides WHERE override_id=?",
+            (oid,),
+        ).fetchone()
+    assert "secret-user" not in row["args_json"]
+    assert ".local/bin" not in row["args_json"]
+    parsed = json.loads(row["args_json"])
+    assert parsed[0] == "baton", "argv[0] must be basename-only"

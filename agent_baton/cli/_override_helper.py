@@ -61,7 +61,13 @@ def record_override(
     if not flag:
         return None
 
+    import os.path as _osp
+
     raw_argv = list(argv) if argv is not None else list(sys.argv)
+    # Trim argv[0] to its basename so we don't leak $HOME / install paths
+    # into the audit row's args_json.
+    if raw_argv:
+        raw_argv = [_osp.basename(raw_argv[0])] + raw_argv[1:]
     derived_command = command or _derive_command(raw_argv)
 
     import os

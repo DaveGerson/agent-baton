@@ -129,21 +129,25 @@ def test_redact_private_key_negative(redactor: Redactor) -> None:
     assert "[REDACTED:private_key]" not in out
 
 
-def test_redact_ipv4_positive(redactor: Redactor) -> None:
-    out = redactor.redact("server at 192.168.1.42 listening")
+def test_redact_ipv4_off_by_default() -> None:
+    """IPv4 redaction is opt-in (default off) — too noisy on prose / version
+    strings like ``chrome/120.0.0.0`` to be on by default."""
+    r = Redactor()
+    out = r.redact("server at 192.168.1.42 listening")
+    assert "192.168.1.42" in out
+
+
+def test_redact_ipv4_when_opted_in() -> None:
+    r = Redactor(include_ipv4=True)
+    out = r.redact("server at 192.168.1.42 listening")
     assert "192.168.1.42" not in out
     assert "[REDACTED:ipv4]" in out
 
 
-def test_redact_ipv4_negative(redactor: Redactor) -> None:
-    out = redactor.redact("version 1.2.3 minor build 9")
+def test_redact_ipv4_negative_when_opted_in() -> None:
+    r = Redactor(include_ipv4=True)
+    out = r.redact("version 1.2.3 minor build 9")
     assert "[REDACTED:ipv4]" not in out
-
-
-def test_redact_ipv4_can_be_disabled() -> None:
-    r = Redactor(include_ipv4=False)
-    out = r.redact("server at 10.0.0.1 listening")
-    assert "10.0.0.1" in out
 
 
 # ---------------------------------------------------------------------------
@@ -253,3 +257,40 @@ def test_redaction_enabled_env_disable(
 ) -> None:
     monkeypatch.setenv("BATON_REDACTION_ENABLED", val)
     assert redaction_enabled() is False
+
+
+def test_tampered_redacted_chain_fails_verify(
+    log_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A redacted chain must still detect on-disk mutation post-write."""
+    monkeypatch.setenv("BATON_REDACTION_ENABLED", "1")
+    writer = ComplianceChainWriter(log_path=log_path)
+    writer.append({"event": "e1", "email": "a@b.com"})
+    writer.append({"event": "e2", "note": "second"})
+    writer.append({"event": "e3", "note": "third"})
+    # Mutate the middle entry's payload after-the-fact (post-redaction).
+    lines = log_path.read_text().splitlines()
+    obj = json.loads(lines[1])
+    obj["note"] = "tampered"
+    lines[1] = json.dumps(obj, separators=(",", ":"))
+    log_path.write_text("\n".join(lines) + "\n")
+    ok, _msg = verify_chain(log_path)
+    assert ok is False, "tamper of redacted chain entry must be detected"
+
+
+def test_prose_with_secret_keyword_does_not_over_redact() -> None:
+    """``password rotation`` (prose) must NOT trigger generic-secret redaction.
+
+    The pattern requires a ``key=val`` form (with ``:``/``=`` separator) so
+    natural-language sentences containing 'password' / 'token' / 'authorization'
+    keywords stay readable in audit logs.
+    """
+    r = Redactor()
+    cases = [
+        "password rotation completed yesterday",
+        "token expired and was reissued",
+        "authorization granted by the manager",
+    ]
+    for sentence in cases:
+        out = r.redact(sentence)
+        assert out == sentence, f"over-redacted prose: {sentence!r} -> {out!r}"

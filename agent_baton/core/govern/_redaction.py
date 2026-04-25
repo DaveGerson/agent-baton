@@ -53,7 +53,7 @@ _AWS_SECRET_KEY_PATTERN = re.compile(
 # the common ``Authorization: Bearer <tok>`` form in a single pass.
 _GENERIC_SECRET_PATTERN = re.compile(
     r"(?i)\b(api[_-]?key|token|secret|password|passwd|authorization|bearer)"
-    r"(\s*[:=]\s*|\s+)"
+    r"(\s*[:=]\s*)"
     r"(?:bearer\s+)?"
     r"['\"]?(?!\[REDACTED:)([^\s'\"<>]{6,})['\"]?",
 )
@@ -132,15 +132,16 @@ class Redactor:
             ``replacement`` is either a string or a callable accepted by
             :func:`re.sub`.  Defaults to the module-level catalog.
         include_ipv4: Whether to redact IPv4 addresses.  IPs are often
-            legitimate (telemetry, log shipping) so callers may opt out.
-            Defaults to ``True``.
+            legitimate (telemetry, log shipping, version strings like
+            ``chrome/120.0.0.0``) so callers may opt in.  Defaults to
+            ``False`` to minimise audit-log debuggability damage.
     """
 
     def __init__(
         self,
         patterns: Iterable[tuple[str, re.Pattern[str], Any]] | None = None,
         *,
-        include_ipv4: bool = True,
+        include_ipv4: bool = False,
     ) -> None:
         if patterns is None:
             cat = list(_DEFAULT_PATTERNS)
