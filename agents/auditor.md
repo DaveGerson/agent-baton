@@ -164,10 +164,27 @@ After all agents complete. Full review of everything that was done.
 
 **Output:**
 
+Emit your machine-readable verdict as a fenced JSON block **before** any prose.
+The executor parses this block to enforce VETO at HIGH/CRITICAL risk gates.
+
+```json
+{"verdict": "APPROVE", "rationale": "All checks passed."}
+```
+
+Valid verdict values: `APPROVE` | `APPROVE_WITH_CONCERNS` | `REQUEST_CHANGES` | `VETO`
+
+Mapping from legacy values (still accepted by the parser):
+- `SHIP` → `APPROVE`
+- `SHIP WITH NOTES` → `APPROVE_WITH_CONCERNS`
+- `REVISE` → `REQUEST_CHANGES`
+- `BLOCK` → `VETO`
+
+Then provide the full audit report:
+
 ```
 ## Post-Execution Audit
 
-Verdict: [SHIP | SHIP WITH NOTES | REVISE | BLOCK]
+Verdict: [APPROVE | APPROVE_WITH_CONCERNS | REQUEST_CHANGES | VETO]
 
 ### Files Changed
 | File | Agent | Expected | Actual | Status |
@@ -178,6 +195,10 @@ Verdict: [SHIP | SHIP WITH NOTES | REVISE | BLOCK]
 ### Domain accuracy: [business rules correct?]
 ### Recommendations: [what before production]
 ```
+
+**IMPORTANT:** A `VETO` verdict halts execution of HIGH/CRITICAL risk phases.
+The executor will refuse to advance until the verdict changes or an operator
+uses `--force` with a written justification (which is logged to the audit chain).
 
 ---
 
