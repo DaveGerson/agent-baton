@@ -154,6 +154,15 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         action="store_true",
         help="When --save is set, print the full plan markdown to stdout (default: compact summary only)",
     )
+    p.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        help=(
+            "Preview the plan + cost/token forecast without saving. "
+            "Use to sanity-check before --save / baton execute start."
+        ),
+    )
     return p
 
 
@@ -190,7 +199,110 @@ def _make_task_id(summary: str) -> str:
     return f"{base}-{uid}"
 
 
+def _render_dry_run_forecast(plan: MachinePlan) -> str:
+    """Render the compact dry-run forecast block for *plan*.
+
+    Format target: ~25 lines, fixed-width, eyeball-readable.
+    See ``baton plan --dry-run`` documentation for the exact format.
+    """
+    from agent_baton.core.engine.cost_estimator import (
+        estimate_gate_seconds,
+        estimate_step_tokens,
+        estimate_wall_clock_minutes,
+        forecast_plan,
+    )
+
+    forecast = forecast_plan(plan)
+    agent_min, gate_min = estimate_wall_clock_minutes(plan)
+
+    n_phases = len(plan.phases)
+    n_steps = plan.total_steps
+    stack = plan.detected_stack or "—"
+
+    lines: list[str] = []
+    lines.append("=== Plan Preview (NOT saved) ===")
+    lines.append(f"Task ID:    {plan.task_id}")
+    lines.append(
+        f"Risk:       {plan.risk_level:<14} Budget: {plan.budget_tier:<13} "
+        f"Mode: {plan.execution_mode}"
+    )
+    lines.append(
+        f"Phases: {n_phases}   Steps: {n_steps}       Stack: {stack}"
+    )
+    lines.append("")
+    lines.append(
+        f"{'Phase / Step':<22}{'Agent':<28}{'Model':<9}{'Est. tokens':>12}"
+    )
+    lines.append("-" * 71)
+
+    for phase in plan.phases:
+        for step in phase.steps:
+            ident = f"{phase.phase_id}.{step.step_id.split('.')[-1]} {phase.name}"[:21]
+            agent = (step.agent_name or "—")[:27]
+            model = (step.model or "sonnet")[:8]
+            tokens = estimate_step_tokens(step)
+            lines.append(
+                f"{ident:<22}{agent:<28}{model:<9}{tokens:>12,}"
+            )
+
+    # Gates that will run
+    gate_lines: list[str] = []
+    for phase in plan.phases:
+        if phase.gate is None:
+            continue
+        secs = estimate_gate_seconds(phase.gate.command)
+        if secs >= 600:
+            label = f"~{secs // 60}min — heavy"
+        elif secs >= 60:
+            label = f"~{secs // 60}min"
+        else:
+            label = f"~{secs}s"
+        cmd = phase.gate.command or "(no command)"
+        # Trim to keep the line eyeballable.
+        if len(cmd) > 28:
+            cmd = cmd[:25] + "..."
+        gate_lines.append(
+            f"  Phase {phase.phase_id}  {phase.gate.gate_type:<6} "
+            f"{cmd:<28} [ {label} ]"
+        )
+    if gate_lines:
+        lines.append("")
+        lines.append("Gates that will block:")
+        lines.extend(gate_lines)
+
+    # Cost summary
+    lines.append("")
+    breakdown_parts = [
+        f"{model} {count}" for model, count in sorted(forecast.model_breakdown.items())
+    ]
+    breakdown = ", ".join(breakdown_parts) if breakdown_parts else "—"
+    lines.append(
+        f"Cost forecast: ~{forecast.total_tokens:,} tokens   "
+        f"~${forecast.total_cost_usd:.2f}   ({breakdown})"
+    )
+    total_min = agent_min + gate_min
+    lines.append(
+        f"Wall-clock:    ~{agent_min} min agent time + "
+        f"{gate_min} min gate time = {total_min} min total"
+    )
+    lines.append("")
+    lines.append("Re-run with --save to commit this plan. Use --explain for rationale.")
+    return "\n".join(lines)
+
+
 def handler(args: argparse.Namespace) -> None:
+    # --dry-run + --save are mutually exclusive: don't let the user
+    # accidentally believe nothing was written when --save is set, and
+    # don't let --save silently win over --dry-run.
+    if getattr(args, "dry_run", False) and getattr(args, "save", False):
+        print(
+            "Error: --dry-run and --save are mutually exclusive. "
+            "Use --dry-run to preview without saving, then re-run with --save "
+            "to commit the plan.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
     # --template: emit a skeleton plan.json and exit
     if getattr(args, "template", False):
         template: dict = {
@@ -337,6 +449,11 @@ def handler(args: argparse.Namespace) -> None:
         default_model=getattr(args, "model", None),
     )
     print("  Done.", file=sys.stderr)
+
+    # --dry-run: print compact forecast and exit without writing anything.
+    if getattr(args, "dry_run", False):
+        print(_render_dry_run_forecast(plan))
+        return
 
     if args.save:
         from agent_baton.core.orchestration.context import ContextManager

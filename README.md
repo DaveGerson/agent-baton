@@ -463,6 +463,7 @@ The `baton` CLI provides 50+ commands organized into ten groups:
 | Command | Description |
 |---------|-------------|
 | `baton plan` | Create a data-driven execution plan |
+| `baton plan --dry-run` | Preview plan + token/cost forecast without saving |
 | `baton execute start` | Start execution from a saved plan |
 | `baton execute next [--all]` | Get next action(s) to perform |
 | `baton execute record` | Record a step completion |
