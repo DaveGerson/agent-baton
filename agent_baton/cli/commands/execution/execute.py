@@ -115,6 +115,8 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
                           help="Claude Code session UUID ($CLAUDE_SESSION_ID) for real token accounting")
     p_record.add_argument("--step-started-at", default="", dest="step_started_at",
                           help="ISO 8601 UTC timestamp when this step was dispatched (lower bound for JSONL scan)")
+    p_record.add_argument("--outcome-spillover-path", default="", dest="outcome_spillover_path",
+                          help="Relative path (under the per-task execution dir) to a spillover file holding the FULL outcome when --outcome was truncated. When omitted, the engine attempts to auto-detect the path from a TRUNCATED breadcrumb in --outcome.")
 
     # baton execute dispatched --step ID --agent NAME
     dispatched_p = sub.add_parser("dispatched", parents=[_task_id_parent],
@@ -169,6 +171,8 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     p_team.add_argument("--status", default="complete", choices=["complete", "failed"])
     p_team.add_argument("--outcome", default="", help="Summary of work done")
     p_team.add_argument("--files", default="", help="Comma-separated files changed")
+    p_team.add_argument("--outcome-spillover-path", default="", dest="outcome_spillover_path",
+                        help="Relative path (under per-task execution dir) to a spillover file holding the FULL member outcome when --outcome was truncated. When omitted, the engine attempts to auto-detect from a TRUNCATED breadcrumb in --outcome.")
 
     # baton execute interact --step-id ID (--input TEXT | --done)
     p_interact = sub.add_parser("interact", parents=[_task_id_parent],
@@ -689,6 +693,7 @@ def handler(args: argparse.Namespace) -> None:
                     status=args.status,
                     outcome=args.outcome,
                     files_changed=files,
+                    outcome_spillover_path=getattr(args, "outcome_spillover_path", ""),
                 )
             else:
                 engine.record_step_result(
@@ -703,6 +708,7 @@ def handler(args: argparse.Namespace) -> None:
                     error=args.error,
                     session_id=getattr(args, "session_id", ""),
                     step_started_at=getattr(args, "step_started_at", ""),
+                    outcome_spillover_path=getattr(args, "outcome_spillover_path", ""),
                 )
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
@@ -805,6 +811,7 @@ def handler(args: argparse.Namespace) -> None:
                 status=args.status,
                 outcome=args.outcome,
                 files_changed=files,
+                outcome_spillover_path=getattr(args, "outcome_spillover_path", ""),
             )
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)

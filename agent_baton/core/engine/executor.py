@@ -2612,11 +2612,20 @@ class ExecutionEngine:
         status: str = "complete",
         outcome: str = "",
         files_changed: list[str] | None = None,
+        outcome_spillover_path: str = "",
     ) -> None:
         """Record the result of a single team member within a team step.
 
         When all members have completed, the parent step is automatically
         marked as complete.  If any member fails, the parent step fails.
+
+        ``outcome_spillover_path``: relative path (under the per-task
+        execution dir) to a spillover file holding the FULL member outcome
+        when ``outcome`` was truncated.  When empty, an attempt is made to
+        auto-detect it from a ``[TRUNCATED — full output: ...]`` breadcrumb
+        in ``outcome``.  The most recent non-empty spillover path is mirrored
+        onto the parent ``StepResult`` so that handoff assembly can recover
+        the full member output.
         """
         state = self._require_execution("record_team_member_result")
 
@@ -2628,6 +2637,14 @@ class ExecutionEngine:
             )
             state.step_results.append(parent)
 
+        # Auto-detect spillover path from outcome breadcrumb when caller
+        # did not pass it explicitly (mirrors record_step_result).
+        _spillover = outcome_spillover_path
+        if not _spillover and outcome:
+            _m = _SPILLOVER_BREADCRUMB_RE.match(outcome)
+            if _m:
+                _spillover = _m.group(1)
+
         member_result = TeamStepResult(
             member_id=member_id,
             agent_name=agent_name,
@@ -2636,6 +2653,12 @@ class ExecutionEngine:
             files_changed=files_changed or [],
         )
         parent.member_results.append(member_result)
+
+        # Bubble the spillover path onto the parent StepResult so that
+        # downstream handoff assembly (which reads parent.outcome_spillover_path)
+        # can recover the full text.  Most recent wins.
+        if _spillover:
+            parent.outcome_spillover_path = _spillover
 
         # Check if all team members are done.  For nested teams the
         # expected set includes the lead AND every recursively-flattened
