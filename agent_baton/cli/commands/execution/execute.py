@@ -42,22 +42,17 @@ from agent_baton.models.plan import MissionLogEntry
 
 _log = logging.getLogger(__name__)
 
-_STEP_ID_RE = re.compile(r'^\d+\.\d+$')
-# Matches team-member IDs of the form N.N.x (e.g. "1.1.a", "2.3.b").
-_TEAM_MEMBER_ID_RE = re.compile(r'^\d+\.\d+\.[a-z]+$')
-
-
-def _is_team_member_id(step_id: str) -> bool:
-    """Return True if *step_id* is a team-member ID (e.g. ``"1.1.a"``).
-
-    Team-member IDs are produced by the executor when it dispatches
-    individual members of a team step.  They differ from regular step IDs
-    (``"N.N"``) by having a lowercase-letter suffix (``"N.N.x"``).
-
-    This helper is used both in :func:`_print_action` (to annotate DISPATCH
-    output) and in the ``team-record`` handler (to detect mis-routed calls).
-    """
-    return bool(_TEAM_MEMBER_ID_RE.match(step_id))
+# Step-ID validators (single source of truth shared across subcommands).
+# See ``agent_baton/cli/commands/execution/_validators.py``.
+from agent_baton.cli.commands.execution._validators import (
+    PLAIN_STEP_ID_RE as _STEP_ID_RE,  # back-compat alias for any external import
+    STEP_ID_RE,
+    STEP_ID_FORMAT_HINT,
+    TEAM_MEMBER_ID_RE as _TEAM_MEMBER_ID_RE,  # back-compat alias
+    is_team_member_id as _is_team_member_id,
+    parent_step_id as _parent_step_id,
+    validate_step_id as _validate_step_id,
+)
 
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
@@ -650,32 +645,65 @@ def handler(args: argparse.Namespace) -> None:
             sys.exit(1)
 
     elif args.subcommand == "dispatched":
-        if not _STEP_ID_RE.match(args.step_id):
-            validation_error(f"invalid step ID '{args.step_id}' (expected format: N.N, e.g. '1.1')")
-        engine.mark_dispatched(step_id=args.step_id, agent_name=args.agent)
-        print(json.dumps({"status": "dispatched", "step_id": args.step_id}))
+        _validate_step_id(args.step_id, validation_error)
+        # Symmetric routing with `next`: if the step ID is a team-member form
+        # (N.N.x[.y...]), record a dispatched marker against the parent team
+        # step using the same store as `team-record`.  Otherwise mark the
+        # plain step as dispatched.
+        if _is_team_member_id(args.step_id):
+            parent_id = _parent_step_id(args.step_id)
+            engine.record_team_member_result(
+                step_id=parent_id,
+                member_id=args.step_id,
+                agent_name=args.agent,
+                status="dispatched",
+            )
+            print(json.dumps({
+                "status": "dispatched",
+                "step_id": args.step_id,
+                "parent_step_id": parent_id,
+                "team_member": True,
+            }))
+        else:
+            engine.mark_dispatched(step_id=args.step_id, agent_name=args.agent)
+            print(json.dumps({"status": "dispatched", "step_id": args.step_id}))
 
     elif args.subcommand == "record":
         # Deprecation warning for --summary
         if "--summary" in sys.argv:
             print("warning: --summary is deprecated, use --outcome instead", file=sys.stderr)
-        if not _STEP_ID_RE.match(args.step_id):
-            validation_error(f"invalid step ID '{args.step_id}' (expected format: N.N, e.g. '1.1')")
+        _validate_step_id(args.step_id, validation_error)
         files = [f.strip() for f in args.files.split(",") if f.strip()] if args.files else []
+        # Symmetric routing: a team-member step ID (N.N.x[.y...]) is recorded
+        # against the parent step via the team-member tracking table — the
+        # same store that `team-record` writes to.  This makes `record` accept
+        # anything `next`/`next --all` emits.
+        is_team_member = _is_team_member_id(args.step_id)
         try:
-            engine.record_step_result(
-                step_id=args.step_id,
-                agent_name=args.agent,
-                status=args.status,
-                outcome=args.outcome,
-                files_changed=files,
-                commit_hash=args.commit,
-                estimated_tokens=args.tokens,
-                duration_seconds=args.duration,
-                error=args.error,
-                session_id=getattr(args, "session_id", ""),
-                step_started_at=getattr(args, "step_started_at", ""),
-            )
+            if is_team_member:
+                parent_id = _parent_step_id(args.step_id)
+                engine.record_team_member_result(
+                    step_id=parent_id,
+                    member_id=args.step_id,
+                    agent_name=args.agent,
+                    status=args.status,
+                    outcome=args.outcome,
+                    files_changed=files,
+                )
+            else:
+                engine.record_step_result(
+                    step_id=args.step_id,
+                    agent_name=args.agent,
+                    status=args.status,
+                    outcome=args.outcome,
+                    files_changed=files,
+                    commit_hash=args.commit,
+                    estimated_tokens=args.tokens,
+                    duration_seconds=args.duration,
+                    error=args.error,
+                    session_id=getattr(args, "session_id", ""),
+                    step_started_at=getattr(args, "step_started_at", ""),
+                )
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
             sys.exit(1)
@@ -691,7 +719,11 @@ def handler(args: argparse.Namespace) -> None:
         )
         ContextManager(task_id=task_id).append_to_mission_log(entry)
         if getattr(args, "output", "text") == "json":
-            print(json.dumps({"status": "recorded", "step_id": args.step_id, "agent": args.agent, "result": args.status}))
+            payload = {"status": "recorded", "step_id": args.step_id, "agent": args.agent, "result": args.status}
+            if is_team_member:
+                payload["parent_step_id"] = _parent_step_id(args.step_id)
+                payload["team_member"] = True
+            print(json.dumps(payload))
         else:
             print(f"Recorded: step {args.step_id} ({args.agent}) — {args.status}")
 
@@ -1049,7 +1081,20 @@ def _handle_run(args: argparse.Namespace) -> None:
     model_override = args.model
     token_budget: int = getattr(args, "token_budget", 0)
 
-    # Resolve or create the execution
+    # Resolve or create the execution.
+    #
+    # Task-id resolution priority (matches general handler at lines ~529-548):
+    #   1. --task-id flag
+    #   2. BATON_TASK_ID env var
+    #   3. SQLite active task pointer
+    #   4. file-based active-task-id.txt marker
+    #
+    # Without steps 3-4, `baton execute run` invoked with no flag/env after
+    # an approval would silently start fresh, wiping prior step_results /
+    # approval_results / gate_results and re-dispatching completed agents
+    # (bd-7444).  Treat ANY non-terminal status as "resume", not just
+    # "running"/"pending" — approval_pending, gate_pending, feedback_pending,
+    # gate_failed, and budget_exceeded all warrant resume.
     bus = EventBus()
     storage = get_project_storage(context_root)
     task_id = getattr(args, "task_id", None)
@@ -1057,7 +1102,37 @@ def _handle_run(args: argparse.Namespace) -> None:
     if task_id is None:
         task_id = os.environ.get("BATON_TASK_ID")
 
-    # If no active execution, start from plan
+    if task_id is None:
+        # SQLite-first: read active task from baton.db before falling back to
+        # the file-based active-task-id.txt marker.
+        try:
+            _backend = detect_backend(context_root)
+        except Exception:  # noqa: BLE001 — defensive: backend detection is best-effort
+            _backend = "file"
+        if _backend == "sqlite":
+            try:
+                _early_storage = get_project_storage(context_root, backend="sqlite")
+                task_id = _early_storage.get_active_task()
+            except Exception as _exc:  # noqa: BLE001
+                _log.debug(
+                    "SQLite active-task lookup failed in execute run, "
+                    "falling back to file: %s",
+                    _exc,
+                )
+        if task_id is None:
+            task_id = StatePersistence.get_active_task_id(context_root)
+
+    # Statuses that mean "this execution is in progress; do NOT start fresh".
+    # Only "complete", "failed", and "cancelled" are terminal — everything
+    # else is resumable, never a reason to overwrite recorded results.
+    _RESUMABLE_STATUSES = frozenset({
+        "running", "pending",
+        "approval_pending", "feedback_pending",
+        "gate_pending", "gate_failed",
+        "budget_exceeded",
+    })
+    _TERMINAL_STATUSES = frozenset({"complete", "failed", "cancelled"})
+
     engine: ExecutionEngine | None = None
     if task_id:
         engine = ExecutionEngine(
@@ -1066,10 +1141,29 @@ def _handle_run(args: argparse.Namespace) -> None:
             token_budget=token_budget or None,
         )
         st = engine.status()
-        if st and st.get("status") in ("running", "pending"):
-            print(f"Resuming execution: {task_id}", file=sys.stderr)
+        st_status = (st or {}).get("status")
+        if st_status in _RESUMABLE_STATUSES:
+            print(
+                f"Resuming execution: {task_id} (status={st_status})",
+                file=sys.stderr,
+            )
+        elif st_status in _TERMINAL_STATUSES:
+            # Already finished — surface clearly rather than silently
+            # restarting and overwriting the prior result.
+            user_error(
+                f"execution {task_id} already {st_status}; not restarting.",
+                hint=(
+                    "Use 'baton execute list' to see executions, "
+                    "'baton execute switch TASK_ID' to switch tasks, "
+                    "or run 'baton plan --save' to create a new plan."
+                ),
+            )
         else:
-            engine = None  # Stale or completed — start fresh
+            # status == "no_active_execution" or unrecognised — treat as
+            # missing and fall through to the start-from-plan branch, but
+            # forget the stale task_id so we use the plan's task_id below.
+            engine = None
+            task_id = None
 
     if engine is None:
         if not plan_path.exists():
@@ -1086,25 +1180,56 @@ def _handle_run(args: argparse.Namespace) -> None:
         except (KeyError, ValueError, TypeError) as exc:
             validation_error(f"plan.json has invalid structure: {exc}")
         task_id = plan.task_id
-        knowledge_resolver = _build_knowledge_resolver(plan)
-        policy_engine = _build_policy_engine()
-        engine = ExecutionEngine(
+
+        # Defence in depth: even if no active marker pointed at this task,
+        # an execution row with the SAME task_id may already exist on disk
+        # (e.g. a previous `baton execute start` then a stale active marker).
+        # Probe one more time before calling engine.start(), which would
+        # unconditionally overwrite ExecutionState (bd-7444).
+        _probe_engine = ExecutionEngine(
             team_context_root=context_root,
             bus=bus, task_id=task_id, storage=storage,
-            knowledge_resolver=knowledge_resolver,
-            policy_engine=policy_engine,
             token_budget=token_budget or None,
         )
-        ContextManager(task_id=task_id).init_mission_log(
-            plan.task_summary, risk_level=plan.risk_level
-        )
-        action = engine.start(plan)
-        try:
-            storage.set_active_task(task_id)
-        except Exception:
-            if engine._persistence is not None:
-                engine._persistence.set_active()
-        print(f"Started execution: {task_id}", file=sys.stderr)
+        _probe_status = _probe_engine.status()
+        _probe_st = (_probe_status or {}).get("status")
+        if _probe_st in _RESUMABLE_STATUSES:
+            print(
+                f"Resuming execution: {task_id} (status={_probe_st}; "
+                "matched via plan task_id)",
+                file=sys.stderr,
+            )
+            engine = _probe_engine
+            action = engine.next_action()
+        elif _probe_st in _TERMINAL_STATUSES:
+            user_error(
+                f"execution {task_id} (from plan) already {_probe_st}; "
+                "refusing to overwrite.",
+                hint=(
+                    "Use 'baton plan --save' with a new task description to "
+                    "create a fresh task, or 'baton execute list' to inspect."
+                ),
+            )
+        else:
+            knowledge_resolver = _build_knowledge_resolver(plan)
+            policy_engine = _build_policy_engine()
+            engine = ExecutionEngine(
+                team_context_root=context_root,
+                bus=bus, task_id=task_id, storage=storage,
+                knowledge_resolver=knowledge_resolver,
+                policy_engine=policy_engine,
+                token_budget=token_budget or None,
+            )
+            ContextManager(task_id=task_id).init_mission_log(
+                plan.task_summary, risk_level=plan.risk_level
+            )
+            action = engine.start(plan)
+            try:
+                storage.set_active_task(task_id)
+            except Exception:
+                if engine._persistence is not None:
+                    engine._persistence.set_active()
+            print(f"Started execution: {task_id}", file=sys.stderr)
     else:
         action = engine.next_action()
 
@@ -1370,6 +1495,34 @@ def _run_loop(
                     phase_id=phase_id, result="approve",
                 )
             else:
+                # Non-TTY safety (bd-7444): without a controlling terminal we
+                # cannot prompt for an approval decision.  Previous behaviour
+                # caught the EOFError on input() and silently set choice =
+                # "reject", which marked the execution failed and destroyed
+                # state.  Instead, exit non-zero with a clear remediation hint
+                # and leave state untouched so the operator can record an
+                # explicit decision via `baton execute approve`.
+                if not sys.stdin.isatty():
+                    print(
+                        f"\n{color_error('ERROR')}: pending approval for phase "
+                        f"{phase_id} requires an explicit decision, but stdin "
+                        "is not a TTY so 'baton execute run' cannot prompt.",
+                        file=sys.stderr,
+                    )
+                    print(
+                        "  Run: baton execute approve "
+                        f"--phase-id {phase_id} --result approve|reject "
+                        "[--feedback TEXT]",
+                        file=sys.stderr,
+                    )
+                    print(
+                        "  Then re-invoke 'baton execute run' to continue.",
+                        file=sys.stderr,
+                    )
+                    # Do NOT mutate execution state — execution remains in
+                    # approval_pending for the operator to resolve.
+                    sys.exit(2)
+
                 # Interactive approval prompt
                 print("  Options: approve, reject, approve-with-feedback", file=sys.stderr)
                 try:

@@ -29,6 +29,33 @@ from agent_baton.core.engine.executor import ExecutionEngine
 
 
 # ---------------------------------------------------------------------------
+# Autouse isolation: bd-7444 made `_handle_run` consult the active-task
+# marker (SQLite + file).  Tests that don't pass --task-id and don't set
+# BATON_TASK_ID must not pick up the surrounding project's real active task,
+# or they will fall into the resume branch and crash on the test's
+# _FakeStorage stub.  This fixture forces the marker lookup to return None
+# for every test in this module.
+# ---------------------------------------------------------------------------
+
+_EXECUTE_MOD_CONST = "agent_baton.cli.commands.execution.execute"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_active_task_marker(monkeypatch):
+    """Force active-task lookup to find nothing, so tests don't see real state."""
+    import os
+    monkeypatch.delenv("BATON_TASK_ID", raising=False)
+    monkeypatch.setattr(
+        f"{_EXECUTE_MOD_CONST}.detect_backend",
+        lambda _root: "file",
+    )
+    monkeypatch.setattr(
+        f"{_EXECUTE_MOD_CONST}.StatePersistence.get_active_task_id",
+        staticmethod(lambda _root: None),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
@@ -111,6 +138,9 @@ def _patched_run(
       - ContextManager → MagicMock (suppresses file I/O)
       - ClaudeCodeLauncher import inside the function → not needed for dry_run
       - auto_sync_current_project → MagicMock (suppresses DB sync)
+      - detect_backend / StatePersistence.get_active_task_id → return file/None
+        so the test does NOT pick up the real project's active task marker
+        (added for bd-7444; _handle_run now consults the active marker).
     """
     storage = _FakeStorage()
     real_engine = ExecutionEngine(team_context_root=tmp_path)
@@ -120,6 +150,11 @@ def _patched_run(
         patch(f"{_EXECUTE_MOD}.ExecutionEngine", return_value=real_engine),
         patch(f"{_EXECUTE_MOD}.ContextManager"),
         patch("agent_baton.core.storage.sync.auto_sync_current_project", return_value=None),
+        patch(f"{_EXECUTE_MOD}.detect_backend", return_value="file"),
+        patch(
+            f"{_EXECUTE_MOD}.StatePersistence.get_active_task_id",
+            return_value=None,
+        ),
     ):
         _handle_run(args)
 
