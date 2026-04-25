@@ -163,7 +163,7 @@ def _resolve_db_path() -> Path:
     """Resolve the project-local ``baton.db`` path.
 
     Honours ``BATON_DB_PATH``, then walks ``cwd`` and ``cwd/.claude/...``
-    in the same way as ``baton execute handoff``.
+    in the same way as the other improve subcommands.
     """
     override = os.environ.get("BATON_DB_PATH")
     if override:

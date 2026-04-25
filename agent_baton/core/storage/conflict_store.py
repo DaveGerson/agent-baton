@@ -1,8 +1,9 @@
 """SQLite-backed persistence for improvement-recommendation conflicts (L2.4).
 
 ``ConflictStore`` owns reads/writes against the project-local
-``improvement_conflicts`` table introduced in schema v19 (bd-362f).  It
-mirrors the design of :class:`agent_baton.core.storage.handoff_store.HandoffStore`:
+``improvement_conflicts`` table introduced in schema v16 (bd-362f).  It
+mirrors the design of the bead store / handoff store conventions used
+elsewhere in ``agent_baton.core.storage``:
 
 - One ``ConnectionManager`` per store, schema configured on first access.
 - All SQL uses parameterised queries.
@@ -80,7 +81,7 @@ class ConflictStore:
         if not self._table_exists():
             _log.warning(
                 "ConflictStore.record: improvement_conflicts table not found "
-                "(schema v19 not yet applied) -- skipping"
+                "(schema v16 not yet applied) -- skipping"
             )
             return ""
         try:

@@ -10,7 +10,7 @@ Covers:
 - ``ConflictStore.list`` filters by status.
 
 The detector is stdlib-only; the store hits a real SQLite file inside the
-pytest tmp_path so we exercise the v19 migration end-to-end.
+pytest tmp_path so we exercise the v16 migration end-to-end.
 """
 from __future__ import annotations
 
