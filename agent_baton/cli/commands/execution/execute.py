@@ -591,6 +591,25 @@ def handler(args: argparse.Namespace) -> None:
             hint="Re-run with --force --justification \"why this VETO is being overridden\"",
         )
 
+    # G1.6 (bd-1a09): mirror the --force invocation into the
+    # governance_overrides table + compliance audit chain BEFORE the
+    # engine consumes the flag.  Failures are logged but never block
+    # execution — overrides must remain a recovery primitive.
+    if force_override:
+        try:
+            from agent_baton.cli._override_helper import record_override
+
+            record_override(
+                flag="--force",
+                justification=override_justification,
+                command=f"baton execute {args.subcommand}",
+            )
+        except Exception as _ovr_exc:  # pragma: no cover - best-effort logging
+            print(
+                f"warning: failed to record override audit row: {_ovr_exc}",
+                file=sys.stderr,
+            )
+
     bus = EventBus()
     storage = get_project_storage(context_root)
     engine = ExecutionEngine(
@@ -1173,6 +1192,23 @@ def _handle_run(args: argparse.Namespace) -> None:
             "--force requires --justification \"<reason>\"",
             hint="Re-run with --force --justification \"why this VETO is being overridden\"",
         )
+
+    # G1.6 (bd-1a09): record the override invocation in the
+    # governance_overrides SQL table + compliance chain.
+    if force_override:
+        try:
+            from agent_baton.cli._override_helper import record_override
+
+            record_override(
+                flag="--force",
+                justification=override_justification,
+                command="baton execute run",
+            )
+        except Exception as _ovr_exc:  # pragma: no cover - best-effort logging
+            print(
+                f"warning: failed to record override audit row: {_ovr_exc}",
+                file=sys.stderr,
+            )
 
     # Resolve or create the execution.
     #

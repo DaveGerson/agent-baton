@@ -1,0 +1,256 @@
+"""Governance override + justification log (G1.6, bd-1a09).
+
+Every use of an operator override flag (``--force``, ``--skip-gate``,
+``--risk-override``, ...) is recorded in two places:
+
+1. The ``governance_overrides`` SQL table — with the full justification
+   text, the flag, the command, the actor (``$USER``), the argv JSON,
+   and a back-reference to the audit-chain entry.
+2. ``compliance-audit.jsonl`` via :class:`ComplianceChainWriter` — with
+   the metadata BUT NOT the justification text.  The chain is exported
+   for external auditors and frequently leaves the host machine, so
+   the rationale stays in the integrity-protected SQL row that travels
+   only to authorised reviewers.
+
+Tying the two together via ``chain_hash`` lets compliance reviewers
+prove the SQL row was emitted at a particular point in the chain
+without needing the SQL row itself to live in the chain.
+"""
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from agent_baton.core.govern.compliance import ComplianceChainWriter
+
+
+def _utcnow_iso() -> str:
+    """Return the current UTC time in ISO-8601 form (no microseconds)."""
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _current_actor() -> str:
+    """Return the operator identity for audit attribution.
+
+    Falls back through ``USER`` → ``USERNAME`` (Windows) → ``"unknown"``.
+    """
+    return (
+        os.environ.get("USER")
+        or os.environ.get("USERNAME")
+        or "unknown"
+    )
+
+
+class OverrideLog:
+    """Persist and query governance override events.
+
+    The log writes two artifacts per call to :meth:`record`:
+
+    * one row in the ``governance_overrides`` SQL table (full detail)
+    * one entry in ``compliance-audit.jsonl`` (metadata only — never the
+      justification text)
+
+    Args:
+        db_path: Path to the project ``baton.db``.  The
+            ``governance_overrides`` table is created automatically by
+            the schema migration; this class only writes / reads.
+        chain_log_path: Path to the hash-chained compliance JSONL file.
+            Defaults to a sibling of ``db_path``.
+    """
+
+    def __init__(
+        self,
+        db_path: Path,
+        chain_log_path: Path | None = None,
+    ) -> None:
+        self._db_path = Path(db_path)
+        if chain_log_path is None:
+            chain_log_path = self._db_path.parent / "compliance-audit.jsonl"
+        self._chain_log_path = Path(chain_log_path)
+
+    # ------------------------------------------------------------------
+    # Write path
+    # ------------------------------------------------------------------
+
+    def record(
+        self,
+        flag: str,
+        command: str,
+        args: list[str],
+        justification: str | None,
+    ) -> str:
+        """Record an override event and return the new ``override_id``.
+
+        Args:
+            flag: Which override flag fired (e.g. ``"--force"``).
+            command: The CLI command path being run (e.g.
+                ``"baton execute gate"``).
+            args: Full argv as a list of strings.  Stored as JSON.
+            justification: Operator-supplied reason.  May be ``None`` /
+                empty when the caller is non-interactive — that case is
+                allowed but the chain entry will still record
+                ``justification_present=False``.
+
+        Returns:
+            The freshly minted ``override_id`` (UUIDv4 hex).
+        """
+        override_id = uuid.uuid4().hex
+        actor = _current_actor()
+        created_at = _utcnow_iso()
+        justification_text = justification or ""
+
+        # Step 1: append the chain entry.  Justification text stays out
+        # of the chain by design — only metadata about its presence.
+        chain_payload: dict[str, Any] = {
+            "event": "override",
+            "override_id": override_id,
+            "flag": flag,
+            "command": command,
+            "actor": actor,
+            "justification_present": bool(justification_text.strip()),
+            "timestamp": created_at,
+        }
+        writer = ComplianceChainWriter(log_path=self._chain_log_path)
+        chain_entry = writer.append(chain_payload)
+        chain_hash = chain_entry.get("entry_hash", "")
+
+        # Step 2: persist the SQL row (full justification included).
+        self._insert_row(
+            override_id=override_id,
+            actor=actor,
+            command=command,
+            args_json=json.dumps(args),
+            flag=flag,
+            justification=justification_text,
+            created_at=created_at,
+            chain_hash=chain_hash,
+        )
+        return override_id
+
+    def _insert_row(
+        self,
+        *,
+        override_id: str,
+        actor: str,
+        command: str,
+        args_json: str,
+        flag: str,
+        justification: str,
+        created_at: str,
+        chain_hash: str,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO governance_overrides (
+                    override_id, actor, command, args_json,
+                    flag, justification, created_at, chain_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    override_id, actor, command, args_json,
+                    flag, justification, created_at, chain_hash,
+                ),
+            )
+            conn.commit()
+
+    # ------------------------------------------------------------------
+    # Read path
+    # ------------------------------------------------------------------
+
+    def list_recent(self, limit: int = 20) -> list[dict[str, Any]]:
+        """Return up to *limit* most-recent overrides, newest first."""
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                SELECT override_id, actor, command, args_json, flag,
+                       justification, created_at, chain_hash
+                FROM governance_overrides
+                ORDER BY created_at DESC, override_id DESC
+                LIMIT ?
+                """,
+                (int(limit),),
+            )
+            return [self._row_to_dict(r) for r in cur.fetchall()]
+
+    def get(self, override_id: str) -> dict[str, Any] | None:
+        """Return a single override by ID, or ``None`` if not found."""
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                SELECT override_id, actor, command, args_json, flag,
+                       justification, created_at, chain_hash
+                FROM governance_overrides
+                WHERE override_id = ?
+                """,
+                (override_id,),
+            )
+            row = cur.fetchone()
+            return self._row_to_dict(row) if row else None
+
+    def export_since(self, since_iso: str | None) -> list[dict[str, Any]]:
+        """Return all overrides created on or after *since_iso* (ISO-8601).
+
+        ``since_iso=None`` returns the full log.
+        """
+        with self._connect() as conn:
+            if since_iso:
+                cur = conn.execute(
+                    """
+                    SELECT override_id, actor, command, args_json, flag,
+                           justification, created_at, chain_hash
+                    FROM governance_overrides
+                    WHERE created_at >= ?
+                    ORDER BY created_at ASC, override_id ASC
+                    """,
+                    (since_iso,),
+                )
+            else:
+                cur = conn.execute(
+                    """
+                    SELECT override_id, actor, command, args_json, flag,
+                           justification, created_at, chain_hash
+                    FROM governance_overrides
+                    ORDER BY created_at ASC, override_id ASC
+                    """,
+                )
+            return [self._row_to_dict(r) for r in cur.fetchall()]
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _connect(self) -> sqlite3.Connection:
+        """Open a short-lived connection that auto-applies migrations.
+
+        Going through :class:`ConnectionManager` ensures the
+        ``governance_overrides`` table exists on first use even when the
+        caller's project DB pre-dates v17.
+        """
+        from agent_baton.core.storage.connection import ConnectionManager
+        from agent_baton.core.storage.schema import (
+            PROJECT_SCHEMA_DDL,
+            SCHEMA_VERSION,
+        )
+
+        cm = ConnectionManager(self._db_path)
+        cm.configure_schema(PROJECT_SCHEMA_DDL, version=SCHEMA_VERSION)
+        return cm.get_connection()
+
+    @staticmethod
+    def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "override_id": row["override_id"],
+            "actor": row["actor"],
+            "command": row["command"],
+            "args_json": row["args_json"],
+            "flag": row["flag"],
+            "justification": row["justification"],
+            "created_at": row["created_at"],
+            "chain_hash": row["chain_hash"],
+        }

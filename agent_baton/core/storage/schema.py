@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -631,6 +631,37 @@ SELECT
 FROM knowledge_telemetry kt
 LEFT JOIN knowledge_doc_meta dm ON dm.doc_name = kt.doc_name AND dm.pack_name = kt.pack_name
 GROUP BY kt.doc_name, kt.pack_name;
+""",
+    17: """
+-- v17 (G1.6 / bd-1a09): governance override + justification log.
+--
+-- Records every use of a --force / --skip-gate / --risk-override flag
+-- alongside the actor identity, the full argv, the operator-supplied
+-- justification, and the hash-chain entry that mirrors the override
+-- in compliance-audit.jsonl.  The chain entry deliberately omits the
+-- justification text — only the SQL row stores it, since the chain is
+-- frequently exported for external audit and the justification may
+-- contain operational detail that does not belong in shared logs.
+--
+-- NOTE: applied to BOTH project and central databases via
+-- ConnectionManager._run_migrations().  No FK constraints (matches the
+-- pattern used by all post-v4 migrations).
+CREATE TABLE IF NOT EXISTS governance_overrides (
+    override_id   TEXT PRIMARY KEY,
+    actor         TEXT NOT NULL DEFAULT '',
+    command       TEXT NOT NULL DEFAULT '',
+    args_json     TEXT NOT NULL DEFAULT '[]',
+    flag          TEXT NOT NULL DEFAULT '',
+    justification TEXT NOT NULL DEFAULT '',
+    created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    chain_hash    TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_governance_overrides_created
+    ON governance_overrides(created_at);
+CREATE INDEX IF NOT EXISTS idx_governance_overrides_flag
+    ON governance_overrides(flag);
+CREATE INDEX IF NOT EXISTS idx_governance_overrides_actor
+    ON governance_overrides(actor);
 """,
 }
 
@@ -1333,6 +1364,24 @@ SELECT
 FROM knowledge_telemetry kt
 LEFT JOIN knowledge_doc_meta dm ON dm.doc_name = kt.doc_name AND dm.pack_name = kt.pack_name
 GROUP BY kt.doc_name, kt.pack_name;
+
+-- G1.6 (bd-1a09): governance override + justification log
+CREATE TABLE IF NOT EXISTS governance_overrides (
+    override_id   TEXT PRIMARY KEY,
+    actor         TEXT NOT NULL DEFAULT '',
+    command       TEXT NOT NULL DEFAULT '',
+    args_json     TEXT NOT NULL DEFAULT '[]',
+    flag          TEXT NOT NULL DEFAULT '',
+    justification TEXT NOT NULL DEFAULT '',
+    created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    chain_hash    TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_governance_overrides_created
+    ON governance_overrides(created_at);
+CREATE INDEX IF NOT EXISTS idx_governance_overrides_flag
+    ON governance_overrides(flag);
+CREATE INDEX IF NOT EXISTS idx_governance_overrides_actor
+    ON governance_overrides(actor);
 """
 
 # =====================================================================
@@ -2363,4 +2412,22 @@ SELECT
 FROM knowledge_telemetry kt
 LEFT JOIN knowledge_doc_meta dm ON dm.doc_name = kt.doc_name AND dm.pack_name = kt.pack_name
 GROUP BY kt.doc_name, kt.pack_name;
+
+-- G1.6 (bd-1a09): governance override + justification log (central mirror)
+CREATE TABLE IF NOT EXISTS governance_overrides (
+    override_id   TEXT PRIMARY KEY,
+    actor         TEXT NOT NULL DEFAULT '',
+    command       TEXT NOT NULL DEFAULT '',
+    args_json     TEXT NOT NULL DEFAULT '[]',
+    flag          TEXT NOT NULL DEFAULT '',
+    justification TEXT NOT NULL DEFAULT '',
+    created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    chain_hash    TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_central_governance_overrides_created
+    ON governance_overrides(created_at);
+CREATE INDEX IF NOT EXISTS idx_central_governance_overrides_flag
+    ON governance_overrides(flag);
+CREATE INDEX IF NOT EXISTS idx_central_governance_overrides_actor
+    ON governance_overrides(actor);
 """
