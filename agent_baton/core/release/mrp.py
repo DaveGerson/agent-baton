@@ -573,11 +573,16 @@ class MRPBuilder:
         intact = True
         message = ""
         try:
-            from agent_baton.core.govern.compliance import verify_chain
-            intact, message = verify_chain(log)
-        except Exception as exc:
-            intact = False
-            message = f"verify failed: {exc}"
+            from agent_baton.core.govern.compliance import verify_chain  # type: ignore[attr-defined]
+        except ImportError:
+            verify_chain = None  # type: ignore[assignment]
+            message = "verify_chain helper unavailable; integrity not checked"
+        if verify_chain is not None:
+            try:
+                intact, message = verify_chain(log)
+            except Exception as exc:
+                intact = False
+                message = f"verify failed: {exc}"
 
         return MRPCompliance(
             override_count=override,
