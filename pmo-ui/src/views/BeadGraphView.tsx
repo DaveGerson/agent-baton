@@ -192,25 +192,6 @@ export function BeadGraphView() {
     return () => observer.disconnect();
   }, []);
 
-  // --- layout + draw ---
-  useEffect(() => {
-    if (loading || size.w < 50) return;
-    layoutRef.current = runSimulation({
-      nodes: visibleBeads,
-      edges: visibleEdges,
-      width: size.w,
-      height: size.h,
-    });
-    drawGraph();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visibleBeads, visibleEdges, size.w, size.h, loading]);
-
-  // Redraw on hover/select without re-running simulation.
-  useEffect(() => {
-    drawGraph();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hoverId, selectedId]);
-
   const drawGraph = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -309,6 +290,23 @@ export function BeadGraphView() {
       }
     }
   }, [size.w, size.h, visibleEdges, hoverId, selectedId]);
+
+  // --- layout + draw ---
+  useEffect(() => {
+    if (loading || size.w < 50) return;
+    layoutRef.current = runSimulation({
+      nodes: visibleBeads,
+      edges: visibleEdges,
+      width: size.w,
+      height: size.h,
+    });
+    drawGraph();
+  }, [visibleBeads, visibleEdges, size.w, size.h, loading, drawGraph]);
+
+  // Redraw on hover/select without re-running simulation.
+  useEffect(() => {
+    drawGraph();
+  }, [hoverId, selectedId, drawGraph]);
 
   // --- mouse handling ---
   function nodeAt(x: number, y: number): SimNode | null {

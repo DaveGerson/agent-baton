@@ -334,13 +334,13 @@ export const BEAD_TYPE_LABEL: Record<BeadType, string> = {
 };
 
 export const LINK_TYPE_STYLE: Record<BeadLinkType, { color: string; dash: string; label: string }> = {
-  blocks:           { color: T.cherry,    dash: '',      label: 'blocks' },
-  blocked_by:       { color: T.cherry,    dash: '6 4',   label: 'blocked by' },
-  relates_to:       { color: T.text2,     dash: '2 4',   label: 'relates to' },
-  discovered_from:  { color: T.blueberry, dash: '4 2',   label: 'discovered from' },
-  validates:        { color: T.mintDark,  dash: '',      label: 'validates' },
+  blocks:           { color: T.cherry,     dash: '',     label: 'blocks' },
+  blocked_by:       { color: T.cherry,     dash: '6 4',  label: 'blocked by' },
+  relates_to:       { color: T.text2,      dash: '2 4',  label: 'relates to' },
+  discovered_from:  { color: T.blueberry,  dash: '4 2',  label: 'discovered from' },
+  validates:        { color: T.mintDark,   dash: '',     label: 'validates' },
   contradicts:      { color: T.cherryDark, dash: '6 2',  label: 'contradicts' },
-  extends:          { color: T.crustDark, dash: '',      label: 'extends' },
+  extends:          { color: T.crustDark,  dash: '',     label: 'extends' },
 };
 
 /** Node sizing — uses retrieval_count when non-zero, else token_estimate. */
