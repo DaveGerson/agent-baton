@@ -35,6 +35,8 @@ class AgentUsageRecord:
     gate_results: list[str] = field(default_factory=list)
     estimated_tokens: int = 0
     duration_seconds: float = 0.0
+    # Tenancy attribution (F0.2)
+    agent_type: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -49,6 +51,7 @@ class AgentUsageRecord:
             gate_results=data.get("gate_results", []),
             estimated_tokens=data.get("estimated_tokens", 0),
             duration_seconds=data.get("duration_seconds", 0.0),
+            agent_type=data.get("agent_type", ""),
         )
 
 
@@ -85,6 +88,12 @@ class TaskUsageRecord:
     gates_failed: int = 0
     outcome: str = ""  # "SHIP", "SHIP WITH NOTES", "REVISE", "BLOCK"
     notes: str = ""
+    # Tenancy attribution (F0.2)
+    org_id: str = ""
+    team_id: str = ""
+    user_id: str = ""
+    spec_author_id: str = ""
+    cost_center: str = ""
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -109,4 +118,9 @@ class TaskUsageRecord:
             gates_failed=data.get("gates_failed", 0),
             outcome=data.get("outcome", ""),
             notes=data.get("notes", ""),
+            org_id=data.get("org_id", ""),
+            team_id=data.get("team_id", ""),
+            user_id=data.get("user_id", ""),
+            spec_author_id=data.get("spec_author_id", ""),
+            cost_center=data.get("cost_center", ""),
         )
