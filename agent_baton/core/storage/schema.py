@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 20
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -662,6 +662,88 @@ CREATE INDEX IF NOT EXISTS idx_governance_overrides_flag
     ON governance_overrides(flag);
 CREATE INDEX IF NOT EXISTS idx_governance_overrides_actor
     ON governance_overrides(actor);
+""",
+    18: """
+-- v18 (DX.3 / bd-d136): session-handoff notes + quality scoring.
+--
+-- ``baton execute handoff --note "<text>"`` writes a structured row
+-- describing where the operator stopped (free-text note, branch state,
+-- and a heuristic 0.0-1.0 quality score with per-heuristic breakdown).
+-- Subsequent sessions can ``baton execute handoff list/show`` to recover
+-- context without re-reading plan.json or trace files.
+--
+-- The table is conceptually project-local but the migration is applied
+-- to BOTH project and central databases (the standard pattern for
+-- post-v4 migrations).  Central never receives writes from this code
+-- path -- HandoffStore is only constructed against per-project baton.db.
+CREATE TABLE IF NOT EXISTS handoffs (
+    handoff_id           TEXT PRIMARY KEY,
+    task_id              TEXT NOT NULL DEFAULT '',
+    note                 TEXT NOT NULL DEFAULT '',
+    branch               TEXT NOT NULL DEFAULT '',
+    commits_ahead        INTEGER NOT NULL DEFAULT 0,
+    git_dirty            INTEGER NOT NULL DEFAULT 0,
+    quality_score        REAL NOT NULL DEFAULT 0.0,
+    score_breakdown_json TEXT NOT NULL DEFAULT '{}',
+    created_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_handoffs_task    ON handoffs(task_id);
+CREATE INDEX IF NOT EXISTS idx_handoffs_created ON handoffs(created_at);
+""",
+    19: """
+-- v19 (L2.4 / bd-362f): improvement-recommendation conflict detection.
+--
+-- Surfaces clusters of recommendations whose ``proposed_change`` touches
+-- overlapping config keys or contradicts a peer's direction.  The detector
+-- in ``agent_baton/core/improve/conflict_detection.py`` writes one row per
+-- conflict pair/cluster; the ``baton improve conflicts`` CLI reads them.
+--
+-- Velocity-zero behaviour: detection only.  ``acknowledged_at`` is set by
+-- the operator via ``baton improve conflicts acknowledge`` and acts as a
+-- "reviewed" flag -- it does NOT auto-resolve the underlying recommendations.
+--
+-- NOTE: applied to BOTH project and central databases via
+-- ConnectionManager._run_migrations().  Additive only -- no FK constraints
+-- (matches the pattern used by all post-v4 migrations).  Fresh databases
+-- get the canonical shape from PROJECT_SCHEMA_DDL / CENTRAL_SCHEMA_DDL.
+CREATE TABLE IF NOT EXISTS improvement_conflicts (
+    conflict_id     TEXT PRIMARY KEY,
+    rec_ids_json    TEXT NOT NULL DEFAULT '[]',
+    reason          TEXT NOT NULL DEFAULT '',
+    severity        TEXT NOT NULL DEFAULT 'low',
+    detected_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    acknowledged_at TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_improvement_conflicts_detected
+    ON improvement_conflicts(detected_at);
+CREATE INDEX IF NOT EXISTS idx_improvement_conflicts_severity
+    ON improvement_conflicts(severity);
+""",
+    20: """
+-- v20 (H3.1 / bd-0dea): human-role taxonomy on the users table.
+--
+-- Adds a ``human_role`` column distinct from the existing ``role`` column.
+--
+-- The pre-existing ``role`` column captures PMO workflow roles
+-- (creator/reviewer/approver/admin) used by the approval workflow.  H3.1
+-- introduces an *orthogonal* engineering-seniority taxonomy
+-- (junior/senior/tech_lead/architect/engineering_manager/qa) that future
+-- PMO views (H3.2) and Separation-of-Duties policy (G1.4) can read.
+--
+-- The two columns serve different concerns and must coexist:
+--   role        -> what the user is *allowed* to do in PMO workflows
+--   human_role  -> who the user *is* on the engineering org chart
+--
+-- Velocity-zero: column is additive with default '' (UNASSIGNED).  Existing
+-- rows load as UNASSIGNED.  No code path reads this column to make
+-- gating decisions yet -- that is deferred to G1.4.
+--
+-- NOTE: applied to BOTH project and central databases via
+-- ConnectionManager._run_migrations().  Project databases will acquire the
+-- column too (harmless -- the users table stays empty on the project side).
+-- The authoritative data always lives in central.db.
+ALTER TABLE users ADD COLUMN human_role TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_users_human_role ON users(human_role);
 """,
 }
 
@@ -1382,6 +1464,41 @@ CREATE INDEX IF NOT EXISTS idx_governance_overrides_flag
     ON governance_overrides(flag);
 CREATE INDEX IF NOT EXISTS idx_governance_overrides_actor
     ON governance_overrides(actor);
+
+-- DX.3 (bd-d136): session-handoff notes + quality scoring.
+-- Project-local only.  Mirrors MIGRATIONS[18].  See
+-- ``agent_baton/core/storage/handoff_store.py`` for the writer and
+-- ``agent_baton/core/improve/handoff_score.py`` for the scoring model.
+CREATE TABLE IF NOT EXISTS handoffs (
+    handoff_id           TEXT PRIMARY KEY,
+    task_id              TEXT NOT NULL DEFAULT '',
+    note                 TEXT NOT NULL DEFAULT '',
+    branch               TEXT NOT NULL DEFAULT '',
+    commits_ahead        INTEGER NOT NULL DEFAULT 0,
+    git_dirty            INTEGER NOT NULL DEFAULT 0,
+    quality_score        REAL NOT NULL DEFAULT 0.0,
+    score_breakdown_json TEXT NOT NULL DEFAULT '{}',
+    created_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_handoffs_task    ON handoffs(task_id);
+CREATE INDEX IF NOT EXISTS idx_handoffs_created ON handoffs(created_at);
+
+-- L2.4 (bd-362f): improvement-recommendation conflict detection.
+-- Project-local only.  Mirrors MIGRATIONS[19].  See
+-- ``agent_baton/core/storage/conflict_store.py`` for the writer and
+-- ``agent_baton/core/improve/conflict_detection.py`` for the detector.
+CREATE TABLE IF NOT EXISTS improvement_conflicts (
+    conflict_id     TEXT PRIMARY KEY,
+    rec_ids_json    TEXT NOT NULL DEFAULT '[]',
+    reason          TEXT NOT NULL DEFAULT '',
+    severity        TEXT NOT NULL DEFAULT 'low',
+    detected_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    acknowledged_at TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_improvement_conflicts_detected
+    ON improvement_conflicts(detected_at);
+CREATE INDEX IF NOT EXISTS idx_improvement_conflicts_severity
+    ON improvement_conflicts(severity);
 """
 
 # =====================================================================

@@ -274,6 +274,25 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     p_switch = sub.add_parser("switch", help="Switch the active execution to a different task ID")
     p_switch.add_argument("switch_task_id", metavar="TASK_ID", help="Task ID to switch to")
 
+    # baton execute handoff --note "..." [--branch] [--score]  (DX.3 / bd-d136)
+    p_handoff = sub.add_parser(
+        "handoff", parents=[_task_id_parent],
+        help="Record a session-handoff note + quality score (DX.3)",
+    )
+    p_handoff.add_argument("--note", default=None,
+                           help="Handoff note (free text). Required for record mode.")
+    p_handoff.add_argument("--branch", action="store_true", default=False,
+                           help="Include git branch + commits-ahead-of-master in the note")
+    p_handoff.add_argument("--score", action="store_true", default=False,
+                           help="Print the quality score after writing")
+    p_handoff.add_argument("--limit", type=int, default=20,
+                           help="(list mode only) Maximum rows to return (default: 20)")
+    p_handoff.add_argument("handoff_action", nargs="?", default=None,
+                           choices=[None, "record", "list", "show"],
+                           help="record (default), list, or show")
+    p_handoff.add_argument("handoff_id", nargs="?", default=None,
+                           help="(show mode only) Handoff ID")
+
     return p
 
 
@@ -560,6 +579,10 @@ def handler(args: argparse.Namespace) -> None:
         _handle_run(args)
         return
 
+    if args.subcommand == "handoff":
+        _handle_handoff(args)
+        return
+
     # Resolve task_id: explicit flag → BATON_TASK_ID env var → SQLite active_task →
     #   file active-task-id.txt → None (legacy flat file)
     task_id = getattr(args, "task_id", None)
@@ -709,7 +732,13 @@ def handler(args: argparse.Namespace) -> None:
                 print(json.dumps(result, indent=2))
             else:
                 action = engine.next_action()
-                _print_action(action.to_dict(), terse=terse)
+                _action_dict = action.to_dict()
+                _print_action(_action_dict, terse=terse)
+                # DX.3 (bd-d136): nudge operator to record a handoff at
+                # natural pause points (gate failure, approval required,
+                # completion).  No-op when stdout is not a TTY or when a
+                # handoff has already been recorded for this task.
+                _maybe_handoff_nudge(_action_dict, task_id, context_root)
         except ExecutionVetoed as exc:
             print(f"error: {exc}", file=sys.stderr)
             print("Recovery options:", file=sys.stderr)
@@ -827,6 +856,10 @@ def handler(args: argparse.Namespace) -> None:
             print(json.dumps({"status": "recorded", "phase_id": args.phase_id, "result": args.result}))
         else:
             print(f"Gate recorded: phase {args.phase_id} — {status}")
+            # DX.3 (bd-d136): a gate FAIL is a natural pause point;
+            # remind the operator to record a session handoff.
+            if not passed:
+                _maybe_handoff_nudge({"action_type": "gate_fail"}, task_id, context_root)
 
     elif args.subcommand == "approve":
         engine.record_approval_result(
@@ -942,6 +975,11 @@ def handler(args: argparse.Namespace) -> None:
                 print(f"Synced {sync_result.rows_synced} rows to central.db")
         except Exception as exc:
             _log.warning("Auto-sync to central.db failed (non-blocking): %s", exc)
+
+        # DX.3 (bd-d136): TTY nudge -- prompt operator to capture a
+        # session handoff if they have not already done so.
+        if getattr(args, "output", "text") != "json":
+            _maybe_handoff_nudge({"action_type": "complete"}, task_id, context_root)
 
     elif args.subcommand == "status":
         st = engine.status()
@@ -1915,3 +1953,88 @@ def _parse_add_steps(specs: list[str]) -> tuple[int | None, list[PlanStep]]:
             task_description=desc,
         ))
     return target_phase, steps
+
+
+# ---------------------------------------------------------------------------
+# DX.3 (bd-d136): TTY end-of-run handoff nudge.
+# ---------------------------------------------------------------------------
+
+
+_HANDOFF_NUDGE_TYPES = frozenset({
+    ActionType.COMPLETE.value,
+    ActionType.APPROVAL.value,
+    ActionType.FAILED.value,
+    "gate_fail",
+    "complete",
+})
+
+
+def _maybe_handoff_nudge(
+    action_dict: dict,
+    task_id: str | None,
+    context_root: Path,
+) -> None:
+    """Print the one-line handoff reminder at natural pause points.
+
+    Fires only when:
+    * The current action is a natural pause (complete, approval-required,
+      gate failure, or failed terminal state).
+    * stdout is a TTY -- never pollute machine-readable output.
+    * No handoff has been recorded for ``task_id`` yet.
+
+    All errors are swallowed -- a nudge must never break the CLI.
+    """
+    try:
+        atype = (action_dict or {}).get("action_type", "")
+        if atype not in _HANDOFF_NUDGE_TYPES:
+            return
+        from agent_baton.cli.commands.execution.handoff import (
+            maybe_print_handoff_nudge,
+        )
+        maybe_print_handoff_nudge(task_id=task_id, context_root=context_root)
+    except Exception:  # noqa: BLE001 - never let a nudge break the CLI
+        return
+
+
+# ---------------------------------------------------------------------------
+# DX.3 (bd-d136): handoff subcommand dispatcher.
+#
+# The actual record/list/show implementations live in handoff.py so they
+# can be imported by other entry points (the auto-discovered top-level
+# ``baton handoff`` alias and the TTY end-of-run nudge).
+# ---------------------------------------------------------------------------
+
+
+def _handle_handoff(args: argparse.Namespace) -> None:
+    """Dispatch ``baton execute handoff [record|list|show] ...``.
+
+    Defaults to ``record`` when no positional action is given (so the
+    spec's headline form ``baton execute handoff --note "..."`` works).
+    """
+    from agent_baton.cli.commands.execution import handoff as _handoff_mod
+
+    action = getattr(args, "handoff_action", None) or "record"
+
+    # Re-shape the namespace so the handoff module's handlers can consume
+    # the same arg names regardless of which entry point invoked them.
+    proxy = argparse.Namespace(
+        note=getattr(args, "note", None),
+        task_id=getattr(args, "task_id", None),
+        branch=getattr(args, "branch", False),
+        score=getattr(args, "score", False),
+        output=getattr(args, "output", "text"),
+        limit=getattr(args, "limit", 20),
+        handoff_id=getattr(args, "handoff_id", None),
+    )
+
+    if action == "list":
+        _handoff_mod._handle_list(proxy)
+    elif action == "show":
+        if not proxy.handoff_id:
+            validation_error(
+                "show requires a handoff ID",
+                hint="Try: baton execute handoff show ho-abc123",
+            )
+        _handoff_mod._handle_show(proxy)
+    else:
+        _handoff_mod._handle_record(proxy)
