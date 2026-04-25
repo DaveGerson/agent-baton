@@ -43,6 +43,22 @@ _SPILLOVER_BREADCRUMB_RE = re.compile(
     r"^\[TRUNCATED — full output: (\S+) \(\d+ bytes total\)\]"
 )
 
+
+def _build_knowledge_telemetry_store():
+    """Construct a default ``KnowledgeTelemetryStore`` (~/.baton/central.db).
+
+    bd-a313 — wires F0.4 telemetry into the executor's ``RetrospectiveEngine``
+    and provides a single source for ad-hoc emission of ``KnowledgeUsed`` rows
+    at dispatch time.  Returns ``None`` on any construction failure so that
+    callers can use ``store or no-op`` semantics safely.
+    """
+    try:
+        from agent_baton.core.engine.knowledge_telemetry import KnowledgeTelemetryStore
+        return KnowledgeTelemetryStore()
+    except Exception as exc:  # noqa: BLE001 — telemetry must never crash boot
+        logger.debug("KnowledgeTelemetryStore construction failed (non-fatal): %s", exc)
+        return None
+
 # Maximum bytes of spillover content to inline into the next step's
 # "Previous Step Output" handoff section.  Sized to match the typical
 # inline knowledge budget — large enough to carry full design docs but
@@ -389,7 +405,8 @@ class ExecutionEngine:
                 log_path=self._root / "telemetry.jsonl"
             )
             self._retro_engine = RetrospectiveEngine(
-                retrospectives_dir=self._root / "retrospectives"
+                retrospectives_dir=self._root / "retrospectives",
+                telemetry=_build_knowledge_telemetry_store(),
             )
 
         self._tracer = TraceRecorder(team_context_root=self._root)
@@ -2164,8 +2181,25 @@ class ExecutionEngine:
         # Reuse self._retro_engine in file mode; create a transient one for
         # storage mode (persist is handled by _save_retro).
         _gen_engine = self._retro_engine or RetrospectiveEngine(
-            retrospectives_dir=self._root / "retrospectives"
+            retrospectives_dir=self._root / "retrospectives",
+            telemetry=_build_knowledge_telemetry_store(),
         )
+        # bd-a313 — assemble (doc_name, pack_name) pairs for every knowledge
+        # attachment that appeared on a plan step.  Deduplicated across the
+        # whole plan so each doc only generates one outcome row.
+        _attached_docs: list[tuple[str, str]] = []
+        try:
+            _seen_pairs: set[tuple[str, str]] = set()
+            for _phase in state.plan.phases:
+                for _step in _phase.steps:
+                    for _att in getattr(_step, "knowledge", []) or []:
+                        _pair = (_att.document_name, _att.pack_name or "")
+                        if _pair not in _seen_pairs:
+                            _seen_pairs.add(_pair)
+                            _attached_docs.append(_pair)
+        except Exception as _att_exc:
+            logger.debug("attached_docs assembly skipped (non-fatal): %s", _att_exc)
+
         retro = _gen_engine.generate_from_usage(
             usage=usage_record,
             task_name=retro_data.get("task_name", state.plan.task_summary),
@@ -2176,6 +2210,7 @@ class ExecutionEngine:
             sequencing_notes=retro_data.get("sequencing_notes"),
             team_compositions=retro_data.get("team_compositions"),
             conflicts=retro_data.get("conflicts"),
+            attached_docs=_attached_docs or None,
         )
         retro_path = self._save_retro(retro)
 
@@ -3238,6 +3273,40 @@ class ExecutionEngine:
             outcome=outcome,
         )
 
+    # bd-a313 — F0.4 KnowledgeUsed emission ----------------------------------
+
+    def _emit_knowledge_used(self, task_id: str, step) -> None:  # noqa: ANN001
+        """Emit a ``KnowledgeUsed`` row for every attachment on *step*.
+
+        Lazily constructs (and caches on the engine) a default
+        ``KnowledgeTelemetryStore`` pointed at ``~/.baton/central.db``.  Any
+        failure during construction or write is swallowed — telemetry is a
+        best-effort side-channel.
+        """
+        attachments = getattr(step, "knowledge", None)
+        if not attachments:
+            return
+        store = getattr(self, "_runtime_knowledge_telemetry", None)
+        if store is None:
+            store = _build_knowledge_telemetry_store()
+            self._runtime_knowledge_telemetry = store
+        if store is None:
+            return
+        for att in attachments:
+            try:
+                store.record_used(
+                    doc_name=att.document_name,
+                    pack_name=att.pack_name or "",
+                    task_id=task_id or "",
+                    step_id=getattr(step, "step_id", "") or "",
+                    delivery=getattr(att, "delivery", "inline") or "inline",
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "KnowledgeTelemetry.record_used failed for %s/%s: %s",
+                    att.pack_name, att.document_name, exc,
+                )
+
     def _build_retrospective_data(self, state: ExecutionState) -> dict:
         """Build a rich data dict for the retrospective from execution state.
 
@@ -4105,6 +4174,15 @@ class ExecutionEngine:
             if self._persistence is not None:
                 self._persistence.save(state)
         enforcement = PromptDispatcher.build_path_enforcement(step)
+
+        # bd-a313 — emit F0.4 KnowledgeUsed telemetry for every attachment on
+        # this step.  The resolver was likely invoked at plan time (without a
+        # task_id), so we record the actual delivery here where task_id and
+        # step_id are known.  Best-effort — never raise from the dispatch path.
+        try:
+            self._emit_knowledge_used(state.task_id, step)
+        except Exception as _kt_exc:
+            logger.debug("knowledge telemetry emission skipped (non-fatal): %s", _kt_exc)
 
         # ── Compliance audit: record dispatch event ──────────────────────────
         preset_name = _risk_level_to_preset(state.plan.risk_level)
@@ -5043,9 +5121,14 @@ class ExecutionEngine:
 
         if resolver is not None:
             try:
+                # bd-a313 — pass task_id/step_id so the resolver's F0.4
+                # telemetry side-channel can record KnowledgeUsed rows tied
+                # back to the actual execution.
                 attachments = resolver.resolve(
                     agent_name=agent_name,
                     task_description=signal.description,
+                    task_id=state.task_id,
+                    step_id=step_id,
                 )
                 if attachments:
                     resolution_found = True

@@ -960,12 +960,21 @@ class IntelligentPlanner:
         _resolver = None
         if self.knowledge_registry is not None:
             from agent_baton.core.engine.knowledge_resolver import KnowledgeResolver
+            from agent_baton.core.engine.knowledge_telemetry import KnowledgeTelemetryStore
+            # Wire F0.4 lifecycle telemetry (bd-a313).  Resolver records a
+            # KnowledgeUsed row per attachment whenever ``task_id``/``step_id``
+            # are passed to ``resolve()``.  Construction is best-effort.
+            try:
+                _telemetry = KnowledgeTelemetryStore()
+            except Exception:
+                _telemetry = None
             _resolver = KnowledgeResolver(
                 self.knowledge_registry,
                 agent_registry=self._registry,
                 rag_available=self._detect_rag(),
                 step_token_budget=32_000,
                 doc_token_cap=8_000,
+                telemetry=_telemetry,
             )
 
         # 7. Classify task sensitivity (DataClassifier if available)
