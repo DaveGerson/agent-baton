@@ -1,16 +1,14 @@
-"""Tests for agent_baton.core.improve.loop.ImprovementLoop."""
+"""Tests for agent_baton.core.improve.loop.ImprovementLoop.
+
+L2.1 (bd-362f) note: per-cycle experiment tracking was retired.  Tests that
+exercised the experiment-evaluation/auto-rollback path were removed; the
+learning-cycle pipeline (``baton learn run-cycle``) is the replacement.
+"""
 from __future__ import annotations
 
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
-
-# Suppress DeprecationWarning for the deprecated ExperimentManager used in
-# test fixtures. These tests remain for backward-compatibility coverage.
-pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
-
-from agent_baton.core.improve.experiments import ExperimentManager
 from agent_baton.core.improve.loop import ImprovementLoop
 from agent_baton.core.improve.proposals import ProposalManager
 from agent_baton.core.improve.rollback import RollbackManager
@@ -82,7 +80,6 @@ def _loop(
     scorer.score_agent.return_value = scorecard
 
     proposals = ProposalManager(improvements_dir)
-    experiments = ExperimentManager(improvements_dir)
     vcs = AgentVersionControl(tmp_path / "agents")
     rollbacks = RollbackManager(vcs=vcs, improvements_dir=improvements_dir)
 
@@ -90,7 +87,6 @@ def _loop(
         trigger_evaluator=triggers,
         recommender=recommender,
         proposal_manager=proposals,
-        experiment_manager=experiments,
         rollback_manager=rollbacks,
         scorer=scorer,
         config=config or ImprovementConfig(),
@@ -263,7 +259,6 @@ class TestCircuitBreaker:
             trigger_evaluator=triggers,
             recommender=recommender,
             proposal_manager=ProposalManager(improvements_dir),
-            experiment_manager=ExperimentManager(improvements_dir),
             rollback_manager=rollbacks,
             scorer=scorer,
             improvements_dir=improvements_dir,
@@ -274,68 +269,12 @@ class TestCircuitBreaker:
 
 
 # ---------------------------------------------------------------------------
-# Experiment evaluation + auto-rollback
+# Experiment evaluation + auto-rollback (RETIRED in L2.1, bd-362f).
+# The TestExperimentEvaluation class previously exercised
+# ``ImprovementLoop.evaluate_experiments`` which depended on the now-deleted
+# ``ExperimentManager``.  Replacement coverage lives in the learning-cycle
+# integration tests (``baton learn run-cycle``).
 # ---------------------------------------------------------------------------
-
-class TestExperimentEvaluation:
-    def test_degraded_experiment_triggers_rollback(self, tmp_path: Path):
-        improvements_dir = tmp_path / "improvements"
-        proposals = ProposalManager(improvements_dir)
-        experiments = ExperimentManager(improvements_dir)
-        vcs = AgentVersionControl(tmp_path / "agents")
-        rollbacks = RollbackManager(vcs=vcs, improvements_dir=improvements_dir)
-
-        # Record a recommendation
-        rec = _auto_rec("rec-to-rollback")
-        rec.status = "applied"
-        proposals.record(rec)
-
-        # Create an experiment
-        exp = experiments.create_experiment(
-            recommendation=rec,
-            metric="first_pass_rate",
-            baseline_value=0.8,
-            target_value=0.84,
-            agent_name="test-agent",
-        )
-        assert exp is not None
-
-        # Record degraded samples (>5% loss from 0.8 baseline)
-        for _ in range(5):
-            experiments.record_sample(exp.experiment_id, 0.5)
-
-        triggers = MagicMock(spec=TriggerEvaluator)
-        triggers.should_analyze.return_value = True
-        triggers.detect_anomalies.return_value = []
-
-        recommender = MagicMock(spec=Recommender)
-        recommender.analyze.return_value = []
-
-        scorer = MagicMock(spec=PerformanceScorer)
-
-        loop = ImprovementLoop(
-            trigger_evaluator=triggers,
-            recommender=recommender,
-            proposal_manager=proposals,
-            experiment_manager=experiments,
-            rollback_manager=rollbacks,
-            scorer=scorer,
-            improvements_dir=improvements_dir,
-        )
-
-        results = loop.evaluate_experiments()
-        assert len(results) == 1
-        assert results[0][1] == "degraded"
-
-        # Verify the experiment was rolled back
-        loaded_exp = experiments.get(exp.experiment_id)
-        assert loaded_exp is not None
-        assert loaded_exp.status == "rolled_back"
-
-        # Verify the recommendation was rolled back
-        loaded_rec = proposals.get("rec-to-rollback")
-        assert loaded_rec is not None
-        assert loaded_rec.status == "rolled_back"
 
 
 # ---------------------------------------------------------------------------

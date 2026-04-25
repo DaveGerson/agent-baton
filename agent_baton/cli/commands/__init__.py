@@ -8,7 +8,7 @@ Sub-packages group commands by functional domain:
 * execution/ -- Plan creation, execution loop, daemon, async dispatch.
 * observe/ -- Tracing, telemetry, dashboards, usage, context queries.
 * govern/ -- Classification, compliance, policy, validation.
-* improve/ -- Scoring, evolution, patterns, budget, experiments.
+* improve/ -- Scoring, patterns, budget, anomalies, conflicts.
 * distribute/ -- Packaging, publishing, registry, install, transfer.
 * agents/ -- Agent listing, routing, events, incidents.
 

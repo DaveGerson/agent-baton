@@ -1,15 +1,17 @@
-"""Tests for agent_baton.core.learn.recommender.Recommender."""
+"""Tests for agent_baton.core.learn.recommender.Recommender.
+
+L2.1 (bd-362f) note: prompt-evolution recommendations were retired and now
+flow from the ``learning-analyst`` agent (``baton learn run-cycle``).  This
+suite no longer covers the in-process prompt path -- see
+``tests/test_l2_retirement.py`` for the retirement assertion.
+"""
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import MagicMock
-
-import pytest
 
 from agent_baton.core.improve.scoring import AgentScorecard, PerformanceScorer
 from agent_baton.core.learn.pattern_learner import PatternLearner
 from agent_baton.core.learn.budget_tuner import BudgetTuner
-from agent_baton.core.improve.evolution import EvolutionProposal, PromptEvolutionEngine
 from agent_baton.core.learn.recommender import Recommender
 from agent_baton.models.budget import BudgetRecommendation
 from agent_baton.models.pattern import LearnedPattern
@@ -37,12 +39,6 @@ def _mock_learner(patterns: list[LearnedPattern]) -> PatternLearner:
     return learner
 
 
-def _mock_evolution(proposals: list[EvolutionProposal]) -> PromptEvolutionEngine:
-    engine = MagicMock(spec=PromptEvolutionEngine)
-    engine.analyze.return_value = proposals
-    return engine
-
-
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -53,7 +49,6 @@ class TestRecommenderAnalyze:
             scorer=_mock_scorer([]),
             pattern_learner=_mock_learner([]),
             budget_tuner=_mock_tuner([]),
-            evolution_engine=_mock_evolution([]),
         )
         assert recommender.analyze() == []
 
@@ -76,7 +71,6 @@ class TestRecommenderAnalyze:
             scorer=_mock_scorer([]),
             pattern_learner=_mock_learner([]),
             budget_tuner=_mock_tuner(recs),
-            evolution_engine=_mock_evolution([]),
         )
         results = recommender.analyze()
         budget_recs = [r for r in results if r.category == "budget_tier"]
@@ -103,38 +97,16 @@ class TestRecommenderAnalyze:
             scorer=_mock_scorer([]),
             pattern_learner=_mock_learner([]),
             budget_tuner=_mock_tuner(recs),
-            evolution_engine=_mock_evolution([]),
         )
         results = recommender.analyze()
         budget_recs = [r for r in results if r.category == "budget_tier"]
         assert len(budget_recs) == 1
         assert budget_recs[0].auto_applicable is False
 
-    def test_prompt_changes_never_auto_applicable(self):
-        proposals = [
-            EvolutionProposal(
-                agent_name="architect",
-                scorecard=AgentScorecard(
-                    agent_name="architect",
-                    times_used=10,
-                    first_pass_rate=0.3,
-                ),
-                issues=["Low first-pass rate"],
-                suggestions=["Add examples"],
-                priority="high",
-            )
-        ]
-        recommender = Recommender(
-            scorer=_mock_scorer([]),
-            pattern_learner=_mock_learner([]),
-            budget_tuner=_mock_tuner([]),
-            evolution_engine=_mock_evolution(proposals),
-        )
-        results = recommender.analyze()
-        prompt_recs = [r for r in results if r.category == "agent_prompt"]
-        assert len(prompt_recs) == 1
-        assert prompt_recs[0].auto_applicable is False
-        assert prompt_recs[0].risk == "high"
+    # NOTE (L2.1, bd-362f): The previous ``test_prompt_changes_never_auto_applicable``
+    # test was removed alongside the in-process prompt-evolution code path.  Prompt
+    # recommendations now originate from the ``learning-analyst`` agent and are
+    # exercised by the learning-cycle integration tests instead.
 
     def test_sequencing_auto_applicable_when_high_confidence_and_success(self):
         patterns = [
@@ -157,7 +129,6 @@ class TestRecommenderAnalyze:
             scorer=_mock_scorer([]),
             pattern_learner=_mock_learner(patterns),
             budget_tuner=_mock_tuner([]),
-            evolution_engine=_mock_evolution([]),
         )
         results = recommender.analyze()
         seq_recs = [r for r in results if r.category == "sequencing"]
@@ -185,7 +156,6 @@ class TestRecommenderAnalyze:
             scorer=_mock_scorer([]),
             pattern_learner=_mock_learner(patterns),
             budget_tuner=_mock_tuner([]),
-            evolution_engine=_mock_evolution([]),
         )
         results = recommender.analyze()
         seq_recs = [r for r in results if r.category == "sequencing"]
@@ -206,7 +176,6 @@ class TestRecommenderAnalyze:
             scorer=_mock_scorer(scorecards),
             pattern_learner=_mock_learner([]),
             budget_tuner=_mock_tuner([]),
-            evolution_engine=_mock_evolution([]),
         )
         results = recommender.analyze()
         routing_recs = [r for r in results if r.category == "routing"]
@@ -250,7 +219,6 @@ class TestRecommenderAnalyze:
             scorer=_mock_scorer([]),
             pattern_learner=_mock_learner(patterns),
             budget_tuner=_mock_tuner(recs),
-            evolution_engine=_mock_evolution([]),
         )
         results = recommender.analyze()
         # Should have both since they are different categories
@@ -289,7 +257,6 @@ class TestRecommenderAnalyze:
             scorer=_mock_scorer([]),
             pattern_learner=_mock_learner([]),
             budget_tuner=_mock_tuner(recs),
-            evolution_engine=_mock_evolution([]),
         )
         results = recommender.analyze()
         confidences = [r.confidence for r in results]

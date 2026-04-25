@@ -16,9 +16,11 @@ Retrospectives bridge the observe and learn layers:
 * :class:`~agent_baton.core.improve.scoring.PerformanceScorer` scans
   retrospective markdown for positive/negative agent mentions to compute
   qualitative scorecard signals.
-* :class:`~agent_baton.core.improve.evolution.PromptEvolutionEngine` uses
-  scorecard data (which includes retrospective mentions) to generate
-  prompt-improvement proposals.
+
+Note: prompt-improvement proposals are no longer generated in-process.
+The ``learning-analyst`` agent (dispatched via ``baton learn run-cycle``)
+reads the retrospectives produced here and emits evidence-cited
+recommendations -- see L2.1 retirement (bd-362f).
 
 Storage format: each retrospective is persisted as a pair of files in
 ``<team_context_root>/retrospectives/``:
