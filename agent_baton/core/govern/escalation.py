@@ -78,6 +78,13 @@ def _parse_block(block: str) -> Escalation | None:
     options_raw = _parse_field(block, "Options")
     options = [o.strip() for o in options_raw.split(",") if o.strip()] if options_raw else []
     answer = _parse_field(block, "Answer")
+    required_role = _parse_field(block, "RequiredRole")
+    timeout_raw = _parse_field(block, "TimeoutMinutes")
+    try:
+        timeout_minutes = int(timeout_raw) if timeout_raw else 0
+    except ValueError:
+        timeout_minutes = 0
+    escalate_to = _parse_field(block, "EscalateTo")
 
     return Escalation(
         agent_name=agent_name,
@@ -88,6 +95,9 @@ def _parse_block(block: str) -> Escalation | None:
         timestamp=timestamp,
         resolved=resolved,
         answer=answer,
+        required_role=required_role,
+        timeout_minutes=timeout_minutes,
+        escalate_to=escalate_to,
     )
 
 
