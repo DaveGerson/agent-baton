@@ -15,6 +15,35 @@ _SKIP_DIRS: frozenset[str] = frozenset({
     "node_modules", "__pycache__", "dist", "build", ".git",
 })
 
+
+# Reviewer-class agents — quality/governance gate roles that MUST NEVER appear
+# as ``implementer`` team members in an ``implement``-type phase.  Their job is
+# to review/audit the work, not co-author it.  Including them as implementers:
+#   - Burns opus tokens (these agents typically run on opus) producing
+#     implementation code they shouldn't write.
+#   - Confuses the role taxonomy — an auditor's verdict in compliance reports
+#     becomes meaningless if it co-authored the work.
+# The planner filters these out when expanding team-step membership for
+# implement-type phases (and warns when a ``--agents`` override tries to
+# include them).  They remain valid for review/gate phases.
+REVIEWER_AGENTS: frozenset[str] = frozenset({
+    "auditor",
+    "code-reviewer",
+    "security-reviewer",
+    "plan-reviewer",
+    "spec-document-reviewer",
+})
+
+
+def is_reviewer_agent(agent_name: str) -> bool:
+    """Return True if ``agent_name`` is a reviewer-class agent.
+
+    Strips the ``--<flavor>`` suffix before lookup so flavored variants like
+    ``code-reviewer--python`` are matched against the base name.
+    """
+    base = agent_name.split("--")[0]
+    return base in REVIEWER_AGENTS
+
 # Stack detection signals: filename → (language, framework_hint)
 PACKAGE_SIGNALS: dict[str, tuple[str, str | None]] = {
     "package.json": ("javascript", None),
