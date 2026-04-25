@@ -20,7 +20,7 @@ import pytest
 
 from agent_baton.core.govern.compliance import (
     ChainIntegrityError,
-    ComplianceChainWriter,
+    LockedJSONLChainWriter,
 )
 
 
@@ -30,7 +30,7 @@ from agent_baton.core.govern.compliance import (
 
 def _append_worker(chain_path_str: str, worker_id: int, n: int) -> None:
     """Append *n* entries tagged with *worker_id* to the chain at *chain_path*."""
-    writer = ComplianceChainWriter(Path(chain_path_str))
+    writer = LockedJSONLChainWriter(Path(chain_path_str))
     for i in range(n):
         writer.append({"worker": worker_id, "seq": i})
 
@@ -41,21 +41,21 @@ def _append_worker(chain_path_str: str, worker_id: int, n: int) -> None:
 
 class TestChainBasics:
     def test_single_append_and_verify(self, tmp_path: Path) -> None:
-        writer = ComplianceChainWriter(tmp_path / "chain.jsonl")
+        writer = LockedJSONLChainWriter(tmp_path / "chain.jsonl")
         h = writer.append({"event": "first"})
         assert isinstance(h, str)
         assert len(h) == 64
         assert writer.verify() == 1
 
     def test_sequential_appends_chain_correctly(self, tmp_path: Path) -> None:
-        writer = ComplianceChainWriter(tmp_path / "chain.jsonl")
+        writer = LockedJSONLChainWriter(tmp_path / "chain.jsonl")
         for i in range(20):
             writer.append({"i": i})
         assert writer.verify() == 20
 
     def test_verify_detects_tampering(self, tmp_path: Path) -> None:
         chain = tmp_path / "chain.jsonl"
-        writer = ComplianceChainWriter(chain)
+        writer = LockedJSONLChainWriter(chain)
         for i in range(5):
             writer.append({"i": i})
         # Mutate one payload without recomputing the hash.
@@ -96,7 +96,7 @@ class TestConcurrentAppend:
         assert w2_seqs == list(range(50))
 
         # Chain integrity preserved end-to-end (no forked hash).
-        writer = ComplianceChainWriter(chain_path)
+        writer = LockedJSONLChainWriter(chain_path)
         assert writer.verify() == 100
 
 
@@ -105,7 +105,7 @@ class TestCrashRecovery:
 
     def test_torn_last_line_is_skipped_on_recovery(self, tmp_path: Path) -> None:
         chain_path = tmp_path / "chain.jsonl"
-        writer = ComplianceChainWriter(chain_path)
+        writer = LockedJSONLChainWriter(chain_path)
         # Write 3 valid entries.
         for i in range(3):
             writer.append({"seq": i})
@@ -117,7 +117,7 @@ class TestCrashRecovery:
             # No closing brace, no newline — torn write.
 
         # A fresh writer must skip the torn line and append cleanly.
-        writer2 = ComplianceChainWriter(chain_path)
+        writer2 = LockedJSONLChainWriter(chain_path)
         new_hash = writer2.append({"seq": 100})
         assert isinstance(new_hash, str) and len(new_hash) == 64
 
@@ -137,7 +137,7 @@ class TestCrashRecovery:
         """Spawn a worker, kill -9 it, then verify a new writer can append."""
         chain_path = tmp_path / "chain.jsonl"
         # Pre-seed with 2 entries to give recovery something to read.
-        seed = ComplianceChainWriter(chain_path)
+        seed = LockedJSONLChainWriter(chain_path)
         seed.append({"seed": 0})
         seed.append({"seed": 1})
 
@@ -147,7 +147,7 @@ class TestCrashRecovery:
             import sys, time
             sys.path.insert(0, {str(Path.cwd())!r})
             from agent_baton.core.govern.compliance import ComplianceChainWriter
-            w = ComplianceChainWriter({str(chain_path)!r})
+            w = LockedJSONLChainWriter({str(chain_path)!r})
             for i in range(10000):
                 w.append({{"i": i}})
                 time.sleep(0.001)
@@ -158,7 +158,7 @@ class TestCrashRecovery:
         proc.wait(timeout=5)
 
         # Recover with a new writer.
-        recover = ComplianceChainWriter(chain_path)
+        recover = LockedJSONLChainWriter(chain_path)
         h = recover.append({"recovered": True})
         assert isinstance(h, str) and len(h) == 64
 
@@ -192,7 +192,7 @@ class TestThroughput:
         # disk-latency bound (~150 ops/sec on rotational, varies on SSD).
         # The flock concurrency guarantee is independent of fsync.
         chain_path = tmp_path / "chain.jsonl"
-        writer = ComplianceChainWriter(chain_path, fsync=False)
+        writer = LockedJSONLChainWriter(chain_path, fsync=False)
         n = 1000
         start = time.perf_counter()
         for i in range(n):

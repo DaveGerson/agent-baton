@@ -657,7 +657,7 @@ class ChainIntegrityError(RuntimeError):
     """Raised when the persisted chain fails hash validation on read."""
 
 
-class ComplianceChainWriter:
+class LockedJSONLChainWriter:
     """Append entries to a tamper-evident hash-chained JSONL log.
 
     Each line of the log is a JSON object of the form::
