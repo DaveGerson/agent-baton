@@ -501,6 +501,124 @@ SELECT ur.cost_center,
 FROM usage_records ur
 LEFT JOIN agent_usage au ON au.task_id = ur.task_id
 GROUP BY ur.cost_center;
+
+-- v16 (continued): Phase 0 foundation primitive tables (F0.1-F0.4).
+--
+-- Bringing the four F0.x primitives into MIGRATIONS[16] so that existing
+-- v15 baton.db files upgrade to v16 with the full Phase 0 schema, not just
+-- the tenancy columns added by bd-c44c above.  All statements use IF NOT
+-- EXISTS / are idempotent (the migrator additionally swallows
+-- "duplicate column name" / "no such table" — see
+-- ConnectionManager._run_migrations).
+--
+-- NOTE: FK constraints are intentionally omitted from this migration block
+-- because it is applied to BOTH project and central databases via
+-- ConnectionManager._run_migrations().  Fresh DBs get the canonical shape
+-- from PROJECT_SCHEMA_DDL / CENTRAL_SCHEMA_DDL directly.
+
+-- F0.1 SPECS
+CREATE TABLE IF NOT EXISTS specs (
+    spec_id      TEXT PRIMARY KEY,
+    project_id   TEXT NOT NULL DEFAULT 'default',
+    author_id    TEXT NOT NULL DEFAULT 'local-user',
+    task_type    TEXT NOT NULL DEFAULT '',
+    template_id  TEXT NOT NULL DEFAULT '',
+    title        TEXT NOT NULL DEFAULT '',
+    state        TEXT NOT NULL DEFAULT 'draft',
+    content      TEXT NOT NULL DEFAULT '',
+    content_hash TEXT NOT NULL DEFAULT '',
+    score_json   TEXT NOT NULL DEFAULT '{}',
+    created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    approved_at  TEXT NOT NULL DEFAULT '',
+    approved_by  TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_specs_state  ON specs(state);
+CREATE INDEX IF NOT EXISTS idx_specs_author ON specs(author_id);
+CREATE INDEX IF NOT EXISTS idx_specs_team   ON specs(project_id);
+
+CREATE TABLE IF NOT EXISTS spec_plan_links (
+    spec_id    TEXT NOT NULL,
+    task_id    TEXT NOT NULL,
+    project_id TEXT NOT NULL DEFAULT 'default',
+    linked_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    PRIMARY KEY (spec_id, task_id)
+);
+CREATE INDEX IF NOT EXISTS idx_spec_plan_links_task ON spec_plan_links(task_id);
+
+-- F0.2 TENANCY hierarchy
+CREATE TABLE IF NOT EXISTS tenancy_orgs (
+    org_id       TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS tenancy_teams (
+    team_id      TEXT PRIMARY KEY,
+    org_id       TEXT NOT NULL DEFAULT 'default',
+    display_name TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_tenancy_teams_org ON tenancy_teams(org_id);
+
+CREATE TABLE IF NOT EXISTS tenancy_cost_centers (
+    cost_center_id TEXT PRIMARY KEY,
+    org_id         TEXT NOT NULL DEFAULT 'default',
+    display_name   TEXT NOT NULL DEFAULT '',
+    created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+-- F0.3 COMPLIANCE LOG (hash-chained, tamper-evident)
+CREATE TABLE IF NOT EXISTS compliance_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id  TEXT NOT NULL DEFAULT 'default',
+    task_id     TEXT NOT NULL DEFAULT '',
+    entry_type  TEXT NOT NULL DEFAULT 'action',
+    actor       TEXT NOT NULL DEFAULT '',
+    payload     TEXT NOT NULL DEFAULT '{}',
+    prev_hash   TEXT NOT NULL DEFAULT '',
+    entry_hash  TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_compliance_log_task ON compliance_log(project_id, task_id);
+
+-- F0.4 KNOWLEDGE TELEMETRY + doc metadata
+CREATE TABLE IF NOT EXISTS knowledge_telemetry (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id          TEXT NOT NULL DEFAULT 'default',
+    doc_name            TEXT NOT NULL DEFAULT '',
+    pack_name           TEXT NOT NULL DEFAULT '',
+    task_id             TEXT NOT NULL DEFAULT '',
+    step_id             TEXT NOT NULL DEFAULT '',
+    used_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    delivery            TEXT NOT NULL DEFAULT 'inline',
+    outcome_correlation REAL
+);
+CREATE INDEX IF NOT EXISTS idx_knowledge_telemetry_doc  ON knowledge_telemetry(doc_name, pack_name);
+CREATE INDEX IF NOT EXISTS idx_knowledge_telemetry_task ON knowledge_telemetry(project_id, task_id);
+
+CREATE TABLE IF NOT EXISTS knowledge_doc_meta (
+    doc_name         TEXT NOT NULL,
+    pack_name        TEXT NOT NULL DEFAULT '',
+    last_modified    TEXT NOT NULL DEFAULT '',
+    stale_after_days INTEGER NOT NULL DEFAULT 90,
+    PRIMARY KEY (doc_name, pack_name)
+);
+
+CREATE VIEW IF NOT EXISTS v_knowledge_effectiveness AS
+SELECT
+    kt.doc_name,
+    kt.pack_name,
+    COUNT(*)                                AS total_uses,
+    ROUND(AVG(CASE WHEN kt.outcome_correlation IS NOT NULL
+              THEN kt.outcome_correlation ELSE NULL END), 4) AS avg_outcome_score,
+    dm.last_modified,
+    dm.stale_after_days,
+    CAST(julianday('now') - julianday(NULLIF(dm.last_modified, '')) AS INTEGER)
+                                            AS days_since_modified
+FROM knowledge_telemetry kt
+LEFT JOIN knowledge_doc_meta dm ON dm.doc_name = kt.doc_name AND dm.pack_name = kt.pack_name
+GROUP BY kt.doc_name, kt.pack_name;
 """,
 }
 
@@ -1079,6 +1197,120 @@ CREATE TABLE IF NOT EXISTS teams (
 );
 CREATE INDEX IF NOT EXISTS idx_teams_leader ON teams(task_id, leader_agent);
 CREATE INDEX IF NOT EXISTS idx_teams_parent ON teams(task_id, parent_team_id);
+
+-- =====================================================================
+-- v16: Phase 0 foundation primitives (F0.1-F0.4)
+--
+-- Mirrors of the F0.x tables that also live in CENTRAL_SCHEMA_DDL so that
+-- a fresh per-project baton.db has the full Phase 0 schema (specs,
+-- tenancy hierarchy, hash-chained compliance log, knowledge telemetry +
+-- effectiveness view).  Without these, a brand-new project DB cannot
+-- write specs/compliance entries even though SCHEMA_VERSION is already 16.
+-- =====================================================================
+
+-- F0.1 SPECS
+CREATE TABLE IF NOT EXISTS specs (
+    spec_id      TEXT PRIMARY KEY,
+    project_id   TEXT NOT NULL DEFAULT 'default',
+    author_id    TEXT NOT NULL DEFAULT 'local-user',
+    task_type    TEXT NOT NULL DEFAULT '',
+    template_id  TEXT NOT NULL DEFAULT '',
+    title        TEXT NOT NULL DEFAULT '',
+    state        TEXT NOT NULL DEFAULT 'draft',
+    content      TEXT NOT NULL DEFAULT '',
+    content_hash TEXT NOT NULL DEFAULT '',
+    score_json   TEXT NOT NULL DEFAULT '{}',
+    created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    approved_at  TEXT NOT NULL DEFAULT '',
+    approved_by  TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_specs_state  ON specs(state);
+CREATE INDEX IF NOT EXISTS idx_specs_author ON specs(author_id);
+CREATE INDEX IF NOT EXISTS idx_specs_team   ON specs(project_id);
+
+CREATE TABLE IF NOT EXISTS spec_plan_links (
+    spec_id    TEXT NOT NULL,
+    task_id    TEXT NOT NULL,
+    project_id TEXT NOT NULL DEFAULT 'default',
+    linked_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    PRIMARY KEY (spec_id, task_id)
+);
+CREATE INDEX IF NOT EXISTS idx_spec_plan_links_task ON spec_plan_links(task_id);
+
+-- F0.2 TENANCY hierarchy
+CREATE TABLE IF NOT EXISTS tenancy_orgs (
+    org_id       TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS tenancy_teams (
+    team_id      TEXT PRIMARY KEY,
+    org_id       TEXT NOT NULL DEFAULT 'default',
+    display_name TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_tenancy_teams_org ON tenancy_teams(org_id);
+
+CREATE TABLE IF NOT EXISTS tenancy_cost_centers (
+    cost_center_id TEXT PRIMARY KEY,
+    org_id         TEXT NOT NULL DEFAULT 'default',
+    display_name   TEXT NOT NULL DEFAULT '',
+    created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+-- F0.3 COMPLIANCE LOG (hash-chained, tamper-evident)
+CREATE TABLE IF NOT EXISTS compliance_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id  TEXT NOT NULL DEFAULT 'default',
+    task_id     TEXT NOT NULL DEFAULT '',
+    entry_type  TEXT NOT NULL DEFAULT 'action',
+    actor       TEXT NOT NULL DEFAULT '',
+    payload     TEXT NOT NULL DEFAULT '{}',
+    prev_hash   TEXT NOT NULL DEFAULT '',
+    entry_hash  TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_compliance_log_task ON compliance_log(project_id, task_id);
+
+-- F0.4 KNOWLEDGE TELEMETRY + doc metadata
+CREATE TABLE IF NOT EXISTS knowledge_telemetry (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id          TEXT NOT NULL DEFAULT 'default',
+    doc_name            TEXT NOT NULL DEFAULT '',
+    pack_name           TEXT NOT NULL DEFAULT '',
+    task_id             TEXT NOT NULL DEFAULT '',
+    step_id             TEXT NOT NULL DEFAULT '',
+    used_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    delivery            TEXT NOT NULL DEFAULT 'inline',
+    outcome_correlation REAL
+);
+CREATE INDEX IF NOT EXISTS idx_knowledge_telemetry_doc  ON knowledge_telemetry(doc_name, pack_name);
+CREATE INDEX IF NOT EXISTS idx_knowledge_telemetry_task ON knowledge_telemetry(project_id, task_id);
+
+CREATE TABLE IF NOT EXISTS knowledge_doc_meta (
+    doc_name         TEXT NOT NULL,
+    pack_name        TEXT NOT NULL DEFAULT '',
+    last_modified    TEXT NOT NULL DEFAULT '',
+    stale_after_days INTEGER NOT NULL DEFAULT 90,
+    PRIMARY KEY (doc_name, pack_name)
+);
+
+CREATE VIEW IF NOT EXISTS v_knowledge_effectiveness AS
+SELECT
+    kt.doc_name,
+    kt.pack_name,
+    COUNT(*)                                AS total_uses,
+    ROUND(AVG(CASE WHEN kt.outcome_correlation IS NOT NULL
+              THEN kt.outcome_correlation ELSE NULL END), 4) AS avg_outcome_score,
+    dm.last_modified,
+    dm.stale_after_days,
+    CAST(julianday('now') - julianday(NULLIF(dm.last_modified, '')) AS INTEGER)
+                                            AS days_since_modified
+FROM knowledge_telemetry kt
+LEFT JOIN knowledge_doc_meta dm ON dm.doc_name = kt.doc_name AND dm.pack_name = kt.pack_name
+GROUP BY kt.doc_name, kt.pack_name;
 """
 
 # =====================================================================
