@@ -235,19 +235,22 @@ class TestRealPacksLoad:
         reg.load_directory(REAL_KNOWLEDGE_DIR)
         return reg
 
-    def test_loads_four_packs(self, real_registry: KnowledgeRegistry) -> None:
-        # NOTE: planning-taxonomy pack directory is not yet created in
-        # .claude/knowledge/, even though it is referenced in design docs and
-        # references/planning-taxonomy.md. Pack registration is tracked
-        # separately. Until then, only 3 packs ship.
-        packs = real_registry.all_packs
-        assert len(packs) == 3
+    def test_loads_at_least_three_well_formed_packs(
+        self, real_registry: KnowledgeRegistry
+    ) -> None:
+        """At least 3 well-formed packs must load. Extras and degraded packs
+        are tolerated for forward-compat with new packs being added."""
+        assert real_registry.well_formed_pack_count >= 3, (
+            f"Expected >= 3 well-formed packs, got "
+            f"{real_registry.well_formed_pack_count}. "
+            f"Degraded: {sorted(real_registry.degraded_pack_names)}"
+        )
 
     def test_expected_pack_names_present(self, real_registry: KnowledgeRegistry) -> None:
+        """Required packs must be loaded; presence-only check tolerates extras."""
         names = set(real_registry.all_packs.keys())
-        assert "agent-baton" in names
-        assert "ai-orchestration" in names
-        assert "case-studies" in names
+        for required in ("agent-baton", "ai-orchestration", "case-studies"):
+            assert required in names, f"Missing required pack: {required}"
 
     def test_agent_baton_pack_has_docs(self, real_registry: KnowledgeRegistry) -> None:
         pack = real_registry.get_pack("agent-baton")

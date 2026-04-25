@@ -272,6 +272,10 @@ class KnowledgeRegistry:
     def __init__(self) -> None:
         self._packs: dict[str, KnowledgePack] = {}
         self._tfidf = _TFIDFIndex()
+        # Track pack provenance so callers (and tests) can distinguish
+        # well-formed packs (with knowledge.yaml) from packs loaded in
+        # degraded mode (no manifest, falling back to directory name).
+        self._degraded_pack_names: set[str] = set()
 
     # ------------------------------------------------------------------
     # Properties
@@ -281,6 +285,29 @@ class KnowledgeRegistry:
     def all_packs(self) -> dict[str, KnowledgePack]:
         """Return a copy of the current pack index."""
         return dict(self._packs)
+
+    @property
+    def well_formed_pack_count(self) -> int:
+        """Number of packs that loaded with a valid ``knowledge.yaml`` manifest.
+
+        A pack counts as well-formed if its source directory contained a
+        readable ``knowledge.yaml``. Packs that fell back to directory-name
+        defaults (degraded mode) are excluded.
+        """
+        return sum(
+            1 for name in self._packs
+            if name not in self._degraded_pack_names
+        )
+
+    @property
+    def degraded_pack_count(self) -> int:
+        """Number of packs loaded in degraded mode (missing/unreadable manifest)."""
+        return len(self._degraded_pack_names)
+
+    @property
+    def degraded_pack_names(self) -> set[str]:
+        """Names of packs that were loaded in degraded mode."""
+        return set(self._degraded_pack_names)
 
     # ------------------------------------------------------------------
     # Loading
@@ -309,13 +336,18 @@ class KnowledgeRegistry:
         for pack_dir in sorted(directory.iterdir()):
             if not pack_dir.is_dir():
                 continue
-            pack = self._load_pack(pack_dir)
-            if pack is None:
+            loaded = self._load_pack(pack_dir)
+            if loaded is None:
                 continue
+            pack, degraded = loaded
             if override or pack.name not in self._packs:
                 # Remove stale TF-IDF entries for the overridden pack, if any.
                 # Simplest approach: rebuild index entries after each override.
                 self._packs[pack.name] = pack
+                if degraded:
+                    self._degraded_pack_names.add(pack.name)
+                else:
+                    self._degraded_pack_names.discard(pack.name)
                 count += 1
 
         # Rebuild TF-IDF index from scratch whenever new packs are added.
@@ -422,7 +454,7 @@ class KnowledgeRegistry:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _load_pack(self, pack_dir: Path) -> KnowledgePack | None:
+    def _load_pack(self, pack_dir: Path) -> tuple[KnowledgePack, bool] | None:
         """Parse a single pack directory into a KnowledgePack.
 
         Graceful degradation:
@@ -430,8 +462,14 @@ class KnowledgeRegistry:
           warning logged.
         - Missing ``name`` in manifest → name from directory.
         - Docs without frontmatter → name from filename, empty metadata.
+
+        Returns:
+            ``(pack, degraded)`` tuple where *degraded* is True if the
+            ``knowledge.yaml`` manifest was missing or unreadable. Returns
+            None only if the directory itself cannot be processed.
         """
         manifest_path = pack_dir / "knowledge.yaml"
+        degraded = False
         if manifest_path.is_file():
             try:
                 raw = manifest_path.read_text(encoding="utf-8")
@@ -439,12 +477,14 @@ class KnowledgeRegistry:
             except (OSError, yaml.YAMLError) as exc:
                 logger.warning("Failed to parse %s: %s", manifest_path, exc)
                 manifest = {}
+                degraded = True
         else:
             logger.warning(
                 "Pack directory %s has no knowledge.yaml — loading with degraded discoverability",
                 pack_dir,
             )
             manifest = {}
+            degraded = True
 
         pack_name = str(manifest.get("name") or "").strip() or pack_dir.name
         description = str(manifest.get("description") or "").strip()
@@ -467,7 +507,7 @@ class KnowledgeRegistry:
             if doc is not None:
                 pack.documents.append(doc)
 
-        return pack
+        return pack, degraded
 
     def _load_document(
         self, path: Path, pack: KnowledgePack
