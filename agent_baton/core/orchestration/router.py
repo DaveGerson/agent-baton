@@ -89,10 +89,17 @@ FLAVOR_MAP: dict[tuple[str, str | None], dict[str, str]] = {
 
 @dataclass
 class StackProfile:
-    """Detected project stack information."""
+    """Detected project stack information.
+
+    ``language`` is the *primary* language used for agent routing and gate
+    command selection.  ``languages`` contains every language detected
+    across root and subdirectories (in detection order, deduplicated)
+    so callers (e.g. the planner) can emit gates for multi-stack repos.
+    """
     language: str | None = None
     framework: str | None = None
     detected_files: list[str] = field(default_factory=list)
+    languages: list[str] = field(default_factory=list)
 
 
 class AgentRouter:
@@ -145,38 +152,90 @@ class AgentRouter:
                     break
 
         # Check package manager signals.
-        # Root-level signals take priority: if the project root contains a
-        # package signal (e.g. pyproject.toml), that defines the primary
-        # language.  Subdirectory signals (e.g. pmo-ui/package.json) are
-        # secondary and won't override a root-level detection.
-        # Within the same priority tier, allow "typescript" to override
-        # "javascript" when tsconfig.json is found alongside package.json.
-        root_language: str | None = None
+        #
+        # Priority rules (per bd-5a7c):
+        # 1. Root-level signals take priority over subdirectory signals.
+        #    If the project root contains pyproject.toml, the primary
+        #    language is Python — even when ``pmo-ui/package.json`` lives
+        #    in a subdirectory.
+        # 2. When BOTH pyproject.toml and a Node/TS signal sit at the root
+        #    (rare — e.g. a typed-stub tsconfig.json next to a Python
+        #    project), prefer Python.  The common monorepo pattern is
+        #    Python backend + JS frontend, not the reverse.
+        # 3. Within Node/TS root signals, allow ``typescript`` to override
+        #    ``javascript`` (tsconfig.json is more specific than package.json).
+        # 4. When no root signal exists, fall back to scanning subdirectories.
+        # 5. Always populate ``languages`` with every distinct language
+        #    seen (root + subdirs) in detection order.
+        def _add_lang(lang: str) -> None:
+            if lang not in profile.languages:
+                profile.languages.append(lang)
+
+        # First pass: collect *all* root-level package signals.
+        root_python_seen = False
+        root_node_lang: str | None = None  # tracks javascript -> typescript override
         for filename, (lang, _) in PACKAGE_SIGNALS.items():
             if (root / filename).exists():
-                if (
-                    root_language is None
-                    or (lang == "typescript" and root_language == "javascript")
-                ):
+                _add_lang(lang)
+                if filename not in profile.detected_files:
+                    profile.detected_files.append(filename)
+                if lang == "python":
+                    root_python_seen = True
+                elif lang in ("javascript", "typescript"):
+                    if (
+                        root_node_lang is None
+                        or (lang == "typescript" and root_node_lang == "javascript")
+                    ):
+                        root_node_lang = lang
+
+        # Resolve the primary root language using the rules above.
+        root_language: str | None = None
+        if root_python_seen:
+            # Rule 2: Python wins at the root, even alongside Node/TS signals.
+            root_language = "python"
+        elif root_node_lang is not None:
+            root_language = root_node_lang
+        else:
+            # No python/node root signal — fall back to first non-node match
+            # (go, rust, ruby, java, kotlin, etc.).
+            for filename, (lang, _) in PACKAGE_SIGNALS.items():
+                if (root / filename).exists():
                     root_language = lang
-                rel = filename
-                if rel not in profile.detected_files:
-                    profile.detected_files.append(rel)
+                    break
 
         if root_language is not None:
             # Root signal found — use it as the primary language.
+            # (Don't overwrite a framework-driven language like ``django``.)
             if profile.language is None:
                 profile.language = root_language
         else:
             # No root signal — fall back to subdirectory scan.
             for filename, (lang, _) in PACKAGE_SIGNALS.items():
                 for scan_dir in scan_dirs:
+                    if scan_dir == root:
+                        continue
                     if (scan_dir / filename).exists():
+                        _add_lang(lang)
                         if (
                             profile.language is None
                             or (lang == "typescript" and profile.language == "javascript")
                         ):
                             profile.language = lang
+                        rel = str((scan_dir / filename).relative_to(root))
+                        if rel not in profile.detected_files:
+                            profile.detected_files.append(rel)
+                        break
+
+        # Rule 5 (cont.): even when a root language was chosen, scan
+        # subdirectories so ``languages`` reflects the full multi-stack
+        # picture (e.g. Python at root + Node in pmo-ui/).
+        if root_language is not None:
+            for filename, (lang, _) in PACKAGE_SIGNALS.items():
+                for scan_dir in scan_dirs:
+                    if scan_dir == root:
+                        continue
+                    if (scan_dir / filename).exists():
+                        _add_lang(lang)
                         rel = str((scan_dir / filename).relative_to(root))
                         if rel not in profile.detected_files:
                             profile.detected_files.append(rel)
