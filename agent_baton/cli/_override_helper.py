@@ -64,19 +64,26 @@ def record_override(
     raw_argv = list(argv) if argv is not None else list(sys.argv)
     derived_command = command or _derive_command(raw_argv)
 
+    import os
+
     is_interactive = (
         interactive
         if interactive is not None
         else bool(getattr(sys.stdin, "isatty", lambda: False)())
     )
+    # Interactive prompt is OPT-IN to keep developer flow unblocked.
+    # Set BATON_OVERRIDE_PROMPT=1 in high-trust orgs that want the prompt.
+    prompt_enabled = os.environ.get("BATON_OVERRIDE_PROMPT", "").lower() in (
+        "1", "true", "yes", "on",
+    )
 
     text = (justification or "").strip()
-    if not text and is_interactive:
+    if not text and is_interactive and prompt_enabled:
         text = _prompt_for_justification(flag)
-    if not text and not is_interactive:
+    if not text:
         sys.stderr.write(
-            f"warning: {flag} used without --justification in a "
-            f"non-interactive shell; recording empty justification.\n"
+            f"warning: {flag} used without --justification; recording empty "
+            f"justification (set BATON_OVERRIDE_PROMPT=1 to require one).\n"
         )
 
     from agent_baton.core.govern.override_log import OverrideLog

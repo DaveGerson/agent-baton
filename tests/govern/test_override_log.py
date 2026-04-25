@@ -241,9 +241,10 @@ def test_record_override_with_justification_persists(
     assert row["flag"] == "--force"
 
 
-def test_record_override_interactive_prompts_for_justification(
+def test_record_override_interactive_prompt_only_when_opted_in(
     db_path: Path, chain_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Prompt is opt-in via BATON_OVERRIDE_PROMPT=1 to keep dev flow unblocked."""
     from agent_baton.cli import _override_helper
 
     monkeypatch.setattr(_override_helper, "_resolve_db_path", lambda: db_path)
@@ -252,15 +253,13 @@ def test_record_override_interactive_prompts_for_justification(
         "agent_baton.core.govern.override_log.OverrideLog",
         lambda db_path=None: real_log,
     )
-    monkeypatch.setattr(_override_helper, "input", lambda: "interactive-reason",
-                        raising=False)
-    # Some Python builds have input() at builtins; patch _prompt_for_justification
-    # directly to avoid stdin coupling.
     monkeypatch.setattr(
         _override_helper, "_prompt_for_justification",
         lambda flag: "interactive-reason",
     )
 
+    # Default (env var unset): TTY does NOT block — empty justification recorded.
+    monkeypatch.delenv("BATON_OVERRIDE_PROMPT", raising=False)
     oid = _override_helper.record_override(
         flag="--force",
         justification=None,
@@ -268,14 +267,30 @@ def test_record_override_interactive_prompts_for_justification(
         argv=["baton", "execute", "gate", "--force"],
         interactive=True,
     )
-    assert oid is not None
     with sqlite3.connect(str(db_path)) as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute(
             "SELECT justification FROM governance_overrides WHERE override_id=?",
             (oid,),
         ).fetchone()
-    assert row["justification"] == "interactive-reason"
+    assert row["justification"] == ""
+
+    # Opt-in: BATON_OVERRIDE_PROMPT=1 → prompt fires.
+    monkeypatch.setenv("BATON_OVERRIDE_PROMPT", "1")
+    oid2 = _override_helper.record_override(
+        flag="--force",
+        justification=None,
+        command="baton execute gate",
+        argv=["baton", "execute", "gate", "--force"],
+        interactive=True,
+    )
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        row2 = conn.execute(
+            "SELECT justification FROM governance_overrides WHERE override_id=?",
+            (oid2,),
+        ).fetchone()
+    assert row2["justification"] == "interactive-reason"
 
 
 # ---------------------------------------------------------------------------
