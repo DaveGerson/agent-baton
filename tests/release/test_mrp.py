@@ -198,33 +198,22 @@ def _write_plan_md(project: Path, task_id: str = "task-x") -> Path:
 
 
 def _write_compliance_log(project: Path) -> Path:
-    """Write a hash-chained compliance-audit.jsonl using stdlib only.
+    """Write a hash-chained compliance-audit.jsonl via the canonical writer.
 
-    The chain shape mirrors agent_baton.core.govern.compliance:
-      - prev_hash field (genesis = 64 zero bytes)
-      - entry_hash field = sha256(prev_hash + canonical_json(payload))
-        where canonical_json excludes ``prev_hash`` and ``entry_hash``.
+    Delegates to :class:`ComplianceChainWriter` so the on-disk hashes match
+    the implementation exactly and ``verify_chain`` accepts the result.
     """
-    import hashlib
+    from agent_baton.core.govern.compliance import ComplianceChainWriter
+
     log = project / ".claude" / "team-context" / "compliance-audit.jsonl"
-    log.parent.mkdir(parents=True, exist_ok=True)
-    payloads = [
+    writer = ComplianceChainWriter(log_path=log)
+    payloads: list[dict] = [
         {"kind": "dispatch", "agent": "backend-engineer"},
         {"kind": "override", "agent": "auditor", "reason": "force"},
     ]
-    prev_hash = "0" * 64
-    lines: list[str] = []
     for payload in payloads:
-        entry = {**payload, "prev_hash": prev_hash}
-        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-        entry_hash = hashlib.sha256(
-            (prev_hash + canonical).encode("utf-8")
-        ).hexdigest()
-        entry["entry_hash"] = entry_hash
-        lines.append(json.dumps(entry, sort_keys=True))
-        prev_hash = entry_hash
-    log.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return log
+        writer.append(payload)
+    return writer.log_path
 
 
 # ---------------------------------------------------------------------------

@@ -7,6 +7,7 @@ list     List Releases, optionally filtered by status.
 show     Show a Release plus the plans tagged against it.
 tag      Tag an existing plan (by ``task_id``) with a release.
 untag    Clear a plan's release tag.
+notes    Auto-generate release notes for a commit range or release (R3.3).
 
 All subcommands are additive metadata only -- they never affect plan
 execution or gating (R3.5 will introduce freeze-period gating later).
@@ -139,6 +140,51 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         help=f"New status ({', '.join(RELEASE_STATUSES)})",
     )
 
+    # -- notes (R3.3) --------------------------------------------------------
+    notes_p = sub.add_parser(
+        "notes",
+        help="Auto-generate release notes for a commit range or release",
+    )
+    notes_p.add_argument(
+        "--release",
+        dest="notes_release_id",
+        default=None,
+        help="Release entity ID (R3.1). Falls back to commit-only mode if unavailable.",
+    )
+    notes_p.add_argument(
+        "--from",
+        dest="from_ref",
+        default=None,
+        help="Git ref to start from (default: master)",
+    )
+    notes_p.add_argument(
+        "--to",
+        dest="to_ref",
+        default=None,
+        help="Git ref to end at (default: HEAD)",
+    )
+    notes_p.add_argument(
+        "--format",
+        dest="notes_format",
+        choices=("markdown", "html", "json"),
+        default="markdown",
+        help="Output format (default: markdown)",
+    )
+    notes_p.add_argument(
+        "--output",
+        dest="notes_output",
+        type=Path,
+        default=None,
+        help="Write output to PATH instead of stdout",
+    )
+    notes_p.add_argument(
+        "--repo-root",
+        dest="repo_root",
+        type=Path,
+        default=None,
+        help="Repository root (default: current working directory)",
+    )
+
     return p
 
 
@@ -152,7 +198,7 @@ def handler(args: argparse.Namespace) -> None:
     if cmd is None:
         print(
             "Usage: baton release <subcommand>  "
-            "[create|list|show|tag|untag|update-status]"
+            "[create|list|show|tag|untag|update-status|notes]"
         )
         print("Run `baton release --help` for details.")
         return
@@ -164,6 +210,7 @@ def handler(args: argparse.Namespace) -> None:
         "tag": _handle_tag,
         "untag": _handle_untag,
         "update-status": _handle_update_status,
+        "notes": _handle_notes,
     }
     fn = dispatch.get(cmd)
     if fn is None:
@@ -303,3 +350,29 @@ def _handle_update_status(args: argparse.Namespace) -> None:
         print(f"error: release not found: {args.release_id}", file=sys.stderr)
         sys.exit(1)
     print(f"Release {args.release_id} -> status {args.new_status}")
+
+
+def _handle_notes(args: argparse.Namespace) -> None:
+    """Auto-generate release notes for a commit range or release (R3.3)."""
+    from agent_baton.core.release.notes import ReleaseNotesBuilder
+
+    builder = ReleaseNotesBuilder(repo_root=args.repo_root)
+    notes = builder.build(
+        release_id=args.notes_release_id,
+        from_ref=args.from_ref,
+        to_ref=args.to_ref,
+    )
+
+    if args.notes_format == "markdown":
+        rendered = notes.to_markdown()
+    elif args.notes_format == "html":
+        rendered = notes.to_html()
+    else:
+        rendered = notes.to_json()
+
+    if args.notes_output:
+        args.notes_output.parent.mkdir(parents=True, exist_ok=True)
+        args.notes_output.write_text(rendered, encoding="utf-8")
+        print(f"Wrote release notes to {args.notes_output}")
+    else:
+        print(rendered)
