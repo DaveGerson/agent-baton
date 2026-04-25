@@ -153,27 +153,12 @@ def test_compliance_log_table_has_chain_columns(tmp_path: Path) -> None:
 # DEFERRED gaps: filed as xfail so follow-up beads have an acceptance test
 # ---------------------------------------------------------------------
 
-@pytest.mark.xfail(
-    reason="GAP: SCHEMA_VERSION is still 15; v16 migration was added "
-           "to CENTRAL_SCHEMA_DDL but no MIGRATIONS[16] entry was "
-           "registered and SCHEMA_VERSION was not bumped. "
-           "Existing v15 databases will not receive the F0.x tables. "
-           "File as BEAD_WARNING for the strategic-roadmap follow-up.",
-    strict=False,
-)
 def test_schema_version_bumped_to_16() -> None:
     from agent_baton.core.storage.schema import SCHEMA_VERSION
 
     assert SCHEMA_VERSION >= 16
 
 
-@pytest.mark.xfail(
-    reason="GAP: PROJECT_SCHEMA_DDL does not include the F0.x tables. "
-           "Fresh project DBs lack specs/tenancy/compliance_log/knowledge "
-           "tables, so a per-project store path will fail. "
-           "File as BEAD_WARNING for the strategic-roadmap follow-up.",
-    strict=False,
-)
 def test_fresh_project_install_has_all_f0_tables(tmp_path: Path) -> None:
     from agent_baton.core.storage.connection import ConnectionManager
     from agent_baton.core.storage.schema import (
@@ -190,12 +175,6 @@ def test_fresh_project_install_has_all_f0_tables(tmp_path: Path) -> None:
     assert not missing, f"project baton.db missing F0.x tables: {missing}"
 
 
-@pytest.mark.xfail(
-    reason="GAP: no MIGRATIONS[16] entry exists. An existing v15 DB "
-           "upgraded in place will not gain the F0.x tables. "
-           "File as BEAD_WARNING for the strategic-roadmap follow-up.",
-    strict=False,
-)
 def test_migrations_dict_has_v16_entry() -> None:
     from agent_baton.core.storage.schema import MIGRATIONS
 
