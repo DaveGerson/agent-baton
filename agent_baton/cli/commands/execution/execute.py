@@ -42,22 +42,17 @@ from agent_baton.models.plan import MissionLogEntry
 
 _log = logging.getLogger(__name__)
 
-_STEP_ID_RE = re.compile(r'^\d+\.\d+$')
-# Matches team-member IDs of the form N.N.x (e.g. "1.1.a", "2.3.b").
-_TEAM_MEMBER_ID_RE = re.compile(r'^\d+\.\d+\.[a-z]+$')
-
-
-def _is_team_member_id(step_id: str) -> bool:
-    """Return True if *step_id* is a team-member ID (e.g. ``"1.1.a"``).
-
-    Team-member IDs are produced by the executor when it dispatches
-    individual members of a team step.  They differ from regular step IDs
-    (``"N.N"``) by having a lowercase-letter suffix (``"N.N.x"``).
-
-    This helper is used both in :func:`_print_action` (to annotate DISPATCH
-    output) and in the ``team-record`` handler (to detect mis-routed calls).
-    """
-    return bool(_TEAM_MEMBER_ID_RE.match(step_id))
+# Step-ID validators (single source of truth shared across subcommands).
+# See ``agent_baton/cli/commands/execution/_validators.py``.
+from agent_baton.cli.commands.execution._validators import (
+    PLAIN_STEP_ID_RE as _STEP_ID_RE,  # back-compat alias for any external import
+    STEP_ID_RE,
+    STEP_ID_FORMAT_HINT,
+    TEAM_MEMBER_ID_RE as _TEAM_MEMBER_ID_RE,  # back-compat alias
+    is_team_member_id as _is_team_member_id,
+    parent_step_id as _parent_step_id,
+    validate_step_id as _validate_step_id,
+)
 
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
@@ -650,32 +645,65 @@ def handler(args: argparse.Namespace) -> None:
             sys.exit(1)
 
     elif args.subcommand == "dispatched":
-        if not _STEP_ID_RE.match(args.step_id):
-            validation_error(f"invalid step ID '{args.step_id}' (expected format: N.N, e.g. '1.1')")
-        engine.mark_dispatched(step_id=args.step_id, agent_name=args.agent)
-        print(json.dumps({"status": "dispatched", "step_id": args.step_id}))
+        _validate_step_id(args.step_id, validation_error)
+        # Symmetric routing with `next`: if the step ID is a team-member form
+        # (N.N.x[.y...]), record a dispatched marker against the parent team
+        # step using the same store as `team-record`.  Otherwise mark the
+        # plain step as dispatched.
+        if _is_team_member_id(args.step_id):
+            parent_id = _parent_step_id(args.step_id)
+            engine.record_team_member_result(
+                step_id=parent_id,
+                member_id=args.step_id,
+                agent_name=args.agent,
+                status="dispatched",
+            )
+            print(json.dumps({
+                "status": "dispatched",
+                "step_id": args.step_id,
+                "parent_step_id": parent_id,
+                "team_member": True,
+            }))
+        else:
+            engine.mark_dispatched(step_id=args.step_id, agent_name=args.agent)
+            print(json.dumps({"status": "dispatched", "step_id": args.step_id}))
 
     elif args.subcommand == "record":
         # Deprecation warning for --summary
         if "--summary" in sys.argv:
             print("warning: --summary is deprecated, use --outcome instead", file=sys.stderr)
-        if not _STEP_ID_RE.match(args.step_id):
-            validation_error(f"invalid step ID '{args.step_id}' (expected format: N.N, e.g. '1.1')")
+        _validate_step_id(args.step_id, validation_error)
         files = [f.strip() for f in args.files.split(",") if f.strip()] if args.files else []
+        # Symmetric routing: a team-member step ID (N.N.x[.y...]) is recorded
+        # against the parent step via the team-member tracking table — the
+        # same store that `team-record` writes to.  This makes `record` accept
+        # anything `next`/`next --all` emits.
+        is_team_member = _is_team_member_id(args.step_id)
         try:
-            engine.record_step_result(
-                step_id=args.step_id,
-                agent_name=args.agent,
-                status=args.status,
-                outcome=args.outcome,
-                files_changed=files,
-                commit_hash=args.commit,
-                estimated_tokens=args.tokens,
-                duration_seconds=args.duration,
-                error=args.error,
-                session_id=getattr(args, "session_id", ""),
-                step_started_at=getattr(args, "step_started_at", ""),
-            )
+            if is_team_member:
+                parent_id = _parent_step_id(args.step_id)
+                engine.record_team_member_result(
+                    step_id=parent_id,
+                    member_id=args.step_id,
+                    agent_name=args.agent,
+                    status=args.status,
+                    outcome=args.outcome,
+                    files_changed=files,
+                )
+            else:
+                engine.record_step_result(
+                    step_id=args.step_id,
+                    agent_name=args.agent,
+                    status=args.status,
+                    outcome=args.outcome,
+                    files_changed=files,
+                    commit_hash=args.commit,
+                    estimated_tokens=args.tokens,
+                    duration_seconds=args.duration,
+                    error=args.error,
+                    session_id=getattr(args, "session_id", ""),
+                    step_started_at=getattr(args, "step_started_at", ""),
+                )
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
             sys.exit(1)
@@ -691,7 +719,11 @@ def handler(args: argparse.Namespace) -> None:
         )
         ContextManager(task_id=task_id).append_to_mission_log(entry)
         if getattr(args, "output", "text") == "json":
-            print(json.dumps({"status": "recorded", "step_id": args.step_id, "agent": args.agent, "result": args.status}))
+            payload = {"status": "recorded", "step_id": args.step_id, "agent": args.agent, "result": args.status}
+            if is_team_member:
+                payload["parent_step_id"] = _parent_step_id(args.step_id)
+                payload["team_member"] = True
+            print(json.dumps(payload))
         else:
             print(f"Recorded: step {args.step_id} ({args.agent}) — {args.status}")
 
@@ -1075,7 +1107,7 @@ def _handle_run(args: argparse.Namespace) -> None:
         # the file-based active-task-id.txt marker.
         try:
             _backend = detect_backend(context_root)
-        except Exception:  # noqa: BLE001 — best-effort detection
+        except Exception:  # noqa: BLE001 — defensive: backend detection is best-effort
             _backend = "file"
         if _backend == "sqlite":
             try:
@@ -1116,6 +1148,8 @@ def _handle_run(args: argparse.Namespace) -> None:
                 file=sys.stderr,
             )
         elif st_status in _TERMINAL_STATUSES:
+            # Already finished — surface clearly rather than silently
+            # restarting and overwriting the prior result.
             user_error(
                 f"execution {task_id} already {st_status}; not restarting.",
                 hint=(
