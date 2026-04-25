@@ -1,0 +1,39 @@
+# Briefing Script Template (from agent-development.txt SE 3.0 vocabulary)
+# A BriefingScript is a structured onboarding artifact delivered to an agent
+# before it begins a complex task. It replaces freeform "here's the context" prompts.
+spec_id: ""
+task_type: briefing-script
+template_id: briefing-script
+title: "<Agent Briefing: task name>"
+
+## Mission
+mission: |
+  <One-sentence mission statement for the agent>
+
+## Codebase Context
+codebase_context: |
+  <Key files, modules, and patterns the agent must understand>
+
+## Constraints
+constraints:
+  - "<Constraint 1: e.g. do not modify X>"
+  - "<Constraint 2>"
+
+## Success Criteria
+success_criteria:
+  - "<Deliverable 1>"
+  - "<Deliverable 2>"
+
+## Known Risks
+known_risks:
+  - "<Risk the agent should watch for>"
+
+## Handoff Protocol
+handoff: |
+  <What the agent must output/commit before it finishes>
+
+## References
+references:
+  docs: []
+  specs: []
+  plans: []

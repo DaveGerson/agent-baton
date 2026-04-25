@@ -1,0 +1,44 @@
+# Loop Script Template (from agent-development.txt SE 3.0 vocabulary)
+# A LoopScript defines a recurring, automated workflow that agents can execute
+# repeatedly — a codified SOP rather than a one-off task spec.
+spec_id: ""
+task_type: loop-script
+template_id: loop-script
+title: "<Loop: workflow name>"
+
+## Trigger
+trigger:
+  type: schedule    # schedule | event | manual | threshold
+  schedule: ""      # cron expression if type=schedule
+  event: ""         # event topic if type=event
+  threshold: ""     # condition if type=threshold
+
+## Pre-conditions
+preconditions:
+  - "<What must be true before the loop runs>"
+
+## Steps
+steps:
+  - order: 1
+    agent: "<agent-name>"
+    description: "<What this step does>"
+    gate: "<Gate command or empty>"
+
+## Post-conditions / Assertions
+postconditions:
+  - "<What must be true after a successful run>"
+
+## On-Failure
+on_failure:
+  action: alert    # alert | retry | skip | escalate
+  max_retries: 3
+  escalate_to: ""
+
+## Metrics
+metrics:
+  - name: "<Metric name>"
+    query: "<How to measure success>"
+
+## History
+last_run: ""
+run_count: 0
