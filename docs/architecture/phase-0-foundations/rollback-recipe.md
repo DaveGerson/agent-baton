@@ -208,3 +208,71 @@ stale WAL may contain v16 frames.  Flush it before restoring:
 ```sql
 PRAGMA wal_checkpoint(TRUNCATE);
 ```
+
+---
+
+## 6. Upgrade procedure: rechain a pre-Phase-0 compliance log (bd-c0e0)
+
+`compliance-audit.jsonl` files written before the F0.3 hash-chain landed
+contain plain-text rows with no `prev_hash` / `entry_hash` fields.
+`baton compliance verify` will return non-zero on these rows because the
+chain is incomplete.  This is expected on the **first run after upgrading**
+to a Phase-0 build — it does not indicate tampering.
+
+### Symptoms
+
+```bash
+$ baton compliance verify
+ERROR  compliance: row 0001 missing prev_hash
+ERROR  compliance: row 0002 missing entry_hash
+EXIT   non-zero
+```
+
+### Recommended sequence
+
+1. **Back up first.**  Rechain mutates the audit log in place; if it
+   aborts midway you want a known-good copy.  Use the same preflight
+   helper that protects schema migrations:
+
+   ```bash
+   baton storage preflight --context .claude/team-context
+   # also copy the JSONL out-of-band:
+   cp .claude/team-context/compliance-audit.jsonl{,.bak-pre-rechain}
+   ```
+
+2. **Rechain.**  This walks each row in order, computes `prev_hash` from
+   the prior row's `entry_hash`, and emits a fresh JSONL with the chain
+   columns populated:
+
+   ```bash
+   baton compliance rechain
+   ```
+
+   Pre-existing rows keep their original `payload`; only the chain
+   columns are added.  New rows written after this point append to a
+   valid chain.
+
+3. **Verify.**  Re-run the verifier — it should now exit zero:
+
+   ```bash
+   baton compliance verify
+   # expected: OK <N> rows, chain intact
+   ```
+
+4. **Sanity-check row counts.**  Number of rows in the rechained file
+   must equal the number in the backup:
+
+   ```bash
+   wc -l .claude/team-context/compliance-audit.jsonl \
+         .claude/team-context/compliance-audit.jsonl.bak-pre-rechain
+   ```
+
+### Risk notes
+
+- Rechain is **destructive** in the sense that it rewrites every row.
+  Do not skip the preflight backup.
+- Once rechained, any future tamper of an old row will be detected by
+  `baton compliance verify` — the upgrade boundary is one-way.
+- If you maintain offsite copies of `compliance-audit.jsonl` for
+  regulatory retention, keep both the pre-rechain and post-rechain
+  versions and document the upgrade event in the audit log itself.
