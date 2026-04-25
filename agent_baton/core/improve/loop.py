@@ -161,6 +161,22 @@ class ImprovementLoop:
         # Detect anomalies
         anomalies = self._triggers.detect_anomalies()
 
+        # O1.3 (bd-91c7): statistical cost-anomaly detection.
+        # Velocity-zero: pure detection, never blocks.  Failures here must
+        # not abort the improvement cycle, so the call is wrapped.
+        try:
+            cost_anomalies = self.detect_cost_anomalies()
+            if cost_anomalies:
+                from agent_baton.models.improvement import Anomaly
+                for ca in cost_anomalies:
+                    anomalies.append(Anomaly.from_dict(ca.to_anomaly_dict()))
+                _log.info(
+                    "ImprovementLoop: surfaced %d statistical cost anomalies",
+                    len(cost_anomalies),
+                )
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("Cost-anomaly detection skipped: %s", exc)
+
         # Run learning engine analysis (best-effort, non-blocking).
         # Reads open LearningIssues, marks proposed candidates, feeds into
         # the recommendation pipeline via confidence scoring.
@@ -478,6 +494,38 @@ class ImprovementLoop:
             _log.warning(
                 "ImprovementLoop._spawn_maintainer failed (non-fatal): %s", exc
             )
+
+    # ------------------------------------------------------------------
+    # Statistical cost-anomaly detection (O1.3, bd-91c7)
+    # ------------------------------------------------------------------
+
+    def detect_cost_anomalies(self, window_days: int = 30) -> list:
+        """Run the statistical cost-anomaly detector.
+
+        Velocity-zero: this never blocks execution.  The result is
+        attached to the improvement report for visibility only.
+
+        Args:
+            window_days: Look-back window in days for the per-pair
+                baseline.
+
+        Returns:
+            A list of :class:`agent_baton.core.improve.cost_anomaly.CostAnomaly`.
+            Returns ``[]`` if the detector cannot read the database (e.g.
+            no SQLite backend, no completed steps, import error).
+        """
+        from agent_baton.core.improve.cost_anomaly import CostAnomalyDetector
+
+        db_path = None
+        storage = getattr(self._triggers, "_storage", None)
+        if storage is not None and hasattr(storage, "db_path"):
+            db_path = storage.db_path
+
+        if db_path is None:
+            return []
+
+        detector = CostAnomalyDetector(db_path=db_path)
+        return detector.detect(window_days=window_days)
 
     # ------------------------------------------------------------------
     # Central Store enrichment (best-effort)
