@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -449,6 +449,59 @@ CREATE INDEX IF NOT EXISTS idx_teams_parent ON teams(task_id, parent_team_id);
 ALTER TABLE team_members ADD COLUMN sub_team  TEXT NOT NULL DEFAULT '[]';
 ALTER TABLE team_members ADD COLUMN synthesis TEXT NOT NULL DEFAULT '';
 """,
+    16: """
+-- v16: tenancy & cost attribution columns on usage_records / agent_usage /
+-- compliance_log so the F0.2 v_usage_by_team / v_usage_by_org /
+-- v_usage_by_cost_center views aggregate non-NULL groupings.
+--
+-- All five identity fields (org_id, team_id, user_id, spec_author_id,
+-- cost_center) plus agent_type on agent_usage.  Defaults match the
+-- TenancyContext fallback so legacy rows roll up under "default" rather
+-- than disappearing into a NULL bucket.
+ALTER TABLE usage_records ADD COLUMN org_id          TEXT NOT NULL DEFAULT 'default';
+ALTER TABLE usage_records ADD COLUMN team_id         TEXT NOT NULL DEFAULT 'default';
+ALTER TABLE usage_records ADD COLUMN user_id         TEXT NOT NULL DEFAULT 'local-user';
+ALTER TABLE usage_records ADD COLUMN spec_author_id  TEXT NOT NULL DEFAULT '';
+ALTER TABLE usage_records ADD COLUMN cost_center     TEXT NOT NULL DEFAULT '';
+
+ALTER TABLE agent_usage ADD COLUMN agent_type      TEXT NOT NULL DEFAULT '';
+ALTER TABLE agent_usage ADD COLUMN org_id          TEXT NOT NULL DEFAULT 'default';
+ALTER TABLE agent_usage ADD COLUMN team_id         TEXT NOT NULL DEFAULT 'default';
+ALTER TABLE agent_usage ADD COLUMN user_id         TEXT NOT NULL DEFAULT 'local-user';
+ALTER TABLE agent_usage ADD COLUMN spec_author_id  TEXT NOT NULL DEFAULT '';
+ALTER TABLE agent_usage ADD COLUMN cost_center     TEXT NOT NULL DEFAULT '';
+
+CREATE INDEX IF NOT EXISTS idx_usage_team ON usage_records(team_id);
+CREATE INDEX IF NOT EXISTS idx_usage_org  ON usage_records(org_id);
+CREATE INDEX IF NOT EXISTS idx_usage_cc   ON usage_records(cost_center);
+
+CREATE VIEW IF NOT EXISTS v_usage_by_team AS
+SELECT ur.team_id,
+       COUNT(DISTINCT ur.task_id) AS task_count,
+       COALESCE(SUM(au.estimated_tokens), 0) AS total_tokens,
+       COALESCE(SUM(au.duration_seconds), 0) AS total_duration_seconds
+FROM usage_records ur
+LEFT JOIN agent_usage au ON au.task_id = ur.task_id
+GROUP BY ur.team_id;
+
+CREATE VIEW IF NOT EXISTS v_usage_by_org AS
+SELECT ur.org_id,
+       COUNT(DISTINCT ur.task_id) AS task_count,
+       COALESCE(SUM(au.estimated_tokens), 0) AS total_tokens,
+       COALESCE(SUM(au.duration_seconds), 0) AS total_duration_seconds
+FROM usage_records ur
+LEFT JOIN agent_usage au ON au.task_id = ur.task_id
+GROUP BY ur.org_id;
+
+CREATE VIEW IF NOT EXISTS v_usage_by_cost_center AS
+SELECT ur.cost_center,
+       COUNT(DISTINCT ur.task_id) AS task_count,
+       COALESCE(SUM(au.estimated_tokens), 0) AS total_tokens,
+       COALESCE(SUM(au.duration_seconds), 0) AS total_duration_seconds
+FROM usage_records ur
+LEFT JOIN agent_usage au ON au.task_id = ur.task_id
+GROUP BY ur.cost_center;
+""",
 }
 
 # =====================================================================
@@ -665,9 +718,18 @@ CREATE TABLE IF NOT EXISTS usage_records (
     gates_passed      INTEGER NOT NULL DEFAULT 0,
     gates_failed      INTEGER NOT NULL DEFAULT 0,
     outcome           TEXT NOT NULL DEFAULT '',
-    notes             TEXT NOT NULL DEFAULT ''
+    notes             TEXT NOT NULL DEFAULT '',
+    -- Tenancy attribution (F0.2)
+    org_id            TEXT NOT NULL DEFAULT 'default',
+    team_id           TEXT NOT NULL DEFAULT 'default',
+    user_id           TEXT NOT NULL DEFAULT 'local-user',
+    spec_author_id    TEXT NOT NULL DEFAULT '',
+    cost_center       TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_usage_timestamp ON usage_records(timestamp);
+CREATE INDEX IF NOT EXISTS idx_usage_team ON usage_records(team_id);
+CREATE INDEX IF NOT EXISTS idx_usage_org  ON usage_records(org_id);
+CREATE INDEX IF NOT EXISTS idx_usage_cc   ON usage_records(cost_center);
 
 -- AGENT_USAGE
 CREATE TABLE IF NOT EXISTS agent_usage (
@@ -680,10 +742,45 @@ CREATE TABLE IF NOT EXISTS agent_usage (
     gate_results       TEXT NOT NULL DEFAULT '[]',
     estimated_tokens   INTEGER NOT NULL DEFAULT 0,
     duration_seconds   REAL NOT NULL DEFAULT 0.0,
+    -- Tenancy attribution (F0.2)
+    agent_type         TEXT NOT NULL DEFAULT '',
+    org_id             TEXT NOT NULL DEFAULT 'default',
+    team_id            TEXT NOT NULL DEFAULT 'default',
+    user_id            TEXT NOT NULL DEFAULT 'local-user',
+    spec_author_id     TEXT NOT NULL DEFAULT '',
+    cost_center        TEXT NOT NULL DEFAULT '',
     FOREIGN KEY (task_id) REFERENCES usage_records(task_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_agent_usage_task ON agent_usage(task_id);
 CREATE INDEX IF NOT EXISTS idx_agent_usage_agent ON agent_usage(agent_name);
+
+-- Tenancy aggregation views (F0.2)
+CREATE VIEW IF NOT EXISTS v_usage_by_team AS
+SELECT ur.team_id,
+       COUNT(DISTINCT ur.task_id) AS task_count,
+       COALESCE(SUM(au.estimated_tokens), 0) AS total_tokens,
+       COALESCE(SUM(au.duration_seconds), 0) AS total_duration_seconds
+FROM usage_records ur
+LEFT JOIN agent_usage au ON au.task_id = ur.task_id
+GROUP BY ur.team_id;
+
+CREATE VIEW IF NOT EXISTS v_usage_by_org AS
+SELECT ur.org_id,
+       COUNT(DISTINCT ur.task_id) AS task_count,
+       COALESCE(SUM(au.estimated_tokens), 0) AS total_tokens,
+       COALESCE(SUM(au.duration_seconds), 0) AS total_duration_seconds
+FROM usage_records ur
+LEFT JOIN agent_usage au ON au.task_id = ur.task_id
+GROUP BY ur.org_id;
+
+CREATE VIEW IF NOT EXISTS v_usage_by_cost_center AS
+SELECT ur.cost_center,
+       COUNT(DISTINCT ur.task_id) AS task_count,
+       COALESCE(SUM(au.estimated_tokens), 0) AS total_tokens,
+       COALESCE(SUM(au.duration_seconds), 0) AS total_duration_seconds
+FROM usage_records ur
+LEFT JOIN agent_usage au ON au.task_id = ur.task_id
+GROUP BY ur.cost_center;
 
 -- TELEMETRY
 CREATE TABLE IF NOT EXISTS telemetry (

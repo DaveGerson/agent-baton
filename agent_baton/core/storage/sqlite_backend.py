@@ -916,6 +916,18 @@ class SqliteStorage:
         Args:
             record: The usage record to persist.
         """
+        # Resolve tenancy from the centralised context when the record
+        # itself does not carry an explicit value.  This keeps callers
+        # that build records with default fields automatically tagged.
+        from agent_baton.core.runtime.tenancy_context import get_current_tenancy
+
+        ctx = get_current_tenancy()
+        org_id = record.org_id or ctx.org_id
+        team_id = record.team_id or ctx.team_id
+        user_id = record.user_id or ctx.user_id
+        spec_author_id = record.spec_author_id or ctx.spec_author_id
+        cost_center = record.cost_center or ctx.cost_center
+
         conn = self._conn()
         with conn:
             conn.execute(
@@ -923,8 +935,9 @@ class SqliteStorage:
                 INSERT OR REPLACE INTO usage_records
                     (task_id, timestamp, total_agents, risk_level,
                      sequencing_mode, gates_passed, gates_failed,
-                     outcome, notes)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     outcome, notes,
+                     org_id, team_id, user_id, spec_author_id, cost_center)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.task_id,
@@ -936,6 +949,11 @@ class SqliteStorage:
                     record.gates_failed,
                     record.outcome,
                     record.notes,
+                    org_id,
+                    team_id,
+                    user_id,
+                    spec_author_id,
+                    cost_center,
                 ),
             )
             # agent_usage has no natural PK — delete and re-insert
@@ -947,8 +965,10 @@ class SqliteStorage:
                     """
                     INSERT INTO agent_usage
                         (task_id, agent_name, model, steps, retries,
-                         gate_results, estimated_tokens, duration_seconds)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                         gate_results, estimated_tokens, duration_seconds,
+                         agent_type, org_id, team_id, user_id,
+                         spec_author_id, cost_center)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         record.task_id,
@@ -959,6 +979,12 @@ class SqliteStorage:
                         json.dumps(au.gate_results),
                         au.estimated_tokens,
                         au.duration_seconds,
+                        au.agent_type,
+                        org_id,
+                        team_id,
+                        user_id,
+                        spec_author_id,
+                        cost_center,
                     ),
                 )
 

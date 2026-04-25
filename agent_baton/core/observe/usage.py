@@ -54,9 +54,29 @@ class UsageLogger:
         appends exactly one line; the file is opened in append mode so
         concurrent writers from different sessions do not corrupt data.
 
+        Tenancy fields on the record are populated from the active
+        :class:`~agent_baton.core.runtime.tenancy_context.TenancyContext`
+        when the caller has not supplied them explicitly.  This keeps
+        legacy callers that construct ``TaskUsageRecord`` without
+        identity information from emitting all-NULL tenancy rows.
+
         Args:
             record: The completed task's usage data to persist.
         """
+        from agent_baton.core.runtime.tenancy_context import get_current_tenancy
+
+        ctx = get_current_tenancy()
+        if not record.org_id:
+            record.org_id = ctx.org_id
+        if not record.team_id:
+            record.team_id = ctx.team_id
+        if not record.user_id:
+            record.user_id = ctx.user_id
+        if not record.spec_author_id:
+            record.spec_author_id = ctx.spec_author_id
+        if not record.cost_center:
+            record.cost_center = ctx.cost_center
+
         self._log_path.parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps(record.to_dict(), separators=(",", ":"))
         with self._log_path.open("a", encoding="utf-8") as f:
