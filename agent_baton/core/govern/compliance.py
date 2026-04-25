@@ -168,6 +168,28 @@ def _entry_hash(entry: dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
+@contextmanager
+def _flock_path(target: Path) -> Iterator[None]:
+    """Acquire an exclusive ``fcntl.flock`` on ``<target>.lock``.
+
+    Shared cross-process locking primitive used by both
+    :class:`ComplianceChainWriter` and :class:`LockedJSONLChainWriter`
+    (bd-fce7).  Lock file is created next to *target* and never written
+    to.  The lock is released via the ``with`` exit even on exception.
+    """
+    target.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = target.with_suffix(target.suffix + ".lock")
+    fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
 class ComplianceChainWriter:
     """Append hash-chained entries to ``compliance-audit.jsonl``.
 
@@ -177,6 +199,18 @@ class ComplianceChainWriter:
 
     This makes the log tamper-evident: modifying any past entry breaks all
     subsequent hashes, detectable by ``verify_chain()``.
+
+    Concurrency (bd-fce7 + bd-4fea)
+    --------------------------------
+    ``append()`` acquires an exclusive ``fcntl.flock`` on a sidecar
+    lock file for the full read-tail / hash / write / fsync window via
+    :func:`_flock_path`.  This makes the writer process-safe: two
+    concurrent processes appending to the same log cannot fork the hash
+    sequence.  The previous hash is always re-read from disk under the
+    lock to guard against a stale in-memory cache.
+
+    Within a single process, callers MUST serialize threads themselves
+    — flock is advisory.
 
     Args:
         log_path: Path to the JSONL log file.  Created on first write.
@@ -192,25 +226,40 @@ class ComplianceChainWriter:
         return self._path
 
     def _last_hash(self) -> str:
-        """Return the entry_hash of the last line, or genesis hash."""
+        """Return the entry_hash of the last line, or genesis hash.
+
+        Tolerates a torn final line (crashed writer): scans backward
+        through parseable lines and returns the last good ``entry_hash``.
+        """
         if not self._path.exists():
             return _GENESIS_HASH
-        last_line = ""
-        with self._path.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                stripped = line.strip()
-                if stripped:
-                    last_line = stripped
-        if not last_line:
-            return _GENESIS_HASH
         try:
-            obj = json.loads(last_line)
-            return obj.get("entry_hash", _GENESIS_HASH)
-        except (json.JSONDecodeError, KeyError):
+            with self._path.open("rb") as fh:
+                raw = fh.read()
+        except OSError:
             return _GENESIS_HASH
+        for line in reversed(raw.splitlines()):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                obj = json.loads(stripped)
+            except json.JSONDecodeError:
+                # Torn write from a crashed appender; skip and keep walking.
+                continue
+            h = obj.get("entry_hash")
+            if isinstance(h, str) and len(h) == 64:
+                return h
+        return _GENESIS_HASH
 
     def append(self, entry: dict[str, Any]) -> dict[str, Any]:
         """Append a hash-chained entry to the log.
+
+        Process-safe via ``fcntl.flock`` on a sidecar lock file
+        (bd-4fea).  Two concurrent processes appending to the same log
+        cannot fork the hash sequence — the loser blocks until the
+        winner releases the lock, then re-reads the freshly committed
+        ``entry_hash`` before computing its own.
 
         Args:
             entry: Arbitrary dict of audit data (must not contain
@@ -220,11 +269,33 @@ class ComplianceChainWriter:
             The entry as written (with ``prev_hash`` and ``entry_hash``).
         """
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        prev_hash = self._last_hash()
-        entry = {**entry, "prev_hash": prev_hash}
-        entry["entry_hash"] = _entry_hash(entry)
-        with self._path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(entry, separators=(",", ":")) + "\n")
+        with _flock_path(self._path):
+            # Re-read under the lock so we never use a stale cached hash.
+            prev_hash = self._last_hash()
+            entry = {**entry, "prev_hash": prev_hash}
+            entry["entry_hash"] = _entry_hash(entry)
+            line = json.dumps(entry, separators=(",", ":"))
+            # If the file ends mid-line (a previous process was killed
+            # before its newline), prepend our own newline so the new
+            # entry starts on a fresh line — torn-line recovery.
+            needs_leading_newline = False
+            if self._path.is_file() and self._path.stat().st_size > 0:
+                with self._path.open("rb") as rfh:
+                    rfh.seek(-1, os.SEEK_END)
+                    if rfh.read(1) != b"\n":
+                        needs_leading_newline = True
+            with self._path.open("ab") as fh:
+                if needs_leading_newline:
+                    fh.write(b"\n")
+                fh.write(line.encode("utf-8"))
+                fh.write(b"\n")
+                fh.flush()
+                try:
+                    os.fsync(fh.fileno())
+                except OSError:
+                    # fsync may fail on some filesystems; the flock
+                    # still guarantees ordering for the next reader.
+                    pass
         return entry
 
     def append_override(
@@ -264,6 +335,9 @@ def verify_chain(log_path: Path) -> tuple[bool, str]:
     Returns:
         A tuple ``(ok, message)`` where ``ok`` is ``True`` when the chain
         is intact and ``message`` describes the first divergence if not.
+        When the first failing row has no ``prev_hash``/``entry_hash``
+        fields at all (i.e. a pre-F0.3 plain-text entry), the message
+        also points operators at ``baton compliance rechain`` (bd-c0e0).
     """
     if not log_path.exists():
         return True, "Log does not exist — nothing to verify."
@@ -283,6 +357,18 @@ def verify_chain(log_path: Path) -> tuple[bool, str]:
 
             stored_prev = entry.get("prev_hash", "")
             stored_hash = entry.get("entry_hash", "")
+
+            # bd-c0e0 — friendlier message when the row pre-dates F0.3
+            # hashing.  Operators upgrading from a pre-hash log should
+            # run ``baton compliance rechain`` once to migrate.
+            if not stored_prev and not stored_hash:
+                return (
+                    False,
+                    f"Line {line_number}: missing prev_hash/entry_hash — "
+                    f"this row pre-dates the F0.3 hash chain.  "
+                    f"Run ``baton compliance rechain --log {log_path}`` "
+                    f"once to migrate the existing log to the hashed format.",
+                )
 
             if stored_prev != prev_hash:
                 return (
@@ -721,20 +807,12 @@ class LockedJSONLChainWriter:
     def _flock(self) -> Iterator[None]:
         """Acquire an exclusive advisory lock on the sidecar lock file.
 
-        Uses ``fcntl.flock(LOCK_EX)`` so other processes block until we
-        release. Released via the ``with`` exit even if the body raises.
+        Delegates to the module-level :func:`_flock_path` so both
+        :class:`ComplianceChainWriter` and this class share a single
+        cross-process locking primitive (bd-fce7).
         """
-        # Open in 'a+' so the lock file exists across processes; we never
-        # write to it. Reopen each call so we don't leak fds.
-        fd = os.open(str(self._lock_path), os.O_RDWR | os.O_CREAT, 0o644)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-        finally:
-            os.close(fd)
+        with _flock_path(self._path):
+            yield
 
     def _read_tail_hash(self) -> str:
         """Return the hash of the last entry on disk (or the genesis hash).

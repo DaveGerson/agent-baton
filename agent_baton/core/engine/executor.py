@@ -3639,15 +3639,24 @@ class ExecutionEngine:
         """Block phase-advance when the auditor returned VETO and risk is HIGH/CRITICAL.
 
         Raises :class:`ExecutionVetoed` when:
-          - Plan ``risk_level`` is HIGH or CRITICAL, AND
+          - Effective phase risk is HIGH or CRITICAL, AND
           - The just-completed phase has a VETO verdict, AND
           - Neither ``state.force_override`` nor ``self._force_override`` is set.
+
+        Effective risk resolution (bd-5bd9): when ``phase_obj.risk_level``
+        is set, it overrides ``state.plan.risk_level`` for the gating
+        check.  This lets a CRITICAL plan contain a single LOW phase
+        whose VETO does not halt the whole plan.
 
         When ``force_override`` is set, an Override row is appended to
         ``compliance-audit.jsonl`` via :class:`ComplianceChainWriter` before
         returning so the override is durably auditable.
         """
-        if not self._is_high_risk(state.plan.risk_level):
+        effective_risk = (
+            (getattr(phase_obj, "risk_level", "") or "").strip()
+            or state.plan.risk_level
+        )
+        if not self._is_high_risk(effective_risk):
             return
 
         verdict, rationale, source_step = self._scan_phase_for_veto(state, phase_obj)

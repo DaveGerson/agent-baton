@@ -32,17 +32,66 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 _DEFAULT_DB_PATH = Path(".claude/team-context/baton.db")
+_DB_REL = Path(".claude/team-context/baton.db")
+
+
+def _resolve_db_path() -> Path:
+    """Resolve the baton.db path with worktree-friendly discovery (bd-ce64).
+
+    Resolution order:
+
+    1. ``BATON_DB_PATH`` env var (absolute or relative to cwd) — explicit
+       operator override; bypasses discovery entirely.
+    2. Module-level ``_DEFAULT_DB_PATH`` if it has been monkey-patched
+       to an absolute path that differs from the default relative one
+       (preserves the legacy test ergonomics from ``tests/test_bead_cli``).
+    3. ``.claude/team-context/baton.db`` directly under the cwd
+       (legacy behaviour — preserved for backwards compatibility).
+    4. Walk parent directories upward, returning the first
+       ``<parent>/.claude/team-context/baton.db`` that exists.  This lets
+       a subagent invoked from a worktree (or any nested cwd) reach the
+       project-root baton.db instead of seeing an empty per-worktree DB.
+    5. Fallback: the legacy cwd-relative path (so ``_get_or_create_*``
+       can still create one in the conventional spot).
+    """
+    override = os.environ.get("BATON_DB_PATH", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+
+    # Honour test-time monkey-patches of _DEFAULT_DB_PATH.  When a caller
+    # has swapped it for an absolute path (the pattern in
+    # tests/test_bead_cli.py and others), use that path directly so we
+    # never accidentally walk upward and pick up the developer's real
+    # project DB.
+    patched = _DEFAULT_DB_PATH
+    if patched.is_absolute() and patched != Path("/").joinpath(_DB_REL):
+        return patched.resolve()
+
+    cwd_default = (Path.cwd() / _DB_REL).resolve()
+    if cwd_default.exists():
+        return cwd_default
+
+    # Walk upward — stop at filesystem root or first match.
+    current = Path.cwd().resolve()
+    for parent in current.parents:
+        candidate = parent / _DB_REL
+        if candidate.exists():
+            return candidate
+
+    return cwd_default
 
 
 def _get_bead_store():
     """Resolve the BeadStore for the current project.
 
     Returns a :class:`~agent_baton.core.engine.bead_store.BeadStore` instance
-    or ``None`` when the database is not found.
+    or ``None`` when the database is not found.  See :func:`_resolve_db_path`
+    for the discovery order (bd-ce64: walks upward so worktree subagents
+    find the project-root baton.db).
     """
     from agent_baton.core.engine.bead_store import BeadStore
 
-    db = _DEFAULT_DB_PATH.resolve()
+    db = _resolve_db_path()
     if not db.exists():
         return None
     return BeadStore(db)
@@ -61,14 +110,14 @@ def _get_or_create_bead_store():
     """
     from agent_baton.core.engine.bead_store import BeadStore
 
-    db = _DEFAULT_DB_PATH.resolve()
+    db = _resolve_db_path()
     db.parent.mkdir(parents=True, exist_ok=True)
     return BeadStore(db)
 
 
 def _get_active_task_id() -> str | None:
     """Return the active task ID from the baton.db active_task table, or None."""
-    db = _DEFAULT_DB_PATH.resolve()
+    db = _resolve_db_path()
     if not db.exists():
         return None
     try:
