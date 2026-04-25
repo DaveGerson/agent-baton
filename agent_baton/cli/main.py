@@ -22,7 +22,7 @@ from agent_baton.cli import commands as commands_pkg
 
 # Command groups for organized --help output
 _COMMAND_GROUPS: dict[str, list[str]] = {
-    "Core Workflow": ["plan", "execute", "status"],
+    "Core Workflow": ["quickstart", "plan", "execute", "status"],
     "Agents & Routing": ["agents", "route", "events", "incident"],
     "Observability": ["dashboard", "trace", "usage", "telemetry", "context-profile", "retro", "context", "export"],
     "Integrations": ["webhook"],
@@ -145,6 +145,7 @@ def main(argv: list[str] | None = None) -> None:
         lines.append(f"    {', '.join(ungrouped)}")
 
     lines.append(f"\nQuick start:")
+    lines.append(f"  0. baton quickstart                 # one-command onboarding")
     lines.append(f"  1. baton plan \"task description\" --save --explain")
     lines.append(f"  2. baton execute start")
     lines.append(f"  3. baton execute next              # get next action")
