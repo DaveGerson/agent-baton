@@ -1049,7 +1049,20 @@ def _handle_run(args: argparse.Namespace) -> None:
     model_override = args.model
     token_budget: int = getattr(args, "token_budget", 0)
 
-    # Resolve or create the execution
+    # Resolve or create the execution.
+    #
+    # Task-id resolution priority (matches general handler at lines ~529-548):
+    #   1. --task-id flag
+    #   2. BATON_TASK_ID env var
+    #   3. SQLite active task pointer
+    #   4. file-based active-task-id.txt marker
+    #
+    # Without steps 3-4, `baton execute run` invoked with no flag/env after
+    # an approval would silently start fresh, wiping prior step_results /
+    # approval_results / gate_results and re-dispatching completed agents
+    # (bd-7444).  Treat ANY non-terminal status as "resume", not just
+    # "running"/"pending" — approval_pending, gate_pending, feedback_pending,
+    # gate_failed, and budget_exceeded all warrant resume.
     bus = EventBus()
     storage = get_project_storage(context_root)
     task_id = getattr(args, "task_id", None)
@@ -1057,7 +1070,37 @@ def _handle_run(args: argparse.Namespace) -> None:
     if task_id is None:
         task_id = os.environ.get("BATON_TASK_ID")
 
-    # If no active execution, start from plan
+    if task_id is None:
+        # SQLite-first: read active task from baton.db before falling back to
+        # the file-based active-task-id.txt marker.
+        try:
+            _backend = detect_backend(context_root)
+        except Exception:  # noqa: BLE001 — best-effort detection
+            _backend = "file"
+        if _backend == "sqlite":
+            try:
+                _early_storage = get_project_storage(context_root, backend="sqlite")
+                task_id = _early_storage.get_active_task()
+            except Exception as _exc:  # noqa: BLE001
+                _log.debug(
+                    "SQLite active-task lookup failed in execute run, "
+                    "falling back to file: %s",
+                    _exc,
+                )
+        if task_id is None:
+            task_id = StatePersistence.get_active_task_id(context_root)
+
+    # Statuses that mean "this execution is in progress; do NOT start fresh".
+    # Only "complete", "failed", and "cancelled" are terminal — everything
+    # else is resumable, never a reason to overwrite recorded results.
+    _RESUMABLE_STATUSES = frozenset({
+        "running", "pending",
+        "approval_pending", "feedback_pending",
+        "gate_pending", "gate_failed",
+        "budget_exceeded",
+    })
+    _TERMINAL_STATUSES = frozenset({"complete", "failed", "cancelled"})
+
     engine: ExecutionEngine | None = None
     if task_id:
         engine = ExecutionEngine(
@@ -1066,10 +1109,27 @@ def _handle_run(args: argparse.Namespace) -> None:
             token_budget=token_budget or None,
         )
         st = engine.status()
-        if st and st.get("status") in ("running", "pending"):
-            print(f"Resuming execution: {task_id}", file=sys.stderr)
+        st_status = (st or {}).get("status")
+        if st_status in _RESUMABLE_STATUSES:
+            print(
+                f"Resuming execution: {task_id} (status={st_status})",
+                file=sys.stderr,
+            )
+        elif st_status in _TERMINAL_STATUSES:
+            user_error(
+                f"execution {task_id} already {st_status}; not restarting.",
+                hint=(
+                    "Use 'baton execute list' to see executions, "
+                    "'baton execute switch TASK_ID' to switch tasks, "
+                    "or run 'baton plan --save' to create a new plan."
+                ),
+            )
         else:
-            engine = None  # Stale or completed — start fresh
+            # status == "no_active_execution" or unrecognised — treat as
+            # missing and fall through to the start-from-plan branch, but
+            # forget the stale task_id so we use the plan's task_id below.
+            engine = None
+            task_id = None
 
     if engine is None:
         if not plan_path.exists():
@@ -1086,25 +1146,56 @@ def _handle_run(args: argparse.Namespace) -> None:
         except (KeyError, ValueError, TypeError) as exc:
             validation_error(f"plan.json has invalid structure: {exc}")
         task_id = plan.task_id
-        knowledge_resolver = _build_knowledge_resolver(plan)
-        policy_engine = _build_policy_engine()
-        engine = ExecutionEngine(
+
+        # Defence in depth: even if no active marker pointed at this task,
+        # an execution row with the SAME task_id may already exist on disk
+        # (e.g. a previous `baton execute start` then a stale active marker).
+        # Probe one more time before calling engine.start(), which would
+        # unconditionally overwrite ExecutionState (bd-7444).
+        _probe_engine = ExecutionEngine(
             team_context_root=context_root,
             bus=bus, task_id=task_id, storage=storage,
-            knowledge_resolver=knowledge_resolver,
-            policy_engine=policy_engine,
             token_budget=token_budget or None,
         )
-        ContextManager(task_id=task_id).init_mission_log(
-            plan.task_summary, risk_level=plan.risk_level
-        )
-        action = engine.start(plan)
-        try:
-            storage.set_active_task(task_id)
-        except Exception:
-            if engine._persistence is not None:
-                engine._persistence.set_active()
-        print(f"Started execution: {task_id}", file=sys.stderr)
+        _probe_status = _probe_engine.status()
+        _probe_st = (_probe_status or {}).get("status")
+        if _probe_st in _RESUMABLE_STATUSES:
+            print(
+                f"Resuming execution: {task_id} (status={_probe_st}; "
+                "matched via plan task_id)",
+                file=sys.stderr,
+            )
+            engine = _probe_engine
+            action = engine.next_action()
+        elif _probe_st in _TERMINAL_STATUSES:
+            user_error(
+                f"execution {task_id} (from plan) already {_probe_st}; "
+                "refusing to overwrite.",
+                hint=(
+                    "Use 'baton plan --save' with a new task description to "
+                    "create a fresh task, or 'baton execute list' to inspect."
+                ),
+            )
+        else:
+            knowledge_resolver = _build_knowledge_resolver(plan)
+            policy_engine = _build_policy_engine()
+            engine = ExecutionEngine(
+                team_context_root=context_root,
+                bus=bus, task_id=task_id, storage=storage,
+                knowledge_resolver=knowledge_resolver,
+                policy_engine=policy_engine,
+                token_budget=token_budget or None,
+            )
+            ContextManager(task_id=task_id).init_mission_log(
+                plan.task_summary, risk_level=plan.risk_level
+            )
+            action = engine.start(plan)
+            try:
+                storage.set_active_task(task_id)
+            except Exception:
+                if engine._persistence is not None:
+                    engine._persistence.set_active()
+            print(f"Started execution: {task_id}", file=sys.stderr)
     else:
         action = engine.next_action()
 
@@ -1370,6 +1461,34 @@ def _run_loop(
                     phase_id=phase_id, result="approve",
                 )
             else:
+                # Non-TTY safety (bd-7444): without a controlling terminal we
+                # cannot prompt for an approval decision.  Previous behaviour
+                # caught the EOFError on input() and silently set choice =
+                # "reject", which marked the execution failed and destroyed
+                # state.  Instead, exit non-zero with a clear remediation hint
+                # and leave state untouched so the operator can record an
+                # explicit decision via `baton execute approve`.
+                if not sys.stdin.isatty():
+                    print(
+                        f"\n{color_error('ERROR')}: pending approval for phase "
+                        f"{phase_id} requires an explicit decision, but stdin "
+                        "is not a TTY so 'baton execute run' cannot prompt.",
+                        file=sys.stderr,
+                    )
+                    print(
+                        "  Run: baton execute approve "
+                        f"--phase-id {phase_id} --result approve|reject "
+                        "[--feedback TEXT]",
+                        file=sys.stderr,
+                    )
+                    print(
+                        "  Then re-invoke 'baton execute run' to continue.",
+                        file=sys.stderr,
+                    )
+                    # Do NOT mutate execution state — execution remains in
+                    # approval_pending for the operator to resolve.
+                    sys.exit(2)
+
                 # Interactive approval prompt
                 print("  Options: approve, reject, approve-with-feedback", file=sys.stderr)
                 try:
