@@ -115,6 +115,7 @@ class ImprovementLoop:
         self._config = config or ImprovementConfig()
         self._bead_store = bead_store  # F12: passed to scorer for bead quality metrics
         self._maintainer_spawner = maintainer_spawner  # Injected for tests; None = default
+        self._storage = storage  # L2.4: used by _persist_conflicts for db_path lookup
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -202,11 +203,37 @@ class ImprovementLoop:
         # Persist all recommendations
         self._proposals.record_many(recommendations)
 
+        # L2.4 (bd-362f): detect contradictions across the freshly-generated
+        # recommendation batch BEFORE the auto-apply pass so we never auto-
+        # apply two recs that disagree on the same target.  Detection is
+        # strictly best-effort: any failure in this block must not block
+        # the rest of the cycle.  Velocity-zero behaviour: conflicting recs
+        # are escalated rather than auto-rejected.
+        conflicting_rec_ids: set[str] = set()
+        try:
+            from agent_baton.core.improve.conflict_detection import ConflictDetector
+
+            conflicts = ConflictDetector().detect(recommendations)
+            if conflicts:
+                for c in conflicts:
+                    for rid in c.rec_ids:
+                        conflicting_rec_ids.add(rid)
+                self._persist_conflicts(conflicts)
+        except Exception as exc:  # noqa: BLE001 - defensive
+            _log.warning(
+                "ConflictDetector failed (non-fatal, continuing cycle): %s", exc
+            )
+
         # Classify and apply
         auto_applied: list[str] = []
         escalated: list[str] = []
 
         for rec in recommendations:
+            if rec.rec_id in conflicting_rec_ids:
+                # Velocity-zero: suppress auto-apply for conflicting recs;
+                # operator reviews via ``baton improve conflicts``.
+                escalated.append(rec.rec_id)
+                continue
             if self._should_auto_apply(rec):
                 self._apply_recommendation(rec)
                 auto_applied.append(rec.rec_id)
@@ -383,6 +410,34 @@ class ImprovementLoop:
             encoding="utf-8",
         )
         return path
+
+    def _persist_conflicts(self, conflicts: list) -> None:  # type: ignore[type-arg]
+        """Persist detected conflicts to the project ``baton.db``.
+
+        L2.4 (bd-362f).  Best-effort: any failure (no storage backend, table
+        missing, etc.) is swallowed so the rest of the cycle continues.
+        """
+        if not conflicts:
+            return
+        db_path = None
+        storage = getattr(self, "_storage", None) or getattr(
+            self._recommender, "_storage", None
+        )
+        if storage is not None:
+            db_path = getattr(storage, "db_path", None)
+        if db_path is None:
+            _log.debug(
+                "ConflictStore: no storage.db_path available -- "
+                "skipping persistence of %d conflict(s)",
+                len(conflicts),
+            )
+            return
+        try:
+            from agent_baton.core.storage.conflict_store import ConflictStore
+
+            ConflictStore(db_path).record_many(conflicts)
+        except Exception as exc:  # noqa: BLE001 - defensive
+            _log.warning("ConflictStore persistence failed: %s", exc)
 
     # ------------------------------------------------------------------
     # Maintainer spawn (best-effort)

@@ -2268,9 +2268,11 @@ CREATE TABLE IF NOT EXISTS users (
     display_name TEXT NOT NULL DEFAULT '',
     email        TEXT NOT NULL DEFAULT '',
     role         TEXT NOT NULL DEFAULT 'creator',
+    human_role   TEXT NOT NULL DEFAULT '',
     created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 CREATE INDEX IF NOT EXISTS idx_central_users_role ON users(role);
+CREATE INDEX IF NOT EXISTS idx_central_users_human_role ON users(human_role);
 
 -- Immutable audit log of every approval action (approve, reject,
 -- request_review, feedback) taken via the PMO API.
