@@ -28,7 +28,12 @@ from agent_baton.core.improve.scoring import AgentScorecard, PerformanceScorer
 from agent_baton.core.learn.budget_tuner import BudgetTuner
 from agent_baton.core.learn.pattern_learner import PatternLearner
 from agent_baton.core.orchestration.registry import AgentRegistry
-from agent_baton.core.orchestration.router import AgentRouter, StackProfile
+from agent_baton.core.orchestration.router import (
+    AgentRouter,
+    REVIEWER_AGENTS,
+    StackProfile,
+    is_reviewer_agent,
+)
 from agent_baton.models.enums import GitStrategy, RiskLevel
 from agent_baton.models.execution import MachinePlan, PlanGate, PlanPhase, PlanStep, TeamMember
 from agent_baton.models.feedback import RetrospectiveFeedback
@@ -237,6 +242,32 @@ _SUBTASK_PHASE_NAMES: dict[str, str] = {
 _SUBTASK_SPLIT = re.compile(
     r"(?:^|(?<=\s))(?:\((\d+)\)|(\d+)[.\)])\s+",
 )
+
+# ---------------------------------------------------------------------------
+# Concern-marker detection — used to split a single implement phase into
+# parallel steps when the task summary names multiple distinct concerns.
+# ---------------------------------------------------------------------------
+#
+# Recognized markers (must appear at start-of-string or after whitespace):
+#   - ``F0.1`` / ``F1.2`` / ``f3.4`` — feature-id markers (any letter prefix
+#     followed by digits, a dot, and more digits).
+#   - ``(1)`` / ``(2)`` — parenthesized integers.
+#   - ``1.`` / ``2.`` / ``1)`` — bare-integer-with-punctuation.
+#
+# We capture the marker so we can split on it AND preserve it as the concern
+# label (useful for step descriptions and bead titles).
+_CONCERN_MARKER = re.compile(
+    r"(?:^|(?<=\s))"                        # boundary: start or whitespace
+    r"("                                    # group 1: the marker itself
+    r"[A-Za-z]\d+\.\d+"                     # F0.1, f1.2, A2.3
+    r"|\(\d+\)"                              # (1), (2)
+    r"|\d+[.\)](?!\d)"                      # 1., 2), but not 1.5 (decimals)
+    r")"
+    r"\s+"                                  # required whitespace after marker
+)
+
+# Minimum distinct concerns needed to trigger the per-concern split.
+_MIN_CONCERNS_FOR_SPLIT = 3
 
 # Maps phase names (lower-cased) to human-readable action verbs for step descriptions
 _PHASE_VERBS: dict[str, str] = {
@@ -792,6 +823,21 @@ class IntelligentPlanner:
                 resolved_agents = list(_DEFAULT_AGENTS.get(inferred_type, []))
             else:
                 resolved_agents = list(agents)
+                # Warn when an explicit override includes reviewer-class agents
+                # — they may still appear in review/gate phases, but the
+                # implement-phase team-step will filter them out (see
+                # _consolidate_team_step).  Surface this so users aren't
+                # surprised when the auditor doesn't show up as an implementer.
+                _override_reviewers = [
+                    a for a in resolved_agents if is_reviewer_agent(a)
+                ]
+                if _override_reviewers:
+                    logger.warning(
+                        "--agents override includes reviewer-class agent(s) %s; "
+                        "they will be excluded from implement-phase team steps "
+                        "(reviewers belong in review/gate phases only)",
+                        _override_reviewers,
+                    )
             logger.debug(
                 "Task classification (override path): type=%s complexity=%s agents=%s",
                 inferred_type,
@@ -1128,8 +1174,35 @@ class IntelligentPlanner:
                         f"add remediation steps."
                     )
 
-        # 12c. Consolidate multi-agent Implement/Fix phases into team steps
+        # 12b-bis. Concern-splitting: when the task summary names ≥3 distinct
+        # concerns/modules (e.g. "F0.1 ... F0.2 ... F0.3 ... F0.4 ..."), split
+        # implement-type phases into one parallel single-agent step per
+        # concern.  This runs BEFORE team consolidation so the planner emits
+        # parallel steps instead of a single bundled team step.
+        # See feedback_planner_parallelization.md.
+        _concerns = self._parse_concerns(task_summary)
+        _split_phase_ids: set[int] = set()
+        if _concerns:
+            logger.debug(
+                "Detected %d concerns in task summary: %s",
+                len(_concerns),
+                [c[0] for c in _concerns],
+            )
+            for phase in plan_phases:
+                if phase.name.lower() in ("implement", "fix", "draft", "migrate"):
+                    self._split_implement_phase_by_concerns(
+                        phase, _concerns, resolved_agents, task_summary,
+                    )
+                    _split_phase_ids.add(phase.phase_id)
+
+        # 12c. Consolidate multi-agent Implement/Fix phases into team steps.
+        # NOTE: After concern-splitting (12b-bis), an implement phase that was
+        # split now has N single-agent steps where each step is for a
+        # *different concern*.  We must NOT re-consolidate those into a team
+        # — they are intentionally parallel-by-concern.
         for phase in plan_phases:
+            if phase.phase_id in _split_phase_ids:
+                continue
             if self._is_team_phase(phase, task_summary):
                 phase.steps = [self._consolidate_team_step(phase)]
 
@@ -1845,6 +1918,134 @@ class IntelligentPlanner:
             i += 3
         return subtasks if len(subtasks) >= 2 else []
 
+    @staticmethod
+    def _parse_concerns(summary: str) -> list[tuple[str, str]]:
+        """Parse distinct concerns from a multi-concern task description.
+
+        Recognized markers (see :data:`_CONCERN_MARKER`):
+          - Feature-id style: ``F0.1 Spec entity ... F0.2 Tenancy ...``
+          - Parenthesized:    ``(1) ... (2) ...``
+          - Bare-numbered:    ``1. ... 2. ...`` or ``1) ... 2) ...``
+
+        Returns a list of ``(marker, text)`` pairs where ``marker`` is the
+        concern label (e.g. ``"F0.1"``) and ``text`` is everything after the
+        marker up to (but not including) the next marker.
+
+        Empty list when fewer than :data:`_MIN_CONCERNS_FOR_SPLIT` concerns
+        are detected — the caller treats this as "single concern, do not split".
+        """
+        matches = list(_CONCERN_MARKER.finditer(summary))
+        if len(matches) < _MIN_CONCERNS_FOR_SPLIT:
+            return []
+
+        concerns: list[tuple[str, str]] = []
+        for i, m in enumerate(matches):
+            # Strip surrounding punctuation: "(1)" → "1", "F0.1" → "F0.1",
+            # "1." → "1", "1)" → "1".  ``str.strip`` removes leading/trailing
+            # only, so the dot inside "F0.1" is preserved.
+            marker = m.group(1).strip("().")
+            start = m.end()
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(summary)
+            text = summary[start:end].strip().rstrip(";,")
+            if text:
+                concerns.append((marker, text))
+
+        return concerns if len(concerns) >= _MIN_CONCERNS_FOR_SPLIT else []
+
+    def _pick_agent_for_concern(
+        self,
+        concern_text: str,
+        candidate_agents: list[str],
+    ) -> str:
+        """Choose the best agent from ``candidate_agents`` for a concern.
+
+        Uses :data:`_CROSS_CONCERN_SIGNALS` keywords to score each candidate
+        against the concern's text.  Reviewer agents are excluded.  Falls
+        back to the first non-reviewer candidate when no signal matches.
+        """
+        text_lower = concern_text.lower()
+        text_words = set(re.findall(r"\b\w+\b", text_lower))
+
+        # Filter reviewer agents out — they must not implement.
+        eligible = [a for a in candidate_agents if not is_reviewer_agent(a)]
+        if not eligible:
+            eligible = list(candidate_agents) or ["backend-engineer"]
+
+        best_agent = eligible[0]
+        best_score = -1
+        for agent in eligible:
+            base = agent.split("--")[0]
+            keywords = _CROSS_CONCERN_SIGNALS.get(base, [])
+            score = 0
+            for kw in keywords:
+                if " " in kw:
+                    if kw in text_lower:
+                        score += 1
+                elif kw in text_words:
+                    score += 1
+            if score > best_score:
+                best_score = score
+                best_agent = agent
+        return best_agent
+
+    def _split_implement_phase_by_concerns(
+        self,
+        phase: PlanPhase,
+        concerns: list[tuple[str, str]],
+        candidate_agents: list[str],
+        task_summary: str,
+    ) -> None:
+        """Replace ``phase.steps`` with one parallel step per concern.
+
+        Each concern becomes a single-agent step (no team wrapper), enabling
+        true parallel execution.  Step IDs are renumbered ``<phase_id>.1``,
+        ``<phase_id>.2``, ... in concern order.
+
+        Knowledge attachments from the original steps are spread across the
+        new steps (deduplicated by path), so no knowledge context is lost.
+
+        Args:
+            phase: The implement-type phase to split (mutated in place).
+            concerns: List of ``(marker, text)`` pairs from
+                :meth:`_parse_concerns`.
+            candidate_agents: Pool of agents to choose from per concern.
+            task_summary: Original task summary (used for verb selection
+                in fallback step descriptions).
+        """
+        all_knowledge: list = []
+        seen_paths: set[str] = set()
+        for s in phase.steps:
+            for k in s.knowledge:
+                key = k.path if k.path else id(k)
+                if key not in seen_paths:
+                    all_knowledge.append(k)
+                    seen_paths.add(key)
+
+        new_steps: list[PlanStep] = []
+        for idx, (marker, text) in enumerate(concerns, start=1):
+            agent = self._pick_agent_for_concern(text, candidate_agents)
+            verb = _PHASE_VERBS.get(phase.name.lower(), phase.name)
+            desc = f"{verb} ({marker}): {text}"
+            new_steps.append(
+                PlanStep(
+                    step_id=f"{phase.phase_id}.{idx}",
+                    agent_name=agent,
+                    task_description=desc,
+                    step_type=_step_type_for_agent(agent, desc),
+                    knowledge=list(all_knowledge),
+                )
+            )
+
+        logger.info(
+            "Split %s phase into %d parallel concern-steps "
+            "(markers=%s, agents=%s)",
+            phase.name,
+            len(new_steps),
+            [c[0] for c in concerns],
+            [s.agent_name for s in new_steps],
+        )
+        phase.steps = new_steps
+
     def _expand_agents_for_concerns(
         self,
         agents: list[str],
@@ -2387,12 +2588,51 @@ class IntelligentPlanner:
         The first step's agent becomes the team lead; the rest become
         implementers.  The original step descriptions become member
         task descriptions.
+
+        For ``implement``/``fix``-type phases, reviewer-class agents
+        (auditor, code-reviewer, etc.) are filtered out — they belong in
+        review/gate phases, not as implementers.  See
+        :data:`agent_baton.core.orchestration.router.REVIEWER_AGENTS`.
         """
+        # Filter out reviewer agents from implement-type phases.  Reviewers
+        # belong in review/gate phases, not as implementers.  This guards
+        # against both default-routed reviewers and ``--agents`` overrides
+        # that mistakenly include them.
+        is_implement_phase = phase.name.lower() in ("implement", "fix", "draft", "migrate")
+        if is_implement_phase:
+            kept_steps: list[PlanStep] = []
+            dropped: list[str] = []
+            for step in phase.steps:
+                if is_reviewer_agent(step.agent_name):
+                    dropped.append(step.agent_name)
+                    continue
+                kept_steps.append(step)
+            if dropped:
+                logger.warning(
+                    "Filtered reviewer agent(s) %s from %s phase team-step "
+                    "(reviewers belong in review/gate phases, not as implementers)",
+                    dropped,
+                    phase.name,
+                )
+            # Guard: if filtering would empty the phase, keep the original
+            # steps so the plan remains executable.
+            if kept_steps:
+                source_steps = kept_steps
+            else:
+                logger.warning(
+                    "All members of %s phase were reviewer agents; "
+                    "keeping original list to preserve executability",
+                    phase.name,
+                )
+                source_steps = phase.steps
+        else:
+            source_steps = phase.steps
+
         members: list[TeamMember] = []
         all_deliverables: list[str] = []
         all_knowledge: list = []
         seen_knowledge_paths: set[str] = set()
-        for i, step in enumerate(phase.steps):
+        for i, step in enumerate(source_steps):
             role = "lead" if i == 0 else "implementer"
             member_id = f"{phase.phase_id}.1.{chr(97 + i)}"
             members.append(TeamMember(
@@ -2411,7 +2651,7 @@ class IntelligentPlanner:
                     all_knowledge.append(k)
                     seen_knowledge_paths.add(key)
 
-        combined_desc = "; ".join(s.task_description for s in phase.steps)
+        combined_desc = "; ".join(s.task_description for s in source_steps)
         return PlanStep(
             step_id=f"{phase.phase_id}.1",
             agent_name="team",
