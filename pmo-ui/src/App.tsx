@@ -3,16 +3,20 @@ import { KanbanBoard } from './components/KanbanBoard';
 import { ForgePanel } from './components/ForgePanel';
 import { BackOfHousePanel } from './components/BackOfHousePanel';
 import { KeyboardShortcutsDialog } from './components/KeyboardShortcutsDialog';
+import { BeadGraphView } from './views/BeadGraphView';
+import { BeadTimelineView } from './views/BeadTimelineView';
 import { useHotkeys } from './hooks/useHotkeys';
 import { usePersistedState } from './hooks/usePersistedState';
 import { T, FONTS, SHADOWS } from './styles/tokens';
 import { ToastProvider } from './contexts/ToastContext';
 import type { PmoCard, PmoSignal } from './api/types';
 
-type View = 'kanban' | 'forge' | 'boh';
+type View = 'kanban' | 'forge' | 'boh' | 'beads';
+type BeadsSubView = 'graph' | 'timeline';
 
 export default function App() {
   const [view, setView] = usePersistedState<View>('pmo:active-view', 'kanban');
+  const [beadsSubView, setBeadsSubView] = usePersistedState<BeadsSubView>('pmo:beads-subview', 'graph');
   const [forgeSignal, setForgeSignal] = useState<PmoSignal | null>(null);
   const [showSignals, setShowSignals] = usePersistedState('pmo:show-signals', false);
   const [showShortcuts, setShowShortcuts] = useState(false);
@@ -71,6 +75,7 @@ export default function App() {
   const NAV_TABS = [
     { id: 'kanban' as const, label: 'The Rail',       emoji: '🥟' },
     { id: 'forge'  as const, label: 'The Forge',      emoji: '🍳' },
+    { id: 'beads'  as const, label: 'Beads',          emoji: '📿' },
     { id: 'boh'    as const, label: 'Back of House',  emoji: '🚪' },
   ];
 
@@ -146,7 +151,7 @@ export default function App() {
                 onClick={() => {
                   if (tab.id === 'kanban') backToBoard();
                   else if (tab.id === 'forge') openForge();
-                  else setView('boh');
+                  else setView(tab.id);
                 }}
                 style={{
                   display: 'flex', alignItems: 'center', gap: 5,
@@ -214,6 +219,57 @@ export default function App() {
             initialSignal={forgeSignal}
             onApproved={refreshBoard}
           />
+        </div>
+        <div
+          id="panel-beads"
+          role="tabpanel"
+          aria-labelledby="tab-beads"
+          aria-hidden={view !== 'beads'}
+          style={{ display: view === 'beads' ? 'flex' : 'none', flexDirection: 'column', height: '100%' }}
+        >
+          {/* Sub-tab toggle: graph vs timeline */}
+          <div
+            role="tablist"
+            aria-label="Beads view mode"
+            style={{
+              display: 'flex',
+              gap: 6,
+              padding: '8px 14px',
+              borderBottom: `2px solid ${T.border}`,
+              background: T.ink,
+              flexShrink: 0,
+            }}
+          >
+            {(['graph', 'timeline'] as const).map(sub => {
+              const active = beadsSubView === sub;
+              return (
+                <button
+                  key={sub}
+                  type="button"
+                  role="tab"
+                  aria-selected={active}
+                  onClick={() => setBeadsSubView(sub)}
+                  style={{
+                    padding: '4px 12px',
+                    borderRadius: 6,
+                    border: active ? `2px solid ${T.butter}` : `2px solid ${T.inkSoft}`,
+                    background: active ? T.butter : 'transparent',
+                    color: active ? T.ink : T.text4,
+                    fontFamily: FONTS.body,
+                    fontSize: 11, fontWeight: 800,
+                    cursor: 'pointer',
+                    textTransform: 'capitalize',
+                    letterSpacing: '.02em',
+                  }}
+                >
+                  {sub === 'graph' ? '🕸 Graph' : '📅 Timeline'}
+                </button>
+              );
+            })}
+          </div>
+          <div style={{ flex: 1, minHeight: 0 }}>
+            {beadsSubView === 'graph' ? <BeadGraphView /> : <BeadTimelineView />}
+          </div>
         </div>
         <div
           id="panel-boh"
