@@ -16,7 +16,7 @@ Two distinct role concepts coexist on the ``users`` table and on the
 
 Backwards compatibility
 -----------------------
-Existing user rows that pre-date schema v20 do not have a
+Existing user rows that pre-date schema v16 do not have a
 ``human_role`` column value.  The migration adds the column with
 ``DEFAULT ''`` so those rows load as ``UNASSIGNED`` automatically.
 ``from_dict`` likewise tolerates dicts where the ``human_role`` key is
@@ -55,7 +55,7 @@ class HumanRole(str, Enum):
 
     The empty-string value (:attr:`UNASSIGNED`) is the canonical
     "no role assigned" sentinel.  It is the default for fresh records
-    and for records that pre-date schema v20.
+    and for records that pre-date schema v16.
     """
 
     JUNIOR = "junior"
@@ -159,7 +159,7 @@ class UserIdentity:
 
         Tolerates missing ``human_role`` keys (treated as
         :attr:`HumanRole.UNASSIGNED`) so that older serialised payloads
-        and pre-v20 database rows load cleanly.
+        and pre-v16 database rows load cleanly.
         """
         return cls(
             user_id=data["user_id"],

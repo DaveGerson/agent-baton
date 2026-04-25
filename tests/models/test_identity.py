@@ -12,6 +12,8 @@ Coverage:
 * :meth:`UserStore.assign_role` writes the SQL row; reading it back
   returns the new role.
 * :func:`get_user_role` returns ``UNASSIGNED`` for unknown users.
+* Pre-v16 ``users`` table (no ``human_role`` column) is migrated on
+  first access and existing rows load as ``UNASSIGNED``.
 """
 from __future__ import annotations
 
@@ -210,10 +212,10 @@ class TestUserStore:
         assert [r.user_id for r in rows] == ["alice", "zara"]
 
 
-class TestPreV20MigrationCompatibility:
-    """The v20 migration must add ``human_role`` to existing ``users`` tables.
+class TestPreV16MigrationCompatibility:
+    """The v16 migration must add ``human_role`` to existing ``users`` tables.
 
-    Simulates a database that was created at a pre-v20 schema (no
+    Simulates a database that was created at a pre-v16 schema (no
     ``human_role`` column) and confirms that opening it via
     :class:`UserStore` upgrades the schema and preserves existing rows
     as :attr:`HumanRole.UNASSIGNED`.
@@ -222,13 +224,13 @@ class TestPreV20MigrationCompatibility:
     def test_existing_user_row_loads_as_unassigned(self, central_db: Path):
         import sqlite3
 
-        # Hand-craft a pre-v20 users table (no human_role column) and
-        # mark the schema version as 19 so the connection manager runs
-        # the v20 migration on next access.
+        # Hand-craft a pre-v16 users table (no human_role column) and
+        # mark the schema version as 15 so the connection manager runs
+        # the v16 migration on next access.
         central_db.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(central_db))
         conn.execute("CREATE TABLE _schema_version (version INTEGER NOT NULL)")
-        conn.execute("INSERT INTO _schema_version VALUES (19)")
+        conn.execute("INSERT INTO _schema_version VALUES (15)")
         conn.execute(
             "CREATE TABLE users ("
             "user_id TEXT PRIMARY KEY,"
@@ -246,14 +248,14 @@ class TestPreV20MigrationCompatibility:
         conn.commit()
         conn.close()
 
-        # Opening through UserStore must run the v20 migration.
+        # Opening through UserStore must run the v16 migration.
         store = UserStore(db_path=central_db)
         loaded = store.get("legacy-alice")
         assert loaded is not None
         assert loaded.user_id == "legacy-alice"
         assert loaded.display_name == "Legacy Alice"
         assert loaded.role == "approver"
-        # Pre-v20 row defaults to UNASSIGNED.
+        # Pre-v16 row defaults to UNASSIGNED.
         assert loaded.human_role is HumanRole.UNASSIGNED
 
         # Subsequent assign_role works -> column was added by the migration.

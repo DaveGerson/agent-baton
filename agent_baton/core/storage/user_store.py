@@ -80,7 +80,7 @@ class UserStore:
 
     def _row_to_identity(self, row: sqlite3.Row) -> UserIdentity:
         keys = set(row.keys())
-        # human_role may be absent on databases at schema < v20.  Tolerate.
+        # human_role may be absent on databases at schema < v16.  Tolerate.
         human_role_value = row["human_role"] if "human_role" in keys else ""
         return UserIdentity(
             user_id=row["user_id"],
@@ -106,7 +106,7 @@ class UserStore:
                 (user_id,),
             ).fetchone()
         except sqlite3.OperationalError as exc:
-            # ``human_role`` column missing on a pre-v20 database that
+            # ``human_role`` column missing on a pre-v16 database that
             # somehow escaped migration -- fall back to the legacy shape.
             if "no such column" in str(exc).lower():
                 return self._get_legacy(user_id)
@@ -120,7 +120,7 @@ class UserStore:
         return self._row_to_identity(row)
 
     def _get_legacy(self, user_id: str) -> UserIdentity | None:
-        """Read a user record without the ``human_role`` column (pre-v20)."""
+        """Read a user record without the ``human_role`` column (pre-v16)."""
         try:
             row = self._conn().execute(
                 "SELECT user_id, display_name, email, role, created_at "
@@ -162,7 +162,7 @@ class UserStore:
         return [self._row_to_identity(r) for r in rows]
 
     def _list_legacy(self) -> list[UserIdentity]:
-        """List rows on a pre-v20 schema (no ``human_role`` column)."""
+        """List rows on a pre-v16 schema (no ``human_role`` column)."""
         try:
             cur = self._conn().execute(
                 "SELECT user_id, display_name, email, role, created_at "
