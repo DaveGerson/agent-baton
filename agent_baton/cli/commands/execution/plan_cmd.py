@@ -163,6 +163,18 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
             "Use to sanity-check before --save / baton execute start."
         ),
     )
+    p.add_argument(
+        "--release",
+        dest="release_id",
+        default=None,
+        metavar="RELEASE_ID",
+        help=(
+            "Tag the saved plan against an existing Release (R3.1). "
+            "Requires --save. The release must exist (create with "
+            "`baton release create --id ...`); otherwise the plan is "
+            "tagged anyway and a warning is printed."
+        ),
+    )
     return p
 
 
@@ -187,6 +199,36 @@ def _persist_plan_to_db(ctx_dir: Path, plan: MachinePlan) -> None:
             plan.task_id,
             exc,
         )
+
+
+def _tag_plan_with_release(ctx_dir: Path, task_id: str, release_id: str) -> None:
+    """Tag *task_id* against *release_id* in the plans table (R3.1).
+
+    Best-effort: warns to stderr on failure but never raises. The release
+    does not need to exist to be tagged (soft FK); a missing release
+    triggers a non-fatal warning so the user notices typos.
+    """
+    try:
+        from agent_baton.core.storage.release_store import ReleaseStore
+
+        db_path = (ctx_dir / "baton.db").resolve()
+        store = ReleaseStore(db_path)
+        if store.get(release_id) is None:
+            print(
+                f"warning: release {release_id!r} does not exist; "
+                "tagging anyway (create with `baton release create --id ...`).",
+                file=sys.stderr,
+            )
+        ok = store.tag_plan(task_id, release_id)
+        if ok:
+            print(f"Tagged plan {task_id} -> release {release_id}", file=sys.stderr)
+        else:
+            print(
+                f"warning: could not tag plan {task_id} (no plans row)",
+                file=sys.stderr,
+            )
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("Could not tag plan %s with release %s: %s", task_id, release_id, exc)
 
 
 def _make_task_id(summary: str) -> str:
@@ -400,6 +442,9 @@ def handler(args: argparse.Namespace) -> None:
             )
             md_path.write_text(plan.to_markdown(), encoding="utf-8")
             _persist_plan_to_db(ctx_dir, plan)
+            release_id = getattr(args, "release_id", None)
+            if release_id:
+                _tag_plan_with_release(ctx_dir, plan.task_id, release_id)
             print(f"Imported plan saved: {ctx.plan_json_path} and {ctx.plan_path}")
             print(f"  (also copied to {json_path} for backward compat)")
             print()
@@ -474,6 +519,9 @@ def handler(args: argparse.Namespace) -> None:
         )
         md_path.write_text(plan.to_markdown(), encoding="utf-8")
         _persist_plan_to_db(ctx_dir, plan)
+        release_id = getattr(args, "release_id", None)
+        if release_id:
+            _tag_plan_with_release(ctx_dir, plan.task_id, release_id)
 
         if args.explain:
             explanation_path = ctx_dir / "explanation.md"
