@@ -1,91 +1,71 @@
 {
   "_template_meta": {
     "name": "learning-cycle",
-    "version": "1",
-    "description": "Six-phase learning cycle: collect execution data, analyze patterns, propose improvements, review with a human, apply approved changes, and document outcomes.",
+    "version": "2",
+    "description": "Two-phase learning cycle: learning-analyst inspects recent execution data and writes evidence-backed Recommendation rows; a review step confirms the analysis. Does NOT apply changes — proposals are routed through the existing escalation / system-maintainer flow.",
     "instantiate_with": "baton learn run-cycle",
     "parameters": {
       "lookback_executions": {
-        "description": "Number of recent executions to include in COLLECT phase",
+        "description": "Number of recent executions the analyst should inspect",
         "default": 20
       }
     }
   },
-  "task": "Run learning cycle: analyze recent executions and propose improvements",
-  "risk_level": "MEDIUM",
+  "task_id": "learning-cycle-template",
+  "task_summary": "Run learning cycle: analyst inspects recent executions and proposes improvements as Recommendation rows",
+  "risk_level": "LOW",
+  "budget_tier": "standard",
+  "execution_mode": "phased",
+  "git_strategy": "no-commit",
+  "task_type": "analysis",
+  "intervention_level": "low",
+  "complexity": "light",
   "phases": [
     {
       "phase_id": 1,
-      "name": "COLLECT",
-      "description": "Gather execution data for analysis",
+      "name": "Analyze",
       "steps": [
         {
           "step_id": "1.1",
-          "agent": "test-engineer",
-          "type": "dispatch",
-          "delegation_prompt": "You are running the COLLECT phase of a learning cycle. Your job is to gather raw data for the ANALYZE phase.\n\nRun these SQL queries against .claude/team-context/baton.db and write the results to .claude/team-context/learning-cycle-data.json:\n\n1. Recent step results (last 20 executions):\n   SELECT sr.task_id, sr.agent_name, sr.status, sr.outcome, sr.started_at, sr.completed_at\n   FROM step_results sr ORDER BY sr.started_at DESC LIMIT 200;\n\n2. Gate results:\n   SELECT gr.task_id, gr.phase_id, gr.gate_type, gr.passed, gr.output, gr.checked_at\n   FROM gate_results gr ORDER BY gr.checked_at DESC LIMIT 100;\n\n3. Approval results:\n   SELECT ar.task_id, ar.phase_id, ar.result, ar.decided_at\n   FROM approval_results ar ORDER BY ar.decided_at DESC LIMIT 50;\n\nAlso read:\n- .claude/team-context/learned-patterns.json (if present)\n- .claude/team-context/budget-recommendations.json (if present)\n- The 5 most recent files in .claude/team-context/retrospectives/ (if present)\n- .claude/team-context/improvements/reports/ — the last 3 report files\n\nBundle all of this into .claude/team-context/learning-cycle-data.json with keys: step_results, gate_results, approval_results, patterns, budget_recs, retrospectives, previous_reports.\n\nReport: what data was found and what was missing."
+          "agent_name": "learning-analyst",
+          "model": "sonnet",
+          "step_type": "consulting",
+          "task_description": "Read the last 20 step_results, gate_results, retrospectives, scorecards, and improvement_reports from .claude/team-context/. Identify evidence-backed patterns (>=3 data points each) and write proposed improvements as Recommendation rows via the ImprovementLoop ingestion path. Persist your structured output to .claude/team-context/learning-cycle-analysis.json with keys agent_issues, gate_issues, budget_issues, retrospective_themes, unresolved_escalations. Do NOT modify code; do NOT apply changes — your output is escalated for human review or system-maintainer action.",
+          "deliverables": [
+            ".claude/team-context/learning-cycle-analysis.json"
+          ],
+          "allowed_paths": [
+            ".claude/team-context/learning-cycle-analysis.json",
+            ".claude/team-context/improvements/reports/"
+          ],
+          "context_files": [
+            ".claude/team-context/baton.db",
+            ".claude/team-context/learned-patterns.json",
+            ".claude/team-context/budget-recommendations.json"
+          ]
         }
       ]
     },
     {
       "phase_id": 2,
-      "name": "ANALYZE",
-      "description": "Identify patterns and failure modes from collected data",
+      "name": "Review",
       "steps": [
         {
           "step_id": "2.1",
-          "agent": "learning-analyst",
-          "type": "dispatch",
-          "delegation_prompt": "You are running the ANALYZE phase of a learning cycle.\n\nRead .claude/team-context/learning-cycle-data.json (written by the COLLECT phase).\n\nAnalyze:\n1. Which agents have high failure or retry rates? What is the pattern?\n2. Which gate types are failing most often? Is there a recurring failure mode?\n3. Are there budget tier mismatches (token usage far above or below tier midpoint)?\n4. What do the retrospective 'What Didn't Work' entries say? Are there recurring themes?\n5. Do previous improvement reports show unresolved escalations or repeated issues?\n\nWrite your findings to .claude/team-context/learning-cycle-analysis.json with structure:\n{\n  \"agent_issues\": [{\"agent\": str, \"issue\": str, \"evidence\": [str], \"severity\": \"low|medium|high\"}],\n  \"gate_issues\": [{\"gate_type\": str, \"issue\": str, \"evidence\": [str]}],\n  \"budget_issues\": [{\"agent\": str, \"issue\": str, \"direction\": \"over|under\"}],\n  \"retrospective_themes\": [str],\n  \"unresolved_escalations\": [str]\n}\n\nBe specific. Cite task IDs, agent names, and counts. Do not produce generic statements like 'agents should be more reliable'."
-        }
-      ]
-    },
-    {
-      "phase_id": 3,
-      "name": "PROPOSE",
-      "description": "Generate specific, actionable improvement proposals",
-      "steps": [
-        {
-          "step_id": "3.1",
-          "agent": "learning-analyst",
-          "type": "dispatch",
-          "delegation_prompt": "You are running the PROPOSE phase of a learning cycle.\n\nRead .claude/team-context/learning-cycle-analysis.json (written by the ANALYZE phase).\n\nFor each issue identified, write a specific proposal. A good proposal:\n- Names the exact file to change (e.g., agents/backend-engineer.md)\n- Describes the exact change (e.g., 'Add a note to the Output Format section requiring...')\n- Cites the evidence that motivates the change (e.g., '3 of 5 backend-engineer runs failed at the ORM query step')\n- Estimates the risk: low (config change), medium (agent prompt addition), high (agent prompt rewrite)\n\nDo NOT produce:\n- Generic advice ('improve the prompt')\n- Changes to core engine code\n- Changes to more than 3 files\n\nWrite proposals to .claude/team-context/learning-cycle-proposals.json:\n{\n  \"proposals\": [\n    {\n      \"id\": str,\n      \"priority\": \"high|medium|low\",\n      \"target_file\": str,\n      \"change_type\": \"append|replace|config\",\n      \"change_description\": str,\n      \"evidence\": [str],\n      \"risk\": \"low|medium|high\"\n    }\n  ]\n}\n\nAlso print a human-readable summary of all proposals."
-        }
-      ]
-    },
-    {
-      "phase_id": 4,
-      "name": "REVIEW",
-      "description": "Human approval gate before any changes are applied",
-      "gate": {
-        "gate_type": "approval",
-        "description": "Review learning cycle proposals before applying",
-        "instructions": "Read .claude/team-context/learning-cycle-proposals.json and the printed summary from the PROPOSE phase. Approve to proceed with APPLY, or reject to abort the cycle without changes. You may edit the proposals file before approving to remove proposals you don't want applied."
-      }
-    },
-    {
-      "phase_id": 5,
-      "name": "APPLY",
-      "description": "Apply approved changes to agent definitions, overrides, or knowledge packs",
-      "steps": [
-        {
-          "step_id": "5.1",
-          "agent": "backend-engineer",
-          "type": "dispatch",
-          "delegation_prompt": "You are running the APPLY phase of a learning cycle.\n\nRead .claude/team-context/learning-cycle-proposals.json. Apply each approved proposal:\n\n- For agent definition changes: edit the target file in agents/\n- For config changes: edit .claude/team-context/learned-overrides.json\n- For knowledge pack additions: create or update files in .claude/knowledge/\n\nBefore making any change:\n1. Read the current file\n2. Apply only the specific change described in the proposal\n3. Do not rewrite or restructure existing content\n\nAfter applying all changes, write a summary to .claude/team-context/learning-cycle-applied.json:\n{\n  \"applied\": [{\"proposal_id\": str, \"file\": str, \"change_summary\": str}],\n  \"skipped\": [{\"proposal_id\": str, \"reason\": str}]\n}"
-        }
-      ]
-    },
-    {
-      "phase_id": 6,
-      "name": "DOCUMENT",
-      "description": "Record what changed and why as a retrospective entry",
-      "steps": [
-        {
-          "step_id": "6.1",
-          "agent": "documentation-architect",
-          "type": "dispatch",
-          "delegation_prompt": "You are running the DOCUMENT phase of a learning cycle.\n\nRead:\n- .claude/team-context/learning-cycle-proposals.json\n- .claude/team-context/learning-cycle-applied.json\n- .claude/team-context/learning-cycle-analysis.json\n\nWrite a retrospective entry to .claude/team-context/retrospectives/learning-cycle-<ISO_DATE>.json with structure:\n{\n  \"type\": \"learning_cycle\",\n  \"timestamp\": \"<ISO 8601>\",\n  \"issues_identified\": int,\n  \"proposals_generated\": int,\n  \"changes_applied\": int,\n  \"what_changed\": [str],\n  \"rationale\": str,\n  \"expected_outcome\": str\n}\n\nAlso update docs/learning-automation.md if any new capabilities were added or deprecated components were removed.\n\nFinally, print a one-paragraph summary of the cycle for the operator."
+          "agent_name": "plan-reviewer",
+          "model": "sonnet",
+          "step_type": "reviewing",
+          "task_description": "Read .claude/team-context/learning-cycle-analysis.json. Verify each finding cites at least 3 evidence data points (task IDs, agent names, counts). Mark findings that fail the evidence bar as 'insufficient'. Print a concise summary grouped by severity. This is a soft review — proposals proceed to the existing escalation / system-maintainer flow regardless; this step exists to flag low-quality proposals before they reach a human.",
+          "depends_on": ["1.1"],
+          "deliverables": [
+            ".claude/team-context/learning-cycle-review.json"
+          ],
+          "allowed_paths": [
+            ".claude/team-context/learning-cycle-review.json"
+          ],
+          "context_files": [
+            ".claude/team-context/learning-cycle-analysis.json"
+          ]
         }
       ]
     }
