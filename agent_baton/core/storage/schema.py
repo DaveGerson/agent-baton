@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -448,6 +448,32 @@ CREATE INDEX IF NOT EXISTS idx_teams_parent ON teams(task_id, parent_team_id);
 
 ALTER TABLE team_members ADD COLUMN sub_team  TEXT NOT NULL DEFAULT '[]';
 ALTER TABLE team_members ADD COLUMN synthesis TEXT NOT NULL DEFAULT '';
+""",
+    16: """
+-- v16 (H3.1 / bd-0dea): human-role taxonomy on the users table.
+--
+-- Adds a ``human_role`` column distinct from the existing ``role`` column.
+--
+-- The pre-existing ``role`` column captures PMO workflow roles
+-- (creator/reviewer/approver/admin) used by the approval workflow.  H3.1
+-- introduces an *orthogonal* engineering-seniority taxonomy
+-- (junior/senior/tech_lead/architect/engineering_manager/qa) that future
+-- PMO views (H3.2) and Separation-of-Duties policy (G1.4) can read.
+--
+-- The two columns serve different concerns and must coexist:
+--   role        -> what the user is *allowed* to do in PMO workflows
+--   human_role  -> who the user *is* on the engineering org chart
+--
+-- Velocity-zero: column is additive with default '' (UNASSIGNED).  Existing
+-- rows load as UNASSIGNED.  No code path reads this column to make
+-- gating decisions yet -- that is deferred to G1.4.
+--
+-- NOTE: applied to BOTH project and central databases via
+-- ConnectionManager._run_migrations().  Project databases will acquire the
+-- column too (harmless -- the users table stays empty on the project side).
+-- The authoritative data always lives in central.db.
+ALTER TABLE users ADD COLUMN human_role TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_users_human_role ON users(human_role);
 """,
 }
 
@@ -1731,15 +1757,21 @@ CREATE INDEX IF NOT EXISTS idx_central_feedback_responses_task ON feedback_respo
 -- ================================================================
 
 -- PMO user identity and role assignment.
--- role: creator, reviewer, approver, admin
+--   role       : PMO workflow role -- creator, reviewer, approver, admin
+--   human_role : engineering-seniority taxonomy (H3.1 / bd-0dea) --
+--                junior, senior, tech_lead, architect, engineering_manager,
+--                qa, or '' (UNASSIGNED).  Read by H3.2 PMO views and the
+--                future G1.4 SoD policy; not enforced by any current code.
 CREATE TABLE IF NOT EXISTS users (
     user_id      TEXT PRIMARY KEY,
     display_name TEXT NOT NULL DEFAULT '',
     email        TEXT NOT NULL DEFAULT '',
     role         TEXT NOT NULL DEFAULT 'creator',
+    human_role   TEXT NOT NULL DEFAULT '',
     created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 CREATE INDEX IF NOT EXISTS idx_central_users_role ON users(role);
+CREATE INDEX IF NOT EXISTS idx_central_users_human_role ON users(human_role);
 
 -- Immutable audit log of every approval action (approve, reject,
 -- request_review, feedback) taken via the PMO API.
