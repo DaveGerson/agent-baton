@@ -153,3 +153,50 @@ def test_languages_deduplicated_when_signal_appears_multiple_places(
     _write(tmp_path / "subpkg" / "pyproject.toml", "[project]\nname='b'\n")
     profile = _detect(tmp_path)
     assert profile.languages.count("python") == 1
+
+
+# ---------------------------------------------------------------------------
+# Gate-command propagation (integration with planner)
+# ---------------------------------------------------------------------------
+
+
+def test_python_stack_yields_pytest_gates_not_node(tmp_path: Path) -> None:
+    """When detect_stack returns Python the planner's _default_gate must
+    emit ``pytest`` for the test gate and not ``npm test`` / ``npx tsc``."""
+    from agent_baton.core.engine.planner import IntelligentPlanner
+
+    _write(tmp_path / "pyproject.toml", "[project]\nname='app'\n")
+    _write(tmp_path / "pmo-ui" / "package.json", '{"name":"pmo-ui"}\n')
+
+    stack = _detect(tmp_path)
+    assert stack.language == "python"
+
+    # Bypass the heavy __init__; we only need the bound _default_gate method.
+    planner = IntelligentPlanner.__new__(IntelligentPlanner)
+    test_gate = planner._default_gate("Test", stack=stack)
+    build_gate = planner._default_gate("Implement", stack=stack)
+
+    assert test_gate is not None
+    assert "pytest" in test_gate.command
+    assert "npm" not in test_gate.command
+    assert "tsc" not in test_gate.command
+
+    assert build_gate is not None
+    assert "pytest" in build_gate.command
+    assert "npx tsc" not in build_gate.command
+    assert "npm test" not in build_gate.command
+
+
+def test_javascript_stack_still_yields_node_gates(tmp_path: Path) -> None:
+    """Sanity check: a true Node project still gets npm/tsc gates."""
+    from agent_baton.core.engine.planner import IntelligentPlanner
+
+    _write(tmp_path / "package.json", '{"name":"app"}\n')
+    _write(tmp_path / "tsconfig.json", "{}\n")
+    stack = _detect(tmp_path)
+    assert stack.language == "typescript"
+
+    planner = IntelligentPlanner.__new__(IntelligentPlanner)
+    build_gate = planner._default_gate("Implement", stack=stack)
+    assert build_gate is not None
+    assert "tsc" in build_gate.command
