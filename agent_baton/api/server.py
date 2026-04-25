@@ -52,6 +52,9 @@ except ImportError:
 # raise ImportError only if the route is actually registered.
 _ROUTE_MODULES: list[tuple[str, str, str, list[str]]] = [
     ("agent_baton.api.routes.health", "router", "/api/v1", ["health"]),
+    # Prometheus scrape endpoint mounts at root (/metrics), not /api/v1,
+    # to match the standard Prometheus convention.
+    ("agent_baton.api.routes.metrics", "router", "", ["metrics"]),
     ("agent_baton.api.routes.plans", "router", "/api/v1", ["plans"]),
     ("agent_baton.api.routes.executions", "router", "/api/v1", ["executions"]),
     ("agent_baton.api.routes.agents", "router", "/api/v1", ["agents"]),

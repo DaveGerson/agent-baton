@@ -762,6 +762,13 @@ class IntelligentPlanner:
         Returns:
             A fully constructed MachinePlan.
         """
+        # O1.4 — opt-in OTel JSONL span around the whole call.  The
+        # branch is cheap (env lookup + dict miss) when disabled.
+        from agent_baton.core.observability import current_exporter
+
+        _otel_exporter = current_exporter()
+        _otel_started_at = datetime.now(timezone.utc) if _otel_exporter else None
+
         # Reset per-call state
         self._last_pattern_used = None
         self._last_score_warnings = []
@@ -1394,6 +1401,27 @@ class IntelligentPlanner:
                 )
             except Exception:
                 pass
+
+        # O1.4 — emit OTel span when the exporter is enabled.
+        if _otel_exporter is not None and _otel_started_at is not None:
+            try:
+                _otel_exporter.record_span(
+                    name="plan.create",
+                    kind="INTERNAL",
+                    attributes={
+                        "task_id": task_id,
+                        "task_type": inferred_type,
+                        "complexity": inferred_complexity,
+                        "risk_level": str(risk_level),
+                        "agent_count": len(resolved_agents),
+                        "phase_count": len(plan_phases),
+                    },
+                    started_at=_otel_started_at,
+                    ended_at=datetime.now(timezone.utc),
+                )
+            except Exception:
+                # Observability must never crash the planner.
+                logger.debug("OTel span emission failed", exc_info=True)
 
         return tmp_plan
 

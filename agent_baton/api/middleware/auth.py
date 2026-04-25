@@ -26,6 +26,8 @@ from starlette.responses import Response
 _AUTH_EXEMPT_PATHS: frozenset[str] = frozenset({
     "/api/v1/health",
     "/api/v1/ready",
+    # Prometheus scrape endpoint — scrapers don't authenticate.
+    "/metrics",
     # OpenAPI schema endpoints — allow tooling to introspect without a token.
     "/openapi.json",
     "/docs",
