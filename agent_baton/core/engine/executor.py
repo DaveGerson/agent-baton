@@ -35,6 +35,20 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# Regex matching the spillover breadcrumb prefix written by
+# ``ClaudeCodeLauncher`` when an outcome exceeds ``max_outcome_length``.
+# Captures the path relative to the per-task execution dir.  See
+# ``agent_baton.core.runtime.claude_launcher._truncate_or_spillover``.
+_SPILLOVER_BREADCRUMB_RE = re.compile(
+    r"^\[TRUNCATED — full output: (\S+) \(\d+ bytes total\)\]"
+)
+
+# Maximum bytes of spillover content to inline into the next step's
+# "Previous Step Output" handoff section.  Sized to match the typical
+# inline knowledge budget — large enough to carry full design docs but
+# bounded to protect prompt-cache hit rates.
+_HANDOFF_SPILLOVER_MAX_BYTES: int = 65_536
+
 from agent_baton.models.execution import (
     ActionType,
     ApprovalResult,
@@ -1326,6 +1340,54 @@ class ExecutionEngine:
             deviations.append("\n".join(current).strip())
         return [d for d in deviations if d]
 
+    def _load_handoff_outcome(self, result: StepResult) -> str:
+        """Return the handoff text for *result*, preferring spillover content.
+
+        When a step's outcome was truncated and the full text was written
+        to the per-task spillover directory (see
+        :func:`agent_baton.core.runtime.claude_launcher._write_outcome_spillover`),
+        read that file and return up to ``_HANDOFF_SPILLOVER_MAX_BYTES``
+        of its content so the next step receives the substantive work
+        rather than the breadcrumb.
+
+        Falls back silently to ``result.outcome`` when:
+        - no spillover path is recorded,
+        - the spillover file is missing (e.g. cross-machine resume), or
+        - the file is unreadable.
+        """
+        spillover_rel = (result.outcome_spillover_path or "").strip()
+        if not spillover_rel:
+            return result.outcome
+
+        # Resolve relative path against the per-task execution dir.
+        task_id = getattr(self, "_task_id", None)
+        root = getattr(self, "_root", None)
+        if not task_id or root is None:
+            return result.outcome
+        spillover_file = Path(root) / "executions" / task_id / spillover_rel
+
+        try:
+            data = spillover_file.read_bytes()
+        except OSError as exc:
+            logger.debug(
+                "Spillover file %s unreadable (%s); falling back to inline outcome.",
+                spillover_file,
+                exc,
+            )
+            return result.outcome
+
+        if len(data) <= _HANDOFF_SPILLOVER_MAX_BYTES:
+            return data.decode("utf-8", errors="replace")
+        # Cap at the handoff budget; preserve a leading note for the agent.
+        head = data[:_HANDOFF_SPILLOVER_MAX_BYTES].decode(
+            "utf-8", errors="replace"
+        )
+        return (
+            f"[Spillover capped at {_HANDOFF_SPILLOVER_MAX_BYTES} bytes; "
+            f"full file: {spillover_rel} ({len(data)} bytes total)]\n\n"
+            f"{head}"
+        )
+
     def record_step_result(
         self,
         step_id: str,
@@ -1339,6 +1401,7 @@ class ExecutionEngine:
         error: str = "",
         session_id: str = "",
         step_started_at: str = "",
+        outcome_spillover_path: str = "",
     ) -> None:
         """Record the result of a step execution.
 
@@ -1476,6 +1539,15 @@ class ExecutionEngine:
             except Exception as _scan_exc:  # noqa: BLE001
                 _log.debug("JSONL scanner failed (non-fatal): %s", _scan_exc)
 
+        # Auto-detect spillover path from outcome breadcrumb when caller
+        # did not pass it explicitly.  This keeps legacy callers (e.g. the
+        # CLI _run_loop in execute.py) compatible without signature edits.
+        _spillover = outcome_spillover_path
+        if not _spillover and outcome:
+            _m = _SPILLOVER_BREADCRUMB_RE.match(outcome)
+            if _m:
+                _spillover = _m.group(1)
+
         result = StepResult(
             step_id=step_id,
             agent_name=agent_name,
@@ -1496,6 +1568,7 @@ class ExecutionEngine:
             model_id=real_model,
             session_id=_sid,
             step_started_at=_started,
+            outcome_spillover_path=_spillover,
         )
         # Replace any existing result for this step_id (e.g. a prior
         # "dispatched" row written by mark_dispatched) instead of appending.
@@ -3784,7 +3857,7 @@ class ExecutionEngine:
         handoff = ""
         for result in reversed(state.step_results):
             if result.step_id != step.step_id and result.status == "complete" and result.outcome:
-                handoff = result.outcome
+                handoff = self._load_handoff_outcome(result)
                 break
 
         # Append resolved decisions to the handoff so the agent does not re-litigate
