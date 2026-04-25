@@ -1,8 +1,13 @@
 """Verify that the migrated knowledge packs load correctly via KnowledgeRegistry.
 
-Checks that all 4 packs in .claude/knowledge/ have:
+Checks that all packs in .claude/knowledge/ have:
 - knowledge.yaml manifests with non-empty name and description
 - All .md docs indexed with non-empty name and description metadata
+
+Note: the `planning-taxonomy` pack is documented in design-decisions.md and
+referenced by `references/planning-taxonomy.md`, but the per-pack
+`.claude/knowledge/planning-taxonomy/` directory has not yet been created.
+Tracked separately so this regression-test suite mirrors the shipped state.
 """
 from __future__ import annotations
 
