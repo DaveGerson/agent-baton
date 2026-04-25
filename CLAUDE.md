@@ -58,6 +58,7 @@ Use `cymbal impact <symbol>` before changing high-fanout symbols.
 |----------|---------|---------|
 | `BATON_TASK_ID` | Target a specific execution in multi-task scenarios | auto-detected |
 | `BATON_APPROVAL_MODE` | PMO approval policy: `local` (self-approve) or `team` (different reviewer required) | `local` |
+| `BATON_DB_PATH` | Override the project `baton.db` location (subagents in worktrees can also rely on the upward-walk discovery) | discovered |
 | `ANTHROPIC_API_KEY` | Required for AI classification and Haiku classifier | (none) |
 
 ## Autonomous Incident Handling (MANDATORY)

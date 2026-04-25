@@ -20,7 +20,9 @@ import pytest
 
 from agent_baton.core.govern.compliance import (
     ChainIntegrityError,
+    ComplianceChainWriter,
     LockedJSONLChainWriter,
+    verify_chain,
 )
 
 
@@ -33,6 +35,13 @@ def _append_worker(chain_path_str: str, worker_id: int, n: int) -> None:
     writer = LockedJSONLChainWriter(Path(chain_path_str))
     for i in range(n):
         writer.append({"worker": worker_id, "seq": i})
+
+
+def _compliance_append_worker(log_path_str: str, worker_id: int, n: int) -> None:
+    """Append *n* entries via ComplianceChainWriter (bd-fce7 / bd-4fea)."""
+    writer = ComplianceChainWriter(log_path=Path(log_path_str))
+    for i in range(n):
+        writer.append({"event": "audit", "worker": worker_id, "seq": i})
 
 
 # ---------------------------------------------------------------------------
@@ -205,3 +214,55 @@ class TestThroughput:
             f"throughput {rate:.0f} ops/sec below required 1000 ops/sec"
         )
         assert writer.verify() == n
+
+
+class TestComplianceChainWriterConcurrency:
+    """bd-fce7 + bd-4fea: ComplianceChainWriter must be process-safe via flock.
+
+    Without the flock primitive, two concurrent processes calling append()
+    can both compute prev_hash from the same on-disk tail, producing two
+    entries with identical prev_hash and forking the chain.  This test
+    proves that does NOT happen now that ComplianceChainWriter shares the
+    _flock_path primitive with LockedJSONLChainWriter.
+    """
+
+    def test_two_processes_append_50_each_no_fork(self, tmp_path: Path) -> None:
+        log_path = tmp_path / "compliance-audit.jsonl"
+        ctx = mp.get_context("spawn")
+        p1 = ctx.Process(
+            target=_compliance_append_worker, args=(str(log_path), 1, 50),
+        )
+        p2 = ctx.Process(
+            target=_compliance_append_worker, args=(str(log_path), 2, 50),
+        )
+        p1.start()
+        p2.start()
+        p1.join(timeout=30)
+        p2.join(timeout=30)
+        assert p1.exitcode == 0
+        assert p2.exitcode == 0
+
+        lines = [l for l in log_path.read_text().splitlines() if l.strip()]
+        assert len(lines) == 100
+
+        # Each worker contributed 50.
+        payloads = [json.loads(l) for l in lines]
+        w1 = sorted(p["seq"] for p in payloads if p.get("worker") == 1)
+        w2 = sorted(p["seq"] for p in payloads if p.get("worker") == 2)
+        assert w1 == list(range(50))
+        assert w2 == list(range(50))
+
+        # Hash chain must be intact end-to-end (no forked prev_hash).
+        ok, msg = verify_chain(log_path)
+        assert ok is True, msg
+
+    def test_sequential_appends_remain_chain_intact(self, tmp_path: Path) -> None:
+        log_path = tmp_path / "compliance-audit.jsonl"
+        writer = ComplianceChainWriter(log_path=log_path)
+        for i in range(20):
+            writer.append({"event": "e", "i": i})
+        ok, msg = verify_chain(log_path)
+        assert ok is True, msg
+        # All 20 entries present.
+        lines = [l for l in log_path.read_text().splitlines() if l.strip()]
+        assert len(lines) == 20

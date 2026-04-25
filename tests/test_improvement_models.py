@@ -144,9 +144,11 @@ class TestAnomaly:
 
 class TestTriggerConfig:
     def test_defaults(self):
+        # Defaults were lowered from 10/5 to 3/3 so the improvement loop
+        # starts producing analyses sooner on real-world projects.
         tc = TriggerConfig()
-        assert tc.min_tasks_before_analysis == 10
-        assert tc.analysis_interval_tasks == 5
+        assert tc.min_tasks_before_analysis == 3
+        assert tc.analysis_interval_tasks == 3
         assert tc.agent_failure_threshold == 0.3
         assert tc.gate_failure_threshold == 0.2
         assert tc.budget_deviation_threshold == 0.5

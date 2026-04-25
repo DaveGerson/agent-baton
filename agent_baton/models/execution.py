@@ -412,6 +412,11 @@ class PlanPhase:
         approval_required: If ``True``, pause for human approval after
             steps complete (before the gate, if any).
         approval_description: What the human should review.
+        risk_level: Optional per-phase risk override. When non-empty,
+            ``ExecutionEngine._enforce_veto_before_advance`` uses this
+            tier (LOW|MEDIUM|HIGH|CRITICAL) for VETO gating in place of
+            the plan-level value. Lets a CRITICAL plan contain a single
+            LOW phase that bypasses VETO blocks (bd-5bd9).
     """
 
     phase_id: int
@@ -421,6 +426,7 @@ class PlanPhase:
     approval_required: bool = False         # pause for human approval after steps complete
     approval_description: str = ""          # what the human should review
     feedback_questions: list[FeedbackQuestion] = field(default_factory=list)  # multiple-choice feedback gate
+    risk_level: str = ""                    # bd-5bd9: optional per-phase override
 
     def to_dict(self) -> dict:
         d: dict = {
@@ -435,6 +441,8 @@ class PlanPhase:
             d["approval_description"] = self.approval_description
         if self.feedback_questions:
             d["feedback_questions"] = [q.to_dict() for q in self.feedback_questions]
+        if self.risk_level:
+            d["risk_level"] = self.risk_level
         return d
 
     @classmethod
@@ -451,6 +459,7 @@ class PlanPhase:
                 FeedbackQuestion.from_dict(q)
                 for q in data.get("feedback_questions", [])
             ],
+            risk_level=data.get("risk_level", ""),
         )
 
 

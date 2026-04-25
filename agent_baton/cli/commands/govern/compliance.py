@@ -46,6 +46,24 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     pr = sub.add_parser(
         "rechain",
         help="One-time migration: add hash chain to an existing compliance-audit.jsonl",
+        description=(
+            "Upgrade an existing compliance-audit.jsonl from the pre-F0.3 "
+            "plain-text format to the hash-chained format used by all writers "
+            "since bd-f606.\n\n"
+            "WHEN TO RUN (bd-c0e0): after any baton upgrade that crosses the "
+            "F0.3 boundary, when 'baton compliance verify' reports "
+            "'missing prev_hash/entry_hash'. Idempotent — running twice on an "
+            "already-rechained log re-emits the same hashes.\n\n"
+            "PROCEDURE:\n"
+            "  1. Stop any in-flight executions writing to the log.\n"
+            "  2. Run: baton compliance rechain --log <path>\n"
+            "  3. Run: baton compliance verify --log <path>  "
+            "(must report 'Chain intact').\n"
+            "  4. Resume executions; new appends will extend the chain.\n\n"
+            "Use --out PATH to write to a separate file instead of an atomic "
+            "swap; useful for dry-runs or air-gapped review."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     pr.add_argument(
         "--log",

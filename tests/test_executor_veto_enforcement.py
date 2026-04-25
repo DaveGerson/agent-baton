@@ -238,6 +238,69 @@ class TestVetoEnforcement:
             ActionType.COMPLETE,
         )
 
+
+class TestPerPhaseRiskOverride:
+    """bd-5bd9: PlanPhase.risk_level overrides plan.risk_level for VETO gating."""
+
+    def _start_with_per_phase_risk(
+        self,
+        tmp_path: Path,
+        *,
+        plan_risk: str,
+        phase_risk: str,
+        verdict: str,
+    ) -> ExecutionEngine:
+        engine = _engine(tmp_path)
+        plan = _two_phase_plan(risk_level=plan_risk)
+        plan.phases[0].risk_level = phase_risk
+        engine.start(plan)
+        action = engine.next_action()
+        if action.action_type == ActionType.APPROVAL:
+            engine.record_approval_result(
+                phase_id=action.phase_id,
+                result="approve",
+                feedback="proceed for test",
+            )
+            engine.next_action()
+        engine.record_step_result(
+            step_id="1.1",
+            agent_name="auditor",
+            status="complete",
+            outcome=_verdict_block(verdict, rationale="phase scoped"),
+        )
+        return engine
+
+    def test_low_phase_in_critical_plan_with_veto_advances(self, tmp_path: Path) -> None:
+        # CRITICAL plan, but the audit phase is locally scoped LOW.
+        engine = self._start_with_per_phase_risk(
+            tmp_path, plan_risk="CRITICAL", phase_risk="LOW", verdict="VETO",
+        )
+        action = engine.next_action()  # MUST NOT raise
+        assert action.action_type in (
+            ActionType.DISPATCH,
+            ActionType.APPROVAL,
+            ActionType.WAIT,
+            ActionType.GATE,
+            ActionType.COMPLETE,
+        )
+
+    def test_high_phase_in_low_plan_with_veto_halts(self, tmp_path: Path) -> None:
+        # LOW plan, but the audit phase is locally elevated HIGH.
+        engine = self._start_with_per_phase_risk(
+            tmp_path, plan_risk="LOW", phase_risk="HIGH", verdict="VETO",
+        )
+        with pytest.raises(ExecutionVetoed) as excinfo:
+            engine.next_action()
+        assert excinfo.value.verdict == AuditorVerdict.VETO
+
+    def test_empty_phase_risk_falls_back_to_plan_risk(self, tmp_path: Path) -> None:
+        # Empty phase risk → use plan risk (legacy behaviour).
+        engine = self._start_with_per_phase_risk(
+            tmp_path, plan_risk="HIGH", phase_risk="", verdict="VETO",
+        )
+        with pytest.raises(ExecutionVetoed):
+            engine.next_action()
+
     def test_request_changes_does_not_block(self, tmp_path: Path) -> None:
         # REQUEST_CHANGES is non-blocking at the executor level — only VETO
         # halts.  Operators are expected to amend the plan in response.

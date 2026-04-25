@@ -172,3 +172,45 @@ def test_rechain_existing_hashed_log_is_idempotent(writer: ComplianceChainWriter
     assert count == 2
     ok, _ = verify_chain(log_path)
     assert ok is True
+
+
+# ---------------------------------------------------------------------------
+# bd-c0e0 — friendly verify message points operators to rechain
+# ---------------------------------------------------------------------------
+
+def test_verify_chain_on_pre_f03_log_points_to_rechain(tmp_path: Path) -> None:
+    """A plain-text (pre-F0.3) log row must produce a verify error that
+    explicitly tells the operator to run ``baton compliance rechain``."""
+    plain = tmp_path / "compliance-audit.jsonl"
+    plain.write_text(
+        '{"event": "legacy", "task_id": "t1"}\n'
+        '{"event": "legacy2", "task_id": "t2"}\n',
+        encoding="utf-8",
+    )
+    ok, msg = verify_chain(plain)
+    assert ok is False
+    assert "missing prev_hash" in msg.lower()
+    assert "baton compliance rechain" in msg
+
+
+def test_rechain_then_verify_round_trip_on_pre_f03_log(tmp_path: Path) -> None:
+    """Document the upgrade procedure end-to-end: rechain pre-F0.3 log → verify passes."""
+    plain = tmp_path / "compliance-audit.jsonl"
+    plain.write_text(
+        '{"event": "legacy", "task_id": "t1"}\n'
+        '{"event": "legacy2", "task_id": "t2"}\n'
+        '{"event": "legacy3", "task_id": "t3"}\n',
+        encoding="utf-8",
+    )
+    # Step 1: verify reports the upgrade-needed message.
+    ok, msg = verify_chain(plain)
+    assert ok is False and "rechain" in msg
+
+    # Step 2: rechain in place.
+    count = rechain(plain)
+    assert count == 3
+
+    # Step 3: verify must now pass.
+    ok2, msg2 = verify_chain(plain)
+    assert ok2 is True
+    assert "3 entries" in msg2

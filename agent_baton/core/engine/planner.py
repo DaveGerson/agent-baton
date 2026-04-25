@@ -933,8 +933,23 @@ class IntelligentPlanner:
         # rosters.  The cap matches HaikuClassifier's _MAX_AGENTS_BY_COMPLEXITY.
         # Only applies to automatically-resolved agents — explicit user-
         # provided agent lists are not capped.
+        #
+        # bd-076c — when concern-splitting will fire (≥3 concerns parsed
+        # from task_summary), the cap is raised to len(concerns) so each
+        # concern can be routed to a distinct specialist instead of
+        # collapsing to duplicates.  Concern detection is idempotent so
+        # calling _parse_concerns here and again at step 12b-bis is safe.
         if agents is None:
             _agent_cap = _MAX_AGENTS_BY_COMPLEXITY.get(inferred_complexity, 5)
+            _early_concerns = self._parse_concerns(task_summary)
+            if _early_concerns and len(_early_concerns) > _agent_cap:
+                _agent_cap = len(_early_concerns)
+                logger.debug(
+                    "Concern-split detected (%d concerns) — raised agent cap "
+                    "to %d to keep one specialist per concern (bd-076c).",
+                    len(_early_concerns),
+                    _agent_cap,
+                )
             if len(resolved_agents) > _agent_cap:
                 resolved_agents = resolved_agents[:_agent_cap]
 
