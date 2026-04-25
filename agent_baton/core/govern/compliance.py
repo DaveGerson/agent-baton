@@ -18,12 +18,21 @@ Typical usage in the execution engine:
    the report and ``save()`` writes it to disk.
 4. The auditor agent reviews the report and sets ``auditor_verdict``.
 
+For tamper-evident audit trails, :class:`ComplianceChainWriter` appends
+hash-chained JSONL entries with process-safe locking via ``fcntl.flock``.
+
 """
 from __future__ import annotations
 
+import fcntl
+import hashlib
+import json
+import os
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Any, Iterator
 
 from agent_baton.models.usage import TaskUsageRecord
 from agent_baton.models.enums import RiskLevel
@@ -285,3 +294,245 @@ class ComplianceReportGenerator:
             A list of up to ``count`` report file paths.
         """
         return self.list_reports()[-count:]
+
+
+# ---------------------------------------------------------------------------
+# Tamper-evident hash-chained append log
+# ---------------------------------------------------------------------------
+
+# Sentinel hash used as the "previous hash" for the very first entry. Stable
+# string so chain validation can always find a deterministic genesis value.
+_CHAIN_GENESIS_HASH = "0" * 64
+
+
+def _hash_entry(prev_hash: str, payload: dict[str, Any]) -> str:
+    """Compute a SHA-256 hash linking *payload* to *prev_hash*.
+
+    The hash input is ``prev_hash + canonical_json(payload)`` where
+    ``canonical_json`` uses sorted keys and no whitespace. This guarantees
+    identical bytes across processes regardless of dict insertion order.
+    """
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    h = hashlib.sha256()
+    h.update(prev_hash.encode("ascii"))
+    h.update(canonical.encode("utf-8"))
+    return h.hexdigest()
+
+
+class ChainIntegrityError(RuntimeError):
+    """Raised when the persisted chain fails hash validation on read."""
+
+
+class ComplianceChainWriter:
+    """Append entries to a tamper-evident hash-chained JSONL log.
+
+    Each line of the log is a JSON object of the form::
+
+        {"prev_hash": "<sha256>", "hash": "<sha256>", "payload": {...}}
+
+    where ``hash = sha256(prev_hash || canonical_json(payload))``. The
+    chain is anchored at :data:`_CHAIN_GENESIS_HASH` for the first entry.
+
+    Concurrency model
+    -----------------
+    ``append()`` acquires an exclusive ``fcntl.flock`` on a sidecar lock
+    file for the full read-tail / hash / write window. This makes the
+    writer **process-safe**: multiple processes can append concurrently
+    to the same chain without forking the hash sequence.
+
+    Within a single process, callers MUST serialize threads themselves —
+    ``flock`` is advisory and does not prevent two threads in the same
+    process from racing inside the lock window. Use a
+    :class:`threading.Lock` if you need thread safety.
+
+    Recovery
+    --------
+    The cached ``_last_hash`` is re-read from disk under the lock on
+    every append, so a crash mid-append (between hash compute and
+    fsync) is recoverable: the next process simply reads the last
+    successfully written line and continues from there.
+    """
+
+    def __init__(
+        self,
+        chain_path: Path | str,
+        *,
+        fsync: bool = True,
+    ) -> None:
+        """Initialise the writer for *chain_path*.
+
+        Args:
+            chain_path: Path to the JSONL chain file. Parent directories
+                are created if missing. A sidecar lock file at
+                ``<chain_path>.lock`` is used for ``flock`` coordination.
+            fsync: If True (default), call ``os.fsync`` after every
+                append for crash durability. Disable only for benchmarks
+                or for buffered append patterns where the caller will
+                fsync explicitly at checkpoints. The flock guarantees
+                inter-process ordering regardless of this setting.
+        """
+        self._path = Path(chain_path)
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock_path = self._path.with_suffix(self._path.suffix + ".lock")
+        self._fsync = fsync
+        # Cached last hash; refreshed under lock on every append.
+        self._last_hash: str = _CHAIN_GENESIS_HASH
+
+    @property
+    def path(self) -> Path:
+        """The JSONL chain file path."""
+        return self._path
+
+    @contextmanager
+    def _flock(self) -> Iterator[None]:
+        """Acquire an exclusive advisory lock on the sidecar lock file.
+
+        Uses ``fcntl.flock(LOCK_EX)`` so other processes block until we
+        release. Released via the ``with`` exit even if the body raises.
+        """
+        # Open in 'a+' so the lock file exists across processes; we never
+        # write to it. Reopen each call so we don't leak fds.
+        fd = os.open(str(self._lock_path), os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+    def _read_tail_hash(self) -> str:
+        """Return the hash of the last entry on disk (or the genesis hash).
+
+        Reads the chain file from the end and decodes the final non-empty
+        line as JSON. Robust to a trailing newline / partial last line:
+        if the last line cannot be parsed it is treated as a crashed
+        write and the *previous* parseable line's hash is returned.
+        """
+        if not self._path.is_file() or self._path.stat().st_size == 0:
+            return _CHAIN_GENESIS_HASH
+        # Small chain files: read all lines. For very large chains this
+        # could be replaced with a reverse-seek scan, but JSONL audit
+        # logs are typically capped or rotated.
+        try:
+            with self._path.open("rb") as fh:
+                raw = fh.read()
+        except OSError:
+            return _CHAIN_GENESIS_HASH
+        lines = raw.splitlines()
+        for line in reversed(lines):
+            if not line.strip():
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                # Likely a torn write from a crashed process; skip it.
+                continue
+            h = obj.get("hash")
+            if isinstance(h, str) and len(h) == 64:
+                return h
+        return _CHAIN_GENESIS_HASH
+
+    def append(self, payload: dict[str, Any]) -> str:
+        """Append *payload* as a new chain entry and return its hash.
+
+        Process-safe via ``fcntl.flock``: the read-tail / hash / write
+        sequence is atomic across processes. Not thread-safe within a
+        single process — callers must serialize threads externally.
+
+        The on-disk ``_last_hash`` is always re-read under the lock to
+        guard against a stale in-memory value (e.g. if another process
+        appended between calls).
+
+        Args:
+            payload: JSON-serialisable dict to record. Keys are sorted
+                during hashing so the chain is independent of insertion
+                order.
+
+        Returns:
+            The SHA-256 hash of the newly appended entry.
+        """
+        with self._flock():
+            # Always refresh from disk: another process may have appended.
+            prev = self._read_tail_hash()
+            entry_hash = _hash_entry(prev, payload)
+            line = json.dumps(
+                {"prev_hash": prev, "hash": entry_hash, "payload": payload},
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            # Open + write + fsync inside the lock so a crash leaves at
+            # most one torn line that the next reader will skip. If the
+            # file ends mid-line (a previous process was killed before
+            # writing its newline), prepend our own newline so our new
+            # entry starts on a fresh line — this is what makes torn-line
+            # recovery work.
+            needs_leading_newline = False
+            if self._path.is_file() and self._path.stat().st_size > 0:
+                with self._path.open("rb") as rfh:
+                    rfh.seek(-1, os.SEEK_END)
+                    if rfh.read(1) != b"\n":
+                        needs_leading_newline = True
+            with self._path.open("ab") as fh:
+                if needs_leading_newline:
+                    fh.write(b"\n")
+                fh.write(line.encode("utf-8"))
+                fh.write(b"\n")
+                fh.flush()
+                if self._fsync:
+                    try:
+                        os.fsync(fh.fileno())
+                    except OSError:
+                        # fsync may fail on some filesystems; the flock
+                        # still guarantees ordering for the next reader.
+                        pass
+            self._last_hash = entry_hash
+            return entry_hash
+
+    def verify(self) -> int:
+        """Walk the chain from genesis and verify every link.
+
+        Returns:
+            Number of entries verified.
+
+        Raises:
+            ChainIntegrityError: If any link's hash does not match
+                ``sha256(prev_hash || canonical_json(payload))`` or if
+                ``prev_hash`` does not match the previous entry's hash.
+        """
+        if not self._path.is_file():
+            return 0
+        prev = _CHAIN_GENESIS_HASH
+        count = 0
+        with self._path.open("r", encoding="utf-8") as fh:
+            for lineno, raw_line in enumerate(fh, start=1):
+                if not raw_line.strip():
+                    continue
+                try:
+                    obj = json.loads(raw_line)
+                except json.JSONDecodeError as exc:
+                    raise ChainIntegrityError(
+                        f"line {lineno}: invalid JSON: {exc}"
+                    ) from exc
+                claimed_prev = obj.get("prev_hash")
+                claimed_hash = obj.get("hash")
+                payload = obj.get("payload")
+                if claimed_prev != prev:
+                    raise ChainIntegrityError(
+                        f"line {lineno}: prev_hash {claimed_prev!r} does not "
+                        f"match expected {prev!r}"
+                    )
+                if not isinstance(payload, dict):
+                    raise ChainIntegrityError(
+                        f"line {lineno}: payload missing or not a dict"
+                    )
+                expected = _hash_entry(prev, payload)
+                if claimed_hash != expected:
+                    raise ChainIntegrityError(
+                        f"line {lineno}: hash {claimed_hash!r} does not "
+                        f"match recomputed {expected!r}"
+                    )
+                prev = expected
+                count += 1
+        return count
