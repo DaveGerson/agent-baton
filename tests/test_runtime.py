@@ -240,9 +240,18 @@ class TestTaskWorkerParallelAndMultiStep:
 
 class TestTaskWorkerGates:
     def test_gate_auto_approved(self, tmp_path: Path) -> None:
+        # Since bd-6fc0, the daemon executes programmatic gates via
+        # subprocess instead of silently auto-approving them.  Use the
+        # POSIX ``true`` command so the gate's subprocess returns 0 and
+        # the worker advances past the phase without invoking pytest
+        # (which would recurse from inside this very pytest run).
         async def _run():
             plan = _plan(phases=[
-                _phase(phase_id=0, steps=[_step("1.1")], gate=_gate()),
+                _phase(
+                    phase_id=0,
+                    steps=[_step("1.1")],
+                    gate=PlanGate(gate_type="test", command="true"),
+                ),
                 _phase(phase_id=1, steps=[_step("2.1", agent="te")]),
             ])
             engine = ExecutionEngine(team_context_root=tmp_path)
