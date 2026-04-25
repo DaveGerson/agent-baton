@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -448,6 +448,35 @@ CREATE INDEX IF NOT EXISTS idx_teams_parent ON teams(task_id, parent_team_id);
 
 ALTER TABLE team_members ADD COLUMN sub_team  TEXT NOT NULL DEFAULT '[]';
 ALTER TABLE team_members ADD COLUMN synthesis TEXT NOT NULL DEFAULT '';
+""",
+    16: """
+-- v16 (L2.4 / bd-362f): improvement-recommendation conflict detection.
+--
+-- Surfaces clusters of recommendations whose ``proposed_change`` touches
+-- overlapping config keys or contradicts a peer's direction.  The detector
+-- in ``agent_baton/core/improve/conflict_detection.py`` writes one row per
+-- conflict pair/cluster; the ``baton improve conflicts`` CLI reads them.
+--
+-- Velocity-zero behaviour: detection only.  ``acknowledged_at`` is set by
+-- the operator via ``baton improve conflicts acknowledge`` and acts as a
+-- "reviewed" flag -- it does NOT auto-resolve the underlying recommendations.
+--
+-- NOTE: applied to BOTH project and central databases via
+-- ConnectionManager._run_migrations().  Additive only -- no FK constraints
+-- (matches the pattern used by all post-v4 migrations).  Fresh databases
+-- get the canonical shape from PROJECT_SCHEMA_DDL / CENTRAL_SCHEMA_DDL.
+CREATE TABLE IF NOT EXISTS improvement_conflicts (
+    conflict_id     TEXT PRIMARY KEY,
+    rec_ids_json    TEXT NOT NULL DEFAULT '[]',
+    reason          TEXT NOT NULL DEFAULT '',
+    severity        TEXT NOT NULL DEFAULT 'low',
+    detected_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    acknowledged_at TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_improvement_conflicts_detected
+    ON improvement_conflicts(detected_at);
+CREATE INDEX IF NOT EXISTS idx_improvement_conflicts_severity
+    ON improvement_conflicts(severity);
 """,
 }
 
@@ -982,6 +1011,23 @@ CREATE TABLE IF NOT EXISTS teams (
 );
 CREATE INDEX IF NOT EXISTS idx_teams_leader ON teams(task_id, leader_agent);
 CREATE INDEX IF NOT EXISTS idx_teams_parent ON teams(task_id, parent_team_id);
+
+-- L2.4 (bd-362f): improvement-recommendation conflict detection.
+-- Project-local only.  Mirrors MIGRATIONS[16].  See
+-- ``agent_baton/core/storage/conflict_store.py`` for the writer and
+-- ``agent_baton/core/improve/conflict_detection.py`` for the detector.
+CREATE TABLE IF NOT EXISTS improvement_conflicts (
+    conflict_id     TEXT PRIMARY KEY,
+    rec_ids_json    TEXT NOT NULL DEFAULT '[]',
+    reason          TEXT NOT NULL DEFAULT '',
+    severity        TEXT NOT NULL DEFAULT 'low',
+    detected_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    acknowledged_at TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_improvement_conflicts_detected
+    ON improvement_conflicts(detected_at);
+CREATE INDEX IF NOT EXISTS idx_improvement_conflicts_severity
+    ON improvement_conflicts(severity);
 """
 
 # =====================================================================
