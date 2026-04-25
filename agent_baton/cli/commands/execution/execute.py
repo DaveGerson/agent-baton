@@ -28,6 +28,7 @@ from pathlib import Path
 
 from agent_baton.cli.colors import success, error as color_error, warning, info as color_info
 from agent_baton.cli.errors import user_error, validation_error
+from agent_baton.core.engine.errors import ExecutionVetoed
 from agent_baton.core.engine.executor import ExecutionEngine
 from agent_baton.core.engine.persistence import StatePersistence
 from agent_baton.core.events.bus import EventBus
@@ -97,6 +98,23 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
             "Prompt-File pointer in stdout.  Reduces per-step token burn for "
             "long plans.  Non-DISPATCH actions are unaffected."
         ),
+    )
+    next_p.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        dest="force_override",
+        help=(
+            "Override an auditor VETO on a HIGH/CRITICAL phase.  Requires "
+            "--justification; an Override audit row is appended to "
+            "compliance-audit.jsonl."
+        ),
+    )
+    next_p.add_argument(
+        "--justification",
+        default="",
+        dest="override_justification",
+        help="Required when --force is supplied; recorded in the audit log.",
     )
 
     # baton execute record --step ID --agent NAME [--status S] [--outcome O] [--tokens N] [--duration N] [--error E]
@@ -194,6 +212,23 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
                        help="Soft token cap: stop dispatching new steps when exceeded (0 = use tier default)")
     p_run.add_argument("--dry-run", action="store_true", dest="dry_run",
                        help="Print actions without executing them")
+    p_run.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        dest="force_override",
+        help=(
+            "Override an auditor VETO on a HIGH/CRITICAL phase for the "
+            "duration of this run.  Requires --justification; appends an "
+            "Override row to compliance-audit.jsonl."
+        ),
+    )
+    p_run.add_argument(
+        "--justification",
+        default="",
+        dest="override_justification",
+        help="Required when --force is supplied; recorded in the audit log.",
+    )
 
     # baton execute complete [--task-id ID]
     sub.add_parser("complete", parents=[_task_id_parent],
@@ -542,9 +577,25 @@ def handler(args: argparse.Namespace) -> None:
         if task_id is None:
             task_id = StatePersistence.get_active_task_id(context_root)
 
+    # F0.3 — VETO override (bd-f606): validate --force / --justification
+    # before constructing the engine so error messages surface uniformly.
+    force_override = bool(getattr(args, "force_override", False))
+    override_justification = (getattr(args, "override_justification", "") or "").strip()
+    if force_override and not override_justification:
+        validation_error(
+            "--force requires --justification \"<reason>\"",
+            hint="Re-run with --force --justification \"why this VETO is being overridden\"",
+        )
+
     bus = EventBus()
     storage = get_project_storage(context_root)
-    engine = ExecutionEngine(bus=bus, task_id=task_id, storage=storage)
+    engine = ExecutionEngine(
+        bus=bus,
+        task_id=task_id,
+        storage=storage,
+        force_override=force_override,
+        override_justification=override_justification,
+    )
 
     if args.subcommand == "start":
         # Resolve plan path: if task_id is known (from --task-id or
@@ -636,6 +687,18 @@ def handler(args: argparse.Namespace) -> None:
             else:
                 action = engine.next_action()
                 _print_action(action.to_dict(), terse=terse)
+        except ExecutionVetoed as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            print("Recovery options:", file=sys.stderr)
+            print(
+                "  Re-run with --force --justification \"...\" to override",
+                file=sys.stderr,
+            )
+            print(
+                "  Or amend the plan to address the auditor's concerns",
+                file=sys.stderr,
+            )
+            sys.exit(2)
         except RuntimeError as exc:
             print(f"error: {exc}", file=sys.stderr)
             print("Recovery options:", file=sys.stderr)
@@ -1081,6 +1144,16 @@ def _handle_run(args: argparse.Namespace) -> None:
     model_override = args.model
     token_budget: int = getattr(args, "token_budget", 0)
 
+    # F0.3 — VETO override (bd-f606): validate --force / --justification
+    # before constructing any engine.
+    force_override = bool(getattr(args, "force_override", False))
+    override_justification = (getattr(args, "override_justification", "") or "").strip()
+    if force_override and not override_justification:
+        validation_error(
+            "--force requires --justification \"<reason>\"",
+            hint="Re-run with --force --justification \"why this VETO is being overridden\"",
+        )
+
     # Resolve or create the execution.
     #
     # Task-id resolution priority (matches general handler at lines ~529-548):
@@ -1139,6 +1212,8 @@ def _handle_run(args: argparse.Namespace) -> None:
             team_context_root=context_root,
             bus=bus, task_id=task_id, storage=storage,
             token_budget=token_budget or None,
+            force_override=force_override,
+            override_justification=override_justification,
         )
         st = engine.status()
         st_status = (st or {}).get("status")
@@ -1190,6 +1265,8 @@ def _handle_run(args: argparse.Namespace) -> None:
             team_context_root=context_root,
             bus=bus, task_id=task_id, storage=storage,
             token_budget=token_budget or None,
+            force_override=force_override,
+            override_justification=override_justification,
         )
         _probe_status = _probe_engine.status()
         _probe_st = (_probe_status or {}).get("status")
@@ -1219,6 +1296,8 @@ def _handle_run(args: argparse.Namespace) -> None:
                 knowledge_resolver=knowledge_resolver,
                 policy_engine=policy_engine,
                 token_budget=token_budget or None,
+                force_override=force_override,
+                override_justification=override_justification,
             )
             ContextManager(task_id=task_id).init_mission_log(
                 plan.task_summary, risk_level=plan.risk_level
@@ -1546,6 +1625,14 @@ def _run_loop(
         try:
             next_act = engine.next_action()
             action_dict = next_act.to_dict()
+        except ExecutionVetoed as exc:
+            print(f"\n{color_error('VETOED')}: {exc}", file=sys.stderr)
+            print(
+                "Recovery: re-run with --force --justification \"...\" "
+                "to override, or amend the plan.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
         except RuntimeError as exc:
             print(f"\n{color_error('ERROR')}: {exc}", file=sys.stderr)
             sys.exit(1)
