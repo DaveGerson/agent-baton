@@ -40,6 +40,10 @@ class LaunchResult:
         estimated_tokens: Token count from the agent's usage report.
         duration_seconds: Wall-clock execution time in seconds.
         error: Error message when status is ``"failed"``.
+        outcome_spillover_path: Relative path (under the execution dir)
+            to a file containing the FULL untruncated outcome when the
+            inline outcome was capped by ``max_outcome_length``.  Empty
+            when no spillover was needed.
     """
     step_id: str
     agent_name: str
@@ -50,6 +54,7 @@ class LaunchResult:
     estimated_tokens: int = 0
     duration_seconds: float = 0.0
     error: str = ""
+    outcome_spillover_path: str = ""
 
 
 class AgentLauncher(Protocol):

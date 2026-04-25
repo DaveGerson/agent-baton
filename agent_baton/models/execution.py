@@ -870,6 +870,7 @@ class StepResult:
     interaction_history: list[InteractionTurn] = field(default_factory=list)  # multi-turn exchange
     step_type: str = "developing"   # echoed from PlanStep for analytics/queries
     updated_at: str = ""            # ISO 8601 UTC; set on every status mutation; used for bi-directional split-brain reconciliation
+    outcome_spillover_path: str = ""  # relative path under execution dir to FULL outcome when truncated
 
     def to_dict(self) -> dict:
         d = {
@@ -894,6 +895,7 @@ class StepResult:
             "deviations": self.deviations,
             "step_type": self.step_type,
             "updated_at": self.updated_at,
+            "outcome_spillover_path": self.outcome_spillover_path,
         }
         if self.member_results:
             d["member_results"] = [m.to_dict() for m in self.member_results]
