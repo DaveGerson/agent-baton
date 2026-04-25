@@ -27,7 +27,7 @@ _COMMAND_GROUPS: dict[str, list[str]] = {
     "Observability": ["dashboard", "trace", "usage", "telemetry", "context-profile", "retro", "context", "export"],
     "Integrations": ["webhook"],
     "Governance": ["classify", "compliance", "policy", "escalations", "validate", "spec-check", "detect", "overrides", "aibom"],
-    "Improvement": ["scores", "patterns", "budget", "changelog", "anomalies", "improve", "learn", "assess", "metrics"],
+    "Improvement": ["scores", "patterns", "budget", "changelog", "anomalies", "improve", "learn", "assess", "metrics", "cost-anomalies", "conflicts"],
     "Release": ["release", "merge"],
     "Distribution": ["install", "uninstall", "package", "publish", "pull", "transfer", "verify-package"],
     "Storage & Sync": ["sync", "source", "cquery", "migrate-storage", "cleanup", "storage"],
