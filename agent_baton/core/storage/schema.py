@@ -475,8 +475,16 @@ CREATE INDEX IF NOT EXISTS idx_usage_team ON usage_records(team_id);
 CREATE INDEX IF NOT EXISTS idx_usage_org  ON usage_records(org_id);
 CREATE INDEX IF NOT EXISTS idx_usage_cc   ON usage_records(cost_center);
 
-CREATE VIEW IF NOT EXISTS v_usage_by_team AS
+-- Canonical per-project view shape (matches PROJECT_SCHEMA_DDL).  We
+-- DROP first so v15-DBs upgraded to v16 that already received an earlier
+-- (now-superseded) view definition — e.g. one without the synthesised
+-- project_id column — are dropped and recreated in the canonical shape.
+-- The migration runner ignores "no such table"-class errors, so the
+-- DROP is a no-op on pre-v16 DBs that never had the views.
+DROP VIEW IF EXISTS v_usage_by_team;
+CREATE VIEW v_usage_by_team AS
 SELECT ur.team_id,
+       'default' AS project_id,
        COUNT(DISTINCT ur.task_id) AS task_count,
        COALESCE(SUM(au.estimated_tokens), 0) AS total_tokens,
        COALESCE(SUM(au.duration_seconds), 0) AS total_duration_seconds
@@ -484,8 +492,10 @@ FROM usage_records ur
 LEFT JOIN agent_usage au ON au.task_id = ur.task_id
 GROUP BY ur.team_id;
 
-CREATE VIEW IF NOT EXISTS v_usage_by_org AS
+DROP VIEW IF EXISTS v_usage_by_org;
+CREATE VIEW v_usage_by_org AS
 SELECT ur.org_id,
+       'default' AS project_id,
        COUNT(DISTINCT ur.task_id) AS task_count,
        COALESCE(SUM(au.estimated_tokens), 0) AS total_tokens,
        COALESCE(SUM(au.duration_seconds), 0) AS total_duration_seconds
@@ -493,8 +503,10 @@ FROM usage_records ur
 LEFT JOIN agent_usage au ON au.task_id = ur.task_id
 GROUP BY ur.org_id;
 
-CREATE VIEW IF NOT EXISTS v_usage_by_cost_center AS
+DROP VIEW IF EXISTS v_usage_by_cost_center;
+CREATE VIEW v_usage_by_cost_center AS
 SELECT ur.cost_center,
+       'default' AS project_id,
        COUNT(DISTINCT ur.task_id) AS task_count,
        COALESCE(SUM(au.estimated_tokens), 0) AS total_tokens,
        COALESCE(SUM(au.duration_seconds), 0) AS total_duration_seconds
@@ -873,8 +885,14 @@ CREATE INDEX IF NOT EXISTS idx_agent_usage_task ON agent_usage(task_id);
 CREATE INDEX IF NOT EXISTS idx_agent_usage_agent ON agent_usage(agent_name);
 
 -- Tenancy aggregation views (F0.2)
-CREATE VIEW IF NOT EXISTS v_usage_by_team AS
+-- Per-project DBs have no project_id column on usage tables; we
+-- synthesise it as the constant 'default' so the view's column shape
+-- matches the central.db version of the same view (see CENTRAL_SCHEMA_DDL).
+-- Consumers can therefore SELECT against either DB with identical SQL.
+DROP VIEW IF EXISTS v_usage_by_team;
+CREATE VIEW v_usage_by_team AS
 SELECT ur.team_id,
+       'default' AS project_id,
        COUNT(DISTINCT ur.task_id) AS task_count,
        COALESCE(SUM(au.estimated_tokens), 0) AS total_tokens,
        COALESCE(SUM(au.duration_seconds), 0) AS total_duration_seconds
@@ -882,8 +900,10 @@ FROM usage_records ur
 LEFT JOIN agent_usage au ON au.task_id = ur.task_id
 GROUP BY ur.team_id;
 
-CREATE VIEW IF NOT EXISTS v_usage_by_org AS
+DROP VIEW IF EXISTS v_usage_by_org;
+CREATE VIEW v_usage_by_org AS
 SELECT ur.org_id,
+       'default' AS project_id,
        COUNT(DISTINCT ur.task_id) AS task_count,
        COALESCE(SUM(au.estimated_tokens), 0) AS total_tokens,
        COALESCE(SUM(au.duration_seconds), 0) AS total_duration_seconds
@@ -891,8 +911,10 @@ FROM usage_records ur
 LEFT JOIN agent_usage au ON au.task_id = ur.task_id
 GROUP BY ur.org_id;
 
-CREATE VIEW IF NOT EXISTS v_usage_by_cost_center AS
+DROP VIEW IF EXISTS v_usage_by_cost_center;
+CREATE VIEW v_usage_by_cost_center AS
 SELECT ur.cost_center,
+       'default' AS project_id,
        COUNT(DISTINCT ur.task_id) AS task_count,
        COALESCE(SUM(au.estimated_tokens), 0) AS total_tokens,
        COALESCE(SUM(au.duration_seconds), 0) AS total_duration_seconds
@@ -1775,10 +1797,18 @@ CREATE TABLE IF NOT EXISTS usage_records (
     gates_failed      INTEGER NOT NULL DEFAULT 0,
     outcome           TEXT NOT NULL DEFAULT '',
     notes             TEXT NOT NULL DEFAULT '',
+    org_id            TEXT NOT NULL DEFAULT 'default',
+    team_id           TEXT NOT NULL DEFAULT 'default',
+    user_id           TEXT NOT NULL DEFAULT 'local-user',
+    spec_author_id    TEXT NOT NULL DEFAULT '',
+    cost_center       TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (project_id, task_id)
 );
 CREATE INDEX IF NOT EXISTS idx_central_usage_ts ON usage_records(timestamp);
 CREATE INDEX IF NOT EXISTS idx_central_usage_project ON usage_records(project_id);
+CREATE INDEX IF NOT EXISTS idx_central_usage_team ON usage_records(team_id);
+CREATE INDEX IF NOT EXISTS idx_central_usage_org  ON usage_records(org_id);
+CREATE INDEX IF NOT EXISTS idx_central_usage_cc   ON usage_records(cost_center);
 
 CREATE TABLE IF NOT EXISTS agent_usage (
     id                 INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1790,7 +1820,13 @@ CREATE TABLE IF NOT EXISTS agent_usage (
     retries            INTEGER NOT NULL DEFAULT 0,
     gate_results       TEXT NOT NULL DEFAULT '[]',
     estimated_tokens   INTEGER NOT NULL DEFAULT 0,
-    duration_seconds   REAL NOT NULL DEFAULT 0.0
+    duration_seconds   REAL NOT NULL DEFAULT 0.0,
+    agent_type         TEXT NOT NULL DEFAULT '',
+    org_id             TEXT NOT NULL DEFAULT 'default',
+    team_id            TEXT NOT NULL DEFAULT 'default',
+    user_id            TEXT NOT NULL DEFAULT 'local-user',
+    spec_author_id     TEXT NOT NULL DEFAULT '',
+    cost_center        TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_central_agent_usage_task ON agent_usage(project_id, task_id);
 CREATE INDEX IF NOT EXISTS idx_central_agent_usage_agent ON agent_usage(agent_name);
@@ -2235,37 +2271,45 @@ CREATE TABLE IF NOT EXISTS tenancy_cost_centers (
 );
 
 -- Tenancy analytics views (F0.2)
-CREATE VIEW IF NOT EXISTS v_usage_by_team AS
-SELECT
-    ur.team_id,
-    ur.project_id,
-    COUNT(DISTINCT ur.task_id)  AS task_count,
-    SUM(au.estimated_tokens)    AS total_tokens,
-    SUM(au.duration_seconds)    AS total_duration_seconds
+-- Column shape MUST match the per-project DDL in PROJECT_SCHEMA_DDL so
+-- that consumers can issue identical SELECTs against either DB.  The
+-- per-project version synthesises project_id as the constant 'default'.
+-- Here we use the real column.  COALESCE wrappers match per-project to
+-- guarantee identical PRAGMA table_info output.
+DROP VIEW IF EXISTS v_usage_by_team;
+CREATE VIEW v_usage_by_team AS
+SELECT ur.team_id,
+       ur.project_id,
+       COUNT(DISTINCT ur.task_id) AS task_count,
+       COALESCE(SUM(au.estimated_tokens), 0) AS total_tokens,
+       COALESCE(SUM(au.duration_seconds), 0) AS total_duration_seconds
 FROM usage_records ur
-LEFT JOIN agent_usage au ON au.project_id = ur.project_id AND au.task_id = ur.task_id
+LEFT JOIN agent_usage au
+       ON au.project_id = ur.project_id AND au.task_id = ur.task_id
 GROUP BY ur.project_id, ur.team_id;
 
-CREATE VIEW IF NOT EXISTS v_usage_by_org AS
-SELECT
-    ur.org_id,
-    ur.project_id,
-    COUNT(DISTINCT ur.task_id)  AS task_count,
-    SUM(au.estimated_tokens)    AS total_tokens,
-    SUM(au.duration_seconds)    AS total_duration_seconds
+DROP VIEW IF EXISTS v_usage_by_org;
+CREATE VIEW v_usage_by_org AS
+SELECT ur.org_id,
+       ur.project_id,
+       COUNT(DISTINCT ur.task_id) AS task_count,
+       COALESCE(SUM(au.estimated_tokens), 0) AS total_tokens,
+       COALESCE(SUM(au.duration_seconds), 0) AS total_duration_seconds
 FROM usage_records ur
-LEFT JOIN agent_usage au ON au.project_id = ur.project_id AND au.task_id = ur.task_id
+LEFT JOIN agent_usage au
+       ON au.project_id = ur.project_id AND au.task_id = ur.task_id
 GROUP BY ur.project_id, ur.org_id;
 
-CREATE VIEW IF NOT EXISTS v_usage_by_cost_center AS
-SELECT
-    ur.cost_center,
-    ur.project_id,
-    COUNT(DISTINCT ur.task_id)  AS task_count,
-    SUM(au.estimated_tokens)    AS total_tokens,
-    SUM(au.duration_seconds)    AS total_duration_seconds
+DROP VIEW IF EXISTS v_usage_by_cost_center;
+CREATE VIEW v_usage_by_cost_center AS
+SELECT ur.cost_center,
+       ur.project_id,
+       COUNT(DISTINCT ur.task_id) AS task_count,
+       COALESCE(SUM(au.estimated_tokens), 0) AS total_tokens,
+       COALESCE(SUM(au.duration_seconds), 0) AS total_duration_seconds
 FROM usage_records ur
-LEFT JOIN agent_usage au ON au.project_id = ur.project_id AND au.task_id = ur.task_id
+LEFT JOIN agent_usage au
+       ON au.project_id = ur.project_id AND au.task_id = ur.task_id
 GROUP BY ur.project_id, ur.cost_center;
 
 -- COMPLIANCE LOG (F0.3 hash-chain)

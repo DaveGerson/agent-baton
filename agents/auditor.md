@@ -265,6 +265,18 @@ The auditor assigns one of these trust levels per agent in the manifest:
 
 ---
 
+## Pre-Phase-0 compliance logs
+
+If `baton compliance verify` returns non-zero on a project that was
+created before the F0.3 hash-chain shipped, the failure is almost
+certainly missing chain columns on legacy rows — not tampering.  Direct
+the user (or the orchestrator) to the rechain procedure documented in
+`docs/architecture/phase-0-foundations/rollback-recipe.md` (section 6,
+"Upgrade procedure: rechain a pre-Phase-0 compliance log").  Do not
+issue a `VETO` on this signal alone.
+
+---
+
 ## Rules
 
 - **You are independent.** The orchestrator plans; you audit. If the plan is

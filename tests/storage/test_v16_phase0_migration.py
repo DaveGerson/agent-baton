@@ -183,3 +183,125 @@ def test_migrations_dict_has_v16_entry() -> None:
     assert "specs" in body
     assert "compliance_log" in body
     assert "knowledge_telemetry" in body
+
+
+# ---------------------------------------------------------------------
+# View-shape parity (bd-87ea): v_usage_by_* must have identical column
+# shape in PROJECT and CENTRAL DBs so consumers can issue identical SQL.
+# ---------------------------------------------------------------------
+
+_USAGE_VIEWS = ("v_usage_by_team", "v_usage_by_org", "v_usage_by_cost_center")
+
+
+def _columns_for_view(conn: sqlite3.Connection, view: str) -> list[str]:
+    return [r[1] for r in conn.execute(f"PRAGMA table_info({view})").fetchall()]
+
+
+def _fresh_db(
+    tmp_path: Path, name: str, ddl_attr: str
+) -> sqlite3.Connection:
+    from agent_baton.core.storage.connection import ConnectionManager
+    from agent_baton.core.storage import schema as schema_mod
+
+    ddl = getattr(schema_mod, ddl_attr)
+    cm = ConnectionManager(tmp_path / name)
+    cm.configure_schema(ddl, schema_mod.SCHEMA_VERSION)
+    return cm.get_connection()
+
+
+def test_v_usage_views_have_identical_shape_across_db_flavors(
+    tmp_path: Path,
+) -> None:
+    """Both DB flavors must expose the same columns for each tenancy view.
+
+    Per bd-87ea, the per-project DB synthesises ``project_id`` as the
+    constant ``'default'`` while central uses the real column.  Either
+    way, ``PRAGMA table_info`` should return identical column names.
+    """
+    proj_dir = tmp_path / "proj"
+    cent_dir = tmp_path / "cent"
+    proj_dir.mkdir()
+    cent_dir.mkdir()
+    proj_conn = _fresh_db(proj_dir, "baton.db", "PROJECT_SCHEMA_DDL")
+    cent_conn = _fresh_db(cent_dir, "central.db", "CENTRAL_SCHEMA_DDL")
+
+    for view in _USAGE_VIEWS:
+        proj_cols = _columns_for_view(proj_conn, view)
+        cent_cols = _columns_for_view(cent_conn, view)
+        assert proj_cols == cent_cols, (
+            f"{view} column shape diverges:\n"
+            f"  project: {proj_cols}\n"
+            f"  central: {cent_cols}"
+        )
+        # Sanity: project_id must always be present so downstream
+        # GROUP BY / WHERE clauses work uniformly.
+        assert "project_id" in proj_cols
+
+
+def test_v_usage_views_queryable_on_both_db_flavors(tmp_path: Path) -> None:
+    """A SELECT against each view must succeed on both DB types."""
+    proj_dir = tmp_path / "proj"
+    cent_dir = tmp_path / "cent"
+    proj_dir.mkdir()
+    cent_dir.mkdir()
+    proj_conn = _fresh_db(proj_dir, "baton.db", "PROJECT_SCHEMA_DDL")
+    cent_conn = _fresh_db(cent_dir, "central.db", "CENTRAL_SCHEMA_DDL")
+
+    for conn in (proj_conn, cent_conn):
+        for view in _USAGE_VIEWS:
+            # Empty result is fine; we only assert no column-name error.
+            rows = conn.execute(
+                f"SELECT project_id, task_count, total_tokens, "
+                f"total_duration_seconds FROM {view}"
+            ).fetchall()
+            assert isinstance(rows, list)
+
+
+def test_v16_migration_drops_and_recreates_views(tmp_path: Path) -> None:
+    """Re-running v16 against an existing v16 DB must drop + recreate
+    the tenancy views (so a stale shape from an earlier dev build gets
+    upgraded to the canonical shape on next open)."""
+    from agent_baton.core.storage.connection import ConnectionManager
+    from agent_baton.core.storage.schema import (
+        PROJECT_SCHEMA_DDL,
+        SCHEMA_VERSION,
+    )
+
+    db = tmp_path / "baton.db"
+
+    # 1) Initialise at v15 (no views yet) so migrations fire on next open.
+    cm1 = ConnectionManager(db)
+    cm1.configure_schema(PROJECT_SCHEMA_DDL, 15)
+    cm1.get_connection()
+    cm1.close()
+
+    # 2) Open at current version — should run MIGRATIONS[16] and create
+    #    the canonical views.
+    cm2 = ConnectionManager(db)
+    cm2.configure_schema(PROJECT_SCHEMA_DDL, SCHEMA_VERSION)
+    conn2 = cm2.get_connection()
+    first_shape = {v: _columns_for_view(conn2, v) for v in _USAGE_VIEWS}
+    cm2.close()
+
+    # 3) Manually corrupt one view to simulate a stale dev definition,
+    #    bump the schema version backwards, and re-open: the migration
+    #    must DROP the corrupt view and recreate the canonical one.
+    raw = sqlite3.connect(db)
+    raw.execute("DROP VIEW v_usage_by_team")
+    raw.execute(
+        "CREATE VIEW v_usage_by_team AS SELECT 1 AS bogus_col"
+    )
+    raw.execute("UPDATE _schema_version SET version = 15")
+    raw.commit()
+    raw.close()
+
+    cm3 = ConnectionManager(db)
+    cm3.configure_schema(PROJECT_SCHEMA_DDL, SCHEMA_VERSION)
+    conn3 = cm3.get_connection()
+    rebuilt_shape = {v: _columns_for_view(conn3, v) for v in _USAGE_VIEWS}
+
+    assert rebuilt_shape == first_shape, (
+        "Re-running v16 migration did not restore the canonical view shape: "
+        f"before={first_shape} after={rebuilt_shape}"
+    )
+    assert "bogus_col" not in rebuilt_shape["v_usage_by_team"]
