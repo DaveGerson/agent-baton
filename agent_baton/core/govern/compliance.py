@@ -261,6 +261,13 @@ class ComplianceChainWriter:
         winner releases the lock, then re-reads the freshly committed
         ``entry_hash`` before computing its own.
 
+        G1.5 (bd-1a09): when redaction is enabled (the default), every
+        string in the payload is scrubbed for emails, SSNs, AWS keys,
+        API tokens, JWTs, private keys, and IPv4 addresses BEFORE the
+        hash is computed.  This means the on-disk value is what gets
+        hashed — post-hoc redaction cannot rewrite the chain, and
+        :func:`verify_chain` works directly against the redacted log.
+
         Args:
             entry: Arbitrary dict of audit data (must not contain
                 ``prev_hash`` or ``entry_hash`` — these are injected here).
@@ -268,7 +275,17 @@ class ComplianceChainWriter:
         Returns:
             The entry as written (with ``prev_hash`` and ``entry_hash``).
         """
+        from agent_baton.core.govern._redaction import (
+            default_redactor,
+            redaction_enabled,
+        )
+
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        # Redact OUTSIDE the flock — pure CPU work, no need to hold the lock.
+        if redaction_enabled():
+            redacted = default_redactor().redact_payload(entry)
+            if isinstance(redacted, dict):
+                entry = redacted
         with _flock_path(self._path):
             # Re-read under the lock so we never use a stale cached hash.
             prev_hash = self._last_hash()
