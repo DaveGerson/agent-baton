@@ -84,7 +84,15 @@ from agent_baton.models.trace import TaskTrace, TraceEvent
 from agent_baton.core.observe.usage import UsageLogger
 from agent_baton.core.observe.retrospective import RetrospectiveEngine
 from agent_baton.core.observe.context_profiler import ContextProfiler
-from agent_baton.core.govern.compliance import ComplianceEntry, ComplianceReportGenerator
+from agent_baton.core.govern.compliance import (
+    AuditorVerdict,
+    ComplianceChainWriter,
+    ComplianceEntry,
+    ComplianceReportGenerator,
+    extract_verdict_from_text,
+    parse_auditor_verdict,
+)
+from agent_baton.core.engine.errors import ExecutionVetoed
 
 
 # ---------------------------------------------------------------------------
@@ -285,6 +293,8 @@ class ExecutionEngine:
         enforce_token_budget: bool = True,
         token_budget: int | None = None,
         max_gate_retries: int = 3,
+        force_override: bool = False,
+        override_justification: str = "",
     ) -> None:
         self._root = (team_context_root or self._DEFAULT_CONTEXT_ROOT).resolve()
         self._task_id = task_id
@@ -326,6 +336,13 @@ class ExecutionEngine:
         # Compliance audit log — JSONL file written best-effort.  Path is
         # resolved after _root is known; initialized to None until first write.
         self._compliance_log_path: Path | None = None
+
+        # F0.3 — VETO override (bd-f606).  When True the engine permits a
+        # HIGH/CRITICAL phase to advance past a VETO verdict but writes an
+        # Override row to the hash-chained compliance-audit.jsonl.  The CLI
+        # rejects --force without --justification.
+        self._force_override: bool = bool(force_override)
+        self._override_justification: str = override_justification or ""
 
         if storage is not None:
             # StorageBackend mode — primary I/O goes through the storage
@@ -764,10 +781,12 @@ class ExecutionEngine:
     # ── Compliance audit helpers ─────────────────────────────────────────────
 
     def _write_compliance_entry(self, entry: dict) -> None:
-        """Append a compliance audit entry as a JSONL line.
+        """Append a compliance audit entry to the hash-chained JSONL log.
 
-        This is best-effort: any I/O failure is logged and silently swallowed
-        so that compliance write failures never block execution.
+        F0.3 (bd-f606): all entries flow through :class:`ComplianceChainWriter`
+        so the log is tamper-evident.  Best-effort: any I/O failure is logged
+        and silently swallowed so that compliance write failures never block
+        execution.
 
         ``entry`` should include at minimum: ``timestamp``, ``event_type``,
         ``task_id``, ``plan_id``, ``step_id``, and ``agent_name``.
@@ -775,10 +794,9 @@ class ExecutionEngine:
         if self._compliance_log_path is None:
             return
         try:
-            self._compliance_log_path.parent.mkdir(parents=True, exist_ok=True)
-            line = json.dumps(entry, ensure_ascii=False) + "\n"
-            with self._compliance_log_path.open("a", encoding="utf-8") as fh:
-                fh.write(line)
+            writer = ComplianceChainWriter(log_path=self._compliance_log_path)
+            writer.append(entry)
+            return
         except Exception as exc:
             _log.warning("Compliance audit write failed (non-fatal): %s", exc)
 
@@ -1080,6 +1098,8 @@ class ExecutionEngine:
             current_phase=0,
             current_step_index=0,
             status=initial_status,
+            force_override=self._force_override,
+            override_justification=self._override_justification,
         )
 
         # Initialise trace (in-memory; committed to disk on complete()).
@@ -2313,6 +2333,9 @@ class ExecutionEngine:
             "step_results": [r.to_dict() for r in state.step_results],
             "step_plan": step_plan,
             "gate_results": [g.to_dict() for g in state.gate_results],
+            # F0.3 — VETO override (bd-f606): expose for diagnostics
+            "force_override": state.force_override,
+            "override_justification": state.override_justification,
         }
 
     def resume(self) -> ExecutionAction:
@@ -3465,6 +3488,143 @@ class ExecutionEngine:
 
     # ── State machine logic ─────────────────────────────────────────────────
 
+    # ── F0.3 — VETO enforcement (bd-f606) ─────────────────────────────────
+    @staticmethod
+    def _is_high_risk(plan_risk_level: str) -> bool:
+        """Return True when the plan's risk level enforces VETO blocks."""
+        return (plan_risk_level or "").upper() in _HIGH_RISK_LEVELS
+
+    def _scan_phase_for_veto(
+        self, state: ExecutionState, phase_obj: PlanPhase | None
+    ) -> tuple[AuditorVerdict | None, str, str]:
+        """Scan a finished phase's step results for an auditor verdict.
+
+        Looks at every completed step in *phase_obj*.  Auditor-style steps
+        (agent name contains ``"auditor"``) are scanned first; otherwise any
+        step outcome that contains a fenced verdict block is considered.
+
+        Returns a tuple ``(verdict, rationale, source_step_id)`` where
+        ``verdict`` is ``None`` when no verdict can be parsed.  When more
+        than one verdict is found, the most blocking one wins (VETO >
+        REQUEST_CHANGES > APPROVE_WITH_CONCERNS > APPROVE).
+        """
+        if phase_obj is None:
+            return None, "", ""
+
+        phase_step_ids = {s.step_id for s in phase_obj.steps}
+        # Sort: auditor agents first, then by step_id for deterministic order
+        candidate_results = [
+            r for r in state.step_results
+            if r.step_id in phase_step_ids and r.status == "complete"
+        ]
+        candidate_results.sort(
+            key=lambda r: (0 if "auditor" in (r.agent_name or "").lower() else 1, r.step_id)
+        )
+
+        severity = {
+            AuditorVerdict.APPROVE: 0,
+            AuditorVerdict.APPROVE_WITH_CONCERNS: 1,
+            AuditorVerdict.REQUEST_CHANGES: 2,
+            AuditorVerdict.VETO: 3,
+        }
+        best_verdict: AuditorVerdict | None = None
+        best_rationale = ""
+        best_source = ""
+        for r in candidate_results:
+            v = extract_verdict_from_text(r.outcome or "")
+            if v is None:
+                continue
+            if best_verdict is None or severity[v] > severity[best_verdict]:
+                best_verdict = v
+                best_rationale = self._extract_rationale(r.outcome or "")
+                best_source = r.step_id
+        return best_verdict, best_rationale, best_source
+
+    @staticmethod
+    def _extract_rationale(text: str) -> str:
+        """Pull a ``rationale`` field from the auditor's fenced JSON block.
+
+        Falls back to the empty string when no JSON block / rationale is
+        found.  Keeps parsing tolerant — a missing rationale must never
+        prevent VETO enforcement.
+        """
+        try:
+            fence_pattern = re.compile(
+                r"```(?:json)?\s*(\{.*?\})\s*```",
+                re.DOTALL | re.IGNORECASE,
+            )
+            for match in fence_pattern.finditer(text):
+                try:
+                    obj = json.loads(match.group(1))
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if isinstance(obj, dict) and "rationale" in obj:
+                    return str(obj.get("rationale") or "")
+        except Exception:
+            return ""
+        return ""
+
+    def _enforce_veto_before_advance(
+        self, state: ExecutionState, phase_obj: PlanPhase
+    ) -> None:
+        """Block phase-advance when the auditor returned VETO and risk is HIGH/CRITICAL.
+
+        Raises :class:`ExecutionVetoed` when:
+          - Plan ``risk_level`` is HIGH or CRITICAL, AND
+          - The just-completed phase has a VETO verdict, AND
+          - Neither ``state.force_override`` nor ``self._force_override`` is set.
+
+        When ``force_override`` is set, an Override row is appended to
+        ``compliance-audit.jsonl`` via :class:`ComplianceChainWriter` before
+        returning so the override is durably auditable.
+        """
+        if not self._is_high_risk(state.plan.risk_level):
+            return
+
+        verdict, rationale, source_step = self._scan_phase_for_veto(state, phase_obj)
+        if verdict is None or not verdict.blocks_execution:
+            return
+
+        force = bool(state.force_override or self._force_override)
+        justification = (
+            state.override_justification or self._override_justification or ""
+        ).strip()
+
+        if not force:
+            raise ExecutionVetoed(
+                phase_id=phase_obj.phase_id,
+                verdict=verdict,
+                rationale=rationale,
+            )
+
+        # Force path — record an Override row in the hash-chained log.
+        try:
+            chain_path = self._root / "compliance-audit.jsonl"
+            writer = ComplianceChainWriter(log_path=chain_path)
+            actor = state.override_justification and "override-cli" or "override-engine"
+            writer.append_override(
+                task_id=state.task_id,
+                actor=actor,
+                justification=justification or "(no justification supplied)",
+                overridden_verdict=verdict.value,
+            )
+        except Exception as exc:
+            _log.warning(
+                "Failed to append Override row for task %s phase %s: %s",
+                state.task_id, phase_obj.phase_id, exc,
+            )
+
+        self._log_telemetry_event(TelemetryEvent(
+            timestamp=_utcnow(),
+            agent_name="engine",
+            event_type="execution.veto_overridden",
+            details=(
+                f"task_id={state.task_id} phase_id={phase_obj.phase_id} "
+                f"source_step={source_step} verdict={verdict.value} "
+                f"justification={justification!r}"
+            ),
+        ))
+
     def _determine_action(self, state: ExecutionState) -> ExecutionAction:
         """Core state machine — inspect *state* and return the next action.
 
@@ -3766,6 +3926,13 @@ class ExecutionEngine:
                 gate_command=phase_obj.gate.command,
                 phase_id=phase_obj.phase_id,
             )
+
+        # F0.3 — VETO enforcement (bd-f606).  Before advancing past a
+        # HIGH/CRITICAL phase, scan for an auditor VETO verdict and either
+        # halt (raise ExecutionVetoed) or record an Override audit row.
+        # LOW/MEDIUM phases are not enforced — VETO only applies to the
+        # regulated tier.
+        self._enforce_veto_before_advance(state, phase_obj)
 
         # Gate passed (or no gate) — move to next phase.
         self._publish(evt.phase_completed(

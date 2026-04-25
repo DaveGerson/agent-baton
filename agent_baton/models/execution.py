@@ -1312,6 +1312,13 @@ class ExecutionState:
     # None until consolidation is attempted; absent in older state files
     # (graceful default applied in from_dict).
     consolidation_result: ConsolidationResult | None = None
+    # F0.3 — auditor VETO override (bd-f606).  When True the executor
+    # advances past a VETO'd HIGH/CRITICAL phase but appends an Override
+    # row to compliance-audit.jsonl via ComplianceChainWriter.
+    # Justification is required when force_override=True; the CLI rejects
+    # --force without --justification.
+    force_override: bool = False
+    override_justification: str = ""
 
     def __post_init__(self) -> None:
         if not self.started_at:
@@ -1376,6 +1383,8 @@ class ExecutionState:
                 if self.consolidation_result is not None
                 else None
             ),
+            "force_override": self.force_override,
+            "override_justification": self.override_justification,
         }
 
     @classmethod
@@ -1398,6 +1407,8 @@ class ExecutionState:
             resolved_decisions=[ResolvedDecision.from_dict(d) for d in data.get("resolved_decisions", [])],
             delivered_knowledge=dict(data.get("delivered_knowledge", {})),
             consolidation_result=ConsolidationResult.from_dict(cr_data) if cr_data is not None else None,
+            force_override=bool(data.get("force_override", False)),
+            override_justification=data.get("override_justification", ""),
         )
 
 
