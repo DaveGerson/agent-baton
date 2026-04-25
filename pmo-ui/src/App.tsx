@@ -2,6 +2,7 @@ import { useState, useCallback, useMemo, useRef } from 'react';
 import { KanbanBoard } from './components/KanbanBoard';
 import { ForgePanel } from './components/ForgePanel';
 import { BackOfHousePanel } from './components/BackOfHousePanel';
+import { SpecsPanel } from './components/SpecsPanel';
 import { KeyboardShortcutsDialog } from './components/KeyboardShortcutsDialog';
 import { useHotkeys } from './hooks/useHotkeys';
 import { usePersistedState } from './hooks/usePersistedState';
@@ -9,7 +10,7 @@ import { T, FONTS, SHADOWS } from './styles/tokens';
 import { ToastProvider } from './contexts/ToastContext';
 import type { PmoCard, PmoSignal } from './api/types';
 
-type View = 'kanban' | 'forge' | 'boh';
+type View = 'kanban' | 'forge' | 'boh' | 'specs';
 
 export default function App() {
   const [view, setView] = usePersistedState<View>('pmo:active-view', 'kanban');
@@ -71,6 +72,7 @@ export default function App() {
   const NAV_TABS = [
     { id: 'kanban' as const, label: 'The Rail',       emoji: '🥟' },
     { id: 'forge'  as const, label: 'The Forge',      emoji: '🍳' },
+    { id: 'specs'  as const, label: 'Specs',          emoji: '📋' },
     { id: 'boh'    as const, label: 'Back of House',  emoji: '🚪' },
   ];
 
@@ -146,7 +148,7 @@ export default function App() {
                 onClick={() => {
                   if (tab.id === 'kanban') backToBoard();
                   else if (tab.id === 'forge') openForge();
-                  else setView('boh');
+                  else setView(tab.id);
                 }}
                 style={{
                   display: 'flex', alignItems: 'center', gap: 5,
@@ -214,6 +216,15 @@ export default function App() {
             initialSignal={forgeSignal}
             onApproved={refreshBoard}
           />
+        </div>
+        <div
+          id="panel-specs"
+          role="tabpanel"
+          aria-labelledby="tab-specs"
+          aria-hidden={view !== 'specs'}
+          style={{ display: view === 'specs' ? 'block' : 'none', height: '100%' }}
+        >
+          <SpecsPanel onBack={backToBoard} />
         </div>
         <div
           id="panel-boh"

@@ -424,3 +424,60 @@ export interface Webhook {
 export interface WebhooksResponse {
   webhooks: Webhook[];
 }
+
+// ---------------------------------------------------------------------------
+// Spec types (F0.1 — First-Class Spec Entity)
+// ---------------------------------------------------------------------------
+
+export type SpecState =
+  | 'draft'
+  | 'reviewed'
+  | 'approved'
+  | 'executing'
+  | 'completed'
+  | 'archived';
+
+export interface SpecScore {
+  clarity?: number;
+  completeness?: number;
+  feasibility?: number;
+  testability?: number;
+  [key: string]: number | undefined;
+}
+
+export interface Spec {
+  spec_id: string;
+  title: string;
+  state: SpecState;
+  task_type: string;
+  author_id: string;
+  template_id: string | null;
+  content: string;
+  linked_plan_ids: string[];
+  score: SpecScore | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SpecListResponse {
+  specs: Spec[];
+  total: number;
+}
+
+export interface SpecApproveResponse {
+  spec_id: string;
+  state: SpecState;
+  updated_at: string;
+}
+
+export interface SpecMarkReviewedResponse {
+  spec_id: string;
+  state: SpecState;
+  updated_at: string;
+}
+
+export interface SpecArchiveResponse {
+  spec_id: string;
+  state: SpecState;
+  updated_at: string;
+}
