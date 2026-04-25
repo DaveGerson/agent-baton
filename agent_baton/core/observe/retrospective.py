@@ -29,12 +29,19 @@ Storage format: each retrospective is persisted as a pair of files in
 from __future__ import annotations
 
 import json
+import logging
 import re
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from agent_baton.models.feedback import RetrospectiveFeedback
 from agent_baton.models.knowledge import KnowledgeGapRecord
+
+if TYPE_CHECKING:
+    from agent_baton.core.engine.knowledge_telemetry import KnowledgeTelemetryStore
+
+logger = logging.getLogger(__name__)
 from agent_baton.models.retrospective import (
     AgentOutcome,
     ConflictRecord,
@@ -67,8 +74,16 @@ class RetrospectiveEngine:
     what the system should learn for next time.
     """
 
-    def __init__(self, retrospectives_dir: Path | None = None) -> None:
+    def __init__(
+        self,
+        retrospectives_dir: Path | None = None,
+        *,
+        telemetry: KnowledgeTelemetryStore | None = None,
+    ) -> None:
         self._dir = (retrospectives_dir or Path(".claude/team-context/retrospectives")).resolve()
+        # Optional F0.4 lifecycle telemetry side-channel; failures must not
+        # crash retro generation.
+        self._telemetry = telemetry
 
     @property
     def dir(self) -> Path:
@@ -87,6 +102,7 @@ class RetrospectiveEngine:
         task_summary: str = "",
         team_compositions: list[TeamCompositionRecord] | None = None,
         conflicts: list[ConflictRecord] | None = None,
+        attached_docs: list[tuple[str, str]] | None = None,
     ) -> Retrospective:
         """Generate a retrospective from a usage record plus qualitative input.
 
@@ -131,7 +147,7 @@ class RetrospectiveEngine:
                 seen_descriptions.add(gap.description)
                 merged_gaps.append(gap)
 
-        return Retrospective(
+        retro = Retrospective(
             task_id=usage.task_id,
             task_name=task_name or usage.task_id,
             timestamp=usage.timestamp,
@@ -149,6 +165,49 @@ class RetrospectiveEngine:
             team_compositions=team_compositions or [],
             conflicts=conflicts or [],
         )
+
+        # F0.4 telemetry: correlate task outcome with each attached knowledge
+        # doc.  Outcome score = gates_passed / (gates_passed + gates_failed),
+        # defaulting to 1.0 when no gates ran.  Best-effort — never raise.
+        if self._telemetry is not None and attached_docs:
+            self._emit_outcome_events(
+                attached_docs,
+                task_id=usage.task_id,
+                gates_passed=usage.gates_passed,
+                gates_failed=usage.gates_failed,
+            )
+
+        return retro
+
+    def _emit_outcome_events(
+        self,
+        attached_docs: list[tuple[str, str]],
+        *,
+        task_id: str,
+        gates_passed: int,
+        gates_failed: int,
+    ) -> None:
+        """Best-effort emission of KnowledgeOutcome telemetry rows."""
+        if self._telemetry is None:
+            return
+        total_gates = gates_passed + gates_failed
+        if total_gates > 0:
+            score = gates_passed / total_gates
+        else:
+            score = 1.0
+        for doc_name, pack_name in attached_docs:
+            try:
+                self._telemetry.record_outcome(
+                    doc_name=doc_name,
+                    pack_name=pack_name or "",
+                    task_id=task_id,
+                    outcome_correlation=score,
+                )
+            except Exception as exc:  # noqa: BLE001 — telemetry must not crash retro
+                logger.debug(
+                    "KnowledgeTelemetry.record_outcome failed for %s/%s: %s",
+                    pack_name, doc_name, exc,
+                )
 
     # ------------------------------------------------------------------
     # Implicit gap detection
