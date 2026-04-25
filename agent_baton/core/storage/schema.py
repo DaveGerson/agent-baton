@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -449,6 +449,42 @@ CREATE INDEX IF NOT EXISTS idx_teams_parent ON teams(task_id, parent_team_id);
 ALTER TABLE team_members ADD COLUMN sub_team  TEXT NOT NULL DEFAULT '[]';
 ALTER TABLE team_members ADD COLUMN synthesis TEXT NOT NULL DEFAULT '';
 """,
+    16: """
+-- v16: R3.1 — Release entity + plan tagging.
+--
+-- A Release is a named delivery target (e.g. "v2.5.0", "2026-Q2-stability")
+-- that plans/specs can be tagged against.  This is purely additive metadata:
+-- no execution, gating, or freeze logic is wired up here (R3.5 will add
+-- freeze gating later).
+--
+-- The releases table is project-scoped (lives in baton.db) but is also
+-- mirrored in central.db for cross-project rollups (R3.3, R3.4).  No
+-- project_id appears in the per-project DDL — central acquires it via
+-- CENTRAL_SCHEMA_DDL on fresh install.
+--
+-- The plans.release_id column is a soft FK (no REFERENCES clause in this
+-- migration) so existing project DBs upgrade cleanly via ALTER TABLE.
+-- Fresh project DBs created from PROJECT_SCHEMA_DDL get the same column
+-- as a nullable TEXT.  Untagged plans store NULL (the default for an
+-- ALTER TABLE ADD COLUMN with no default).
+--
+-- NOTE: FK constraints are intentionally omitted from this migration
+-- because it is applied to BOTH project and central databases via
+-- ConnectionManager._run_migrations().  Fresh project DBs get FKs from
+-- PROJECT_SCHEMA_DDL directly.
+CREATE TABLE IF NOT EXISTS releases (
+    release_id   TEXT PRIMARY KEY,
+    name         TEXT NOT NULL DEFAULT '',
+    target_date  TEXT NOT NULL DEFAULT '',
+    status       TEXT NOT NULL DEFAULT 'planned',
+    notes        TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_releases_status ON releases(status);
+
+ALTER TABLE plans ADD COLUMN release_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_plans_release ON plans(release_id);
+""",
 }
 
 # =====================================================================
@@ -477,6 +513,17 @@ CREATE TABLE IF NOT EXISTS executions (
 CREATE INDEX IF NOT EXISTS idx_executions_status ON executions(status);
 CREATE INDEX IF NOT EXISTS idx_executions_started ON executions(started_at);
 
+-- RELEASES (R3.1: named delivery targets that plans/specs can be tagged against)
+CREATE TABLE IF NOT EXISTS releases (
+    release_id   TEXT PRIMARY KEY,
+    name         TEXT NOT NULL DEFAULT '',
+    target_date  TEXT NOT NULL DEFAULT '',
+    status       TEXT NOT NULL DEFAULT 'planned',
+    notes        TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_releases_status ON releases(status);
+
 -- PLANS (replaces plan.json)
 CREATE TABLE IF NOT EXISTS plans (
     task_id                    TEXT PRIMARY KEY,
@@ -495,8 +542,14 @@ CREATE TABLE IF NOT EXISTS plans (
     task_type                  TEXT,
     classification_signals     TEXT,
     classification_confidence  REAL,
+    -- release_id: soft FK to releases.release_id (R3.1).  Not declared as a
+    -- hard REFERENCES because the v16 migration (ALTER TABLE ADD COLUMN)
+    -- cannot add an FK in SQLite, and migrated vs. fresh DBs must behave
+    -- identically.  Tagging is purely metadata; freeze gating is R3.5.
+    release_id                 TEXT,
     FOREIGN KEY (task_id) REFERENCES executions(task_id) ON DELETE CASCADE
 );
+CREATE INDEX IF NOT EXISTS idx_plans_release ON plans(release_id);
 
 -- PLAN_PHASES
 CREATE TABLE IF NOT EXISTS plan_phases (
@@ -1264,6 +1317,20 @@ CREATE INDEX IF NOT EXISTS idx_central_exec_status ON executions(status);
 CREATE INDEX IF NOT EXISTS idx_central_exec_project ON executions(project_id);
 CREATE INDEX IF NOT EXISTS idx_central_exec_started ON executions(started_at);
 
+-- RELEASES (R3.1: project-scoped target releases, mirrored centrally for rollups)
+CREATE TABLE IF NOT EXISTS releases (
+    project_id   TEXT NOT NULL,
+    release_id   TEXT NOT NULL,
+    name         TEXT NOT NULL DEFAULT '',
+    target_date  TEXT NOT NULL DEFAULT '',
+    status       TEXT NOT NULL DEFAULT 'planned',
+    notes        TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (project_id, release_id)
+);
+CREATE INDEX IF NOT EXISTS idx_central_releases_status ON releases(status);
+CREATE INDEX IF NOT EXISTS idx_central_releases_project ON releases(project_id);
+
 CREATE TABLE IF NOT EXISTS plans (
     project_id                 TEXT NOT NULL,
     task_id                    TEXT NOT NULL,
@@ -1282,10 +1349,12 @@ CREATE TABLE IF NOT EXISTS plans (
     task_type                  TEXT,
     classification_signals     TEXT,
     classification_confidence  REAL,
+    release_id                 TEXT,
     PRIMARY KEY (project_id, task_id)
 );
 CREATE INDEX IF NOT EXISTS idx_central_plans_risk ON plans(risk_level);
 CREATE INDEX IF NOT EXISTS idx_central_plans_project ON plans(project_id);
+CREATE INDEX IF NOT EXISTS idx_central_plans_release ON plans(release_id);
 
 CREATE TABLE IF NOT EXISTS plan_phases (
     project_id           TEXT NOT NULL,
