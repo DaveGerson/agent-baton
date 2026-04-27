@@ -78,7 +78,7 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     )
     sub = p.add_subparsers(dest="subcommand")
 
-    # baton execute start [--plan PATH] [--task-id ID]
+    # baton execute start [--plan PATH] [--task-id ID] [--dry-run]
     p_start = sub.add_parser("start", parents=[_task_id_parent],
                              help="Start execution from a saved plan")
     p_start.add_argument(
@@ -86,6 +86,28 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         default=".claude/team-context/plan.json",
         help="Path to plan.json (default: .claude/team-context/plan.json)",
     )
+    p_start.add_argument(
+        "--dry-run",
+        action="store_true",
+        dest="dry_run",
+        default=False,
+        help=(
+            "Dry-run mode: no Claude API calls and no file writes by agents.  "
+            "Subsequent 'baton execute next/run' calls will use the dry-run "
+            "launcher and gate runner.  Prints a banner so the mode is "
+            "visible at every step."
+        ),
+    )
+
+    # baton execute dry-run [--plan PATH] [--max-steps N]
+    # Convenience: load plan, start in dry-run mode, drive the loop to
+    # COMPLETE, and write a summary report.  Single-shot entrypoint.
+    p_dry = sub.add_parser("dry-run", parents=[_task_id_parent],
+                           help="Walk a plan end-to-end with no API calls and write a report")
+    p_dry.add_argument("--plan", default=".claude/team-context/plan.json",
+                       help="Path to plan.json (default: .claude/team-context/plan.json)")
+    p_dry.add_argument("--max-steps", type=int, default=50, dest="max_steps",
+                       help="Safety limit: maximum steps before aborting (default: 50)")
 
     # baton execute next [--all] [--terse] [--task-id ID]
     next_p = sub.add_parser("next", parents=[_task_id_parent],
@@ -244,6 +266,23 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
 
 
 _DISPATCH_PROMPT_SIDECAR = ".claude/team-context/current-dispatch.prompt.md"
+
+# Banner printed at the start of any dry-run flow.  Used by both
+# ``baton execute start --dry-run`` and ``baton execute dry-run`` so the
+# mode is visible at every entrypoint.
+_DRY_RUN_BANNER = (
+    "=== DRY RUN MODE — no API calls, no file writes will occur ==="
+)
+
+# Filename written by the dry-run report writer (relative to context_root).
+_DRY_RUN_REPORT_FILENAME = "dry-run-report.md"
+
+# Default placeholder durations used when a real launch did not actually
+# occur.  These are crude order-of-magnitude estimates intended to give
+# developers a "this plan would take ~N seconds" feel rather than precise
+# wall-clock values.
+_DRY_RUN_DISPATCH_SECONDS = 10.0
+_DRY_RUN_GATE_SECONDS = 2.0
 
 
 def _resolve_context_root() -> Path:
@@ -526,6 +565,10 @@ def handler(args: argparse.Namespace) -> None:
         _handle_run(args)
         return
 
+    if args.subcommand == "dry-run":
+        _handle_dry_run(args)
+        return
+
     # Resolve task_id: explicit flag → BATON_TASK_ID env var → SQLite active_task →
     #   file active-task-id.txt → None (legacy flat file)
     task_id = getattr(args, "task_id", None)
@@ -602,8 +645,12 @@ def handler(args: argparse.Namespace) -> None:
         # to call it again here.
         if getattr(args, "output", "text") == "json":
             result = {"task_id": task_id, "action": action.to_dict()}
+            if getattr(args, "dry_run", False):
+                result["dry_run"] = True
             print(json.dumps(result, indent=2))
         else:
+            if getattr(args, "dry_run", False):
+                print(_DRY_RUN_BANNER)
             print(f"Session binding: export BATON_TASK_ID={task_id}\n")
             _print_action(action.to_dict())
 
@@ -1029,6 +1076,289 @@ def _build_knowledge_resolver(plan: MachinePlan):
 # ---------------------------------------------------------------------------
 # Autonomous execution loop
 # ---------------------------------------------------------------------------
+
+def _handle_dry_run(args: argparse.Namespace) -> None:
+    """Drive a plan end-to-end with mock launchers and write a report.
+
+    Convenience entrypoint for the DX.5 dry-run testing harness.  Loads the
+    saved plan, starts a fresh execution in a tmp_path-style flow, walks
+    every action the engine emits using
+    :class:`agent_baton.core.engine.dry_run_launcher.TracingDryRunLauncher`
+    (no Claude API calls) and
+    :class:`agent_baton.core.engine.gates.DryRunGateRunner` (always-pass),
+    and writes ``dry-run-report.md`` to the team-context directory.
+
+    Approval and INTERACT actions are auto-progressed so the loop reaches
+    COMPLETE without user prompts.
+    """
+    plan_path = Path(args.plan)
+    context_root = _resolve_context_root()
+    max_steps = getattr(args, "max_steps", 50)
+
+    # ── Load plan ────────────────────────────────────────────────────────
+    if not plan_path.exists():
+        user_error(
+            f"plan file not found: {plan_path}",
+            hint="Run 'baton plan --save \"task description\"' first.",
+        )
+    try:
+        data = json.loads(plan_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        validation_error(f"plan.json is not valid JSON: {exc}")
+    try:
+        plan = MachinePlan.from_dict(data)
+    except (KeyError, ValueError, TypeError) as exc:
+        validation_error(f"plan.json has invalid structure: {exc}")
+
+    # ── Banner: visible at the very top of every dry-run ────────────────
+    print(_DRY_RUN_BANNER)
+
+    # ── Build engine + dry-run launcher/gate runner ──────────────────────
+    bus = EventBus()
+    storage = get_project_storage(context_root)
+    task_id = plan.task_id
+
+    engine = ExecutionEngine(
+        team_context_root=context_root,
+        bus=bus,
+        task_id=task_id,
+        storage=storage,
+    )
+    ContextManager(task_id=task_id).init_mission_log(
+        plan.task_summary, risk_level=plan.risk_level
+    )
+    action = engine.start(plan)
+
+    # Imports are local so file-only installs don't pay the cost on every
+    # ``baton execute`` invocation.
+    from agent_baton.core.engine.dry_run_launcher import (
+        TracingDryRunLauncher,
+    )
+    from agent_baton.core.engine.gates import DryRunGateRunner
+
+    launcher = TracingDryRunLauncher()
+    gate_runner = DryRunGateRunner()
+
+    # ── Drive the loop ───────────────────────────────────────────────────
+    import asyncio as _asyncio
+
+    steps_executed = 0
+    action_dict = action.to_dict()
+
+    while True:
+        atype = action_dict.get("action_type", "")
+
+        if atype == ActionType.COMPLETE.value:
+            engine.complete()
+            break
+
+        if atype == ActionType.FAILED.value:
+            print(
+                color_error("FAILED")
+                + f": {action_dict.get('summary', action_dict.get('message', ''))}",
+                file=sys.stderr,
+            )
+            break
+
+        if steps_executed >= max_steps:
+            print(
+                warning("ABORTED")
+                + f": reached max-steps limit ({max_steps})",
+                file=sys.stderr,
+            )
+            break
+
+        if atype == ActionType.DISPATCH.value:
+            step_id = action_dict.get("step_id", "")
+            agent_name = action_dict.get("agent_name", "")
+            agent_model = action_dict.get("agent_model", "sonnet")
+            prompt = action_dict.get("delegation_prompt", "")
+            print(
+                f"  [{step_id}] (dry-run) would dispatch {agent_name} "
+                f"(model={agent_model}, prompt={len(prompt)} chars)"
+            )
+            engine.mark_dispatched(step_id=step_id, agent_name=agent_name)
+            result = _asyncio.run(
+                launcher.launch(
+                    agent_name=agent_name,
+                    model=agent_model,
+                    prompt=prompt,
+                    step_id=step_id,
+                )
+            )
+            engine.record_step_result(
+                step_id=step_id,
+                agent_name=agent_name,
+                status=result.status,
+                outcome=result.outcome or "dry-run complete",
+                files_changed=list(result.files_changed),
+                duration_seconds=_DRY_RUN_DISPATCH_SECONDS,
+            )
+            steps_executed += 1
+
+        elif atype == ActionType.GATE.value:
+            phase_id = action_dict.get("phase_id", 0)
+            gate_type = action_dict.get("gate_type", "")
+            gate_cmd = action_dict.get("gate_command", "")
+            # Synthesize a PlanGate so DryRunGateRunner can record it.
+            from agent_baton.models.execution import PlanGate as _PlanGate
+            synthetic_gate = _PlanGate(
+                gate_type=gate_type or "test",
+                command=gate_cmd,
+            )
+            gate_runner.evaluate_output(
+                synthetic_gate, "", 0, phase_id=phase_id
+            )
+            print(
+                f"  [GATE] (dry-run) phase {phase_id} ({gate_type}): "
+                f"would run {gate_cmd or '(no command)'}"
+            )
+            engine.record_gate_result(
+                phase_id=phase_id,
+                passed=True,
+                output=f"[dry-run] {gate_cmd}",
+            )
+
+        elif atype == ActionType.APPROVAL.value:
+            phase_id = action_dict.get("phase_id", 0)
+            print(
+                f"  [APPROVAL] (dry-run) phase {phase_id}: auto-approving"
+            )
+            engine.record_approval_result(phase_id=phase_id, result="approve")
+
+        elif atype == ActionType.INTERACT.value:
+            step_id = action_dict.get("step_id", "")
+            print(
+                f"  [INTERACT] (dry-run) step {step_id}: "
+                "auto-completing interaction"
+            )
+            try:
+                engine.complete_interaction(step_id=step_id)
+            except (RuntimeError, ValueError) as exc:
+                print(f"    skipped (engine refused): {exc}", file=sys.stderr)
+                break
+
+        else:
+            # Unknown action type — bail to avoid an infinite loop.
+            print(
+                f"  [unknown action_type={atype!r}] aborting dry-run",
+                file=sys.stderr,
+            )
+            break
+
+        try:
+            action_dict = engine.next_action().to_dict()
+        except RuntimeError as exc:
+            print(
+                color_error("ERROR") + f": {exc}",
+                file=sys.stderr,
+            )
+            break
+
+    # ── Write report ─────────────────────────────────────────────────────
+    report_path = context_root / _DRY_RUN_REPORT_FILENAME
+    report_text = _build_dry_run_report(
+        plan=plan,
+        launcher=launcher,
+        gate_runner=gate_runner,
+        steps_executed=steps_executed,
+    )
+    try:
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(report_text, encoding="utf-8")
+        print(f"\nDry-run report written to: {report_path}")
+    except OSError as exc:
+        print(
+            warning("WARN")
+            + f": could not write dry-run report to {report_path}: {exc}",
+            file=sys.stderr,
+        )
+
+    # Always end with a clear summary banner.
+    print(success("COMPLETE") + ": dry-run finished without API calls.")
+
+
+def _build_dry_run_report(
+    *,
+    plan: MachinePlan,
+    launcher,  # TracingDryRunLauncher; typed as Any to avoid forward-ref churn
+    gate_runner,  # DryRunGateRunner
+    steps_executed: int,
+) -> str:
+    """Render the dry-run summary as Markdown.
+
+    Surfaces:
+    - Total steps executed, total dispatches, total gates run.
+    - Predicted token cost (sum of TracingDryRunLauncher per-step estimates;
+      falls back to "N/A" when no launches recorded).
+    - Total wall-clock estimate using the placeholder per-action constants.
+    - Per-step table with step_id, agent, model, status.
+    """
+    total_dispatches = len(launcher.launches)
+    total_gates = len(gate_runner.gates_run)
+    total_tokens = sum(
+        int(entry.get("estimated_tokens", 0)) for entry in launcher.launches
+    )
+    token_display = str(total_tokens) if total_dispatches else "N/A"
+    wall_clock = (
+        total_dispatches * _DRY_RUN_DISPATCH_SECONDS
+        + total_gates * _DRY_RUN_GATE_SECONDS
+    )
+
+    lines: list[str] = []
+    lines.append(f"# Dry-Run Report — {plan.task_id}")
+    lines.append("")
+    lines.append(f"**Task summary:** {plan.task_summary}")
+    lines.append("")
+    lines.append("## Summary")
+    lines.append("")
+    lines.append(f"- Total steps executed: {steps_executed}")
+    lines.append(f"- Total dispatches: {total_dispatches}")
+    lines.append(f"- Total gates run: {total_gates}")
+    lines.append(f"- Predicted token cost: {token_display}")
+    lines.append(
+        f"- Total wall-clock estimate: {wall_clock:.1f}s "
+        f"(placeholder: {_DRY_RUN_DISPATCH_SECONDS:.0f}s/dispatch + "
+        f"{_DRY_RUN_GATE_SECONDS:.0f}s/gate)"
+    )
+    lines.append("")
+    lines.append("## Steps")
+    lines.append("")
+    lines.append("| step_id | agent | model | status |")
+    lines.append("|---------|-------|-------|--------|")
+    # Build a step_id → model lookup from the plan so we can show the
+    # configured model alongside what the launcher actually saw.
+    plan_models: dict[str, str] = {}
+    for phase in plan.phases:
+        for step in phase.steps:
+            model = getattr(step, "model", "") or "sonnet"
+            plan_models[step.step_id] = model
+
+    for entry in launcher.launches:
+        sid = entry.get("step_id", "?")
+        agent = entry.get("agent_name", "?")
+        model = entry.get("model") or plan_models.get(sid, "?")
+        # Status column is always "complete" in dry-run unless the caller
+        # pre-configured a per-step override on the launcher.
+        result = launcher._results.get(sid)
+        status = result.status if result is not None else "complete"
+        lines.append(f"| {sid} | {agent} | {model} | {status} |")
+
+    if total_gates:
+        lines.append("")
+        lines.append("## Gates")
+        lines.append("")
+        lines.append("| phase_id | gate_type | command |")
+        lines.append("|----------|-----------|---------|")
+        for entry in gate_runner.gates_run:
+            phase = entry.get("phase_id", "?")
+            gtype = entry.get("gate_type", "?")
+            cmd = entry.get("command", "") or "(none)"
+            lines.append(f"| {phase} | {gtype} | `{cmd}` |")
+
+    lines.append("")
+    return "\n".join(lines)
+
 
 def _handle_run(args: argparse.Namespace) -> None:
     """Drive the full execution loop autonomously using headless Claude.
