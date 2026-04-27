@@ -70,8 +70,10 @@ def test_migration_creates_tables(conn: sqlite3.Connection) -> None:
     assert "knowledge_ab_assignments" in tables
 
 
-def test_schema_version_is_25() -> None:
-    assert SCHEMA_VERSION == 25
+def test_k24_migration_is_v25() -> None:
+    """K2.4 reserved schema version v25; SCHEMA_VERSION moves forward as
+    other waves land migrations on top of v25 (e.g. R3.8 ships v26)."""
+    assert SCHEMA_VERSION >= 25
     assert 25 in MIGRATIONS
 
 

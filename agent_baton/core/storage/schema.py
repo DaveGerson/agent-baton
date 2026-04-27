@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 25
+SCHEMA_VERSION = 26
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -412,6 +412,42 @@ CREATE TABLE IF NOT EXISTS approval_log (
 );
 CREATE INDEX IF NOT EXISTS idx_approval_log_task ON approval_log(task_id);
 CREATE INDEX IF NOT EXISTS idx_approval_log_user ON approval_log(user_id);
+""",
+    16: """
+-- v16: deployment profiles (R3.8).
+--
+-- deployment_profiles holds named bundles of deploy-time configuration:
+-- environment, required gate types, target SLO names, and allowed risk
+-- levels.  A profile is attached to a release via the deployment_profile_id
+-- FK on the releases table.
+--
+-- releases is created here as a lightweight stub so the FK column can be
+-- added.  Projects already at v15 via the multi-team migration will acquire
+-- both the standalone table and the FK column in one step.
+--
+-- NOTE: FK constraints are intentionally omitted from this migration because
+-- it is applied to BOTH project and central databases via
+-- ConnectionManager._run_migrations().  Fresh project DBs get FKs from
+-- PROJECT_SCHEMA_DDL directly.
+CREATE TABLE IF NOT EXISTS deployment_profiles (
+    profile_id          TEXT PRIMARY KEY,
+    name                TEXT NOT NULL DEFAULT '',
+    environment         TEXT NOT NULL DEFAULT '',
+    required_gates      TEXT NOT NULL DEFAULT '[]',
+    target_slos         TEXT NOT NULL DEFAULT '[]',
+    allowed_risk_levels TEXT NOT NULL DEFAULT '["LOW","MEDIUM"]',
+    description         TEXT NOT NULL DEFAULT '',
+    created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+
+CREATE TABLE IF NOT EXISTS releases (
+    release_id            TEXT PRIMARY KEY,
+    name                  TEXT NOT NULL DEFAULT '',
+    status                TEXT NOT NULL DEFAULT 'planned',
+    deployment_profile_id TEXT,
+    created_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_releases_profile ON releases(deployment_profile_id);
 """,
     15: """
 -- v15: multi-team orchestration — teams registry + sub_team/synthesis columns.
@@ -894,6 +930,26 @@ CREATE TABLE IF NOT EXISTS knowledge_ab_assignments (
 CREATE INDEX IF NOT EXISTS idx_kab_exp  ON knowledge_ab_assignments(experiment_id);
 CREATE INDEX IF NOT EXISTS idx_kab_task ON knowledge_ab_assignments(task_id);
 """,
+    26: """
+-- v26 (R3.8): deployment profiles + releases.deployment_profile_id soft-FK.
+--
+-- Named bundles of deploy-time configuration (required gates, target SLOs,
+-- allowed risk levels) attached to a release.  Velocity-positive: pure
+-- read-side configuration, ProfileChecker emits warnings only -- never blocks.
+CREATE TABLE IF NOT EXISTS deployment_profiles (
+    profile_id          TEXT PRIMARY KEY,
+    name                TEXT NOT NULL DEFAULT '',
+    environment         TEXT NOT NULL DEFAULT '',
+    required_gates      TEXT NOT NULL DEFAULT '[]',
+    target_slos         TEXT NOT NULL DEFAULT '[]',
+    allowed_risk_levels TEXT NOT NULL DEFAULT '["LOW","MEDIUM"]',
+    description         TEXT NOT NULL DEFAULT '',
+    created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+
+ALTER TABLE releases ADD COLUMN deployment_profile_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_releases_profile ON releases(deployment_profile_id);
+""",
 }
 
 # =====================================================================
@@ -922,16 +978,19 @@ CREATE TABLE IF NOT EXISTS executions (
 CREATE INDEX IF NOT EXISTS idx_executions_status ON executions(status);
 CREATE INDEX IF NOT EXISTS idx_executions_started ON executions(started_at);
 
--- RELEASES (R3.1: named delivery targets that plans/specs can be tagged against)
+-- RELEASES (R3.1: named delivery targets that plans/specs can be tagged
+-- against; R3.8 adds deployment_profile_id soft-FK).
 CREATE TABLE IF NOT EXISTS releases (
-    release_id   TEXT PRIMARY KEY,
-    name         TEXT NOT NULL DEFAULT '',
-    target_date  TEXT NOT NULL DEFAULT '',
-    status       TEXT NOT NULL DEFAULT 'planned',
-    notes        TEXT NOT NULL DEFAULT '',
-    created_at   TEXT NOT NULL DEFAULT ''
+    release_id            TEXT PRIMARY KEY,
+    name                  TEXT NOT NULL DEFAULT '',
+    target_date           TEXT NOT NULL DEFAULT '',
+    status                TEXT NOT NULL DEFAULT 'planned',
+    notes                 TEXT NOT NULL DEFAULT '',
+    created_at            TEXT NOT NULL DEFAULT '',
+    deployment_profile_id TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_releases_status ON releases(status);
+CREATE INDEX IF NOT EXISTS idx_releases_status  ON releases(status);
+CREATE INDEX IF NOT EXISTS idx_releases_profile ON releases(deployment_profile_id);
 
 -- SLOs (O1.5: operator-authored reliability targets + measurement history)
 CREATE TABLE IF NOT EXISTS slo_definitions (
@@ -1747,6 +1806,19 @@ CREATE TABLE IF NOT EXISTS knowledge_ab_assignments (
 );
 CREATE INDEX IF NOT EXISTS idx_kab_exp  ON knowledge_ab_assignments(experiment_id);
 CREATE INDEX IF NOT EXISTS idx_kab_task ON knowledge_ab_assignments(task_id);
+
+-- DEPLOYMENT_PROFILES (R3.8): named bundles of deploy-time configuration
+-- (required gates, target SLOs, allowed risk levels) attached to a release.
+CREATE TABLE IF NOT EXISTS deployment_profiles (
+    profile_id          TEXT PRIMARY KEY,
+    name                TEXT NOT NULL DEFAULT '',
+    environment         TEXT NOT NULL DEFAULT '',
+    required_gates      TEXT NOT NULL DEFAULT '[]',
+    target_slos         TEXT NOT NULL DEFAULT '[]',
+    allowed_risk_levels TEXT NOT NULL DEFAULT '["LOW","MEDIUM"]',
+    description         TEXT NOT NULL DEFAULT '',
+    created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
 """
 
 # =====================================================================
