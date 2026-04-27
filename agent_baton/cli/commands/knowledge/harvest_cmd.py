@@ -17,13 +17,15 @@ import argparse
 import sys
 from pathlib import Path
 
+from agent_baton.cli.commands.knowledge import (
+    dispatch as _knowledge_dispatch,
+    get_or_create_parser,
+    register_handler,
+)
+
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:  # type: ignore[type-arg]
-    p = subparsers.add_parser(
-        "knowledge",
-        help="Manage knowledge packs (harvest, etc.)",
-    )
-    sub = p.add_subparsers(dest="subcommand")
+    p, sub = get_or_create_parser(subparsers)
 
     p_harvest = sub.add_parser(
         "harvest",
@@ -74,25 +76,23 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         help="Override the .claude/knowledge root (mostly for tests)",
     )
 
+    register_handler("harvest", _handle_harvest)
     return p
 
 
 def handler(args: argparse.Namespace) -> None:
-    if not getattr(args, "subcommand", None):
-        print("usage: baton knowledge <subcommand>")
-        print("subcommands: harvest")
-        sys.exit(1)
-    if args.subcommand == "harvest":
-        kind = getattr(args, "harvest_kind", None)
-        if kind == "adrs":
-            _harvest_adrs(args)
-        elif kind == "reviews":
-            _harvest_reviews(args)
-        else:
-            print("usage: baton knowledge harvest {adrs|reviews}")
-            sys.exit(1)
+    """Auto-discovery entry — delegate to the shared knowledge dispatcher."""
+    _knowledge_dispatch(args)
+
+
+def _handle_harvest(args: argparse.Namespace) -> None:
+    kind = getattr(args, "harvest_kind", None)
+    if kind == "adrs":
+        _harvest_adrs(args)
+    elif kind == "reviews":
+        _harvest_reviews(args)
     else:
-        print(f"error: unknown knowledge subcommand: {args.subcommand}")
+        print("usage: baton knowledge harvest {adrs|reviews}")
         sys.exit(1)
 
 

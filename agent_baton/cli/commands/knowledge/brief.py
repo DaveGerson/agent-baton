@@ -13,6 +13,11 @@ import argparse
 import sys
 from pathlib import Path
 
+from agent_baton.cli.commands.knowledge import (
+    dispatch as _knowledge_dispatch,
+    get_or_create_parser,
+    register_handler,
+)
 from agent_baton.core.knowledge.codebase_brief import (
     CodebaseBriefer,
     render,
@@ -22,18 +27,8 @@ _DEFAULT_SAVE_PATH = Path(".claude/team-context/codebase-brief.md")
 
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:  # type: ignore[type-arg]
-    """Register ``baton knowledge brief``.
-
-    The ``knowledge`` parent parser owns sub-subcommands; ``brief`` is the
-    only one for now (K2.7).  Future ``knowledge X`` commands can extend
-    the same parent by adding their own sub-parsers — but care must be
-    taken to avoid registering the parent twice from multiple modules.
-    """
-    p = subparsers.add_parser(
-        "knowledge",
-        help="Codebase knowledge utilities (briefing, packs, etc.)",
-    )
-    sub = p.add_subparsers(dest="knowledge_cmd", metavar="SUBCOMMAND")
+    """Register ``baton knowledge brief`` via the cooperative parser helper."""
+    p, sub = get_or_create_parser(subparsers)
 
     brief_p = sub.add_parser(
         "brief",
@@ -65,26 +60,24 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         default="markdown",
         help="Output format (default: markdown)",
     )
+    register_handler("brief", _handle_brief)
     return p
 
 
 def handler(args: argparse.Namespace) -> None:
-    """Dispatch ``baton knowledge ...`` subcommands."""
-    sub = getattr(args, "knowledge_cmd", None)
-    if sub is None:
-        print(
-            "usage: baton knowledge {brief}\n\n"
-            "Run `baton knowledge brief --help` for details.",
-            file=sys.stderr,
-        )
-        sys.exit(2)
+    """Auto-discovery entry.
 
-    if sub == "brief":
+    When invoked through the CLI ``register()`` path, the cooperative
+    knowledge dispatcher routes via ``args.knowledge_cmd`` to the bound
+    ``_handle_brief``.  Tests that build their own ``argparse.Namespace``
+    and call ``handler`` directly (without first calling ``register``) get
+    the same behavior because the dispatcher falls through to a direct
+    branch on ``knowledge_cmd == 'brief'``.
+    """
+    if getattr(args, "knowledge_cmd", None) == "brief":
         _handle_brief(args)
         return
-
-    print(f"error: unknown knowledge subcommand '{sub}'", file=sys.stderr)
-    sys.exit(2)
+    _knowledge_dispatch(args)
 
 
 def _handle_brief(args: argparse.Namespace) -> None:
