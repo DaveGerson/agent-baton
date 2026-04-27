@@ -86,6 +86,16 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         default=".claude/team-context/plan.json",
         help="Path to plan.json (default: .claude/team-context/plan.json)",
     )
+    p_start.add_argument(
+        "--predict-conflicts",
+        action="store_true",
+        dest="predict_conflicts",
+        help=(
+            "Run R3.7 file-conflict prediction over the plan before "
+            "dispatching the first action and print warnings (never blocks). "
+            "Equivalent to setting BATON_CONFLICT_PREDICT=1."
+        ),
+    )
 
     # baton execute next [--all] [--terse] [--task-id ID]
     next_p = sub.add_parser("next", parents=[_task_id_parent],
@@ -244,6 +254,37 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
 
 
 _DISPATCH_PROMPT_SIDECAR = ".claude/team-context/current-dispatch.prompt.md"
+
+
+def _emit_conflict_predictions(plan: MachinePlan) -> None:
+    """Run R3.7 conflict prediction over *plan* and emit warnings.
+
+    Velocity-positive: warnings only, never blocks.  Defaults OFF; the
+    caller is responsible for the opt-in check (``--predict-conflicts``
+    flag or ``BATON_CONFLICT_PREDICT=1``).
+    """
+    # Local import keeps engine startup latency at zero for the default
+    # (opt-in disabled) path.
+    from agent_baton.core.release.conflict_predictor import ConflictPredictor
+
+    report = ConflictPredictor(plan).predict()
+    if not report.has_conflicts:
+        _log.info(
+            "Conflict prediction: no parallel-step conflicts found "
+            "(steps=%d, parallel_groups=%d)",
+            report.total_steps_analyzed,
+            report.parallel_groups_analyzed,
+        )
+        return
+    for c in report.conflicts:
+        msg = (
+            f"Predicted conflict: {c.step_a_id} <-> {c.step_b_id} "
+            f"on {c.file_path} ({c.conflict_type}, conf={c.confidence:.2f})"
+        )
+        _log.warning(msg)
+        # Also surface to stderr so operators see warnings without enabling
+        # debug logging.
+        print(f"WARNING: {msg}", file=sys.stderr)
 
 
 def _resolve_context_root() -> Path:
@@ -593,6 +634,14 @@ def handler(args: argparse.Namespace) -> None:
             policy_engine=policy_engine,
         )
         ContextManager(task_id=task_id).init_mission_log(plan.task_summary, risk_level=plan.risk_level)
+
+        # R3.7 — opt-in conflict prediction (warnings only, never blocks).
+        if (
+            getattr(args, "predict_conflicts", False)
+            or os.environ.get("BATON_CONFLICT_PREDICT") == "1"
+        ):
+            _emit_conflict_predictions(plan)
+
         try:
             action = engine.start(plan)
         except (ValueError, RuntimeError) as exc:
