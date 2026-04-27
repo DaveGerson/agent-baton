@@ -1,0 +1,17 @@
+[Unit]
+Description=Agent Baton Daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/baton daemon serve
+Restart=on-failure
+RestartSec=5s
+User=baton
+Group=baton
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
