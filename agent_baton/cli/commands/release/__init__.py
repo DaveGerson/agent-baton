@@ -1,7 +1,6 @@
 """CLI command group: release-quality tooling.
 
-Currently houses the ``predict-conflicts`` command (R3.7).  The
-``release`` directory is reserved for future release-time CLIs such as
-release-notes generation, deploy-time gates, and rollout summaries.
+Houses release-time CLIs: ``predict-conflicts`` (R3.7), ``release
+readiness`` (R3.2), release notes, deploy-time gates, rollout summaries.
 """
 from __future__ import annotations
