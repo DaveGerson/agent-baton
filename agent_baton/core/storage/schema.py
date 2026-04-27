@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 22
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -450,7 +450,6 @@ ALTER TABLE team_members ADD COLUMN sub_team  TEXT NOT NULL DEFAULT '[]';
 ALTER TABLE team_members ADD COLUMN synthesis TEXT NOT NULL DEFAULT '';
 """,
     16: """
-<<<<<<< HEAD
 -- v16: tenancy & cost attribution columns on usage_records / agent_usage /
 -- compliance_log so the F0.2 v_usage_by_team / v_usage_by_org /
 -- v_usage_by_cost_center views aggregate non-NULL groupings.
@@ -767,6 +766,53 @@ CREATE INDEX IF NOT EXISTS idx_releases_status ON releases(status);
 ALTER TABLE plans ADD COLUMN release_id TEXT;
 CREATE INDEX IF NOT EXISTS idx_plans_release ON plans(release_id);
 """,
+    22: """
+-- v22 (O1.5): SLO + error-budget tracking.
+--
+-- Three new tables backing the observability SLO subsystem:
+--
+--   slo_definitions      operator-authored reliability targets
+--   slo_measurements     point-in-time SLI computations (history)
+--   error_budget_burns   spans of elevated error-budget consumption
+--
+-- All three are read-side observation only -- nothing here adds gates or
+-- prompts.  FK constraints are intentionally omitted (this migration runs
+-- against both project and central databases; central uses composite PKs).
+CREATE TABLE IF NOT EXISTS slo_definitions (
+    name         TEXT PRIMARY KEY,
+    sli_query    TEXT NOT NULL,
+    target       REAL NOT NULL,
+    window_days  INTEGER NOT NULL DEFAULT 28,
+    description  TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS slo_measurements (
+    id                          INTEGER PRIMARY KEY AUTOINCREMENT,
+    slo_name                    TEXT NOT NULL,
+    window_start                TEXT NOT NULL,
+    window_end                  TEXT NOT NULL,
+    sli_value                   REAL NOT NULL,
+    target                      REAL NOT NULL,
+    is_meeting                  INTEGER NOT NULL DEFAULT 0,
+    error_budget_remaining_pct  REAL NOT NULL DEFAULT 0.0,
+    computed_at                 TEXT NOT NULL,
+    sample_size                 INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_slo_measurements_name ON slo_measurements(slo_name);
+CREATE INDEX IF NOT EXISTS idx_slo_measurements_computed ON slo_measurements(computed_at);
+
+CREATE TABLE IF NOT EXISTS error_budget_burns (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    slo_name             TEXT NOT NULL,
+    incident_id          TEXT NOT NULL DEFAULT '',
+    burn_rate            REAL NOT NULL DEFAULT 0.0,
+    budget_consumed_pct  REAL NOT NULL DEFAULT 0.0,
+    started_at           TEXT NOT NULL,
+    ended_at             TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_error_budget_burns_name ON error_budget_burns(slo_name);
+CREATE INDEX IF NOT EXISTS idx_error_budget_burns_started ON error_budget_burns(started_at);
+""",
 }
 
 # =====================================================================
@@ -805,6 +851,42 @@ CREATE TABLE IF NOT EXISTS releases (
     created_at   TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_releases_status ON releases(status);
+
+-- SLOs (O1.5: operator-authored reliability targets + measurement history)
+CREATE TABLE IF NOT EXISTS slo_definitions (
+    name         TEXT PRIMARY KEY,
+    sli_query    TEXT NOT NULL,
+    target       REAL NOT NULL,
+    window_days  INTEGER NOT NULL DEFAULT 28,
+    description  TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS slo_measurements (
+    id                          INTEGER PRIMARY KEY AUTOINCREMENT,
+    slo_name                    TEXT NOT NULL,
+    window_start                TEXT NOT NULL,
+    window_end                  TEXT NOT NULL,
+    sli_value                   REAL NOT NULL,
+    target                      REAL NOT NULL,
+    is_meeting                  INTEGER NOT NULL DEFAULT 0,
+    error_budget_remaining_pct  REAL NOT NULL DEFAULT 0.0,
+    computed_at                 TEXT NOT NULL,
+    sample_size                 INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_slo_measurements_name ON slo_measurements(slo_name);
+CREATE INDEX IF NOT EXISTS idx_slo_measurements_computed ON slo_measurements(computed_at);
+
+CREATE TABLE IF NOT EXISTS error_budget_burns (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    slo_name             TEXT NOT NULL,
+    incident_id          TEXT NOT NULL DEFAULT '',
+    burn_rate            REAL NOT NULL DEFAULT 0.0,
+    budget_consumed_pct  REAL NOT NULL DEFAULT 0.0,
+    started_at           TEXT NOT NULL,
+    ended_at             TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_error_budget_burns_name ON error_budget_burns(slo_name);
+CREATE INDEX IF NOT EXISTS idx_error_budget_burns_started ON error_budget_burns(started_at);
 
 -- PLANS (replaces plan.json)
 CREATE TABLE IF NOT EXISTS plans (
