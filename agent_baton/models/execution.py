@@ -1467,6 +1467,13 @@ class ExecutionAction:
     path_enforcement: str = ""
     # MCP server names to pass through to this dispatch:
     mcp_servers: list[str] = field(default_factory=list)
+    # Subagent isolation contract — set to "worktree" when the engine
+    # emits this action as part of a parallel DISPATCH wave (>=2 actions).
+    # The orchestrator MUST forward this onto the Agent invocation as
+    # ``isolation="worktree"`` so concurrent agents land in separate git
+    # worktrees and cannot contaminate the parent branch.  Empty string
+    # means no isolation contract (singleton or sequential dispatch).
+    isolation: str = ""
 
     # For GATE actions:
     gate_type: str = ""
@@ -1521,6 +1528,8 @@ class ExecutionAction:
                 d["interact_max_turns"] = self.interact_max_turns
             if self.command:
                 d["command"] = self.command
+            if self.isolation:
+                d["isolation"] = self.isolation
         elif self.action_type == ActionType.GATE:
             d.update({
                 "gate_type": self.gate_type,

@@ -1306,12 +1306,12 @@ class ExecutionEngine:
             | interacting_ids
         )
 
-        actions: list[ExecutionAction] = []
+        # First pass: discover which steps would dispatch this wave so we
+        # can decide isolation BEFORE building prompts.  Building first
+        # then rewriting would force a re-render to inject the Worktree
+        # Discipline block and relativize paths.
+        dispatchable_steps: list[tuple[PlanStep, bool]] = []
         for step in phase_obj.steps:
-            # Team steps can be re-entered while still in dispatched state
-            # when the team_dispatch tool has added new sub-team members
-            # mid-flight; _team_dispatch_action handles the "nothing ready"
-            # case by returning WAIT.
             is_in_flight_team = (
                 step.team
                 and step.step_id in dispatched
@@ -1324,12 +1324,20 @@ class ExecutionEngine:
                 dep in completed for dep in step.depends_on
             ):
                 continue
-            # Team steps route through _team_dispatch_action so nested
-            # sub-teams are expanded and the team_registry is populated.
+            dispatchable_steps.append((step, bool(is_in_flight_team)))
+
+        # Concurrent dispatch contract (Fix C, worktree-isolation-fix.md):
+        # 2+ steps in the wave -> each runs in its own worktree.  Pass
+        # isolation through _dispatch_action so the prompt includes the
+        # Worktree Discipline block and uses relativized paths.
+        wave_isolation = "worktree" if len(dispatchable_steps) >= 2 else ""
+
+        actions: list[ExecutionAction] = []
+        for step, is_in_flight_team in dispatchable_steps:
             if step.team:
-                team_action = self._team_dispatch_action(step, state)
-                # Skip the WAIT result when the step is already in flight —
-                # it adds nothing and would confuse batch callers.
+                team_action = self._team_dispatch_action(
+                    step, state, wave_isolation=wave_isolation,
+                )
                 if (
                     is_in_flight_team
                     and team_action.action_type == ActionType.WAIT
@@ -1337,7 +1345,11 @@ class ExecutionEngine:
                     continue
                 actions.append(team_action)
             else:
-                actions.append(self._dispatch_action(step, state))
+                actions.append(
+                    self._dispatch_action(
+                        step, state, isolation=wave_isolation,
+                    )
+                )
 
         return actions
 
@@ -4037,7 +4049,13 @@ class ExecutionEngine:
             ))
         return self._determine_action(state)
 
-    def _dispatch_action(self, step: PlanStep, state: ExecutionState) -> ExecutionAction:
+    def _dispatch_action(
+        self,
+        step: PlanStep,
+        state: ExecutionState,
+        *,
+        isolation: str = "",
+    ) -> ExecutionAction:
         """Build a DISPATCH action for *step*.
 
         Before building the prompt, runs a policy check against the active
@@ -4177,6 +4195,8 @@ class ExecutionEngine:
                 task_type=state.plan.task_type or "",
                 prior_beads=prior_beads or None,
                 delivered_knowledge=state.delivered_knowledge,
+                isolation=isolation or None,
+                project_root=self._project_root() if isolation else None,
             )
             # Persist the updated delivered_knowledge map so subsequent
             # dispatches in this run know which docs are already inlined.
@@ -4217,7 +4237,17 @@ class ExecutionEngine:
             path_enforcement=enforcement or "",
             interactive=step.interactive,
             interact_max_turns=step.max_turns if step.interactive else 10,
+            isolation=isolation,
         )
+
+    def _project_root(self) -> Path:
+        """Return the resolved project root.
+
+        ``self._root`` is ``<project>/.claude/team-context`` in normal use,
+        so the project root is two parents up.  Used for path
+        relativization in worktree-isolation dispatch (Fix A).
+        """
+        return self._root.parent.parent
 
     def _interact_action(
         self,
@@ -4637,7 +4667,11 @@ class ExecutionEngine:
         return None
 
     def _team_dispatch_action(
-        self, step: PlanStep, state: ExecutionState,
+        self,
+        step: PlanStep,
+        state: ExecutionState,
+        *,
+        wave_isolation: str = "",
     ) -> ExecutionAction:
         """Build a DISPATCH action with parallel_actions for each team member.
 
@@ -4752,6 +4786,17 @@ class ExecutionEngine:
                 message=f"Waiting for team members in step {step.step_id}.",
                 summary=f"Team step {step.step_id} has members in flight.",
             )
+
+        # Concurrent dispatch contract (Fix C, worktree-isolation-fix.md):
+        # mark isolation when (a) this team has 2+ members dispatching in
+        # parallel, OR (b) the enclosing phase wave already has 2+
+        # dispatchable steps (signaled via wave_isolation).
+        effective_iso = wave_isolation or (
+            "worktree" if len(member_actions) >= 2 else ""
+        )
+        if effective_iso:
+            for ma in member_actions:
+                ma.isolation = effective_iso
 
         # Return the first member action with the rest as parallel_actions.
         first = member_actions[0]
