@@ -20,18 +20,26 @@ import types
 
 from agent_baton.cli import commands as commands_pkg
 
-# Command groups for organized --help output
+# Deprecation banners: printed to stderr before the handler runs.
+_DEPRECATED_HELP: dict[str, str] = {
+    "evolve": "DEPRECATED: use 'baton learn run-cycle' instead.",
+    "experiment": "DEPRECATED: use 'baton learn run-cycle' instead.",
+}
+
+# Command groups for organized --help output (most-used groups first)
 _COMMAND_GROUPS: dict[str, list[str]] = {
     "Core Workflow": ["plan", "execute", "status"],
-    "Agents & Routing": ["agents", "route", "events", "incident"],
     "Observability": ["dashboard", "trace", "usage", "telemetry", "context-profile", "retro", "context", "export"],
-    "Integrations": ["webhook"],
-    "Governance": ["classify", "compliance", "policy", "escalations", "validate", "spec-check", "detect"],
-    "Improvement": ["scores", "evolve", "patterns", "budget", "changelog", "experiment", "anomalies", "improve", "learn"],
-    "Distribution": ["install", "uninstall", "package", "publish", "pull", "transfer", "verify-package"],
-    "Storage & Sync": ["sync", "source", "cquery", "migrate-storage", "cleanup"],
+    "Agents & Routing": ["agents", "route", "events", "incident"],
     "Memory": ["beads"],
+    "Knowledge": [],
+    "Improvement": ["scores", "evolve", "patterns", "budget", "changelog", "experiment", "anomalies", "improve", "learn"],
+    "Governance": ["classify", "compliance", "policy", "escalations", "validate", "spec-check", "detect"],
+    "Release": [],
     "Execution (Advanced)": ["daemon", "async", "decide"],
+    "Storage & Sync": ["sync", "source", "cquery", "migrate-storage", "cleanup"],
+    "Distribution": ["install", "uninstall", "package", "publish", "pull", "transfer", "verify-package"],
+    "Integrations": ["webhook"],
     "Portfolio": ["pmo", "serve"],
 }
 
@@ -129,7 +137,14 @@ def main(argv: list[str] | None = None) -> None:
         dispatch[subcommand] = mod
 
     # Build grouped help epilog
-    lines = ["\nCommand groups:"]
+    lines = ["\nCommon workflows:"]
+    lines.append("  baton quickstart                  # one-command onboarding")
+    lines.append("  baton plan \"...\" --save           # plan a task")
+    lines.append("  baton execute start               # start the engine")
+    lines.append("  baton status                      # see where you are")
+    lines.append("  baton dashboard                   # observability")
+    lines.append("")
+    lines.append("Command groups:")
     for group_name, cmd_names in _COMMAND_GROUPS.items():
         # Only include commands that actually exist
         available = [c for c in cmd_names if c in dispatch]
@@ -144,7 +159,7 @@ def main(argv: list[str] | None = None) -> None:
         lines.append(f"\n  Other:")
         lines.append(f"    {', '.join(ungrouped)}")
 
-    lines.append(f"\nQuick start:")
+    lines.append(f"\nDetailed walkthrough:")
     lines.append(f"  1. baton plan \"task description\" --save --explain")
     lines.append(f"  2. baton execute start")
     lines.append(f"  3. baton execute next              # get next action")
@@ -160,6 +175,17 @@ def main(argv: list[str] | None = None) -> None:
 
     parser.epilog = "\n".join(lines)
     parser.formatter_class = argparse.RawDescriptionHelpFormatter
+
+    # Print deprecation banner before parse_args so it appears even on --help.
+    # We pre-scan argv (or sys.argv[1:]) for a deprecated command token.
+    _scan = argv if argv is not None else sys.argv[1:]
+    for _token in _scan:
+        if _token in _DEPRECATED_HELP:
+            print(_DEPRECATED_HELP[_token], file=sys.stderr)
+            break
+        # Stop scanning at first non-flag token (the subcommand position)
+        if not _token.startswith("-"):
+            break
 
     args = parser.parse_args(argv)
 
