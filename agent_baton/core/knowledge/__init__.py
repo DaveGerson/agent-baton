@@ -1,14 +1,23 @@
-"""Knowledge effectiveness scoring + ROI helpers (K2.x roadmap).
+"""Knowledge subsystem — effectiveness analytics + DB-backed lifecycle metadata.
 
-This subpackage hosts the read-side analytics for knowledge documents:
-attachment counts, success rates, ROI per kilo-token, and stale-doc
-detection.  It is intentionally pure-stdlib and *read-only* with respect
-to telemetry sources — the consuming pipeline (K2.3) handles deletion.
+Knowledge content (markdown documents inside ``.claude/knowledge/<pack>/``)
+remains on disk and is loaded by ``agent_baton.core.orchestration.knowledge_registry``.
+This package layers two complementary read/write surfaces on top of that
+filesystem view:
 
-See ``effectiveness.py`` for the public API:
-    - ``compute_effectiveness``
-    - ``find_stale_docs``
-    - ``DocEffectiveness`` / ``StaleDoc`` dataclasses
-    - ``KnowledgeTelemetryStore`` protocol (default impl reads baton.db)
+* **Effectiveness analytics** (read-only): attachment counts, success
+  rates, ROI per kilo-token, and stale-doc detection — see
+  ``effectiveness.py``.
+* **Lifecycle metadata** (read/write): per-document usage counts,
+  last-used timestamps, deprecation flags, and retirement — see
+  ``lifecycle.py`` (K2.3).
+
+Public API:
+
+    from agent_baton.core.knowledge import KnowledgeLifecycle
 """
 from __future__ import annotations
+
+from agent_baton.core.knowledge.lifecycle import KnowledgeLifecycle
+
+__all__ = ["KnowledgeLifecycle"]
