@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 25
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -859,6 +859,40 @@ CREATE INDEX IF NOT EXISTS idx_knowledge_items_state ON knowledge_items(lifecycl
 CREATE INDEX IF NOT EXISTS idx_knowledge_items_pack  ON knowledge_items(pack_name);
 CREATE INDEX IF NOT EXISTS idx_knowledge_items_retire_after
     ON knowledge_items(retire_after);
+""",
+    25: """
+-- v25: knowledge A/B testing tables (K2.4).
+--
+-- knowledge_ab_experiments  -- registers two variant paths for a single
+--   knowledge document and tracks experiment lifecycle (active/stopped).
+-- knowledge_ab_assignments  -- one row per dispatch: records which variant
+--   was served and the eventual outcome (success/failure/'').
+--
+-- NOTE: No FK constraints — this migration is applied to BOTH project and
+-- central databases via ConnectionManager._run_migrations().  Fresh project
+-- DBs get the tables from PROJECT_SCHEMA_DDL (which also has no FKs here
+-- because experiments are task-independent registries).
+CREATE TABLE IF NOT EXISTS knowledge_ab_experiments (
+    experiment_id   TEXT PRIMARY KEY,
+    knowledge_id    TEXT NOT NULL,
+    variant_a_path  TEXT NOT NULL,
+    variant_b_path  TEXT NOT NULL,
+    split_ratio     REAL NOT NULL DEFAULT 0.5,
+    status          TEXT NOT NULL DEFAULT 'active',
+    started_at      TEXT NOT NULL,
+    stopped_at      TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS knowledge_ab_assignments (
+    assignment_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    experiment_id   TEXT NOT NULL,
+    task_id         TEXT NOT NULL,
+    step_id         TEXT NOT NULL DEFAULT '',
+    variant         TEXT NOT NULL,
+    assigned_at     TEXT NOT NULL,
+    outcome         TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_kab_exp  ON knowledge_ab_assignments(experiment_id);
+CREATE INDEX IF NOT EXISTS idx_kab_task ON knowledge_ab_assignments(task_id);
 """,
 }
 
@@ -1686,6 +1720,33 @@ CREATE INDEX IF NOT EXISTS idx_improvement_conflicts_detected
     ON improvement_conflicts(detected_at);
 CREATE INDEX IF NOT EXISTS idx_improvement_conflicts_severity
     ON improvement_conflicts(severity);
+
+-- KNOWLEDGE_AB_EXPERIMENTS (K2.4: A/B testing knowledge attachments)
+-- Registers two variant paths for a single knowledge document.
+CREATE TABLE IF NOT EXISTS knowledge_ab_experiments (
+    experiment_id   TEXT PRIMARY KEY,
+    knowledge_id    TEXT NOT NULL,
+    variant_a_path  TEXT NOT NULL,
+    variant_b_path  TEXT NOT NULL,
+    split_ratio     REAL NOT NULL DEFAULT 0.5,
+    status          TEXT NOT NULL DEFAULT 'active',
+    started_at      TEXT NOT NULL,
+    stopped_at      TEXT NOT NULL DEFAULT ''
+);
+
+-- KNOWLEDGE_AB_ASSIGNMENTS (K2.4: per-dispatch variant assignments)
+-- One row per dispatch: records which variant was served and the outcome.
+CREATE TABLE IF NOT EXISTS knowledge_ab_assignments (
+    assignment_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    experiment_id   TEXT NOT NULL,
+    task_id         TEXT NOT NULL,
+    step_id         TEXT NOT NULL DEFAULT '',
+    variant         TEXT NOT NULL,
+    assigned_at     TEXT NOT NULL,
+    outcome         TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_kab_exp  ON knowledge_ab_assignments(experiment_id);
+CREATE INDEX IF NOT EXISTS idx_kab_task ON knowledge_ab_assignments(task_id);
 """
 
 # =====================================================================

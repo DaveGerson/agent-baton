@@ -1,4 +1,4 @@
-"""Knowledge subsystem — effectiveness analytics + DB-backed lifecycle metadata.
+"""Knowledge subsystem — effectiveness analytics, lifecycle metadata, A/B testing.
 
 Knowledge content (markdown documents inside ``.claude/knowledge/<pack>/``)
 remains on disk and is loaded by ``agent_baton.core.orchestration.knowledge_registry``.
