@@ -39,9 +39,16 @@ def get_or_create_parser(
     if existing is not None:
         sub = getattr(existing, "_baton_knowledge_sub", None)
         if sub is None:
-            sub = existing.add_subparsers(
-                dest="knowledge_cmd", metavar="SUBCOMMAND",
-            )
+            # Older modules (brief.py, harvest_cmd.py) call add_subparsers
+            # directly on the parent without going through this helper.
+            # Find their existing _SubParsersAction via argparse internals
+            # rather than adding a second one (which raises
+            # "cannot have multiple subparser arguments").
+            sub = _find_existing_subparsers_action(existing)
+            if sub is None:
+                sub = existing.add_subparsers(
+                    dest="knowledge_cmd", metavar="SUBCOMMAND",
+                )
             existing._baton_knowledge_sub = sub  # type: ignore[attr-defined]
             existing.set_defaults(_dispatch=dispatch)
         return existing, sub
@@ -86,6 +93,21 @@ def dispatch(args: argparse.Namespace) -> None:
         print(f"error: unknown knowledge subcommand: {name}")
         return
     handler_fn(args)
+
+
+def _find_existing_subparsers_action(
+    parser: argparse.ArgumentParser,
+) -> argparse._SubParsersAction | None:  # type: ignore[type-arg]
+    """Return the parser's existing ``_SubParsersAction`` if one exists.
+
+    argparse stores actions in the private ``_actions`` list. Only one
+    ``_SubParsersAction`` is permitted per parser, so the first match (if
+    any) is the one we want to reuse.
+    """
+    for action in getattr(parser, "_actions", ()):
+        if isinstance(action, argparse._SubParsersAction):  # type: ignore[attr-defined]
+            return action
+    return None
 
 
 # Backward-compat alias for HEAD's previous private name.
