@@ -122,6 +122,7 @@ class KnowledgeResolver:
         step_token_budget: int = _STEP_TOKEN_BUDGET_DEFAULT,
         doc_token_cap: int = _DOC_TOKEN_CAP_DEFAULT,
         inline_byte_threshold: int = _INLINE_BYTE_THRESHOLD_DEFAULT,
+        lifecycle: "object | None" = None,
     ) -> None:
         self._registry = registry
         self._agent_registry = agent_registry
@@ -129,6 +130,11 @@ class KnowledgeResolver:
         self._step_token_budget = step_token_budget
         self._doc_token_cap = doc_token_cap
         self._inline_byte_threshold = inline_byte_threshold
+        # Optional KnowledgeLifecycle (K2.3) — when provided, every resolved
+        # attachment triggers a record_usage call so the lifecycle table
+        # tracks freshness without forcing a hard dependency on storage in
+        # tests that build a resolver against a stub registry.
+        self._lifecycle = lifecycle
 
     # ------------------------------------------------------------------
     # Public API
@@ -237,6 +243,20 @@ class KnowledgeResolver:
                     prior_step_id=prior.get(key),
                 )
                 attachments.append(attachment)
+
+        # K2.3: bump usage counters for every resolved attachment.  Failures
+        # here must never break resolution — lifecycle tracking is best-effort.
+        if self._lifecycle is not None:
+            for att in attachments:
+                pack = getattr(att, "pack_name", "") or ""
+                doc = getattr(att, "document_name", "") or ""
+                if not doc:
+                    continue
+                kid = f"{pack}/{doc}" if pack else doc
+                try:
+                    self._lifecycle.record_usage(kid)
+                except Exception as exc:  # noqa: BLE001 — never break resolve
+                    logger.debug("record_usage(%s) failed: %s", kid, exc)
 
         return attachments
 

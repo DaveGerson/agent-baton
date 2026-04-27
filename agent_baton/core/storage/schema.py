@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 23
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -449,6 +449,53 @@ CREATE INDEX IF NOT EXISTS idx_teams_parent ON teams(task_id, parent_team_id);
 ALTER TABLE team_members ADD COLUMN sub_team  TEXT NOT NULL DEFAULT '[]';
 ALTER TABLE team_members ADD COLUMN synthesis TEXT NOT NULL DEFAULT '';
 """,
+    23: """
+-- v23: knowledge lifecycle (K2.3) — freshness, deprecation, retirement.
+--
+-- Adds the knowledge_items table that tracks per-document lifecycle metadata
+-- for filesystem-backed knowledge packs.  Each row is keyed by knowledge_id
+-- (the canonical "<pack_name>/<doc_name>" string) so the table can be
+-- referenced from CLI/API without coupling to internal pack/doc primary keys.
+--
+-- Lifecycle states:
+--   active     -- in use; default state for any newly recorded knowledge_id.
+--   deprecated -- the user has flagged the item; it stays accessible during
+--                 the grace period (retire_after) so existing references do
+--                 not break.
+--   retired    -- past grace; the item is hidden from default lookups.
+--
+-- Velocity-positive defaults:
+--   * Items are *not* auto-deprecated by age.  Only an explicit
+--     ``mark_deprecated`` call (CLI or API) flips the state.
+--   * Auto-retirement only fires for items the user already deprecated and
+--     whose ``retire_after`` is in the past.
+--   * Stale-detection (``find_stale``) is purely informational — it reports
+--     candidates and never mutates state.
+--
+-- NOTE: Idempotent.  Re-applying CREATE TABLE IF NOT EXISTS / CREATE INDEX
+-- IF NOT EXISTS on a DB that already has the table is a no-op.
+--
+-- NOTE: This migration is applied to BOTH project and central databases via
+-- ConnectionManager._run_migrations().  The central DB acquires the table
+-- harmlessly; lifecycle data is per-project.
+CREATE TABLE IF NOT EXISTS knowledge_items (
+    knowledge_id        TEXT PRIMARY KEY,
+    pack_name           TEXT NOT NULL DEFAULT '',
+    doc_name            TEXT NOT NULL DEFAULT '',
+    lifecycle_state     TEXT NOT NULL DEFAULT 'active',
+    usage_count         INTEGER NOT NULL DEFAULT 0,
+    last_used_at        TEXT NOT NULL DEFAULT '',
+    deprecated_at       TEXT NOT NULL DEFAULT '',
+    retire_after        TEXT NOT NULL DEFAULT '',
+    deprecation_reason  TEXT NOT NULL DEFAULT '',
+    created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_knowledge_items_state ON knowledge_items(lifecycle_state);
+CREATE INDEX IF NOT EXISTS idx_knowledge_items_pack  ON knowledge_items(pack_name);
+CREATE INDEX IF NOT EXISTS idx_knowledge_items_retire_after
+    ON knowledge_items(retire_after);
+""",
 }
 
 # =====================================================================
@@ -739,6 +786,25 @@ CREATE TABLE IF NOT EXISTS knowledge_gaps (
     suggested_fix   TEXT NOT NULL DEFAULT '',
     FOREIGN KEY (task_id) REFERENCES retrospectives(task_id) ON DELETE CASCADE
 );
+
+-- KNOWLEDGE_ITEMS (K2.3 — lifecycle metadata for filesystem-backed knowledge)
+CREATE TABLE IF NOT EXISTS knowledge_items (
+    knowledge_id        TEXT PRIMARY KEY,
+    pack_name           TEXT NOT NULL DEFAULT '',
+    doc_name            TEXT NOT NULL DEFAULT '',
+    lifecycle_state     TEXT NOT NULL DEFAULT 'active',
+    usage_count         INTEGER NOT NULL DEFAULT 0,
+    last_used_at        TEXT NOT NULL DEFAULT '',
+    deprecated_at       TEXT NOT NULL DEFAULT '',
+    retire_after        TEXT NOT NULL DEFAULT '',
+    deprecation_reason  TEXT NOT NULL DEFAULT '',
+    created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_knowledge_items_state ON knowledge_items(lifecycle_state);
+CREATE INDEX IF NOT EXISTS idx_knowledge_items_pack  ON knowledge_items(pack_name);
+CREATE INDEX IF NOT EXISTS idx_knowledge_items_retire_after
+    ON knowledge_items(retire_after);
 
 -- ROSTER_RECOMMENDATIONS
 CREATE TABLE IF NOT EXISTS roster_recommendations (
