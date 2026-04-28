@@ -1526,7 +1526,7 @@ class ExecutionEngine:
                     state.task_id,
                     exc_info=True,
                 )
-        return self._determine_action(state)
+        return self._drive_resolver_loop(state)
 
     def next_action(self) -> ExecutionAction:
         """Determine and return the next action based on current state.
@@ -1560,7 +1560,7 @@ class ExecutionEngine:
                 summary=f"No execution state for '{task_hint}'.",
             )
 
-        action = self._determine_action(state)
+        action = self._drive_resolver_loop(state)
         self._save_execution(state)
         return action
 
@@ -3630,7 +3630,7 @@ class ExecutionEngine:
         except Exception as _be_resume_exc:  # pragma: no cover
             _log.debug("BudgetEnforcer resume restore skipped (non-fatal): %s", _be_resume_exc)
 
-        return self._determine_action(state)
+        return self._drive_resolver_loop(state)
 
     def recover_dispatched_steps(self) -> int:
         """Clear stale dispatched-step markers for crash recovery.
