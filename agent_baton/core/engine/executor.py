@@ -4963,6 +4963,51 @@ class ExecutionEngine:
             return self._state_handlers["running"]
         return handler
 
+    def _build_gate_action(self, phase_obj: PlanPhase) -> ExecutionAction:
+        """Build the standard GATE action for *phase_obj*.
+
+        Shared by ``EMPTY_PHASE_GATE``, ``PHASE_NEEDS_GATE``, and
+        ``GATE_PENDING`` arms — all three produce a byte-identical
+        ExecutionAction message.  ``GATE_FAILED`` uses a different (retry-
+        count-aware) message and is intentionally not routed through this
+        helper.
+        """
+        assert phase_obj.gate is not None
+        return ExecutionAction(
+            action_type=ActionType.GATE,
+            message=(
+                f"Run gate '{phase_obj.gate.gate_type}' for phase "
+                f"{phase_obj.phase_id}."
+            ),
+            gate_type=phase_obj.gate.gate_type,
+            gate_command=phase_obj.gate.command,
+            phase_id=phase_obj.phase_id,
+        )
+
+    def _publish_phase_started(self, state: ExecutionState) -> None:
+        """Publish ``phase_pre_start`` + ``phase_started`` events for the
+        phase referenced by ``state.current_phase`` (post-advance).
+
+        Shared by ``EMPTY_PHASE_ADVANCE`` and ``PHASE_ADVANCE_OK`` arms —
+        the bodies of both are byte-identical post-advance.  No-op when
+        ``state.current_phase`` has walked past the last phase (the engine
+        emits the COMPLETE action on the next resolver pass).
+        """
+        if state.current_phase < len(state.plan.phases):
+            next_phase = state.plan.phases[state.current_phase]
+            self._publish(evt.phase_pre_start(
+                task_id=state.task_id,
+                phase_id=next_phase.phase_id,
+                phase_name=next_phase.name,
+                step_count=len(next_phase.steps),
+            ))
+            self._publish(evt.phase_started(
+                task_id=state.task_id,
+                phase_id=next_phase.phase_id,
+                phase_name=next_phase.name,
+                step_count=len(next_phase.steps),
+            ))
+
     def _apply_resolver_decision(
         self,
         state: ExecutionState,
@@ -4994,8 +5039,16 @@ class ExecutionEngine:
             #   (a) state.status == "failed" already — pure report.
             #   (b) gate_failed with fail_count >= max_retries — flip to
             #       "failed" and persist BEFORE returning the action.
-            if state.status != "failed" and decision.fail_count > 0:
-                state.status = "failed"
+            # Read status BEFORE handler.handle() so the legacy gate
+            # (only flip+save when transitioning out of a non-failed status
+            # via a gate exhaustion) is preserved.  See design §3.1.
+            pre_status = state.status
+            if pre_status != "failed" and decision.fail_count > 0:
+                handler = self._state_handler_for(pre_status)
+                handler.handle(state, decision)
+                # Handler (ExecutingPhaseState or AwaitingApprovalState) flips
+                # status to "failed".  Persist after the handler call to
+                # preserve legacy ordering.
                 self._save_execution(state)
             return ExecutionAction(
                 action_type=ActionType.FAILED,
@@ -5097,7 +5150,7 @@ class ExecutionEngine:
         if kind == DecisionKind.EMPTY_PHASE_GATE:
             phase_obj = state.current_phase_obj
             assert phase_obj is not None and phase_obj.gate is not None
-            state.status = "gate_pending"
+            self._state_handler_for(state.status).handle(state, decision)
             return ExecutionAction(
                 action_type=ActionType.GATE,
                 message=(
@@ -5119,27 +5172,13 @@ class ExecutionEngine:
                 phase_name=phase_obj.name,
             ))
             self._synthesize_beads_post_phase()
-            state.current_phase += 1
-            state.current_step_index = 0
-            if state.current_phase < len(state.plan.phases):
-                next_phase = state.plan.phases[state.current_phase]
-                self._publish(evt.phase_pre_start(
-                    task_id=state.task_id,
-                    phase_id=next_phase.phase_id,
-                    phase_name=next_phase.name,
-                    step_count=len(next_phase.steps),
-                ))
-                self._publish(evt.phase_started(
-                    task_id=state.task_id,
-                    phase_id=next_phase.phase_id,
-                    phase_name=next_phase.name,
-                    step_count=len(next_phase.steps),
-                ))
+            self._phase_manager.advance_phase(state, set_status_running=False)
+            self._publish_phase_started(state)
             return None  # loop
 
         # ── A failed step in this phase short-circuits to FAILED ────────────
         if kind == DecisionKind.STEP_FAILED_IN_PHASE:
-            state.status = "failed"
+            self._state_handler_for(state.status).handle(state, decision)
             self._close_open_beads_at_terminal(state, succeeded=False)
             return ExecutionAction(
                 action_type=ActionType.FAILED,
@@ -5235,7 +5274,9 @@ class ExecutionEngine:
             result.error = timeout_msg
             result.completed_at = _utcnow()
             result.updated_at = _utcnow()
-            state.status = "failed"
+            # Hand the overall-status flip to the state handler.  Heavy bead
+            # write + record_step_result recursion remain on the engine.
+            self._state_handler_for(state.status).handle(state, decision)
             self.record_step_result(
                 step_id=result.step_id,
                 agent_name=result.agent_name,
@@ -5271,21 +5312,21 @@ class ExecutionEngine:
         if kind == DecisionKind.PHASE_NEEDS_APPROVAL:
             phase_obj = state.current_phase_obj
             assert phase_obj is not None
-            state.status = "approval_pending"
+            self._state_handler_for(state.status).handle(state, decision)
             return self._approval_action(state, phase_obj)
 
         # ── PHASE_NEEDS_FEEDBACK ────────────────────────────────────────────
         if kind == DecisionKind.PHASE_NEEDS_FEEDBACK:
             phase_obj = state.current_phase_obj
             assert phase_obj is not None
-            state.status = "feedback_pending"
+            self._state_handler_for(state.status).handle(state, decision)
             return self._feedback_action(state, phase_obj)
 
         # ── PHASE_NEEDS_GATE: build GATE action and flip status ─────────────
         if kind == DecisionKind.PHASE_NEEDS_GATE:
             phase_obj = state.current_phase_obj
             assert phase_obj is not None and phase_obj.gate is not None
-            state.status = "gate_pending"
+            self._state_handler_for(state.status).handle(state, decision)
             return ExecutionAction(
                 action_type=ActionType.GATE,
                 message=(
@@ -5310,23 +5351,8 @@ class ExecutionEngine:
                 phase_name=phase_obj.name,
             ))
             self._synthesize_beads_post_phase()
-            state.current_phase += 1
-            state.current_step_index = 0
-            state.status = "running"
-            if state.current_phase < len(state.plan.phases):
-                next_phase = state.plan.phases[state.current_phase]
-                self._publish(evt.phase_pre_start(
-                    task_id=state.task_id,
-                    phase_id=next_phase.phase_id,
-                    phase_name=next_phase.name,
-                    step_count=len(next_phase.steps),
-                ))
-                self._publish(evt.phase_started(
-                    task_id=state.task_id,
-                    phase_id=next_phase.phase_id,
-                    phase_name=next_phase.name,
-                    step_count=len(next_phase.steps),
-                ))
+            self._phase_manager.advance_phase(state, set_status_running=True)
+            self._publish_phase_started(state)
             return None  # loop
 
         # Defensive: should be unreachable — every DecisionKind is handled.
