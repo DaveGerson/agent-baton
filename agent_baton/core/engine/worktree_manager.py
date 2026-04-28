@@ -607,16 +607,26 @@ class WorktreeManager:
 
     @staticmethod
     def _parse_conflict_files(output: str) -> list[str]:
-        """Extract conflict file names from git output."""
+        """Extract conflict file paths from git rebase/merge output.
+
+        bd-c9e7: the previous split-on-colon approach returned prose such as
+        "Merge conflict in foo.py" instead of the bare path "foo.py".  Use a
+        regex to capture the trailing path component from both git output
+        formats:
+
+          CONFLICT (content): Merge conflict in path/to/file.py
+          Merge conflict in path/to/file.py
+        """
+        import re as _re
+        _CONFLICT_RE = _re.compile(
+            r"^(?:CONFLICT\s*\([^)]+\):\s*)?(?:Merge conflict|content) in (.+)$"
+        )
         files: list[str] = []
         for line in output.splitlines():
             line = line.strip()
-            if line.startswith("CONFLICT") and ":" in line:
-                parts = line.split(":", 1)
-                if len(parts) == 2:
-                    files.append(parts[1].strip())
-            elif line.startswith("Auto-merging "):
-                pass  # not a conflict
+            m = _CONFLICT_RE.match(line)
+            if m:
+                files.append(m.group(1).strip())
         return files
 
     def cleanup(
