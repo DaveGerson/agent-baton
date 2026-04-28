@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 26
+SCHEMA_VERSION = 27
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -950,6 +950,31 @@ CREATE TABLE IF NOT EXISTS deployment_profiles (
 ALTER TABLE releases ADD COLUMN deployment_profile_id TEXT;
 CREATE INDEX IF NOT EXISTS idx_releases_profile ON releases(deployment_profile_id);
 """,
+    27: """
+-- v27 (Wave 2.2): agent_context table for ContextHarvester.
+--
+-- Stores compact "what this agent learned in this domain" rows so that
+-- subsequent dispatches to the same (agent_name, domain) prepend a
+-- "Prior Context" block to the delegation prompt, eliminating cold-start
+-- re-discovery costs.  Keyed by (agent_name, domain) — only the most
+-- recent harvest per pair is retained (UPSERT semantics).
+--
+-- Velocity-positive: best-effort write after every successful step,
+-- best-effort read on every dispatch.  Failures never block execution.
+-- See agent_baton/core/intel/context_harvester.py for the harvester logic
+-- and dispatcher.build_delegation_prompt for the read-side surface.
+CREATE TABLE IF NOT EXISTS agent_context (
+    agent_name         TEXT NOT NULL,
+    domain             TEXT NOT NULL,
+    expertise_summary  TEXT NOT NULL DEFAULT '',
+    strategies_worked  TEXT NOT NULL DEFAULT '',
+    strategies_failed  TEXT NOT NULL DEFAULT '',
+    last_task_id       TEXT NOT NULL DEFAULT '',
+    updated_at         TEXT NOT NULL,
+    PRIMARY KEY (agent_name, domain)
+);
+CREATE INDEX IF NOT EXISTS idx_agent_context_agent ON agent_context(agent_name);
+""",
 }
 
 # =====================================================================
@@ -1819,6 +1844,22 @@ CREATE TABLE IF NOT EXISTS deployment_profiles (
     description         TEXT NOT NULL DEFAULT '',
     created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );
+
+-- AGENT_CONTEXT (Wave 2.2): per-(agent, domain) harvested learnings used
+-- by ContextHarvester to eliminate cold-start re-discovery on subsequent
+-- dispatches.  Mirrors MIGRATIONS[27].  See
+-- agent_baton/core/intel/context_harvester.py.
+CREATE TABLE IF NOT EXISTS agent_context (
+    agent_name         TEXT NOT NULL,
+    domain             TEXT NOT NULL,
+    expertise_summary  TEXT NOT NULL DEFAULT '',
+    strategies_worked  TEXT NOT NULL DEFAULT '',
+    strategies_failed  TEXT NOT NULL DEFAULT '',
+    last_task_id       TEXT NOT NULL DEFAULT '',
+    updated_at         TEXT NOT NULL,
+    PRIMARY KEY (agent_name, domain)
+);
+CREATE INDEX IF NOT EXISTS idx_agent_context_agent ON agent_context(agent_name);
 """
 
 # =====================================================================
