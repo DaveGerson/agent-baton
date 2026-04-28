@@ -2197,7 +2197,20 @@ class IntelligentPlanner:
         text_words = set(re.findall(r"\b\w+\b", text_lower))
 
         # Filter reviewer agents out — they must not implement.
-        eligible = [a for a in candidate_agents if not is_reviewer_agent(a)]
+        # bd-0e36: also filter architect-class agents — concern-split steps
+        # are implementation work and architects belong in Phase 1 design.
+        _ARCHITECT_BASES = {"architect", "ai-systems-architect"}
+        eligible = [
+            a for a in candidate_agents
+            if not is_reviewer_agent(a)
+            and a.split("--")[0] not in _ARCHITECT_BASES
+        ]
+        if not eligible:
+            # Last resort: drop only the reviewer filter, keep architect block.
+            eligible = [
+                a for a in candidate_agents
+                if a.split("--")[0] not in _ARCHITECT_BASES
+            ]
         if not eligible:
             eligible = list(candidate_agents) or ["backend-engineer"]
 
@@ -2783,6 +2796,31 @@ class IntelligentPlanner:
         "review": ["code-reviewer", "security-reviewer", "auditor", "architect"],
     }
 
+    # bd-0e36: agent roles that must NOT be routed to a given phase, even
+    # by round-robin/leftover passes.  Architect-class agents are reserved
+    # for design/research/review phases — they must not own Implement or
+    # Fix steps.  When the only candidate for a phase is a blocked role,
+    # the planner falls back to a generic implementer.
+    _PHASE_BLOCKED_ROLES: dict[str, set[str]] = {
+        "implement": {"architect", "ai-systems-architect"},
+        "fix": {"architect", "ai-systems-architect"},
+        "draft": set(),
+    }
+
+    # Fallback agent used when a phase has no eligible candidates after
+    # blocked-role filtering (bd-0e36).
+    _IMPLEMENT_FALLBACK_AGENT = "backend-engineer"
+
+    @classmethod
+    def _is_blocked_for_phase(cls, agent_name: str, phase_name: str) -> bool:
+        """Return True if *agent_name* must not be assigned to *phase_name*.
+
+        See ``_PHASE_BLOCKED_ROLES`` for the policy table.  bd-0e36.
+        """
+        base = agent_name.split("--")[0]
+        blocked = cls._PHASE_BLOCKED_ROLES.get(phase_name.lower(), set())
+        return base in blocked
+
     def _assign_agents_to_phases(
         self, phases: list[PlanPhase], agents: list[str], task_summary: str = ""
     ) -> list[PlanPhase]:
@@ -2830,26 +2868,50 @@ class IntelligentPlanner:
                 if matched:
                     break
 
-        # Pass 2: assign remaining agents to remaining phases round-robin
+        # Pass 2: assign remaining agents to remaining phases round-robin.
+        # bd-0e36: skip agents blocked for this phase (e.g. architect on
+        # Implement); rotate them to the back of the queue and try the next
+        # candidate.
         for phase in list(remaining_phases):
-            if remaining_agents:
-                agent = remaining_agents.pop(0)
-                assigned.append((phase, agent))
+            chosen: str | None = None
+            skipped: list[str] = []
+            while remaining_agents:
+                candidate = remaining_agents.pop(0)
+                if self._is_blocked_for_phase(candidate, phase.name):
+                    skipped.append(candidate)
+                    continue
+                chosen = candidate
+                break
+            # Restore skipped agents so other phases can still use them.
+            remaining_agents = skipped + remaining_agents
+            if chosen is not None:
+                assigned.append((phase, chosen))
                 remaining_phases.remove(phase)
 
-        # Pass 3: phases still unassigned — reuse the best-fit agent from pool
+        # Pass 3: phases still unassigned — reuse the best-fit agent from pool.
+        # bd-0e36: prefer ideal roles, then any non-blocked agent, then
+        # fall back to the implement-fallback agent rather than re-using
+        # a blocked role like architect.
         for phase in remaining_phases:
             ideal_roles = self._PHASE_IDEAL_ROLES.get(phase.name.lower(), [])
             best = None
             for role in ideal_roles:
                 for agent in agents:
-                    if agent.split("--")[0] == role:
+                    if agent.split("--")[0] == role and not self._is_blocked_for_phase(agent, phase.name):
                         best = agent
                         break
                 if best:
                     break
             if best is None:
-                best = agents[0]
+                # Try any non-blocked agent from the pool.
+                for agent in agents:
+                    if not self._is_blocked_for_phase(agent, phase.name):
+                        best = agent
+                        break
+            if best is None:
+                # All pool agents are blocked for this phase — synthesize a
+                # generic implementer so we don't violate the policy table.
+                best = self._IMPLEMENT_FALLBACK_AGENT
             assigned.append((phase, best))
 
         # Pass 4: leftover agents — add to work phases only.
@@ -2857,6 +2919,8 @@ class IntelligentPlanner:
         # have at most one agent from Passes 1-3.  Leftover agents are placed
         # only into implementation-like phases (implement, fix, draft) to avoid
         # bloated plans where every agent gets a redundant design/review step.
+        # bd-0e36: skip leftover agents that are blocked for every work phase
+        # (e.g. architect) — they should not be force-fit into Implement.
         _WORK_PHASES = {"implement", "fix", "draft"}
         for agent in remaining_agents:
             base = agent.split("--")[0]
@@ -2864,18 +2928,24 @@ class IntelligentPlanner:
             for phase_name, roles in self._PHASE_IDEAL_ROLES.items():
                 if phase_name not in _WORK_PHASES:
                     continue
-                if base in roles:
+                if base in roles and not self._is_blocked_for_phase(agent, phase_name):
                     best_phase = next(
                         (p for p in phases if p.name.lower() == phase_name), None
                     )
                     if best_phase:
                         break
             if best_phase is None:
-                # Fall back to the first work phase, or first phase if none
-                best_phase = next(
-                    (p for p in phases if p.name.lower() in _WORK_PHASES),
-                    phases[0],
-                )
+                # Fall back to the first non-blocked work phase, or skip if
+                # the agent is blocked from every work phase.
+                for p in phases:
+                    if p.name.lower() in _WORK_PHASES and not self._is_blocked_for_phase(agent, p.name):
+                        best_phase = p
+                        break
+            if best_phase is None:
+                # Truly nowhere to land this agent — drop it from the leftover
+                # pass.  Pass 1-3 already gave it (or its role peers) at least
+                # one assignment elsewhere if it had any phase affinity.
+                continue
             assigned.append((best_phase, agent))
 
         # Build PlanStep objects from assignments
