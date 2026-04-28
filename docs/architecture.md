@@ -1640,6 +1640,48 @@ creation entirely; all lifecycle methods become no-ops.
 
 See `docs/specs/velocity-engine-spec.md` (Wave 1.3) for the full design.
 
+### 13.7 Wave 5 — Human/Agent Loop Primitives
+
+Wave 5 introduces three primitives that close the loop between failed
+agent steps and human (or higher-tier) intervention.  Each is gated by an
+environment variable so the platform can ship them as opt-in and roll
+forward incrementally.
+
+**Takeover (Wave 5.1, bd-e208).**  When a step fails, its retained
+worktree is left on disk and a developer can take it over with `baton
+execute takeover STEP_ID [--editor CMD] [--shell] [--reason TEXT]
+[--no-rerun-gate]`.  The CLI launches an editor/shell inside the
+worktree, records the takeover in `state.takeover_records`, and pauses
+execution at status `paused-takeover`.  After the developer commits
+their fix, `baton execute resume` re-runs the failed gate (or skips it
+with `--no-rerun-gate`); on success the dev commits are folded back
+into the parent branch and the worktree is reclaimed.  `baton execute
+resume --abort` discards the takeover and marks the step as
+permanently failed.  Default: `BATON_TAKEOVER_ENABLED=1` (on).
+
+**Self-heal (Wave 5.2, bd-1483).**  When a gate fails, the engine can
+automatically re-dispatch the failing step at a higher model tier
+(`haiku` → `sonnet` → `opus`) up to a configurable cap, optionally
+trimmed to just the failing assertion via gate output parsing.  An
+operator can also trigger a manual escalation with `baton execute
+self-heal STEP_ID [--max-tier opus]`.  Each retry emits a
+`selfheal_attempt` trace event so the closed-loop learning pipeline
+can score escalation effectiveness.  Default:
+`BATON_SELFHEAL_ENABLED=0` (off — opt-in until we have enough
+production data on cost vs. recovery rate).
+
+**Speculate (Wave 5.3, bd-9839).**  Speculative pipelines launch the
+next likely step in a sibling worktree before the current step
+completes.  If the parent step succeeds with a compatible commit, the
+speculative work is `accept`ed and folded in; otherwise it is
+`reject`ed and reclaimed.  `baton execute speculate
+status|accept|reject|show [SPEC_ID]` is the operator-facing surface.
+Default: `BATON_SPECULATE_ENABLED=0` (off — speculation is a wall-clock
+optimisation that costs tokens whether or not the speculation lands,
+so it ships gated until benchmarks justify the spend).
+
+See `docs/specs/wave5-human-agent-loop-spec.md` for the full design.
+
 ---
 
 ## 14. Extension Points
