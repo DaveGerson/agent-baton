@@ -207,6 +207,77 @@ class BudgetEnforcer:
         """Return today's speculation spend."""
         return self._spec_daily_spend[_today_str()]
 
+    # ── Swarm API (Wave 6.2 Part A, bd-707d) ─────────────────────────────────
+
+    # Default per-swarm cap: $5.00 (matches immune daily cap)
+    DEFAULT_SWARM_CAP_USD: float = 5.00
+
+    def preflight_swarm(
+        self,
+        chunks: list,
+        model: str,
+        est_tokens_per_chunk: int,
+    ) -> bool:
+        """Return True when the swarm fits within the per-swarm budget cap.
+
+        Args:
+            chunks: List of :class:`~agent_baton.core.swarm.partitioner.CodeChunk`
+                objects (uses ``len(chunks)`` only — no direct import to avoid
+                circular dependency).
+            model: LLM model tier (used to select pricing).
+            est_tokens_per_chunk: Estimated tokens per chunk agent invocation.
+
+        Returns:
+            True if the estimated cost is within cap; False otherwise.
+        """
+        n_chunks = len(chunks)
+        # Estimate: est_tokens_per_chunk input + 25% output
+        tokens_in = n_chunks * est_tokens_per_chunk
+        tokens_out = n_chunks * (est_tokens_per_chunk // 4)
+        estimated_cost = _cost_usd(model, tokens_in, tokens_out)
+
+        cap = self.DEFAULT_SWARM_CAP_USD
+        if estimated_cost > cap:
+            msg = (
+                f"BEAD_WARNING: swarm-budget-preflight-rejected "
+                f"n_chunks={n_chunks} model={model} "
+                f"est_tokens_per_chunk={est_tokens_per_chunk} "
+                f"estimated_cost_usd={estimated_cost:.4f} cap_usd={cap:.2f}"
+            )
+            _log.warning(msg)
+            self._file_bead_warning("swarm-preflight", msg)
+            return False
+
+        _log.debug(
+            "BudgetEnforcer.preflight_swarm: OK n_chunks=%d model=%s "
+            "est_cost_usd=%.4f cap_usd=%.2f",
+            n_chunks, model, estimated_cost, cap,
+        )
+        return True
+
+    def record_swarm_spend(
+        self,
+        swarm_id: str,
+        tokens_in: int,
+        tokens_out: int,
+    ) -> None:
+        """Record actual swarm spend against the task-level ledger.
+
+        Args:
+            swarm_id: Unique identifier for the swarm execution.
+            tokens_in: Total input tokens consumed by the swarm.
+            tokens_out: Total output tokens produced by the swarm.
+        """
+        cost = _cost_usd("haiku", tokens_in, tokens_out)
+        # Record against the task-level self-heal ledger as a unified cost sink.
+        # Full Wave 2.2 persistence will add a dedicated swarm ledger.
+        self._selfheal_task_spend += cost
+        _log.info(
+            "BudgetEnforcer.record_swarm_spend: swarm_id=%s tokens_in=%d "
+            "tokens_out=%d cost_usd=%.4f (task_total=%.4f)",
+            swarm_id, tokens_in, tokens_out, cost, self._selfheal_task_spend,
+        )
+
     # ── Private helpers ───────────────────────────────────────────────────────
 
     def _file_bead_warning(self, step_id: str, content: str) -> None:
