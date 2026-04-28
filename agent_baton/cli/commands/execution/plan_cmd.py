@@ -175,6 +175,19 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
             "tagged anyway and a warning is printed."
         ),
     )
+    p.add_argument(
+        "--gate-scope",
+        dest="gate_scope",
+        default="focused",
+        choices=["focused", "full", "smoke"],
+        help=(
+            "How broadly gate commands run (bd-124f). "
+            "'focused' (default) scopes pytest to the test files that cover "
+            "changed source paths — fast, permission-policy-safe. "
+            "'full' produces legacy unscoped pytest / pytest --cov (escape hatch). "
+            "'smoke' runs import-only (build gates) or collect-only (test gates)."
+        ),
+    )
     return p
 
 
@@ -318,9 +331,18 @@ def _render_dry_run_forecast(plan: MachinePlan) -> str:
         f"{model} {count}" for model, count in sorted(forecast.model_breakdown.items())
     ]
     breakdown = ", ".join(breakdown_parts) if breakdown_parts else "—"
+    # bd-47b4: surface the ±50% confidence band on every forecast so
+    # developers do not treat the dollar figure as authoritative.
+    low_usd = forecast.total_cost_usd * 0.5
+    high_usd = forecast.total_cost_usd * 1.5
+    lines.append(
+        "Estimate ±50%; based on historical token-rate samples — "
+        "actual cost depends on model + retries."
+    )
     lines.append(
         f"Cost forecast: ~{forecast.total_tokens:,} tokens   "
-        f"~${forecast.total_cost_usd:.2f}   ({breakdown})"
+        f"~${forecast.total_cost_usd:.2f}   "
+        f"(range ~${low_usd:.2f}–${high_usd:.2f}; {breakdown})"
     )
     total_min = agent_min + gate_min
     lines.append(
@@ -492,11 +514,49 @@ def handler(args: argparse.Namespace) -> None:
         explicit_knowledge_docs=args.knowledge,
         intervention_level=args.intervention,
         default_model=getattr(args, "model", None),
+        gate_scope=getattr(args, "gate_scope", "focused"),
     )
     print("  Done.", file=sys.stderr)
 
     # --dry-run: print compact forecast and exit without writing anything.
     if getattr(args, "dry_run", False):
+        # bd-47b4: when paired with --json, emit a structured payload that
+        # includes the ±50% range so machine consumers (CI dashboards,
+        # forge, etc.) cannot mistake the central estimate for an
+        # authoritative figure.
+        if getattr(args, "json", False):
+            from agent_baton.core.engine.cost_estimator import (
+                estimate_wall_clock_minutes,
+                forecast_plan,
+            )
+            forecast = forecast_plan(plan)
+            agent_min, gate_min = estimate_wall_clock_minutes(plan)
+            payload = {
+                "task_id": plan.task_id,
+                "risk_level": plan.risk_level,
+                "budget_tier": plan.budget_tier,
+                "phases": len(plan.phases),
+                "steps": plan.total_steps,
+                "cost_forecast": {
+                    "total_tokens": forecast.total_tokens,
+                    "total_cost_usd": round(forecast.total_cost_usd, 4),
+                    "estimate_band": {
+                        "low_usd": round(forecast.total_cost_usd * 0.5, 4),
+                        "high_usd": round(forecast.total_cost_usd * 1.5, 4),
+                        "confidence": "±50%",
+                        "basis": "historical token-rate samples; "
+                                 "actual cost depends on model + retries",
+                    },
+                    "model_breakdown_tokens": dict(forecast.model_breakdown),
+                },
+                "wall_clock": {
+                    "agent_minutes": agent_min,
+                    "gate_minutes": gate_min,
+                    "total_minutes": agent_min + gate_min,
+                },
+            }
+            print(json.dumps(payload, indent=2))
+            return
         print(_render_dry_run_forecast(plan))
         return
 

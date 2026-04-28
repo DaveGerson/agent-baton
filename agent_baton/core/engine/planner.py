@@ -7,13 +7,14 @@ to default heuristics when no historical data is available.
 """
 from __future__ import annotations
 
+import glob
 import json
 import logging
 import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from agent_baton.core.engine.classifier import (
     FallbackClassifier,
@@ -130,6 +131,160 @@ _PHASE_NAMES: dict[str, list[str]] = {
 }
 
 _DEFAULT_PHASE_NAMES: list[str] = ["Design", "Implement", "Test", "Review"]
+
+
+# ---------------------------------------------------------------------------
+# Gate scope literal type
+# ---------------------------------------------------------------------------
+
+GateScope = Literal["focused", "full", "smoke"]
+"""
+Controls how gate commands are scoped:
+
+- ``"focused"`` (default) — commands are scoped to test files that cover the
+  changed source paths in the phase.  Falls back to an import-smoke check
+  (build gate) or ``pytest --co`` collect-only (test gate) when no mapping
+  is found.
+- ``"full"`` — legacy unscoped ``pytest`` / ``pytest --cov``; escape hatch
+  for broad validation runs.
+- ``"smoke"`` — fast import-only check for build gates;
+  ``pytest --co`` collect-only for test gates.
+
+bd-124f: Added to fix full-suite gate commands being generated for every plan.
+"""
+
+# Paths that are never matched to test files — tested via their consumers.
+_SKIP_GATE_SCOPE_PATTERNS: tuple[str, ...] = (
+    "__init__.py",
+    "_validators.py",
+    "agent_baton/templates/",
+    "__pycache__/",
+)
+
+# Maximum number of resolved test files per gate before falling back to a
+# directory-level pytest invocation.
+_MAX_GATE_TEST_FILES = 20
+
+
+def _test_files_for_changes(
+    changed_paths: list[str],
+    project_root: Path | None = None,
+) -> list[str]:
+    """Map a list of changed source paths to the test files that cover them.
+
+    Pure function — no side-effects, no I/O beyond filesystem probing.
+
+    Convention (bd-124f):
+    - ``agent_baton/core/engine/<x>.py``
+      → ``tests/test_<x>.py``, ``tests/test_<x>_*.py``,
+        ``tests/integration/test_<x>*.py``
+    - ``agent_baton/cli/commands/<x>.py``
+      → ``tests/test_<x>.py``, ``tests/test_<x>_*.py``
+    - Any path that is itself under ``tests/`` is included directly.
+    - Paths matching ``_SKIP_GATE_SCOPE_PATTERNS`` are skipped.
+    - When a changed file IS a test file, include it directly.
+    - Returns at most ``_MAX_GATE_TEST_FILES`` entries; the caller should
+      fall back to a directory-level run when the cap is hit.
+
+    Args:
+        changed_paths: Source paths relative to the project root (strings).
+            May include both source and test files.
+        project_root: Filesystem root for glob resolution.  When ``None``
+            the current working directory is used.
+
+    Returns:
+        Deduplicated list of test file paths (relative strings) that exist
+        on disk, capped at ``_MAX_GATE_TEST_FILES``.  Empty list means no
+        test files were found (caller should use smoke fallback).
+    """
+    root = project_root or Path(".")
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def _add(p: str) -> None:
+        if p not in seen:
+            seen.add(p)
+            found.append(p)
+
+    for src in changed_paths:
+        src_norm = src.replace("\\", "/")
+
+        # Skip unmappable paths
+        if any(pat in src_norm for pat in _SKIP_GATE_SCOPE_PATTERNS):
+            continue
+
+        # Already a test file — include directly
+        fname = Path(src_norm).name
+        if fname.startswith("test_") or "/tests/" in src_norm or src_norm.startswith("tests/"):
+            if (root / src_norm).exists():
+                _add(src_norm)
+            continue
+
+        # Derive base module name from the source file stem
+        stem = Path(src_norm).stem  # e.g. "planner", "executor"
+
+        # Candidate glob patterns (in priority order)
+        candidates: list[str] = [
+            f"tests/test_{stem}.py",
+            f"tests/test_{stem}_*.py",
+            f"tests/integration/test_{stem}*.py",
+            f"tests/unit/test_{stem}*.py",
+        ]
+
+        for pattern in candidates:
+            for match in sorted(glob.glob(str(root / pattern))):
+                rel = str(Path(match).relative_to(root)).replace("\\", "/")
+                _add(rel)
+
+    # Cap to avoid overly broad runs
+    if len(found) > _MAX_GATE_TEST_FILES:
+        return []  # signal: use directory fallback
+    return found
+
+
+def _coverage_package_for_changes(changed_paths: list[str]) -> str:
+    """Derive the most specific ``--cov=<pkg>`` argument for changed paths.
+
+    Walks the changed paths and returns the longest common package prefix
+    under ``agent_baton/``.  For example:
+
+    - ``["agent_baton/core/engine/planner.py"]``
+      → ``"agent_baton/core/engine"``
+    - ``["agent_baton/core/engine/planner.py", "agent_baton/cli/commands/plan_cmd.py"]``
+      → ``"agent_baton"``
+    - ``[]`` or no ``agent_baton/`` paths → ``""`` (let caller use plain ``--cov``)
+
+    Args:
+        changed_paths: List of source paths (relative strings).
+
+    Returns:
+        A package path string suitable for ``pytest --cov=<pkg>``, or ``""``
+        when no suitable prefix can be found.
+    """
+    pkg_paths: list[Path] = []
+    for p in changed_paths:
+        norm = p.replace("\\", "/")
+        if "agent_baton/" in norm:
+            # Take the directory, not the file itself
+            pkg_paths.append(Path(norm).parent)
+        elif norm.startswith("agent_baton"):
+            pkg_paths.append(Path(norm).parent)
+
+    if not pkg_paths:
+        return ""
+
+    # Find common prefix across all package paths
+    parts_list = [list(p.parts) for p in pkg_paths]
+    common: list[str] = []
+    for parts in zip(*parts_list):
+        if len(set(parts)) == 1:
+            common.append(parts[0])
+        else:
+            break
+
+    if not common or common[0] != "agent_baton":
+        return ""
+    return "/".join(common)
 
 
 # ---------------------------------------------------------------------------
@@ -856,6 +1011,7 @@ class IntelligentPlanner:
         explicit_knowledge_docs: list[str] | None = None,
         intervention_level: str = "low",
         default_model: str | None = None,
+        gate_scope: GateScope = "focused",
     ) -> MachinePlan:
         """Create a complete, data-driven execution plan.
 
@@ -891,6 +1047,11 @@ class IntelligentPlanner:
                     Stored on MachinePlan.explicit_knowledge_docs.
             intervention_level: How aggressively agents escalate knowledge gaps.
                     ``low`` (default) | ``medium`` | ``high``.
+            gate_scope: How broadly gate commands run.  ``"focused"`` (default)
+                    scopes pytest to the test files covering the changed source
+                    paths.  ``"full"`` produces legacy unscoped ``pytest`` /
+                    ``pytest --cov``.  ``"smoke"`` uses import-only / collect-only
+                    checks.  bd-124f.
 
         Returns:
             A fully constructed MachinePlan.
@@ -1345,10 +1506,22 @@ class IntelligentPlanner:
             except Exception:
                 pass
 
-        # 12. Add QA gates (stack-aware)
+        # 12. Add QA gates (stack-aware, bd-124f: scoped to changed paths)
         for phase in plan_phases:
             if phase.gate is None:
-                phase.gate = self._default_gate(phase.name, stack=stack_profile)
+                # Collect changed source paths from all steps in this phase.
+                # Use allowed_paths (sandbox write paths) as the best signal
+                # for what files the phase will modify.
+                phase_changed: list[str] = []
+                for _step in phase.steps:
+                    phase_changed.extend(_step.allowed_paths)
+                phase.gate = self._default_gate(
+                    phase.name,
+                    stack=stack_profile,
+                    changed_paths=phase_changed or None,
+                    gate_scope=gate_scope,
+                    project_root=project_root,
+                )
 
         # 12.a. Apply project config (baton.yaml) defaults — additive.
         # No-op when no baton.yaml is present in the project.
@@ -3086,7 +3259,12 @@ class IntelligentPlanner:
     # ------------------------------------------------------------------
 
     def _default_gate(
-        self, phase_name: str, stack: StackProfile | None = None,
+        self,
+        phase_name: str,
+        stack: StackProfile | None = None,
+        changed_paths: list[str] | None = None,
+        gate_scope: GateScope = "focused",
+        project_root: Path | None = None,
     ) -> PlanGate | None:
         """Return an appropriate QA gate for a phase name.
 
@@ -3096,6 +3274,23 @@ class IntelligentPlanner:
         - 'Test' → test gate (language-appropriate test runner)
         - 'Investigate', 'Research', 'Review', 'Design' → no automated gate
         - All others (Implement, Fix, etc.) → build check (language-appropriate)
+
+        Args:
+            phase_name: The name of the phase (e.g. ``"Implement"``, ``"Test"``).
+            stack: Detected project stack for language-aware command selection.
+            changed_paths: Source files the phase's steps will modify.  Used
+                by ``"focused"`` scope to scope the gate command to the
+                relevant test files.  Ignored for non-Python stacks.
+            gate_scope: One of ``"focused"`` (default), ``"full"``, or
+                ``"smoke"``.  Controls how broadly the gate command runs.
+                bd-124f: ``"focused"`` replaces the previous always-full-suite
+                behaviour.
+            project_root: Filesystem root for resolving test file paths.
+                Passed through to :func:`_test_files_for_changes`.
+
+        Returns:
+            A :class:`PlanGate` with a scoped command, or ``None`` for
+            non-code-producing phases.
         """
         name_lower = phase_name.lower()
         if name_lower in ("investigate", "research", "review", "design", "feedback"):
@@ -3119,19 +3314,93 @@ class IntelligentPlanner:
             except Exception:
                 pass  # Never block planning on a learning failure
 
+        # ------------------------------------------------------------------
+        # Scope the gate command (bd-124f).
+        # Only applies to Python stack (or no detected stack); non-Python
+        # stacks use their own runners which don't support the same
+        # file-scoping syntax.
+        # ------------------------------------------------------------------
+        is_python_stack = language in (None, "python")
+
         if name_lower == "test":
+            if gate_scope == "full" or not is_python_stack:
+                return PlanGate(
+                    gate_type="test",
+                    command=commands["test"],
+                    description="Run full test suite with coverage report.",
+                    fail_on=["test failure", "coverage below threshold"],
+                )
+            if gate_scope == "smoke":
+                return PlanGate(
+                    gate_type="test",
+                    command="pytest --co -q",
+                    description="Collect-only smoke check — verifies test discovery without running.",
+                    fail_on=["collection error"],
+                )
+            # gate_scope == "focused"
+            test_files = _test_files_for_changes(changed_paths or [], project_root)
+            if test_files:
+                # Determine coverage target from changed source paths
+                cov_pkg = _coverage_package_for_changes(changed_paths or [])
+                cov_flag = f" --cov={cov_pkg}" if cov_pkg else " --cov"
+                files_str = " ".join(test_files)
+                return PlanGate(
+                    gate_type="test",
+                    command=f"pytest{cov_flag} {files_str}",
+                    description=(
+                        f"Run focused test suite (scoped to {len(test_files)} file(s)) "
+                        f"with coverage report. bd-124f."
+                    ),
+                    fail_on=["test failure", "coverage below threshold"],
+                )
+            # No test files mapped — fall back to collect-only smoke
             return PlanGate(
                 gate_type="test",
-                command=commands["test"],
-                description="Run full test suite with coverage report.",
-                fail_on=["test failure", "coverage below threshold"],
+                command="pytest --co -q",
+                description=(
+                    "No specific test files found for changed paths; "
+                    "running collect-only smoke check. bd-124f."
+                ),
+                fail_on=["collection error"],
             )
-        # All other code-producing phases (implement, fix, migrate, etc.)
+
+        # All other code-producing phases (implement, fix, migrate, etc.) → build gate
+        if gate_scope == "full" or not is_python_stack:
+            return PlanGate(
+                gate_type="build",
+                command=commands["build"],
+                description="Run test suite to verify the implementation builds cleanly.",
+                fail_on=["test failure", "import error"],
+            )
+        if gate_scope == "smoke":
+            return PlanGate(
+                gate_type="build",
+                command='python -c "import agent_baton; print(\'ok\')"',
+                description="Import smoke check — fast sanity that the package imports cleanly.",
+                fail_on=["import error"],
+            )
+        # gate_scope == "focused"
+        test_files = _test_files_for_changes(changed_paths or [], project_root)
+        if test_files:
+            files_str = " ".join(test_files)
+            return PlanGate(
+                gate_type="build",
+                command=f"pytest {files_str}",
+                description=(
+                    f"Run focused build check ({len(test_files)} file(s) scoped to "
+                    f"changed paths). bd-124f."
+                ),
+                fail_on=["test failure", "import error"],
+            )
+        # No test files mapped — fast import smoke
         return PlanGate(
             gate_type="build",
-            command=commands["build"],
-            description="Run test suite to verify the implementation builds cleanly.",
-            fail_on=["test failure", "import error"],
+            command='python -c "import agent_baton; print(\'ok\')"',
+            description=(
+                "No specific test files found for changed paths; "
+                "running import smoke check. bd-124f."
+            ),
+            fail_on=["import error"],
         )
 
     @staticmethod
