@@ -17,10 +17,10 @@ Commands are organized into functional groups:
 | Group | Concern | Commands |
 |-------|---------|----------|
 | **Execution** | Plan, execute, and manage orchestrated tasks | `plan`, `execute`, `status`, `daemon`, `async`, `decide` |
-| **Observe** | Traces, usage, dashboards, telemetry | `dashboard`, `trace`, `usage`, `telemetry`, `context-profile`, `retro`, `context`, `cleanup`, `migrate-storage` |
+| **Observe** | Traces, usage, dashboards, telemetry | `dashboard`, `trace`, `usage`, `telemetry`, `context-profile`, `retro`, `context`, `cleanup` |
 | **Govern** | Risk, policy, compliance, validation | `classify`, `compliance`, `policy`, `escalations`, `validate`, `spec-check`, `detect` |
-| **Improve** | Scoring, evolution, patterns, budgets | `scores`, `evolve`, `patterns`, `budget`, `changelog`, `anomalies`, `experiment`, `improve` |
-| **Distribute** | Packaging, publishing, installation | `package`, `publish`, `pull`, `verify-package`, `install`, `transfer` |
+| **Improve** | Scoring, learning, patterns, budgets | `scores`, `learn`, `patterns`, `budget`, `changelog`, `anomalies` |
+| **Distribute** | Packaging, publishing, installation | `package`, `publish`, `pull`, `install`, `transfer` |
 | **Agents** | Agent discovery, routing, events | `agents`, `route`, `events`, `incident` |
 | **PMO** | Portfolio management overlay | `pmo serve`, `pmo status`, `pmo add`, `pmo health` |
 | **Sync** | Federated data sync | `sync`, `sync status` |
@@ -799,36 +799,9 @@ baton cleanup --retention-days 60
 
 ---
 
-### `baton migrate-storage`
+### `baton migrate-storage` (deprecated)
 
-Migrate JSON/JSONL flat files to SQLite database (`baton.db`).
-
-```
-baton migrate-storage [options]
-```
-
-| Argument | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `--dry-run` | No | false | Show what would be migrated without writing |
-| `--keep-files` | No | true | Keep original files after migration |
-| `--remove-files` | No | false | Move originals to `pre-sqlite-backup/` |
-| `--team-context PATH` | No | `.claude/team-context` | Path to team-context directory |
-| `--verify` | No | false | Compare source file counts against DB row counts |
-
-Safe to run multiple times -- uses INSERT OR IGNORE to skip duplicates.
-
-**Example:**
-
-```bash
-# Preview migration
-baton migrate-storage --dry-run
-
-# Migrate and verify
-baton migrate-storage --verify
-
-# Migrate and archive original files
-baton migrate-storage --remove-files --verify
-```
+> **Deprecated.** Use [`baton sync --migrate-storage`](#baton-sync) instead. The shim still works and prints a `DEPRECATED:` warning to stderr.
 
 ---
 
@@ -1058,22 +1031,9 @@ baton scores --agent backend-engineer--python
 
 ---
 
-### `baton evolve`
+### `baton evolve` (deprecated)
 
-Analyze agent performance and propose prompt improvements for
-underperforming agents.
-
-```
-baton evolve [options]
-```
-
-| Argument | Required | Description |
-|----------|----------|-------------|
-| `--agent NAME` | No | Show proposal for a specific agent |
-| `--save` | No | Write proposals to `.claude/team-context/evolution-proposals/` |
-| `--write` | No | Write summary report to disk |
-
-Without flags, prints the evolution report to stdout.
+> **Deprecated.** Prompt-evolution proposals are now produced by the unified learning loop. Use [`baton learn run-cycle`](#baton-learn) instead. The shim still works and prints a `DEPRECATED:` warning to stderr.
 
 ---
 
@@ -1183,78 +1143,93 @@ agent, metric, current value, threshold, and evidence.
 
 ---
 
-### `baton experiment`
+### `baton experiment` (deprecated)
 
-Manage improvement experiments. This is a command group with subcommands.
-
-#### `baton experiment list`
-
-```
-baton experiment list
-```
-
-Lists all experiments with their status, agent, metric, and sample count.
-
-#### `baton experiment show`
-
-```
-baton experiment show EXPERIMENT_ID
-```
-
-Shows full details of an experiment including hypothesis, baseline,
-target, status, result, and samples.
-
-#### `baton experiment conclude`
-
-```
-baton experiment conclude EXPERIMENT_ID --result RESULT
-```
-
-| Argument | Required | Description |
-|----------|----------|-------------|
-| `EXPERIMENT_ID` | Yes | Experiment to conclude |
-| `--result` | Yes | `improved`, `degraded`, or `inconclusive` |
-
-#### `baton experiment rollback`
-
-```
-baton experiment rollback EXPERIMENT_ID
-```
-
-Rolls back the recommendation associated with an experiment. Triggers
-a circuit breaker warning if 3+ rollbacks occur within 7 days.
+> **Deprecated.** Experiment tracking is folded into the unified learning loop. Use [`baton learn run-cycle`](#baton-learn) (which handles auto-apply, escalate, and experiment rollback automatically) instead. The shim still works and prints a `DEPRECATED:` warning to stderr.
 
 ---
 
-### `baton improve`
+### `baton improve` (deprecated)
 
-Run the improvement loop or view reports.
+> **Deprecated.** Use [`baton learn improve`](#baton-learn) instead. The shim still works and prints a `DEPRECATED:` warning to stderr.
+
+---
+
+### `baton learn`
+
+Learning automation — track, analyze, propose, and apply fixes for
+recurring issues. This is a command group with subcommands.
 
 ```
-baton improve [options]
+baton learn [SUBCOMMAND] [options]
 ```
 
-| Argument | Required | Description |
-|----------|----------|-------------|
-| `--run` | No | Run a full improvement cycle |
-| `--force` | No | Force-run a cycle even if triggers haven't fired |
-| `--report` | No | Show the latest improvement report |
-| `--experiments` | No | Show active experiments |
-| `--history` | No | Show all improvement reports |
+| Subcommand | Description |
+|------------|-------------|
+| `status` | Dashboard: open issues by type/severity, auto-apply stats |
+| `issues` | List learning issues (filterable by `--type`, `--severity`, `--status`) |
+| `analyze` | Run analysis: compute confidence, mark auto-apply candidates |
+| `apply` | Apply a specific fix (`--issue ID`) or all proposed (`--all-safe`) |
+| `interview` | Interactive structured dialogue for human-directed decisions |
+| `history` | Show resolution history (`--limit N`, default 20) |
+| `reset` | Reopen an issue and rollback its applied override (`--issue ID`) |
+| `run-cycle` | Instantiate the learning-cycle plan template (and optionally execute it) |
+| `improve` | Run the improvement loop or view reports (formerly `baton improve`) |
 
-Without flags, shows the latest improvement report.
+#### `baton learn run-cycle`
 
-**Example:**
+Instantiate the learning-cycle plan template. The cycle collects
+execution data, analyzes patterns, proposes improvements, requires
+human approval, applies changes, and documents outcomes.
+
+```
+baton learn run-cycle [--run] [--dry-run] [--template PATH]
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--run` | false | Execute the cycle immediately via `baton execute run` after creating the plan |
+| `--dry-run` | false | Print the `baton execute run` command that would be invoked, without executing |
+| `--template PATH` | bundled | Path to a custom learning-cycle plan template JSON file |
+
+#### `baton learn improve`
+
+Run a full improvement cycle (formerly `baton improve`). Detects
+anomalies, generates recommendations, auto-applies safe changes,
+escalates risky ones, and starts experiments.
+
+```
+baton learn improve [--run | --force | --report | --experiments | --history] [--min-tasks N] [--interval N]
+```
+
+| Flag | Description |
+|------|-------------|
+| `--run` | Run a full improvement cycle |
+| `--force` | Force-run a cycle bypassing the data-threshold check |
+| `--report` | Show the latest improvement report |
+| `--experiments` | Show active experiments |
+| `--history` | Show all improvement reports |
+| `--min-tasks N` | Minimum total tasks before analysis fires (overrides `BATON_MIN_TASKS`) |
+| `--interval N` | Re-analyze every N new tasks (overrides `BATON_ANALYSIS_INTERVAL`) |
+
+**Examples:**
 
 ```bash
+# Dashboard
+baton learn status
+
+# List high-severity issues
+baton learn issues --severity high
+
+# Analyze and auto-apply safe fixes
+baton learn analyze
+baton learn apply --all-safe
+
 # Run a full improvement cycle
-baton improve --run
+baton learn improve --run
 
-# Force a cycle regardless of triggers
-baton improve --force
-
-# View improvement history
-baton improve --history
+# Instantiate and execute the learning cycle
+baton learn run-cycle --run
 ```
 
 ---
@@ -1361,26 +1336,9 @@ baton pull my-agents --registry /shared/baton-registry --version 2.0.0 --scope u
 
 ---
 
-### `baton verify-package`
+### `baton verify-package` (deprecated)
 
-Validate a `.tar.gz` package before distribution.
-
-```
-baton verify-package ARCHIVE [--checksums]
-```
-
-| Argument | Required | Description |
-|----------|----------|-------------|
-| `ARCHIVE` | Yes | Path to the `.tar.gz` package to verify |
-| `--checksums` | No | Display per-file SHA-256 checksums |
-
-**Exit code:** `1` if validation fails.
-
-**Example:**
-
-```bash
-baton verify-package my-agents-2.0.0.tar.gz --checksums
-```
+> **Deprecated.** Use [`baton sync --verify ARCHIVE`](#baton-sync) instead. The shim still works and prints a `DEPRECATED:` warning to stderr.
 
 ---
 
@@ -1663,6 +1621,9 @@ Program Health
 ### `baton sync`
 
 Sync project data from project-local `baton.db` to `~/.baton/central.db`.
+Also hosts two utilities folded in from removed top-level commands:
+`--migrate-storage` (formerly `baton migrate-storage`) and `--verify`
+(formerly `baton verify-package`).
 
 ```
 baton sync [SUBCOMMAND] [options]
@@ -1674,6 +1635,14 @@ baton sync [SUBCOMMAND] [options]
 | `--all` | No | false | Sync all registered projects |
 | `--project ID` | No | -- | Sync a specific project by ID |
 | `--rebuild` | No | false | Full rebuild (delete all central rows then re-sync) |
+| `--migrate-storage` | No | false | Migrate JSON/JSONL flat files to SQLite (`baton.db`). Formerly `baton migrate-storage`. |
+| `--dry-run` | No | false | (with `--migrate-storage`) Show what would be migrated without writing |
+| `--keep-files` | No | true | (with `--migrate-storage`) Keep originals after migration |
+| `--remove-files` | No | false | (with `--migrate-storage`) Archive originals to `pre-sqlite-backup/` |
+| `--team-context PATH` | No | `.claude/team-context` | (with `--migrate-storage`) Path to team-context directory |
+| `--migrate-verify` | No | false | (with `--migrate-storage`) Verify row counts after migration |
+| `--verify [ARCHIVE]` | No | -- | Validate a `.tar.gz` agent-baton package. Formerly `baton verify-package`. |
+| `--checksums` | No | false | (with `--verify`) Display per-file SHA-256 checksums |
 
 **Default behavior** (no flags): syncs the current project by auto-detecting
 from the working directory.
@@ -1695,7 +1664,17 @@ baton sync --rebuild
 
 # Show sync watermarks
 baton sync status
+
+# Migrate JSON/JSONL flat files to SQLite (replaces 'baton migrate-storage')
+baton sync --migrate-storage --dry-run
+baton sync --migrate-storage --migrate-verify
+baton sync --migrate-storage --remove-files --migrate-verify
+
+# Validate a package archive (replaces 'baton verify-package')
+baton sync --verify my-agents-2.0.0.tar.gz --checksums
 ```
+
+**Exit code:** `1` if `--verify` validation fails or sync errors occur.
 
 ---
 
@@ -2032,17 +2011,17 @@ baton pmo health
 baton anomalies
 
 # 2. Run improvement cycle
-baton improve --run
+baton learn improve --run
 
 # 3. Review recommendations
 baton budget --recommend
-baton evolve
+baton learn run-cycle
 
 # 4. Refresh learned patterns
 baton patterns --refresh
 
-# 5. Check experiment status
-baton experiment list
+# 5. Check experiment status (folded into the learn loop)
+baton learn improve --experiments
 ```
 
 ### Package Distribution
@@ -2053,7 +2032,7 @@ baton package --name my-agents --version 1.0.0 \
     --description "Custom agent set" --include-knowledge
 
 # 2. Verify the package
-baton verify-package my-agents-1.0.0.tar.gz --checksums
+baton sync --verify my-agents-1.0.0.tar.gz --checksums
 
 # 3. Initialize a registry and publish
 baton publish --init /shared/registry
@@ -2067,10 +2046,26 @@ baton pull my-agents --registry /shared/registry --scope user
 
 ## Environment Variables
 
-| Variable | Used By | Description |
-|----------|---------|-------------|
-| `BATON_TASK_ID` | `baton execute *` | Bind a shell session to a specific execution. Set after `baton execute start` to scope all subsequent commands. |
-| `BATON_API_TOKEN` | `baton serve` | Bearer token for API authentication. CLI `--token` flag takes precedence. |
+The full list of Baton environment variables. The same table is mirrored
+in [references/baton-engine.md](../references/baton-engine.md#environment-variables).
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `BATON_TASK_ID` | Bind a shell session to a specific execution. Set after `baton execute start` to scope all subsequent commands. | auto-detected |
+| `BATON_DB_PATH` | Override the project `baton.db` location. CLI walks upward from cwd if unset. | discovered |
+| `BATON_APPROVAL_MODE` | PMO approval policy: `local` (self-approve) or `team` (different reviewer required). In `team` mode, `baton swarm` defaults `--require-approval-bead` ON. | `local` |
+| `BATON_RUN_TOKEN_CEILING` | Per-run cumulative spend cap (USD float). Read fresh on every check; restored on `baton execute resume`. Selfheal/speculator/immune respect it; main `Executor.dispatch()` only warns at HIGH/CRITICAL run start (bd-3f80). | unset |
+| `BATON_EXPERIMENTAL` | CSV opt-in for experimental subsystems. Required for `baton swarm` (`BATON_EXPERIMENTAL=swarm`). Exits with code 2 if unset. | unset |
+| `BATON_SWARM_ENABLED` | Required in addition to `BATON_EXPERIMENTAL=swarm` to dispatch a swarm refactor. | unset |
+| `BATON_SOULS_ENABLED` | Wave 6.1 Part B persistent agent souls (signing + revocation). | `0` |
+| `BATON_PREDICT_ENABLED` | Wave 6.2 Part C predictive computation watcher / classifier / dispatcher. | `0` |
+| `BATON_IMMUNE_ENABLED` | Immune-system monitoring loop. | `0` |
+| `BATON_EXEC_BEADS_ENABLED` | Wave 6.1 Part C executable beads. Sandbox is process-level only — see `references/baton-patterns.md` trust-boundary section before extending to external-origin input. | `0` |
+| `BATON_SKIP_GIT_NOTES_SETUP` | Silence install-time git-notes refspec setup and the runtime warning emitted by `NotesAdapter.write()` when the wildcard refspec is missing. | unset |
+| `BATON_SELFHEAL_ENABLED` | Enable speculator/selfheal escalation on gate failure. Falsy values (`0`, `false`, `no`) are honoured and emit a `selfheal_suppressed` row to `compliance-audit.jsonl`. | `0` |
+| `BATON_WORKTREE_STALE_HOURS` | Worktree GC stale threshold in hours; legacy alias `BATON_WORKTREE_GC_HOURS`. GC runs on every `baton execute complete`. | `4` |
+| `BATON_API_TOKEN` | Bearer token for the FastAPI server (`baton serve`). CLI `--token` flag takes precedence. | unset |
+| `ANTHROPIC_API_KEY` | Required for AI risk classification and the Haiku planner classifier. | unset |
 
 ### Task-ID Resolution Order
 
@@ -2105,7 +2100,7 @@ Commands that exit with code 1:
 - `baton execute start` -- plan file not found
 - `baton validate` -- errors found (or warnings in `--strict` mode)
 - `baton spec-check` -- validation failed
-- `baton verify-package` -- package validation failed
+- `baton sync --verify` -- package validation failed (formerly `baton verify-package`)
 - `baton sync` -- sync failures
 - `baton source` -- source not found or connection failed
 

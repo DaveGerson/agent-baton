@@ -27,12 +27,13 @@ _COMMAND_GROUPS: dict[str, list[str]] = {
     "Observability": ["dashboard", "trace", "usage", "telemetry", "context-profile", "retro", "context", "export"],
     "Integrations": ["webhook"],
     "Governance": ["classify", "compliance", "policy", "escalations", "validate", "spec-check", "detect"],
-    "Improvement": ["scores", "evolve", "patterns", "budget", "changelog", "experiment", "anomalies", "learn"],
+    "Improvement": ["scores", "patterns", "budget", "changelog", "anomalies", "learn"],
     "Distribution": ["install", "uninstall", "package", "publish", "pull", "transfer"],
     "Storage & Sync": ["sync", "source", "cquery", "storage", "cleanup"],
     "Memory": ["beads", "souls"],
     "Execution (Advanced)": ["daemon", "async", "decide"],
     "Portfolio": ["pmo", "serve"],
+    "Deprecated": ["migrate-storage", "verify-package", "improve", "evolve", "experiment"],
 }
 
 # Deprecated top-level commands — kept for backward compatibility.
@@ -41,8 +42,8 @@ _DEPRECATED_HELP: dict[str, str] = {
     "migrate-storage": "use 'baton sync --migrate-storage' instead",
     "verify-package": "use 'baton sync --verify ARCHIVE' instead",
     "improve": "use 'baton learn improve' instead",
-    "evolve": "use 'baton learn' subcommands instead",
-    "experiment": "use 'baton learn' subcommands instead",
+    "evolve": "use 'baton learn run-cycle' instead",
+    "experiment": "use 'baton learn run-cycle' instead",
 }
 
 

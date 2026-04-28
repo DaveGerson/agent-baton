@@ -80,7 +80,6 @@ cymbal impact <symbol>          # blast radius before edits
 | Gap | Bead | Surface |
 |-----|------|---------|
 | Executor wiring of `BATON_RUN_TOKEN_CEILING` | bd-3f80 | Selfheal/speculator/immune respect the cap; `Executor.dispatch()` only warns at run start. |
-| Soul caller migration | bd-1ca2 | Existing `soul.verify` callers not yet routed through revocation-aware `SoulRouter.verify_signature()`. |
 | Wave 6.1 Part A integration | bd-971d | Git-notes bead persistence + executor BeadStore handoff is partial. |
 
 ## Regulated-domain rules
