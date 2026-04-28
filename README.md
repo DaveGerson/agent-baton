@@ -788,6 +788,55 @@ automation, and the improvement pipeline are implemented and tested.
 
 ---
 
+## Recent changes (2026-04-28 end-user-readiness sweep)
+
+A focused readiness sweep landed on master today. Twelve user-visible concerns plus an autonomous planner fix were merged as PRs #59 and #61–#72. Highlights:
+
+**Safety gates and kill-switches**
+
+- `baton swarm` now requires `BATON_EXPERIMENTAL=swarm` (PR #63). The dispatcher is still a v1 stub — see "Known integration gaps" below.
+- In `BATON_APPROVAL_MODE=team`, `baton swarm` defaults `--require-approval-bead` ON (PR #64). PR #59 added an explicit operator sign-off prompt and a swarm-approval audit bead.
+- `BATON_RUN_TOKEN_CEILING=<USD float>` — run-level cumulative token kill-switch (PR #67). Restored from execution state on `baton execute resume`.
+- `BATON_SELFHEAL_ENABLED` toggle now writes a `selfheal_suppressed` row to `compliance-audit.jsonl` whenever it is disabled (PR #61 added regression coverage).
+
+**Operations**
+
+- `BATON_WORKTREE_STALE_HOURS` (default `4`, was `72`) now drives a GC sweep on every `baton execute complete` (PR #72). Legacy alias `BATON_WORKTREE_GC_HOURS` still honoured.
+- `BATON_SKIP_GIT_NOTES_SETUP=1` — opt out of the install-time git-notes refspec setup added in PR #66.
+- `WorktreeManager` now correctly walks up to the parent repo when `project_dir` is itself a git worktree (PR #69).
+- The plan partitioner emits a warning bead when libcst can't parse a file, so parallelism loss becomes visible in the bead stream (PR #62).
+
+**New CLI surface**
+
+- `baton souls revoke --reason X`, `baton souls list-revocations`, `baton souls rotate` (PR #68).
+- `baton sync --migrate-storage`, `baton sync --verify ARCHIVE`, and `baton learn improve` are the canonical paths after the CLI consolidation in PR #70.
+- Deprecated top-level aliases that still work but warn on stderr: `baton migrate-storage` (bd-8eef), `baton verify-package` (bd-7eec), `baton improve` (bd-5049). See the "Deprecated aliases" section in the CLI Reference table above.
+
+**Trust boundary documentation**
+
+- The executable-bead trust boundary is now documented in [`references/baton-patterns.md`](references/baton-patterns.md) (PR #65). The sandbox is process-level only — do not extend `BATON_EXEC_BEADS_ENABLED` to external-origin input without further review.
+
+**Schema**
+
+- Schema bumped to **v34**: `immune_queue` (v33) and `soul_revocations` (v34).
+
+**Planner (autonomous fix landed today)**
+
+- Planner now honors explicit `--agents` in the compound-subtask path (PR #71, bd-701e).
+
+### Known integration gaps
+
+These are tracked beads, not regressions in the shipped flags above:
+
+- **bd-3f80** — `BATON_RUN_TOKEN_CEILING` is fully respected by selfheal/speculator/immune; the main `Executor.dispatch()` only emits a warn-if-unset notice at HIGH-risk run start and restores `initial_run_spend_usd` from state on resume. Per-dispatch enforcement in `Executor.dispatch()` is still pending.
+- **bd-1ca2** — Existing callers of `soul.verify` are not yet migrated to `SoulRouter.verify_signature()`. The revocation guard is opt-in for legacy code paths until the migration completes.
+- **bd-971d** — Wave 6.1 Part A bead-anchor wiring through `BeadStore` is not on master yet (`gastown_dual_write` / `_notes_adapter` / `_anchor_index` not present). PR #76 restored the `NotesAdapter` methods deleted by the Part C merge.
+- **bd-c925**, **bd-2b9f** — The swarm dispatcher remains a v1 stub. Real Haiku integration is pending and is gated by `BATON_EXPERIMENTAL=swarm` until then.
+
+A comprehensive documentation overhaul is in flight in PR #74; this section is intentionally a small, surgical addition.
+
+---
+
 ## License
 
 License pending. Contact the maintainers for terms.
