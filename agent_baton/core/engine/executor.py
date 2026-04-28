@@ -163,6 +163,15 @@ def _speculate_enabled() -> bool:
     return os.environ.get("BATON_SPECULATE_ENABLED", "0") not in ("0", "false", "False", "no")
 
 
+def _souls_enabled() -> bool:
+    """Return True when persistent agent souls are enabled (Wave 6.1 Part B, bd-d975).
+
+    Default: disabled (opt-in).  Set ``BATON_SOULS_ENABLED=1`` to enable.
+    When disabled, BeadStore signing is a no-op and SoulRouter is never constructed.
+    """
+    return os.environ.get("BATON_SOULS_ENABLED", "0") not in ("0", "false", "False", "no")
+
+
 def _cli_actor() -> str:
     """Return a best-effort identity string for the current CLI user.
 
@@ -472,7 +481,26 @@ class ExecutionEngine:
                 from agent_baton.core.engine.bead_store import BeadStore
                 _bead_db = storage.db_path
                 if isinstance(_bead_db, Path):
-                    self._bead_store = BeadStore(_bead_db)
+                    # Wave 6.1 Part B (bd-d975): construct SoulRouter when
+                    # BATON_SOULS_ENABLED=1.  When disabled, soul_router=None
+                    # and BeadStore signing is a complete no-op.
+                    _soul_router = None
+                    if _souls_enabled():
+                        try:
+                            from agent_baton.core.engine.soul_router import SoulRouter
+                            from agent_baton.core.engine.soul_registry import SoulRegistry
+                            _project_root_for_souls = self._root.parent.parent
+                            _soul_registry = SoulRegistry()
+                            _soul_router = SoulRouter(
+                                registry=_soul_registry,
+                                repo_root=_project_root_for_souls,
+                            )
+                            _log.debug("SoulRouter initialised (BATON_SOULS_ENABLED=1)")
+                        except Exception as _soul_init_exc:
+                            _log.debug(
+                                "SoulRouter init skipped (non-fatal): %s", _soul_init_exc
+                            )
+                    self._bead_store = BeadStore(_bead_db, soul_router=_soul_router)
             except Exception as _bead_init_exc:
                 _log.debug(
                     "BeadStore init skipped (non-fatal): %s", _bead_init_exc
