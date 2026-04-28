@@ -832,6 +832,58 @@ class BeadStore:
             return 0
 
     # ------------------------------------------------------------------
+    # Wave 6.2 Part A (bd-707d) — Swarm approval helpers
+    # ------------------------------------------------------------------
+
+    def find_recent_approvals(
+        self,
+        tag: str,
+        max_age_minutes: int = 5,
+    ) -> "list[Bead]":  # noqa: F821
+        """Return open approval beads that carry *tag* and were created within
+        the last *max_age_minutes* minutes.
+
+        Used by the ``baton swarm refactor`` sign-off gate when
+        ``--require-approval-bead`` is set without an explicit bead ID.
+
+        Args:
+            tag: The tag that must be present on the bead (e.g.
+                ``"swarm-refactor"``).
+            max_age_minutes: How far back to look, in minutes (default 5).
+
+        Returns:
+            List of matching :class:`~agent_baton.models.bead.Bead` objects,
+            newest first.  Empty list when none are found or on any error.
+        """
+        if not self._table_exists():
+            return []
+        try:
+            from datetime import timedelta
+
+            cutoff = (
+                datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
+            ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+            rows = self._conn().execute(
+                """
+                SELECT * FROM beads
+                WHERE bead_type = 'approval'
+                  AND status = 'open'
+                  AND created_at >= ?
+                  AND bead_id IN (
+                      SELECT bead_id FROM bead_tags WHERE tag = ?
+                  )
+                ORDER BY created_at DESC
+                LIMIT 50
+                """,
+                (cutoff, tag),
+            ).fetchall()
+            return [self._row_to_bead(r) for r in rows]
+        except Exception as exc:
+            _log.warning("BeadStore.find_recent_approvals failed: %s", exc)
+            return []
+
+    # ------------------------------------------------------------------
     # Internal conversion helpers
     # ------------------------------------------------------------------
 
