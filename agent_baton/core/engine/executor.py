@@ -1529,7 +1529,25 @@ class ExecutionEngine:
         root = getattr(self, "_root", None)
         if not task_id or root is None:
             return result.outcome
-        spillover_file = Path(root) / "executions" / task_id / spillover_rel
+        # SECURITY (bd-c134): outcome_spillover_path is recorded by step
+        # results which originate (transitively) from agent output. A
+        # malicious or buggy spillover_rel like "../../../etc/passwd" would
+        # otherwise cause a read_bytes() outside the execution sandbox.
+        # Resolve and constrain the read to the per-task execution dir.
+        execution_dir = (Path(root) / "executions" / task_id).resolve()
+        try:
+            spillover_file = (execution_dir / spillover_rel).resolve(strict=True)
+            spillover_file.relative_to(execution_dir)
+        except (OSError, ValueError, RuntimeError) as exc:
+            logger.warning(
+                "Rejected spillover path %r for task %s (outside execution dir or unreadable: %s).",
+                spillover_rel,
+                task_id,
+                exc,
+            )
+            return result.outcome
+        if not spillover_file.is_file():
+            return result.outcome
 
         try:
             data = spillover_file.read_bytes()
