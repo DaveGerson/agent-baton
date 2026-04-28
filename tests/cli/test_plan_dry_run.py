@@ -304,6 +304,94 @@ class TestCostMath:
 
 
 # ---------------------------------------------------------------------------
+# bd-1359 — team-augmented step coverage
+# ---------------------------------------------------------------------------
+
+class TestTeamAugmentedForecast:
+    """Regression coverage for bd-1359.
+
+    A plan with at least one team-augmented step must have each team
+    member's cost rolled into both the rendered text forecast and the
+    structured JSON forecast (bd-47b4 dry-run --json variant).
+    """
+
+    def _team_plan(self) -> MachinePlan:
+        from agent_baton.models.execution import TeamMember
+        return MachinePlan(
+            task_id="2026-04-25-team-test-feed1234",
+            task_summary="team-augmented dry-run test",
+            risk_level="MEDIUM",
+            budget_tier="standard",
+            execution_mode="phased",
+            phases=[
+                PlanPhase(
+                    phase_id=1,
+                    name="Build",
+                    steps=[PlanStep(
+                        step_id="1.1",
+                        agent_name="architect",                # 8_000 baseline
+                        task_description="lead",
+                        model="opus",                          # 30/M
+                        team=[
+                            TeamMember(
+                                member_id="1.1.a",
+                                agent_name="backend-engineer", # 5_000 baseline
+                                role="implementer",
+                                model="sonnet",                # 6/M
+                            ),
+                            TeamMember(
+                                member_id="1.1.b",
+                                agent_name="test-engineer",    # 5_000 baseline
+                                role="reviewer",
+                                model="haiku",                 # 1.25/M
+                            ),
+                        ],
+                    )],
+                ),
+            ],
+            detected_stack="python",
+        )
+
+    def test_text_forecast_aggregates_team_member_tokens(
+        self, capsys: pytest.CaptureFixture
+    ) -> None:
+        plan = self._team_plan()
+        out = _run_handler(_make_args(dry_run=True), plan, capsys)
+        # Lead 8_000 + members 5_000 + 5_000 = 18_000 tokens.
+        assert "~18,000 tokens" in out
+        # Cost: opus 0.24 + sonnet 0.03 + haiku 0.00625 = 0.27625 -> "~$0.28"
+        assert "~$0.28" in out
+        # Breakdown shows each model family's tokens.
+        assert "opus 8000" in out
+        assert "sonnet 5000" in out
+        assert "haiku 5000" in out
+
+    def test_json_forecast_aggregates_team_member_costs(
+        self, capsys: pytest.CaptureFixture
+    ) -> None:
+        plan = self._team_plan()
+        # bd-47b4: --dry-run --json emits the structured payload.
+        args = _make_args(dry_run=True)
+        args.json = True
+        out = _run_handler(args, plan, capsys)
+        # Strip the planner stderr noise — payload is the only stdout JSON.
+        import json as _json
+        payload = _json.loads(out)
+        assert payload["cost_forecast"]["total_tokens"] == 18_000
+        # 0.24 + 0.03 + 0.00625 = 0.27625
+        assert payload["cost_forecast"]["total_cost_usd"] == pytest.approx(
+            0.27625, abs=1e-4
+        )
+        breakdown = payload["cost_forecast"]["model_breakdown_tokens"]
+        assert breakdown == {"opus": 8_000, "sonnet": 5_000, "haiku": 5_000}
+        # bd-47b4: ±50% band exposed alongside the central estimate.
+        band = payload["cost_forecast"]["estimate_band"]
+        assert band["confidence"] == "±50%"
+        assert band["low_usd"] == pytest.approx(0.27625 * 0.5, abs=1e-4)
+        assert band["high_usd"] == pytest.approx(0.27625 * 1.5, abs=1e-4)
+
+
+# ---------------------------------------------------------------------------
 # Per-step model honoured
 # ---------------------------------------------------------------------------
 

@@ -311,3 +311,102 @@ class TestNormaliseModelComposite:
         assert any(
             "gpt-5-turbo" in rec.getMessage() for rec in caplog.records
         ), [r.getMessage() for r in caplog.records]
+
+
+# ---------------------------------------------------------------------------
+# bd-1359 — team-augmented step forecast
+# ---------------------------------------------------------------------------
+
+class TestForecastPlanTeamAugmented:
+    """Regression coverage for bd-1359.
+
+    ``forecast_plan`` must aggregate each team member's cost on top of
+    the lead step.  Previously only single-agent steps were exercised,
+    leaving the team-walk path uncovered.
+    """
+
+    def _team_plan(self) -> MachinePlan:
+        from agent_baton.models.execution import TeamMember
+        lead = PlanStep(
+            step_id="1.1",
+            agent_name="architect",                       # baseline 8_000
+            task_description="lead",
+            model="opus",                                 # 30 / 1M
+            team=[
+                TeamMember(
+                    member_id="1.1.a",
+                    agent_name="backend-engineer",        # baseline 5_000
+                    role="implementer",
+                    model="sonnet",                       # 6 / 1M
+                ),
+                TeamMember(
+                    member_id="1.1.b",
+                    agent_name="test-engineer",           # baseline 5_000
+                    role="implementer",
+                    model="haiku",                        # 1.25 / 1M
+                ),
+            ],
+        )
+        return _plan([[lead]])
+
+    def test_team_member_tokens_aggregated(self) -> None:
+        plan = self._team_plan()
+        forecast = forecast_plan(plan)
+        # 8_000 (lead) + 5_000 (member a) + 5_000 (member b) = 18_000
+        assert forecast.total_tokens == 18_000
+
+    def test_team_member_cost_aggregated(self) -> None:
+        plan = self._team_plan()
+        forecast = forecast_plan(plan)
+        # opus: 8000 * 30 / 1M = 0.24
+        # sonnet: 5000 * 6 / 1M = 0.03
+        # haiku: 5000 * 1.25 / 1M = 0.00625
+        # total: 0.27625
+        expected = (
+            8_000 * MODEL_PRICING["opus"]
+            + 5_000 * MODEL_PRICING["sonnet"]
+            + 5_000 * MODEL_PRICING["haiku"]
+        ) / 1_000_000.0
+        assert forecast.total_cost_usd == pytest.approx(expected, abs=1e-6)
+        assert forecast.total_cost_usd == pytest.approx(0.27625, abs=1e-6)
+
+    def test_team_per_step_records_each_member(self) -> None:
+        plan = self._team_plan()
+        forecast = forecast_plan(plan)
+        # The lead step + each team member appear individually.
+        ids = [sid for sid, _ in forecast.per_step_tokens]
+        assert ids == ["1.1", "1.1.a", "1.1.b"]
+        # And the per-step token sum matches the aggregate total.
+        assert sum(t for _, t in forecast.per_step_tokens) == forecast.total_tokens
+
+    def test_team_model_breakdown_separates_families(self) -> None:
+        plan = self._team_plan()
+        forecast = forecast_plan(plan)
+        assert forecast.model_breakdown == {
+            "opus": 8_000,
+            "sonnet": 5_000,
+            "haiku": 5_000,
+        }
+
+    def test_team_with_unknown_member_model_falls_back_to_default(self) -> None:
+        """A team member with an unrecognised model defaults to sonnet pricing."""
+        from agent_baton.models.execution import TeamMember
+        lead = PlanStep(
+            step_id="2.1",
+            agent_name="backend-engineer",                # 5_000 sonnet
+            task_description="lead",
+            model="sonnet",
+            team=[
+                TeamMember(
+                    member_id="2.1.a",
+                    agent_name="frontend-engineer",       # 5_000 baseline
+                    role="implementer",
+                    model="some-future-model",            # → sonnet fallback
+                ),
+            ],
+        )
+        plan = _plan([[lead]])
+        forecast = forecast_plan(plan)
+        # Both contribute under sonnet pricing in the breakdown.
+        assert forecast.model_breakdown == {"sonnet": 10_000}
+        assert forecast.total_tokens == 10_000
