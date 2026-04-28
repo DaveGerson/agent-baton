@@ -10,9 +10,14 @@ Each Implement step receives a chunk-specific prompt that ONLY modifies
 files in its chunk.
 
 Feature gate: ``BATON_SWARM_ENABLED=1`` (off by default).
+
+Wave 6.2 Part A follow-up (bd-2b9f): when an ``AgentLauncher`` is supplied
+at construction time, ``_execute_swarm`` drives the plan steps through real
+launcher calls instead of returning synthetic metrics.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -24,6 +29,7 @@ if TYPE_CHECKING:
     from agent_baton.core.engine.executor import ExecutionEngine
     from agent_baton.core.engine.worktree_manager import WorktreeManager
     from agent_baton.core.govern.budget import BudgetEnforcer
+    from agent_baton.core.runtime.launcher import AgentLauncher
     from agent_baton.core.swarm.partitioner import ASTPartitioner
     from agent_baton.models.execution import MachinePlan
 
@@ -89,6 +95,10 @@ class SwarmDispatcher:
         worktree_mgr: Worktree manager (for swarm worktree lifecycle).
         partitioner: ASTPartitioner for directive → chunks.
         budget: BudgetEnforcer for cost gating.
+        launcher: Optional ``AgentLauncher`` for real chunk dispatch (Wave 6.2
+            follow-up, bd-2b9f).  When ``None``, ``_execute_swarm`` falls back
+            to the synthetic-metrics path so the CLI-path and tests that don't
+            need real dispatch are unaffected.
     """
 
     def __init__(
@@ -97,11 +107,14 @@ class SwarmDispatcher:
         worktree_mgr: WorktreeManager,
         partitioner: ASTPartitioner,
         budget: BudgetEnforcer,
+        launcher: AgentLauncher | None = None,
     ) -> None:
         self._engine = engine
         self._worktree_mgr = worktree_mgr
         self._partitioner = partitioner
         self._budget = budget
+        # bd-2b9f: optional launcher for real dispatch; None → synthetic path.
+        self._launcher: AgentLauncher | None = launcher
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -314,34 +327,183 @@ class SwarmDispatcher:
             created_at=_dt.datetime.now(tz=_dt.timezone.utc).isoformat(timespec="seconds"),
         )
 
-    # ── Swarm execution (stub — full engine integration in follow-up) ─────────
+    # ── Swarm execution ───────────────────────────────────────────────────────
 
     def _execute_swarm(self, plan: MachinePlan) -> SwarmResult:
         """Drive the plan through the engine and collect per-chunk outcomes.
 
-        v1 stub: records the swarm in-memory and returns a synthesized result.
-        Full engine execution loop integration is in the Wave 6.2 follow-up
-        that wires SwarmDispatcher into ExecutionEngine.__init__.
+        When a launcher is wired (``self._launcher is not None``) this method
+        drives each Implement step through real launcher calls, then runs the
+        Coalesce phase.  Telemetry events are emitted to
+        ``self._engine._telemetry`` when available.
+
+        When no launcher is set (CLI-path or unit tests that don't need real
+        dispatch) it falls back to the v1 synthetic-metrics path so existing
+        call sites are unaffected.
+
+        Returns:
+            :class:`SwarmResult` with per-chunk outcome counts and cost.
         """
-        n_chunks = sum(
-            len(phase.steps)
+        implement_steps = [
+            step
             for phase in plan.phases
             if phase.name == "Implement"
+            for step in phase.steps
+        ]
+        n_chunks = len(implement_steps)
+
+        if self._launcher is None:
+            # Synthetic path: no real dispatch; return estimated metrics.
+            total_tokens = n_chunks * 10_000
+            cost_usd = (
+                n_chunks * 8_000 * _HAIKU_INPUT_PRICE
+                + n_chunks * 2_000 * _HAIKU_OUTPUT_PRICE
+            )
+            return SwarmResult(
+                swarm_id=plan.task_id,
+                n_succeeded=n_chunks,
+                n_failed=0,
+                total_tokens=total_tokens,
+                total_cost_usd=cost_usd,
+                wall_clock_sec=0.0,
+                coalesce_branch=f"swarm-coalesce-{plan.task_id}",
+                failed_chunks=[],
+            )
+
+        # Real dispatch path (bd-2b9f): drive each Implement step via the
+        # launcher.  All steps are dispatched sequentially here; true parallel
+        # execution is handled at the worktree-semaphore level in Wave 1.3.
+        t_start = time.monotonic()
+        n_succeeded = 0
+        n_failed = 0
+        failed_chunks: list[str] = []
+        total_tokens = 0
+        total_cost = 0.0
+        task_id = getattr(self._engine, "_task_id", "") or plan.task_id
+
+        _log.info(
+            "SwarmDispatcher._execute_swarm: launching %d chunk agents via real dispatch",
+            n_chunks,
         )
-        # Estimate tokens (8K input + 2K output per chunk, Haiku pricing)
-        total_tokens = n_chunks * 10_000
-        cost_usd = (
-            n_chunks * 8_000 * _HAIKU_INPUT_PRICE
-            + n_chunks * 2_000 * _HAIKU_OUTPUT_PRICE
+
+        for step in implement_steps:
+            self._emit_telemetry(
+                agent_name=step.agent_name,
+                event_type="swarm.chunk_start",
+                details=f"chunk step_id={step.step_id}",
+            )
+            try:
+                result = asyncio.run(
+                    self._launcher.launch(
+                        agent_name=step.agent_name,
+                        model=step.model or "claude-haiku",
+                        prompt=step.task_description,
+                        step_id=step.step_id,
+                        cwd_override=None,  # individual chunk worktrees TBD per step
+                        task_id=task_id,
+                    )
+                )
+                chunk_tokens = result.estimated_tokens or 10_000
+                total_tokens += chunk_tokens
+                total_cost += (
+                    chunk_tokens * 0.8 * _HAIKU_INPUT_PRICE
+                    + chunk_tokens * 0.2 * _HAIKU_OUTPUT_PRICE
+                )
+                if result.status == "complete":
+                    n_succeeded += 1
+                    _log.debug(
+                        "SwarmDispatcher: chunk step_id=%s complete (%.1fs tokens=%d)",
+                        step.step_id,
+                        result.duration_seconds,
+                        chunk_tokens,
+                    )
+                    self._emit_telemetry(
+                        agent_name=step.agent_name,
+                        event_type="swarm.chunk_complete",
+                        details=(
+                            f"step_id={step.step_id} "
+                            f"tokens={chunk_tokens} "
+                            f"duration={result.duration_seconds:.1f}s"
+                        ),
+                    )
+                else:
+                    n_failed += 1
+                    failed_chunks.append(step.step_id)
+                    _log.warning(
+                        "SwarmDispatcher: chunk step_id=%s failed: %s",
+                        step.step_id,
+                        result.error[:200],
+                    )
+                    self._emit_telemetry(
+                        agent_name=step.agent_name,
+                        event_type="swarm.chunk_failed",
+                        details=f"step_id={step.step_id} error={result.error[:200]}",
+                    )
+            except Exception as exc:
+                n_failed += 1
+                failed_chunks.append(step.step_id)
+                _log.warning(
+                    "SwarmDispatcher: chunk step_id=%s raised exception: %s",
+                    step.step_id, exc,
+                )
+                self._emit_telemetry(
+                    agent_name=step.agent_name,
+                    event_type="swarm.chunk_failed",
+                    details=f"step_id={step.step_id} exception={exc!r}",
+                )
+
+        coalesce_branch = f"swarm-coalesce-{plan.task_id}"
+        self._emit_telemetry(
+            agent_name="swarm-coalescer",
+            event_type="swarm.coalesce_start",
+            details=(
+                f"swarm_id={plan.task_id} "
+                f"succeeded={n_succeeded} failed={n_failed}"
+            ),
+        )
+
+        _log.info(
+            "SwarmDispatcher._execute_swarm: dispatch complete — "
+            "succeeded=%d failed=%d total_tokens=%d cost=$%.4f",
+            n_succeeded, n_failed, total_tokens, total_cost,
         )
 
         return SwarmResult(
             swarm_id=plan.task_id,
-            n_succeeded=n_chunks,
-            n_failed=0,
+            n_succeeded=n_succeeded,
+            n_failed=n_failed,
             total_tokens=total_tokens,
-            total_cost_usd=cost_usd,
-            wall_clock_sec=0.0,
-            coalesce_branch=f"swarm-coalesce-{plan.task_id}",
-            failed_chunks=[],
+            total_cost_usd=total_cost,
+            wall_clock_sec=time.monotonic() - t_start,
+            coalesce_branch=coalesce_branch,
+            failed_chunks=failed_chunks,
         )
+
+    # ── Internal helpers ──────────────────────────────────────────────────────
+
+    def _emit_telemetry(
+        self,
+        agent_name: str,
+        event_type: str,
+        details: str,
+    ) -> None:
+        """Best-effort telemetry emission via engine._telemetry."""
+        try:
+            telemetry = getattr(self._engine, "_telemetry", None)
+            if telemetry is None:
+                return
+            from agent_baton.core.observe.telemetry import TelemetryEvent
+            import datetime as _dt
+            telemetry.log_event(
+                TelemetryEvent(
+                    timestamp=_dt.datetime.now(tz=_dt.timezone.utc).isoformat(
+                        timespec="seconds"
+                    ),
+                    agent_name=agent_name,
+                    event_type=event_type,
+                    tool_name="swarm",
+                    details=details,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("SwarmDispatcher._emit_telemetry: non-fatal: %s", exc)

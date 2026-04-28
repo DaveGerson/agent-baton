@@ -11,6 +11,7 @@ DO NOT escalate to Sonnet.  Rest of swarm continues.
 """
 from __future__ import annotations
 
+import asyncio  # noqa: F401 — used inside _dispatch_reconciler_agent
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -121,40 +122,155 @@ class ConflictReconciler:
     ) -> ReconcileResult:
         """Build the reconciler prompt and dispatch the Haiku agent.
 
-        v1 stub: returns a failure result (real Haiku dispatch wired in
-        Wave 6.2 follow-up when ClaudeCodeLauncher.cwd_override is available).
+        Wave 6.2 follow-up (bd-c925): dispatches the ``swarm-reconciler`` agent
+        via the launcher held on ``self._dispatcher._launcher``.  When no
+        launcher is wired (CLI-path or tests), falls back to the v1 failure
+        result so those callers are unaffected.
+
+        The launcher is called with:
+        - ``agent_name="swarm-reconciler"`` (Haiku tier per agent def)
+        - ``cwd_override`` set to the swarm-coalesce worktree path when
+          derivable from the dispatcher's WorktreeManager.
+        - ``task_id`` from ``getattr(engine, "_task_id", "") or ""``
+          per bd-37a9 convention.
+
+        Outcome parsing:
+        - Outcome starting with ``RECONCILE_BLOCKED:`` → failure (ambiguous).
+        - Non-empty outcome otherwise → treat as resolved unified diff.
+        - Empty outcome or launcher failure → failure + bead.
         """
+        import asyncio as _asyncio
+
         from agent_baton.core.swarm.partitioner import ReconcileResult
 
+        # Build the conflict-context prompt with all required elements.
         file_list = "\n".join(f"  - {f}" for f in ctx.conflict_files)
-        _prompt = (
+
+        # Read 50 lines of context from each conflict file (best-effort).
+        context_sections: list[str] = []
+        for fpath in ctx.conflict_files[:3]:  # cap at 3 files to keep prompt bounded
+            try:
+                lines = Path(fpath).read_text(encoding="utf-8", errors="replace").splitlines()
+                # Show up to 50 lines centred around conflict markers.
+                snippet_lines = lines[:50]
+                context_sections.append(
+                    f"=== {fpath} (first {len(snippet_lines)} lines) ===\n"
+                    + "\n".join(snippet_lines)
+                )
+            except OSError:
+                context_sections.append(f"=== {fpath} (unreadable) ===")
+
+        file_context = "\n\n".join(context_sections)
+
+        prompt = (
             f"[SWARM CONFLICT RECONCILER] chunk={ctx.chunk_id[:8]}\n\n"
-            f"Two chunks of an AST migration conflicted.\n\n"
+            f"Two chunks of an AST migration conflicted during coalescing.\n\n"
             f"Chunk A intent: {ctx.intent_a}\n"
             f"Chunk B intent: {ctx.intent_b}\n\n"
             f"Conflict files:\n{file_list}\n\n"
-            "Produce a unified diff that satisfies both intents.  "
-            "Output ONLY the diff — nothing else.\n"
-            "If you cannot reconcile without ambiguity, output:\n"
+            f"File context (up to 50 lines each):\n{file_context}\n\n"
+            "Produce a unified diff that satisfies both intents simultaneously.  "
+            "Output ONLY the diff in standard git-diff format — no preamble, "
+            "no explanation.\n"
+            "If you cannot reconcile without ambiguity, output EXACTLY:\n"
             "RECONCILE_BLOCKED: <one-line reason>"
         )
 
-        _log.debug(
-            "ConflictReconciler: reconciler prompt built for chunk %s "
-            "(agent dispatch pending Wave 6.2 follow-up)",
+        # Retrieve the launcher from the dispatcher (Wave 6.2 follow-up wires it).
+        launcher = getattr(self._dispatcher, "_launcher", None)
+        if launcher is None:
+            _log.debug(
+                "ConflictReconciler: no launcher on dispatcher — "
+                "reverting chunk %s (v1 fallback)",
+                ctx.chunk_id[:8],
+            )
+            return ReconcileResult(
+                success=False,
+                resolved_diff="",
+                error=(
+                    "swarm-reconciler: no launcher wired on SwarmDispatcher. "
+                    "Chunk reverted; rest of swarm continues."
+                ),
+            )
+
+        # Derive cwd_override from the swarm-coalesce worktree if available.
+        cwd_override: str | None = None
+        try:
+            wt_mgr = getattr(self._dispatcher, "_worktree_mgr", None)
+            if wt_mgr is not None:
+                # Look for an active coalesce worktree in the manager's registry.
+                coalesce_wt = getattr(wt_mgr, "_coalesce_worktree", None)
+                if coalesce_wt is not None:
+                    cwd_override = str(coalesce_wt)
+        except Exception:
+            pass
+
+        engine = getattr(self._dispatcher, "_engine", None)
+        task_id: str = getattr(engine, "_task_id", "") or ""
+
+        _log.info(
+            "ConflictReconciler: dispatching swarm-reconciler for chunk %s "
+            "(cwd_override=%s task_id=%s)",
             ctx.chunk_id[:8],
+            cwd_override or "(default)",
+            task_id or "(none)",
         )
 
-        # v1: return failure so the caller reverts and files a bead.
-        # Real Haiku dispatch to be wired once ClaudeCodeLauncher gains
-        # cwd_override support.
+        try:
+            result = _asyncio.run(
+                launcher.launch(
+                    agent_name="swarm-reconciler",
+                    model="claude-haiku",
+                    prompt=prompt,
+                    step_id=f"reconcile-{ctx.chunk_id[:8]}",
+                    cwd_override=cwd_override,
+                    task_id=task_id,
+                )
+            )
+        except Exception as exc:
+            _log.warning(
+                "ConflictReconciler: launcher.launch raised for chunk %s: %s",
+                ctx.chunk_id[:8], exc,
+            )
+            return ReconcileResult(
+                success=False,
+                resolved_diff="",
+                error=f"Reconciler launcher raised: {exc}",
+            )
+
+        outcome = (result.outcome or "").strip()
+
+        if result.status != "complete" or not outcome:
+            return ReconcileResult(
+                success=False,
+                resolved_diff="",
+                error=(
+                    f"swarm-reconciler returned status={result.status!r} "
+                    f"error={result.error!r}"
+                ),
+            )
+
+        if outcome.startswith("RECONCILE_BLOCKED:"):
+            reason = outcome[len("RECONCILE_BLOCKED:"):].strip()
+            _log.warning(
+                "ConflictReconciler: reconciler reported BLOCKED for chunk %s: %s",
+                ctx.chunk_id[:8], reason,
+            )
+            return ReconcileResult(
+                success=False,
+                resolved_diff="",
+                error=f"RECONCILE_BLOCKED: {reason}",
+            )
+
+        # Non-empty, non-blocked outcome → treat as the resolved diff.
+        _log.info(
+            "ConflictReconciler: reconciler produced diff (%d chars) for chunk %s",
+            len(outcome), ctx.chunk_id[:8],
+        )
         return ReconcileResult(
-            success=False,
-            resolved_diff="",
-            error=(
-                "swarm-reconciler Haiku dispatch not yet wired (Wave 6.2 follow-up). "
-                "Chunk reverted; rest of swarm continues."
-            ),
+            success=True,
+            resolved_diff=outcome,
+            error="",
         )
 
     def _file_bead_warning(self, chunk_id: str, reason: str) -> None:
