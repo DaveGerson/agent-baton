@@ -1078,6 +1078,16 @@ summary. Persisted to `handoff_beads` (schema v29) for audit; listable
 via `baton beads handoffs --task-id <id>`. Fully deterministic, single-
 task scope, best-effort. Resolves bd-65d4 / bd-61a5.
 
+#### Multi-Agent Debate (D4, Tier-4 research)
+
+`agent_baton/core/intel/debate.py` runs a structured N-round debate
+between 2-5 specialist agents (each given a distinct framing), then
+dispatches a moderator agent to synthesize a recommendation plus a list
+of unresolved disagreements. Sequential dispatch via a pluggable
+`DebateRunner` (HeadlessClaude in production, stub in dry-run/tests).
+Persisted to `debates` (schema v30); CLI surface: `baton debate`. Opt-in
+only — never auto-invoked by the planner or engine.
+
 ### 7.4 Serialization
 
 All model types implement `to_dict()` / `from_dict()` class methods for JSON
