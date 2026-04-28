@@ -217,7 +217,7 @@ agent_baton/
   |  |  events.py     SSE event stream (1 endpoint)
   |  |  webhooks.py   Webhook subscriptions (3 endpoints)
   |  |  pmo.py        PMO board/project/forge/execute/gates/changelist/review/signals (36 endpoints)
-  |  |  pmo_h3.py     PMO H3 surfaces: scorecard, arch-review, playbooks, CRP (5 endpoints)
+  |  |  pmo_h3.py     PMO H3 surfaces: scorecard, arch-review, playbooks, CRP, beads (6 endpoints)
   |  |  learn.py      Learning issues and auto-correction (5 endpoints)
   |  models/
   |  |  requests.py   Pydantic request bodies
@@ -266,9 +266,22 @@ pmo-ui/              React/Vite PMO frontend (served at /pmo/)
     |                 BeadGraphView, BeadTimelineView
     views/            H3 PMO views — RoleBasedDashboard (H3.2),
     |                 DeveloperScorecard (H3.4), ArchReviewPanel (H3.7),
-    |                 PlaybookGallery (H3.8), CRPWizard (H3.9). Backed
+    |                 PlaybookGallery (H3.8), CRPWizard (H3.9),
+    |                 BeadGraphView + BeadTimelineView (DX.6). Backed
     |                 by /api/v1/pmo/scorecard, /arch-beads, /playbooks,
-    |                 /crp endpoints in routes/pmo_h3.py.
+    |                 /crp, and /beads endpoints in routes/pmo_h3.py.
+
+> **DX.6 — `GET /api/v1/pmo/beads`** (bd-aade): the PMO `BeadGraphView`
+> and `BeadTimelineView` are powered by a `GET /api/v1/pmo/beads`
+> endpoint in `routes/pmo_h3.py`.  It wraps `BeadStore.query()` and
+> returns a `{ beads, total }` envelope with the full Bead shape
+> (links, tags, affected files, quality/retrieval scores).  Optional
+> query params — `status` (default `open`, pass `all` to disable
+> filtering), `bead_type`, `tags` (comma-separated, AND semantics),
+> `task_id`, and `limit` (default 200, max 1000) — are passed through
+> to `BeadStore.query()`.  The endpoint degrades to an empty envelope
+> when the project's `baton.db` is missing or its `beads` table is
+> not yet provisioned.
     contexts/         ToastContext
     hooks/            useHotkeys, usePersistedState, usePmoBoard
     api/              client.ts, types.ts
