@@ -2065,8 +2065,12 @@ class IntelligentPlanner:
     def _extract_file_paths(self, text: str) -> list[str]:
         """Extract file path candidates from task summary text.
 
-        Scans for tokens that look like file paths — must contain a ``/``
-        or end with a known code/config extension to reduce false positives.
+        Scans for tokens that look like file paths.  bd-0960: a candidate
+        is accepted only when its final segment ends in a known
+        code/config extension (e.g. ``.py``, ``.md``).  Trailing-slash
+        phrases (e.g. ``required_role/timeout_minutes/``) and bare
+        slash-separated word lists with no extension are rejected — those
+        are typically parse artifacts from prose, not real paths.
 
         Returns:
             Deduplicated list of path-like strings found in *text*.
@@ -2074,17 +2078,31 @@ class IntelligentPlanner:
         _CODE_EXTENSIONS = {
             ".py", ".ts", ".md", ".json", ".yaml", ".yml", ".toml",
             ".cfg", ".txt", ".html", ".css", ".js", ".jsx", ".tsx",
+            ".rs", ".go", ".java", ".rb", ".sh", ".sql", ".ini",
+            ".lock", ".env", ".conf",
         }
         pattern = r'(?:^|[\s(])([a-zA-Z0-9_./-]+(?:\.[a-zA-Z0-9]+|/))'
         candidates = re.findall(pattern, text)
         seen: set[str] = set()
         result: list[str] = []
         for c in candidates:
+            # Reject trailing-slash artifacts — paths must point at a file.
+            if c.endswith("/"):
+                continue
+            # Reject leading-punctuation noise (e.g. ".foo" with no real ext).
+            if c.startswith((".", "/", "-")):
+                continue
             last_part = c.split("/")[-1]
-            ext_match = "." in last_part and f".{last_part.rsplit('.', 1)[-1]}" in _CODE_EXTENSIONS
-            if ("/" in c or ext_match) and c not in seen:
-                seen.add(c)
-                result.append(c)
+            if "." not in last_part:
+                # No extension on the basename — not a file path.
+                continue
+            ext = f".{last_part.rsplit('.', 1)[-1].lower()}"
+            if ext not in _CODE_EXTENSIONS:
+                continue
+            if c in seen:
+                continue
+            seen.add(c)
+            result.append(c)
         return result
 
     def _generate_task_id(self, summary: str) -> str:
