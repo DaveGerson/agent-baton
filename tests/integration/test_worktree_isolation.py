@@ -816,3 +816,146 @@ class TestWorkingBranchHeadRecordsFoldTarget:
 
         # fold_back() must have been called with the commit hash.
         assert mock_wt_mgr.fold_back.called, "fold_back() must be called on success path"
+
+
+# ---------------------------------------------------------------------------
+# bd-a735 — record_step_result retries cleanup with force=True on
+# WorktreeCleanupError (untracked-file blockers on the success path)
+# ---------------------------------------------------------------------------
+
+
+class TestRecordStepResultRetriesCleanupWithForce:
+    """When a step completes successfully but `cleanup(on_failure=False)`
+    raises ``WorktreeCleanupError`` (e.g. because untracked .pyc / build
+    output is still in the worktree), the engine must:
+
+      1. Catch the ``WorktreeCleanupError`` specifically (not all
+         exceptions);
+      2. Retry once with ``force=True``;
+      3. Treat the success path as still-successful — no re-raise, no
+         step status downgrade.
+
+    Before the retry was wired, the success-path exception bubbled up
+    (or was swallowed by a too-wide ``except Exception`` and the
+    worktree directory leaked).  This test pins the retry contract.
+    """
+
+    def test_cleanup_retries_with_force_on_cleanup_error_with_commit(
+        self,
+        engine: ExecutionEngine,
+        tmp_git_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from agent_baton.core.engine.worktree_manager import WorktreeCleanupError
+
+        monkeypatch.setattr(engine, "_detect_branch", lambda: "main")
+
+        plan = _plan(task_id="task-a735-cleanup-retry")
+        engine.start(plan)
+        engine.mark_dispatched("1.1", "backend-engineer")
+
+        FAKE_NEW_HEAD = "11223344" * 5
+        mock_wt_mgr = MagicMock()
+        mock_wt_mgr._enabled = True
+        mock_wt_mgr._bead_store = None
+        mock_wt_mgr.fold_back.return_value = FAKE_NEW_HEAD
+
+        # cleanup raises WorktreeCleanupError on the first (non-force) call,
+        # succeeds on the second (force=True) call.
+        cleanup_calls: list[dict] = []
+
+        def _cleanup_side_effect(handle, *, on_failure, force=False):
+            cleanup_calls.append({"on_failure": on_failure, "force": force})
+            if not force:
+                raise WorktreeCleanupError(
+                    "untracked file blocked vanilla cleanup"
+                )
+            return None
+
+        mock_wt_mgr.cleanup.side_effect = _cleanup_side_effect
+        monkeypatch.setattr(engine, "_worktree_mgr", mock_wt_mgr)
+
+        # Success path: commit_hash present, status=complete.
+        engine.record_step_result(
+            step_id="1.1",
+            agent_name="backend-engineer",
+            status="complete",
+            commit_hash="cafebabe" * 5,
+        )
+
+        # Two cleanup calls: first non-force (raises), second force (succeeds).
+        assert len(cleanup_calls) == 2, (
+            f"cleanup() must be retried with force=True after the first "
+            f"WorktreeCleanupError; got calls={cleanup_calls}"
+        )
+        assert cleanup_calls[0] == {"on_failure": False, "force": False}
+        assert cleanup_calls[1] == {"on_failure": False, "force": True}
+
+        # The step result must remain "complete" — the cleanup hiccup is
+        # non-fatal on the success path.
+        state_final = engine._load_execution()
+        assert state_final is not None
+        result = state_final.get_step_result("1.1")
+        assert result is not None
+        assert result.status == "complete", (
+            f"step status must remain complete after cleanup retry; got "
+            f"{result.status!r}"
+        )
+
+        # The handle must have been removed from step_worktrees so a future
+        # GC pass doesn't trip over a stale entry.
+        assert "1.1" not in getattr(state_final, "step_worktrees", {}), (
+            "step_worktrees must drop the handle once cleanup (eventually) "
+            "succeeds"
+        )
+
+    def test_cleanup_retries_with_force_on_cleanup_error_no_commit(
+        self,
+        engine: ExecutionEngine,
+        tmp_git_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Same retry contract on the no-commit success path (no fold-back)."""
+        from agent_baton.core.engine.worktree_manager import WorktreeCleanupError
+
+        monkeypatch.setattr(engine, "_detect_branch", lambda: "main")
+
+        plan = _plan(task_id="task-a735-no-commit-retry")
+        engine.start(plan)
+        engine.mark_dispatched("1.1", "backend-engineer")
+
+        mock_wt_mgr = MagicMock()
+        mock_wt_mgr._enabled = True
+        mock_wt_mgr._bead_store = None
+
+        cleanup_calls: list[dict] = []
+
+        def _cleanup_side_effect(handle, *, on_failure, force=False):
+            cleanup_calls.append({"on_failure": on_failure, "force": force})
+            if not force:
+                raise WorktreeCleanupError("untracked .pyc blocked cleanup")
+            return None
+
+        mock_wt_mgr.cleanup.side_effect = _cleanup_side_effect
+        monkeypatch.setattr(engine, "_worktree_mgr", mock_wt_mgr)
+
+        # No-commit success path: status=complete, commit_hash="".
+        engine.record_step_result(
+            step_id="1.1",
+            agent_name="backend-engineer",
+            status="complete",
+            commit_hash="",
+        )
+
+        assert len(cleanup_calls) == 2
+        assert cleanup_calls[0] == {"on_failure": False, "force": False}
+        assert cleanup_calls[1] == {"on_failure": False, "force": True}
+
+        # fold_back() must NOT have been called on the no-commit path.
+        assert not mock_wt_mgr.fold_back.called, (
+            "fold_back() must be skipped when commit_hash is empty"
+        )
+
+        state_final = engine._load_execution()
+        assert state_final is not None
+        assert "1.1" not in getattr(state_final, "step_worktrees", {})
