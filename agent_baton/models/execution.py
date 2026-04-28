@@ -1353,6 +1353,17 @@ class ExecutionState:
     # Used as base_branch for all worktree create() calls.
     working_branch: str = ""
 
+    # Wave 5 (bd-e208, bd-1483, bd-9839): Human-Agent Loop fields.
+    # All fields use getattr(state, "...", default) in accessors for legacy
+    # file load compatibility.
+    #
+    # bd-e208: Takeover records — active record has empty resumed_at.
+    takeover_records: list[dict] = field(default_factory=list)
+    # bd-1483: Self-heal attempt records.
+    selfheal_attempts: list[dict] = field(default_factory=list)
+    # bd-9839: Speculation records — keyed by spec_id.
+    speculations: dict[str, dict] = field(default_factory=dict)
+
     def __post_init__(self) -> None:
         if not self.started_at:
             self.started_at = datetime.now(timezone.utc).isoformat()
@@ -1421,6 +1432,10 @@ class ExecutionState:
             # Wave 1.3 (bd-86bf): worktree isolation state
             "step_worktrees": dict(getattr(self, "step_worktrees", {})),
             "working_branch": getattr(self, "working_branch", ""),
+            # Wave 5 (bd-e208, bd-1483, bd-9839): Human-Agent Loop state
+            "takeover_records": list(getattr(self, "takeover_records", [])),
+            "selfheal_attempts": list(getattr(self, "selfheal_attempts", [])),
+            "speculations": dict(getattr(self, "speculations", {})),
         }
 
     @classmethod
@@ -1448,6 +1463,10 @@ class ExecutionState:
             # Wave 1.3 (bd-86bf): worktree isolation — default to empty for legacy files
             step_worktrees=dict(data.get("step_worktrees", {})),
             working_branch=data.get("working_branch", ""),
+            # Wave 5 (bd-e208, bd-1483, bd-9839): default to empty for legacy files
+            takeover_records=list(data.get("takeover_records", [])),
+            selfheal_attempts=list(data.get("selfheal_attempts", [])),
+            speculations=dict(data.get("speculations", {})),
         )
 
 
