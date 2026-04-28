@@ -1823,6 +1823,72 @@ def _build_dry_run_report(
     return "\n".join(lines)
 
 
+def _print_dry_run_preview(plan: "MachinePlan", max_steps: int) -> None:  # noqa: F821
+    """Print a read-only preview of what ``baton execute run`` would do.
+
+    Walks the plan's phases/steps/gates/approvals in order and prints the
+    same ``[DRY RUN]`` lines that the live loop emits, but touches no engine
+    state whatsoever.  Called by ``_handle_run`` when ``--dry-run`` is set,
+    immediately after the plan is resolved, before any ``engine.start()`` or
+    ``engine.next_action()`` call.
+
+    Exits via ``sys.exit(1)`` if ``max_steps`` is exhausted, matching the
+    behaviour of the live loop when the ``--max-steps`` limit is reached.
+    """
+    print(_DRY_RUN_BANNER)
+    print(f"Task: {plan.task_id}", file=sys.stderr)
+    steps_shown = 0
+    for phase in plan.phases:
+        for step in phase.steps:
+            if steps_shown >= max_steps:
+                print(
+                    f"\n{warning('ABORTED')}: reached max-steps limit ({max_steps})",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            step_id = step.step_id
+            agent_name = step.agent_name
+            step_type = getattr(step, "step_type", "") or ""
+            if step_type == "automation":
+                command = getattr(step, "command", "") or ""
+                print(
+                    f"\n  [{step_id}] Running automation: {command[:80]}...",
+                    file=sys.stderr,
+                )
+                print(f"  [DRY RUN] Would run: {command}", file=sys.stderr)
+            else:
+                model = getattr(step, "model", "sonnet") or "sonnet"
+                print(
+                    f"\n  [{step_id}] Dispatching {agent_name} (model={model})...",
+                    file=sys.stderr,
+                )
+                print(
+                    f"  [DRY RUN] Would launch {agent_name} with prompt",
+                    file=sys.stderr,
+                )
+            steps_shown += 1
+
+        if phase.gate:
+            gate_cmd = getattr(phase.gate, "command", "") or ""
+            gate_type = getattr(phase.gate, "gate_type", "") or ""
+            print(
+                f"\n  [GATE] Phase {phase.phase_id} ({gate_type}): {gate_cmd}",
+                file=sys.stderr,
+            )
+            print(f"  [DRY RUN] Would run: {gate_cmd}", file=sys.stderr)
+
+        if phase.approval_required:
+            print(
+                f"\n  [APPROVAL REQUIRED] Phase {phase.phase_id}",
+                file=sys.stderr,
+            )
+            print("  [DRY RUN] Auto-approving", file=sys.stderr)
+
+    print(
+        f"\n{success('COMPLETE')}: dry-run preview finished — execution state unchanged"
+    )
+
+
 def _handle_run(args: argparse.Namespace) -> None:
     """Drive the full execution loop autonomously using headless Claude.
 
@@ -1992,6 +2058,9 @@ def _handle_run(args: argparse.Namespace) -> None:
                 file=sys.stderr,
             )
             engine = _probe_engine
+            if dry_run:
+                _print_dry_run_preview(plan, max_steps)
+                return
             action = engine.next_action()
         elif _probe_st in _TERMINAL_STATUSES:
             user_error(
@@ -2014,6 +2083,9 @@ def _handle_run(args: argparse.Namespace) -> None:
                 force_override=force_override,
                 override_justification=override_justification,
             )
+            if dry_run:
+                _print_dry_run_preview(plan, max_steps)
+                return
             ContextManager(task_id=task_id).init_mission_log(
                 plan.task_summary, risk_level=plan.risk_level
             )
@@ -2025,6 +2097,17 @@ def _handle_run(args: argparse.Namespace) -> None:
                     engine._persistence.set_active()
             print(f"Started execution: {task_id}", file=sys.stderr)
     else:
+        if dry_run:
+            _existing_state = engine._load_execution()
+            _preview_plan = _existing_state.plan if _existing_state is not None else None
+            if _preview_plan is not None:
+                _print_dry_run_preview(_preview_plan, max_steps)
+            else:
+                print(
+                    f"\n{warning('WARN')}: could not load plan for dry-run preview",
+                    file=sys.stderr,
+                )
+            return
         action = engine.next_action()
 
     # Import the launcher (deferred so it only fails when actually running)
@@ -2092,6 +2175,9 @@ def _run_loop(
         atype = action_dict.get("action_type", "")
 
         if atype == ActionType.COMPLETE.value:
+            if dry_run:
+                print(f"\n{success('COMPLETE')}: dry-run preview finished — execution state unchanged")
+                return
             summary = engine.complete()
             print(f"\n{success('COMPLETE')}: {summary}")
             # Auto-sync
@@ -2121,14 +2207,11 @@ def _run_loop(
                 # ── Automation: run shell command directly, no LLM ───────
                 command = action_dict.get("command", "")
                 print(f"\n  [{step_id}] Running automation: {command[:80]}...", file=sys.stderr)
-                engine.mark_dispatched(step_id=step_id, agent_name="automation")
+                if not dry_run:
+                    engine.mark_dispatched(step_id=step_id, agent_name="automation")
 
                 if dry_run:
                     print(f"  [DRY RUN] Would run: {command}", file=sys.stderr)
-                    engine.record_step_result(
-                        step_id=step_id, agent_name="automation",
-                        status="complete", outcome="dry-run skip",
-                    )
                 else:
                     import subprocess as _subprocess
                     try:
@@ -2165,14 +2248,11 @@ def _run_loop(
                 if msg:
                     print(f"    {msg[:120]}", file=sys.stderr)
 
-                engine.mark_dispatched(step_id=step_id, agent_name=agent_name)
+                if not dry_run:
+                    engine.mark_dispatched(step_id=step_id, agent_name=agent_name)
 
                 if dry_run:
                     print(f"  [DRY RUN] Would launch {agent_name} with {len(prompt)} char prompt", file=sys.stderr)
-                    engine.record_step_result(
-                        step_id=step_id, agent_name=agent_name,
-                        status="complete", outcome="dry-run skip",
-                    )
                 else:
                     import asyncio as _asyncio
                     assert launcher is not None  # guarded by user_error above
@@ -2222,7 +2302,6 @@ def _run_loop(
 
             if dry_run:
                 print(f"  [DRY RUN] Would run: {gate_cmd}", file=sys.stderr)
-                engine.record_gate_result(phase_id=phase_id, passed=True, output="dry-run skip")
             elif gate_type == "ci":
                 # Wave 4.1 — CI provider gate.  Polls GitHub Actions for the
                 # current branch's HEAD commit (rather than dispatching a new
@@ -2329,9 +2408,6 @@ def _run_loop(
 
             if dry_run:
                 print("  [DRY RUN] Auto-approving", file=sys.stderr)
-                engine.record_approval_result(
-                    phase_id=phase_id, result="approve",
-                )
             else:
                 # Non-TTY safety (bd-7444): without a controlling terminal we
                 # cannot prompt for an approval decision.  Previous behaviour
