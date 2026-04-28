@@ -21,7 +21,9 @@ import fcntl
 import json
 import logging
 import os
+import random
 import subprocess
+import threading
 import time
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
@@ -89,10 +91,13 @@ class WorktreeHandle:
     base_sha: str               # SHA of base_branch at create time
     created_at: str             # ISO 8601
     parent_repo: Path           # absolute path to parent repo's project root
+    # Wave 6.2 Part A extensions (bd-707d) — additive, None for legacy handles
+    swarm_id: str | None = None   # swarm this worktree belongs to (if any)
+    pool: str | None = None       # pool tag e.g. "swarm", "speculation", None
 
     def to_dict(self) -> dict:
         """Serialise to a plain dict (for JSON state + .baton-worktree.json)."""
-        return {
+        d = {
             "task_id": self.task_id,
             "step_id": self.step_id,
             "path": str(self.path),
@@ -102,6 +107,12 @@ class WorktreeHandle:
             "created_at": self.created_at,
             "parent_repo": str(self.parent_repo),
         }
+        # Only write non-None swarm fields to avoid cluttering legacy manifests
+        if self.swarm_id is not None:
+            d["swarm_id"] = self.swarm_id
+        if self.pool is not None:
+            d["pool"] = self.pool
+        return d
 
     @classmethod
     def from_dict(cls, data: dict) -> WorktreeHandle:
@@ -114,6 +125,8 @@ class WorktreeHandle:
             base_sha=data.get("base_sha", ""),
             created_at=data.get("created_at", ""),
             parent_repo=Path(data["parent_repo"]),
+            swarm_id=data.get("swarm_id"),
+            pool=data.get("pool"),
         )
 
     def takeover_command(self) -> str:
@@ -244,6 +257,7 @@ class WorktreeManager:
         enabled: bool = True,
         trace_recorder: object | None = None,  # TraceRecorder | None
         bead_store: object | None = None,       # BeadStore | None
+        max_concurrent: int = 16,               # Wave 6.2 (bd-707d): concurrency cap
     ) -> None:
         self._project_root = project_root.resolve()
         self._worktrees_root = (
@@ -252,6 +266,10 @@ class WorktreeManager:
         self._enabled = enabled
         self._tracer = trace_recorder  # may be None
         self._bead_store = bead_store   # may be None
+        # Wave 6.2 (bd-707d): semaphore caps concurrent git worktree add calls.
+        # Default 16 keeps existing behaviour; swarm path overrides to 128.
+        self._semaphore = threading.Semaphore(max_concurrent)
+        self._max_concurrent = max_concurrent
         # In-memory index: (task_id, step_id) -> WorktreeHandle
         self._handles: dict[tuple[str, str], WorktreeHandle] = {}
         # Active trace reference (set by engine before calls)
@@ -328,12 +346,24 @@ class WorktreeManager:
         base_branch: str,
         *,
         base_sha: str | None = None,
+        pool: str | None = None,
+        swarm_id: str | None = None,
     ) -> WorktreeHandle:
         """Materialize an isolated worktree.
 
         Idempotent: if a worktree at the canonical path already exists AND
         its branch matches the expected name AND HEAD == base_sha, the
         existing handle is returned.
+
+        Args:
+            task_id: Execution task identifier.
+            step_id: Step identifier within the task.
+            base_branch: Branch to base the worktree on.
+            base_sha: Optional explicit SHA; resolved from HEAD if omitted.
+            pool: Wave 6.2 pool tag (``"swarm"``, ``"speculation"``, or ``None``).
+                Swarm/speculation pools use staggered jitter before semaphore
+                acquisition to reduce git object-DB contention.
+            swarm_id: Wave 6.2 swarm identifier (stored on the handle for GC).
 
         Raises:
             WorktreeCreateError: on lock contention, dirty path, base ref
@@ -349,6 +379,8 @@ class WorktreeManager:
                 base_sha="",
                 created_at=_utcnow(),
                 parent_repo=self._project_root,
+                swarm_id=swarm_id,
+                pool=pool,
             )
 
         branch_name = _safe_branch_name(task_id, step_id)
@@ -357,6 +389,48 @@ class WorktreeManager:
 
         t_start = time.monotonic()
 
+        # Wave 6.2 (bd-707d): stagger jitter before semaphore acquisition for
+        # swarm/speculation pools to reduce git shared-object-DB contention.
+        if pool in ("swarm", "speculation"):
+            time.sleep(random.uniform(0, 0.05))
+
+        # Block until a slot is available (bounded by max_concurrent semaphore).
+        # Defensive getattr: managers constructed via __new__ in tests lack
+        # _semaphore; fall back to unguarded execution in that case.
+        semaphore = getattr(self, "_semaphore", None)
+        if semaphore is not None:
+            semaphore.acquire()
+        try:
+            return self._create_locked(
+                task_id=task_id,
+                step_id=step_id,
+                base_branch=base_branch,
+                base_sha=base_sha,
+                pool=pool,
+                swarm_id=swarm_id,
+                branch_name=branch_name,
+                worktree_path=worktree_path,
+                lock_path=lock_path,
+                t_start=t_start,
+            )
+        finally:
+            if semaphore is not None:
+                semaphore.release()
+
+    def _create_locked(
+        self,
+        task_id: str,
+        step_id: str,
+        base_branch: str,
+        base_sha: str | None,
+        pool: str | None,
+        swarm_id: str | None,
+        branch_name: str,
+        worktree_path: Path,
+        lock_path: Path,
+        t_start: float,
+    ) -> WorktreeHandle:
+        """Internal: perform the actual git worktree creation under the semaphore."""
         with _FileLock(lock_path):
             # ── Idempotency check ────────────────────────────────────────────
             cached = self._handles.get((task_id, step_id))
@@ -432,6 +506,8 @@ class WorktreeManager:
                 base_sha=base_sha,
                 created_at=_utcnow(),
                 parent_repo=self._project_root,
+                swarm_id=swarm_id,
+                pool=pool,
             )
 
             # ── Persist manifest ─────────────────────────────────────────────
@@ -607,16 +683,26 @@ class WorktreeManager:
 
     @staticmethod
     def _parse_conflict_files(output: str) -> list[str]:
-        """Extract conflict file names from git output."""
+        """Extract conflict file paths from git rebase/merge output.
+
+        bd-c9e7: the previous split-on-colon approach returned prose such as
+        "Merge conflict in foo.py" instead of the bare path "foo.py".  Use a
+        regex to capture the trailing path component from both git output
+        formats:
+
+          CONFLICT (content): Merge conflict in path/to/file.py
+          Merge conflict in path/to/file.py
+        """
+        import re as _re
+        _CONFLICT_RE = _re.compile(
+            r"^(?:CONFLICT\s*\([^)]+\):\s*)?(?:Merge conflict|content) in (.+)$"
+        )
         files: list[str] = []
         for line in output.splitlines():
             line = line.strip()
-            if line.startswith("CONFLICT") and ":" in line:
-                parts = line.split(":", 1)
-                if len(parts) == 2:
-                    files.append(parts[1].strip())
-            elif line.startswith("Auto-merging "):
-                pass  # not a conflict
+            m = _CONFLICT_RE.match(line)
+            if m:
+                files.append(m.group(1).strip())
         return files
 
     def cleanup(
@@ -748,11 +834,24 @@ class WorktreeManager:
         *,
         terminal_step_ids: set[str] | None = None,
         dry_run: bool = False,
+        pool: str | None = None,
     ) -> list[WorktreeHandle]:
         """Remove worktrees older than max_age_hours whose step is terminal.
 
         SAFETY: never deletes a worktree whose step is still in
         ``running``, ``dispatched``, ``interacting``, or ``gate_pending``.
+
+        Args:
+            max_age_hours: Minimum age (in hours) before a worktree is eligible
+                for reclaim.  Use ``0`` to reclaim immediately (e.g. for
+                atomic swarm cleanup after coalescing completes).
+            terminal_step_ids: When set, only reclaim worktrees whose step_id
+                is in this set (safety gate for running steps).
+            dry_run: List eligible worktrees without removing them.
+            pool: Wave 6.2 (bd-707d) — when set, only reclaim worktrees whose
+                ``pool`` tag matches this value.  Allows
+                ``gc_stale(pool="swarm", max_age_hours=0)`` for atomic swarm
+                reclamation after coalescing completes.
 
         Returns the list of handles reclaimed.
         """
@@ -783,6 +882,16 @@ class WorktreeManager:
                     handle = WorktreeHandle.from_dict(json.loads(manifest.read_text("utf-8")))
                 except Exception as exc:
                     _log.debug("gc_stale: skipping %s (bad manifest: %s)", step_dir, exc)
+                    skipped += 1
+                    continue
+
+                # Pool filter — Wave 6.2 (bd-707d): when pool is specified,
+                # skip any worktree whose pool tag does not match.
+                if pool is not None and handle.pool != pool:
+                    _log.debug(
+                        "gc_stale: skipping step=%s (pool=%r != filter pool=%r)",
+                        handle.step_id, handle.pool, pool,
+                    )
                     skipped += 1
                     continue
 

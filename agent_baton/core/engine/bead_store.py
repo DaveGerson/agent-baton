@@ -7,6 +7,13 @@ tables defined in ``core/storage/schema.py`` (added in schema v4).  It uses
 the same ``ConnectionManager`` pattern as ``SqliteStorage`` — one connection
 per thread, WAL mode, schema applied on first access.
 
+Gastown Part A (bd-2870): when ``gastown_dual_write=True`` the store also
+writes each bead as a JSON note in ``refs/notes/baton-beads`` via
+``NotesAdapter``, and maintains a ``bead_anchors`` SQLite index for O(1)
+git-notes lookups.  The flag defaults to ``False`` (Phase M0 — no behaviour
+change for existing callers).  Phase M1+ flag flips happen in follow-up
+commits.
+
 Design invariants:
 - All SQL uses parameterised queries (no f-string interpolation of values).
 - ``write()`` writes ``beads`` and ``bead_tags`` in a single transaction.
@@ -14,6 +21,8 @@ Design invariants:
   method returns a safe empty/None value and logs a warning rather than
   raising.  This supports graceful degradation when running against an
   older schema.
+- Notes writes are always warn-only on failure — SQLite success is the
+  contract.  A notes failure NEVER rolls back the SQLite transaction.
 
 See ``docs/superpowers/specs/2026-04-12-bead-memory-design.md`` for the
 full design rationale and ``models/bead.py`` for the data model.
@@ -49,12 +58,24 @@ class BeadStore:
             for signing writes and verifying reads.  When ``None``, signing is
             completely skipped (backward-compatible behaviour, default when
             ``BATON_SOULS_ENABLED`` is not set).
+        repo_root: Optional path to the git repository root.  Required when
+            ``gastown_dual_write`` is True.  When ``None``, the store attempts
+            to derive the repo root from ``db_path.parent`` (walking upward
+            for a ``.git`` directory).
+        gastown_dual_write: Phase M0 flag (default ``False``).  When ``True``,
+            every ``write()`` call also writes the bead as a git note in
+            ``refs/notes/baton-beads`` (warn-only on failure) and updates the
+            ``bead_anchors`` SQLite index.  Has no effect on reads — the read
+            path always uses SQLite (Phase M0/M1 behaviour).
     """
 
     def __init__(
         self,
         db_path: Path,
-        soul_router=None,  # SoulRouter | None
+        soul_router=None,  # SoulRouter | None — Wave 6.1 Part B (bd-d975)
+        repo_root: Path | None = None,  # Wave 6.1 Part A (bd-2870)
+        *,
+        gastown_dual_write: bool = False,  # Wave 6.1 Part A (bd-2870)
     ) -> None:
         from agent_baton.core.storage.connection import ConnectionManager
         from agent_baton.core.storage.schema import PROJECT_SCHEMA_DDL, SCHEMA_VERSION
@@ -64,6 +85,81 @@ class BeadStore:
         # Wave 6.1 Part B (bd-d975): optional SoulRouter for signing.
         # None → signing disabled (BATON_SOULS_ENABLED=0, the default).
         self._soul_router = soul_router
+
+        self._gastown_dual_write = gastown_dual_write
+
+        # Resolve repo root for git-notes operations.
+        if repo_root is not None:
+            self._repo_root: Path | None = repo_root
+        elif gastown_dual_write:
+            self._repo_root = self._find_repo_root(db_path)
+        else:
+            self._repo_root = None
+
+        # Lazy-init: NotesAdapter and BeadAnchorIndex are constructed only
+        # when gastown_dual_write is True and a repo root is available.
+        self._notes_adapter = None
+        self._anchor_index = None
+        if self._gastown_dual_write and self._repo_root is not None:
+            self._init_gastown()
+
+    # ------------------------------------------------------------------
+    # Gastown initialisation helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _find_repo_root(db_path: Path) -> Path | None:
+        """Walk upward from *db_path* to find a directory containing ``.git``."""
+        candidate = db_path.parent
+        for _ in range(10):  # max 10 levels up
+            if (candidate / ".git").exists():
+                return candidate
+            parent = candidate.parent
+            if parent == candidate:
+                break
+            candidate = parent
+        return None
+
+    def _init_gastown(self) -> None:
+        """Initialise NotesAdapter and BeadAnchorIndex."""
+        try:
+            from agent_baton.core.engine.notes_adapter import NotesAdapter
+            from agent_baton.core.engine.bead_anchors import BeadAnchorIndex
+
+            self._notes_adapter = NotesAdapter(self._repo_root)  # type: ignore[arg-type]
+            self._anchor_index = BeadAnchorIndex(self._conn())
+            _log.debug(
+                "BeadStore: Gastown dual-write enabled (repo=%s)", self._repo_root
+            )
+        except Exception as exc:
+            _log.warning(
+                "BeadStore: Gastown init failed — dual-write disabled: %s", exc
+            )
+            self._gastown_dual_write = False
+
+    def _compute_anchor(self, bead: "Bead") -> tuple[str, str]:
+        """Return ``(anchor_commit, branch_at_create)`` for *bead*.
+
+        Task-scoped beads anchor to ``HEAD``; project-scoped beads anchor to
+        ``git merge-base origin/main HEAD`` (falling back to the root commit).
+
+        Returns empty strings on any failure so the caller can decide whether
+        to skip the notes write.
+        """
+        if self._notes_adapter is None:
+            return "", ""
+        try:
+            adapter = self._notes_adapter
+            branch = adapter.resolve_branch()
+            is_project_scoped = not bead.task_id  # empty task_id → project scope
+            if is_project_scoped:
+                anchor = adapter.resolve_merge_base()
+            else:
+                anchor = adapter.resolve_head()
+            return anchor, branch
+        except Exception as exc:
+            _log.debug("BeadStore._compute_anchor failed: %s", exc)
+            return "", ""
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -274,10 +370,37 @@ class BeadStore:
                     (bead.bead_id, tag),
                 )
             conn.commit()
+
             return bead.bead_id
         except Exception as exc:
             _log.warning("BeadStore.write failed for %s: %s", bead.bead_id, exc)
             return ""
+        finally:
+            # ------------------------------------------------------------------
+            # Gastown Phase M0: dual-write to git notes (warn-only on failure).
+            # Runs in `finally` so notes failures NEVER prevent SQLite success
+            # from being returned.  `bead.bead_id` is the return value only when
+            # the try block above completed without exception; in the except path
+            # the finally body still runs but the caller already gets "".
+            # Notes writes are fully isolated — any exception here is swallowed.
+            # ------------------------------------------------------------------
+            if self._gastown_dual_write and self._notes_adapter is not None:
+                try:
+                    anchor_commit, branch = self._compute_anchor(bead)
+                    if anchor_commit:
+                        blob = bead.to_dict()
+                        blob["schema_version"] = "gastown-1"
+                        blob["anchor_commit"] = anchor_commit
+                        blob["branch_at_create"] = branch
+                        self._notes_adapter.write(bead.bead_id, anchor_commit, blob)
+                        if self._anchor_index is not None:
+                            self._anchor_index.put(bead.bead_id, anchor_commit)
+                except Exception as notes_exc:
+                    _log.warning(
+                        "BEAD_WARNING: notes-write-failed bead=%s exc=%s",
+                        bead.bead_id,
+                        notes_exc,
+                    )
 
     def read(self, bead_id: str) -> "Bead | None":  # noqa: F821
         """Fetch a single bead by ID.

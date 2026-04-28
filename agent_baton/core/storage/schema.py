@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 31
+SCHEMA_VERSION = 32
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -1065,17 +1065,24 @@ CREATE TABLE IF NOT EXISTS debates (
 CREATE INDEX IF NOT EXISTS idx_debates_created ON debates(created_at);
 """,
     31: """
--- v31: Wave 6.1 Part B — Persistent Agent Souls (bd-d975).
+-- v31: Gastown Part A (bd-2870) — bead_anchors index for git-notes-backed
+-- bead persistence.  bead_anchors maps bead_id → anchor_commit_sha for
+-- O(1) lookup during git-notes reads.  Applied to BOTH project and
+-- central databases via ConnectionManager._run_migrations().
+CREATE TABLE IF NOT EXISTS bead_anchors (
+    bead_id        TEXT PRIMARY KEY,
+    anchor_commit  TEXT NOT NULL,
+    last_seen_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_bead_anchors_commit ON bead_anchors(anchor_commit);
+""",
+    32: """
+-- v32: Wave 6.1 Part B — Persistent Agent Souls (bd-d975).
 --
 -- agent_souls and soul_expertise live in central.db ONLY (cross-project
--- federation per feedback_schema_project_id.md).  This migration adds the
--- tables to central.db when upgrading from v30; fresh central.db installs
--- get them from CENTRAL_SCHEMA_DDL directly.
---
--- Per-project baton.db: this migration is a no-op (the CREATE TABLE IF NOT
--- EXISTS statements are safe to apply but soul tables are never queried
--- from baton.db — all soul reads/writes go through SoulRegistry which
--- targets central.db exclusively).
+-- federation per feedback_schema_project_id.md).  Per-project baton.db
+-- migration is a no-op for soul tables (all soul reads/writes go through
+-- SoulRegistry which targets central.db exclusively).
 --
 -- Bead signing columns: signed_by and signature are additive columns on
 -- the beads table.  Legacy beads load with signed_by='' — no soul
@@ -2050,6 +2057,18 @@ CREATE TABLE IF NOT EXISTS agent_context (
     PRIMARY KEY (agent_name, domain)
 );
 CREATE INDEX IF NOT EXISTS idx_agent_context_agent ON agent_context(agent_name);
+
+-- BEAD_ANCHORS (Gastown Part A, v31, bd-2870): bead_id → anchor_commit index
+-- for O(1) git-notes reads.  Updated on every BeadStore.write().  The
+-- rebuild_from_notes() path recreates this table from a live notes scan when
+-- it drifts.  No FK constraint — anchor entries outlive the dual-write
+-- transition window and must survive bead removal from the SQLite mirror.
+CREATE TABLE IF NOT EXISTS bead_anchors (
+    bead_id        TEXT PRIMARY KEY,
+    anchor_commit  TEXT NOT NULL,
+    last_seen_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_bead_anchors_commit ON bead_anchors(anchor_commit);
 """
 
 # =====================================================================
