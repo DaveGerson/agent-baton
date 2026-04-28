@@ -1390,6 +1390,19 @@ All IDs are prefixed with `bd-` (e.g., `bd-a1b2`).
 
 ---
 
+## 12.5 Project Config (`baton.yaml`)
+
+Optional, additive project-level config loaded by
+`agent_baton.core.config.ProjectConfig.load()` (walks up from cwd).
+Lets a project declare `default_agents`, `default_gates`,
+`default_isolation`, `auto_route_rules`, and `excluded_paths` so
+`baton plan` doesn't need repeated CLI flags. The planner applies these
+in `_apply_project_config()` after stack-aware QA gates — empty/missing
+configs are a complete no-op. Inspect/scaffold via `baton config show`,
+`baton config init`, and `baton config validate`.
+
+---
+
 ## 13. Cross-Cutting Concerns
 
 ### 13.1 Error Handling
