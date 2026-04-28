@@ -19,7 +19,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 _log = logging.getLogger(__name__)
 
@@ -302,10 +302,21 @@ class ASTPartitioner:
 
     Args:
         codebase_root: Absolute path to the root of the Python project.
+        bead_store: Optional :class:`~agent_baton.core.engine.bead_store.BeadStore`
+            used to emit warning beads on parse failure.  When ``None``, beads
+            are not emitted (warnings are still logged).
     """
 
-    def __init__(self, codebase_root: Path) -> None:
+    def __init__(
+        self,
+        codebase_root: Path,
+        bead_store: Optional[object] = None,  # BeadStore | None
+    ) -> None:
         self._root = codebase_root.resolve()
+        self._bead_store = bead_store
+        # In-memory set of absolute paths that have already had a warning bead
+        # emitted in this run — prevents bead spam during codebase-wide sweeps.
+        self._warned_parse_failures: set[Path] = set()
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -435,7 +446,11 @@ class ASTPartitioner:
                 # Quick pre-filter before full parse
                 if module_base not in source:
                     continue
-                tree = cst.parse_module(source)
+                try:
+                    tree = cst.parse_module(source)
+                except cst.ParserSyntaxError as parse_exc:
+                    self._emit_parse_failure_bead(py_file, parse_exc)
+                    continue
                 visitor = _ImportRefCollector(module_base)
                 wrapper = cst_meta.MetadataWrapper(tree, unsafe_skip_copy=True)
                 try:
@@ -458,6 +473,53 @@ class ASTPartitioner:
 
         return sites
 
+    def _emit_parse_failure_bead(self, file_path: Path, error: Exception) -> None:
+        """Emit a warning bead for a libcst parse failure, at most once per file.
+
+        Only fires when a :class:`~agent_baton.core.engine.bead_store.BeadStore`
+        was injected at construction time.  Uses an in-memory set to suppress
+        duplicate beads for the same file within a single partitioner run.
+        """
+        abs_path = file_path.resolve()
+        if abs_path in self._warned_parse_failures:
+            return
+        self._warned_parse_failures.add(abs_path)
+
+        content = (
+            f"partitioner: failed to AST-partition {abs_path} ({error}); "
+            "falling back to single-chunk — this file's edits will be serialized "
+            "through one agent. Fix the syntax error or partition will resume."
+        )
+        _log.warning(
+            "ASTPartitioner: parse failure in %s — falling back to single-chunk "
+            "(parallelism loss). Error: %s",
+            abs_path,
+            error,
+        )
+
+        if self._bead_store is None:
+            return
+
+        try:
+            from agent_baton.models.bead import Bead
+
+            bead_id = f"bd-{hashlib.sha256(content.encode()).hexdigest()[:4]}"
+            bead = Bead(
+                bead_id=bead_id,
+                task_id="",
+                step_id="partitioner",
+                agent_name="partitioner",
+                bead_type="warning",
+                content=content,
+                confidence="high",
+                scope="project",
+                tags=["partitioner", "parse-failure", "parallelism-loss"],
+                affected_files=[str(abs_path)],
+            )
+            self._bead_store.write(bead)  # type: ignore[union-attr]
+        except Exception as bead_exc:
+            _log.debug("ASTPartitioner: bead emit failed (non-fatal): %s", bead_exc)
+
     def _extract_sites_with_libcst(
         self,
         source: str,
@@ -467,6 +529,9 @@ class ASTPartitioner:
         """Parse *source* with libcst and collect call sites for *target_names*."""
         try:
             tree = cst.parse_module(source)
+        except cst.ParserSyntaxError as exc:
+            self._emit_parse_failure_bead(file_path, exc)
+            return []
         except Exception as exc:
             _log.debug("libcst parse failed for %s: %s", file_path, exc)
             return []
