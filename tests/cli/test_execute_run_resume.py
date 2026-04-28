@@ -35,6 +35,7 @@ from agent_baton.cli.commands.execution.execute import _handle_run
 from agent_baton.core.engine.executor import ExecutionEngine
 from agent_baton.core.engine.persistence import StatePersistence
 from agent_baton.models.execution import (
+    ActionType,
     ApprovalResult,
     ExecutionState,
     GateResult,
@@ -629,36 +630,37 @@ class TestIdempotentRunAfterApproval:
             approvals=[(1, "approve")],
         )
 
-        # Track which steps are processed by this run by spying on
-        # record_step_result.  In dry_run mode mark_dispatched is intentionally
-        # skipped (it has git-worktree side effects), so record_step_result is
-        # the correct interception point — it is called for every step that
-        # _run_loop actually processes (including the dry-run skip path).
+        # Track which step_ids the engine offers as DISPATCH actions during
+        # this dry-run.  In dry-run mode neither mark_dispatched nor
+        # record_step_result is called (bd-92bc made dry-run fully read-only),
+        # so we spy on engine.next_action() — the one call that happens on
+        # every loop iteration regardless of dry_run.  We capture any action
+        # whose action_type is DISPATCH and record its step_id.
         dispatched_step_ids: list[str] = []
 
-        original_record = ExecutionEngine.record_step_result
+        original_next_action = ExecutionEngine.next_action
 
-        def _spy_record(self, step_id: str, agent_name: str = "", **kwargs):
-            dispatched_step_ids.append(step_id)
-            return original_record(
-                self, step_id=step_id, agent_name=agent_name, **kwargs
-            )
+        def _spy_next_action(self):
+            action = original_next_action(self)
+            if action.action_type == ActionType.DISPATCH:
+                dispatched_step_ids.append(action.step_id)
+            return action
 
         args = _make_args(str(plan_path), task_id=None, dry_run=True)
         patches = _patches_for_run(tmp_path)
         with (
             patches[0], patches[1], patches[2], patches[3],
             patches[4], patches[5], patches[6],
-            patch.object(ExecutionEngine, "record_step_result", _spy_record),
+            patch.object(ExecutionEngine, "next_action", _spy_next_action),
         ):
             _handle_run(args)
 
         # 1.1 (architect) was completed BEFORE the run; it must NOT be
-        # in the dispatched list for this invocation.
+        # offered as a fresh DISPATCH by the engine.
         assert "1.1" not in dispatched_step_ids, (
             f"architect step was re-dispatched on resume: {dispatched_step_ids}"
         )
-        # 2.1 should have been dispatched (this is the new work).
+        # 2.1 should have been offered as DISPATCH (this is the pending work).
         assert "2.1" in dispatched_step_ids
 
 
