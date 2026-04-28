@@ -13,6 +13,16 @@ types.  Example:
 
     baton swarm refactor '{"kind":"rename-symbol","old":"mymod.Foo","new":"mymod.Bar"}'
 
+EXPERIMENTAL gate (bd-18f6)
+----------------------------
+``baton swarm`` is gated behind ``BATON_EXPERIMENTAL=swarm``.  The current
+dispatcher (Wave 6.2 Part A) is a v1 stub: partition plans are real but
+agent dispatch is **not yet wired** end-to-end (see bd-c925, bd-2b9f).
+
+Without the flag the command exits immediately with exit code 2 and an
+explanatory message.  This keeps the stub off the happy-path for users who
+have not opted in.
+
 Feature gate: ``BATON_SWARM_ENABLED=1`` required (in env or baton.yaml).
 When disabled the command exits with a clear error message.
 
@@ -53,6 +63,17 @@ _DISABLED_MSG = (
     "BATON_SWARM_ENABLED environment variable to enable it."
 )
 
+_EXPERIMENTAL_ENV = "BATON_EXPERIMENTAL"
+_EXPERIMENTAL_BLOCKED_MSG = (
+    "error: `baton swarm` is experimental — current dispatcher does not invoke real agents.\n"
+    "To opt in (development/testing only), set BATON_EXPERIMENTAL=swarm.\n"
+    "See bd-c925 / bd-2b9f for the integration roadmap."
+)
+_EXPERIMENTAL_WARNING_MSG = (
+    "[EXPERIMENTAL] swarm dispatcher is a v1 stub — chunk plans are real but "
+    "agent dispatch is not yet wired (bd-c925)."
+)
+
 # Conservative cost model (Wave 6.2 Part A design, bd-707d).
 # Assume est_tokens_per_chunk input tokens; half that as output.
 # Pricing per 1 M tokens (April 2026 baseline):
@@ -85,11 +106,16 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     """Register the ``swarm`` subcommand and its sub-subcommands."""
     parser: argparse.ArgumentParser = subparsers.add_parser(
         "swarm",
-        help="Massive parallel AST-aware swarm refactoring (Wave 6.2, bd-707d).",
+        help=(
+            "[EXPERIMENTAL] Massive parallel AST-aware swarm refactoring "
+            "(Wave 6.2, bd-707d). Requires BATON_EXPERIMENTAL=swarm to run."
+        ),
         description=(
-            "Dispatch up to 100 Haiku agents in parallel to apply a single "
-            "refactor directive across provably-independent code chunks.  "
-            "Requires BATON_SWARM_ENABLED=1."
+            "[EXPERIMENTAL] Dispatch up to 100 Haiku agents in parallel to apply "
+            "a single refactor directive across provably-independent code chunks.  "
+            "The v1 dispatcher stub produces real partition plans but does NOT yet "
+            "invoke real agents end-to-end (see bd-c925 / bd-2b9f).  "
+            "Requires BATON_EXPERIMENTAL=swarm and BATON_SWARM_ENABLED=1."
         ),
     )
     swarm_sub = parser.add_subparsers(dest="swarm_command", metavar="COMMAND")
@@ -216,12 +242,16 @@ Examples:
     baton swarm refactor '{"kind":"migrate-api","old_call_pattern":"requests.get(...)","new_call_template":"httpx.get(...)"}'
 
 Environment:
-  BATON_SWARM_ENABLED=1   Required to enable swarm dispatch.
+  BATON_EXPERIMENTAL=swarm   Required to run (stub — real dispatch not wired).
+  BATON_SWARM_ENABLED=1      Required to enable swarm dispatch.
 """
 
 
 def handler(args: argparse.Namespace) -> None:
     """Dispatch the appropriate swarm sub-command handler."""
+    # Experimental gate must fire BEFORE the sign-off gate so blocked users
+    # never see the sign-off prompt (bd-18f6).
+    _check_experimental()
     _check_enabled()
     if args.swarm_command == "refactor":
         _handle_refactor(args)
@@ -770,6 +800,27 @@ def _run_with_engine(
 # ---------------------------------------------------------------------------
 # Feature gate
 # ---------------------------------------------------------------------------
+
+
+def _check_experimental() -> None:
+    """Block execution unless BATON_EXPERIMENTAL contains 'swarm' (bd-18f6).
+
+    Parses BATON_EXPERIMENTAL as a comma-separated list so multiple flags
+    can coexist (e.g. BATON_EXPERIMENTAL=swarm,immune).
+
+    - If 'swarm' is absent: print error to stderr and exit 2.
+    - If 'swarm' is present: print a one-line warning to stderr so the
+      operator is reminded the dispatcher is a stub, then return normally.
+    """
+    flags = {
+        f.strip()
+        for f in os.environ.get(_EXPERIMENTAL_ENV, "").split(",")
+        if f.strip()
+    }
+    if "swarm" not in flags:
+        print(_EXPERIMENTAL_BLOCKED_MSG, file=sys.stderr)
+        sys.exit(2)
+    print(_EXPERIMENTAL_WARNING_MSG, file=sys.stderr)
 
 
 def _check_enabled() -> None:
