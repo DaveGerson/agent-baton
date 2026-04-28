@@ -756,3 +756,61 @@ class TestWorktreeHandleRoundTrip:
         handle = WorktreeHandle.from_dict(data)
         assert handle.base_sha == ""
         assert handle.created_at == ""
+
+
+# ---------------------------------------------------------------------------
+# bd-c9e7 — _parse_conflict_files returns paths not prose
+# ---------------------------------------------------------------------------
+
+
+class TestParseConflictFilesReturnsPaths:
+    """bd-c9e7: _parse_conflict_files must return bare file paths, not prose
+    like 'Merge conflict in foo.py'."""
+
+    def test_parse_conflict_files_returns_paths_not_prose(self) -> None:
+        """Real git rebase output: CONFLICT line with path at the end."""
+        output = (
+            "CONFLICT (content): Merge conflict in foo.py\n"
+            "CONFLICT (modify/delete): bar/baz.py deleted in HEAD.\n"
+            "Auto-merging unrelated.py\n"
+            "CONFLICT (content): Merge conflict in bar/baz.py\n"
+        )
+        result = WorktreeManager._parse_conflict_files(output)
+        assert "foo.py" in result, f"Expected 'foo.py' in {result}"
+        assert "bar/baz.py" in result, f"Expected 'bar/baz.py' in {result}"
+        # Must NOT contain prose descriptions
+        for item in result:
+            assert not item.startswith("Merge conflict"), (
+                f"Result item {item!r} is prose, not a file path"
+            )
+
+    def test_parse_conflict_files_handles_merge_conflict_in_prefix(self) -> None:
+        """Output lines starting with 'Merge conflict in' (no CONFLICT prefix)."""
+        output = (
+            "Merge conflict in foo.py\n"
+            "Merge conflict in bar/baz.py\n"
+        )
+        result = WorktreeManager._parse_conflict_files(output)
+        assert "foo.py" in result, f"Expected 'foo.py' in {result}"
+        assert "bar/baz.py" in result, f"Expected 'bar/baz.py' in {result}"
+
+    def test_parse_conflict_files_empty_output(self) -> None:
+        """No conflict lines in output returns empty list."""
+        output = "Auto-merging clean.py\nApplying: some commit\n"
+        result = WorktreeManager._parse_conflict_files(output)
+        assert result == [], f"Expected empty list, got {result}"
+
+    def test_parse_conflict_files_synthetic_rebase_output(self) -> None:
+        """Synthetic multi-file conflict: all returned items are plain paths."""
+        output = (
+            "First, rewinding head to replay your work on top of it...\n"
+            "Applying: implement feature\n"
+            "CONFLICT (content): Merge conflict in src/api/routes.py\n"
+            "CONFLICT (content): Merge conflict in src/models/user.py\n"
+            "Auto-merging tests/test_api.py\n"
+            "error: Failed to merge in the changes.\n"
+        )
+        result = WorktreeManager._parse_conflict_files(output)
+        assert result == ["src/api/routes.py", "src/models/user.py"], (
+            f"Expected ['src/api/routes.py', 'src/models/user.py'], got {result}"
+        )
