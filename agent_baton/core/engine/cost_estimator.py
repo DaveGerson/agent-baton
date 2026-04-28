@@ -87,22 +87,69 @@ class CostForecast:
 # Public API
 # ---------------------------------------------------------------------------
 
+#: Explicit prefix → canonical family mapping.  Order matters only for
+#: documentation; lookup is by token / prefix match (see :func:`normalise_model`).
+#: bd-a8b2: substring matching (``"opus" in "opus-via-haiku-router"``)
+#: previously misclassified composite/router model IDs and was order-sensitive.
+_MODEL_PREFIX_MAP: dict[str, str] = {
+    # Anthropic Claude family — full vendor IDs
+    "claude-opus": "opus",
+    "claude-sonnet": "sonnet",
+    "claude-haiku": "haiku",
+    # Bare family names + versioned variants
+    "opus": "opus",
+    "sonnet": "sonnet",
+    "haiku": "haiku",
+}
+
+
 def normalise_model(model: str) -> str:
     """Map an arbitrary model string to a known pricing family key.
+
+    Resolution rules (bd-a8b2 — replaces previous substring-match):
+
+    1. **Explicit prefix match.**  If *model* starts with one of the
+       entries in :data:`_MODEL_PREFIX_MAP` (longest prefix wins) the
+       mapped family is returned.  This catches both bare names
+       (``"opus"``, ``"opus-4"``) and full vendor IDs
+       (``"claude-opus-4-7"``, ``"claude-sonnet-4-6"``).
+    2. **Token suffix match.**  When the prefix path misses, split the
+       lowercased ID on ``-`` and ``_`` and inspect the last token.  If
+       that token is a known family name, return it.  This handles the
+       legacy ``"claude-3-5-sonnet"`` style without re-introducing the
+       earlier substring-anywhere bug — composite IDs such as
+       ``"opus-via-haiku-router"`` still resolve to their *leading*
+       family because step 1 fires first.
+    3. **Fallback.**  Unrecognised models default to
+       :data:`_DEFAULT_MODEL` and emit a warning so operators notice
+       miscategorised IDs in their cost forecasts.
 
     Examples:
         ``"opus"`` -> ``"opus"``
         ``"claude-opus-4-7"`` -> ``"opus"``
-        ``"sonnet-3.5"`` -> ``"sonnet"``
-        ``"haiku"`` -> ``"haiku"``
-        ``""`` / unknown -> ``"sonnet"`` (the planner default).
+        ``"claude-sonnet-4-6"`` -> ``"sonnet"``
+        ``"claude-3-5-sonnet"`` -> ``"sonnet"`` (suffix rule)
+        ``"opus-via-haiku-router"`` -> ``"opus"`` (prefix rule beats suffix)
+        ``""`` / unknown -> ``"sonnet"`` + warning.
     """
     if not model:
         return _DEFAULT_MODEL
     lower = model.lower()
-    for family in MODEL_PRICING:
-        if family in lower:
-            return family
+    # 1. Explicit-prefix lookup — longest match wins so ``"claude-opus"``
+    #    beats the bare ``"opus"`` key for IDs like ``"claude-opus-4-7"``.
+    for prefix in sorted(_MODEL_PREFIX_MAP, key=len, reverse=True):
+        if lower.startswith(prefix):
+            return _MODEL_PREFIX_MAP[prefix]
+    # 2. Suffix-token lookup for legacy ``claude-N-M-<family>`` IDs.
+    tokens = lower.replace("_", "-").split("-")
+    if tokens and tokens[-1] in MODEL_PRICING:
+        return tokens[-1]
+    # 3. Fallback with warning.
+    import logging as _logging
+    _logging.getLogger(__name__).warning(
+        "normalise_model: unrecognised model %r; defaulting to %r pricing",
+        model, _DEFAULT_MODEL,
+    )
     return _DEFAULT_MODEL
 
 
