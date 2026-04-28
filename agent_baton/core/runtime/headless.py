@@ -33,6 +33,60 @@ from agent_baton.core.runtime.claude_launcher import (
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Macros validation
+# ---------------------------------------------------------------------------
+
+#: Keys every macro entry dict must contain.
+_MACRO_REQUIRED_KEYS: frozenset[str] = frozenset({"command"})
+
+
+def _validate_macros(macros: dict) -> None:  # type: ignore[type-arg]
+    """Validate a macros configuration block.
+
+    A valid macros block is a ``dict`` whose values are dicts, each with:
+
+    - ``command`` (str, non-empty) — the shell command the macro expands to.
+    - Any additional string keys (e.g. ``description``) are tolerated.
+
+    Raises:
+        ValueError: On the first structural or value violation found, with a
+            descriptive message indicating which macro and what is wrong.
+
+    Args:
+        macros: The macros configuration block to validate.
+
+    Examples::
+
+        _validate_macros({})                          # OK — empty is allowed
+        _validate_macros({"lint": {"command": "ruff check ."}})  # OK
+        _validate_macros(None)                        # ValueError — not a dict
+        _validate_macros({"bad": {}})                 # ValueError — missing 'command'
+        _validate_macros({"bad": {"command": ""}})    # ValueError — empty command
+    """
+    if not isinstance(macros, dict):
+        raise ValueError(
+            f"macros must be a dict, got {type(macros).__name__!r}"
+        )
+
+    for name, entry in macros.items():
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"macros[{name!r}]: entry must be a dict, got {type(entry).__name__!r}"
+            )
+        for key in _MACRO_REQUIRED_KEYS:
+            if key not in entry:
+                raise ValueError(
+                    f"macros[{name!r}]: missing required key {key!r}"
+                )
+        command = entry["command"]
+        if not isinstance(command, str) or not command.strip():
+            raise ValueError(
+                f"macros[{name!r}]: 'command' must be a non-empty string, "
+                f"got {command!r}"
+            )
+
+
 _DEFAULT_ENV_PASSTHROUGH: list[str] = [
     "CLAUDE_CODE_USE_BEDROCK",
     "CLAUDE_CODE_USE_VERTEX",
@@ -65,6 +119,13 @@ class HeadlessConfig:
     env_passthrough: list[str] = field(
         default_factory=lambda: list(_DEFAULT_ENV_PASSTHROUGH)
     )
+    macros: dict[str, dict[str, Any]] = field(default_factory=dict)
+    """Named macros forwarded to the headless session.
+
+    Each entry maps a macro name to a dict with at minimum a ``command``
+    key (non-empty str).  An optional ``description`` key is also
+    recognised.  Pass ``{}`` (the default) to disable macros entirely.
+    """
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -75,6 +136,7 @@ class HeadlessConfig:
             "base_retry_delay": self.base_retry_delay,
             "working_directory": self.working_directory.as_posix() if self.working_directory else None,
             "env_passthrough": list(self.env_passthrough),
+            "macros": dict(self.macros),
         }
 
     @classmethod
@@ -88,6 +150,7 @@ class HeadlessConfig:
             base_retry_delay=float(data.get("base_retry_delay", 5.0)),
             working_directory=Path(wd) if wd else None,
             env_passthrough=list(data.get("env_passthrough", _DEFAULT_ENV_PASSTHROUGH)),
+            macros=dict(data.get("macros", {})),
         )
 
 
@@ -108,6 +171,7 @@ class HeadlessClaude:
 
     def __init__(self, config: HeadlessConfig | None = None) -> None:
         self._config = config or HeadlessConfig()
+        _validate_macros(self._config.macros)
         resolved = shutil.which(self._config.claude_path)
         self._claude_bin: str | None = resolved
         if resolved is None:
