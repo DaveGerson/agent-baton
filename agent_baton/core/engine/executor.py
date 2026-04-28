@@ -123,6 +123,17 @@ from agent_baton.core.engine._executor_helpers import (
     find_step as _exec_helpers_find_step,
     effective_timeout as _exec_helpers_effective_timeout,
 )
+# 005b Phase 3: PhaseManager + state-class dispatch table.  PhaseManager owns
+# the crisp phase-advance mutator; state classes own the small mutation
+# epilogue tied to a state.status cluster (hybrid dispatch — see design §2.5).
+from agent_baton.core.engine.phase_manager import PhaseManager
+from agent_baton.core.engine.states import (
+    ExecutionPhaseStateProtocol,
+    PlanningState,
+    ExecutingPhaseState,
+    AwaitingApprovalState,
+    TerminalState,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -398,6 +409,27 @@ class ExecutionEngine:
         # frozen by API contract.  Tests inject a fake by monkeypatching
         # ``engine._resolver``.
         self._resolver = ActionResolver(max_gate_retries=self._max_gate_retries)
+
+        # ── 005b Phase 3: PhaseManager + state-handler dispatch table ───────
+        # Both attributes are private — must NOT appear in the public API
+        # contract test (see design §4).  PhaseManager is the zero-arg
+        # singleton that owns is_phase_complete / evaluate_*_gate / advance_phase.
+        # _state_handlers is a status -> stateless-singleton lookup consulted
+        # only for the small mutation epilogue (hybrid dispatch — design §2.5).
+        self._phase_manager = PhaseManager()
+        self._state_handlers: dict[str, ExecutionPhaseStateProtocol] = {
+            "pending":           PlanningState(),
+            "running":           ExecutingPhaseState(),
+            "paused":            AwaitingApprovalState(),
+            "paused-takeover":   AwaitingApprovalState(),
+            "gate_pending":      AwaitingApprovalState(),
+            "gate_failed":       AwaitingApprovalState(),
+            "approval_pending":  AwaitingApprovalState(),
+            "feedback_pending":  AwaitingApprovalState(),
+            "complete":          TerminalState(),
+            "failed":            TerminalState(),
+            "budget_exceeded":   TerminalState(),
+        }
 
         # KnowledgeResolver for runtime gap auto-resolution.  Callers (CLI and
         # tests) set this at construction time.  When None, gaps fall through to
@@ -4914,6 +4946,22 @@ class ExecutionEngine:
             f"{state.task_id!r} — likely a resolver bug (a decision is failing "
             "to converge to a terminal action)."
         )
+
+    def _state_handler_for(self, status: str) -> ExecutionPhaseStateProtocol:
+        """Return the state-handler singleton for *status*.
+
+        Falls back to ``ExecutingPhaseState`` (with a warning log) when the
+        status is not in the known map — defensive guard for forward-compat
+        with future status values added by other subsystems.  See design §2.6.
+        """
+        handler = self._state_handlers.get(status)
+        if handler is None:
+            _log.warning(
+                "Unknown state.status %r — falling back to ExecutingPhaseState",
+                status,
+            )
+            return self._state_handlers["running"]
+        return handler
 
     def _apply_resolver_decision(
         self,
