@@ -4050,6 +4050,10 @@ class ExecutionEngine:
             - state.interrupted_step_ids
         )
         if pending:
+            # bd-7312: Check for timed-out dispatched steps before returning WAIT.
+            timeout_action = self._check_timeout(state)
+            if timeout_action is not None:
+                return timeout_action
             return ExecutionAction(
                 action_type=ActionType.WAIT,
                 message="Waiting for in-flight steps to complete before proceeding.",
@@ -4958,6 +4962,131 @@ class ExecutionEngine:
             trigger_phase_id=phase_id,
             feedback=feedback,
         )
+
+    # ── Step-timeout enforcement (bd-7312) ────────────────────────────────────
+
+    def _effective_timeout(self, step: PlanStep) -> int:
+        """Return the effective timeout in seconds for *step*.
+
+        Priority:
+        1. ``step.timeout_seconds`` if > 0.
+        2. ``BATON_DEFAULT_STEP_TIMEOUT_S`` env var if parseable as a positive int.
+        3. 0 — unlimited (no enforcement).
+        """
+        if step.timeout_seconds > 0:
+            return step.timeout_seconds
+        import os
+        raw = os.environ.get("BATON_DEFAULT_STEP_TIMEOUT_S", "")
+        if raw:
+            try:
+                val = int(raw)
+                if val > 0:
+                    return val
+            except ValueError:
+                pass
+        return 0
+
+    def _check_timeout(self, state: ExecutionState) -> ExecutionAction | None:
+        """Check in-flight dispatched steps for timeout violations.
+
+        Walks ``state.step_results`` looking for steps with
+        ``status == "dispatched"``.  For each, computes the effective timeout.
+        If elapsed time exceeds the timeout the step result is mutated to
+        ``status="failed"`` with a TIMEOUT outcome, state is persisted, a
+        best-effort warning bead is filed, and a FAILED action is returned.
+
+        Returns ``None`` when no timeout breach is detected.
+        """
+        now = datetime.now(tz=timezone.utc)
+
+        for result in state.step_results:
+            if result.status != "dispatched":
+                continue
+
+            plan_step = self._find_step(state, result.step_id)
+            if plan_step is None:
+                continue
+
+            effective = self._effective_timeout(plan_step)
+            if effective == 0:
+                continue
+
+            if not result.step_started_at:
+                continue
+
+            try:
+                started_at = datetime.fromisoformat(result.step_started_at)
+                if started_at.tzinfo is None:
+                    started_at = started_at.replace(tzinfo=timezone.utc)
+                elapsed = (now - started_at).total_seconds()
+            except (ValueError, TypeError):
+                continue
+
+            if elapsed <= effective:
+                continue
+
+            # Timeout breached — mark step failed.
+            result.status = "failed"
+            result.outcome = (
+                f"TIMEOUT after {effective}s (elapsed {int(elapsed)}s)"
+            )
+            state.status = "failed"
+            self._save_execution(state)
+
+            # Best-effort warning bead — must not block timeout enforcement.
+            try:
+                if self._bead_store is not None:
+                    from agent_baton.models.bead import Bead, _generate_bead_id
+                    import hashlib  # noqa: F401 — used inside _generate_bead_id
+                    _ts = _utcnow()
+                    _content = (
+                        f"Step {result.step_id} timed out after {effective}s "
+                        f"(elapsed {int(elapsed)}s)."
+                    )
+                    _bead_count = len(
+                        self._bead_store.query(
+                            task_id=state.task_id, limit=10000
+                        )
+                    )
+                    _bead_id = _generate_bead_id(
+                        task_id=state.task_id,
+                        step_id=result.step_id,
+                        content=_content,
+                        timestamp=_ts,
+                        bead_count=_bead_count,
+                    )
+                    _bead = Bead(
+                        bead_id=_bead_id,
+                        task_id=state.task_id,
+                        step_id=result.step_id,
+                        agent_name=result.agent_name,
+                        bead_type="warning",
+                        content=_content,
+                        confidence="high",
+                        scope="step",
+                        tags=["timeout"],
+                        created_at=_ts,
+                        source="agent-signal",
+                    )
+                    self._bead_store.write(_bead)
+            except Exception as _bead_exc:
+                _log.debug(
+                    "Timeout bead write failed (non-fatal) for step %s: %s",
+                    result.step_id,
+                    _bead_exc,
+                )
+
+            msg = (
+                f"Step {result.step_id} timed out after {effective}s "
+                f"(elapsed {int(elapsed)}s)."
+            )
+            return ExecutionAction(
+                action_type=ActionType.FAILED,
+                message=msg,
+                summary=msg,
+            )
+
+        return None
 
     @staticmethod
     def _find_step(state: ExecutionState, step_id: str) -> PlanStep | None:
