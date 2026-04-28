@@ -805,7 +805,8 @@ def handler(args: argparse.Namespace) -> None:
             "supply a subcommand: start, dry-run, next, record, dispatched, gate, "
             "approve, feedback, amend, team-record, interact, complete, status, "
             "resume, list, switch, cancel, run, retry-gate, fail, resume-budget, "
-            "verify-dispatch, audit-isolation, handoff, worktree-gc"
+            "verify-dispatch, audit-isolation, handoff, worktree-gc, "
+            "takeover, self-heal, speculate"
         )
 
     if args.subcommand == "list":
