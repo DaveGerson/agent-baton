@@ -12,9 +12,10 @@ import json
 import logging
 import re
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from agent_baton.core.engine.classifier import (
     FallbackClassifier,
@@ -768,6 +769,106 @@ class RetroEngine(Protocol):
     """
 
     def load_recent_feedback(self, limit: int = ...) -> RetrospectiveFeedback: ...
+
+
+# ---------------------------------------------------------------------------
+# 005b Phase 1.4b — _CreatePlanState
+# ---------------------------------------------------------------------------
+#
+# Internal mutable state container threaded through ``IntelligentPlanner``'s
+# ``_step_*`` methods.  Each field corresponds 1:1 with a local variable
+# that previously lived inside the monolithic ``create_plan`` body.  The
+# refactor is purely structural — no semantics changed; the same locals are
+# now accessed as attributes on this dataclass so they can flow between
+# extracted step methods.
+#
+# DO NOT rename a field without updating every ``_step_*`` reader and
+# writer.  Adding a new field is fine; removing one means the corresponding
+# locality of reference vanished from ``create_plan``.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _CreatePlanState:
+    """Per-call state for ``IntelligentPlanner.create_plan``.
+
+    Holds every local variable that flows between the extracted ``_step_*``
+    helper methods.  The dataclass is private and not part of the public
+    planner API — callers should never construct or inspect it.
+    """
+
+    # --- create_plan call arguments (snapshotted on entry) ---
+    task_summary: str = ""
+    task_type: str | None = None
+    complexity: str | None = None
+    project_root: Path | None = None
+    agents: list[str] | None = None
+    phases: list[dict] | None = None
+    explicit_knowledge_packs: list[str] | None = None
+    explicit_knowledge_docs: list[str] | None = None
+    intervention_level: str = "low"
+    default_model: str | None = None
+    gate_scope: GateScope = "focused"
+
+    # --- observability ---
+    otel_exporter: Any = None
+    otel_started_at: datetime | None = None
+
+    # --- step 1/2/2b: identity, stack, structured parse ---
+    task_id: str = ""
+    stack_profile: StackProfile | None = None
+
+    # --- step 3: classification ---
+    classified_phases: list[str] | None = None
+    inferred_type: str = ""
+    inferred_complexity: str = "medium"
+    resolved_agents: list[str] = field(default_factory=list)
+
+    # --- step 4: pattern + 4b: bead hints ---
+    pattern: LearnedPattern | None = None
+    bead_hints: list = field(default_factory=list)
+
+    # --- step 5b: retro feedback ---
+    retro_feedback: RetrospectiveFeedback | None = None
+
+    # --- step 5c: compound subtasks ---
+    subtask_data: list[dict] | None = None
+
+    # --- step 5e/6: routing ---
+    pre_routing_agents: list[str] = field(default_factory=list)
+    agent_route_map: dict[str, str] = field(default_factory=dict)
+
+    # --- step 6.5: knowledge resolver ---
+    resolver: Any = None
+    ranker: Any = None
+    max_knowledge_per_step: int = 8
+
+    # --- step 7/8/8b: classification + risk ---
+    classification: ClassificationResult | None = None
+    keyword_risk_level: str = ""
+    risk_level: str = ""
+    risk_level_enum: RiskLevel = RiskLevel.LOW
+    git_strategy: str = ""
+
+    # --- step 9: phases ---
+    plan_phases: list[PlanPhase] = field(default_factory=list)
+
+    # --- step 11: budget ---
+    budget_tier: str = "standard"
+
+    # --- step 12b-bis: concerns ---
+    concerns: list = field(default_factory=list)
+    split_phase_ids: set[int] = field(default_factory=set)
+
+    # --- step 12c.4: extracted file paths ---
+    extracted_paths: list[str] = field(default_factory=list)
+
+    # --- step 13d: prior-task dependency ---
+    depends_on_task_id: str | None = None
+
+    # --- step 14: shared context derivation ---
+    classification_signals: str | None = None
+    classification_confidence: float | None = None
 
 
 # ---------------------------------------------------------------------------
