@@ -1071,6 +1071,187 @@ class IntelligentPlanner:
     # + analyzer dispatches.
     # ------------------------------------------------------------------
 
+    def _step_resolve_knowledge(
+        self,
+        plan_phases: list[PlanPhase],
+        *,
+        resolver,
+        ranker,
+        max_knowledge_per_step: int,
+        inferred_type: str,
+        risk_level: str,
+        explicit_knowledge_packs: list[str] | None,
+        explicit_knowledge_docs: list[str] | None,
+    ) -> None:
+        """Steps 9.5 + 9.6 — knowledge resolution and gap-suggested
+        attachments.
+
+        Mutates *plan_phases* steps in place by setting ``step.knowledge``.
+        Body is byte-identical to the inline version.
+        """
+        # 9.5. Resolve knowledge attachments for each step.
+        # Runs after phase building so step.agent_name and task_description are final.
+        # explicit_knowledge_packs/docs come from create_plan args (CLI --knowledge flags).
+        # bd-0184: after resolving, rank by historical effectiveness and cap count.
+        if resolver is not None:
+            for phase in plan_phases:
+                for step in phase.steps:
+                    try:
+                        resolved = resolver.resolve(
+                            agent_name=step.agent_name,
+                            task_description=step.task_description,
+                            task_type=inferred_type,
+                            risk_level=risk_level,
+                            explicit_packs=explicit_knowledge_packs or [],
+                            explicit_docs=explicit_knowledge_docs or [],
+                        )
+                        if ranker is not None:
+                            resolved = ranker.rank(resolved)
+                        step.knowledge = resolved[:max_knowledge_per_step]
+                    except Exception:
+                        logger.debug(
+                            "Knowledge resolution failed for step %s — skipping",
+                            step.step_id,
+                            exc_info=True,
+                        )
+
+        # 9.6. Gap-suggested attachments — query pattern learner for prior gaps
+        # matching each step's agent + task type. Only runs when both resolver
+        # and pattern learner are available.
+        if resolver is not None and self._pattern_learner is not None:
+            for phase in plan_phases:
+                for step in phase.steps:
+                    try:
+                        prior_gaps = self._pattern_learner.knowledge_gaps_for(
+                            step.agent_name, inferred_type
+                        )
+                        for gap in prior_gaps:
+                            matches = resolver.resolve(
+                                agent_name=step.agent_name,
+                                task_description=gap.description,
+                            )
+                            existing_paths = {a.path for a in step.knowledge if a.path}
+                            for match in matches:
+                                if match.path and match.path in existing_paths:
+                                    continue
+                                match.source = "gap-suggested"
+                                step.knowledge.append(match)
+                                if match.path:
+                                    existing_paths.add(match.path)
+                    except Exception:
+                        logger.debug(
+                            "Gap-suggested resolution failed for step %s — skipping",
+                            step.step_id,
+                            exc_info=True,
+                        )
+
+    def _step_apply_foresight(
+        self,
+        plan_phases: list[PlanPhase],
+        *,
+        task_summary: str,
+        risk_level: str,
+        resolved_agents: list[str],
+        resolver,
+        ranker,
+        max_knowledge_per_step: int,
+        inferred_type: str,
+        explicit_knowledge_packs: list[str] | None,
+        explicit_knowledge_docs: list[str] | None,
+    ) -> list[PlanPhase]:
+        """Steps 9.7 + 9.8 — foresight insertion and post-foresight
+        knowledge resolution for inserted steps.
+
+        Foresight may rebuild *plan_phases*, so this returns the new
+        list.  ``self._last_foresight_insights`` is set as a side effect
+        (matching legacy behaviour).  Body is byte-identical to the inline
+        version.
+        """
+        # 9.7. Foresight analysis — proactively insert preparatory steps
+        # for predicted capability gaps, prerequisites, and edge cases.
+        try:
+            plan_phases, foresight_insights = self._foresight_engine.analyze(
+                plan_phases,
+                task_summary,
+                risk_level=risk_level,
+                existing_agents=resolved_agents,
+            )
+            self._last_foresight_insights = foresight_insights
+        except Exception:
+            logger.debug(
+                "Foresight analysis failed — skipping",
+                exc_info=True,
+            )
+
+        # 9.8. Resolve knowledge for foresight-inserted steps.
+        # Foresight steps are inserted after the initial knowledge resolution
+        # pass (9.5), so they need their own resolution pass.
+        # bd-0184: also rank + cap foresight-step attachments.
+        if resolver is not None and self._last_foresight_insights:
+            foresight_step_ids = set()
+            for ins in self._last_foresight_insights:
+                foresight_step_ids.update(ins.inserted_step_ids)
+            for phase in plan_phases:
+                for step in phase.steps:
+                    if step.step_id in foresight_step_ids:
+                        try:
+                            resolved = resolver.resolve(
+                                agent_name=step.agent_name,
+                                task_description=step.task_description,
+                                task_type=inferred_type,
+                                risk_level=risk_level,
+                                explicit_packs=explicit_knowledge_packs or [],
+                                explicit_docs=explicit_knowledge_docs or [],
+                            )
+                            if ranker is not None:
+                                resolved = ranker.rank(resolved)
+                            step.knowledge = resolved[:max_knowledge_per_step]
+                        except Exception:
+                            logger.debug(
+                                "Knowledge resolution failed for foresight step %s — skipping",
+                                step.step_id,
+                                exc_info=True,
+                            )
+        return plan_phases
+
+    def _step_check_scores(
+        self,
+        plan_phases: list[PlanPhase],
+        *,
+        resolved_agents: list[str],
+        inferred_type: str,
+        classification: ClassificationResult | None,
+    ) -> str:
+        """Steps 10 / 11 / 11b — score warnings, budget tier, policy check.
+
+        Returns the selected budget tier.  Mutates ``self._last_policy_violations``
+        and emits score warnings via ``_check_agent_scores`` (which mutates
+        ``self._last_score_warnings``).  Body is byte-identical to the
+        inline version it replaced.
+        """
+        # 10. Score check — warn about low-health agents
+        self._check_agent_scores(resolved_agents)
+
+        # 11. Budget tier
+        budget_tier = self._select_budget_tier(inferred_type, len(resolved_agents))
+
+        # 11b. Policy validation — check agent assignments against active policy set.
+        # Violations are recorded as warnings; they never hard-block plan creation.
+        if self._policy_engine is not None:
+            try:
+                preset_name = self._classify_to_preset_key(classification)
+                policy_set = self._policy_engine.load_preset(preset_name)
+                if policy_set is not None:
+                    self._last_policy_violations = self._validate_agents_against_policy(
+                        resolved_agents, policy_set, plan_phases
+                    )
+                    # Enforce structural require_agent rules by injecting missing
+                    # required agents into the plan's shared context as warnings.
+                    # (We cannot silently add phases here — the user decides.)
+            except Exception:
+                pass
+        return budget_tier
+
     def _step_apply_gates(
         self,
         plan_phases: list[PlanPhase],
@@ -1968,129 +2149,46 @@ class IntelligentPlanner:
         # 9b. Enrich steps with cross-phase context and default deliverables
         plan_phases = self._enrich_phases(plan_phases, task_summary=task_summary)
 
-        # 9.5. Resolve knowledge attachments for each step.
-        # Runs after phase building so step.agent_name and task_description are final.
-        # explicit_knowledge_packs/docs come from create_plan args (CLI --knowledge flags).
-        # bd-0184: after resolving, rank by historical effectiveness and cap count.
-        if _resolver is not None:
-            for phase in plan_phases:
-                for step in phase.steps:
-                    try:
-                        resolved = _resolver.resolve(
-                            agent_name=step.agent_name,
-                            task_description=step.task_description,
-                            task_type=inferred_type,
-                            risk_level=risk_level,
-                            explicit_packs=explicit_knowledge_packs or [],
-                            explicit_docs=explicit_knowledge_docs or [],
-                        )
-                        if _ranker is not None:
-                            resolved = _ranker.rank(resolved)
-                        step.knowledge = resolved[:_max_knowledge_per_step]
-                    except Exception:
-                        logger.debug(
-                            "Knowledge resolution failed for step %s — skipping",
-                            step.step_id,
-                            exc_info=True,
-                        )
+        # 9.5 + 9.6. Resolve knowledge attachments + gap-suggested
+        # attachments per step.  Extracted to ``_step_resolve_knowledge``
+        # (005b 1.4b) without semantic change.
+        self._step_resolve_knowledge(
+            plan_phases,
+            resolver=_resolver,
+            ranker=_ranker,
+            max_knowledge_per_step=_max_knowledge_per_step,
+            inferred_type=inferred_type,
+            risk_level=risk_level,
+            explicit_knowledge_packs=explicit_knowledge_packs,
+            explicit_knowledge_docs=explicit_knowledge_docs,
+        )
 
-        # 9.6. Gap-suggested attachments — query pattern learner for prior gaps
-        # matching each step's agent + task type. Only runs when both resolver
-        # and pattern learner are available.
-        if _resolver is not None and self._pattern_learner is not None:
-            for phase in plan_phases:
-                for step in phase.steps:
-                    try:
-                        prior_gaps = self._pattern_learner.knowledge_gaps_for(
-                            step.agent_name, inferred_type
-                        )
-                        for gap in prior_gaps:
-                            matches = _resolver.resolve(
-                                agent_name=step.agent_name,
-                                task_description=gap.description,
-                            )
-                            existing_paths = {a.path for a in step.knowledge if a.path}
-                            for match in matches:
-                                if match.path and match.path in existing_paths:
-                                    continue
-                                match.source = "gap-suggested"
-                                step.knowledge.append(match)
-                                if match.path:
-                                    existing_paths.add(match.path)
-                    except Exception:
-                        logger.debug(
-                            "Gap-suggested resolution failed for step %s — skipping",
-                            step.step_id,
-                            exc_info=True,
-                        )
+        # 9.7 + 9.8. Foresight analysis + knowledge resolution for
+        # foresight-inserted steps.  Extracted to ``_step_apply_foresight``
+        # (005b 1.4b) without semantic change.  Returns the (possibly new)
+        # plan_phases list since foresight may rebuild the structure.
+        plan_phases = self._step_apply_foresight(
+            plan_phases,
+            task_summary=task_summary,
+            risk_level=risk_level,
+            resolved_agents=resolved_agents,
+            resolver=_resolver,
+            ranker=_ranker,
+            max_knowledge_per_step=_max_knowledge_per_step,
+            inferred_type=inferred_type,
+            explicit_knowledge_packs=explicit_knowledge_packs,
+            explicit_knowledge_docs=explicit_knowledge_docs,
+        )
 
-        # 9.7. Foresight analysis — proactively insert preparatory steps
-        # for predicted capability gaps, prerequisites, and edge cases.
-        try:
-            plan_phases, foresight_insights = self._foresight_engine.analyze(
-                plan_phases,
-                task_summary,
-                risk_level=risk_level,
-                existing_agents=resolved_agents,
-            )
-            self._last_foresight_insights = foresight_insights
-        except Exception:
-            logger.debug(
-                "Foresight analysis failed — skipping",
-                exc_info=True,
-            )
-
-        # 9.8. Resolve knowledge for foresight-inserted steps.
-        # Foresight steps are inserted after the initial knowledge resolution
-        # pass (9.5), so they need their own resolution pass.
-        # bd-0184: also rank + cap foresight-step attachments.
-        if _resolver is not None and self._last_foresight_insights:
-            foresight_step_ids = set()
-            for ins in self._last_foresight_insights:
-                foresight_step_ids.update(ins.inserted_step_ids)
-            for phase in plan_phases:
-                for step in phase.steps:
-                    if step.step_id in foresight_step_ids:
-                        try:
-                            resolved = _resolver.resolve(
-                                agent_name=step.agent_name,
-                                task_description=step.task_description,
-                                task_type=inferred_type,
-                                risk_level=risk_level,
-                                explicit_packs=explicit_knowledge_packs or [],
-                                explicit_docs=explicit_knowledge_docs or [],
-                            )
-                            if _ranker is not None:
-                                resolved = _ranker.rank(resolved)
-                            step.knowledge = resolved[:_max_knowledge_per_step]
-                        except Exception:
-                            logger.debug(
-                                "Knowledge resolution failed for foresight step %s — skipping",
-                                step.step_id,
-                                exc_info=True,
-                            )
-
-        # 10. Score check — warn about low-health agents
-        self._check_agent_scores(resolved_agents)
-
-        # 11. Budget tier
-        budget_tier = self._select_budget_tier(inferred_type, len(resolved_agents))
-
-        # 11b. Policy validation — check agent assignments against active policy set.
-        # Violations are recorded as warnings; they never hard-block plan creation.
-        if self._policy_engine is not None:
-            try:
-                preset_name = self._classify_to_preset_key(classification)
-                policy_set = self._policy_engine.load_preset(preset_name)
-                if policy_set is not None:
-                    self._last_policy_violations = self._validate_agents_against_policy(
-                        resolved_agents, policy_set, plan_phases
-                    )
-                    # Enforce structural require_agent rules by injecting missing
-                    # required agents into the plan's shared context as warnings.
-                    # (We cannot silently add phases here — the user decides.)
-            except Exception:
-                pass
+        # 10 + 11 + 11b. Score check, budget tier selection, and policy
+        # validation.  Extracted to ``_step_check_scores`` (005b 1.4b)
+        # without semantic change.  Returns the selected budget tier.
+        budget_tier = self._step_check_scores(
+            plan_phases,
+            resolved_agents=resolved_agents,
+            inferred_type=inferred_type,
+            classification=classification,
+        )
 
         # 12 + 12.a. Add QA gates and apply project-config defaults.
         # Extracted to ``_step_apply_gates`` (005b 1.4b).
