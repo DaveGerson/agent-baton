@@ -59,10 +59,10 @@ class PlanningState:
 
     def handle(self, state: ExecutionState, decision: ResolverDecision) -> None:
         # All DecisionKinds reachable from 'pending' are transition-initiating
-        # decisions: the engine's start() / _save_execution handle the flip.
+        # decisions: the engine's start() handles the flip out of 'pending'.
         # The state class has no additional mutation to perform.
         # DISPATCH and TEAM_DISPATCH are unlikely from 'pending' but not
-        # illegal — engine handles them via heavy builders.
+        # illegal — engine handles them via heavy builders (bd-068b).
         _ = state
         _ = decision
 

@@ -4951,12 +4951,34 @@ class ExecutionEngine:
     def _state_handler_for(self, status: str) -> ExecutionPhaseStateProtocol:
         """Return the state-handler singleton for *status*.
 
-        Falls back to ``ExecutingPhaseState`` (with a warning log) when the
-        status is not in the known map — defensive guard for forward-compat
-        with future status values added by other subsystems.  See design §2.6.
+        Fallback policy (bd-7eac):
+            When *status* is not in ``self._state_handlers``, this method
+            emits a ``_log.warning`` and returns the ``ExecutingPhaseState``
+            singleton.  The fallback is **deliberate forward-compatibility**:
+            other subsystems (daemon, swarm, future gate types) may
+            introduce new ``state.status`` values before the dispatch map
+            is updated.  Routing the unknown status through
+            ``ExecutingPhaseState`` keeps the engine running while the
+            warning surfaces the gap in logs / observability for a
+            follow-up patch.
+
+            ``ExecutingPhaseState`` is the safe default because its
+            ``handle()`` method is the most permissive: it no-ops on
+            transitive decisions and only flips to ``failed`` for
+            terminal-failure kinds.  An unknown status is therefore most
+            likely to behave correctly under the running-state contract,
+            and any illegal DecisionKind raises immediately rather than
+            silently corrupting state.
+
+            The warning log is the contract — callers / observability
+            pipelines must surface it so the missing entry can be added.
+
+        See design §2.6.
         """
         handler = self._state_handlers.get(status)
         if handler is None:
+            # Forward-compat fallback (bd-7eac).  Warning is the contract;
+            # see docstring above.
             _log.warning(
                 "Unknown state.status %r — falling back to ExecutingPhaseState",
                 status,
