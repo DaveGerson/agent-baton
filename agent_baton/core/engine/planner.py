@@ -2279,15 +2279,9 @@ class IntelligentPlanner:
         _otel_exporter = current_exporter()
         _otel_started_at = datetime.now(timezone.utc) if _otel_exporter else None
 
-        # Reset per-call state
-        self._last_pattern_used = None
-        self._last_score_warnings = []
-        self._last_routing_notes = []
-        self._last_classification = None
-        self._last_policy_violations = []
-        self._last_retro_feedback = None
-        self._last_task_classification = None
-        self._last_foresight_insights = []
+        # Reset per-call state (extracted to _reset_explainability_state
+        # in 005b 1.4 commit 1).
+        self._reset_explainability_state()
 
         # 1 + 2 + 2b. Task id, stack detection, structured description parsing.
         # Extracted to ``_step_initialize_state`` (005b 1.4b).
