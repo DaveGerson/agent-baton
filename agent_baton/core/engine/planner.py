@@ -342,6 +342,22 @@ _CONCERN_MARKER = re.compile(
 # Minimum distinct concerns needed to trigger the per-concern split.
 _MIN_CONCERNS_FOR_SPLIT = 3
 
+# Constraint-clause keywords that bound the deliverable list during
+# concern-splitting.  When the planner sees one of these phrases, it
+# stops consuming further markers as deliverables — anything after is
+# treated as a constraint or non-goal, not a phantom deliverable.
+# See bd-021d for the original repro (a "Must not regress F0.3 ..."
+# trailing sentence got split into a phantom Implement step).
+_CONCERN_CONSTRAINT_KEYWORDS = (
+    "must not",
+    "do not",
+    "shall not",
+    "should not",
+    "regress",
+    "non-goal",
+    "non-goals",
+)
+
 # Maps phase names (lower-cased) to human-readable action verbs for step descriptions
 _PHASE_VERBS: dict[str, str] = {
     "research": "Explore and document",
@@ -2109,7 +2125,18 @@ class IntelligentPlanner:
         Empty list when fewer than :data:`_MIN_CONCERNS_FOR_SPLIT` concerns
         are detected — the caller treats this as "single concern, do not split".
         """
-        matches = list(_CONCERN_MARKER.finditer(summary))
+        # bd-021d: bound the deliverable list at the first constraint clause
+        # (e.g. "Must not regress F0.3 ...").  Anything after is treated as a
+        # non-goal, not a phantom deliverable.
+        lower = summary.lower()
+        bound = len(summary)
+        for kw in _CONCERN_CONSTRAINT_KEYWORDS:
+            idx = lower.find(kw)
+            if idx != -1 and idx < bound:
+                bound = idx
+        bounded_summary = summary[:bound]
+
+        matches = list(_CONCERN_MARKER.finditer(bounded_summary))
         if len(matches) < _MIN_CONCERNS_FOR_SPLIT:
             return []
 
@@ -2120,8 +2147,8 @@ class IntelligentPlanner:
             # only, so the dot inside "F0.1" is preserved.
             marker = m.group(1).strip("().")
             start = m.end()
-            end = matches[i + 1].start() if i + 1 < len(matches) else len(summary)
-            text = summary[start:end].strip().rstrip(";,")
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(bounded_summary)
+            text = bounded_summary[start:end].strip().rstrip(";,")
             if text:
                 concerns.append((marker, text))
 
