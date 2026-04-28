@@ -2639,12 +2639,13 @@ class ExecutionEngine:
                 gate_type=gate_type,
                 output=output,
             ))
-            # Advance to next phase.  current_phase is a 0-based index into
-            # plan.phases, whereas phase_id is a 1-based identifier — so we
-            # must increment the index, not derive it from phase_id.
-            state.current_phase += 1
-            state.current_step_index = 0
-            state.status = "running"
+            # Advance to next phase via PhaseManager so event publication
+            # mirrors the PHASE_ADVANCE_OK arm in _apply_resolver_decision
+            # (bd-0a63).  current_phase is a 0-based index into plan.phases;
+            # phase_id is a 1-based identifier — advance_phase increments
+            # the index, not derives it from phase_id.
+            self._phase_manager.advance_phase(state, set_status_running=True)
+            self._publish_phase_started(state)
 
         self._save_execution(state)
 
