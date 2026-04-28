@@ -357,6 +357,67 @@ def test_cli_list_show_export_roundtrip(
     assert just_map[b] == "reason-b"
 
 
+# ---------------------------------------------------------------------------
+# bd-fe42: _current_actor must not blindly trust spoofed $USER
+# ---------------------------------------------------------------------------
+
+def test_current_actor_prefers_os_identity_over_spoofed_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If $USER differs from the OS-derived identity, the OS value wins
+    and the env value is recorded inline so reviewers see the spoof."""
+    from agent_baton.core.govern import override_log as ol
+
+    monkeypatch.setattr(ol, "_os_identity", lambda: "real-uid-name")
+    monkeypatch.setenv("USER", "auditor")
+    monkeypatch.delenv("USERNAME", raising=False)
+
+    actor = ol._current_actor()
+    assert actor.startswith("real-uid-name")
+    assert "auditor" in actor
+    # The OS identity must never be silently replaced by the env value.
+    assert actor != "auditor"
+
+
+def test_current_actor_uses_os_identity_when_env_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent_baton.core.govern import override_log as ol
+
+    monkeypatch.setattr(ol, "_os_identity", lambda: "alice")
+    monkeypatch.setenv("USER", "alice")
+    monkeypatch.delenv("USERNAME", raising=False)
+
+    assert ol._current_actor() == "alice"
+
+
+def test_current_actor_falls_back_to_env_when_no_os_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On platforms without ``pwd`` (Windows), $USER / $USERNAME is the
+    only signal — we still accept it but the docstring records the
+    weakened guarantee."""
+    from agent_baton.core.govern import override_log as ol
+
+    monkeypatch.setattr(ol, "_os_identity", lambda: None)
+    monkeypatch.delenv("USER", raising=False)
+    monkeypatch.setenv("USERNAME", "winuser")
+
+    assert ol._current_actor() == "winuser"
+
+
+def test_current_actor_unknown_when_no_signal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent_baton.core.govern import override_log as ol
+
+    monkeypatch.setattr(ol, "_os_identity", lambda: None)
+    monkeypatch.delenv("USER", raising=False)
+    monkeypatch.delenv("USERNAME", raising=False)
+
+    assert ol._current_actor() == "unknown"
+
+
 def test_record_override_strips_argv0_basename(
     db_path: Path, chain_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

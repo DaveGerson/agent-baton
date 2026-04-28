@@ -34,16 +34,50 @@ def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
+def _os_identity() -> str | None:
+    """Return the OS-derived identity (tamper-resistant) or ``None``.
+
+    Resolved via ``pwd.getpwuid(os.geteuid()).pw_name`` on POSIX.  Unlike
+    ``$USER``, this cannot be trivially spoofed by setting an environment
+    variable — it reflects the actual effective UID of the process.
+
+    Returns ``None`` on platforms without ``pwd`` (e.g. Windows) or when
+    the lookup fails (no passwd entry for the effective UID).
+    """
+    try:
+        import pwd  # POSIX-only
+        return pwd.getpwuid(os.geteuid()).pw_name
+    except (ImportError, KeyError, OSError):
+        return None
+
+
 def _current_actor() -> str:
     """Return the operator identity for audit attribution.
 
-    Falls back through ``USER`` → ``USERNAME`` (Windows) → ``"unknown"``.
+    Resolution order (bd-fe42 hardening):
+
+    1. The OS-derived identity from ``pwd.getpwuid(os.geteuid())`` — this
+       is tamper-resistant: setting ``USER=auditor`` in the environment
+       does NOT change the effective UID of the process.
+    2. If the OS identity is available AND ``$USER`` / ``$USERNAME`` is
+       set to a different value, the entry is tagged ``"<os>?env=<env>"``
+       so reviewers can see the spoof attempt.
+    3. ``USER`` → ``USERNAME`` (Windows fallback).
+    4. ``"unknown"``.
+
+    The audit trail is local-dev-grade (a determined attacker with shell
+    access can still escalate), but blind ``$USER`` spoofing is now
+    visibly recorded rather than silently trusted.
     """
-    return (
-        os.environ.get("USER")
-        or os.environ.get("USERNAME")
-        or "unknown"
-    )
+    os_user = _os_identity()
+    env_user = os.environ.get("USER") or os.environ.get("USERNAME")
+    if os_user:
+        if env_user and env_user != os_user:
+            # Spoof attempt: keep the trustworthy OS identity but record
+            # the divergent env value so it's visible in the audit log.
+            return f"{os_user}?env={env_user}"
+        return os_user
+    return env_user or "unknown"
 
 
 class OverrideLog:
