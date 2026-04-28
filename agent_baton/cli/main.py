@@ -190,7 +190,14 @@ def main(argv: list[str] | None = None) -> None:
             file=_sys.stderr,
         )
 
-    args = parser.parse_args(argv)
+    # For deprecated shim commands, use parse_known_args so that legacy scripts
+    # passing old flags (e.g. `baton evolve --run`, `baton experiment --id foo`)
+    # still reach the handler's deprecation message instead of getting an argparse
+    # "unrecognized arguments" error (bd-ed80).
+    if _argv and _argv[0] in _DEPRECATED_HELP:
+        args, _unknown = parser.parse_known_args(argv)
+    else:
+        args = parser.parse_args(argv)
 
     if getattr(args, "no_color", False):
         from agent_baton.cli.colors import set_color_enabled
