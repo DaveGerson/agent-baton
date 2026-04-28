@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 31
+SCHEMA_VERSION = 32
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -1066,25 +1066,50 @@ CREATE INDEX IF NOT EXISTS idx_debates_created ON debates(created_at);
 """,
     31: """
 -- v31: Gastown Part A (bd-2870) — bead_anchors index for git-notes-backed
--- bead persistence.
---
--- bead_anchors maps bead_id → anchor_commit_sha for O(1) lookup during
--- git-notes reads.  Without this index every BeadStore.read() would require
--- a full ``git notes list`` scan to locate the anchor commit.
---
--- last_seen_at is updated on every write so stale entries can be pruned
--- in a future GC pass.
---
--- NOTE: No FK constraint on bead_id — the anchor index outlives the
--- dual-write transition and must survive even if a bead is later removed
--- from the SQLite mirror.  Applied to BOTH project and central databases
--- via ConnectionManager._run_migrations().
+-- bead persistence.  bead_anchors maps bead_id → anchor_commit_sha for
+-- O(1) lookup during git-notes reads.  Applied to BOTH project and
+-- central databases via ConnectionManager._run_migrations().
 CREATE TABLE IF NOT EXISTS bead_anchors (
     bead_id        TEXT PRIMARY KEY,
     anchor_commit  TEXT NOT NULL,
     last_seen_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 CREATE INDEX IF NOT EXISTS idx_bead_anchors_commit ON bead_anchors(anchor_commit);
+""",
+    32: """
+-- v32: Wave 6.1 Part B — Persistent Agent Souls (bd-d975).
+--
+-- agent_souls and soul_expertise live in central.db ONLY (cross-project
+-- federation per feedback_schema_project_id.md).  Per-project baton.db
+-- migration is a no-op for soul tables (all soul reads/writes go through
+-- SoulRegistry which targets central.db exclusively).
+--
+-- Bead signing columns: signed_by and signature are additive columns on
+-- the beads table.  Legacy beads load with signed_by='' — no soul
+-- attribution; routing falls back to round-robin as per the spec.
+ALTER TABLE beads ADD COLUMN signed_by  TEXT NOT NULL DEFAULT '';
+ALTER TABLE beads ADD COLUMN signature  TEXT NOT NULL DEFAULT '';
+CREATE TABLE IF NOT EXISTS agent_souls (
+    soul_id          TEXT PRIMARY KEY,
+    role             TEXT NOT NULL,
+    pubkey           BLOB NOT NULL,
+    privkey_path     TEXT,
+    created_at       TEXT NOT NULL,
+    retired_at       TEXT NOT NULL DEFAULT '',
+    parent_soul_id   TEXT NOT NULL DEFAULT '',
+    origin_project   TEXT NOT NULL DEFAULT '',
+    notes            TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_agent_souls_role ON agent_souls(role);
+CREATE TABLE IF NOT EXISTS soul_expertise (
+    soul_id          TEXT NOT NULL,
+    scope            TEXT NOT NULL,
+    ref              TEXT NOT NULL,
+    weight           REAL NOT NULL,
+    last_touched_at  TEXT NOT NULL,
+    PRIMARY KEY (soul_id, scope, ref)
+);
+CREATE INDEX IF NOT EXISTS idx_soul_expertise_soul ON soul_expertise(soul_id);
 """,
 }
 
@@ -1680,6 +1705,8 @@ CREATE TABLE IF NOT EXISTS beads (
     token_estimate   INTEGER NOT NULL DEFAULT 0,
     quality_score    REAL    NOT NULL DEFAULT 0.0,
     retrieval_count  INTEGER NOT NULL DEFAULT 0,
+    signed_by        TEXT    NOT NULL DEFAULT '',
+    signature        TEXT    NOT NULL DEFAULT '',
     FOREIGN KEY (task_id) REFERENCES executions(task_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_beads_task ON beads(task_id);
@@ -2745,6 +2772,8 @@ CREATE TABLE IF NOT EXISTS beads (
     token_estimate   INTEGER NOT NULL DEFAULT 0,
     quality_score    REAL    NOT NULL DEFAULT 0.0,
     retrieval_count  INTEGER NOT NULL DEFAULT 0,
+    signed_by        TEXT    NOT NULL DEFAULT '',
+    signature        TEXT    NOT NULL DEFAULT '',
     PRIMARY KEY (project_id, bead_id)
 );
 CREATE INDEX IF NOT EXISTS idx_central_beads_task ON beads(project_id, task_id);
@@ -3108,4 +3137,30 @@ CREATE INDEX IF NOT EXISTS idx_central_governance_overrides_flag
     ON governance_overrides(flag);
 CREATE INDEX IF NOT EXISTS idx_central_governance_overrides_actor
     ON governance_overrides(actor);
+
+-- v31: Wave 6.1 Part B — Persistent Agent Souls (bd-d975)
+-- Souls are cross-project entities: they live exclusively in central.db.
+-- Per feedback_schema_project_id.md: NEVER add project_id to agent_souls.
+CREATE TABLE IF NOT EXISTS agent_souls (
+    soul_id          TEXT PRIMARY KEY,
+    role             TEXT NOT NULL,
+    pubkey           BLOB NOT NULL,
+    privkey_path     TEXT,
+    created_at       TEXT NOT NULL,
+    retired_at       TEXT NOT NULL DEFAULT '',
+    parent_soul_id   TEXT NOT NULL DEFAULT '',
+    origin_project   TEXT NOT NULL DEFAULT '',
+    notes            TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_agent_souls_role ON agent_souls(role);
+
+CREATE TABLE IF NOT EXISTS soul_expertise (
+    soul_id          TEXT NOT NULL,
+    scope            TEXT NOT NULL,
+    ref              TEXT NOT NULL,
+    weight           REAL NOT NULL,
+    last_touched_at  TEXT NOT NULL,
+    PRIMARY KEY (soul_id, scope, ref)
+);
+CREATE INDEX IF NOT EXISTS idx_soul_expertise_soul ON soul_expertise(soul_id);
 """

@@ -193,8 +193,12 @@ class Bead:
     token_estimate: int = 0
     quality_score: float = 0.0
     retrieval_count: int = 0
-    # Gastown Part A fields (bd-2870).  All default to empty string so that
-    # existing beads round-trip without change.
+    # Wave 6.1 Part B — Persistent Agent Souls (bd-d975). Additive fields;
+    # default "" so legacy beads load without soul attribution.
+    signed_by: str = ""
+    signature: str = ""
+    # Wave 6.1 Part A — Gastown git-native bead persistence (bd-2870).
+    # All default to empty string so existing beads round-trip without change.
     schema_version: str = "gastown-1"
     anchor_commit: str = ""
     branch_at_create: str = ""
@@ -221,7 +225,10 @@ class Bead:
             "token_estimate": self.token_estimate,
             "quality_score": self.quality_score,
             "retrieval_count": self.retrieval_count,
-            # Gastown Part A fields (bd-2870)
+            # Wave 6.1 Part B (bd-d975)
+            "signed_by": self.signed_by,
+            "signature": self.signature,
+            # Wave 6.1 Part A — Gastown (bd-2870)
             "schema_version": self.schema_version,
             "anchor_commit": self.anchor_commit,
             "branch_at_create": self.branch_at_create,
@@ -252,7 +259,10 @@ class Bead:
             token_estimate=int(data.get("token_estimate", 0)),
             quality_score=float(data.get("quality_score", 0.0)),
             retrieval_count=int(data.get("retrieval_count", 0)),
-            # Gastown Part A fields (bd-2870) — use .get() for legacy load
+            # Wave 6.1 Part B (bd-d975) — use .get() for legacy load
+            signed_by=data.get("signed_by", ""),
+            signature=data.get("signature", ""),
+            # Wave 6.1 Part A — Gastown (bd-2870) — use .get() for legacy load
             schema_version=data.get("schema_version", ""),
             anchor_commit=data.get("anchor_commit", ""),
             branch_at_create=data.get("branch_at_create", ""),

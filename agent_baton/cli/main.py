@@ -30,7 +30,7 @@ _COMMAND_GROUPS: dict[str, list[str]] = {
     "Improvement": ["scores", "evolve", "patterns", "budget", "changelog", "experiment", "anomalies", "learn"],
     "Distribution": ["install", "uninstall", "package", "publish", "pull", "transfer"],
     "Storage & Sync": ["sync", "source", "cquery", "storage", "cleanup"],
-    "Memory": ["beads"],
+    "Memory": ["beads", "souls"],
     "Execution (Advanced)": ["daemon", "async", "decide"],
     "Portfolio": ["pmo", "serve"],
 }
