@@ -1605,6 +1605,56 @@ class TestCompoundDecomposition:
         assert len(plan.phases) == 1
         assert plan.phases[0].name == "Custom"
 
+    def test_compound_honors_explicit_agents_override(
+        self, extended_planner: IntelligentPlanner
+    ):
+        """bd-701e: when --agents is explicit on a compound task, every
+        subtask phase must use that roster, not the type-defaulted agents.
+
+        Reproduces the multi-concern HIGH-risk thin-plan failure: a 6-item
+        numbered task with an explicit --agents list previously produced
+        phases with 0 implementer steps because the compound path silently
+        substituted ``_DEFAULT_AGENTS.get(st_type)`` for every subtask.
+        """
+        explicit_agents = [
+            "architect",
+            "backend-engineer",
+            "test-engineer",
+            "documentation-architect",
+            "code-reviewer",
+        ]
+        plan = extended_planner.create_plan(
+            "Multi-concern feature: "
+            "(1) Design data model "
+            "(2) Implement service layer "
+            "(3) Write integration tests "
+            "(4) Document the API "
+            "(5) Add new auth feature "
+            "(6) Refactor legacy module",
+            agents=explicit_agents,
+        )
+        # Every phase must have at least one step (no gate-only phases).
+        for phase in plan.phases:
+            assert len(phase.steps) >= 1, (
+                f"phase {phase.phase_id} ({phase.name}) is empty; "
+                "compound path dropped the explicit --agents roster"
+            )
+
+        # The non-reviewer agents from the override must each appear at
+        # least once across all steps (ratio guard for bd-701e).
+        all_names: set[str] = set()
+        for phase in plan.phases:
+            for step in phase.steps:
+                all_names.add(step.agent_name.split("--")[0])
+                for member in step.team:
+                    all_names.add(member.agent_name.split("--")[0])
+        for required in ("architect", "backend-engineer", "test-engineer",
+                         "documentation-architect"):
+            assert required in all_names, (
+                f"explicit --agents included {required!r} but it does not "
+                f"appear in any phase; got {sorted(all_names)}"
+            )
+
 
 # ---------------------------------------------------------------------------
 # Cross-concern agent expansion

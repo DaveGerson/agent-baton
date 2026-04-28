@@ -1204,10 +1204,20 @@ class IntelligentPlanner:
             subtasks = self._parse_subtasks(task_summary)
             if len(subtasks) >= 2:
                 _subtask_data = []
+                # bd-701e: when the user passes an explicit --agents override,
+                # honour it for every subtask so compound decomposition does
+                # not silently swap the roster for type-defaulted agents and
+                # produce phases without implementer steps.  Reviewer-class
+                # agents in the override are preserved here; the implement-
+                # phase team-step (_consolidate_team_step) filters them out.
+                _explicit_agents = list(agents) if agents is not None else None
                 for sub_idx, sub_text in subtasks:
                     st_type = self._infer_task_type(sub_text)
-                    st_agents = list(_DEFAULT_AGENTS.get(st_type, ["backend-engineer"]))
-                    st_agents = self._expand_agents_for_concerns(st_agents, sub_text)
+                    if _explicit_agents is not None:
+                        st_agents = list(_explicit_agents)
+                    else:
+                        st_agents = list(_DEFAULT_AGENTS.get(st_type, ["backend-engineer"]))
+                        st_agents = self._expand_agents_for_concerns(st_agents, sub_text)
                     _subtask_data.append({
                         "index": sub_idx,
                         "text": sub_text,
