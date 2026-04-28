@@ -2499,9 +2499,12 @@ def _handle_run(args: argparse.Namespace) -> None:
                 file=sys.stderr,
             )
             engine = _probe_engine
-            if dry_run:
-                _print_dry_run_preview(plan, max_steps)
-                return
+            # bd-f4de: do NOT short-circuit to _print_dry_run_preview here.
+            # That function walks the plan blindly without checking existing
+            # step/gate state, so it re-emits previews for already-completed
+            # steps and already-passed gates.  Fall through to _run_loop
+            # instead — next_action() is state-aware and will skip terminal
+            # steps/gates naturally.
             action = engine.next_action()
         elif _probe_st in _TERMINAL_STATUSES:
             user_error(
@@ -2538,17 +2541,10 @@ def _handle_run(args: argparse.Namespace) -> None:
                     engine._persistence.set_active()
             print(f"Started execution: {task_id}", file=sys.stderr)
     else:
-        if dry_run:
-            _existing_state = engine._load_execution()
-            _preview_plan = _existing_state.plan if _existing_state is not None else None
-            if _preview_plan is not None:
-                _print_dry_run_preview(_preview_plan, max_steps)
-            else:
-                print(
-                    f"\n{warning('WARN')}: could not load plan for dry-run preview",
-                    file=sys.stderr,
-                )
-            return
+        # bd-f4de: do NOT short-circuit to _print_dry_run_preview here.
+        # The active-marker resume path must also use _run_loop so that
+        # next_action() skips already-completed steps and already-passed
+        # gates instead of blindly re-previewing them.
         action = engine.next_action()
 
     # Import the launcher (deferred so it only fails when actually running)
@@ -2571,6 +2567,12 @@ def _handle_run(args: argparse.Namespace) -> None:
                 f"Cannot initialize Claude launcher: {exc}",
                 hint="Install Claude Code CLI or use --dry-run.",
             )
+
+    # bd-f4de: resume paths no longer call _print_dry_run_preview (which
+    # would blindly re-preview terminal-state steps/gates), so print the
+    # dry-run banner here before entering the state-aware _run_loop.
+    if dry_run:
+        print(_DRY_RUN_BANNER)
 
     steps_executed = 0
     action_dict = action.to_dict()
