@@ -1,8 +1,10 @@
 """Git-notes-backed storage adapter for bead persistence.
 
-Part A of the Gastown bead architecture (bd-2870).  Stores one git note per
-bead in ``refs/notes/baton-beads``, anchored to the commit that the engine
-considers the bead's creation point.
+Part A + Part C of the Gastown bead architecture (bd-2870 / bd-81b9).
+Stores one git note per bead in ``refs/notes/baton-beads``, anchored to the
+commit that the engine considers the bead's creation point.  Part C adds a
+second ref (``refs/notes/baton-bead-scripts``) for content-addressed script
+bodies used by ExecutableBeadRunner.
 
 Notes reference: ``refs/notes/baton-beads``
 Storage format: one JSON blob per note, anchored to the bead's creation
@@ -34,6 +36,7 @@ intentionally manage notes replication outside of baton.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -133,6 +136,7 @@ class NotesAdapter:
     """
 
     NOTES_REF = "refs/notes/baton-beads"
+    SCRIPTS_REF = "refs/notes/baton-bead-scripts"  # Part C (bd-81b9)
 
     def __init__(self, repo_root: Path) -> None:
         self._repo_root = repo_root
@@ -413,3 +417,120 @@ class NotesAdapter:
         except Exception as exc:
             _log.debug("NotesAdapter.resolve_branch: %s", exc)
         return ""
+
+    # ------------------------------------------------------------------
+    # Script body notes — Part C (bd-81b9)
+    # ------------------------------------------------------------------
+
+    def _sentinel_commit(self) -> str | None:
+        """Return the anchor sentinel commit SHA used for script notes.
+
+        Uses ``merge-base origin/main HEAD`` for project-scoped storage, or
+        the repo's root commit as fallback.
+        """
+        try:
+            result = self._git("merge-base", "origin/main", "HEAD")
+            if result.returncode == 0:
+                sha = result.stdout.strip()
+                if sha:
+                    return sha
+        except Exception as exc:
+            _log.debug("NotesAdapter._sentinel_commit: merge-base failed: %s", exc)
+        try:
+            result = self._git("rev-list", "--max-parents=0", "HEAD")
+            if result.returncode == 0:
+                sha = result.stdout.strip().splitlines()[0]
+                if sha:
+                    return sha
+        except Exception as exc:
+            _log.debug("NotesAdapter._sentinel_commit: root-commit fallback failed: %s", exc)
+        return None
+
+    def write_script(self, content_sha: str, script_body: str) -> bool:
+        """Store *script_body* as a note keyed by *content_sha*.
+
+        Scripts are content-addressed: the same SHA results in an idempotent
+        overwrite.  Each script is stored under a sub-ref of the form
+        ``refs/notes/baton-bead-scripts/<sha>``.
+
+        Args:
+            content_sha: SHA-256 hex digest of *script_body*.
+            script_body: The full script text.
+
+        Returns:
+            ``True`` on success, ``False`` on any failure.
+        """
+        sentinel = self._sentinel_commit()
+        if not sentinel:
+            _log.warning(
+                "NotesAdapter.write_script: no sentinel commit for script %s",
+                content_sha[:8],
+            )
+            return False
+        script_ref = f"{self.SCRIPTS_REF}/{content_sha}"
+        try:
+            result = self._git(
+                "notes",
+                f"--ref={script_ref}",
+                "add",
+                "-f",
+                "-m",
+                script_body,
+                sentinel,
+            )
+            if result.returncode != 0:
+                _log.warning(
+                    "NotesAdapter.write_script: git notes failed for %s: %s",
+                    content_sha[:8],
+                    result.stderr.strip(),
+                )
+                return False
+            _log.debug(
+                "NotesAdapter.write_script: stored script %s on %s",
+                content_sha[:8],
+                sentinel[:8],
+            )
+            return True
+        except Exception as exc:
+            _log.warning(
+                "NotesAdapter.write_script: error for %s: %s",
+                content_sha[:8],
+                exc,
+            )
+            return False
+
+    def read_script(self, content_sha: str) -> str | None:
+        """Read a script body stored under *content_sha*.
+
+        Args:
+            content_sha: SHA-256 hex digest of the script body.
+
+        Returns:
+            The script body string, or ``None`` if not found.
+        """
+        sentinel = self._sentinel_commit()
+        if not sentinel:
+            return None
+        script_ref = f"{self.SCRIPTS_REF}/{content_sha}"
+        try:
+            result = self._git("notes", f"--ref={script_ref}", "show", sentinel)
+            if result.returncode != 0:
+                return None
+            return result.stdout
+        except Exception as exc:
+            _log.debug("NotesAdapter.read_script: error for %s: %s", content_sha[:8], exc)
+            return None
+
+    # ------------------------------------------------------------------
+    # Utilities
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def compute_script_sha(script_body: str) -> str:
+        """Return the SHA-256 hex digest of *script_body* (UTF-8 encoded)."""
+        return hashlib.sha256(script_body.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def script_ref_for(content_sha: str) -> str:
+        """Return the canonical sub-ref string for a script keyed by *content_sha*."""
+        return f"refs/notes/baton-bead-scripts/{content_sha}"
