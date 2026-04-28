@@ -193,6 +193,12 @@ class Bead:
     token_estimate: int = 0
     quality_score: float = 0.0
     retrieval_count: int = 0
+    # Wave 6.1 Part B — Persistent Agent Souls (bd-d975).
+    # Additive fields: default to "" so legacy beads load without soul attribution.
+    # signed_by: soul_id that signed this bead; "" means unsigned / no soul.
+    # signature: "ed25519:<base64>" over the canonical bead body JSON; "" means unsigned.
+    signed_by: str = ""
+    signature: str = ""
 
     def to_dict(self) -> dict:
         """Serialise to a plain dict for JSON storage."""
@@ -216,6 +222,8 @@ class Bead:
             "token_estimate": self.token_estimate,
             "quality_score": self.quality_score,
             "retrieval_count": self.retrieval_count,
+            "signed_by": self.signed_by,
+            "signature": self.signature,
         }
 
     @classmethod
@@ -243,4 +251,6 @@ class Bead:
             token_estimate=int(data.get("token_estimate", 0)),
             quality_score=float(data.get("quality_score", 0.0)),
             retrieval_count=int(data.get("retrieval_count", 0)),
+            signed_by=data.get("signed_by", ""),
+            signature=data.get("signature", ""),
         )
