@@ -43,6 +43,13 @@ import type {
   SpecApproveResponse,
   SpecMarkReviewedResponse,
   SpecArchiveResponse,
+  DeveloperScorecard,
+  ArchBead,
+  ArchReviewBody,
+  ArchReviewResponse,
+  Playbook,
+  CRPRequestBody,
+  CRPResponse,
 } from './types';
 
 const BASE = '/api/v1/pmo';
@@ -454,6 +461,33 @@ export const api = {
       .catch(err => { clearTimeout(timeout); throw err; });
   },
 
+  // -------------------------------------------------------------------------
+  // H3 endpoints — scorecards, arch review, playbooks, CRP
+  // -------------------------------------------------------------------------
+
+  getDeveloperScorecard(userId: string): Promise<DeveloperScorecard> {
+    return request(`/scorecard/${encodeURIComponent(userId)}`);
+  },
+
+  listArchBeads(status: string = 'open'): Promise<ArchBead[]> {
+    return request(`/arch-beads?status=${encodeURIComponent(status)}`);
+  },
+
+  reviewArchBead(beadId: string, body: ArchReviewBody): Promise<ArchReviewResponse> {
+    return request(`/arch-beads/${encodeURIComponent(beadId)}/review`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  },
+
+  listPlaybooks(): Promise<Playbook[]> {
+    return request('/playbooks');
+  },
+
+  submitCrp(body: CRPRequestBody): Promise<CRPResponse> {
+    return request('/crp', { method: 'POST', body: JSON.stringify(body) });
+  },
+
   /**
    * HEAD-ping an endpoint path (relative to /api/v1/pmo).
    * Resolves true if the server responds with a non-5xx status,
@@ -476,4 +510,4 @@ export const api = {
 };
 
 // Re-export types for convenience
-export type { PmoCard, PmoProject, ProgramHealth, PmoSignal, BoardResponse, PlanResponse, ForgePlanBody, ForgePlanResponse, ForgePlanWrappedResponse, ForgeApproveBody, ForgeApproveResponse, InterviewResponse, RegenerateBody, AdoSearchResponse, ExecuteCardBody, ExecuteCardResponse, ExternalItem, ExternalMapping, PendingGate, GateApproveBody, GateRejectBody, GateActionResponse, ConsolidationResult, MergeResponse, CreatePrResponse, ApprovalLogEntry, ApprovalLogResponse, RequestReviewBody, RequestReviewResponse, ExecutionControlResponse, UpdatePlanResponse, Agent, AgentsResponse, PolicyPreset, PoliciesResponse, Webhook, WebhooksResponse, Spec, SpecState, SpecScore, SpecListResponse, SpecApproveResponse, SpecMarkReviewedResponse, SpecArchiveResponse };
+export type { PmoCard, PmoProject, ProgramHealth, PmoSignal, BoardResponse, PlanResponse, ForgePlanBody, ForgePlanResponse, ForgePlanWrappedResponse, ForgeApproveBody, ForgeApproveResponse, InterviewResponse, RegenerateBody, AdoSearchResponse, ExecuteCardBody, ExecuteCardResponse, ExternalItem, ExternalMapping, PendingGate, GateApproveBody, GateRejectBody, GateActionResponse, ConsolidationResult, MergeResponse, CreatePrResponse, ApprovalLogEntry, ApprovalLogResponse, RequestReviewBody, RequestReviewResponse, ExecutionControlResponse, UpdatePlanResponse, Agent, AgentsResponse, PolicyPreset, PoliciesResponse, Webhook, WebhooksResponse, Spec, SpecState, SpecScore, SpecListResponse, SpecApproveResponse, SpecMarkReviewedResponse, SpecArchiveResponse, DeveloperScorecard, ArchBead, ArchReviewBody, ArchReviewResponse, Playbook, CRPRequestBody, CRPResponse };
