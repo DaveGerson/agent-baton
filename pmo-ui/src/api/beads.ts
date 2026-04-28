@@ -265,18 +265,42 @@ async function _fetchJSON<T>(path: string, signal?: AbortSignal): Promise<T> {
 // Public API
 // ---------------------------------------------------------------------------
 
+export interface BeadListParams {
+  /** Filter by status: 'open' | 'closed' | 'archived' | 'all'. Default 'open'. */
+  status?: string;
+  /** Filter to a single bead_type (e.g. 'warning'). */
+  bead_type?: BeadType | string;
+  /** Comma-separated tags; AND semantics. */
+  tags?: string | string[];
+  /** Filter to beads from a specific task/execution. */
+  task_id?: string;
+  /** Filter by project (reserved — currently passed through to backend). */
+  project_id?: string;
+  /** Maximum number of beads to return. Default 200, max 1000. */
+  limit?: number;
+}
+
 export const beadsApi = {
   /**
-   * List beads — optionally filtered by project.  Falls back to the
+   * List beads from the project's bead store.  Falls back to the
    * fixture when the backend route is missing (404 / network failure).
    */
-  async list(params?: { project_id?: string; limit?: number }): Promise<BeadListResponse> {
+  async list(params?: BeadListParams): Promise<BeadListResponse> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 10_000);
     try {
       const qs = new URLSearchParams();
+      if (params?.status)     qs.set('status', params.status);
+      if (params?.bead_type)  qs.set('bead_type', String(params.bead_type));
+      if (params?.task_id)    qs.set('task_id', params.task_id);
       if (params?.project_id) qs.set('project_id', params.project_id);
       if (params?.limit)      qs.set('limit', String(params.limit));
+      if (params?.tags) {
+        const tagsStr = Array.isArray(params.tags)
+          ? params.tags.join(',')
+          : params.tags;
+        if (tagsStr) qs.set('tags', tagsStr);
+      }
       const suffix = qs.toString() ? `?${qs.toString()}` : '';
       const data = await _fetchJSON<BeadListResponse>(`/beads${suffix}`, controller.signal);
       // Defensive: backend may return raw array.

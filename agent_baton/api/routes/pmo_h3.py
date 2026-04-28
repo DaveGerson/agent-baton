@@ -109,6 +109,50 @@ class ArchBeadResponse(BaseModel):
     tags: list[str] = Field(default_factory=list)
 
 
+class BeadLinkResponse(BaseModel):
+    """A single typed link from one bead to another."""
+
+    target_bead_id: str
+    link_type: str
+    created_at: str = ""
+
+
+class BeadResponse(BaseModel):
+    """Full bead representation surfaced by ``GET /pmo/beads``.
+
+    Mirrors :class:`agent_baton.models.bead.Bead` so the PMO UI's
+    ``BeadGraphView`` and ``BeadTimelineView`` can render the graph and
+    timeline without reaching into the SQLite layer.
+    """
+
+    bead_id: str
+    task_id: str = ""
+    step_id: str = ""
+    agent_name: str = ""
+    bead_type: str
+    content: str = ""
+    confidence: str = "medium"
+    scope: str = "step"
+    tags: list[str] = Field(default_factory=list)
+    affected_files: list[str] = Field(default_factory=list)
+    status: str = "open"
+    created_at: str = ""
+    closed_at: str = ""
+    summary: str = ""
+    links: list[BeadLinkResponse] = Field(default_factory=list)
+    source: str = "agent-signal"
+    token_estimate: int = 0
+    quality_score: float = 0.0
+    retrieval_count: int = 0
+
+
+class BeadListResponse(BaseModel):
+    """Envelope returned by ``GET /pmo/beads``."""
+
+    beads: list[BeadResponse] = Field(default_factory=list)
+    total: int = 0
+
+
 class ArchReviewRequest(BaseModel):
     """Body for ``POST /pmo/arch-beads/{bead_id}/review``."""
 
@@ -448,3 +492,110 @@ async def submit_crp(body: CRPRequest) -> CRPResponse:
         risk_level=body.risk_level,
         submitted_at=now,
     )
+
+
+# ---------------------------------------------------------------------------
+# DX.6 — Bead listing for PMO graph + timeline (bd-aade)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/pmo/beads", response_model=BeadListResponse)
+async def list_beads(
+    status: str | None = Query(
+        "open",
+        description="Filter by bead status (open|closed|archived). "
+        "Pass an empty string or 'all' to skip status filtering.",
+    ),
+    bead_type: str | None = Query(
+        None, description="Filter to a specific bead type (e.g. 'warning')."
+    ),
+    tags: str | None = Query(
+        None,
+        description="Comma-separated list of tags; AND semantics — "
+        "returned beads must carry every tag in the list.",
+    ),
+    task_id: str | None = Query(
+        None, description="Filter to beads from a specific task/execution."
+    ),
+    limit: int = Query(
+        200, ge=1, le=1000, description="Maximum number of beads to return."
+    ),
+) -> BeadListResponse:
+    """List beads from the project's ``baton.db`` for the PMO Beads view.
+
+    Returns the full bead shape — including links, tags, and affected
+    files — matching :class:`agent_baton.models.bead.Bead` so the UI's
+    ``BeadGraphView`` and ``BeadTimelineView`` can render without
+    additional round-trips.
+
+    The endpoint degrades gracefully when the bead store is unavailable
+    (no DB file, missing tables) by returning an empty envelope rather
+    than 500ing — the PMO can still render its empty state.
+    """
+    db_path = _project_db_path()
+
+    # Empty string or "all" disables the status filter.
+    status_filter: str | None = status
+    if status in ("", "all", None):
+        status_filter = None
+
+    parsed_tags: list[str] | None = None
+    if tags:
+        parsed_tags = [t.strip() for t in tags.split(",") if t.strip()]
+        if not parsed_tags:
+            parsed_tags = None
+
+    if not db_path.exists():
+        return BeadListResponse(beads=[], total=0)
+
+    try:
+        from agent_baton.core.engine.bead_store import BeadStore
+
+        store = BeadStore(db_path)
+        beads = store.query(
+            task_id=task_id,
+            bead_type=bead_type,
+            status=status_filter,
+            tags=parsed_tags,
+            limit=limit,
+        )
+    except Exception:
+        # Velocity-first: never 500 on a storage hiccup.
+        return BeadListResponse(beads=[], total=0)
+
+    items: list[BeadResponse] = []
+    for b in beads:
+        items.append(
+            BeadResponse(
+                bead_id=b.bead_id,
+                task_id=b.task_id or "",
+                step_id=b.step_id or "",
+                agent_name=b.agent_name or "",
+                bead_type=b.bead_type,
+                content=b.content or "",
+                confidence=b.confidence or "medium",
+                scope=b.scope or "step",
+                tags=list(b.tags or []),
+                affected_files=list(b.affected_files or []),
+                status=b.status or "open",
+                created_at=b.created_at or "",
+                closed_at=b.closed_at or "",
+                summary=b.summary or "",
+                links=[
+                    BeadLinkResponse(
+                        target_bead_id=lnk.target_bead_id,
+                        link_type=lnk.link_type,
+                        created_at=getattr(lnk, "created_at", "") or "",
+                    )
+                    for lnk in (b.links or [])
+                ],
+                source=b.source or "agent-signal",
+                token_estimate=int(b.token_estimate or 0),
+                quality_score=float(getattr(b, "quality_score", 0.0) or 0.0),
+                retrieval_count=int(
+                    getattr(b, "retrieval_count", 0) or 0
+                ),
+            )
+        )
+
+    return BeadListResponse(beads=items, total=len(items))
