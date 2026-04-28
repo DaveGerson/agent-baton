@@ -172,6 +172,128 @@ class TestGetDecision:
 
 
 # ===========================================================================
+# Path traversal guard on context_files (bd-90c4)
+# ===========================================================================
+
+
+class TestContextFilesPathTraversal:
+    """Regression coverage for bd-90c4.
+
+    The GET /decisions/{id} route enriches responses with the inline contents
+    of every path listed in ``context_files``. Prior to bd-90c4 those reads
+    were unconstrained, so any caller that could place an absolute or
+    ``..``-prefixed path into the decision payload could read arbitrary
+    files from the API host. The fix constrains reads to paths that resolve
+    inside ``DecisionManager.safe_read_root`` (the team-context root).
+    """
+
+    def test_absolute_path_outside_root_is_silently_omitted(
+        self, client: TestClient, decision_manager: DecisionManager, tmp_path: Path
+    ) -> None:
+        outside = tmp_path.parent / "secret.txt"  # one level above safe_root
+        outside.write_text("TOP-SECRET", encoding="utf-8")
+        req = DecisionRequest.create(
+            task_id="t1",
+            decision_type="gate_approval",
+            summary="x",
+            context_files=[str(outside)],
+        )
+        decision_manager.request(req)
+
+        body = client.get(f"/api/v1/decisions/{req.request_id}").json()
+        assert "TOP-SECRET" not in (body.get("context_file_contents") or {}).values()
+        assert str(outside) not in (body.get("context_file_contents") or {})
+
+    def test_etc_passwd_style_absolute_read_is_blocked(
+        self, client: TestClient, decision_manager: DecisionManager
+    ) -> None:
+        req = DecisionRequest.create(
+            task_id="t1",
+            decision_type="gate_approval",
+            summary="x",
+            context_files=["/etc/passwd"],
+        )
+        decision_manager.request(req)
+
+        body = client.get(f"/api/v1/decisions/{req.request_id}").json()
+        contents = body.get("context_file_contents") or {}
+        assert "/etc/passwd" not in contents
+        assert all("root:" not in v for v in contents.values())
+
+    def test_dotdot_traversal_is_blocked(
+        self, client: TestClient, decision_manager: DecisionManager, tmp_path: Path
+    ) -> None:
+        outside = tmp_path.parent / "leak.txt"
+        outside.write_text("LEAKED", encoding="utf-8")
+        traversal = str(tmp_path / ".." / outside.name)
+        req = DecisionRequest.create(
+            task_id="t1",
+            decision_type="gate_approval",
+            summary="x",
+            context_files=[traversal],
+        )
+        decision_manager.request(req)
+
+        body = client.get(f"/api/v1/decisions/{req.request_id}").json()
+        contents = body.get("context_file_contents") or {}
+        assert "LEAKED" not in contents.values()
+
+    def test_symlink_escaping_root_is_blocked(
+        self, client: TestClient, decision_manager: DecisionManager, tmp_path: Path
+    ) -> None:
+        outside = tmp_path.parent / "secret-target.txt"
+        outside.write_text("CLASSIFIED", encoding="utf-8")
+        link = tmp_path / "evil-symlink"
+        try:
+            link.symlink_to(outside)
+        except (OSError, NotImplementedError):
+            pytest.skip("symlinks unsupported on this platform")
+
+        req = DecisionRequest.create(
+            task_id="t1",
+            decision_type="gate_approval",
+            summary="x",
+            context_files=[str(link)],
+        )
+        decision_manager.request(req)
+
+        body = client.get(f"/api/v1/decisions/{req.request_id}").json()
+        contents = body.get("context_file_contents") or {}
+        assert "CLASSIFIED" not in contents.values()
+
+    def test_path_inside_root_is_returned(
+        self, client: TestClient, decision_manager: DecisionManager, tmp_path: Path
+    ) -> None:
+        # Sanity: legitimate reads inside the root still work.
+        legit = tmp_path / "context.md"
+        legit.write_text("hello world", encoding="utf-8")
+
+        req = DecisionRequest.create(
+            task_id="t1",
+            decision_type="gate_approval",
+            summary="x",
+            context_files=[str(legit)],
+        )
+        decision_manager.request(req)
+
+        body = client.get(f"/api/v1/decisions/{req.request_id}").json()
+        contents = body.get("context_file_contents") or {}
+        assert contents.get(str(legit)) == "hello world"
+
+    def test_manager_with_no_safe_root_refuses_all_reads(
+        self, tmp_path: Path
+    ) -> None:
+        # If a caller forgets to wire safe_read_root, the route MUST refuse
+        # every read rather than fall back to the old unconstrained behaviour.
+        from agent_baton.api.routes.decisions import _safe_read_context_file
+
+        legit = tmp_path / "in.txt"
+        legit.write_text("inside", encoding="utf-8")
+
+        assert _safe_read_context_file(str(legit), safe_root=None) is None
+
+
+# ===========================================================================
 # POST /api/v1/decisions/{request_id}/resolve
 # ===========================================================================
 
