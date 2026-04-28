@@ -1,20 +1,24 @@
-"""Git-notes-backed storage adapter for bead persistence.
+"""Wave 6.1 Part A/C — Git-Native Bead Persistence: notes adapter (bd-2870/bd-81b9).
 
-Part A of the Gastown bead architecture (bd-2870).  Stores one git note per
-bead in ``refs/notes/baton-beads``, anchored to the commit that the engine
-considers the bead's creation point.
+``NotesAdapter`` is the thin I/O layer between the Python bead model and
+``git notes``.  It handles two notes refs:
 
-Notes reference: ``refs/notes/baton-beads``
-Storage format: one JSON blob per note, anchored to the bead's creation
-commit (task-scoped beads → HEAD at step start; project-scoped beads →
-``git merge-base origin/main HEAD``).
+- ``refs/notes/baton-beads``  — per-bead JSON blobs (Part A).
+- ``refs/notes/baton-bead-scripts`` — script bodies keyed by content SHA
+  (Part C).
 
-All git operations are performed via ``subprocess.run`` — no GitPython
-dependency.  Every method degrades gracefully: any subprocess failure returns
-a safe empty value and logs a warning.  No exception is propagated to callers.
+The adapter is intentionally stateless beyond the ``repo_root`` path.  It
+never caches; callers (BeadStore, ExecutableBeadRunner) own any caching
+layer they need.
+
+Resilience contract: every method catches ``subprocess.CalledProcessError``
+and ``FileNotFoundError`` and returns a safe default (``None``, ``False``),
+so callers degrade gracefully when git is unavailable or the notes ref does
+not yet exist.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import subprocess
@@ -22,294 +26,204 @@ from pathlib import Path
 
 _log = logging.getLogger(__name__)
 
-_GIT_TIMEOUT = 15  # seconds per git subprocess call
+
+def _run_git(args: list[str], cwd: Path, *, input: str | None = None) -> str:
+    """Run a git command and return stdout, or raise on non-zero exit."""
+    cmd = ["git"] + args
+    result = subprocess.run(
+        cmd,
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        input=input,
+    )
+    if result.returncode != 0:
+        raise subprocess.CalledProcessError(
+            result.returncode, cmd, result.stdout, result.stderr
+        )
+    return result.stdout.strip()
 
 
 class NotesAdapter:
-    """Git-notes-backed adapter for the BeadStore facade.
-
-    Notes ref: ``refs/notes/baton-beads``
-    Storage: one note per bead, JSON blob anchored to the bead's creation
-    commit.  The note key is the commit SHA; the blob contains the full
-    ``Bead.to_dict()`` payload (including the ``bead_id`` field so callers
-    can reconstruct which bead a note belongs to on a ``list()`` scan).
+    """Git-notes I/O for bead JSON blobs and script bodies.
 
     Args:
-        repo_root: Absolute path to the git repository root.  All ``git``
-            subprocess calls use ``git -C <repo_root>``.
+        repo_root: Path to the git repository root.  Defaults to the current
+            working directory if not supplied.
     """
 
     NOTES_REF = "refs/notes/baton-beads"
+    SCRIPTS_REF = "refs/notes/baton-bead-scripts"
 
-    def __init__(self, repo_root: Path) -> None:
-        self._repo_root = repo_root
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _git(self, *args: str) -> subprocess.CompletedProcess:
-        """Run a git command in the repo root.  Returns the CompletedProcess."""
-        cmd = ["git", "-C", str(self._repo_root), *args]
-        return subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=_GIT_TIMEOUT,
-        )
+    def __init__(self, repo_root: Path | None = None) -> None:
+        self._root: Path = (repo_root or Path.cwd()).resolve()
 
     # ------------------------------------------------------------------
-    # Ref lifecycle
+    # Bead JSON notes (Part A interface)
     # ------------------------------------------------------------------
 
-    def has_ref(self) -> bool:
-        """Return True if the notes ref ``refs/notes/baton-beads`` exists."""
+    def _sentinel_commit(self) -> str | None:
+        """Return the anchor sentinel commit SHA.
+
+        Uses ``merge-base origin/main HEAD`` for project-scoped beads, or
+        the repo's root commit as fallback (Open Question 4 answer: B).
+        """
         try:
-            result = self._git("rev-parse", "--verify", self.NOTES_REF)
-            return result.returncode == 0
-        except Exception as exc:
-            _log.debug("NotesAdapter.has_ref error: %s", exc)
+            return _run_git(
+                ["merge-base", "origin/main", "HEAD"],
+                self._root,
+            )
+        except subprocess.CalledProcessError:
+            pass
+        try:
+            return _run_git(
+                ["rev-list", "--max-parents=0", "HEAD"],
+                self._root,
+            )
+        except subprocess.CalledProcessError:
+            return None
+
+    def write_bead(self, bead_id: str, bead_dict: dict) -> bool:
+        """Attach *bead_dict* as a JSON note on the sentinel commit.
+
+        Args:
+            bead_id: Used only for logging.
+            bead_dict: Dict from ``Bead.to_dict()``.
+
+        Returns:
+            ``True`` on success, ``False`` on any failure.
+        """
+        sentinel = self._sentinel_commit()
+        if not sentinel:
+            _log.warning("NotesAdapter.write_bead: no sentinel commit for %s", bead_id)
+            return False
+        try:
+            note_body = json.dumps(bead_dict, separators=(",", ":"), sort_keys=True)
+            _run_git(
+                [
+                    "notes",
+                    f"--ref={self.NOTES_REF}",
+                    "add",
+                    "-f",
+                    "-m",
+                    note_body,
+                    sentinel,
+                ],
+                self._root,
+            )
+            _log.debug("NotesAdapter.write_bead: wrote %s to %s", bead_id, sentinel[:8])
+            return True
+        except subprocess.CalledProcessError as exc:
+            _log.warning(
+                "NotesAdapter.write_bead: git notes failed for %s: %s",
+                bead_id,
+                exc.stderr,
+            )
             return False
 
-    def init_ref(self) -> None:
-        """Create the notes ref if it does not already exist.
-
-        Uses ``git notes --ref=<ref> list`` as a no-op probe; if that fails
-        (ref absent), we write an empty initial note to a sentinel that we
-        immediately remove, which is the safest way to materialise the ref
-        without needing an arbitrary commit to annotate.
-
-        In practice ``git notes`` creates the ref lazily on the first
-        ``add`` call, so this method is a pre-flight convenience for callers
-        that want to verify the ref is reachable before any writes.
-        """
-        if self.has_ref():
-            return
-        # The ref is created implicitly by the first ``git notes add`` call.
-        # We log a debug note here but do not force any write.
-        _log.debug(
-            "NotesAdapter.init_ref: ref %s does not exist yet — "
-            "it will be created on the first write()",
-            self.NOTES_REF,
-        )
-
-    # ------------------------------------------------------------------
-    # Write path
-    # ------------------------------------------------------------------
-
-    def write(self, bead_id: str, anchor_commit: str, blob: dict) -> None:
-        """Attach *blob* as a JSON note to *anchor_commit*.
-
-        Uses ``git notes --ref=<ref> add -f -m '<json>' <anchor>`` with the
-        force flag so that closing/replacing a bead overwrites any prior note
-        on the same anchor commit.
+    def read_bead(self, anchor_commit: str) -> dict | None:
+        """Read a bead JSON note from *anchor_commit*.
 
         Args:
-            bead_id: Bead identifier (stored inside the blob but also used for
-                logging).
-            anchor_commit: The commit SHA to annotate.  Must be a reachable
-                commit in the repository.
-            blob: Plain dict to serialize as the note body.  Typically the
-                output of ``Bead.to_dict()``.
+            anchor_commit: The commit SHA the note is attached to.
 
-        Raises:
-            Nothing — all failures are logged as warnings and silently ignored
-            to preserve the "notes write is warn-only" contract.
+        Returns:
+            Parsed dict or ``None`` if not found.
         """
-        if not anchor_commit:
-            _log.warning(
-                "NotesAdapter.write: bead %s has empty anchor_commit — skipping note write",
-                bead_id,
-            )
-            return
         try:
-            json_body = json.dumps(blob, separators=(",", ":"), ensure_ascii=False)
-            result = self._git(
-                "notes",
-                f"--ref={self.NOTES_REF}",
-                "add",
-                "-f",
-                "-m",
-                json_body,
-                anchor_commit,
+            raw = _run_git(
+                ["notes", f"--ref={self.NOTES_REF}", "show", anchor_commit],
+                self._root,
             )
-            if result.returncode != 0:
-                _log.warning(
-                    "BEAD_WARNING: notes-write-failed bead=%s anchor=%s stderr=%r",
-                    bead_id,
-                    anchor_commit,
-                    result.stderr.strip(),
-                )
-        except Exception as exc:
-            _log.warning(
-                "BEAD_WARNING: notes-write-failed bead=%s exc=%s",
-                bead_id,
-                exc,
-            )
+            return json.loads(raw)
+        except (subprocess.CalledProcessError, json.JSONDecodeError):
+            return None
 
     # ------------------------------------------------------------------
-    # Read path
+    # Script body notes (Part C interface)
     # ------------------------------------------------------------------
 
-    def read(self, bead_id: str, anchor_commit: str) -> dict | None:
-        """Fetch the note attached to *anchor_commit* and return the parsed dict.
+    def write_script(self, content_sha: str, script_body: str) -> bool:
+        """Store *script_body* as a note on the sentinel commit.
 
-        Uses ``git notes --ref=<ref> show <anchor>``.  Returns ``None`` on any
-        failure (no note, parse error, git error).
+        Scripts are content-addressed: the same SHA will overwrite an
+        identical prior write (idempotent).
 
         Args:
-            bead_id: Only used for diagnostic logging.
-            anchor_commit: The commit SHA whose note to fetch.
+            content_sha: SHA-256 hex digest of *script_body*.
+            script_body: The full script text.
 
         Returns:
-            Parsed JSON dict, or ``None`` if not found.
+            ``True`` on success, ``False`` on any failure.
         """
-        if not anchor_commit:
-            return None
+        sentinel = self._sentinel_commit()
+        if not sentinel:
+            _log.warning(
+                "NotesAdapter.write_script: no sentinel commit for script %s",
+                content_sha[:8],
+            )
+            return False
+
+        # We encode the (sha, body) pair so multiple scripts can coexist on
+        # the same sentinel commit.  Each script is stored as a note keyed by
+        # a sub-ref: refs/notes/baton-bead-scripts/<sha>.
+        script_ref = f"{self.SCRIPTS_REF}/{content_sha}"
         try:
-            result = self._git("notes", f"--ref={self.NOTES_REF}", "show", anchor_commit)
-            if result.returncode != 0:
-                _log.debug(
-                    "NotesAdapter.read: no note for bead=%s anchor=%s",
-                    bead_id,
-                    anchor_commit,
-                )
-                return None
-            return json.loads(result.stdout)
-        except json.JSONDecodeError as exc:
-            _log.warning(
-                "NotesAdapter.read: JSON parse error for bead=%s anchor=%s: %s",
-                bead_id,
-                anchor_commit,
-                exc,
+            _run_git(
+                [
+                    "notes",
+                    f"--ref={script_ref}",
+                    "add",
+                    "-f",
+                    "-m",
+                    script_body,
+                    sentinel,
+                ],
+                self._root,
             )
-            return None
-        except Exception as exc:
-            _log.warning(
-                "NotesAdapter.read: unexpected error bead=%s: %s",
-                bead_id,
-                exc,
+            _log.debug(
+                "NotesAdapter.write_script: stored script %s on %s",
+                content_sha[:8], sentinel[:8],
             )
-            return None
+            return True
+        except subprocess.CalledProcessError as exc:
+            _log.warning(
+                "NotesAdapter.write_script: git notes failed for %s: %s",
+                content_sha[:8], exc.stderr,
+            )
+            return False
 
-    # ------------------------------------------------------------------
-    # List / scan
-    # ------------------------------------------------------------------
+    def read_script(self, content_sha: str) -> str | None:
+        """Read a script body stored under *content_sha*.
 
-    def list(self) -> list[tuple[str, str]]:
-        """Return all ``(anchor_commit, bead_id)`` pairs in the notes ref.
-
-        Parses the output of ``git notes --ref=<ref> list``.  Each output line
-        has the form ``<note_object_sha> <annotated_commit_sha>``.  We resolve
-        each note object to its content and extract the ``bead_id`` field from
-        the JSON blob.
-
-        Lines whose note body is not valid JSON or is missing a ``bead_id``
-        field are skipped with a debug log.
+        Args:
+            content_sha: SHA-256 hex digest of the script body.
 
         Returns:
-            List of ``(anchor_commit_sha, bead_id)`` tuples, one per valid
-            note in the ref.  Empty list if the ref doesn't exist or on any
-            error.
+            The script body string, or ``None`` if not found.
         """
+        sentinel = self._sentinel_commit()
+        if not sentinel:
+            return None
+        script_ref = f"{self.SCRIPTS_REF}/{content_sha}"
         try:
-            result = self._git("notes", f"--ref={self.NOTES_REF}", "list")
-            if result.returncode != 0:
-                _log.debug("NotesAdapter.list: no notes ref or empty ref")
-                return []
-
-            pairs: list[tuple[str, str]] = []
-            for line in result.stdout.splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                parts = line.split()
-                if len(parts) != 2:
-                    _log.debug("NotesAdapter.list: unexpected line %r", line)
-                    continue
-                note_sha, anchor_commit = parts[0], parts[1]
-                # Resolve note object to its text content
-                cat_result = self._git("cat-file", "-p", note_sha)
-                if cat_result.returncode != 0:
-                    _log.debug(
-                        "NotesAdapter.list: cannot cat-file note %s", note_sha
-                    )
-                    continue
-                try:
-                    blob = json.loads(cat_result.stdout)
-                    bead_id = blob.get("bead_id", "")
-                    if bead_id:
-                        pairs.append((anchor_commit, bead_id))
-                    else:
-                        _log.debug(
-                            "NotesAdapter.list: note at anchor %s has no bead_id",
-                            anchor_commit,
-                        )
-                except json.JSONDecodeError:
-                    _log.debug(
-                        "NotesAdapter.list: non-JSON note at anchor %s — skipping",
-                        anchor_commit,
-                    )
-            return pairs
-        except Exception as exc:
-            _log.warning("NotesAdapter.list: error: %s", exc)
-            return []
+            return _run_git(
+                ["notes", f"--ref={script_ref}", "show", sentinel],
+                self._root,
+            )
+        except subprocess.CalledProcessError:
+            return None
 
     # ------------------------------------------------------------------
-    # Anchor resolution helpers
+    # Utilities
     # ------------------------------------------------------------------
 
-    def resolve_head(self) -> str:
-        """Return the current HEAD commit SHA, or empty string on failure."""
-        try:
-            result = self._git("rev-parse", "HEAD")
-            if result.returncode == 0:
-                return result.stdout.strip()
-        except Exception as exc:
-            _log.debug("NotesAdapter.resolve_head: %s", exc)
-        return ""
+    @staticmethod
+    def compute_script_sha(script_body: str) -> str:
+        """Return the SHA-256 hex digest of *script_body* (UTF-8 encoded)."""
+        return hashlib.sha256(script_body.encode("utf-8")).hexdigest()
 
-    def resolve_merge_base(self) -> str:
-        """Return ``git merge-base origin/main HEAD``, falling back to root commit.
-
-        Used as the anchor for project-scoped beads.  On failure (no
-        ``origin/main``, detached HEAD, unborn branch) falls back to the
-        repository root commit via ``git rev-list --max-parents=0 HEAD``.
-        """
-        try:
-            result = self._git("merge-base", "origin/main", "HEAD")
-            if result.returncode == 0:
-                sha = result.stdout.strip()
-                if sha:
-                    return sha
-        except Exception as exc:
-            _log.debug("NotesAdapter.resolve_merge_base: merge-base failed: %s", exc)
-
-        # Fall back to root commit
-        try:
-            result = self._git("rev-list", "--max-parents=0", "HEAD")
-            if result.returncode == 0:
-                sha = result.stdout.strip().splitlines()[0]
-                if sha:
-                    _log.debug(
-                        "NotesAdapter.resolve_merge_base: fell back to root commit %s",
-                        sha,
-                    )
-                    return sha
-        except Exception as exc:
-            _log.debug("NotesAdapter.resolve_merge_base: root-commit fallback failed: %s", exc)
-
-        return ""
-
-    def resolve_branch(self) -> str:
-        """Return the current branch name, or empty string on failure (detached HEAD etc.)."""
-        try:
-            result = self._git("rev-parse", "--abbrev-ref", "HEAD")
-            if result.returncode == 0:
-                branch = result.stdout.strip()
-                # ``git rev-parse --abbrev-ref HEAD`` returns "HEAD" when detached
-                if branch and branch != "HEAD":
-                    return branch
-        except Exception as exc:
-            _log.debug("NotesAdapter.resolve_branch: %s", exc)
-        return ""
+    @staticmethod
+    def script_ref_for(content_sha: str) -> str:
+        """Return the canonical ``script_ref`` string for *content_sha*."""
+        return f"refs/notes/baton-bead-scripts:{content_sha}"
