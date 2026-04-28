@@ -1,4 +1,5 @@
 """Wave 6.1 Part B — Persistent Agent Souls: SoulRouter (bd-d975).
+v33 addendum — Revocation check in signature-verification path.
 
 Routes agent dispatches to the best-matching soul for a given
 (role, affected_files) pair based on two signals:
@@ -13,6 +14,15 @@ Combined score = ``0.6 * authorship + 0.4 * bead_authorship``.
 Expertise weights are lazily recomputed when the ``soul_expertise`` row is
 older than 24 h.  Background recomputation is Wave 6.2 territory; here we
 recompute synchronously on the first read after the TTL expires.
+
+Revocation guard (v33)
+----------------------
+``verify_signature(soul_id, data, signature)`` is the single entry point for
+signature verification.  It calls ``registry.is_revoked()`` *before* the
+cryptographic check.  If the soul is revoked the signature is rejected
+unconditionally, a WARNING is emitted to the log, and a structured warning
+bead line is printed so that upstream tooling (BeadStore, etc.) can surface
+the alert.  The successor soul_id is included in the warning when present.
 """
 from __future__ import annotations
 
@@ -169,6 +179,91 @@ class SoulRouter:
         except Exception as exc:
             _log.warning("SoulRouter.current_soul failed for role=%s: %s", role, exc)
             return None
+
+    # ------------------------------------------------------------------
+    # Signature verification with revocation guard (v33)
+    # ------------------------------------------------------------------
+
+    def verify_signature(
+        self,
+        soul_id: str,
+        data: bytes,
+        signature: str,
+    ) -> bool:
+        """Verify *signature* over *data* for *soul_id*, checking revocation first.
+
+        This is the canonical entry point for all signature verification.
+        Callers (BeadStore, executor, etc.) MUST use this method rather than
+        calling ``soul.verify()`` directly so that revocation is enforced.
+
+        Verification logic:
+        1. Look up the soul in the registry.  If not found → ``False``.
+        2. Call ``registry.is_revoked(soul_id)``.  If revoked:
+           - Emit a WARNING log line with soul_id, revoked_at, reason.
+           - If a successor soul exists, include it in the warning.
+           - Print a ``BEAD_WARNING:`` line for upstream tooling.
+           - Return ``False`` unconditionally (revoked keys are never trusted).
+        3. Delegate to ``soul.verify(data, signature)`` for the cryptographic check.
+
+        Args:
+            soul_id: The soul that allegedly produced the signature.
+            data: The raw bytes that were signed.
+            signature: Base64-encoded signature string (``"ed25519:<b64>"``).
+
+        Returns:
+            ``True`` if the signature is valid AND the soul is not revoked.
+            ``False`` for any failure mode (unknown soul, revoked, bad sig).
+        """
+        try:
+            soul = self._registry.get(soul_id)
+            if soul is None:
+                _log.warning(
+                    "soul.verify_unknown soul_id=%s — soul not found in registry",
+                    soul_id,
+                )
+                return False
+
+            if self._registry.is_revoked(soul_id):
+                # Fetch revocation metadata for the warning message.
+                revocations = self._registry.list_revocations()
+                rev = next((r for r in revocations if r.soul_id == soul_id), None)
+                if rev is not None:
+                    successor_hint = (
+                        f" successor={rev.successor_soul_id}"
+                        if rev.successor_soul_id
+                        else ""
+                    )
+                    _log.warning(
+                        "soul.revoked_signature_rejected soul_id=%s revoked_at=%s "
+                        "reason=%r%s — dispatch decision signed by a revoked soul",
+                        soul_id, rev.revoked_at, rev.reason, successor_hint,
+                    )
+                    print(
+                        f"BEAD_WARNING: dispatch decision signed by revoked soul "
+                        f"{soul_id} (revoked_at={rev.revoked_at}, "
+                        f"reason={rev.reason!r}"
+                        + (f", successor={rev.successor_soul_id}" if rev.successor_soul_id else "")
+                        + ")"
+                    )
+                else:
+                    # Revoked via legacy notes prefix — no structured metadata.
+                    _log.warning(
+                        "soul.revoked_signature_rejected soul_id=%s "
+                        "(legacy notes-based revocation) — signature rejected",
+                        soul_id,
+                    )
+                    print(
+                        f"BEAD_WARNING: dispatch decision signed by revoked soul "
+                        f"{soul_id} (legacy revocation, no structured metadata)"
+                    )
+                return False
+
+            return soul.verify(data, signature)
+        except Exception as exc:
+            _log.warning(
+                "SoulRouter.verify_signature error for soul_id=%s: %s", soul_id, exc
+            )
+            return False
 
     # ------------------------------------------------------------------
     # Scoring internals
