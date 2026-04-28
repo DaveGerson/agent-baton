@@ -269,3 +269,45 @@ class TestWallClock:
         agent_min, gate_min = estimate_wall_clock_minutes(plan)
         assert agent_min == 3
         assert gate_min == 0
+
+
+# ---------------------------------------------------------------------------
+# bd-a8b2 — composite / router model IDs MUST use prefix, not substring
+# ---------------------------------------------------------------------------
+
+class TestNormaliseModelComposite:
+    """Regression coverage for bd-a8b2.
+
+    The previous substring implementation could mis-classify composite
+    model IDs (``"opus-via-haiku-router"`` would accidentally match
+    ``"haiku"`` depending on dict iteration order).  The replacement
+    explicit prefix→canonical map must always pick the *leading* family
+    for composite IDs.
+    """
+
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            # The motivating example from the bead.
+            ("opus-via-haiku-router", "opus"),
+            ("haiku-via-opus-cache", "haiku"),
+            ("sonnet-routed-through-haiku", "sonnet"),
+            # Additional vendor-style composites.
+            ("claude-opus-4-7-via-router", "opus"),
+            ("claude-sonnet-4-6-thinking", "sonnet"),
+        ],
+    )
+    def test_composite_id_uses_leading_family(
+        self, raw: str, expected: str
+    ) -> None:
+        assert normalise_model(raw) == expected
+
+    def test_unknown_model_warns_and_defaults(self, caplog) -> None:
+        import logging
+        caplog.set_level(logging.WARNING, logger="agent_baton.core.engine.cost_estimator")
+        result = normalise_model("gpt-5-turbo")
+        assert result == "sonnet"
+        # A warning was emitted naming the offending model + the fallback.
+        assert any(
+            "gpt-5-turbo" in rec.getMessage() for rec in caplog.records
+        ), [r.getMessage() for r in caplog.records]
