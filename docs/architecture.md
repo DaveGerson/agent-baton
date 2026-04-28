@@ -217,6 +217,7 @@ agent_baton/
   |  |  events.py     SSE event stream (1 endpoint)
   |  |  webhooks.py   Webhook subscriptions (3 endpoints)
   |  |  pmo.py        PMO board/project/forge/execute/gates/changelist/review/signals (36 endpoints)
+  |  |  pmo_h3.py     PMO H3 surfaces: scorecard, arch-review, playbooks, CRP (5 endpoints)
   |  |  learn.py      Learning issues and auto-correction (5 endpoints)
   |  models/
   |  |  requests.py   Pydantic request bodies
@@ -261,11 +262,18 @@ pmo-ui/              React/Vite PMO frontend (served at /pmo/)
     |                 ConfirmDialog, ExecutionProgress, ForgePanel,
     |                 GateApprovalPanel, HealthBar, InterviewPanel,
     |                 KanbanBoard, KanbanCard, KeyboardShortcutsDialog,
-    |                 PlanEditor, PlanPreview, ReviewPanel, SignalsBar
+    |                 PlanEditor, PlanPreview, ReviewPanel, SignalsBar,
+    |                 BeadGraphView, BeadTimelineView
+    views/            H3 PMO views — RoleBasedDashboard (H3.2),
+    |                 DeveloperScorecard (H3.4), ArchReviewPanel (H3.7),
+    |                 PlaybookGallery (H3.8), CRPWizard (H3.9). Backed
+    |                 by /api/v1/pmo/scorecard, /arch-beads, /playbooks,
+    |                 /crp endpoints in routes/pmo_h3.py.
     contexts/         ToastContext
     hooks/            useHotkeys, usePersistedState, usePmoBoard
     api/              client.ts, types.ts
     styles/           index.css, tokens.ts
+    test/             setup.ts (Vitest + jsdom + jest-dom matchers)
     utils/            agent-names.ts
 agents/              Distributable agent definitions (19 .md files)
 references/          Distributable reference docs (15 .md files)
