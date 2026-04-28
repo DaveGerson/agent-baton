@@ -248,3 +248,32 @@ def test_bd1974_review_phase_prefers_code_reviewer(planner: IntelligentPlanner):
     assert "backend-engineer" not in review_agents, (
         f"backend-engineer leaked into Review phase: {review_agents}"
     )
+
+
+def test_bd1974_review_phase_synthesizes_reviewer_when_pool_lacks_one(
+    planner: IntelligentPlanner,
+):
+    """When the agent pool contains only implementers, the Review phase
+    must still be routed to a reviewer-class agent (synthesized fallback)
+    rather than handed to a backend/test/data engineer."""
+    from agent_baton.models.execution import PlanPhase
+
+    phases = [
+        PlanPhase(phase_id=1, name="Implement", steps=[]),
+        PlanPhase(phase_id=2, name="Review", steps=[]),
+    ]
+    # Pool contains only an implementer — Review must NOT be routed to it.
+    result = planner._assign_agents_to_phases(
+        phases,
+        ["backend-engineer"],
+        task_summary="Refactor the API layer",
+    )
+    review_phase = next(p for p in result if p.name == "Review")
+    review_agents = [s.agent_name.split("--")[0] for s in review_phase.steps]
+    assert "backend-engineer" not in review_agents, (
+        f"Implementer leaked into Review phase: {review_agents}"
+    )
+    assert any(
+        a in {"code-reviewer", "security-reviewer", "auditor"}
+        for a in review_agents
+    ), f"Review phase has no reviewer-class agent: {review_agents}"

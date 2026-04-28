@@ -2817,17 +2817,34 @@ class IntelligentPlanner:
     # bd-0e36: agent roles that must NOT be routed to a given phase, even
     # by round-robin/leftover passes.  Architect-class agents are reserved
     # for design/research/review phases — they must not own Implement or
-    # Fix steps.  When the only candidate for a phase is a blocked role,
-    # the planner falls back to a generic implementer.
+    # Fix steps.  bd-1974: implementer-class agents (backend/frontend/
+    # devops/data-*) must not own Review steps either — that role belongs
+    # to code-reviewer/security-reviewer/auditor.  When the only candidate
+    # for a phase is a blocked role, the planner falls back to a phase-
+    # appropriate fallback agent.
     _PHASE_BLOCKED_ROLES: dict[str, set[str]] = {
         "implement": {"architect", "ai-systems-architect"},
         "fix": {"architect", "ai-systems-architect"},
         "draft": set(),
+        "review": {
+            "backend-engineer", "frontend-engineer", "devops-engineer",
+            "data-engineer", "data-scientist", "data-analyst",
+            "visualization-expert", "test-engineer",
+        },
     }
 
-    # Fallback agent used when a phase has no eligible candidates after
-    # blocked-role filtering (bd-0e36).
-    _IMPLEMENT_FALLBACK_AGENT = "backend-engineer"
+    # Fallback agents used when a phase has no eligible candidates after
+    # blocked-role filtering.
+    _IMPLEMENT_FALLBACK_AGENT = "backend-engineer"  # bd-0e36
+    _REVIEW_FALLBACK_AGENT = "code-reviewer"        # bd-1974
+
+    # Map phase name → fallback agent.  Falls back to backend-engineer
+    # when the phase isn't listed.
+    _PHASE_FALLBACK_AGENT: dict[str, str] = {
+        "implement": _IMPLEMENT_FALLBACK_AGENT,
+        "fix": _IMPLEMENT_FALLBACK_AGENT,
+        "review": _REVIEW_FALLBACK_AGENT,
+    }
 
     @classmethod
     def _is_blocked_for_phase(cls, agent_name: str, phase_name: str) -> bool:
@@ -2927,9 +2944,13 @@ class IntelligentPlanner:
                         best = agent
                         break
             if best is None:
-                # All pool agents are blocked for this phase — synthesize a
-                # generic implementer so we don't violate the policy table.
-                best = self._IMPLEMENT_FALLBACK_AGENT
+                # All pool agents are blocked for this phase — synthesize the
+                # phase-appropriate fallback (backend-engineer for implement/
+                # fix, code-reviewer for review) so we don't violate the
+                # policy table.  bd-0e36, bd-1974.
+                best = self._PHASE_FALLBACK_AGENT.get(
+                    phase.name.lower(), self._IMPLEMENT_FALLBACK_AGENT
+                )
             assigned.append((phase, best))
 
         # Pass 4: leftover agents — add to work phases only.
