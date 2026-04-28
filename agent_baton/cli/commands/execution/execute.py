@@ -287,9 +287,21 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     sub.add_parser("status", parents=[_task_id_parent],
                    help="Show current execution state")
 
-    # baton execute resume [--task-id ID]
-    sub.add_parser("resume", parents=[_task_id_parent],
-                   help="Resume execution after a crash")
+    # baton execute resume [--task-id ID] [--abort] [--no-rerun-gate]
+    p_resume = sub.add_parser("resume", parents=[_task_id_parent],
+                              help="Resume execution after a crash")
+    # bd-5d4f: declare --abort and --no-rerun-gate explicitly so they show
+    # up in `baton execute resume --help`.  The dispatch code at the
+    # paused-takeover branch already reads these via getattr() with safe
+    # defaults, so behaviour is unchanged for non-takeover resumes.
+    p_resume.add_argument(
+        "--abort", dest="abort", action="store_true", default=False,
+        help="Abort an active takeover (paused-takeover status only)",
+    )
+    p_resume.add_argument(
+        "--no-rerun-gate", dest="no_rerun_gate", action="store_true", default=False,
+        help="Skip automatic gate re-run when resuming from a takeover",
+    )
 
     # baton execute cancel [--task-id ID] [--reason TEXT]
     p_cancel = sub.add_parser("cancel", parents=[_task_id_parent],
@@ -404,16 +416,8 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         help="Skip automatic gate re-run on 'baton execute resume'",
     )
 
-    # baton execute resume: extend with --abort for takeover resolution.
-    # Note: resume parser already exists; we need to extend it.  Since
-    # sub.add_parser("resume") is already registered above, add --abort
-    # and --no-rerun-gate to the EXISTING resume parser.  We use a
-    # separate approach: add_argument on the result of choices lookup.
-    # Actually the cleanest way is to modify the existing resume parser.
-    # Find it via _subparsers_actions — the safest is to just accept
-    # unknown args in resume and parse them manually.  For now we
-    # re-declare resume with the extra flags.  TODO: refactor to a
-    # single add_parser call when the existing code is consolidated.
+    # bd-5d4f: --abort and --no-rerun-gate are now declared on the resume
+    # parser at registration time (see p_resume above).
 
     # ── Wave 5.2 (bd-1483): Manual Self-Heal Trigger ─────────────────────────
     # baton execute self-heal STEP_ID [--max-tier opus] [--task-id ID]

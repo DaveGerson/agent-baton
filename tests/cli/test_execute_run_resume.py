@@ -651,3 +651,65 @@ class TestIdempotentRunAfterApproval:
         )
         # 2.1 should have been dispatched (this is the new work).
         assert "2.1" in dispatched_step_ids
+
+
+# ---------------------------------------------------------------------------
+# bd-5d4f — `baton execute resume` parser exposes --abort and --no-rerun-gate
+# ---------------------------------------------------------------------------
+
+
+class TestResumeParserDeclaresTakeoverFlags:
+    """The resume subparser must declare --abort and --no-rerun-gate so they
+    surface in `baton execute resume --help`.
+
+    Before the fix the dispatch code read these flags via getattr() with
+    safe defaults, but argparse never knew about them — the help text was
+    silent and `--abort foo` was rejected as an unrecognized argument.
+    """
+
+    @staticmethod
+    def _build_resume_parser() -> argparse.ArgumentParser:
+        """Build a minimal parser containing only the `execute resume` chain."""
+        from agent_baton.cli.commands.execution import execute as exec_mod
+
+        root = argparse.ArgumentParser(prog="baton")
+        sub = root.add_subparsers(dest="command")
+        exec_mod.register(sub)
+        return root
+
+    def test_resume_help_lists_abort(self) -> None:
+        root = self._build_resume_parser()
+        # Locate the resume subparser via argparse's choices map.
+        execute_sp = root._subparsers._group_actions[0].choices["execute"]
+        resume_sp = execute_sp._subparsers._group_actions[0].choices["resume"]
+        help_text = resume_sp.format_help()
+
+        assert "--abort" in help_text, (
+            "resume parser must declare --abort so help text surfaces it; "
+            f"got:\n{help_text}"
+        )
+
+    def test_resume_help_lists_no_rerun_gate(self) -> None:
+        root = self._build_resume_parser()
+        execute_sp = root._subparsers._group_actions[0].choices["execute"]
+        resume_sp = execute_sp._subparsers._group_actions[0].choices["resume"]
+        help_text = resume_sp.format_help()
+
+        assert "--no-rerun-gate" in help_text, (
+            "resume parser must declare --no-rerun-gate so help text "
+            f"surfaces it; got:\n{help_text}"
+        )
+
+    def test_resume_parses_abort_and_no_rerun_gate_flags(self) -> None:
+        """Argparse must accept the flags without falling back to error."""
+        root = self._build_resume_parser()
+        ns = root.parse_args(["execute", "resume", "--abort", "--no-rerun-gate"])
+        assert getattr(ns, "abort", None) is True
+        assert getattr(ns, "no_rerun_gate", None) is True
+
+    def test_resume_defaults_when_flags_omitted(self) -> None:
+        """Both flags default to False when omitted."""
+        root = self._build_resume_parser()
+        ns = root.parse_args(["execute", "resume"])
+        assert getattr(ns, "abort", None) is False
+        assert getattr(ns, "no_rerun_gate", None) is False
