@@ -59,14 +59,15 @@ class PhaseStatus(Enum):
 
 class ActionType(Enum):
     """What the caller (Claude session) should do next."""
-    DISPATCH = "dispatch"       # spawn a subagent with the given prompt
-    GATE = "gate"               # run a QA gate check
-    COMPLETE = "complete"       # execution is finished
-    FAILED = "failed"           # execution cannot continue
-    WAIT = "wait"               # parallel steps still running
-    APPROVAL = "approval"       # pause for human review / approval
-    FEEDBACK = "feedback"       # present multiple-choice questions, dispatch based on answers
-    INTERACT = "interact"       # multi-turn interaction: agent responded, awaiting human input
+    DISPATCH = "dispatch"               # spawn a subagent with the given prompt
+    GATE = "gate"                       # run a QA gate check
+    COMPLETE = "complete"               # execution is finished
+    FAILED = "failed"                   # execution cannot continue
+    WAIT = "wait"                       # parallel steps still running
+    APPROVAL = "approval"               # pause for human review / approval
+    FEEDBACK = "feedback"               # present multiple-choice questions, dispatch based on answers
+    INTERACT = "interact"               # multi-turn interaction: agent responded, awaiting human input
+    SWARM_DISPATCH = "swarm.dispatch"   # Wave 6.2 (bd-2b9f): trigger a SwarmDispatcher run
 
 
 # ---------------------------------------------------------------------------

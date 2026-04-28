@@ -172,6 +172,15 @@ def _souls_enabled() -> bool:
     return os.environ.get("BATON_SOULS_ENABLED", "0") not in ("0", "false", "False", "no")
 
 
+def _swarm_enabled() -> bool:
+    """Return True when the swarm feature flag is explicitly set (Wave 6.2, bd-2b9f).
+
+    Default: disabled (off by default so existing flows don't require swarm infra).
+    Override via env: ``BATON_SWARM_ENABLED=1``.
+    """
+    return os.environ.get("BATON_SWARM_ENABLED", "0").strip().lower() in ("1", "true", "yes")
+
+
 def _cli_actor() -> str:
     """Return a best-effort identity string for the current CLI user.
 
@@ -549,6 +558,46 @@ class ExecutionEngine:
                 daemon=True,
             )
             _gc_thread.start()
+
+        # ── Wave 6.2 (bd-2b9f): SwarmDispatcher ─────────────────────────────
+        # Constructed only when BATON_SWARM_ENABLED=1 AND the worktree manager
+        # is available (Wave 1.3 semaphore ships with it).  Silently None when
+        # either guard fails — all call sites check ``is not None``.
+        self._swarm = None
+        if _swarm_enabled() and self._worktree_mgr is not None:
+            try:
+                from agent_baton.core.swarm.dispatcher import SwarmDispatcher
+                from agent_baton.core.swarm.partitioner import ASTPartitioner
+                from agent_baton.core.govern.budget import BudgetEnforcer
+                _project_root_for_swarm = self._root.parent.parent
+                self._swarm = SwarmDispatcher(
+                    engine=self,
+                    worktree_mgr=self._worktree_mgr,
+                    partitioner=ASTPartitioner(_project_root_for_swarm),
+                    budget=BudgetEnforcer(),
+                    # launcher is injected later via engine.set_swarm_launcher()
+                    # once the CLI constructs ClaudeCodeLauncher.
+                    launcher=None,
+                )
+                _log.debug("SwarmDispatcher initialised (BATON_SWARM_ENABLED=1)")
+            except Exception as _swarm_init_exc:
+                _log.debug(
+                    "SwarmDispatcher init skipped (non-fatal): %s", _swarm_init_exc
+                )
+
+    def set_swarm_launcher(self, launcher: object) -> None:
+        """Inject a launcher into the SwarmDispatcher after engine construction.
+
+        Called by the CLI execute loop after it constructs ``ClaudeCodeLauncher``
+        so that swarm chunk agents use the same launcher as normal DISPATCH steps.
+        When ``self._swarm`` is ``None`` (swarm disabled) this is a no-op.
+
+        Args:
+            launcher: Any object satisfying the ``AgentLauncher`` protocol.
+        """
+        if self._swarm is not None:
+            self._swarm._launcher = launcher  # type: ignore[attr-defined]
+            _log.debug("SwarmDispatcher launcher injected")
 
     # ── Storage routing helpers ──────────────────────────────────────────────
 
