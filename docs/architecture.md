@@ -440,6 +440,18 @@ class ExecutionDriver(Protocol):
 `ExecutionEngine`. Tests inject lightweight protocol-conforming objects
 without subclassing (ADR-03).
 
+#### CI Gates (Wave 4.1)
+
+Plans may declare a `gate_type="ci"` gate whose `command` is a workflow
+filename (e.g. `"ci.yml"`) or a JSON config (`{"provider": "github",
+"workflow": "ci.yml", "timeout_s": 600}`). The CLI/executor invoke
+`agent_baton.core.gates.ci_gate.CIGateRunner`, which polls
+`gh run list/view` every 15 s for the current branch's HEAD commit and
+returns a `CIGateResult` (passed, run_id, conclusion, url, log_excerpt).
+CI gates are opt-in — default plans do not include one. Missing `gh`,
+GitLab, and timeout are reported as `passed=False` with sentinel
+conclusions (`gh_unavailable`, `not_implemented`, `timeout`).
+
 ---
 
 ### 5.2 Runtime (`core/runtime/`)
