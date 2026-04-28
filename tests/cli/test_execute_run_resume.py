@@ -102,6 +102,12 @@ class _FakeStorage:
     def set_active_task(self, task_id: str) -> None:
         self._active = task_id
 
+    # bd-96d8: SQLite fallback path in ExecutionEngine now calls
+    # storage.load_execution(task_id) — the shim needs the method even if
+    # it always returns None (file persistence takes over).
+    def load_execution(self, task_id: str):  # noqa: ARG002
+        return None
+
 
 def _make_args(
     plan: str,
@@ -266,19 +272,18 @@ class TestPreRecordedApprovalHonored:
         assert "Started execution" not in out, out
 
         # Architect (1.1) must NOT appear as a re-dispatch in this run —
-        # it should remain "complete" from the seed.  Verify by checking
-        # the persisted state: only one StepResult for 1.1, and 2.1 was
-        # dispatched in this dry-run.
+        # it should remain "complete" from the seed.  Verify the seeded
+        # outcome is still on disk and that the engine printed a
+        # [DRY RUN] dispatch line for 2.1 (read-only since bd-29bf).
         sp = StatePersistence(tmp_path, task_id=_TWO_PHASE_PLAN["task_id"])
         final = sp.load()
         assert final is not None
         results_by_step = {r.step_id: r for r in final.step_results}
         assert "1.1" in results_by_step
-        # Step 1.1's outcome must still be the seeded value (proves no
-        # re-dispatch overwrote it).
+        # The seeded outcome must survive — proves no real re-dispatch
+        # overwrote it. Under bd-29bf (read-only dry-run) the engine prints
+        # a [DRY RUN] preview line for every step but does NOT mutate state.
         assert "(seeded)" in results_by_step["1.1"].outcome
-        # Step 2.1 must have been processed in this run.
-        assert "2.1" in results_by_step
 
     def test_run_proceeds_to_phase_two_after_approval(
         self, tmp_path: Path, capsys: pytest.CaptureFixture
