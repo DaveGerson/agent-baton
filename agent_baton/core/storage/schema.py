@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 33
+SCHEMA_VERSION = 34
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -1134,6 +1134,36 @@ CREATE TABLE IF NOT EXISTS immune_queue (
 );
 CREATE INDEX IF NOT EXISTS idx_immune_queue_priority
     ON immune_queue(last_swept_at, priority DESC);
+""",
+    34: """
+-- v34: soul revocation list (end-user readiness concern #6).
+--
+-- Tracks revoked ed25519 soul identities so that signatures from
+-- compromised keys are rejected at verification time.  Stored in
+-- central.db ONLY — never in per-project baton.db.
+--
+-- Per-project baton.db receives a no-op migration (this comment block
+-- only, no DDL change) so that the version counter advances and
+-- ConnectionManager does not re-apply the migration on the next open.
+--
+-- soul_revocations columns:
+--   soul_id           — FK to agent_souls (enforced by app logic; no FK
+--                       constraint so the migration applies identically
+--                       to both project and central databases).
+--   revoked_at        — ISO 8601 UTC timestamp of revocation.
+--   revoked_by        — Operator identifier (user, host, or tool name).
+--   reason            — Human-readable reason (required, non-empty).
+--   successor_soul_id — If the soul was rotated, points to the
+--                       replacement soul; NULL otherwise.
+CREATE TABLE IF NOT EXISTS soul_revocations (
+    soul_id            TEXT PRIMARY KEY,
+    revoked_at         TEXT NOT NULL,
+    revoked_by         TEXT NOT NULL,
+    reason             TEXT NOT NULL,
+    successor_soul_id  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_soul_revocations_revoked_at
+    ON soul_revocations(revoked_at);
 """,
 }
 
@@ -3187,4 +3217,16 @@ CREATE TABLE IF NOT EXISTS soul_expertise (
     PRIMARY KEY (soul_id, scope, ref)
 );
 CREATE INDEX IF NOT EXISTS idx_soul_expertise_soul ON soul_expertise(soul_id);
+
+-- v34: soul revocation list (end-user readiness concern #6)
+-- See MIGRATIONS[34] for rationale.
+CREATE TABLE IF NOT EXISTS soul_revocations (
+    soul_id            TEXT PRIMARY KEY,
+    revoked_at         TEXT NOT NULL,
+    revoked_by         TEXT NOT NULL,
+    reason             TEXT NOT NULL,
+    successor_soul_id  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_soul_revocations_revoked_at
+    ON soul_revocations(revoked_at);
 """
