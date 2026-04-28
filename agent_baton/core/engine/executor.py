@@ -110,6 +110,11 @@ from agent_baton.core.govern.compliance import (
     parse_auditor_verdict,
 )
 from agent_baton.core.engine.errors import ExecutionVetoed
+from agent_baton.core.engine.resolver import (
+    ActionResolver,
+    DecisionKind,
+    ResolverDecision,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -378,6 +383,13 @@ class ExecutionEngine:
         # Operators can still call fail_gate() at any time to force a terminal
         # failure before the cap is reached.
         self._max_gate_retries: int = max_gate_retries
+
+        # ── 005b Phase 2: ActionResolver wiring ─────────────────────────────
+        # Stateless evaluator that maps ExecutionState -> ResolverDecision.
+        # Hidden private attribute (per design §3.3) — public constructor is
+        # frozen by API contract.  Tests inject a fake by monkeypatching
+        # ``engine._resolver``.
+        self._resolver = ActionResolver(max_gate_retries=self._max_gate_retries)
 
         # KnowledgeResolver for runtime gap auto-resolution.  Callers (CLI and
         # tests) set this at construction time.  When None, gaps fall through to
