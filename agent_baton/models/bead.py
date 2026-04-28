@@ -193,6 +193,11 @@ class Bead:
     token_estimate: int = 0
     quality_score: float = 0.0
     retrieval_count: int = 0
+    # Gastown Part A fields (bd-2870).  All default to empty string so that
+    # existing beads round-trip without change.
+    schema_version: str = "gastown-1"
+    anchor_commit: str = ""
+    branch_at_create: str = ""
 
     def to_dict(self) -> dict:
         """Serialise to a plain dict for JSON storage."""
@@ -216,6 +221,10 @@ class Bead:
             "token_estimate": self.token_estimate,
             "quality_score": self.quality_score,
             "retrieval_count": self.retrieval_count,
+            # Gastown Part A fields (bd-2870)
+            "schema_version": self.schema_version,
+            "anchor_commit": self.anchor_commit,
+            "branch_at_create": self.branch_at_create,
         }
 
     @classmethod
@@ -243,4 +252,8 @@ class Bead:
             token_estimate=int(data.get("token_estimate", 0)),
             quality_score=float(data.get("quality_score", 0.0)),
             retrieval_count=int(data.get("retrieval_count", 0)),
+            # Gastown Part A fields (bd-2870) — use .get() for legacy load
+            schema_version=data.get("schema_version", ""),
+            anchor_commit=data.get("anchor_commit", ""),
+            branch_at_create=data.get("branch_at_create", ""),
         )

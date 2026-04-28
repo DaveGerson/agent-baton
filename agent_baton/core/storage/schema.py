@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 30
+SCHEMA_VERSION = 31
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -1064,6 +1064,28 @@ CREATE TABLE IF NOT EXISTS debates (
 );
 CREATE INDEX IF NOT EXISTS idx_debates_created ON debates(created_at);
 """,
+    31: """
+-- v31: Gastown Part A (bd-2870) — bead_anchors index for git-notes-backed
+-- bead persistence.
+--
+-- bead_anchors maps bead_id → anchor_commit_sha for O(1) lookup during
+-- git-notes reads.  Without this index every BeadStore.read() would require
+-- a full ``git notes list`` scan to locate the anchor commit.
+--
+-- last_seen_at is updated on every write so stale entries can be pruned
+-- in a future GC pass.
+--
+-- NOTE: No FK constraint on bead_id — the anchor index outlives the
+-- dual-write transition and must survive even if a bead is later removed
+-- from the SQLite mirror.  Applied to BOTH project and central databases
+-- via ConnectionManager._run_migrations().
+CREATE TABLE IF NOT EXISTS bead_anchors (
+    bead_id        TEXT PRIMARY KEY,
+    anchor_commit  TEXT NOT NULL,
+    last_seen_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_bead_anchors_commit ON bead_anchors(anchor_commit);
+""",
 }
 
 # =====================================================================
@@ -2008,6 +2030,18 @@ CREATE TABLE IF NOT EXISTS agent_context (
     PRIMARY KEY (agent_name, domain)
 );
 CREATE INDEX IF NOT EXISTS idx_agent_context_agent ON agent_context(agent_name);
+
+-- BEAD_ANCHORS (Gastown Part A, v31, bd-2870): bead_id → anchor_commit index
+-- for O(1) git-notes reads.  Updated on every BeadStore.write().  The
+-- rebuild_from_notes() path recreates this table from a live notes scan when
+-- it drifts.  No FK constraint — anchor entries outlive the dual-write
+-- transition window and must survive bead removal from the SQLite mirror.
+CREATE TABLE IF NOT EXISTS bead_anchors (
+    bead_id        TEXT PRIMARY KEY,
+    anchor_commit  TEXT NOT NULL,
+    last_seen_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_bead_anchors_commit ON bead_anchors(anchor_commit);
 """
 
 # =====================================================================

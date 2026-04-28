@@ -42,9 +42,11 @@ if [ ! -d "$AGENTS_DIR" ]; then
 fi
 
 UPGRADE=false
+GASTOWN=false
 for arg in "$@"; do
     case "$arg" in
-        --upgrade) UPGRADE=true ;;
+        --upgrade)  UPGRADE=true ;;
+        --gastown)  GASTOWN=true ;;
     esac
 done
 
@@ -302,6 +304,40 @@ echo "  ====================================="
 echo ""
 echo "  VERIFY:     Start Claude Code, run /agents"
 echo "  FIRST RUN:  'Use the orchestrator to [describe task]'"
+
+# ── Step 5: Gastown (git-notes bead persistence) ─────────
+# Gated by --gastown flag.  Phase M0 default: OFF.
+# Enable in Phase M1+ once the dual-write window starts.
+if [ "$GASTOWN" = true ]; then
+    echo ""
+    echo "  STEP 5: Gastown Git-Notes Bead Persistence"
+    echo "  ───────────────────────────────────────────"
+    if git rev-parse --git-dir &>/dev/null 2>&1; then
+        # Carry bead notes across rebases
+        git config --local notes.rewriteRef "refs/notes/baton-beads" 2>/dev/null && \
+            echo "  + git config: notes.rewriteRef set" || \
+            echo "  ! notes.rewriteRef config failed (non-fatal)"
+
+        # Register the JSON-aware bead merge driver
+        git config --local merge.baton-notes.driver \
+            "scripts/baton-notes-merge %O %A %B" 2>/dev/null && \
+            echo "  + git config: merge.baton-notes.driver set" || \
+            echo "  ! merge driver config failed (non-fatal)"
+
+        # Fetch bead notes from origin on git fetch/pull (idempotent)
+        _NOTES_FETCH="+refs/notes/baton-beads:refs/notes/baton-beads"
+        if git config --local --get-all remote.origin.fetch | grep -qF "$_NOTES_FETCH" 2>/dev/null; then
+            echo "  ~ remote.origin.fetch: notes refspec already present"
+        else
+            git config --local --add remote.origin.fetch "$_NOTES_FETCH" 2>/dev/null && \
+                echo "  + git config: remote.origin.fetch notes refspec added" || \
+                echo "  ! notes fetch refspec config failed (non-fatal)"
+        fi
+    else
+        echo "  ! Not inside a git repository — Gastown git config skipped"
+        echo "    Run 'git init' first, then re-run install.sh --gastown"
+    fi
+fi
 
 # Auto-verify if baton CLI is available
 if command -v baton &>/dev/null || python3 -m agent_baton.cli.main --help &>/dev/null 2>&1; then
