@@ -38,85 +38,15 @@ from agent_baton.models.execution import (
 )
 
 
-# === TEMPORARY HELPERS ======================================================
-# These are inline copies of the five pure helpers that the parallel agent on
-# step 2.2B is moving into ``agent_baton/core/engine/_executor_helpers.py``.
-# When that branch merges, step 2.3 will replace this block with:
-#
-#     from agent_baton.core.engine._executor_helpers import (
-#         find_step,
-#         effective_timeout,
-#         gate_passed_for_phase,
-#         approval_passed_for_phase,
-#         feedback_resolved_for_phase,
-#     )
-#
-# Source of truth: ``executor.py:5703-5709``, ``5711-5717``, ``5779-5790``,
-# ``6179-6198``, ``6302-6309``.  Tracked by step 2.3.
-
-
-def _gate_passed(state: ExecutionState, phase_id: int) -> bool:
-    """Return True if a passing gate result exists for *phase_id*."""
-    for g in state.gate_results:
-        if g.phase_id == phase_id and g.passed:
-            return True
-    return False
-
-
-def _approval_passed(state: ExecutionState, phase_id: int) -> bool:
-    """Return True if an approval (approve / approve-with-feedback) exists."""
-    for a in state.approval_results:
-        if a.phase_id == phase_id and a.result in (
-            "approve",
-            "approve-with-feedback",
-        ):
-            return True
-    return False
-
-
-def _feedback_resolved(state: ExecutionState, phase_id: int) -> bool:
-    """Return True if all feedback questions for *phase_id* are answered."""
-    phase_obj = state.current_phase_obj
-    if phase_obj is None:
-        return True
-    question_ids = {q.question_id for q in phase_obj.feedback_questions}
-    answered_ids = {
-        r.question_id
-        for r in state.feedback_results
-        if r.phase_id == phase_id
-    }
-    return question_ids <= answered_ids
-
-
-def _find_step(state: ExecutionState, step_id: str) -> PlanStep | None:
-    """Locate a PlanStep by step_id in the plan."""
-    for phase in state.plan.phases:
-        for step in phase.steps:
-            if step.step_id == step_id:
-                return step
-    return None
-
-
-def _effective_timeout(step: PlanStep) -> int:
-    """Return the effective timeout in seconds for *step*.
-
-    Priority:
-      1. ``step.timeout_seconds`` if > 0.
-      2. ``BATON_DEFAULT_STEP_TIMEOUT_S`` env var if a positive int.
-      3. 0 — unlimited (no enforcement).
-    """
-    if step.timeout_seconds > 0:
-        return step.timeout_seconds
-    import os
-    raw = os.environ.get("BATON_DEFAULT_STEP_TIMEOUT_S", "")
-    if raw:
-        try:
-            val = int(raw)
-            if val > 0:
-                return val
-        except ValueError:
-            pass
-    return 0
+# Pure helpers shared with ExecutionEngine live in _executor_helpers.
+# Imported with aliases to preserve the resolver's _-prefixed call-site names.
+from agent_baton.core.engine._executor_helpers import (
+    find_step as _find_step,
+    effective_timeout as _effective_timeout,
+    gate_passed_for_phase as _gate_passed,
+    approval_passed_for_phase as _approval_passed,
+    feedback_resolved_for_phase as _feedback_resolved,
+)
 
 
 def _elapsed_seconds(started_at: str) -> float:
