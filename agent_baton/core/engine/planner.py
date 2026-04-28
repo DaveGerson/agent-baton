@@ -192,6 +192,78 @@ _AGENT_STEP_TYPE: dict[str, str] = {
 _TEST_ENGINEER_DEVELOPING_KEYWORDS = ("create", "build", "scaffold")
 
 
+def _derive_expected_outcome(step: "PlanStep", task_summary: str = "") -> str:
+    """Derive a 1-sentence behavioral demo statement for a step.
+
+    Wave 3.1 (Expected Outcome / Demo Statement). Pure deterministic
+    rule-based generation — no LLM call. The output is consumed by
+    ``code-reviewer`` and ``test-engineer`` to anchor review on
+    *behavioral correctness* rather than "no errors".
+
+    Format: ``"After this step, <observable behavioral statement>."``
+    For TEST steps: describes what behavior an automated test now covers.
+    For other steps: describes what visible behavior the implementation
+    should produce.
+
+    Returns an empty string when the inputs are too thin to produce
+    anything useful (preserves back-compat for older plans).
+    """
+    desc = (step.task_description or "").strip()
+    if not desc:
+        return ""
+
+    base_agent = (step.agent_name or "").split("--")[0]
+    step_type = (step.step_type or "").lower()
+
+    # Strip leading "verb (marker):" or "Verb:" prefixes that the planner
+    # may have prepended — we want the user-facing concern, not the verb.
+    cleaned = desc
+    for sep in (": ", " — ", " - "):
+        if sep in cleaned and cleaned.index(sep) < 60:
+            cleaned = cleaned.split(sep, 1)[1].strip()
+            break
+
+    # Trim trailing planner-added cross-phase reference noise so the
+    # outcome stays focused on the step's own concern.
+    for marker in (" Build on the ", " Apply sound ", " Document your approach"):
+        if marker in cleaned:
+            cleaned = cleaned.split(marker, 1)[0].strip()
+
+    # Cap length so the outcome stays demo-statement-sized.
+    snippet = cleaned[:140].rstrip(" .,;:")
+    if not snippet:
+        return ""
+
+    # Test-style steps get a behavior-coverage framing.
+    if step_type in {"testing", "test"} or base_agent == "test-engineer":
+        outcome = (
+            f"After this step, the behavior in '{snippet}' is covered by an "
+            f"automated test that fails before the fix and passes after."
+        )
+    elif step_type == "reviewing" or base_agent in {"code-reviewer", "security-reviewer", "auditor"}:
+        outcome = (
+            f"After this step, '{snippet}' has a documented review verdict "
+            f"with any blocking issues called out."
+        )
+    elif step_type == "planning" or base_agent in {"architect", "subject-matter-expert"}:
+        outcome = (
+            f"After this step, '{snippet}' has a concrete approach the "
+            f"implementation team can build from without further clarification."
+        )
+    else:
+        # Default: implementation-style behavioral statement.
+        outcome = (
+            f"After this step, '{snippet}' is implemented and observably "
+            f"working in the running system."
+        )
+
+    # Cap final length to keep prompts compact (under ~200 chars target,
+    # but allow a small margin for the longer test-style framing).
+    if len(outcome) > 240:
+        outcome = outcome[:237] + "..."
+    return outcome
+
+
 def _step_type_for_agent(agent_name: str, task_description: str = "") -> str:
     """Return the appropriate step_type for a given agent role.
 
@@ -993,7 +1065,7 @@ class IntelligentPlanner:
         )
 
         # 9b. Enrich steps with cross-phase context and default deliverables
-        plan_phases = self._enrich_phases(plan_phases)
+        plan_phases = self._enrich_phases(plan_phases, task_summary=task_summary)
 
         # 9.5. Resolve knowledge attachments for each step.
         # Runs after phase building so step.agent_name and task_description are final.
@@ -1914,7 +1986,11 @@ class IntelligentPlanner:
     # Private helpers — phase building
     # ------------------------------------------------------------------
 
-    def _enrich_phases(self, phases: list[PlanPhase]) -> list[PlanPhase]:
+    def _enrich_phases(
+        self,
+        phases: list[PlanPhase],
+        task_summary: str = "",
+    ) -> list[PlanPhase]:
         """Post-process phases to add cross-phase context and default deliverables.
 
         For each step:
@@ -1922,6 +1998,11 @@ class IntelligentPlanner:
           phase so the agent knows what to build on.
         - If the step has no explicit deliverables, populates them from
           ``_AGENT_DELIVERABLES`` based on the agent's base name.
+        - If the step has no ``expected_outcome`` set, derives one from the
+          step description, agent role, and the overall task summary
+          (Wave 3.1 — Demo Statement). Pure deterministic rule-based; if
+          derivation yields nothing useful, leaves ``expected_outcome`` empty
+          for back-compat.
         """
         for phase in phases:
             for step in phase.steps:
@@ -1947,6 +2028,12 @@ class IntelligentPlanner:
                     defaults = _AGENT_DELIVERABLES.get(base_agent)
                     if defaults and not self._agent_has_output_spec(step.agent_name):
                         step.deliverables = list(defaults)
+
+                # Wave 3.1 — derive expected_outcome for review/test prompting
+                if not step.expected_outcome:
+                    step.expected_outcome = _derive_expected_outcome(
+                        step, task_summary
+                    )
 
         return phases
 
