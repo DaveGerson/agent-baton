@@ -233,6 +233,27 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     sub.add_parser("resume-budget", parents=[_task_id_parent],
                    help="Clear budget_exceeded status so execution can continue")
 
+    # baton execute verify-dispatch STEP_ID [--task-id ID] [--output text|json]
+    # Read-only post-dispatch isolation check (bd-edbf).  Verifies that the
+    # files written by a single step fall under its declared allowed_paths
+    # and that the recorded commit_hash resolves in the repo.
+    p_verify = sub.add_parser(
+        "verify-dispatch", parents=[_task_id_parent],
+        help="Verify a dispatched step's filesystem + branch compliance",
+    )
+    p_verify.add_argument(
+        "verify_step_id", metavar="STEP_ID",
+        help="Step ID to verify (e.g. 1.1)",
+    )
+
+    # baton execute audit-isolation [--task-id ID] [--output text|json]
+    # Task-wide audit; runs verify-dispatch over every recorded step.
+    # Exits non-zero on any violation.
+    sub.add_parser(
+        "audit-isolation", parents=[_task_id_parent],
+        help="Audit every dispatched step for isolation compliance",
+    )
+
     # baton execute list
     sub.add_parser("list", help="List all executions (active and completed)")
 
@@ -512,7 +533,7 @@ def _print_action(action: dict, *, terse: bool = False) -> None:
 
 def handler(args: argparse.Namespace) -> None:
     if args.subcommand is None:
-        validation_error("supply a subcommand: start, next, record, dispatched, gate, approve, feedback, amend, team-record, interact, complete, status, resume, list, switch, cancel, run, retry-gate, fail, resume-budget")
+        validation_error("supply a subcommand: start, next, record, dispatched, gate, approve, feedback, amend, team-record, interact, complete, status, resume, list, switch, cancel, run, retry-gate, fail, resume-budget, verify-dispatch, audit-isolation")
 
     if args.subcommand == "list":
         _handle_list()
@@ -973,6 +994,130 @@ def handler(args: argparse.Namespace) -> None:
             print(json.dumps({"status": "running", "message": "budget_exceeded cleared"}))
         else:
             print("Budget status cleared — execution resumed. Run 'baton execute next' to continue.")
+
+    elif args.subcommand == "verify-dispatch":
+        _handle_verify_dispatch(args, engine, context_root)
+
+    elif args.subcommand == "audit-isolation":
+        _handle_audit_isolation(args, engine, context_root)
+
+
+# ---------------------------------------------------------------------------
+# Dispatch verification (bd-edbf) — read-only post-hoc audit
+# ---------------------------------------------------------------------------
+
+
+def _project_root_for_audit(context_root: Path) -> Path:
+    """Resolve the git project root for verifier git operations.
+
+    ``context_root`` is the ``.claude/team-context/`` directory; the audit
+    runs against the repo containing it.  We walk two levels up which
+    always lands on the project root for the standard layout.
+    """
+    return context_root.parent.parent
+
+
+def _format_verify_text(result) -> list[str]:
+    """Render a single ``VerificationResult`` as text lines."""
+    lines: list[str] = []
+    if result.inconclusive:
+        lines.append(f"INCONCLUSIVE  step {result.step_id}: no files_changed and no commit_hash recorded")
+        return lines
+    if result.passed:
+        lines.append(f"PASS  step {result.step_id}")
+        return lines
+    lines.append(f"FAIL  step {result.step_id}")
+    for v in result.violations:
+        lines.append(f"  - {v}")
+    return lines
+
+
+def _handle_verify_dispatch(args: argparse.Namespace, engine, context_root: Path) -> None:
+    """Handle ``baton execute verify-dispatch <step_id>``.
+
+    Read-only: never writes to state, plan, git, or any artifact.
+    """
+    from agent_baton.core.audit.dispatch_verifier import DispatchVerifier
+
+    state = engine._load_execution()
+    if state is None:
+        user_error(
+            "no active execution found",
+            hint="Run 'baton execute list' to find an execution, then "
+                 "'baton execute verify-dispatch <step_id> --task-id <id>'.",
+        )
+
+    step_id = args.verify_step_id
+    step = None
+    for phase in state.plan.phases:
+        for s in phase.steps:
+            if s.step_id == step_id:
+                step = s
+                break
+        if step is not None:
+            break
+    if step is None:
+        user_error(
+            f"step '{step_id}' not found in plan",
+            hint="Use 'baton execute status' to list known step IDs.",
+        )
+
+    step_result = state.get_step_result(step_id)
+    if step_result is None:
+        user_error(
+            f"step '{step_id}' has no recorded result yet",
+            hint="The step has not been dispatched and recorded — nothing to verify.",
+        )
+
+    project_root = _project_root_for_audit(context_root)
+    result = DispatchVerifier().verify_step(step, step_result, project_root)
+
+    if getattr(args, "output", "text") == "json":
+        print(json.dumps(result.to_dict(), indent=2))
+    else:
+        for line in _format_verify_text(result):
+            print(line)
+
+    # Exit non-zero on a definite violation; inconclusive is exit 0.
+    if not result.passed:
+        sys.exit(1)
+
+
+def _handle_audit_isolation(args: argparse.Namespace, engine, context_root: Path) -> None:
+    """Handle ``baton execute audit-isolation``.
+
+    Read-only: aggregates per-step verifications across the whole task.
+    Exit non-zero on any violation; exit 0 when all steps pass or are
+    inconclusive.
+    """
+    from agent_baton.core.audit.dispatch_verifier import DispatchVerifier
+
+    state = engine._load_execution()
+    if state is None:
+        user_error(
+            "no active execution found",
+            hint="Run 'baton execute list' to find an execution, then "
+                 "'baton execute audit-isolation --task-id <id>'.",
+        )
+
+    project_root = _project_root_for_audit(context_root)
+    report = DispatchVerifier().audit_task(state, project_root)
+
+    if getattr(args, "output", "text") == "json":
+        print(json.dumps(report.to_dict(), indent=2))
+    else:
+        print(f"Isolation audit — task {report.task_id}")
+        print(f"  Steps inspected: {report.total_steps}")
+        print(f"  Compliant:       {report.compliant_count}")
+        print(f"  Violations:      {report.violation_count}")
+        if report.results:
+            print()
+            for r in report.results:
+                for line in _format_verify_text(r):
+                    print(f"  {line}")
+
+    if report.has_violations:
+        sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
