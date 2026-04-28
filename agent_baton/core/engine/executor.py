@@ -4202,6 +4202,7 @@ class ExecutionEngine:
                 path_enforcement=enforcement or "",
                 interactive=True,
                 interact_max_turns=step.max_turns,
+                expected_outcome=step.expected_outcome,
             )
 
         # Find the most recent completed step (different step_id) for handoff.
@@ -4358,6 +4359,7 @@ class ExecutionEngine:
             interactive=step.interactive,
             interact_max_turns=step.max_turns if step.interactive else 10,
             isolation=isolation,
+            expected_outcome=step.expected_outcome,
         )
 
     def _project_root(self) -> Path:
@@ -5189,6 +5191,7 @@ class ExecutionEngine:
                             context_files=list(original_plan_step.context_files),
                             allowed_paths=list(original_plan_step.allowed_paths),
                             blocked_paths=list(original_plan_step.blocked_paths),
+                            expected_outcome=original_plan_step.expected_outcome,
                         )
                         containing_phase.steps.append(re_dispatch_step)
 

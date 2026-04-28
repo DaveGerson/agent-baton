@@ -281,6 +281,12 @@ class PlanStep:
         knowledge: Knowledge documents attached by the planner.
         synthesis: How to merge team member outputs.  Only meaningful
             when ``team`` is non-empty.
+        expected_outcome: One-sentence behavioral statement describing what
+            should be observably true after this step completes.  Wave 3.1
+            (Demo Statement) — used as the primary prompt anchor for
+            ``code-reviewer`` and ``test-engineer`` to shift review from
+            "no errors" to "behavioral correctness".  Empty string means
+            no outcome was derived (preserves back-compat for older plans).
     """
 
     step_id: str                          # e.g. "1.1"
@@ -301,6 +307,7 @@ class PlanStep:
     step_type: str = "developing"   # planning, developing, testing, reviewing,
                                     # consulting, task, automation
     command: str = ""               # shell command for automation steps
+    expected_outcome: str = ""      # Wave 3.1: 1-sentence demo statement (behavioral)
 
     def to_dict(self) -> dict:
         d = {
@@ -328,6 +335,8 @@ class PlanStep:
             d["max_turns"] = self.max_turns
         if self.command:
             d["command"] = self.command
+        if self.expected_outcome:
+            d["expected_outcome"] = self.expected_outcome
         return d
 
     @classmethod
@@ -351,6 +360,7 @@ class PlanStep:
             max_turns=data.get("max_turns", 10),
             step_type=data.get("step_type", "developing"),
             command=data.get("command", ""),
+            expected_outcome=data.get("expected_outcome", ""),
         )
 
 
@@ -657,6 +667,8 @@ class MachinePlan:
                     lines.append(f"### Step {step.step_id}: {step.agent_name}")
                     lines.append(f"- **Model**: {step.model}")
                     lines.append(f"- **Task**: {step.task_description}")
+                if step.expected_outcome:
+                    lines.append(f"- **Expected outcome**: {step.expected_outcome}")
                 if step.depends_on:
                     lines.append(f"- **Depends on**: {', '.join(step.depends_on)}")
                 if step.deliverables:
@@ -1502,6 +1514,10 @@ class ExecutionAction:
     interact_max_turns: int = 10       # maximum allowed turns for this step
     interactive: bool = False          # True on DISPATCH when the step is interactive
 
+    # Wave 3.1 — behavioral demo statement echoed from PlanStep.expected_outcome
+    # so the CLI and the orchestrator can surface it without re-reading plan.json.
+    expected_outcome: str = ""         # DISPATCH only; empty when not derived
+
     def to_dict(self) -> dict[str, Any]:
         # action_type is serialised as a plain string so CLI / Claude output
         # is unaffected by the internal enum representation.
@@ -1530,6 +1546,8 @@ class ExecutionAction:
                 d["command"] = self.command
             if self.isolation:
                 d["isolation"] = self.isolation
+            if self.expected_outcome:
+                d["expected_outcome"] = self.expected_outcome
         elif self.action_type == ActionType.GATE:
             d.update({
                 "gate_type": self.gate_type,

@@ -372,6 +372,17 @@ for the driving session (Claude or daemon) to perform.
 | `bead_selector.py` | `BeadSelector` | Selects and ranks beads for injection into delegation prompts. Three-tier selection: dependency-chain beads (highest priority), same-phase beads, cross-phase beads. Within each tier, ranks by type priority (warning > discovery > decision > outcome > planning) and quality score. Budget-trimmed output. |
 | `bead_decay.py` | `decay_beads()` | Retention-based archival of old beads. Moves stale open beads to `archived` status based on configurable age thresholds. |
 
+#### Expected Outcome (Demo Statement, Wave 3.1)
+
+Every `PlanStep` carries an `expected_outcome` — a 1-sentence behavioral
+statement of what should be observably true after the step. The planner
+derives it deterministically from the step description, agent role, and
+step type (no LLM call). The dispatcher prepends it as a `## Expected
+Outcome` section in the delegation prompt; `plan.md` and the CLI
+`DISPATCH` action surface it on their own lines. The goal is to anchor
+`code-reviewer` and `test-engineer` on behavioral correctness rather
+than "no errors". Empty string preserves back-compat for older plans.
+
 #### ExecutionEngine Lifecycle
 
 ```

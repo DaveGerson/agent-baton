@@ -551,6 +551,17 @@ class PromptDispatcher:
             "",
         ]
 
+        # Wave 3.1 — Expected Outcome (Demo Statement).  Anchors review on
+        # behavioral correctness rather than "no errors".  Only emitted when
+        # the planner derived an outcome (preserves prompt shape for plans
+        # built before Wave 3.1).
+        if getattr(step, "expected_outcome", "").strip():
+            parts += [
+                "## Expected Outcome",
+                step.expected_outcome.strip(),
+                "",
+            ]
+
         # Success Criteria — inline when present
         success_criteria = _SUCCESS_CRITERIA.get(task_type, "")
         if success_criteria:

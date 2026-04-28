@@ -459,6 +459,7 @@ def _print_action(action: dict, *, terse: bool = False) -> None:
           Model: <agent_model>
           Step:  <step_id>
           Message: <human-readable description>
+          Expected: <demo statement>     # Wave 3.1, omitted when not derived
 
         --- Delegation Prompt ---
         <full prompt text for the subagent>
@@ -546,6 +547,12 @@ def _print_action(action: dict, *, terse: bool = False) -> None:
                 print(f"  Interactive: yes")
                 print(f"  Max-Turns: {action.get('interact_max_turns', 10)}")
             print(f"  Message: {msg}")
+            # Wave 3.1 — Expected Outcome (Demo Statement). Surfaced on its
+            # own line so the orchestrator and human reviewer can see the
+            # behavioral demo statement without parsing the delegation prompt.
+            expected = action.get("expected_outcome", "")
+            if expected:
+                print(f"  Expected: {expected}")
             if terse:
                 prompt = action.get("delegation_prompt", "")
                 sidecar_path = _write_dispatch_sidecar(prompt)
