@@ -1710,8 +1710,18 @@ models  -->  events, observe, govern, learn, improve, distribute, orchestration,
 | Attribute | Value |
 |-----------|-------|
 | Entry | `--knowledge` / `--knowledge-pack` on `baton plan`; `KNOWLEDGE_GAP` in agent output |
-| Path | `IntelligentPlanner` -> `KnowledgeRegistry` -> `KnowledgeResolver` -> `PromptDispatcher` -> `KnowledgeGap` handler |
+| Path | `IntelligentPlanner` -> `KnowledgeRegistry` -> `KnowledgeResolver` -> `KnowledgeRanker` -> `PromptDispatcher` -> `KnowledgeGap` handler |
 | Output | Knowledge blocks in delegation prompts; `KnowledgeGapRecord` in retrospectives |
+
+#### Knowledge Ranking (bd-0184)
+
+After `KnowledgeResolver` produces candidates for each step, `KnowledgeRanker`
+(`agent_baton/core/intel/knowledge_ranker.py`) re-orders them by a deterministic
+composite score: `effectiveness_score * 0.6 + recency_factor * 0.2 + usage_factor * 0.2`.
+Scores are read from `v_knowledge_effectiveness` in `central.db`; missing telemetry
+yields a neutral 0.5 so documents with no history sort stably. The planner then
+caps the list at `BATON_MAX_KNOWLEDGE_PER_STEP` (default 8) before attaching to
+the step. The full ranked table is exposed via `baton knowledge ranking`.
 
 ### Domain 4: Federated Sync
 
