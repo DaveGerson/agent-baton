@@ -1525,6 +1525,18 @@ the env var name stored in its config).
   .pmo-migrated                     One-time migration marker
 ```
 
+### 13.5 Dispatch Verification (bd-edbf)
+
+`baton execute verify-dispatch <step_id>` and `baton execute audit-isolation`
+provide read-only post-hoc compliance checks for the worktree-isolation
+contract. The `DispatchVerifier` (`agent_baton/core/audit/`) compares each
+recorded `StepResult.files_changed` against the dispatched `PlanStep.allowed_paths`
+(falling back to `git diff-tree` when files_changed is empty but commit_hash
+is present), and validates that any recorded commit hash resolves in the repo.
+Both commands are read-only by contract — they never mutate state, plans, or
+git — and exit non-zero on any definite violation so CI pipelines can gate on
+isolation compliance without re-running the executor.
+
 ---
 
 ## 14. Extension Points
