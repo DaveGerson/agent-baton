@@ -92,7 +92,36 @@ def _replace_generic_secret(m: re.Match[str]) -> str:
     return f"{m.group(1)}{m.group(2)}[REDACTED:secret]"
 
 
-def _replace_email(_m: re.Match[str]) -> str:
+# bd-bdd2: machine-generated noreply addresses are not secrets — they
+# regularly appear in commit metadata (e.g. ``Co-Authored-By: Claude
+# <noreply@anthropic.com>``).  Redacting them mangles the audit-log
+# entries that record commit trailers.  Allowlist the well-known
+# patterns so they survive verbatim.
+_EMAIL_ALLOWLIST_SUFFIXES: tuple[str, ...] = (
+    "@users.noreply.github.com",
+    "@noreply.github.com",
+    "@noreply.anthropic.com",
+    "@anthropic.com",  # Co-Authored-By trailer for Claude agents
+)
+_EMAIL_ALLOWLIST_LOCALS: tuple[str, ...] = (
+    "noreply",
+    "no-reply",
+)
+
+
+def _email_is_allowlisted(addr: str) -> bool:
+    """Return True if *addr* is a known machine-generated noreply email."""
+    lower = addr.lower()
+    if any(lower.endswith(suffix) for suffix in _EMAIL_ALLOWLIST_SUFFIXES):
+        return True
+    local = lower.split("@", 1)[0] if "@" in lower else lower
+    return local in _EMAIL_ALLOWLIST_LOCALS
+
+
+def _replace_email(m: re.Match[str]) -> str:
+    addr = m.group(0)
+    if _email_is_allowlisted(addr):
+        return addr
     return "[REDACTED:email]"
 
 
