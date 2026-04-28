@@ -270,7 +270,19 @@ def _derive_expected_outcome(step: "PlanStep", task_summary: str = "") -> str:
     return outcome
 
 
-def _step_type_for_agent(agent_name: str, task_description: str = "") -> str:
+# Phase names whose step_type must be "developing" regardless of the
+# agent's default role.  bd-b3e1: an architect (or any agent) landing on
+# an Implement phase must produce a developing-typed step, not its default
+# (e.g. "planning") — otherwise the engine treats the step as design work
+# and skips downstream code-aware behavior.
+_IMPLEMENT_PHASE_NAMES = {"implement", "fix", "draft", "build", "develop"}
+
+
+def _step_type_for_agent(
+    agent_name: str,
+    task_description: str = "",
+    phase_name: str | None = None,
+) -> str:
     """Return the appropriate step_type for a given agent role.
 
     Uses ``_AGENT_STEP_TYPE`` for the lookup with ``"developing"`` as the
@@ -278,10 +290,19 @@ def _step_type_for_agent(agent_name: str, task_description: str = "") -> str:
     task description contains build/scaffold keywords (i.e. the step is
     building test infrastructure, not running tests).
 
+    When *phase_name* is one of the implementation phases
+    (``implement``, ``fix``, ``draft``, ``build``, ``develop``), the
+    step_type is forced to ``"developing"`` regardless of the agent's
+    default — this fixes bd-b3e1 where architect-on-Implement produced
+    a ``"planning"`` step.
+
     Args:
         agent_name: Full agent name (may include ``--`` variant suffix).
         task_description: Task description text used for the test-engineer
             override check.  Optional — defaults to ``""``.
+        phase_name: Name of the phase the step belongs to.  When this is
+            an implementation phase, the agent's default step_type is
+            overridden to ``"developing"``.
 
     Returns:
         One of the step_type strings defined in ``_AGENT_STEP_TYPE``, or
@@ -293,6 +314,13 @@ def _step_type_for_agent(agent_name: str, task_description: str = "") -> str:
     if base == "test-engineer" and step_type == "testing":
         lower_desc = task_description.lower()
         if any(kw in lower_desc for kw in _TEST_ENGINEER_DEVELOPING_KEYWORDS):
+            step_type = "developing"
+    # bd-b3e1: phase context wins over agent default for Implement-class phases.
+    # Reviewer agents are deliberately left alone — a code-reviewer on an
+    # Implement phase is a routing bug (bd-0e36), not a step_type bug, and
+    # forcing them to "developing" would mask it.
+    if phase_name and phase_name.lower() in _IMPLEMENT_PHASE_NAMES:
+        if base not in {"code-reviewer", "security-reviewer", "auditor"}:
             step_type = "developing"
     return step_type
 
@@ -2319,7 +2347,7 @@ class IntelligentPlanner:
                     step_id=f"{phase.phase_id}.{idx}",
                     agent_name=agent,
                     task_description=desc,
-                    step_type=_step_type_for_agent(agent, desc),
+                    step_type=_step_type_for_agent(agent, desc, phase_name=phase.name),
                     knowledge=concern_knowledge,
                 )
             )
@@ -2392,7 +2420,9 @@ class IntelligentPlanner:
                         step_id=f"{idx}.{step_idx}",
                         agent_name=routed_name,
                         task_description=_desc,
-                        step_type=_step_type_for_agent(routed_name, _desc),
+                        step_type=_step_type_for_agent(
+                            routed_name, _desc, phase_name=phase_name
+                        ),
                     )
                 )
 
@@ -2774,7 +2804,9 @@ class IntelligentPlanner:
                             step_id=f"{phase.phase_id}.1",
                             agent_name="backend-engineer",
                             task_description=_desc,
-                            step_type=_step_type_for_agent("backend-engineer", _desc),
+                            step_type=_step_type_for_agent(
+                                "backend-engineer", _desc, phase_name=phase.name
+                            ),
                         )
                     )
             return phases
@@ -2856,7 +2888,7 @@ class IntelligentPlanner:
                     step_id=step_id,
                     agent_name=agent,
                     task_description=_desc,
-                    step_type=_step_type_for_agent(agent, _desc),
+                    step_type=_step_type_for_agent(agent, _desc, phase_name=phase.name),
                 )
             )
 
@@ -2869,7 +2901,9 @@ class IntelligentPlanner:
                         step_id=f"{phase.phase_id}.1",
                         agent_name=agents[0],
                         task_description=_desc,
-                        step_type=_step_type_for_agent(agents[0], _desc),
+                        step_type=_step_type_for_agent(
+                            agents[0], _desc, phase_name=phase.name
+                        ),
                     )
                 )
 
@@ -2926,7 +2960,7 @@ class IntelligentPlanner:
                         step_id=f"{idx}.{step_idx}",
                         agent_name=agent,
                         task_description=_desc,
-                        step_type=_step_type_for_agent(agent, _desc),
+                        step_type=_step_type_for_agent(agent, _desc, phase_name=name),
                     )
                 )
             phases.append(PlanPhase(phase_id=idx, name=name, steps=steps, gate=gate))
