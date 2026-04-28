@@ -131,9 +131,22 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     p_gate = sub.add_parser("gate", parents=[_task_id_parent],
                             help="Record a QA gate result")
     p_gate.add_argument("--phase-id", type=int, required=True, help="Phase ID")
-    p_gate.add_argument("--result", required=True, choices=["pass", "fail"], help="Gate result")
+    # Wave 4.1 — --result is required for the manual record path (pass/fail).
+    # When --type=ci is supplied the CLI runs the CI gate itself and derives
+    # pass/fail from the provider; --result becomes optional in that mode.
+    p_gate.add_argument("--result", choices=["pass", "fail"], default=None,
+                        help="Gate result (required unless --type=ci, which derives result from CI)")
     p_gate.add_argument("--gate-output", "--notes", default="", dest="gate_output",
                         help="Gate command output or notes (--notes is accepted as an alias; --output is reserved for format)")
+    # Wave 4.1 — opt-in CI gate.  Lets an operator drive a CI gate
+    # manually without modifying the plan: 'baton execute gate
+    # --phase-id N --type ci --workflow ci.yml'.
+    p_gate.add_argument("--type", default=None, dest="gate_type_override",
+                        help="Gate type override (e.g. 'ci' to dispatch CI provider gate)")
+    p_gate.add_argument("--workflow", default="", dest="ci_workflow",
+                        help="CI workflow file (used with --type ci, e.g. 'ci.yml')")
+    p_gate.add_argument("--ci-timeout", type=int, default=None, dest="ci_timeout_s",
+                        help="CI gate timeout in seconds (used with --type ci, default 600)")
 
     # baton execute approve --phase-id N --result approve|reject|approve-with-feedback [--feedback TEXT]
     p_approve = sub.add_parser("approve", parents=[_task_id_parent],
@@ -430,11 +443,26 @@ def _print_action(action: dict, *, terse: bool = False) -> None:
 
     elif atype == ActionType.GATE.value:
         phase_id = action.get('phase_id', '')
+        gate_type = action.get('gate_type', '')
+        gate_cmd = action.get('gate_command', '')
         print(f"ACTION: GATE")
-        print(f"  Type:    {action.get('gate_type', '')}")
+        print(f"  Type:    {gate_type}")
         print(f"  Phase:   {phase_id}")
-        print(f"  Command: {action.get('gate_command', '')}")
+        print(f"  Command: {gate_cmd}")
         print(f"  Message: {msg}")
+        # Wave 4.1 — surface CI gate context up-front so the orchestrator
+        # knows this is a long-running poll, not a local subprocess gate.
+        if gate_type == "ci":
+            try:
+                import subprocess as _sp_pa
+                _sha = _sp_pa.run(
+                    ["git", "rev-parse", "HEAD"],
+                    capture_output=True, text=True, check=False, timeout=5,
+                ).stdout.strip()[:8] or "?"
+            except Exception:
+                _sha = "?"
+            workflow_hint = (gate_cmd or "ci.yml").strip() or "ci.yml"
+            print(f"  CI:      Waiting for CI workflow {workflow_hint} on {_sha}...")
         print()
         print("To record gate result:")
         print(f"  baton execute gate --phase-id {phase_id} --result pass")
@@ -696,17 +724,79 @@ def handler(args: argparse.Namespace) -> None:
             print(f"Recorded: step {args.step_id} ({args.agent}) — {args.status}")
 
     elif args.subcommand == "gate":
-        passed = args.result == "pass"
-        engine.record_gate_result(
-            phase_id=args.phase_id,
-            passed=passed,
-            output=args.gate_output,
-        )
-        status = "PASS" if passed else "FAIL"
-        if getattr(args, "output", "text") == "json":
-            print(json.dumps({"status": "recorded", "phase_id": args.phase_id, "result": args.result}))
+        # Wave 4.1 — opt-in CI gate via manual CLI.  When --type=ci is
+        # supplied we drive the CI provider directly rather than recording
+        # an externally-decided pass/fail.  Otherwise behave as before:
+        # the orchestrator (or operator) has already determined the
+        # result and is just recording it.
+        gate_type_override = getattr(args, "gate_type_override", None)
+        if gate_type_override == "ci":
+            from agent_baton.core.gates.ci_gate import (
+                CIGateRunner,
+                parse_ci_gate_config,
+            )
+            workflow = (args.ci_workflow or "").strip() or "ci.yml"
+            timeout_s = args.ci_timeout_s or 600
+            try:
+                import subprocess as _sp_ci
+                sha = _sp_ci.run(
+                    ["git", "rev-parse", "HEAD"],
+                    capture_output=True, text=True, check=False, timeout=10,
+                ).stdout.strip()
+                branch = _sp_ci.run(
+                    ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                    capture_output=True, text=True, check=False, timeout=10,
+                ).stdout.strip() or "HEAD"
+            except (FileNotFoundError, Exception):
+                sha, branch = "", "HEAD"
+            print(f"Waiting for CI workflow {workflow} on {sha[:8] or '?'}...", file=sys.stderr)
+            ci_result = CIGateRunner().wait_for_workflow(
+                provider="github",
+                workflow=workflow,
+                branch=branch,
+                commit_sha=sha,
+                timeout_s=timeout_s,
+            )
+            passed = ci_result.passed
+            output = (
+                f"CI conclusion: {ci_result.conclusion}\n"
+                f"Run URL: {ci_result.url}\n"
+                f"Run ID: {ci_result.run_id}\n"
+                f"Duration: {ci_result.duration_s:.1f}s"
+                + (f"\n--- log excerpt ---\n{ci_result.log_excerpt}" if ci_result.log_excerpt else "")
+            )
+            engine.record_gate_result(
+                phase_id=args.phase_id,
+                passed=passed,
+                output=output,
+                command=f"gh workflow run {workflow}",
+                exit_code=0 if passed else 1,
+            )
+            status = "PASS" if passed else "FAIL"
+            if getattr(args, "output", "text") == "json":
+                print(json.dumps({
+                    "status": "recorded",
+                    "phase_id": args.phase_id,
+                    "result": "pass" if passed else "fail",
+                    "ci": ci_result.to_dict(),
+                }))
+            else:
+                marker = success(status) if passed else color_error(status)
+                print(f"CI gate {marker}: {ci_result.conclusion} — {ci_result.url or '(no run url)'}")
         else:
-            print(f"Gate recorded: phase {args.phase_id} — {status}")
+            if args.result is None:
+                user_error("--result is required when --type is not 'ci'.")
+            passed = args.result == "pass"
+            engine.record_gate_result(
+                phase_id=args.phase_id,
+                passed=passed,
+                output=args.gate_output,
+            )
+            status = "PASS" if passed else "FAIL"
+            if getattr(args, "output", "text") == "json":
+                print(json.dumps({"status": "recorded", "phase_id": args.phase_id, "result": args.result}))
+            else:
+                print(f"Gate recorded: phase {args.phase_id} — {status}")
 
     elif args.subcommand == "approve":
         engine.record_approval_result(
@@ -1305,26 +1395,70 @@ def _run_loop(
                 print(f"  [DRY RUN] Would run: {gate_cmd}", file=sys.stderr)
                 engine.record_gate_result(phase_id=phase_id, passed=True, output="dry-run skip")
             elif gate_type == "ci":
-                # CI gate: dispatch GitHub Actions workflow and poll for completion.
-                # This is a long-running synchronous operation (up to 15 minutes)
-                # so we call it directly in the CLI process rather than spawning a
-                # subprocess — the subprocess would lose the polling context.
-                from agent_baton.core.engine.gates import run_github_actions_gate
+                # Wave 4.1 — CI provider gate.  Polls GitHub Actions for the
+                # current branch's HEAD commit (rather than dispatching a new
+                # workflow run, which is the model used by the older
+                # ``run_github_actions_gate`` path).  CIGateRunner returns a
+                # CIGateResult whose ``passed`` field is the gate verdict.
+                from agent_baton.core.gates.ci_gate import (
+                    CIGateRunner,
+                    parse_ci_gate_config,
+                )
+                import subprocess as _sp_ci
 
-                workflow_name = gate_cmd.strip() or "ci.yml"
-                print(f"  [GATE] Dispatching CI workflow '{workflow_name}' and waiting...", file=sys.stderr)
-                result = run_github_actions_gate(workflow_name)
+                config = parse_ci_gate_config(gate_cmd)
+                workflow_name = config.workflow or "ci.yml"
+                try:
+                    sha = _sp_ci.run(
+                        ["git", "rev-parse", "HEAD"],
+                        capture_output=True, text=True, check=False, timeout=10,
+                    ).stdout.strip()
+                except (FileNotFoundError, _sp_ci.TimeoutExpired):
+                    sha = ""
+                branch = config.branch
+                if not branch or branch == "auto":
+                    try:
+                        branch = _sp_ci.run(
+                            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                            capture_output=True, text=True, check=False, timeout=10,
+                        ).stdout.strip() or "HEAD"
+                    except (FileNotFoundError, _sp_ci.TimeoutExpired):
+                        branch = "HEAD"
+                print(
+                    f"  [GATE] Waiting for CI workflow {workflow_name} on "
+                    f"{(sha[:8] or '?')} (branch {branch})...",
+                    file=sys.stderr,
+                )
+                ci_result = CIGateRunner(poll_interval_s=config.poll_interval_s).wait_for_workflow(
+                    provider=config.provider,
+                    workflow=workflow_name,
+                    branch=branch,
+                    commit_sha=sha,
+                    timeout_s=config.timeout_s,
+                )
+                output = (
+                    f"CI conclusion: {ci_result.conclusion}\n"
+                    f"Run URL: {ci_result.url}\n"
+                    f"Run ID: {ci_result.run_id}\n"
+                    f"Duration: {ci_result.duration_s:.1f}s"
+                    + (f"\n--- log excerpt ---\n{ci_result.log_excerpt}"
+                       if ci_result.log_excerpt else "")
+                )
                 engine.record_gate_result(
                     phase_id=phase_id,
-                    passed=result.passed,
-                    output=result.output,
-                    command=f"gh workflow run {workflow_name}",
-                    exit_code=None,
+                    passed=ci_result.passed,
+                    output=output,
+                    command=f"gh run watch (workflow={workflow_name})",
+                    exit_code=0 if ci_result.passed else 1,
                 )
-                marker = success("PASS") if result.passed else color_error("FAIL")
-                print(f"  [GATE] {marker}", file=sys.stderr)
-                if not result.passed and result.output:
-                    print(f"    Output: {result.output[:200]}", file=sys.stderr)
+                marker = success("PASS") if ci_result.passed else color_error("FAIL")
+                print(
+                    f"  [GATE] {marker} ({ci_result.conclusion}) — "
+                    f"{ci_result.url or '(no run url)'}",
+                    file=sys.stderr,
+                )
+                if not ci_result.passed and ci_result.log_excerpt:
+                    print(f"    Log: {ci_result.log_excerpt[:200]}", file=sys.stderr)
             else:
                 try:
                     proc = _subprocess.run(
