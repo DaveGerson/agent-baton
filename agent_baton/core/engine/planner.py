@@ -1071,6 +1071,158 @@ class IntelligentPlanner:
     # + analyzer dispatches.
     # ------------------------------------------------------------------
 
+    def _step_setup_knowledge(self) -> tuple:
+        """Step 6.5 — knowledge resolver/ranker construction.
+
+        Returns ``(resolver, ranker, max_knowledge_per_step)`` for use
+        at step 9.5.  Body is byte-identical to the inline version.
+        """
+        _resolver = None
+        _ranker = None
+        _max_knowledge_per_step: int = 8
+        if self.knowledge_registry is not None:
+            import os as _os
+            from agent_baton.core.engine.knowledge_resolver import KnowledgeResolver
+            from agent_baton.core.engine.knowledge_telemetry import KnowledgeTelemetryStore
+            from agent_baton.core.intel.knowledge_ranker import KnowledgeRanker
+            # Wire F0.4 lifecycle telemetry (bd-a313).  Resolver records a
+            # KnowledgeUsed row per attachment whenever ``task_id``/``step_id``
+            # are passed to ``resolve()``.  Construction is best-effort.
+            try:
+                _telemetry = KnowledgeTelemetryStore()
+            except Exception:
+                _telemetry = None
+            _resolver = KnowledgeResolver(
+                self.knowledge_registry,
+                agent_registry=self._registry,
+                rag_available=self._detect_rag(),
+                step_token_budget=32_000,
+                doc_token_cap=8_000,
+                telemetry=_telemetry,
+            )
+            # bd-0184: effectiveness-aware ranking.  Best-effort — ranker failure
+            # never degrades planning; it simply returns the input unchanged.
+            try:
+                _ranker = KnowledgeRanker()
+            except Exception:
+                _ranker = None
+            try:
+                _max_knowledge_per_step = int(
+                    _os.environ.get("BATON_MAX_KNOWLEDGE_PER_STEP", "8")
+                )
+            except (ValueError, TypeError):
+                _max_knowledge_per_step = 8
+        return _resolver, _ranker, _max_knowledge_per_step
+
+    def _step_classify_data(
+        self,
+        *,
+        task_id: str,
+        task_summary: str,
+        resolved_agents: list[str],
+    ) -> tuple[ClassificationResult | None, str, RiskLevel, str]:
+        """Steps 7 / 8 / 8b — DataClassifier dispatch, risk merging, and
+        git-strategy selection.
+
+        Returns ``(classification, risk_level, risk_level_enum, git_strategy)``.
+        ``self._last_classification`` is set as a side effect (matching
+        legacy behaviour).  Body is byte-identical to the inline version.
+        """
+        # 7. Classify task sensitivity (DataClassifier if available)
+        classification: ClassificationResult | None = None
+        if self._classifier is not None:
+            try:
+                classification = self._classifier.classify(task_summary)
+                self._last_classification = classification
+            except Exception:
+                pass
+
+        # 8. Risk — combines DataClassifier output with keyword/structural signals.
+        # The classifier's risk level is the floor; keyword/structural signals can
+        # raise it further but cannot lower it below what the classifier detected.
+        keyword_risk_level = self._assess_risk(task_summary, resolved_agents)
+        if classification is not None:
+            # Take the higher of the two assessments
+            classifier_ordinal = _RISK_ORDINAL[classification.risk_level]
+            keyword_ordinal = _RISK_ORDINAL[RiskLevel(keyword_risk_level)]
+            if classifier_ordinal > keyword_ordinal:
+                risk_level = classification.risk_level.value
+            else:
+                risk_level = keyword_risk_level
+        else:
+            risk_level = keyword_risk_level
+        risk_level_enum = RiskLevel(risk_level)
+
+        logger.info(
+            "Risk classification: task_id=%s risk=%s (keyword=%s classifier=%s) git_strategy=%s",
+            task_id,
+            risk_level,
+            keyword_risk_level,
+            classification.risk_level.value if classification else "n/a",
+            _select_git_strategy(risk_level_enum).value,
+        )
+
+        # 8b. Git strategy — derived from risk
+        git_strategy = _select_git_strategy(risk_level_enum).value
+        return classification, risk_level, risk_level_enum, git_strategy
+
+    def _step_build_phases(
+        self,
+        *,
+        task_id: str,
+        task_summary: str,
+        inferred_type: str,
+        inferred_complexity: str,
+        complexity: str | None,
+        resolved_agents: list[str],
+        phases: list[dict] | None,
+        classified_phases: list[str] | None,
+        pattern: LearnedPattern | None,
+        subtask_data: list[dict] | None,
+        agent_route_map: dict[str, str],
+    ) -> list[PlanPhase]:
+        """Steps 9 / 9b — phase construction and enrichment.
+
+        Returns the constructed-and-enriched ``plan_phases`` list.  Body
+        is byte-identical to the inline version.
+        """
+        # 9. Build phases
+        if subtask_data is not None:
+            # Compound task — each sub-task becomes its own phase
+            plan_phases = self._build_compound_phases(
+                subtask_data, agent_route_map,
+            )
+        elif phases is not None:
+            plan_phases = self._phases_from_dicts(phases, resolved_agents, task_summary)
+        elif classified_phases is not None:
+            # Use classifier-provided phase names
+            plan_phases = self._build_phases_for_names(
+                classified_phases, resolved_agents, task_summary
+            )
+        elif pattern is not None:
+            plan_phases = self._apply_pattern(pattern, inferred_type, task_summary)
+            # Apply routed agent names to pattern-derived phases
+            plan_phases = self._assign_agents_to_phases(plan_phases, resolved_agents, task_summary)
+        elif complexity is not None:
+            # Explicit complexity override — scale phases to match.
+            # Use KeywordClassifier phase scaling so light/heavy produces
+            # the right number of phases even in the legacy path.
+            from agent_baton.core.engine.classifier import KeywordClassifier as _KC
+            complexity_phases = _KC()._select_phases(inferred_type, inferred_complexity, _PHASE_NAMES)
+            plan_phases = self._build_phases_for_names(complexity_phases, resolved_agents, task_summary)
+        else:
+            plan_phases = self._default_phases(inferred_type, resolved_agents, task_summary)
+
+        logger.info(
+            "Plan phases selected for task_id=%s: %s",
+            task_id,
+            [(p.name, [s.agent_name for s in p.steps]) for p in plan_phases],
+        )
+
+        # 9b. Enrich steps with cross-phase context and default deliverables
+        plan_phases = self._enrich_phases(plan_phases, task_summary=task_summary)
+        return plan_phases
+
     def _step_resolve_knowledge(
         self,
         plan_phases: list[PlanPhase],
@@ -2035,119 +2187,37 @@ class IntelligentPlanner:
         )
 
         # 6.5. Resolve knowledge attachments per step (KnowledgeRegistry if available).
-        # This runs after routing so step.agent_name reflects the routed variant.
-        # Phases and steps are not built yet at this point — knowledge resolution
-        # happens after phase building (step 9). We defer it to a post-phase hook
-        # at step 9.5 so it can iterate over actual PlanStep objects.
-        # (The resolver reference is stored here for use at step 9.5 below.)
-        _resolver = None
-        _ranker = None
-        _max_knowledge_per_step: int = 8
-        if self.knowledge_registry is not None:
-            import os as _os
-            from agent_baton.core.engine.knowledge_resolver import KnowledgeResolver
-            from agent_baton.core.engine.knowledge_telemetry import KnowledgeTelemetryStore
-            from agent_baton.core.intel.knowledge_ranker import KnowledgeRanker
-            # Wire F0.4 lifecycle telemetry (bd-a313).  Resolver records a
-            # KnowledgeUsed row per attachment whenever ``task_id``/``step_id``
-            # are passed to ``resolve()``.  Construction is best-effort.
-            try:
-                _telemetry = KnowledgeTelemetryStore()
-            except Exception:
-                _telemetry = None
-            _resolver = KnowledgeResolver(
-                self.knowledge_registry,
-                agent_registry=self._registry,
-                rag_available=self._detect_rag(),
-                step_token_budget=32_000,
-                doc_token_cap=8_000,
-                telemetry=_telemetry,
+        # Extracted to ``_step_setup_knowledge`` (005b 1.4b).  Returns the
+        # resolver/ranker references and the per-step cap for later use
+        # at step 9.5.
+        _resolver, _ranker, _max_knowledge_per_step = self._step_setup_knowledge()
+
+        # 7 + 8 + 8b. Classify task sensitivity, merge risk signals, derive
+        # git strategy.  Extracted to ``_step_classify_data`` (005b 1.4b).
+        classification, risk_level, risk_level_enum, git_strategy = (
+            self._step_classify_data(
+                task_id=task_id,
+                task_summary=task_summary,
+                resolved_agents=resolved_agents,
             )
-            # bd-0184: effectiveness-aware ranking.  Best-effort — ranker failure
-            # never degrades planning; it simply returns the input unchanged.
-            try:
-                _ranker = KnowledgeRanker()
-            except Exception:
-                _ranker = None
-            try:
-                _max_knowledge_per_step = int(
-                    _os.environ.get("BATON_MAX_KNOWLEDGE_PER_STEP", "8")
-                )
-            except (ValueError, TypeError):
-                _max_knowledge_per_step = 8
-
-        # 7. Classify task sensitivity (DataClassifier if available)
-        classification: ClassificationResult | None = None
-        if self._classifier is not None:
-            try:
-                classification = self._classifier.classify(task_summary)
-                self._last_classification = classification
-            except Exception:
-                pass
-
-        # 8. Risk — combines DataClassifier output with keyword/structural signals.
-        # The classifier's risk level is the floor; keyword/structural signals can
-        # raise it further but cannot lower it below what the classifier detected.
-        keyword_risk_level = self._assess_risk(task_summary, resolved_agents)
-        if classification is not None:
-            # Take the higher of the two assessments
-            classifier_ordinal = _RISK_ORDINAL[classification.risk_level]
-            keyword_ordinal = _RISK_ORDINAL[RiskLevel(keyword_risk_level)]
-            if classifier_ordinal > keyword_ordinal:
-                risk_level = classification.risk_level.value
-            else:
-                risk_level = keyword_risk_level
-        else:
-            risk_level = keyword_risk_level
-        risk_level_enum = RiskLevel(risk_level)
-
-        logger.info(
-            "Risk classification: task_id=%s risk=%s (keyword=%s classifier=%s) git_strategy=%s",
-            task_id,
-            risk_level,
-            keyword_risk_level,
-            classification.risk_level.value if classification else "n/a",
-            _select_git_strategy(risk_level_enum).value,
         )
 
-        # 8b. Git strategy — derived from risk
-        git_strategy = _select_git_strategy(risk_level_enum).value
-
-        # 9. Build phases
-        if _subtask_data is not None:
-            # Compound task — each sub-task becomes its own phase
-            plan_phases = self._build_compound_phases(
-                _subtask_data, _agent_route_map,
-            )
-        elif phases is not None:
-            plan_phases = self._phases_from_dicts(phases, resolved_agents, task_summary)
-        elif classified_phases is not None:
-            # Use classifier-provided phase names
-            plan_phases = self._build_phases_for_names(
-                classified_phases, resolved_agents, task_summary
-            )
-        elif pattern is not None:
-            plan_phases = self._apply_pattern(pattern, inferred_type, task_summary)
-            # Apply routed agent names to pattern-derived phases
-            plan_phases = self._assign_agents_to_phases(plan_phases, resolved_agents, task_summary)
-        elif complexity is not None:
-            # Explicit complexity override — scale phases to match.
-            # Use KeywordClassifier phase scaling so light/heavy produces
-            # the right number of phases even in the legacy path.
-            from agent_baton.core.engine.classifier import KeywordClassifier as _KC
-            complexity_phases = _KC()._select_phases(inferred_type, inferred_complexity, _PHASE_NAMES)
-            plan_phases = self._build_phases_for_names(complexity_phases, resolved_agents, task_summary)
-        else:
-            plan_phases = self._default_phases(inferred_type, resolved_agents, task_summary)
-
-        logger.info(
-            "Plan phases selected for task_id=%s: %s",
-            task_id,
-            [(p.name, [s.agent_name for s in p.steps]) for p in plan_phases],
+        # 9 + 9b. Build phases (compound / explicit / classifier / pattern /
+        # complexity / default) and enrich them.  Extracted to
+        # ``_step_build_phases`` (005b 1.4b).
+        plan_phases = self._step_build_phases(
+            task_id=task_id,
+            task_summary=task_summary,
+            inferred_type=inferred_type,
+            inferred_complexity=inferred_complexity,
+            complexity=complexity,
+            resolved_agents=resolved_agents,
+            phases=phases,
+            classified_phases=classified_phases,
+            pattern=pattern,
+            subtask_data=_subtask_data,
+            agent_route_map=_agent_route_map,
         )
-
-        # 9b. Enrich steps with cross-phase context and default deliverables
-        plan_phases = self._enrich_phases(plan_phases, task_summary=task_summary)
 
         # 9.5 + 9.6. Resolve knowledge attachments + gap-suggested
         # attachments per step.  Extracted to ``_step_resolve_knowledge``
