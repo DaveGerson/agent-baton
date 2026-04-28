@@ -4109,33 +4109,6 @@ class ExecutionEngine:
             resolution="unresolved",
         )
 
-    def _effective_timeout(self, step: PlanStep) -> int:
-        """Return the effective timeout in seconds for *step*.
-
-        Resolution order:
-        1. ``step.timeout_seconds`` when non-zero (explicit per-step override).
-        2. ``BATON_DEFAULT_STEP_TIMEOUT_S`` env var when set to a positive int.
-        3. 0 (no timeout) — default, fully backward-compatible.
-
-        Args:
-            step: The plan step to evaluate.
-
-        Returns:
-            Effective timeout in seconds; ``0`` means no timeout enforced.
-        """
-        import os
-        if step.timeout_seconds > 0:
-            return step.timeout_seconds
-        env_val = os.environ.get("BATON_DEFAULT_STEP_TIMEOUT_S", "")
-        if env_val:
-            try:
-                parsed = int(env_val)
-                if parsed > 0:
-                    return parsed
-            except ValueError:
-                pass
-        return 0
-
     def _check_token_budget(self, state: ExecutionState) -> str | None:
         """Return a warning string if cumulative tokens exceed the budget limit.
 
@@ -5313,464 +5286,6 @@ class ExecutionEngine:
             f"_apply_resolver_decision received unhandled DecisionKind: {kind!r}"
         )
 
-    def _determine_action(self, state: ExecutionState) -> ExecutionAction:
-        """Core state machine — inspect *state* and return the next action.
-
-        This method is the single source of truth for what comes next.
-        It does NOT mutate *state* itself; callers are responsible for saving.
-        """
-        # Terminal states — report immediately.
-        if state.status == "complete":
-            return ExecutionAction(
-                action_type=ActionType.COMPLETE,
-                message=f"Task {state.task_id} is already complete.",
-                summary=f"Task {state.task_id} completed.",
-            )
-        if state.status == "failed":
-            # Check if the failure was caused by an approval rejection rather
-            # than a step failure — the message should reflect the distinction.
-            rejected_approval = next(
-                (a for a in reversed(state.approval_results) if a.result == "reject"),
-                None,
-            )
-            if rejected_approval is not None:
-                msg = (
-                    f"Phase {rejected_approval.phase_id} approval was rejected. "
-                    "To continue: amend the plan with 'baton execute amend', "
-                    "or finalize with 'baton execute complete'."
-                )
-            else:
-                failed_ids = list(state.failed_step_ids)
-                msg = f"Execution failed. Failed step(s): {', '.join(failed_ids) or 'gate'}"
-            return ExecutionAction(
-                action_type=ActionType.FAILED,
-                message=msg,
-                summary=msg,
-            )
-
-        # approval_pending — waiting for human approval before proceeding.
-        if state.status == "approval_pending":
-            phase_obj = state.current_phase_obj
-            if phase_obj and phase_obj.approval_required:
-                return self._approval_action(state, phase_obj)
-
-        # feedback_pending — waiting for user answers to feedback questions.
-        if state.status == "feedback_pending":
-            phase_obj = state.current_phase_obj
-            if phase_obj and phase_obj.feedback_questions:
-                return self._feedback_action(state, phase_obj)
-
-        # gate_pending — a gate was requested but result not yet recorded.
-        if state.status == "gate_pending":
-            phase_obj = state.current_phase_obj
-            if phase_obj and phase_obj.gate:
-                return ExecutionAction(
-                    action_type=ActionType.GATE,
-                    message=f"Run gate '{phase_obj.gate.gate_type}' for phase {phase_obj.phase_id}.",
-                    gate_type=phase_obj.gate.gate_type,
-                    gate_command=phase_obj.gate.command,
-                    phase_id=phase_obj.phase_id,
-                )
-
-        # gate_failed — a gate ran and failed.  Count how many times this
-        # gate has already failed for the current phase.  If the failure count
-        # has reached _max_gate_retries, auto-terminate with FAILED so the
-        # engine never loops forever in headless / API mode.  Otherwise
-        # re-issue the GATE action so the caller can retry manually.
-        # Use 'baton execute retry-gate' to reset and re-run, or
-        # 'baton execute fail' to permanently fail at any point.
-        if state.status == "gate_failed":
-            phase_obj = state.current_phase_obj
-            if phase_obj and phase_obj.gate:
-                fail_count = sum(
-                    1
-                    for gr in state.gate_results
-                    if gr.phase_id == phase_obj.phase_id and not gr.passed
-                )
-                if fail_count >= self._max_gate_retries:
-                    state.status = "failed"
-                    self._save_execution(state)
-                    msg = (
-                        f"Gate '{phase_obj.gate.gate_type}' for phase "
-                        f"{phase_obj.phase_id} failed {fail_count} time(s) "
-                        f"(max_gate_retries={self._max_gate_retries}). "
-                        "Execution terminated."
-                    )
-                    return ExecutionAction(
-                        action_type=ActionType.FAILED,
-                        message=msg,
-                        summary=msg,
-                    )
-                return ExecutionAction(
-                    action_type=ActionType.GATE,
-                    message=(
-                        f"Gate '{phase_obj.gate.gate_type}' for phase "
-                        f"{phase_obj.phase_id} failed "
-                        f"({fail_count}/{self._max_gate_retries} attempts). "
-                        "Retry with 'baton execute retry-gate --phase-id "
-                        f"{phase_obj.phase_id}', or permanently fail with "
-                        f"'baton execute fail --phase-id {phase_obj.phase_id}'."
-                    ),
-                    gate_type=phase_obj.gate.gate_type,
-                    gate_command=phase_obj.gate.command,
-                    phase_id=phase_obj.phase_id,
-                )
-
-        # paused-takeover — Wave 5.1 (bd-e208): a developer has opened the
-        # retained failed worktree for manual inspection/repair.  Return an
-        # INFO-style WAIT action with the takeover banner so the orchestrator
-        # knows not to dispatch new work until `baton execute resume` is run.
-        if state.status == "paused-takeover":
-            # Find the active TakeoverRecord for context.
-            takeover_records = getattr(state, "takeover_records", [])
-            active = next(
-                (r for r in reversed(takeover_records) if not r.get("resumed_at")),
-                None,
-            )
-            step_hint = active.get("step_id", "unknown") if active else "unknown"
-            worktree_hint = ""
-            if self._worktree_mgr is not None and active:
-                _h = self._worktree_mgr.handle_for(state.task_id, step_hint)
-                if _h:
-                    worktree_hint = str(_h.path)
-            msg = (
-                f"Execution paused — developer takeover active for step '{step_hint}'. "
-                f"Worktree: {worktree_hint or '(unknown)'}. "
-                "When done: commit your changes inside the worktree, then run "
-                "'baton execute resume'. "
-                "To abort: 'baton execute resume --abort'."
-            )
-            return ExecutionAction(
-                action_type=ActionType.WAIT,
-                message=msg,
-            )
-
-        # budget_exceeded — token budget was reached; block new dispatches.
-        # In-flight steps already running are allowed to complete.  The operator
-        # can clear this status with 'baton execute resume-budget' to allow
-        # further spend (e.g. after reviewing costs or raising the cap).
-        if state.status == "budget_exceeded":
-            total = sum(r.estimated_tokens for r in state.step_results)
-            return ExecutionAction(
-                action_type=ActionType.COMPLETE,
-                message=(
-                    f"Task {state.task_id} stopped: token budget exceeded "
-                    f"({total:,} tokens used). "
-                    "Run 'baton execute resume-budget' to allow further spend, "
-                    "or 'baton execute complete' to finalize as-is."
-                ),
-                summary=(
-                    f"Budget exceeded at {total:,} tokens. "
-                    "Execution paused — no data lost."
-                ),
-            )
-
-        # F11 — Conflict Detection: warn when unresolved bead conflicts exist.
-        # Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
-        # This is a non-blocking warning — execution continues but the conflict
-        # is surfaced as a log warning and a domain event so operators are aware.
-        if self._bead_store is not None:
-            try:
-                if self._bead_store.has_unresolved_conflicts(state.task_id):
-                    _log.warning(
-                        "Bead conflict: unresolved contradicting beads detected "
-                        "for task %s — review with `baton beads list --tag conflict:unresolved`",
-                        state.task_id,
-                    )
-                    if self._bus is not None:
-                        from agent_baton.core.events.events import bead_conflict
-                        self._bus.publish(bead_conflict(task_id=state.task_id))
-            except Exception as _cf_exc:
-                _log.debug("Bead conflict check failed (non-fatal): %s", _cf_exc)
-
-        # No more phases — all done.
-        if state.current_phase >= len(state.plan.phases):
-            return ExecutionAction(
-                action_type=ActionType.COMPLETE,
-                message=f"All phases of task {state.task_id} are complete.",
-                summary=f"Task {state.task_id} completed successfully.",
-            )
-
-        phase_obj = state.current_phase_obj
-        if phase_obj is None:
-            return ExecutionAction(
-                action_type=ActionType.COMPLETE,
-                message="No more phases.",
-                summary=f"Task {state.task_id} completed.",
-            )
-
-        steps = phase_obj.steps
-
-        # If phase has no steps, go straight to gate or next phase.
-        if not steps:
-            if phase_obj.gate and not self._gate_passed_for_phase(state, phase_obj.phase_id):
-                state.status = "gate_pending"
-                return ExecutionAction(
-                    action_type=ActionType.GATE,
-                    message=f"Run gate '{phase_obj.gate.gate_type}' for phase {phase_obj.phase_id}.",
-                    gate_type=phase_obj.gate.gate_type,
-                    gate_command=phase_obj.gate.command,
-                    phase_id=phase_obj.phase_id,
-                )
-            # Advance past empty phase with no gate (or gate already done).
-            self._publish(evt.phase_completed(
-                task_id=state.task_id,
-                phase_id=phase_obj.phase_id,
-                phase_name=phase_obj.name,
-            ))
-            # Post-phase: refresh the bead knowledge graph (Wave 2.1).
-            self._synthesize_beads_post_phase()
-            state.current_phase += 1
-            state.current_step_index = 0
-            if state.current_phase < len(state.plan.phases):
-                next_phase = state.plan.phases[state.current_phase]
-                self._publish(evt.phase_pre_start(
-                    task_id=state.task_id,
-                    phase_id=next_phase.phase_id,
-                    phase_name=next_phase.name,
-                    step_count=len(next_phase.steps),
-                ))
-                self._publish(evt.phase_started(
-                    task_id=state.task_id,
-                    phase_id=next_phase.phase_id,
-                    phase_name=next_phase.name,
-                    step_count=len(next_phase.steps),
-                ))
-            return self._determine_action(state)
-
-        # Check for any failed steps in this phase.
-        for step in steps:
-            if step.step_id in state.failed_step_ids:
-                state.status = "failed"
-                # Close any still-open beads (planning + agent-level) so decay
-                # can archive them; otherwise failed tasks leak open beads.
-                self._close_open_beads_at_terminal(state, succeeded=False)
-                msg = f"Step {step.step_id} failed."
-                return ExecutionAction(
-                    action_type=ActionType.FAILED,
-                    message=msg,
-                    summary=msg,
-                )
-
-        # Find the next dispatchable step — must not be completed, failed,
-        # dispatched, or interrupted (interrupted steps have been superseded
-        # by a re-dispatch step inserted via the knowledge-gap amend flow).
-        # Interactive steps in "interacting" or "interact_dispatched" are
-        # treated as in-flight (parallel-safe): other steps keep flowing.
-        completed = state.completed_step_ids
-        dispatched = state.dispatched_step_ids
-        interacting_ids = {
-            r.step_id for r in state.step_results
-            if r.status in ("interacting", "interact_dispatched")
-        }
-        occupied = (
-            completed
-            | state.failed_step_ids
-            | dispatched
-            | state.interrupted_step_ids
-            | interacting_ids
-        )
-
-        next_step: PlanStep | None = None
-        for step in steps:
-            if step.step_id in occupied:
-                continue
-            # Check dependency satisfaction: all depends_on must be completed.
-            if step.depends_on and not all(
-                dep in completed for dep in step.depends_on
-            ):
-                continue
-            next_step = step
-            break
-
-        if next_step is not None:
-            # There is still work to do in this phase.
-            if next_step.team:
-                return self._team_dispatch_action(next_step, state)
-            return self._dispatch_action(next_step, state)
-
-        # After exhausting normal dispatch candidates, check whether any step
-        # is waiting for human input (interacting).  Return an INTERACT action
-        # so the orchestrator can surface it — but only when there is no other
-        # pending work being dispatched.
-        for result in state.step_results:
-            if result.status == "interacting":
-                plan_step = self._find_step(state, result.step_id)
-                if plan_step is not None:
-                    return self._interact_action(plan_step, result, state)
-
-        # Check for interact_dispatched steps that need a continuation DISPATCH.
-        for result in state.step_results:
-            if result.status == "interact_dispatched":
-                plan_step = self._find_step(state, result.step_id)
-                if plan_step is not None:
-                    return self._dispatch_action(plan_step, state)
-
-        # ── Step timeout enforcement ──────────────────────────────────────────
-        # Before returning WAIT, check whether any dispatched step has exceeded
-        # its timeout.  When a step times out it is immediately marked failed
-        # (so the next _determine_action call returns FAILED) and a warning
-        # bead is filed.  The loop continues to catch multiple simultaneous
-        # timeouts — the first one will flip state.status to "failed" on the
-        # next iteration.
-        for result in state.step_results:
-            if result.status != "dispatched":
-                continue
-            plan_step = self._find_step(state, result.step_id)
-            if plan_step is None:
-                continue
-            effective_timeout = self._effective_timeout(plan_step)
-            if effective_timeout <= 0:
-                continue
-            elapsed = _elapsed_seconds(result.step_started_at or state.started_at)
-            if elapsed > effective_timeout:
-                timeout_msg = (
-                    f"TIMEOUT after {effective_timeout}s"
-                    f" (elapsed {int(elapsed)}s)"
-                )
-                _log.warning(
-                    "Step %s timed out after %ss (elapsed %.1fs); marking failed.",
-                    result.step_id,
-                    effective_timeout,
-                    elapsed,
-                )
-                # Best-effort warning bead — must not block timeout handling.
-                try:
-                    if self._bead_store is not None:
-                        from agent_baton.models.bead import Bead, _generate_bead_id
-                        _ts = _utcnow()
-                        _bead_count = len(
-                            self._bead_store.query(task_id=state.task_id, limit=10000)
-                        )
-                        _bead = Bead(
-                            bead_id=_generate_bead_id(
-                                state.task_id,
-                                result.step_id,
-                                timeout_msg,
-                                _ts,
-                                _bead_count,
-                            ),
-                            task_id=state.task_id,
-                            step_id=result.step_id,
-                            agent_name=result.agent_name,
-                            bead_type="warning",
-                            content=(
-                                f"Step {result.step_id} timed out after "
-                                f"{effective_timeout}s"
-                            ),
-                            tags=["timeout"],
-                            created_at=_ts,
-                            source="agent-signal",
-                        )
-                        self._bead_store.write(_bead)
-                except Exception as _bead_exc:  # noqa: BLE001
-                    _log.debug(
-                        "Timeout bead write failed (non-fatal): %s", _bead_exc
-                    )
-                # Mark the step failed in the in-memory state so the final
-                # _save_execution() call in next_action() persists the correct
-                # status.  record_step_result() also loads/saves independently,
-                # but the caller (next_action) overwrites disk after
-                # _determine_action returns — so we must update state too.
-                result.status = "failed"
-                result.outcome = timeout_msg
-                result.error = timeout_msg
-                result.completed_at = _utcnow()
-                result.updated_at = _utcnow()
-                state.status = "failed"
-                self.record_step_result(
-                    step_id=result.step_id,
-                    agent_name=result.agent_name,
-                    status="failed",
-                    outcome=timeout_msg,
-                    error=timeout_msg,
-                )
-                msg = f"Step {result.step_id} timed out after {effective_timeout}s."
-                return ExecutionAction(
-                    action_type=ActionType.FAILED,
-                    message=msg,
-                    summary=msg,
-                )
-
-        # If no step is dispatchable but some are still pending (dispatched or
-        # blocked by dependencies), return WAIT.
-        # Interrupted steps are excluded: they have been superseded by amended
-        # re-dispatch steps and must not hold the phase in a WAIT loop.
-        pending = (
-            {s.step_id for s in steps}
-            - completed
-            - state.failed_step_ids
-            - state.interrupted_step_ids
-        )
-        if pending:
-            # bd-7312: Check for timed-out dispatched steps before returning WAIT.
-            timeout_action = self._check_timeout(state)
-            if timeout_action is not None:
-                return timeout_action
-            return ExecutionAction(
-                action_type=ActionType.WAIT,
-                message="Waiting for in-flight steps to complete before proceeding.",
-                summary=f"Steps in flight or blocked: {', '.join(sorted(pending))}",
-            )
-
-        # All steps in this phase are complete.
-        # Check approval requirement BEFORE feedback and gate.
-        if (phase_obj.approval_required
-                and not self._approval_passed_for_phase(state, phase_obj.phase_id)):
-            state.status = "approval_pending"
-            return self._approval_action(state, phase_obj)
-
-        # Check feedback questions AFTER approval but BEFORE gate.
-        if (phase_obj.feedback_questions
-                and not self._feedback_resolved_for_phase(state, phase_obj.phase_id)):
-            state.status = "feedback_pending"
-            return self._feedback_action(state, phase_obj)
-
-        if phase_obj.gate and not self._gate_passed_for_phase(state, phase_obj.phase_id):
-            state.status = "gate_pending"
-            return ExecutionAction(
-                action_type=ActionType.GATE,
-                message=f"Run gate '{phase_obj.gate.gate_type}' for phase {phase_obj.phase_id}.",
-                gate_type=phase_obj.gate.gate_type,
-                gate_command=phase_obj.gate.command,
-                phase_id=phase_obj.phase_id,
-            )
-
-        # F0.3 — VETO enforcement (bd-f606).  Before advancing past a
-        # HIGH/CRITICAL phase, scan for an auditor VETO verdict and either
-        # halt (raise ExecutionVetoed) or record an Override audit row.
-        # LOW/MEDIUM phases are not enforced — VETO only applies to the
-        # regulated tier.
-        self._enforce_veto_before_advance(state, phase_obj)
-
-        # Gate passed (or no gate) — move to next phase.
-        self._publish(evt.phase_completed(
-            task_id=state.task_id,
-            phase_id=phase_obj.phase_id,
-            phase_name=phase_obj.name,
-        ))
-        # Post-phase: refresh the bead knowledge graph (Wave 2.1).
-        # Best-effort — failure here must never block phase advancement.
-        self._synthesize_beads_post_phase()
-        state.current_phase += 1
-        state.current_step_index = 0
-        state.status = "running"
-        if state.current_phase < len(state.plan.phases):
-            next_phase = state.plan.phases[state.current_phase]
-            self._publish(evt.phase_pre_start(
-                task_id=state.task_id,
-                phase_id=next_phase.phase_id,
-                phase_name=next_phase.name,
-                step_count=len(next_phase.steps),
-            ))
-            self._publish(evt.phase_started(
-                task_id=state.task_id,
-                phase_id=next_phase.phase_id,
-                phase_name=next_phase.name,
-                step_count=len(next_phase.steps),
-            ))
-        return self._determine_action(state)
-
     def _dispatch_action(
         self,
         step: PlanStep,
@@ -6142,21 +5657,20 @@ class ExecutionEngine:
         self._save_execution(state)
         _log.info("Interaction completed (human --done) for step %s.", step_id)
 
+    # Shim: delegates to the canonical helper module.  Kept on the class
+    # because tests / callers may reference ``ExecutionEngine._gate_passed_for_phase``.
     @staticmethod
     def _gate_passed_for_phase(state: ExecutionState, phase_id: int) -> bool:
-        """Return True if a passing gate result exists for *phase_id*."""
-        for g in state.gate_results:
-            if g.phase_id == phase_id and g.passed:
-                return True
-        return False
+        """Delegate to ``_executor_helpers.gate_passed_for_phase`` (005b)."""
+        from agent_baton.core.engine._executor_helpers import gate_passed_for_phase
+        return gate_passed_for_phase(state, phase_id)
 
+    # Shim: delegates to the canonical helper module.
     @staticmethod
     def _approval_passed_for_phase(state: ExecutionState, phase_id: int) -> bool:
-        """Return True if an approval result (approve or approve-with-feedback) exists."""
-        for a in state.approval_results:
-            if a.phase_id == phase_id and a.result in ("approve", "approve-with-feedback"):
-                return True
-        return False
+        """Delegate to ``_executor_helpers.approval_passed_for_phase`` (005b)."""
+        from agent_baton.core.engine._executor_helpers import approval_passed_for_phase
+        return approval_passed_for_phase(state, phase_id)
 
     def _approval_action(
         self, state: ExecutionState, phase_obj: PlanPhase,
@@ -6218,18 +5732,12 @@ class ExecutionEngine:
 
         return "\n".join(lines)
 
+    # Shim: delegates to the canonical helper module.
     @staticmethod
     def _feedback_resolved_for_phase(state: ExecutionState, phase_id: int) -> bool:
-        """Return True if all feedback questions for *phase_id* have been answered."""
-        phase_obj = state.current_phase_obj
-        if phase_obj is None:
-            return True
-        question_ids = {q.question_id for q in phase_obj.feedback_questions}
-        answered_ids = {
-            r.question_id for r in state.feedback_results
-            if r.phase_id == phase_id
-        }
-        return question_ids <= answered_ids
+        """Delegate to ``_executor_helpers.feedback_resolved_for_phase`` (005b)."""
+        from agent_baton.core.engine._executor_helpers import feedback_resolved_for_phase
+        return feedback_resolved_for_phase(state, phase_id)
 
     def _feedback_action(
         self, state: ExecutionState, phase_obj: PlanPhase,
@@ -6619,25 +6127,17 @@ class ExecutionEngine:
     # ── Step-timeout enforcement (bd-7312) ────────────────────────────────────
 
     def _effective_timeout(self, step: PlanStep) -> int:
-        """Return the effective timeout in seconds for *step*.
+        """Delegate to ``_executor_helpers.effective_timeout`` (005b shim).
 
-        Priority:
-        1. ``step.timeout_seconds`` if > 0.
-        2. ``BATON_DEFAULT_STEP_TIMEOUT_S`` env var if parseable as a positive int.
-        3. 0 — unlimited (no enforcement).
+        Kept on the class because ``tests/test_step_timeout.py`` references
+        ``engine._effective_timeout(step)`` directly.  The legacy duplicate
+        body lived at two locations on the class (lines 4112 and 6171 in
+        the pre-cutover code, both with subtly different ``import os``
+        ordering) — both deleted in 005b step 2.3d, replaced by this single
+        shim.
         """
-        if step.timeout_seconds > 0:
-            return step.timeout_seconds
-        import os
-        raw = os.environ.get("BATON_DEFAULT_STEP_TIMEOUT_S", "")
-        if raw:
-            try:
-                val = int(raw)
-                if val > 0:
-                    return val
-            except ValueError:
-                pass
-        return 0
+        from agent_baton.core.engine._executor_helpers import effective_timeout
+        return effective_timeout(step)
 
     def _check_timeout(self, state: ExecutionState) -> ExecutionAction | None:
         """Check in-flight dispatched steps for timeout violations.
@@ -6743,12 +6243,14 @@ class ExecutionEngine:
 
     @staticmethod
     def _find_step(state: ExecutionState, step_id: str) -> PlanStep | None:
-        """Locate a PlanStep by step_id in the plan."""
-        for phase in state.plan.phases:
-            for step in phase.steps:
-                if step.step_id == step_id:
-                    return step
-        return None
+        """Delegate to ``_executor_helpers.find_step`` (005b shim).
+
+        Kept on the class because
+        ``agent_baton/cli/commands/execution/execute.py:1243`` references
+        ``engine._find_step(state, step_id)`` directly.
+        """
+        from agent_baton.core.engine._executor_helpers import find_step
+        return find_step(state, step_id)
 
     def _emit_worktree_error(
         self,
