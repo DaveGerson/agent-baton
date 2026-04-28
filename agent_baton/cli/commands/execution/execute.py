@@ -2660,6 +2660,17 @@ def _run_loop(
                     engine.mark_dispatched(step_id=step_id, agent_name="automation")
 
                 if dry_run:
+                    # bd-ae75: guard against infinite loop — automation steps
+                    # also need deduplication in dry-run mode, same as the LLM
+                    # path.  Without this, next_action() returns the same
+                    # DISPATCH forever and the loop hits max_steps + exit 1.
+                    if step_id in _dry_run_previewed_steps:
+                        print(
+                            f"\n{success('COMPLETE')}: dry-run preview finished"
+                            " — execution state unchanged",
+                        )
+                        return
+                    _dry_run_previewed_steps.add(step_id)
                     print(f"  [DRY RUN] Would run: {command}", file=sys.stderr)
                 else:
                     import subprocess as _subprocess
@@ -2785,7 +2796,9 @@ def _run_loop(
             if dry_run:
                 # bd-92bc: same loop-guard as DISPATCH — gates also loop
                 # infinitely without state persistence.
-                _gate_key = f"{phase_id}:{gate_type}"
+                # bd-145f: include gate_cmd in the key so two phases with the
+                # same phase_id + gate_type but different commands don't collide.
+                _gate_key = f"{phase_id}:{gate_type}:{gate_cmd}"
                 if _gate_key in _dry_run_previewed_gates:
                     print(
                         f"\n{success('COMPLETE')}: dry-run preview finished"
