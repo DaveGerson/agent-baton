@@ -75,7 +75,7 @@ extra:
   # - Bing Webmaster Tools: https://www.bing.com/webmasters → "Add a site" → choose
   #   "HTML Meta Tag" verification → copy the content="..." value.
   analytics:
-    google_site_verification: "inBGhoYrfGtfXZnLdCJDyO6k_Ho1Vhb5NRemQx19rfw"
+    google_site_verification: "FZs54B52NlOUiqo6T3vIinVO5GzFtaaffm864mj7sPk"
     bing_site_verification: ""
 
 nav:
