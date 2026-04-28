@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 28
+SCHEMA_VERSION = 29
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -1015,6 +1015,35 @@ CREATE TABLE IF NOT EXISTS bead_clusters (
     created_at  TEXT NOT NULL DEFAULT ''
 );
 """,
+    29: """
+-- v29: HandoffSynthesizer (Wave 3.2) — automated handoff documents.
+--
+-- When the dispatcher hands off from agent N to agent N+1, the
+-- HandoffSynthesizer compresses the prior step's git diff, discoveries
+-- (beads created during the prior step), and any open warning beads
+-- whose files/tags overlap the next step into a compact (<=400 char)
+-- handoff bead.  Persisted here for audit so a chain of handoffs can be
+-- replayed and inspected via ``baton beads handoffs --task-id <id>``.
+--
+-- Resolves bd-65d4 (structured handoff documents) and bd-61a5 (shared
+-- task list).  All synthesis is deterministic — no LLM calls.
+--
+-- NOTE: FK constraints intentionally omitted because this migration is
+-- applied to BOTH project and central databases via
+-- ConnectionManager._run_migrations().  Fresh project DBs get the same
+-- DDL in PROJECT_SCHEMA_DDL below.
+CREATE TABLE IF NOT EXISTS handoff_beads (
+    handoff_id   TEXT PRIMARY KEY,
+    task_id      TEXT NOT NULL DEFAULT '',
+    from_step_id TEXT NOT NULL DEFAULT '',
+    to_step_id   TEXT NOT NULL DEFAULT '',
+    content      TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_handoff_beads_task ON handoff_beads(task_id);
+CREATE INDEX IF NOT EXISTS idx_handoff_beads_from ON handoff_beads(from_step_id);
+CREATE INDEX IF NOT EXISTS idx_handoff_beads_to   ON handoff_beads(to_step_id);
+""",
 }
 
 # =====================================================================
@@ -1649,6 +1678,23 @@ CREATE TABLE IF NOT EXISTS bead_clusters (
     bead_ids    TEXT NOT NULL DEFAULT '[]',
     created_at  TEXT NOT NULL DEFAULT ''
 );
+
+-- HANDOFF_BEADS (v29: HandoffSynthesizer — Wave 3.2)
+-- Persisted record of automated handoff documents synthesized between
+-- consecutive steps in a single task's execution chain.  Resolves
+-- bd-65d4 / bd-61a5.  See agent_baton/core/intel/handoff_synthesizer.py
+-- and dispatcher.build_delegation_prompt for the read-side surface.
+CREATE TABLE IF NOT EXISTS handoff_beads (
+    handoff_id   TEXT PRIMARY KEY,
+    task_id      TEXT NOT NULL DEFAULT '',
+    from_step_id TEXT NOT NULL DEFAULT '',
+    to_step_id   TEXT NOT NULL DEFAULT '',
+    content      TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_handoff_beads_task ON handoff_beads(task_id);
+CREATE INDEX IF NOT EXISTS idx_handoff_beads_from ON handoff_beads(from_step_id);
+CREATE INDEX IF NOT EXISTS idx_handoff_beads_to   ON handoff_beads(to_step_id);
 
 -- INTERACTION_TURNS (A4: persist multi-turn INTERACT exchanges)
 -- Each row is one turn in a multi-turn agent interaction step.
