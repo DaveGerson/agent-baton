@@ -16,8 +16,19 @@ Public surface:
   connected-component clustering, conflict flagging.  Runs post-phase
   by the executor and is also invokable manually via
   ``baton beads synthesize``.
+* :class:`HandoffSynthesizer` (Wave 3.2) — compresses the prior step's
+  files / discoveries / blockers into a <=400-char "Handoff from Prior
+  Step" section that the dispatcher prepends to the next agent's
+  delegation prompt.  Persists each handoff to ``handoff_beads`` for
+  audit (``baton beads handoffs --task-id ...``).
 """
 from agent_baton.core.intel.bead_synthesizer import BeadSynthesizer, SynthesisResult
 from agent_baton.core.intel.context_harvester import ContextHarvester
+from agent_baton.core.intel.handoff_synthesizer import HandoffSynthesizer
 
-__all__ = ["BeadSynthesizer", "ContextHarvester", "SynthesisResult"]
+__all__ = [
+    "BeadSynthesizer",
+    "ContextHarvester",
+    "HandoffSynthesizer",
+    "SynthesisResult",
+]
