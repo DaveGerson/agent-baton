@@ -1071,6 +1071,92 @@ class IntelligentPlanner:
     # + analyzer dispatches.
     # ------------------------------------------------------------------
 
+    def _step_build_shared_context(
+        self,
+        *,
+        task_id: str,
+        task_summary: str,
+        inferred_type: str,
+        inferred_complexity: str,
+        risk_level: str,
+        budget_tier: str,
+        git_strategy: str,
+        plan_phases: list[PlanPhase],
+        pattern: LearnedPattern | None,
+        explicit_knowledge_packs: list[str] | None,
+        explicit_knowledge_docs: list[str] | None,
+        intervention_level: str,
+        stack_profile: StackProfile | None,
+        classification: ClassificationResult | None,
+        depends_on_task_id: str | None,
+    ) -> MachinePlan:
+        """Final-assembly step (steps 14 + 16).
+
+        Builds the ``MachinePlan`` from accumulated planner state,
+        computes team-cost estimates, and attaches the shared-context
+        string.  Body is byte-identical to the inline version it replaced
+        in ``create_plan``.
+        """
+        # 14. Shared context
+        # A3: Derive classification_signals (JSON) and classification_confidence
+        # from the DataClassifier result when available.
+        _classification_signals: str | None = None
+        _classification_confidence: float | None = None
+        if classification is not None:
+            _classification_signals = json.dumps(
+                {
+                    "signals": classification.signals_found,
+                    "risk_level": classification.risk_level.value,
+                    "guardrail_preset": classification.guardrail_preset,
+                    "explanation": classification.explanation,
+                }
+            )
+            # ClassificationResult.confidence is "high" | "low" (string).
+            # Map to float so callers can order/threshold numerically.
+            _classification_confidence = 1.0 if classification.confidence == "high" else 0.5
+
+        tmp_plan = MachinePlan(
+            task_id=task_id,
+            task_summary=task_summary,
+            risk_level=risk_level,
+            budget_tier=budget_tier,
+            git_strategy=git_strategy,
+            phases=plan_phases,
+            pattern_source=pattern.pattern_id if pattern else None,
+            task_type=inferred_type,
+            explicit_knowledge_packs=list(explicit_knowledge_packs or []),
+            explicit_knowledge_docs=list(explicit_knowledge_docs or []),
+            intervention_level=intervention_level,
+            complexity=inferred_complexity,
+            classification_source=(
+                self._last_task_classification.source
+                if self._last_task_classification
+                else "cli-override"
+            ),
+            detected_stack=(
+                f"{stack_profile.language}/{stack_profile.framework}"
+                if stack_profile and stack_profile.framework
+                else (stack_profile.language if stack_profile else None)
+            ),
+            foresight_insights=list(self._last_foresight_insights),
+            depends_on_task=depends_on_task_id,
+            classification_signals=_classification_signals,
+            classification_confidence=_classification_confidence,
+        )
+        # 16. Team cost estimation — look up historical cost data for team steps.
+        self._last_team_cost_estimates: dict[str, int] = {}
+        for phase in tmp_plan.phases:
+            for step in phase.steps:
+                if step.team and len(step.team) >= 2:
+                    agents = [m.agent_name for m in step.team]
+                    estimate = self._pattern_learner.get_team_cost_estimate(agents)
+                    if estimate is not None:
+                        self._last_team_cost_estimates[step.step_id] = estimate
+
+        shared_context = self._build_shared_context(tmp_plan)
+        tmp_plan.shared_context = shared_context
+        return tmp_plan
+
     def _step_emit_telemetry(
         self,
         tmp_plan: MachinePlan,
@@ -1940,64 +2026,26 @@ class IntelligentPlanner:
                     plan_phases, depends_on_task_id
                 )
 
-        # 14. Shared context
-        # A3: Derive classification_signals (JSON) and classification_confidence
-        # from the DataClassifier result when available.
-        _classification_signals: str | None = None
-        _classification_confidence: float | None = None
-        if classification is not None:
-            _classification_signals = json.dumps(
-                {
-                    "signals": classification.signals_found,
-                    "risk_level": classification.risk_level.value,
-                    "guardrail_preset": classification.guardrail_preset,
-                    "explanation": classification.explanation,
-                }
-            )
-            # ClassificationResult.confidence is "high" | "low" (string).
-            # Map to float so callers can order/threshold numerically.
-            _classification_confidence = 1.0 if classification.confidence == "high" else 0.5
-
-        tmp_plan = MachinePlan(
+        # 14 + 16. Final assembly — build the MachinePlan, compute team
+        # cost estimates, and attach shared_context.  Extracted to
+        # ``_step_build_shared_context`` (005b 1.4b) without semantic change.
+        tmp_plan = self._step_build_shared_context(
             task_id=task_id,
             task_summary=task_summary,
+            inferred_type=inferred_type,
+            inferred_complexity=inferred_complexity,
             risk_level=risk_level,
             budget_tier=budget_tier,
             git_strategy=git_strategy,
-            phases=plan_phases,
-            pattern_source=pattern.pattern_id if pattern else None,
-            task_type=inferred_type,
-            explicit_knowledge_packs=list(explicit_knowledge_packs or []),
-            explicit_knowledge_docs=list(explicit_knowledge_docs or []),
+            plan_phases=plan_phases,
+            pattern=pattern,
+            explicit_knowledge_packs=explicit_knowledge_packs,
+            explicit_knowledge_docs=explicit_knowledge_docs,
             intervention_level=intervention_level,
-            complexity=inferred_complexity,
-            classification_source=(
-                self._last_task_classification.source
-                if self._last_task_classification
-                else "cli-override"
-            ),
-            detected_stack=(
-                f"{stack_profile.language}/{stack_profile.framework}"
-                if stack_profile and stack_profile.framework
-                else (stack_profile.language if stack_profile else None)
-            ),
-            foresight_insights=list(self._last_foresight_insights),
-            depends_on_task=depends_on_task_id,
-            classification_signals=_classification_signals,
-            classification_confidence=_classification_confidence,
+            stack_profile=stack_profile,
+            classification=classification,
+            depends_on_task_id=depends_on_task_id,
         )
-        # 16. Team cost estimation — look up historical cost data for team steps.
-        self._last_team_cost_estimates: dict[str, int] = {}
-        for phase in tmp_plan.phases:
-            for step in phase.steps:
-                if step.team and len(step.team) >= 2:
-                    agents = [m.agent_name for m in step.team]
-                    estimate = self._pattern_learner.get_team_cost_estimate(agents)
-                    if estimate is not None:
-                        self._last_team_cost_estimates[step.step_id] = estimate
-
-        shared_context = self._build_shared_context(tmp_plan)
-        tmp_plan.shared_context = shared_context
 
         # F4 — Planning Decision Capture / O1.4 — OTel span emission.
         # Both are observability side effects with no impact on the returned
