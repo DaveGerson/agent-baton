@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 30
+SCHEMA_VERSION = 31
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -1063,6 +1063,30 @@ CREATE TABLE IF NOT EXISTS debates (
     created_at       TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_debates_created ON debates(created_at);
+""",
+    31: """
+-- v31: add immune_queue table for Wave 6.2 Part B — Immune System (bd-be76).
+--
+-- Per-project sweep target queue used by ImmuneDaemon + SweepScheduler.
+-- Stored in per-project baton.db only — NEVER in central.db (sweep targets
+-- are project-local per feedback_schema_project_id.md).
+--
+-- (path, kind) is the natural primary key: one queue entry per file+kind.
+-- last_swept_at is an ISO-8601 UTC string; ordering by it implements the
+-- "oldest first" scheduling policy.
+-- found_issue_at records the most-recent timestamp at which a finding was
+-- returned for this entry (NULL = never found).
+-- priority is a floating-point weight for tie-breaking (higher = sooner).
+CREATE TABLE IF NOT EXISTS immune_queue (
+    path            TEXT NOT NULL,
+    kind            TEXT NOT NULL,
+    last_swept_at   TEXT NOT NULL,
+    found_issue_at  TEXT,
+    priority        REAL NOT NULL DEFAULT 1.0,
+    PRIMARY KEY (path, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_immune_queue_priority
+    ON immune_queue(last_swept_at, priority DESC);
 """,
 }
 
