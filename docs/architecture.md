@@ -709,6 +709,30 @@ broad `try/except` so observability failures can never crash the engine; the
 default destination is `.claude/team-context/otel-spans.jsonl`, overridable via
 `BATON_OTEL_PATH`.
 
+#### FinOps chargeback (`core/observability/`)
+
+Two read-only modules turn `usage_records` into cost-attribution reports:
+
+| Module | Class | Role |
+|--------|-------|------|
+| `chargeback.py` | `ChargebackBuilder` | Groups token + USD spend by the F0.2 tenancy hierarchy (org / team / project / user / cost_center) over a configurable time window. Emits CSV or JSON via `ChargebackReport`. |
+| `attribution_coverage.py` | `CoverageScanner` | Scans `usage_records` and reports the percentage of rows that carry a non-default value per tenancy dimension. Emits a human-readable table or JSON via `AttributionCoverageReport`. |
+
+CLI surface:
+
+```
+baton finops chargeback [--since DATE] [--until DATE] [--group-by SCOPE] [--format csv|json]
+baton finops attribution-coverage [--output table|json] [--db PATH]
+```
+
+Operators must populate `~/.baton/identity.yaml` (or env vars `BATON_ORG_ID`,
+`BATON_TEAM_ID`, `BATON_USER_ID`, `BATON_COST_CENTER`) before running tasks so
+that `usage_records` rows carry meaningful attribution values.  Use
+`baton finops attribution-coverage` to verify coverage before exporting
+chargeback reports.
+
+See [docs/finops-chargeback.md](finops-chargeback.md) for the full operator walkthrough.
+
 ---
 
 ### 5.6 Govern (`core/govern/`)
