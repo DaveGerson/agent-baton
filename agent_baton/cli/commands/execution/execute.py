@@ -725,8 +725,14 @@ def _print_action(action: dict, *, terse: bool = False) -> None:
 
 def handler(args: argparse.Namespace) -> None:
     if args.subcommand is None:
-        validation_error("supply a subcommand: start, next, record, dispatched, gate, approve, feedback, amend, team-record, interact, complete, status, resume, list, switch, cancel, run, retry-gate, fail, resume-budget, verify-dispatch, audit-isolation")
-        validation_error("supply a subcommand: start, next, record, dispatched, gate, approve, feedback, amend, team-record, interact, complete, status, resume, list, switch, cancel, run, retry-gate, fail, resume-budget, worktree-gc")
+        # bd-8944: consolidated single validation_error with the full list of
+        # registered subcommands (removed stale duplicate that was unreachable).
+        validation_error(
+            "supply a subcommand: start, dry-run, next, record, dispatched, gate, "
+            "approve, feedback, amend, team-record, interact, complete, status, "
+            "resume, list, switch, cancel, run, retry-gate, fail, resume-budget, "
+            "verify-dispatch, audit-isolation, handoff, worktree-gc"
+        )
 
     if args.subcommand == "list":
         _handle_list()
