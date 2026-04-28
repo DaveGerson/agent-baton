@@ -211,9 +211,11 @@ class TestWorktreeCreateDiskFullSimulated:
             return original_run(cmd, **kwargs)
 
         with patch("agent_baton.core.engine.worktree_manager.subprocess.run", side_effect=mock_run):
-            # Need a fresh manager since __init__ also calls subprocess.run
+            # Need a fresh manager since __init__ also calls subprocess.run.
+            # bd-c071: _canonical_repo must be set alongside _project_root.
             fresh_mgr = WorktreeManager.__new__(WorktreeManager)
             fresh_mgr._project_root = tmp_git_repo.resolve()
+            fresh_mgr._canonical_repo = tmp_git_repo.resolve()
             fresh_mgr._worktrees_root = (tmp_git_repo / ".claude" / "worktrees").resolve()
             fresh_mgr._enabled = True
             fresh_mgr._tracer = None
@@ -814,3 +816,212 @@ class TestParseConflictFilesReturnsPaths:
         assert result == ["src/api/routes.py", "src/models/user.py"], (
             f"Expected ['src/api/routes.py', 'src/models/user.py'], got {result}"
         )
+
+
+# ---------------------------------------------------------------------------
+# bd-c071 / bd-b7c9 / bd-0a0f — parent-repo detection when project_dir is worktree
+# ---------------------------------------------------------------------------
+
+
+def _init_repo_for_wt_tests(path: Path) -> None:
+    """Initialise a git repo with one empty commit at *path*."""
+    subprocess.run(["git", "init", "-b", "main"], cwd=path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"],
+                   cwd=path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test User"],
+                   cwd=path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "--allow-empty", "-m", "initial"],
+                   cwd=path, check=True, capture_output=True)
+
+
+def _add_linked_worktree(canonical: Path, linked: Path) -> None:
+    """Add a detached linked worktree at *linked* off *canonical* HEAD.
+
+    Uses --detach to avoid branch-checkout conflicts when main is already
+    checked out in the canonical repo.
+    """
+    sha_r = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=canonical, check=True, capture_output=True, text=True,
+    )
+    sha = sha_r.stdout.strip()
+    subprocess.run(
+        ["git", "worktree", "add", "--detach", str(linked), sha],
+        cwd=canonical, check=True, capture_output=True,
+    )
+
+
+class TestCreateAgentWorktreeWhenProjectDirIsWorktree:
+    """WorktreeManager constructed from inside a linked worktree must still be
+    able to create new agent worktrees, using the canonical repo as the git
+    operations root (bd-c071 / bd-b7c9 / bd-0a0f)."""
+
+    def test_create_agent_worktree_when_project_dir_is_worktree(
+        self, tmp_path: Path
+    ) -> None:
+        from agent_baton.core.engine.worktree_manager import _is_inside_worktree
+
+        canonical = tmp_path / "canonical"
+        canonical.mkdir()
+        _init_repo_for_wt_tests(canonical)
+
+        linked = tmp_path / "linked"
+        _add_linked_worktree(canonical, linked)
+
+        # Confirm linked has a .git *file* (gitlink), not a directory
+        assert (linked / ".git").is_file(), "linked worktree must have a .git gitlink file"
+        assert _is_inside_worktree(linked) is True
+
+        # Construct WorktreeManager from inside the linked worktree
+        mgr = WorktreeManager(project_root=linked)
+
+        # The manager must be enabled (not auto-disabled)
+        assert mgr._enabled, "WorktreeManager must stay enabled when project_dir is a linked worktree"
+
+        # It must have resolved the canonical repo correctly
+        assert mgr._canonical_repo == canonical.resolve(), (
+            f"canonical_repo should be {canonical.resolve()}, got {mgr._canonical_repo}"
+        )
+
+        # create() must successfully materialise a new agent worktree
+        handle = mgr.create(task_id="task-wt-detect", step_id="1.1", base_branch="main")
+        assert handle.path != Path("/dev/null"), "create() must not return a dummy handle"
+        assert handle.path.is_dir(), "agent worktree directory must exist on disk"
+        assert (handle.path / ".git").exists(), "agent worktree must be a real git checkout"
+
+        # The new worktree must be registered in the canonical repo
+        wt_list = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            cwd=canonical, capture_output=True, text=True, check=True,
+        )
+        assert str(handle.path) in wt_list.stdout, (
+            "new agent worktree must appear in canonical repo's worktree list"
+        )
+
+    def test_canonical_repo_stored_on_handle_parent_repo(self, tmp_path: Path) -> None:
+        """handle.parent_repo reflects project_root (user-facing), not canonical_repo."""
+        canonical = tmp_path / "canonical"
+        canonical.mkdir()
+        _init_repo_for_wt_tests(canonical)
+
+        linked = tmp_path / "linked"
+        _add_linked_worktree(canonical, linked)
+
+        mgr = WorktreeManager(project_root=linked)
+        handle = mgr.create(task_id="task-parent-repo", step_id="1.1", base_branch="main")
+
+        # parent_repo on the handle is the user-supplied project_root
+        assert handle.parent_repo == linked.resolve(), (
+            "handle.parent_repo must be the user-supplied project_root, not canonical_repo"
+        )
+
+
+class TestCanonicalRepoPorcelainParse:
+    """_resolve_canonical_repo() correctly identifies the canonical repo path
+    from various git worktree list --porcelain layouts (bd-c071)."""
+
+    def test_canonical_repo_resolution_porcelain_parse_simple(
+        self, tmp_path: Path
+    ) -> None:
+        """Single-repo case: canonical is the only entry, returns its path."""
+        from agent_baton.core.engine.worktree_manager import _resolve_canonical_repo
+
+        canonical = tmp_path / "myrepo"
+        canonical.mkdir()
+        _init_repo_for_wt_tests(canonical)
+
+        result = _resolve_canonical_repo(canonical)
+        assert result == canonical.resolve()
+
+    def test_canonical_repo_resolution_porcelain_parse_with_linked_worktree(
+        self, tmp_path: Path
+    ) -> None:
+        """With a linked worktree present, still resolves to the main repo."""
+        from agent_baton.core.engine.worktree_manager import _resolve_canonical_repo
+
+        canonical = tmp_path / "main_repo"
+        canonical.mkdir()
+        _init_repo_for_wt_tests(canonical)
+
+        linked = tmp_path / "agent_wt"
+        _add_linked_worktree(canonical, linked)
+
+        result = _resolve_canonical_repo(linked)
+        assert result == canonical.resolve(), (
+            f"Expected canonical at {canonical.resolve()}, got {result}"
+        )
+
+    def test_canonical_repo_resolution_from_canonical_itself(
+        self, tmp_path: Path
+    ) -> None:
+        """Calling _resolve_canonical_repo on the canonical repo itself is idempotent."""
+        from agent_baton.core.engine.worktree_manager import _resolve_canonical_repo
+
+        canonical = tmp_path / "idempotent_repo"
+        canonical.mkdir()
+        _init_repo_for_wt_tests(canonical)
+
+        linked = tmp_path / "wt_idempotent"
+        _add_linked_worktree(canonical, linked)
+
+        result = _resolve_canonical_repo(canonical)
+        assert result == canonical.resolve()
+
+    def test_resolve_canonical_repo_raises_on_non_git_dir(
+        self, tmp_path: Path
+    ) -> None:
+        """_resolve_canonical_repo raises WorktreeError on a non-git directory."""
+        from agent_baton.core.engine.worktree_manager import (
+            WorktreeError,
+            _resolve_canonical_repo,
+        )
+
+        with pytest.raises(WorktreeError):
+            _resolve_canonical_repo(tmp_path)
+
+
+class TestCreateInCanonicalRepoUnchanged:
+    """When project_dir IS the canonical repo, WorktreeManager behavior is
+    unchanged — _canonical_repo == _project_root and create() works as before
+    (bd-c071 regression guard)."""
+
+    def test_canonical_repo_equals_project_root_when_not_worktree(
+        self, tmp_git_repo: Path
+    ) -> None:
+        mgr = WorktreeManager(project_root=tmp_git_repo)
+        assert mgr._canonical_repo == tmp_git_repo.resolve(), (
+            "_canonical_repo must equal project_root when project_root is the main repo"
+        )
+
+    def test_create_in_canonical_repo_produces_correct_handle(
+        self, tmp_git_repo: Path
+    ) -> None:
+        mgr = WorktreeManager(project_root=tmp_git_repo)
+        handle = mgr.create(task_id="task-canon", step_id="2.1", base_branch="main")
+
+        expected_path = tmp_git_repo / ".claude" / "worktrees" / "task-canon" / "2.1"
+        assert handle.path == expected_path.resolve()
+        assert handle.branch == "worktree/task-canon/2.1"
+        assert handle.path.is_dir()
+
+    def test_is_inside_worktree_false_for_canonical_repo(
+        self, tmp_git_repo: Path
+    ) -> None:
+        """_is_inside_worktree returns False when .git is a directory."""
+        from agent_baton.core.engine.worktree_manager import _is_inside_worktree
+
+        assert _is_inside_worktree(tmp_git_repo) is False
+
+    def test_is_inside_worktree_true_for_linked_worktree(
+        self, tmp_path: Path
+    ) -> None:
+        """_is_inside_worktree returns True when .git is a file (gitlink)."""
+        from agent_baton.core.engine.worktree_manager import _is_inside_worktree
+
+        canonical = tmp_path / "canon"
+        canonical.mkdir()
+        _init_repo_for_wt_tests(canonical)
+        linked = tmp_path / "linked_wt"
+        _add_linked_worktree(canonical, linked)
+        assert _is_inside_worktree(linked) is True
+
