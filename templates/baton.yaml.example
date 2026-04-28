@@ -1,0 +1,18 @@
+# Agent Baton project config — drop in repo root
+# All fields optional. Missing fields use built-in defaults.
+default_agents:
+  backend: backend-engineer--python
+  frontend: frontend-engineer--react
+  test: test-engineer
+default_gates:
+  - pytest
+default_risk_level: MEDIUM
+default_isolation: worktree
+auto_route_rules:
+  - path_glob: "tests/**"
+    agent: test-engineer
+  - path_glob: "docs/**"
+    agent: documentation-architect
+excluded_paths:
+  - "node_modules/**"
+  - ".venv/**"
