@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from agent_baton.models.knowledge import KnowledgeAttachment, KnowledgeDocument
 
 if TYPE_CHECKING:
+    from agent_baton.core.engine.knowledge_telemetry import KnowledgeTelemetryStore
     from agent_baton.core.orchestration.knowledge_registry import KnowledgeRegistry
     from agent_baton.core.orchestration.registry import AgentRegistry
 
@@ -122,6 +123,8 @@ class KnowledgeResolver:
         step_token_budget: int = _STEP_TOKEN_BUDGET_DEFAULT,
         doc_token_cap: int = _DOC_TOKEN_CAP_DEFAULT,
         inline_byte_threshold: int = _INLINE_BYTE_THRESHOLD_DEFAULT,
+        telemetry: KnowledgeTelemetryStore | None = None,
+        lifecycle: "object | None" = None,
     ) -> None:
         self._registry = registry
         self._agent_registry = agent_registry
@@ -129,6 +132,14 @@ class KnowledgeResolver:
         self._step_token_budget = step_token_budget
         self._doc_token_cap = doc_token_cap
         self._inline_byte_threshold = inline_byte_threshold
+        # Optional side-channel for F0.4 lifecycle telemetry. Failures here
+        # MUST never crash production code — telemetry is best-effort only.
+        self._telemetry = telemetry
+        # Optional KnowledgeLifecycle (K2.3) — when provided, every resolved
+        # attachment triggers a record_usage call so the lifecycle table
+        # tracks freshness without forcing a hard dependency on storage in
+        # tests that build a resolver against a stub registry.
+        self._lifecycle = lifecycle
 
     # ------------------------------------------------------------------
     # Public API
@@ -144,6 +155,8 @@ class KnowledgeResolver:
         explicit_packs: list[str] | None = None,
         explicit_docs: list[str] | None = None,
         already_delivered: dict[str, str] | None = None,
+        task_id: str = "",
+        step_id: str = "",
     ) -> list[KnowledgeAttachment]:
         """Resolve knowledge attachments for a single plan step.
 
@@ -238,7 +251,56 @@ class KnowledgeResolver:
                 )
                 attachments.append(attachment)
 
+        # F0.4 telemetry: record each resolved attachment as a KnowledgeUsed
+        # event.  Best-effort — never raise from a telemetry failure.
+        if self._telemetry is not None:
+            self._emit_used_events(attachments, task_id=task_id, step_id=step_id)
+
+        # K2.3: bump usage counters for every resolved attachment.  Failures
+        # here must never break resolution — lifecycle tracking is best-effort.
+        if self._lifecycle is not None:
+            for att in attachments:
+                pack = getattr(att, "pack_name", "") or ""
+                doc = getattr(att, "document_name", "") or ""
+                if not doc:
+                    continue
+                kid = f"{pack}/{doc}" if pack else doc
+                try:
+                    self._lifecycle.record_usage(kid)
+                except Exception as exc:  # noqa: BLE001 — never break resolve
+                    logger.debug("record_usage(%s) failed: %s", kid, exc)
+
         return attachments
+
+    def _emit_used_events(
+        self,
+        attachments: list[KnowledgeAttachment],
+        *,
+        task_id: str,
+        step_id: str,
+    ) -> None:
+        """Best-effort emission of KnowledgeUsed telemetry rows.
+
+        Wrapped in a broad exception handler so transient sqlite errors,
+        missing tables, or filesystem permission issues never propagate to
+        the resolver caller (which is on the dispatch hot path).
+        """
+        if self._telemetry is None:
+            return
+        for att in attachments:
+            try:
+                self._telemetry.record_used(
+                    doc_name=att.document_name,
+                    pack_name=att.pack_name or "",
+                    task_id=task_id,
+                    step_id=step_id,
+                    delivery=att.delivery,
+                )
+            except Exception as exc:  # noqa: BLE001 — telemetry must not crash dispatch
+                logger.debug(
+                    "KnowledgeTelemetry.record_used failed for %s/%s: %s",
+                    att.pack_name, att.document_name, exc,
+                )
 
     # ------------------------------------------------------------------
     # Layer implementations

@@ -28,6 +28,7 @@ from pathlib import Path
 
 from agent_baton.cli.colors import success, error as color_error, warning, info as color_info
 from agent_baton.cli.errors import user_error, validation_error
+from agent_baton.core.engine.errors import ExecutionVetoed
 from agent_baton.core.engine.executor import ExecutionEngine
 from agent_baton.core.engine.persistence import StatePersistence
 from agent_baton.core.events.bus import EventBus
@@ -42,22 +43,17 @@ from agent_baton.models.plan import MissionLogEntry
 
 _log = logging.getLogger(__name__)
 
-_STEP_ID_RE = re.compile(r'^\d+\.\d+$')
-# Matches team-member IDs of the form N.N.x (e.g. "1.1.a", "2.3.b").
-_TEAM_MEMBER_ID_RE = re.compile(r'^\d+\.\d+\.[a-z]+$')
-
-
-def _is_team_member_id(step_id: str) -> bool:
-    """Return True if *step_id* is a team-member ID (e.g. ``"1.1.a"``).
-
-    Team-member IDs are produced by the executor when it dispatches
-    individual members of a team step.  They differ from regular step IDs
-    (``"N.N"``) by having a lowercase-letter suffix (``"N.N.x"``).
-
-    This helper is used both in :func:`_print_action` (to annotate DISPATCH
-    output) and in the ``team-record`` handler (to detect mis-routed calls).
-    """
-    return bool(_TEAM_MEMBER_ID_RE.match(step_id))
+# Step-ID validators (single source of truth shared across subcommands).
+# See ``agent_baton/cli/commands/execution/_validators.py``.
+from agent_baton.cli.commands.execution._validators import (
+    PLAIN_STEP_ID_RE as _STEP_ID_RE,  # back-compat alias for any external import
+    STEP_ID_RE,
+    STEP_ID_FORMAT_HINT,
+    TEAM_MEMBER_ID_RE as _TEAM_MEMBER_ID_RE,  # back-compat alias
+    is_team_member_id as _is_team_member_id,
+    parent_step_id as _parent_step_id,
+    validate_step_id as _validate_step_id,
+)
 
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
@@ -78,7 +74,7 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     )
     sub = p.add_subparsers(dest="subcommand")
 
-    # baton execute start [--plan PATH] [--task-id ID]
+    # baton execute start [--plan PATH] [--task-id ID] [--dry-run]
     p_start = sub.add_parser("start", parents=[_task_id_parent],
                              help="Start execution from a saved plan")
     p_start.add_argument(
@@ -86,6 +82,38 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         default=".claude/team-context/plan.json",
         help="Path to plan.json (default: .claude/team-context/plan.json)",
     )
+    p_start.add_argument(
+        "--predict-conflicts",
+        action="store_true",
+        dest="predict_conflicts",
+        help=(
+            "Run R3.7 file-conflict prediction over the plan before "
+            "dispatching the first action and print warnings (never blocks). "
+            "Equivalent to setting BATON_CONFLICT_PREDICT=1."
+        ),
+    )
+    p_start.add_argument(
+        "--dry-run",
+        action="store_true",
+        dest="dry_run",
+        default=False,
+        help=(
+            "Dry-run mode: no Claude API calls and no file writes by agents.  "
+            "Subsequent 'baton execute next/run' calls will use the dry-run "
+            "launcher and gate runner.  Prints a banner so the mode is "
+            "visible at every step."
+        ),
+    )
+
+    # baton execute dry-run [--plan PATH] [--max-steps N]
+    # Convenience: load plan, start in dry-run mode, drive the loop to
+    # COMPLETE, and write a summary report.  Single-shot entrypoint.
+    p_dry = sub.add_parser("dry-run", parents=[_task_id_parent],
+                           help="Walk a plan end-to-end with no API calls and write a report")
+    p_dry.add_argument("--plan", default=".claude/team-context/plan.json",
+                       help="Path to plan.json (default: .claude/team-context/plan.json)")
+    p_dry.add_argument("--max-steps", type=int, default=50, dest="max_steps",
+                       help="Safety limit: maximum steps before aborting (default: 50)")
 
     # baton execute next [--all] [--terse] [--task-id ID]
     next_p = sub.add_parser("next", parents=[_task_id_parent],
@@ -102,6 +130,23 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
             "Prompt-File pointer in stdout.  Reduces per-step token burn for "
             "long plans.  Non-DISPATCH actions are unaffected."
         ),
+    )
+    next_p.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        dest="force_override",
+        help=(
+            "Override an auditor VETO on a HIGH/CRITICAL phase.  Requires "
+            "--justification; an Override audit row is appended to "
+            "compliance-audit.jsonl."
+        ),
+    )
+    next_p.add_argument(
+        "--justification",
+        default="",
+        dest="override_justification",
+        help="Required when --force is supplied; recorded in the audit log.",
     )
 
     # baton execute record --step ID --agent NAME [--status S] [--outcome O] [--tokens N] [--duration N] [--error E]
@@ -120,6 +165,8 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
                           help="Claude Code session UUID ($CLAUDE_SESSION_ID) for real token accounting")
     p_record.add_argument("--step-started-at", default="", dest="step_started_at",
                           help="ISO 8601 UTC timestamp when this step was dispatched (lower bound for JSONL scan)")
+    p_record.add_argument("--outcome-spillover-path", default="", dest="outcome_spillover_path",
+                          help="Relative path (under the per-task execution dir) to a spillover file holding the FULL outcome when --outcome was truncated. When omitted, the engine attempts to auto-detect the path from a TRUNCATED breadcrumb in --outcome.")
 
     # baton execute dispatched --step ID --agent NAME
     dispatched_p = sub.add_parser("dispatched", parents=[_task_id_parent],
@@ -131,9 +178,22 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     p_gate = sub.add_parser("gate", parents=[_task_id_parent],
                             help="Record a QA gate result")
     p_gate.add_argument("--phase-id", type=int, required=True, help="Phase ID")
-    p_gate.add_argument("--result", required=True, choices=["pass", "fail"], help="Gate result")
+    # Wave 4.1 — --result is required for the manual record path (pass/fail).
+    # When --type=ci is supplied the CLI runs the CI gate itself and derives
+    # pass/fail from the provider; --result becomes optional in that mode.
+    p_gate.add_argument("--result", choices=["pass", "fail"], default=None,
+                        help="Gate result (required unless --type=ci, which derives result from CI)")
     p_gate.add_argument("--gate-output", "--notes", default="", dest="gate_output",
                         help="Gate command output or notes (--notes is accepted as an alias; --output is reserved for format)")
+    # Wave 4.1 — opt-in CI gate.  Lets an operator drive a CI gate
+    # manually without modifying the plan: 'baton execute gate
+    # --phase-id N --type ci --workflow ci.yml'.
+    p_gate.add_argument("--type", default=None, dest="gate_type_override",
+                        help="Gate type override (e.g. 'ci' to dispatch CI provider gate)")
+    p_gate.add_argument("--workflow", default="", dest="ci_workflow",
+                        help="CI workflow file (used with --type ci, e.g. 'ci.yml')")
+    p_gate.add_argument("--ci-timeout", type=int, default=None, dest="ci_timeout_s",
+                        help="CI gate timeout in seconds (used with --type ci, default 600)")
 
     # baton execute approve --phase-id N --result approve|reject|approve-with-feedback [--feedback TEXT]
     p_approve = sub.add_parser("approve", parents=[_task_id_parent],
@@ -174,6 +234,8 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     p_team.add_argument("--status", default="complete", choices=["complete", "failed"])
     p_team.add_argument("--outcome", default="", help="Summary of work done")
     p_team.add_argument("--files", default="", help="Comma-separated files changed")
+    p_team.add_argument("--outcome-spillover-path", default="", dest="outcome_spillover_path",
+                        help="Relative path (under per-task execution dir) to a spillover file holding the FULL member outcome when --outcome was truncated. When omitted, the engine attempts to auto-detect from a TRUNCATED breadcrumb in --outcome.")
 
     # baton execute interact --step-id ID (--input TEXT | --done)
     p_interact = sub.add_parser("interact", parents=[_task_id_parent],
@@ -199,6 +261,23 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
                        help="Soft token cap: stop dispatching new steps when exceeded (0 = use tier default)")
     p_run.add_argument("--dry-run", action="store_true", dest="dry_run",
                        help="Print actions without executing them")
+    p_run.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        dest="force_override",
+        help=(
+            "Override an auditor VETO on a HIGH/CRITICAL phase for the "
+            "duration of this run.  Requires --justification; appends an "
+            "Override row to compliance-audit.jsonl."
+        ),
+    )
+    p_run.add_argument(
+        "--justification",
+        default="",
+        dest="override_justification",
+        help="Required when --force is supplied; recorded in the audit log.",
+    )
 
     # baton execute complete [--task-id ID]
     sub.add_parser("complete", parents=[_task_id_parent],
@@ -233,6 +312,27 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     sub.add_parser("resume-budget", parents=[_task_id_parent],
                    help="Clear budget_exceeded status so execution can continue")
 
+    # baton execute verify-dispatch STEP_ID [--task-id ID] [--output text|json]
+    # Read-only post-dispatch isolation check (bd-edbf).  Verifies that the
+    # files written by a single step fall under its declared allowed_paths
+    # and that the recorded commit_hash resolves in the repo.
+    p_verify = sub.add_parser(
+        "verify-dispatch", parents=[_task_id_parent],
+        help="Verify a dispatched step's filesystem + branch compliance",
+    )
+    p_verify.add_argument(
+        "verify_step_id", metavar="STEP_ID",
+        help="Step ID to verify (e.g. 1.1)",
+    )
+
+    # baton execute audit-isolation [--task-id ID] [--output text|json]
+    # Task-wide audit; runs verify-dispatch over every recorded step.
+    # Exits non-zero on any violation.
+    sub.add_parser(
+        "audit-isolation", parents=[_task_id_parent],
+        help="Audit every dispatched step for isolation compliance",
+    )
+
     # baton execute list
     sub.add_parser("list", help="List all executions (active and completed)")
 
@@ -240,10 +340,77 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     p_switch = sub.add_parser("switch", help="Switch the active execution to a different task ID")
     p_switch.add_argument("switch_task_id", metavar="TASK_ID", help="Task ID to switch to")
 
+    # baton execute handoff --note "..." [--branch] [--score]  (DX.3 / bd-d136)
+    p_handoff = sub.add_parser(
+        "handoff", parents=[_task_id_parent],
+        help="Record a session-handoff note + quality score (DX.3)",
+    )
+    p_handoff.add_argument("--note", default=None,
+                           help="Handoff note (free text). Required for record mode.")
+    p_handoff.add_argument("--branch", action="store_true", default=False,
+                           help="Include git branch + commits-ahead-of-master in the note")
+    p_handoff.add_argument("--score", action="store_true", default=False,
+                           help="Print the quality score after writing")
+    p_handoff.add_argument("--limit", type=int, default=20,
+                           help="(list mode only) Maximum rows to return (default: 20)")
+    p_handoff.add_argument("handoff_action", nargs="?", default=None,
+                           choices=[None, "record", "list", "show"],
+                           help="record (default), list, or show")
+    p_handoff.add_argument("handoff_id", nargs="?", default=None,
+                           help="(show mode only) Handoff ID")
+
     return p
 
 
 _DISPATCH_PROMPT_SIDECAR = ".claude/team-context/current-dispatch.prompt.md"
+
+# Banner printed at the start of any dry-run flow.  Used by both
+# ``baton execute start --dry-run`` and ``baton execute dry-run`` so the
+# mode is visible at every entrypoint.
+_DRY_RUN_BANNER = (
+    "=== DRY RUN MODE — no API calls, no file writes will occur ==="
+)
+
+# Filename written by the dry-run report writer (relative to context_root).
+_DRY_RUN_REPORT_FILENAME = "dry-run-report.md"
+
+# Default placeholder durations used when a real launch did not actually
+# occur.  These are crude order-of-magnitude estimates intended to give
+# developers a "this plan would take ~N seconds" feel rather than precise
+# wall-clock values.
+_DRY_RUN_DISPATCH_SECONDS = 10.0
+_DRY_RUN_GATE_SECONDS = 2.0
+
+
+def _emit_conflict_predictions(plan: MachinePlan) -> None:
+    """Run R3.7 conflict prediction over *plan* and emit warnings.
+
+    Velocity-positive: warnings only, never blocks.  Defaults OFF; the
+    caller is responsible for the opt-in check (``--predict-conflicts``
+    flag or ``BATON_CONFLICT_PREDICT=1``).
+    """
+    # Local import keeps engine startup latency at zero for the default
+    # (opt-in disabled) path.
+    from agent_baton.core.release.conflict_predictor import ConflictPredictor
+
+    report = ConflictPredictor(plan).predict()
+    if not report.has_conflicts:
+        _log.info(
+            "Conflict prediction: no parallel-step conflicts found "
+            "(steps=%d, parallel_groups=%d)",
+            report.total_steps_analyzed,
+            report.parallel_groups_analyzed,
+        )
+        return
+    for c in report.conflicts:
+        msg = (
+            f"Predicted conflict: {c.step_a_id} <-> {c.step_b_id} "
+            f"on {c.file_path} ({c.conflict_type}, conf={c.confidence:.2f})"
+        )
+        _log.warning(msg)
+        # Also surface to stderr so operators see warnings without enabling
+        # debug logging.
+        print(f"WARNING: {msg}", file=sys.stderr)
 
 
 def _resolve_context_root() -> Path:
@@ -326,6 +493,7 @@ def _print_action(action: dict, *, terse: bool = False) -> None:
           Model: <agent_model>
           Step:  <step_id>
           Message: <human-readable description>
+          Expected: <demo statement>     # Wave 3.1, omitted when not derived
 
         --- Delegation Prompt ---
         <full prompt text for the subagent>
@@ -413,6 +581,12 @@ def _print_action(action: dict, *, terse: bool = False) -> None:
                 print(f"  Interactive: yes")
                 print(f"  Max-Turns: {action.get('interact_max_turns', 10)}")
             print(f"  Message: {msg}")
+            # Wave 3.1 — Expected Outcome (Demo Statement). Surfaced on its
+            # own line so the orchestrator and human reviewer can see the
+            # behavioral demo statement without parsing the delegation prompt.
+            expected = action.get("expected_outcome", "")
+            if expected:
+                print(f"  Expected: {expected}")
             if terse:
                 prompt = action.get("delegation_prompt", "")
                 sidecar_path = _write_dispatch_sidecar(prompt)
@@ -430,11 +604,26 @@ def _print_action(action: dict, *, terse: bool = False) -> None:
 
     elif atype == ActionType.GATE.value:
         phase_id = action.get('phase_id', '')
+        gate_type = action.get('gate_type', '')
+        gate_cmd = action.get('gate_command', '')
         print(f"ACTION: GATE")
-        print(f"  Type:    {action.get('gate_type', '')}")
+        print(f"  Type:    {gate_type}")
         print(f"  Phase:   {phase_id}")
-        print(f"  Command: {action.get('gate_command', '')}")
+        print(f"  Command: {gate_cmd}")
         print(f"  Message: {msg}")
+        # Wave 4.1 — surface CI gate context up-front so the orchestrator
+        # knows this is a long-running poll, not a local subprocess gate.
+        if gate_type == "ci":
+            try:
+                import subprocess as _sp_pa
+                _sha = _sp_pa.run(
+                    ["git", "rev-parse", "HEAD"],
+                    capture_output=True, text=True, check=False, timeout=5,
+                ).stdout.strip()[:8] or "?"
+            except Exception:
+                _sha = "?"
+            workflow_hint = (gate_cmd or "ci.yml").strip() or "ci.yml"
+            print(f"  CI:      Waiting for CI workflow {workflow_hint} on {_sha}...")
         print()
         print("To record gate result:")
         print(f"  baton execute gate --phase-id {phase_id} --result pass")
@@ -512,7 +701,7 @@ def _print_action(action: dict, *, terse: bool = False) -> None:
 
 def handler(args: argparse.Namespace) -> None:
     if args.subcommand is None:
-        validation_error("supply a subcommand: start, next, record, dispatched, gate, approve, feedback, amend, team-record, interact, complete, status, resume, list, switch, cancel, run, retry-gate, fail, resume-budget")
+        validation_error("supply a subcommand: start, next, record, dispatched, gate, approve, feedback, amend, team-record, interact, complete, status, resume, list, switch, cancel, run, retry-gate, fail, resume-budget, verify-dispatch, audit-isolation")
 
     if args.subcommand == "list":
         _handle_list()
@@ -524,6 +713,14 @@ def handler(args: argparse.Namespace) -> None:
 
     if args.subcommand == "run":
         _handle_run(args)
+        return
+
+    if args.subcommand == "handoff":
+        _handle_handoff(args)
+        return
+
+    if args.subcommand == "dry-run":
+        _handle_dry_run(args)
         return
 
     # Resolve task_id: explicit flag → BATON_TASK_ID env var → SQLite active_task →
@@ -547,9 +744,44 @@ def handler(args: argparse.Namespace) -> None:
         if task_id is None:
             task_id = StatePersistence.get_active_task_id(context_root)
 
+    # F0.3 — VETO override (bd-f606): validate --force / --justification
+    # before constructing the engine so error messages surface uniformly.
+    force_override = bool(getattr(args, "force_override", False))
+    override_justification = (getattr(args, "override_justification", "") or "").strip()
+    if force_override and not override_justification:
+        validation_error(
+            "--force requires --justification \"<reason>\"",
+            hint="Re-run with --force --justification \"why this VETO is being overridden\"",
+        )
+
+    # G1.6 (bd-1a09): mirror the --force invocation into the
+    # governance_overrides table + compliance audit chain BEFORE the
+    # engine consumes the flag.  Failures are logged but never block
+    # execution — overrides must remain a recovery primitive.
+    if force_override:
+        try:
+            from agent_baton.cli._override_helper import record_override
+
+            record_override(
+                flag="--force",
+                justification=override_justification,
+                command=f"baton execute {args.subcommand}",
+            )
+        except Exception as _ovr_exc:  # pragma: no cover - best-effort logging
+            print(
+                f"warning: failed to record override audit row: {_ovr_exc}",
+                file=sys.stderr,
+            )
+
     bus = EventBus()
     storage = get_project_storage(context_root)
-    engine = ExecutionEngine(bus=bus, task_id=task_id, storage=storage)
+    engine = ExecutionEngine(
+        bus=bus,
+        task_id=task_id,
+        storage=storage,
+        force_override=force_override,
+        override_justification=override_justification,
+    )
 
     if args.subcommand == "start":
         # Resolve plan path: if task_id is known (from --task-id or
@@ -593,6 +825,14 @@ def handler(args: argparse.Namespace) -> None:
             policy_engine=policy_engine,
         )
         ContextManager(task_id=task_id).init_mission_log(plan.task_summary, risk_level=plan.risk_level)
+
+        # R3.7 — opt-in conflict prediction (warnings only, never blocks).
+        if (
+            getattr(args, "predict_conflicts", False)
+            or os.environ.get("BATON_CONFLICT_PREDICT") == "1"
+        ):
+            _emit_conflict_predictions(plan)
+
         try:
             action = engine.start(plan)
         except (ValueError, RuntimeError) as exc:
@@ -602,8 +842,12 @@ def handler(args: argparse.Namespace) -> None:
         # to call it again here.
         if getattr(args, "output", "text") == "json":
             result = {"task_id": task_id, "action": action.to_dict()}
+            if getattr(args, "dry_run", False):
+                result["dry_run"] = True
             print(json.dumps(result, indent=2))
         else:
+            if getattr(args, "dry_run", False):
+                print(_DRY_RUN_BANNER)
             print(f"Session binding: export BATON_TASK_ID={task_id}\n")
             _print_action(action.to_dict())
 
@@ -640,7 +884,25 @@ def handler(args: argparse.Namespace) -> None:
                 print(json.dumps(result, indent=2))
             else:
                 action = engine.next_action()
-                _print_action(action.to_dict(), terse=terse)
+                _action_dict = action.to_dict()
+                _print_action(_action_dict, terse=terse)
+                # DX.3 (bd-d136): nudge operator to record a handoff at
+                # natural pause points (gate failure, approval required,
+                # completion).  No-op when stdout is not a TTY or when a
+                # handoff has already been recorded for this task.
+                _maybe_handoff_nudge(_action_dict, task_id, context_root)
+        except ExecutionVetoed as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            print("Recovery options:", file=sys.stderr)
+            print(
+                "  Re-run with --force --justification \"...\" to override",
+                file=sys.stderr,
+            )
+            print(
+                "  Or amend the plan to address the auditor's concerns",
+                file=sys.stderr,
+            )
+            sys.exit(2)
         except RuntimeError as exc:
             print(f"error: {exc}", file=sys.stderr)
             print("Recovery options:", file=sys.stderr)
@@ -650,32 +912,67 @@ def handler(args: argparse.Namespace) -> None:
             sys.exit(1)
 
     elif args.subcommand == "dispatched":
-        if not _STEP_ID_RE.match(args.step_id):
-            validation_error(f"invalid step ID '{args.step_id}' (expected format: N.N, e.g. '1.1')")
-        engine.mark_dispatched(step_id=args.step_id, agent_name=args.agent)
-        print(json.dumps({"status": "dispatched", "step_id": args.step_id}))
+        _validate_step_id(args.step_id, validation_error)
+        # Symmetric routing with `next`: if the step ID is a team-member form
+        # (N.N.x[.y...]), record a dispatched marker against the parent team
+        # step using the same store as `team-record`.  Otherwise mark the
+        # plain step as dispatched.
+        if _is_team_member_id(args.step_id):
+            parent_id = _parent_step_id(args.step_id)
+            engine.record_team_member_result(
+                step_id=parent_id,
+                member_id=args.step_id,
+                agent_name=args.agent,
+                status="dispatched",
+            )
+            print(json.dumps({
+                "status": "dispatched",
+                "step_id": args.step_id,
+                "parent_step_id": parent_id,
+                "team_member": True,
+            }))
+        else:
+            engine.mark_dispatched(step_id=args.step_id, agent_name=args.agent)
+            print(json.dumps({"status": "dispatched", "step_id": args.step_id}))
 
     elif args.subcommand == "record":
         # Deprecation warning for --summary
         if "--summary" in sys.argv:
             print("warning: --summary is deprecated, use --outcome instead", file=sys.stderr)
-        if not _STEP_ID_RE.match(args.step_id):
-            validation_error(f"invalid step ID '{args.step_id}' (expected format: N.N, e.g. '1.1')")
+        _validate_step_id(args.step_id, validation_error)
         files = [f.strip() for f in args.files.split(",") if f.strip()] if args.files else []
+        # Symmetric routing: a team-member step ID (N.N.x[.y...]) is recorded
+        # against the parent step via the team-member tracking table — the
+        # same store that `team-record` writes to.  This makes `record` accept
+        # anything `next`/`next --all` emits.
+        is_team_member = _is_team_member_id(args.step_id)
         try:
-            engine.record_step_result(
-                step_id=args.step_id,
-                agent_name=args.agent,
-                status=args.status,
-                outcome=args.outcome,
-                files_changed=files,
-                commit_hash=args.commit,
-                estimated_tokens=args.tokens,
-                duration_seconds=args.duration,
-                error=args.error,
-                session_id=getattr(args, "session_id", ""),
-                step_started_at=getattr(args, "step_started_at", ""),
-            )
+            if is_team_member:
+                parent_id = _parent_step_id(args.step_id)
+                engine.record_team_member_result(
+                    step_id=parent_id,
+                    member_id=args.step_id,
+                    agent_name=args.agent,
+                    status=args.status,
+                    outcome=args.outcome,
+                    files_changed=files,
+                    outcome_spillover_path=getattr(args, "outcome_spillover_path", ""),
+                )
+            else:
+                engine.record_step_result(
+                    step_id=args.step_id,
+                    agent_name=args.agent,
+                    status=args.status,
+                    outcome=args.outcome,
+                    files_changed=files,
+                    commit_hash=args.commit,
+                    estimated_tokens=args.tokens,
+                    duration_seconds=args.duration,
+                    error=args.error,
+                    session_id=getattr(args, "session_id", ""),
+                    step_started_at=getattr(args, "step_started_at", ""),
+                    outcome_spillover_path=getattr(args, "outcome_spillover_path", ""),
+                )
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
             sys.exit(1)
@@ -691,22 +988,92 @@ def handler(args: argparse.Namespace) -> None:
         )
         ContextManager(task_id=task_id).append_to_mission_log(entry)
         if getattr(args, "output", "text") == "json":
-            print(json.dumps({"status": "recorded", "step_id": args.step_id, "agent": args.agent, "result": args.status}))
+            payload = {"status": "recorded", "step_id": args.step_id, "agent": args.agent, "result": args.status}
+            if is_team_member:
+                payload["parent_step_id"] = _parent_step_id(args.step_id)
+                payload["team_member"] = True
+            print(json.dumps(payload))
         else:
             print(f"Recorded: step {args.step_id} ({args.agent}) — {args.status}")
 
     elif args.subcommand == "gate":
-        passed = args.result == "pass"
-        engine.record_gate_result(
-            phase_id=args.phase_id,
-            passed=passed,
-            output=args.gate_output,
-        )
-        status = "PASS" if passed else "FAIL"
-        if getattr(args, "output", "text") == "json":
-            print(json.dumps({"status": "recorded", "phase_id": args.phase_id, "result": args.result}))
+        # Wave 4.1 — opt-in CI gate via manual CLI.  When --type=ci is
+        # supplied we drive the CI provider directly rather than recording
+        # an externally-decided pass/fail.  Otherwise behave as before:
+        # the orchestrator (or operator) has already determined the
+        # result and is just recording it.
+        gate_type_override = getattr(args, "gate_type_override", None)
+        if gate_type_override == "ci":
+            from agent_baton.core.gates.ci_gate import (
+                CIGateRunner,
+                parse_ci_gate_config,
+            )
+            workflow = (args.ci_workflow or "").strip() or "ci.yml"
+            timeout_s = args.ci_timeout_s or 600
+            try:
+                import subprocess as _sp_ci
+                sha = _sp_ci.run(
+                    ["git", "rev-parse", "HEAD"],
+                    capture_output=True, text=True, check=False, timeout=10,
+                ).stdout.strip()
+                branch = _sp_ci.run(
+                    ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                    capture_output=True, text=True, check=False, timeout=10,
+                ).stdout.strip() or "HEAD"
+            except (FileNotFoundError, Exception):
+                sha, branch = "", "HEAD"
+            print(f"Waiting for CI workflow {workflow} on {sha[:8] or '?'}...", file=sys.stderr)
+            ci_result = CIGateRunner().wait_for_workflow(
+                provider="github",
+                workflow=workflow,
+                branch=branch,
+                commit_sha=sha,
+                timeout_s=timeout_s,
+            )
+            passed = ci_result.passed
+            output = (
+                f"CI conclusion: {ci_result.conclusion}\n"
+                f"Run URL: {ci_result.url}\n"
+                f"Run ID: {ci_result.run_id}\n"
+                f"Duration: {ci_result.duration_s:.1f}s"
+                + (f"\n--- log excerpt ---\n{ci_result.log_excerpt}" if ci_result.log_excerpt else "")
+            )
+            engine.record_gate_result(
+                phase_id=args.phase_id,
+                passed=passed,
+                output=output,
+                command=f"gh workflow run {workflow}",
+                exit_code=0 if passed else 1,
+            )
+            status = "PASS" if passed else "FAIL"
+            if getattr(args, "output", "text") == "json":
+                print(json.dumps({
+                    "status": "recorded",
+                    "phase_id": args.phase_id,
+                    "result": "pass" if passed else "fail",
+                    "ci": ci_result.to_dict(),
+                }))
+            else:
+                marker = success(status) if passed else color_error(status)
+                print(f"CI gate {marker}: {ci_result.conclusion} — {ci_result.url or '(no run url)'}")
         else:
-            print(f"Gate recorded: phase {args.phase_id} — {status}")
+            if args.result is None:
+                user_error("--result is required when --type is not 'ci'.")
+            passed = args.result == "pass"
+            engine.record_gate_result(
+                phase_id=args.phase_id,
+                passed=passed,
+                output=args.gate_output,
+            )
+            status = "PASS" if passed else "FAIL"
+            if getattr(args, "output", "text") == "json":
+                print(json.dumps({"status": "recorded", "phase_id": args.phase_id, "result": args.result}))
+            else:
+                print(f"Gate recorded: phase {args.phase_id} — {status}")
+            # DX.3 (bd-d136): a gate FAIL is a natural pause point;
+            # remind the operator to record a session handoff.
+            if not passed:
+                _maybe_handoff_nudge({"action_type": "gate_fail"}, task_id, context_root)
 
     elif args.subcommand == "approve":
         engine.record_approval_result(
@@ -773,6 +1140,7 @@ def handler(args: argparse.Namespace) -> None:
                 status=args.status,
                 outcome=args.outcome,
                 files_changed=files,
+                outcome_spillover_path=getattr(args, "outcome_spillover_path", ""),
             )
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
@@ -821,6 +1189,11 @@ def handler(args: argparse.Namespace) -> None:
                 print(f"Synced {sync_result.rows_synced} rows to central.db")
         except Exception as exc:
             _log.warning("Auto-sync to central.db failed (non-blocking): %s", exc)
+
+        # DX.3 (bd-d136): TTY nudge -- prompt operator to capture a
+        # session handoff if they have not already done so.
+        if getattr(args, "output", "text") != "json":
+            _maybe_handoff_nudge({"action_type": "complete"}, task_id, context_root)
 
     elif args.subcommand == "status":
         st = engine.status()
@@ -974,6 +1347,130 @@ def handler(args: argparse.Namespace) -> None:
         else:
             print("Budget status cleared — execution resumed. Run 'baton execute next' to continue.")
 
+    elif args.subcommand == "verify-dispatch":
+        _handle_verify_dispatch(args, engine, context_root)
+
+    elif args.subcommand == "audit-isolation":
+        _handle_audit_isolation(args, engine, context_root)
+
+
+# ---------------------------------------------------------------------------
+# Dispatch verification (bd-edbf) — read-only post-hoc audit
+# ---------------------------------------------------------------------------
+
+
+def _project_root_for_audit(context_root: Path) -> Path:
+    """Resolve the git project root for verifier git operations.
+
+    ``context_root`` is the ``.claude/team-context/`` directory; the audit
+    runs against the repo containing it.  We walk two levels up which
+    always lands on the project root for the standard layout.
+    """
+    return context_root.parent.parent
+
+
+def _format_verify_text(result) -> list[str]:
+    """Render a single ``VerificationResult`` as text lines."""
+    lines: list[str] = []
+    if result.inconclusive:
+        lines.append(f"INCONCLUSIVE  step {result.step_id}: no files_changed and no commit_hash recorded")
+        return lines
+    if result.passed:
+        lines.append(f"PASS  step {result.step_id}")
+        return lines
+    lines.append(f"FAIL  step {result.step_id}")
+    for v in result.violations:
+        lines.append(f"  - {v}")
+    return lines
+
+
+def _handle_verify_dispatch(args: argparse.Namespace, engine, context_root: Path) -> None:
+    """Handle ``baton execute verify-dispatch <step_id>``.
+
+    Read-only: never writes to state, plan, git, or any artifact.
+    """
+    from agent_baton.core.audit.dispatch_verifier import DispatchVerifier
+
+    state = engine._load_execution()
+    if state is None:
+        user_error(
+            "no active execution found",
+            hint="Run 'baton execute list' to find an execution, then "
+                 "'baton execute verify-dispatch <step_id> --task-id <id>'.",
+        )
+
+    step_id = args.verify_step_id
+    step = None
+    for phase in state.plan.phases:
+        for s in phase.steps:
+            if s.step_id == step_id:
+                step = s
+                break
+        if step is not None:
+            break
+    if step is None:
+        user_error(
+            f"step '{step_id}' not found in plan",
+            hint="Use 'baton execute status' to list known step IDs.",
+        )
+
+    step_result = state.get_step_result(step_id)
+    if step_result is None:
+        user_error(
+            f"step '{step_id}' has no recorded result yet",
+            hint="The step has not been dispatched and recorded — nothing to verify.",
+        )
+
+    project_root = _project_root_for_audit(context_root)
+    result = DispatchVerifier().verify_step(step, step_result, project_root)
+
+    if getattr(args, "output", "text") == "json":
+        print(json.dumps(result.to_dict(), indent=2))
+    else:
+        for line in _format_verify_text(result):
+            print(line)
+
+    # Exit non-zero on a definite violation; inconclusive is exit 0.
+    if not result.passed:
+        sys.exit(1)
+
+
+def _handle_audit_isolation(args: argparse.Namespace, engine, context_root: Path) -> None:
+    """Handle ``baton execute audit-isolation``.
+
+    Read-only: aggregates per-step verifications across the whole task.
+    Exit non-zero on any violation; exit 0 when all steps pass or are
+    inconclusive.
+    """
+    from agent_baton.core.audit.dispatch_verifier import DispatchVerifier
+
+    state = engine._load_execution()
+    if state is None:
+        user_error(
+            "no active execution found",
+            hint="Run 'baton execute list' to find an execution, then "
+                 "'baton execute audit-isolation --task-id <id>'.",
+        )
+
+    project_root = _project_root_for_audit(context_root)
+    report = DispatchVerifier().audit_task(state, project_root)
+
+    if getattr(args, "output", "text") == "json":
+        print(json.dumps(report.to_dict(), indent=2))
+    else:
+        print(f"Isolation audit — task {report.task_id}")
+        print(f"  Steps inspected: {report.total_steps}")
+        print(f"  Compliant:       {report.compliant_count}")
+        print(f"  Violations:      {report.violation_count}")
+        if report.results:
+            print()
+            for r in report.results:
+                for line in _format_verify_text(r):
+                    print(f"  {line}")
+
+    if report.has_violations:
+        sys.exit(1)
+
 
 # ---------------------------------------------------------------------------
 # Policy engine construction
@@ -1013,12 +1510,25 @@ def _build_knowledge_resolver(plan: MachinePlan):
     """
     try:
         from agent_baton.core.engine.knowledge_resolver import KnowledgeResolver
+        from agent_baton.core.engine.knowledge_telemetry import KnowledgeTelemetryStore
         from agent_baton.core.orchestration.knowledge_registry import KnowledgeRegistry
 
         registry = KnowledgeRegistry()
         registry.load_default_paths()
 
-        return KnowledgeResolver(registry)
+        # Wire F0.4 lifecycle telemetry (bd-a313).  Defaults to ~/.baton/central.db.
+        # KnowledgeTelemetryStore manages its own connection; failures inside the
+        # resolver are swallowed so dispatch is never blocked.
+        try:
+            telemetry = KnowledgeTelemetryStore()
+        except Exception as tel_exc:
+            _log.debug(
+                "KnowledgeTelemetryStore construction failed (non-fatal): %s",
+                tel_exc,
+            )
+            telemetry = None
+
+        return KnowledgeResolver(registry, telemetry=telemetry)
     except Exception as exc:
         _log.debug(
             "KnowledgeResolver construction failed (non-fatal): %s", exc
@@ -1029,6 +1539,289 @@ def _build_knowledge_resolver(plan: MachinePlan):
 # ---------------------------------------------------------------------------
 # Autonomous execution loop
 # ---------------------------------------------------------------------------
+
+def _handle_dry_run(args: argparse.Namespace) -> None:
+    """Drive a plan end-to-end with mock launchers and write a report.
+
+    Convenience entrypoint for the DX.5 dry-run testing harness.  Loads the
+    saved plan, starts a fresh execution in a tmp_path-style flow, walks
+    every action the engine emits using
+    :class:`agent_baton.core.engine.dry_run_launcher.TracingDryRunLauncher`
+    (no Claude API calls) and
+    :class:`agent_baton.core.engine.gates.DryRunGateRunner` (always-pass),
+    and writes ``dry-run-report.md`` to the team-context directory.
+
+    Approval and INTERACT actions are auto-progressed so the loop reaches
+    COMPLETE without user prompts.
+    """
+    plan_path = Path(args.plan)
+    context_root = _resolve_context_root()
+    max_steps = getattr(args, "max_steps", 50)
+
+    # ── Load plan ────────────────────────────────────────────────────────
+    if not plan_path.exists():
+        user_error(
+            f"plan file not found: {plan_path}",
+            hint="Run 'baton plan --save \"task description\"' first.",
+        )
+    try:
+        data = json.loads(plan_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        validation_error(f"plan.json is not valid JSON: {exc}")
+    try:
+        plan = MachinePlan.from_dict(data)
+    except (KeyError, ValueError, TypeError) as exc:
+        validation_error(f"plan.json has invalid structure: {exc}")
+
+    # ── Banner: visible at the very top of every dry-run ────────────────
+    print(_DRY_RUN_BANNER)
+
+    # ── Build engine + dry-run launcher/gate runner ──────────────────────
+    bus = EventBus()
+    storage = get_project_storage(context_root)
+    task_id = plan.task_id
+
+    engine = ExecutionEngine(
+        team_context_root=context_root,
+        bus=bus,
+        task_id=task_id,
+        storage=storage,
+    )
+    ContextManager(task_id=task_id).init_mission_log(
+        plan.task_summary, risk_level=plan.risk_level
+    )
+    action = engine.start(plan)
+
+    # Imports are local so file-only installs don't pay the cost on every
+    # ``baton execute`` invocation.
+    from agent_baton.core.engine.dry_run_launcher import (
+        TracingDryRunLauncher,
+    )
+    from agent_baton.core.engine.gates import DryRunGateRunner
+
+    launcher = TracingDryRunLauncher()
+    gate_runner = DryRunGateRunner()
+
+    # ── Drive the loop ───────────────────────────────────────────────────
+    import asyncio as _asyncio
+
+    steps_executed = 0
+    action_dict = action.to_dict()
+
+    while True:
+        atype = action_dict.get("action_type", "")
+
+        if atype == ActionType.COMPLETE.value:
+            engine.complete()
+            break
+
+        if atype == ActionType.FAILED.value:
+            print(
+                color_error("FAILED")
+                + f": {action_dict.get('summary', action_dict.get('message', ''))}",
+                file=sys.stderr,
+            )
+            break
+
+        if steps_executed >= max_steps:
+            print(
+                warning("ABORTED")
+                + f": reached max-steps limit ({max_steps})",
+                file=sys.stderr,
+            )
+            break
+
+        if atype == ActionType.DISPATCH.value:
+            step_id = action_dict.get("step_id", "")
+            agent_name = action_dict.get("agent_name", "")
+            agent_model = action_dict.get("agent_model", "sonnet")
+            prompt = action_dict.get("delegation_prompt", "")
+            print(
+                f"  [{step_id}] (dry-run) would dispatch {agent_name} "
+                f"(model={agent_model}, prompt={len(prompt)} chars)"
+            )
+            engine.mark_dispatched(step_id=step_id, agent_name=agent_name)
+            result = _asyncio.run(
+                launcher.launch(
+                    agent_name=agent_name,
+                    model=agent_model,
+                    prompt=prompt,
+                    step_id=step_id,
+                )
+            )
+            engine.record_step_result(
+                step_id=step_id,
+                agent_name=agent_name,
+                status=result.status,
+                outcome=result.outcome or "dry-run complete",
+                files_changed=list(result.files_changed),
+                duration_seconds=_DRY_RUN_DISPATCH_SECONDS,
+            )
+            steps_executed += 1
+
+        elif atype == ActionType.GATE.value:
+            phase_id = action_dict.get("phase_id", 0)
+            gate_type = action_dict.get("gate_type", "")
+            gate_cmd = action_dict.get("gate_command", "")
+            # Synthesize a PlanGate so DryRunGateRunner can record it.
+            from agent_baton.models.execution import PlanGate as _PlanGate
+            synthetic_gate = _PlanGate(
+                gate_type=gate_type or "test",
+                command=gate_cmd,
+            )
+            gate_runner.evaluate_output(
+                synthetic_gate, "", 0, phase_id=phase_id
+            )
+            print(
+                f"  [GATE] (dry-run) phase {phase_id} ({gate_type}): "
+                f"would run {gate_cmd or '(no command)'}"
+            )
+            engine.record_gate_result(
+                phase_id=phase_id,
+                passed=True,
+                output=f"[dry-run] {gate_cmd}",
+            )
+
+        elif atype == ActionType.APPROVAL.value:
+            phase_id = action_dict.get("phase_id", 0)
+            print(
+                f"  [APPROVAL] (dry-run) phase {phase_id}: auto-approving"
+            )
+            engine.record_approval_result(phase_id=phase_id, result="approve")
+
+        elif atype == ActionType.INTERACT.value:
+            step_id = action_dict.get("step_id", "")
+            print(
+                f"  [INTERACT] (dry-run) step {step_id}: "
+                "auto-completing interaction"
+            )
+            try:
+                engine.complete_interaction(step_id=step_id)
+            except (RuntimeError, ValueError) as exc:
+                print(f"    skipped (engine refused): {exc}", file=sys.stderr)
+                break
+
+        else:
+            # Unknown action type — bail to avoid an infinite loop.
+            print(
+                f"  [unknown action_type={atype!r}] aborting dry-run",
+                file=sys.stderr,
+            )
+            break
+
+        try:
+            action_dict = engine.next_action().to_dict()
+        except RuntimeError as exc:
+            print(
+                color_error("ERROR") + f": {exc}",
+                file=sys.stderr,
+            )
+            break
+
+    # ── Write report ─────────────────────────────────────────────────────
+    report_path = context_root / _DRY_RUN_REPORT_FILENAME
+    report_text = _build_dry_run_report(
+        plan=plan,
+        launcher=launcher,
+        gate_runner=gate_runner,
+        steps_executed=steps_executed,
+    )
+    try:
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(report_text, encoding="utf-8")
+        print(f"\nDry-run report written to: {report_path}")
+    except OSError as exc:
+        print(
+            warning("WARN")
+            + f": could not write dry-run report to {report_path}: {exc}",
+            file=sys.stderr,
+        )
+
+    # Always end with a clear summary banner.
+    print(success("COMPLETE") + ": dry-run finished without API calls.")
+
+
+def _build_dry_run_report(
+    *,
+    plan: MachinePlan,
+    launcher,  # TracingDryRunLauncher; typed as Any to avoid forward-ref churn
+    gate_runner,  # DryRunGateRunner
+    steps_executed: int,
+) -> str:
+    """Render the dry-run summary as Markdown.
+
+    Surfaces:
+    - Total steps executed, total dispatches, total gates run.
+    - Predicted token cost (sum of TracingDryRunLauncher per-step estimates;
+      falls back to "N/A" when no launches recorded).
+    - Total wall-clock estimate using the placeholder per-action constants.
+    - Per-step table with step_id, agent, model, status.
+    """
+    total_dispatches = len(launcher.launches)
+    total_gates = len(gate_runner.gates_run)
+    total_tokens = sum(
+        int(entry.get("estimated_tokens", 0)) for entry in launcher.launches
+    )
+    token_display = str(total_tokens) if total_dispatches else "N/A"
+    wall_clock = (
+        total_dispatches * _DRY_RUN_DISPATCH_SECONDS
+        + total_gates * _DRY_RUN_GATE_SECONDS
+    )
+
+    lines: list[str] = []
+    lines.append(f"# Dry-Run Report — {plan.task_id}")
+    lines.append("")
+    lines.append(f"**Task summary:** {plan.task_summary}")
+    lines.append("")
+    lines.append("## Summary")
+    lines.append("")
+    lines.append(f"- Total steps executed: {steps_executed}")
+    lines.append(f"- Total dispatches: {total_dispatches}")
+    lines.append(f"- Total gates run: {total_gates}")
+    lines.append(f"- Predicted token cost: {token_display}")
+    lines.append(
+        f"- Total wall-clock estimate: {wall_clock:.1f}s "
+        f"(placeholder: {_DRY_RUN_DISPATCH_SECONDS:.0f}s/dispatch + "
+        f"{_DRY_RUN_GATE_SECONDS:.0f}s/gate)"
+    )
+    lines.append("")
+    lines.append("## Steps")
+    lines.append("")
+    lines.append("| step_id | agent | model | status |")
+    lines.append("|---------|-------|-------|--------|")
+    # Build a step_id → model lookup from the plan so we can show the
+    # configured model alongside what the launcher actually saw.
+    plan_models: dict[str, str] = {}
+    for phase in plan.phases:
+        for step in phase.steps:
+            model = getattr(step, "model", "") or "sonnet"
+            plan_models[step.step_id] = model
+
+    for entry in launcher.launches:
+        sid = entry.get("step_id", "?")
+        agent = entry.get("agent_name", "?")
+        model = entry.get("model") or plan_models.get(sid, "?")
+        # Status column is always "complete" in dry-run unless the caller
+        # pre-configured a per-step override on the launcher.
+        result = launcher._results.get(sid)
+        status = result.status if result is not None else "complete"
+        lines.append(f"| {sid} | {agent} | {model} | {status} |")
+
+    if total_gates:
+        lines.append("")
+        lines.append("## Gates")
+        lines.append("")
+        lines.append("| phase_id | gate_type | command |")
+        lines.append("|----------|-----------|---------|")
+        for entry in gate_runner.gates_run:
+            phase = entry.get("phase_id", "?")
+            gtype = entry.get("gate_type", "?")
+            cmd = entry.get("command", "") or "(none)"
+            lines.append(f"| {phase} | {gtype} | `{cmd}` |")
+
+    lines.append("")
+    return "\n".join(lines)
+
 
 def _handle_run(args: argparse.Namespace) -> None:
     """Drive the full execution loop autonomously using headless Claude.
@@ -1049,7 +1842,47 @@ def _handle_run(args: argparse.Namespace) -> None:
     model_override = args.model
     token_budget: int = getattr(args, "token_budget", 0)
 
-    # Resolve or create the execution
+    # F0.3 — VETO override (bd-f606): validate --force / --justification
+    # before constructing any engine.
+    force_override = bool(getattr(args, "force_override", False))
+    override_justification = (getattr(args, "override_justification", "") or "").strip()
+    if force_override and not override_justification:
+        validation_error(
+            "--force requires --justification \"<reason>\"",
+            hint="Re-run with --force --justification \"why this VETO is being overridden\"",
+        )
+
+    # G1.6 (bd-1a09): record the override invocation in the
+    # governance_overrides SQL table + compliance chain.
+    if force_override:
+        try:
+            from agent_baton.cli._override_helper import record_override
+
+            record_override(
+                flag="--force",
+                justification=override_justification,
+                command="baton execute run",
+            )
+        except Exception as _ovr_exc:  # pragma: no cover - best-effort logging
+            print(
+                f"warning: failed to record override audit row: {_ovr_exc}",
+                file=sys.stderr,
+            )
+
+    # Resolve or create the execution.
+    #
+    # Task-id resolution priority (matches general handler at lines ~529-548):
+    #   1. --task-id flag
+    #   2. BATON_TASK_ID env var
+    #   3. SQLite active task pointer
+    #   4. file-based active-task-id.txt marker
+    #
+    # Without steps 3-4, `baton execute run` invoked with no flag/env after
+    # an approval would silently start fresh, wiping prior step_results /
+    # approval_results / gate_results and re-dispatching completed agents
+    # (bd-7444).  Treat ANY non-terminal status as "resume", not just
+    # "running"/"pending" — approval_pending, gate_pending, feedback_pending,
+    # gate_failed, and budget_exceeded all warrant resume.
     bus = EventBus()
     storage = get_project_storage(context_root)
     task_id = getattr(args, "task_id", None)
@@ -1057,19 +1890,70 @@ def _handle_run(args: argparse.Namespace) -> None:
     if task_id is None:
         task_id = os.environ.get("BATON_TASK_ID")
 
-    # If no active execution, start from plan
+    if task_id is None:
+        # SQLite-first: read active task from baton.db before falling back to
+        # the file-based active-task-id.txt marker.
+        try:
+            _backend = detect_backend(context_root)
+        except Exception:  # noqa: BLE001 — defensive: backend detection is best-effort
+            _backend = "file"
+        if _backend == "sqlite":
+            try:
+                _early_storage = get_project_storage(context_root, backend="sqlite")
+                task_id = _early_storage.get_active_task()
+            except Exception as _exc:  # noqa: BLE001
+                _log.debug(
+                    "SQLite active-task lookup failed in execute run, "
+                    "falling back to file: %s",
+                    _exc,
+                )
+        if task_id is None:
+            task_id = StatePersistence.get_active_task_id(context_root)
+
+    # Statuses that mean "this execution is in progress; do NOT start fresh".
+    # Only "complete", "failed", and "cancelled" are terminal — everything
+    # else is resumable, never a reason to overwrite recorded results.
+    _RESUMABLE_STATUSES = frozenset({
+        "running", "pending",
+        "approval_pending", "feedback_pending",
+        "gate_pending", "gate_failed",
+        "budget_exceeded",
+    })
+    _TERMINAL_STATUSES = frozenset({"complete", "failed", "cancelled"})
+
     engine: ExecutionEngine | None = None
     if task_id:
         engine = ExecutionEngine(
             team_context_root=context_root,
             bus=bus, task_id=task_id, storage=storage,
             token_budget=token_budget or None,
+            force_override=force_override,
+            override_justification=override_justification,
         )
         st = engine.status()
-        if st and st.get("status") in ("running", "pending"):
-            print(f"Resuming execution: {task_id}", file=sys.stderr)
+        st_status = (st or {}).get("status")
+        if st_status in _RESUMABLE_STATUSES:
+            print(
+                f"Resuming execution: {task_id} (status={st_status})",
+                file=sys.stderr,
+            )
+        elif st_status in _TERMINAL_STATUSES:
+            # Already finished — surface clearly rather than silently
+            # restarting and overwriting the prior result.
+            user_error(
+                f"execution {task_id} already {st_status}; not restarting.",
+                hint=(
+                    "Use 'baton execute list' to see executions, "
+                    "'baton execute switch TASK_ID' to switch tasks, "
+                    "or run 'baton plan --save' to create a new plan."
+                ),
+            )
         else:
-            engine = None  # Stale or completed — start fresh
+            # status == "no_active_execution" or unrecognised — treat as
+            # missing and fall through to the start-from-plan branch, but
+            # forget the stale task_id so we use the plan's task_id below.
+            engine = None
+            task_id = None
 
     if engine is None:
         if not plan_path.exists():
@@ -1086,25 +1970,60 @@ def _handle_run(args: argparse.Namespace) -> None:
         except (KeyError, ValueError, TypeError) as exc:
             validation_error(f"plan.json has invalid structure: {exc}")
         task_id = plan.task_id
-        knowledge_resolver = _build_knowledge_resolver(plan)
-        policy_engine = _build_policy_engine()
-        engine = ExecutionEngine(
+
+        # Defence in depth: even if no active marker pointed at this task,
+        # an execution row with the SAME task_id may already exist on disk
+        # (e.g. a previous `baton execute start` then a stale active marker).
+        # Probe one more time before calling engine.start(), which would
+        # unconditionally overwrite ExecutionState (bd-7444).
+        _probe_engine = ExecutionEngine(
             team_context_root=context_root,
             bus=bus, task_id=task_id, storage=storage,
-            knowledge_resolver=knowledge_resolver,
-            policy_engine=policy_engine,
             token_budget=token_budget or None,
+            force_override=force_override,
+            override_justification=override_justification,
         )
-        ContextManager(task_id=task_id).init_mission_log(
-            plan.task_summary, risk_level=plan.risk_level
-        )
-        action = engine.start(plan)
-        try:
-            storage.set_active_task(task_id)
-        except Exception:
-            if engine._persistence is not None:
-                engine._persistence.set_active()
-        print(f"Started execution: {task_id}", file=sys.stderr)
+        _probe_status = _probe_engine.status()
+        _probe_st = (_probe_status or {}).get("status")
+        if _probe_st in _RESUMABLE_STATUSES:
+            print(
+                f"Resuming execution: {task_id} (status={_probe_st}; "
+                "matched via plan task_id)",
+                file=sys.stderr,
+            )
+            engine = _probe_engine
+            action = engine.next_action()
+        elif _probe_st in _TERMINAL_STATUSES:
+            user_error(
+                f"execution {task_id} (from plan) already {_probe_st}; "
+                "refusing to overwrite.",
+                hint=(
+                    "Use 'baton plan --save' with a new task description to "
+                    "create a fresh task, or 'baton execute list' to inspect."
+                ),
+            )
+        else:
+            knowledge_resolver = _build_knowledge_resolver(plan)
+            policy_engine = _build_policy_engine()
+            engine = ExecutionEngine(
+                team_context_root=context_root,
+                bus=bus, task_id=task_id, storage=storage,
+                knowledge_resolver=knowledge_resolver,
+                policy_engine=policy_engine,
+                token_budget=token_budget or None,
+                force_override=force_override,
+                override_justification=override_justification,
+            )
+            ContextManager(task_id=task_id).init_mission_log(
+                plan.task_summary, risk_level=plan.risk_level
+            )
+            action = engine.start(plan)
+            try:
+                storage.set_active_task(task_id)
+            except Exception:
+                if engine._persistence is not None:
+                    engine._persistence.set_active()
+            print(f"Started execution: {task_id}", file=sys.stderr)
     else:
         action = engine.next_action()
 
@@ -1305,26 +2224,70 @@ def _run_loop(
                 print(f"  [DRY RUN] Would run: {gate_cmd}", file=sys.stderr)
                 engine.record_gate_result(phase_id=phase_id, passed=True, output="dry-run skip")
             elif gate_type == "ci":
-                # CI gate: dispatch GitHub Actions workflow and poll for completion.
-                # This is a long-running synchronous operation (up to 15 minutes)
-                # so we call it directly in the CLI process rather than spawning a
-                # subprocess — the subprocess would lose the polling context.
-                from agent_baton.core.engine.gates import run_github_actions_gate
+                # Wave 4.1 — CI provider gate.  Polls GitHub Actions for the
+                # current branch's HEAD commit (rather than dispatching a new
+                # workflow run, which is the model used by the older
+                # ``run_github_actions_gate`` path).  CIGateRunner returns a
+                # CIGateResult whose ``passed`` field is the gate verdict.
+                from agent_baton.core.gates.ci_gate import (
+                    CIGateRunner,
+                    parse_ci_gate_config,
+                )
+                import subprocess as _sp_ci
 
-                workflow_name = gate_cmd.strip() or "ci.yml"
-                print(f"  [GATE] Dispatching CI workflow '{workflow_name}' and waiting...", file=sys.stderr)
-                result = run_github_actions_gate(workflow_name)
+                config = parse_ci_gate_config(gate_cmd)
+                workflow_name = config.workflow or "ci.yml"
+                try:
+                    sha = _sp_ci.run(
+                        ["git", "rev-parse", "HEAD"],
+                        capture_output=True, text=True, check=False, timeout=10,
+                    ).stdout.strip()
+                except (FileNotFoundError, _sp_ci.TimeoutExpired):
+                    sha = ""
+                branch = config.branch
+                if not branch or branch == "auto":
+                    try:
+                        branch = _sp_ci.run(
+                            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                            capture_output=True, text=True, check=False, timeout=10,
+                        ).stdout.strip() or "HEAD"
+                    except (FileNotFoundError, _sp_ci.TimeoutExpired):
+                        branch = "HEAD"
+                print(
+                    f"  [GATE] Waiting for CI workflow {workflow_name} on "
+                    f"{(sha[:8] or '?')} (branch {branch})...",
+                    file=sys.stderr,
+                )
+                ci_result = CIGateRunner(poll_interval_s=config.poll_interval_s).wait_for_workflow(
+                    provider=config.provider,
+                    workflow=workflow_name,
+                    branch=branch,
+                    commit_sha=sha,
+                    timeout_s=config.timeout_s,
+                )
+                output = (
+                    f"CI conclusion: {ci_result.conclusion}\n"
+                    f"Run URL: {ci_result.url}\n"
+                    f"Run ID: {ci_result.run_id}\n"
+                    f"Duration: {ci_result.duration_s:.1f}s"
+                    + (f"\n--- log excerpt ---\n{ci_result.log_excerpt}"
+                       if ci_result.log_excerpt else "")
+                )
                 engine.record_gate_result(
                     phase_id=phase_id,
-                    passed=result.passed,
-                    output=result.output,
-                    command=f"gh workflow run {workflow_name}",
-                    exit_code=None,
+                    passed=ci_result.passed,
+                    output=output,
+                    command=f"gh run watch (workflow={workflow_name})",
+                    exit_code=0 if ci_result.passed else 1,
                 )
-                marker = success("PASS") if result.passed else color_error("FAIL")
-                print(f"  [GATE] {marker}", file=sys.stderr)
-                if not result.passed and result.output:
-                    print(f"    Output: {result.output[:200]}", file=sys.stderr)
+                marker = success("PASS") if ci_result.passed else color_error("FAIL")
+                print(
+                    f"  [GATE] {marker} ({ci_result.conclusion}) — "
+                    f"{ci_result.url or '(no run url)'}",
+                    file=sys.stderr,
+                )
+                if not ci_result.passed and ci_result.log_excerpt:
+                    print(f"    Log: {ci_result.log_excerpt[:200]}", file=sys.stderr)
             else:
                 try:
                     proc = _subprocess.run(
@@ -1370,6 +2333,34 @@ def _run_loop(
                     phase_id=phase_id, result="approve",
                 )
             else:
+                # Non-TTY safety (bd-7444): without a controlling terminal we
+                # cannot prompt for an approval decision.  Previous behaviour
+                # caught the EOFError on input() and silently set choice =
+                # "reject", which marked the execution failed and destroyed
+                # state.  Instead, exit non-zero with a clear remediation hint
+                # and leave state untouched so the operator can record an
+                # explicit decision via `baton execute approve`.
+                if not sys.stdin.isatty():
+                    print(
+                        f"\n{color_error('ERROR')}: pending approval for phase "
+                        f"{phase_id} requires an explicit decision, but stdin "
+                        "is not a TTY so 'baton execute run' cannot prompt.",
+                        file=sys.stderr,
+                    )
+                    print(
+                        "  Run: baton execute approve "
+                        f"--phase-id {phase_id} --result approve|reject "
+                        "[--feedback TEXT]",
+                        file=sys.stderr,
+                    )
+                    print(
+                        "  Then re-invoke 'baton execute run' to continue.",
+                        file=sys.stderr,
+                    )
+                    # Do NOT mutate execution state — execution remains in
+                    # approval_pending for the operator to resolve.
+                    sys.exit(2)
+
                 # Interactive approval prompt
                 print("  Options: approve, reject, approve-with-feedback", file=sys.stderr)
                 try:
@@ -1393,6 +2384,14 @@ def _run_loop(
         try:
             next_act = engine.next_action()
             action_dict = next_act.to_dict()
+        except ExecutionVetoed as exc:
+            print(f"\n{color_error('VETOED')}: {exc}", file=sys.stderr)
+            print(
+                "Recovery: re-run with --force --justification \"...\" "
+                "to override, or amend the plan.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
         except RuntimeError as exc:
             print(f"\n{color_error('ERROR')}: {exc}", file=sys.stderr)
             sys.exit(1)
@@ -1619,3 +2618,88 @@ def _parse_add_steps(specs: list[str]) -> tuple[int | None, list[PlanStep]]:
             task_description=desc,
         ))
     return target_phase, steps
+
+
+# ---------------------------------------------------------------------------
+# DX.3 (bd-d136): TTY end-of-run handoff nudge.
+# ---------------------------------------------------------------------------
+
+
+_HANDOFF_NUDGE_TYPES = frozenset({
+    ActionType.COMPLETE.value,
+    ActionType.APPROVAL.value,
+    ActionType.FAILED.value,
+    "gate_fail",
+    "complete",
+})
+
+
+def _maybe_handoff_nudge(
+    action_dict: dict,
+    task_id: str | None,
+    context_root: Path,
+) -> None:
+    """Print the one-line handoff reminder at natural pause points.
+
+    Fires only when:
+    * The current action is a natural pause (complete, approval-required,
+      gate failure, or failed terminal state).
+    * stdout is a TTY -- never pollute machine-readable output.
+    * No handoff has been recorded for ``task_id`` yet.
+
+    All errors are swallowed -- a nudge must never break the CLI.
+    """
+    try:
+        atype = (action_dict or {}).get("action_type", "")
+        if atype not in _HANDOFF_NUDGE_TYPES:
+            return
+        from agent_baton.cli.commands.execution.handoff import (
+            maybe_print_handoff_nudge,
+        )
+        maybe_print_handoff_nudge(task_id=task_id, context_root=context_root)
+    except Exception:  # noqa: BLE001 - never let a nudge break the CLI
+        return
+
+
+# ---------------------------------------------------------------------------
+# DX.3 (bd-d136): handoff subcommand dispatcher.
+#
+# The actual record/list/show implementations live in handoff.py so they
+# can be imported by other entry points (the auto-discovered top-level
+# ``baton handoff`` alias and the TTY end-of-run nudge).
+# ---------------------------------------------------------------------------
+
+
+def _handle_handoff(args: argparse.Namespace) -> None:
+    """Dispatch ``baton execute handoff [record|list|show] ...``.
+
+    Defaults to ``record`` when no positional action is given (so the
+    spec's headline form ``baton execute handoff --note "..."`` works).
+    """
+    from agent_baton.cli.commands.execution import handoff as _handoff_mod
+
+    action = getattr(args, "handoff_action", None) or "record"
+
+    # Re-shape the namespace so the handoff module's handlers can consume
+    # the same arg names regardless of which entry point invoked them.
+    proxy = argparse.Namespace(
+        note=getattr(args, "note", None),
+        task_id=getattr(args, "task_id", None),
+        branch=getattr(args, "branch", False),
+        score=getattr(args, "score", False),
+        output=getattr(args, "output", "text"),
+        limit=getattr(args, "limit", 20),
+        handoff_id=getattr(args, "handoff_id", None),
+    )
+
+    if action == "list":
+        _handoff_mod._handle_list(proxy)
+    elif action == "show":
+        if not proxy.handoff_id:
+            validation_error(
+                "show requires a handoff ID",
+                hint="Try: baton execute handoff show ho-abc123",
+            )
+        _handoff_mod._handle_show(proxy)
+    else:
+        _handoff_mod._handle_record(proxy)

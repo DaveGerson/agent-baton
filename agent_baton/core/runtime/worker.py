@@ -291,6 +291,9 @@ class TaskWorker:
                                 estimated_tokens=result.estimated_tokens,
                                 duration_seconds=result.duration_seconds,
                                 error=result.error,
+                                outcome_spillover_path=getattr(
+                                    result, "outcome_spillover_path", ""
+                                ),
                             )
 
                             # Publish step.completed or step.failed event.

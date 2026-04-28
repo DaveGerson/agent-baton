@@ -139,6 +139,63 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         ),
     )
 
+    # ---- improve -----------------------------------------------------------
+    improve_p = sub.add_parser(
+        "improve",
+        help="Run the improvement loop or view reports (formerly 'baton improve')",
+        description=(
+            "Run or view improvement cycle reports. A single cycle detects "
+            "anomalies, generates recommendations, auto-applies safe changes, "
+            "escalates risky ones, and starts experiments."
+        ),
+    )
+    improve_grp = improve_p.add_mutually_exclusive_group()
+    improve_grp.add_argument(
+        "--run",
+        action="store_true",
+        help="Run a full improvement cycle",
+    )
+    improve_grp.add_argument(
+        "--force",
+        action="store_true",
+        help="Force-run a cycle bypassing the data-threshold check entirely",
+    )
+    improve_grp.add_argument(
+        "--report",
+        action="store_true",
+        help="Show the latest improvement report",
+    )
+    improve_grp.add_argument(
+        "--experiments",
+        action="store_true",
+        help="Show active experiments",
+    )
+    improve_grp.add_argument(
+        "--history",
+        action="store_true",
+        help="Show all improvement reports",
+    )
+    improve_p.add_argument(
+        "--min-tasks",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Minimum total tasks before analysis fires (overrides default and "
+            "BATON_MIN_TASKS env var for this run only)"
+        ),
+    )
+    improve_p.add_argument(
+        "--interval",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Re-analyze every N new tasks (overrides default and "
+            "BATON_ANALYSIS_INTERVAL env var for this run only)"
+        ),
+    )
+
     return p
 
 
@@ -148,6 +205,12 @@ def handler(args: argparse.Namespace) -> None:
     # run-cycle does not need baton.db — it works from the plan template.
     if cmd == "run-cycle":
         _cmd_run_cycle(args)
+        return
+
+    # improve delegates to the shared improvement-loop implementation.
+    if cmd == "improve":
+        from agent_baton.cli.commands.improve.improve_cmd import _improve_handler_impl
+        _improve_handler_impl(args)
         return
 
     db = _db_path()

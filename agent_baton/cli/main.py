@@ -27,12 +27,20 @@ _COMMAND_GROUPS: dict[str, list[str]] = {
     "Observability": ["dashboard", "trace", "usage", "telemetry", "context-profile", "retro", "context", "export"],
     "Integrations": ["webhook"],
     "Governance": ["classify", "compliance", "policy", "escalations", "validate", "spec-check", "detect"],
-    "Improvement": ["scores", "evolve", "patterns", "budget", "changelog", "experiment", "anomalies", "improve", "learn"],
-    "Distribution": ["install", "uninstall", "package", "publish", "pull", "transfer", "verify-package"],
-    "Storage & Sync": ["sync", "source", "cquery", "migrate-storage", "cleanup"],
+    "Improvement": ["scores", "evolve", "patterns", "budget", "changelog", "experiment", "anomalies", "learn"],
+    "Distribution": ["install", "uninstall", "package", "publish", "pull", "transfer"],
+    "Storage & Sync": ["sync", "source", "cquery", "storage", "cleanup"],
     "Memory": ["beads"],
     "Execution (Advanced)": ["daemon", "async", "decide"],
     "Portfolio": ["pmo", "serve"],
+}
+
+# Deprecated top-level commands — kept for backward compatibility.
+# These still work but print a WARN to stderr on each invocation.
+_DEPRECATED_HELP: dict[str, str] = {
+    "migrate-storage": "use 'baton storage migrate' instead",
+    "verify-package": "use 'baton install verify' instead",
+    "improve": "use 'baton learn improve' instead",
 }
 
 

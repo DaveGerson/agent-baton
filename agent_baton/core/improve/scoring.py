@@ -29,11 +29,11 @@ Scoring methodology:
 
 Downstream consumers:
 
-* :class:`~agent_baton.core.improve.evolution.PromptEvolutionEngine` uses
-  scorecards to identify underperformers and generate prompt-improvement
-  proposals.
 * :class:`~agent_baton.core.learn.recommender.Recommender` uses
   ``needs-improvement`` scorecards to generate routing recommendations.
+* The ``learning-analyst`` agent (dispatched via ``baton learn run-cycle``)
+  reads scorecards plus retrospectives to produce prompt-improvement
+  proposals -- L2.1 (bd-362f) retired the in-process ``PromptEvolutionEngine``.
 """
 from __future__ import annotations
 

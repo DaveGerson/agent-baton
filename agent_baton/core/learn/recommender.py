@@ -2,9 +2,14 @@
 
 The Recommender sits at the boundary between the learn and improve layers.
 It runs all analysis engines (budget tuner, pattern learner, performance
-scorer, prompt evolution engine) and produces a single, deduplicated,
-ranked list of :class:`~agent_baton.models.improvement.Recommendation`
-objects.
+scorer) and produces a single, deduplicated, ranked list of
+:class:`~agent_baton.models.improvement.Recommendation` objects.
+
+Note (L2.1, bd-362f): the in-process prompt-evolution engine was retired.
+Prompt-improvement recommendations now flow from the ``learning-analyst``
+agent dispatched via ``baton learn run-cycle``, which produces
+evidence-cited proposals from real retrospectives rather than scorecard
+threshold templates.
 
 Each recommendation carries:
 
@@ -39,7 +44,6 @@ from datetime import datetime, timezone
 from agent_baton.core.improve.scoring import PerformanceScorer, AgentScorecard
 from agent_baton.core.learn.pattern_learner import PatternLearner
 from agent_baton.core.learn.budget_tuner import BudgetTuner
-from agent_baton.core.improve.evolution import PromptEvolutionEngine
 from agent_baton.models.improvement import Recommendation
 
 
@@ -67,22 +71,14 @@ class Recommender:
         scorer: PerformanceScorer | None = None,
         pattern_learner: PatternLearner | None = None,
         budget_tuner: BudgetTuner | None = None,
-        evolution_engine: PromptEvolutionEngine | None = None,
         storage=None,
     ) -> None:
         self._scorer = scorer or PerformanceScorer(storage=storage)
         self._learner = pattern_learner or PatternLearner()
         self._tuner = budget_tuner or BudgetTuner()
-        # PromptEvolutionEngine is deprecated (D7). Suppress the warning here
-        # because Recommender is a grandfathered internal caller. New code
-        # should use the learning-cycle pipeline instead.
-        import warnings
-        if evolution_engine is not None:
-            self._evolution = evolution_engine
-        else:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", DeprecationWarning)
-                self._evolution = PromptEvolutionEngine()
+        # Prompt evolution retired in L2.1 (bd-362f); use learning-analyst agent
+        # dispatched via 'baton learn run-cycle' for evidence-based prompt
+        # recommendations.
 
     # ------------------------------------------------------------------
     # Public API
@@ -91,13 +87,15 @@ class Recommender:
     def analyze(self) -> list[Recommendation]:
         """Run all analysis engines and return a deduplicated, ranked list.
 
-        Executes four analysis pipelines in sequence:
+        Executes three analysis pipelines in sequence:
 
         1. **Budget recommendations** -- from :class:`BudgetTuner`.
-        2. **Prompt recommendations** -- from :class:`PromptEvolutionEngine`.
-        3. **Sequencing recommendations** -- from :class:`PatternLearner`.
-        4. **Scoring recommendations** -- from :class:`PerformanceScorer`
+        2. **Sequencing recommendations** -- from :class:`PatternLearner`.
+        3. **Scoring recommendations** -- from :class:`PerformanceScorer`
            (flags agents with ``health="needs-improvement"``).
+
+        Prompt-evolution recommendations were retired in L2.1 (bd-362f);
+        the ``learning-analyst`` agent now produces those out-of-process.
 
         After collection, recommendations are deduplicated by
         ``(category, target)`` (highest confidence wins) and sorted by
@@ -111,7 +109,6 @@ class Recommender:
         recs: list[Recommendation] = []
 
         recs.extend(self._budget_recommendations())
-        recs.extend(self._prompt_recommendations())
         recs.extend(self._sequencing_recommendations())
         recs.extend(self._scoring_recommendations())
 
@@ -180,37 +177,8 @@ class Recommender:
         return recs
 
     # ------------------------------------------------------------------
-    # Prompt recommendations (NEVER auto-apply)
+    # Prompt evolution retired in L2.1 (bd-362f); use learning-analyst agent.
     # ------------------------------------------------------------------
-
-    def _prompt_recommendations(self) -> list[Recommendation]:
-        recs: list[Recommendation] = []
-        proposals = self._evolution.analyze()
-
-        for proposal in proposals:
-            confidence = 0.5 if proposal.priority == "normal" else 0.7
-            recs.append(Recommendation(
-                rec_id=_make_id("prompt"),
-                category="agent_prompt",
-                target=proposal.agent_name,
-                action="evolve prompt",
-                description="; ".join(proposal.issues),
-                evidence=[f"suggestion: {s}" for s in proposal.suggestions],
-                confidence=confidence,
-                risk="high",       # Prompt changes are always high risk
-                auto_applicable=False,  # GUARDRAIL: never auto-apply prompt changes
-                proposed_change={
-                    "type": "prompt_evolution",
-                    "agent_name": proposal.agent_name,
-                    "suggestions": proposal.suggestions,
-                },
-                rollback_spec={
-                    "type": "prompt_rollback",
-                    "agent_name": proposal.agent_name,
-                },
-                created_at=_now_iso(),
-            ))
-        return recs
 
     # ------------------------------------------------------------------
     # Sequencing recommendations

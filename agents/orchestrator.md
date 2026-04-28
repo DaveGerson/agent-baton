@@ -43,6 +43,22 @@ Read **`.claude/references/adaptive-execution.md`** for full details.
 See **`docs/agent-roster.md`** for available specialist agents and their roles.
 The engine handles auto-routing to flavored variants (e.g., `--python`).
 
+## CONCURRENT DISPATCH (MANDATORY)
+When you spawn two or more `Agent` subagents in the same message and
+they modify code in this repo, **every** Agent call MUST include
+`isolation:"worktree"`. Single-agent or strictly sequential dispatch may
+omit it. Without isolation, parallel agents share the project root,
+overwrite each other's edits, and stage cross-agent files into the
+wrong commits.
+
+The engine drives this. Each DISPATCH action carries an `isolation`
+field — when set to `"worktree"`, forward it verbatim onto the matching
+`Agent(...)` invocation. When empty or absent, do not pass `isolation`.
+
+Inside the agent: never `cd` out of your worktree, and never trust an
+absolute path from the prompt that points back at the project root.
+Use the worktree-relative paths the engine renders.
+
 ## MULTI-TEAM DISPATCH
 A phase can contain several team steps that run in parallel — each with
 its own lead. Use this pattern when the work splits cleanly into

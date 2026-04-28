@@ -35,6 +35,36 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# Regex matching the spillover breadcrumb prefix written by
+# ``ClaudeCodeLauncher`` when an outcome exceeds ``max_outcome_length``.
+# Captures the path relative to the per-task execution dir.  See
+# ``agent_baton.core.runtime.claude_launcher._truncate_or_spillover``.
+_SPILLOVER_BREADCRUMB_RE = re.compile(
+    r"^\[TRUNCATED — full output: (\S+) \(\d+ bytes total\)\]"
+)
+
+
+def _build_knowledge_telemetry_store():
+    """Construct a default ``KnowledgeTelemetryStore`` (~/.baton/central.db).
+
+    bd-a313 — wires F0.4 telemetry into the executor's ``RetrospectiveEngine``
+    and provides a single source for ad-hoc emission of ``KnowledgeUsed`` rows
+    at dispatch time.  Returns ``None`` on any construction failure so that
+    callers can use ``store or no-op`` semantics safely.
+    """
+    try:
+        from agent_baton.core.engine.knowledge_telemetry import KnowledgeTelemetryStore
+        return KnowledgeTelemetryStore()
+    except Exception as exc:  # noqa: BLE001 — telemetry must never crash boot
+        logger.debug("KnowledgeTelemetryStore construction failed (non-fatal): %s", exc)
+        return None
+
+# Maximum bytes of spillover content to inline into the next step's
+# "Previous Step Output" handoff section.  Sized to match the typical
+# inline knowledge budget — large enough to carry full design docs but
+# bounded to protect prompt-cache hit rates.
+_HANDOFF_SPILLOVER_MAX_BYTES: int = 65_536
+
 from agent_baton.models.execution import (
     ActionType,
     ApprovalResult,
@@ -70,7 +100,15 @@ from agent_baton.models.trace import TaskTrace, TraceEvent
 from agent_baton.core.observe.usage import UsageLogger
 from agent_baton.core.observe.retrospective import RetrospectiveEngine
 from agent_baton.core.observe.context_profiler import ContextProfiler
-from agent_baton.core.govern.compliance import ComplianceEntry, ComplianceReportGenerator
+from agent_baton.core.govern.compliance import (
+    AuditorVerdict,
+    ComplianceChainWriter,
+    ComplianceEntry,
+    ComplianceReportGenerator,
+    extract_verdict_from_text,
+    parse_auditor_verdict,
+)
+from agent_baton.core.engine.errors import ExecutionVetoed
 
 
 # ---------------------------------------------------------------------------
@@ -271,6 +309,8 @@ class ExecutionEngine:
         enforce_token_budget: bool = True,
         token_budget: int | None = None,
         max_gate_retries: int = 3,
+        force_override: bool = False,
+        override_justification: str = "",
     ) -> None:
         self._root = (team_context_root or self._DEFAULT_CONTEXT_ROOT).resolve()
         self._task_id = task_id
@@ -312,6 +352,13 @@ class ExecutionEngine:
         # Compliance audit log — JSONL file written best-effort.  Path is
         # resolved after _root is known; initialized to None until first write.
         self._compliance_log_path: Path | None = None
+
+        # F0.3 — VETO override (bd-f606).  When True the engine permits a
+        # HIGH/CRITICAL phase to advance past a VETO verdict but writes an
+        # Override row to the hash-chained compliance-audit.jsonl.  The CLI
+        # rejects --force without --justification.
+        self._force_override: bool = bool(force_override)
+        self._override_justification: str = override_justification or ""
 
         if storage is not None:
             # StorageBackend mode — primary I/O goes through the storage
@@ -358,7 +405,8 @@ class ExecutionEngine:
                 log_path=self._root / "telemetry.jsonl"
             )
             self._retro_engine = RetrospectiveEngine(
-                retrospectives_dir=self._root / "retrospectives"
+                retrospectives_dir=self._root / "retrospectives",
+                telemetry=_build_knowledge_telemetry_store(),
             )
 
         self._tracer = TraceRecorder(team_context_root=self._root)
@@ -605,6 +653,37 @@ class ExecutionEngine:
                 return self._retro_engine.save(retro)
             return None
 
+    # ── Bead graph synthesis (Wave 2.1) ─────────────────────────────────────
+
+    def _synthesize_beads_post_phase(self) -> None:
+        """Best-effort post-phase bead-graph refresh.
+
+        Runs after every phase boundary (both empty-phase fast-path and the
+        normal completion path).  Inferred edges + clusters land in the
+        ``bead_edges`` / ``bead_clusters`` tables (schema v28).
+
+        Failure here MUST NEVER block phase advancement — wrap everything,
+        log at debug, and return.
+        """
+        if self._bead_store is None:
+            return
+        try:
+            from agent_baton.core.intel.bead_synthesizer import BeadSynthesizer
+
+            conn = self._bead_store._conn()
+            result = BeadSynthesizer().synthesize(conn)
+            if result.edges_added or result.clusters_created or result.conflicts_flagged:
+                _log.debug(
+                    "BeadSynthesizer post-phase: %d edges, %d clusters, %d conflicts",
+                    result.edges_added,
+                    result.clusters_created,
+                    result.conflicts_flagged,
+                )
+        except Exception as exc:
+            _log.debug(
+                "BeadSynthesizer post-phase skipped (non-fatal): %s", exc
+            )
+
     # ── Split-brain reconciliation helpers ──────────────────────────────────
     # Step status advancement order: dispatched < interrupted < failed < complete.
     # Used by _reconcile_states to pick the more-advanced result when SQLite and
@@ -750,10 +829,12 @@ class ExecutionEngine:
     # ── Compliance audit helpers ─────────────────────────────────────────────
 
     def _write_compliance_entry(self, entry: dict) -> None:
-        """Append a compliance audit entry as a JSONL line.
+        """Append a compliance audit entry to the hash-chained JSONL log.
 
-        This is best-effort: any I/O failure is logged and silently swallowed
-        so that compliance write failures never block execution.
+        F0.3 (bd-f606): all entries flow through :class:`ComplianceChainWriter`
+        so the log is tamper-evident.  Best-effort: any I/O failure is logged
+        and silently swallowed so that compliance write failures never block
+        execution.
 
         ``entry`` should include at minimum: ``timestamp``, ``event_type``,
         ``task_id``, ``plan_id``, ``step_id``, and ``agent_name``.
@@ -761,10 +842,9 @@ class ExecutionEngine:
         if self._compliance_log_path is None:
             return
         try:
-            self._compliance_log_path.parent.mkdir(parents=True, exist_ok=True)
-            line = json.dumps(entry, ensure_ascii=False) + "\n"
-            with self._compliance_log_path.open("a", encoding="utf-8") as fh:
-                fh.write(line)
+            writer = ComplianceChainWriter(log_path=self._compliance_log_path)
+            writer.append(entry)
+            return
         except Exception as exc:
             _log.warning("Compliance audit write failed (non-fatal): %s", exc)
 
@@ -838,6 +918,91 @@ class ExecutionEngine:
             "passed": passed,
             "output_snippet": output[:500] if output else "",
         })
+
+    # ── CI gate dispatch (Wave 4.1) ──────────────────────────────────────────
+
+    def _run_ci_gate(
+        self,
+        gate_command_or_config: str,
+        *,
+        commit_sha: str = "",
+        branch: str = "",
+        runner: "Any" = None,
+    ):
+        """Run a CI provider gate and return a :class:`CIGateResult`.
+
+        Wave 4.1 — CI-Driven Quality Gates.  Resolves bd-b050.
+
+        Dispatched when ``gate_type == "ci"``.  The executor itself does not
+        block on the CI call (that lives in the CLI loop), but exposing the
+        helper here lets callers (CLI, future API endpoints, tests) share
+        the same parsing and provider-routing logic.
+
+        Args:
+            gate_command_or_config: The ``PlanGate.command`` field — either a
+                JSON object (full config) or a workflow file shorthand.  See
+                :func:`agent_baton.core.gates.ci_gate.parse_ci_gate_config`.
+            commit_sha: HEAD commit SHA the CI run must match.  Defaults to
+                the result of ``git rev-parse HEAD`` in the current working
+                directory.  Pass explicitly when the executor's CWD is not
+                the repo being tested (e.g. worktree dispatch).
+            branch: Branch to scope the search.  When empty or ``"auto"``,
+                resolved from ``git rev-parse --abbrev-ref HEAD``.
+            runner: Optional pre-built :class:`CIGateRunner` (test injection).
+
+        Returns:
+            A :class:`CIGateResult`.  Never raises for normal failures —
+            missing gh, timeout, and provider stubs are returned as
+            ``passed=False`` results.
+
+        Raises:
+            NotImplementedError: When the parsed provider is unsupported
+                (e.g. ``gitlab``).  Surfaced so plan authors notice the
+                gap immediately.
+        """
+        # Local imports keep the executor's import graph small for the
+        # common case (no CI gates).
+        from agent_baton.core.gates.ci_gate import (
+            CIGateRunner,
+            parse_ci_gate_config,
+        )
+        import subprocess as _sp
+
+        config = parse_ci_gate_config(gate_command_or_config)
+
+        resolved_sha = commit_sha
+        resolved_branch = branch or config.branch
+
+        if not resolved_sha:
+            try:
+                proc = _sp.run(
+                    ["git", "rev-parse", "HEAD"],
+                    capture_output=True, text=True, check=False, timeout=10,
+                )
+                resolved_sha = (proc.stdout or "").strip()
+            except (FileNotFoundError, _sp.TimeoutExpired):
+                resolved_sha = ""
+
+        if not resolved_branch or resolved_branch == "auto":
+            try:
+                proc = _sp.run(
+                    ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                    capture_output=True, text=True, check=False, timeout=10,
+                )
+                resolved_branch = (proc.stdout or "").strip() or "HEAD"
+            except (FileNotFoundError, _sp.TimeoutExpired):
+                resolved_branch = "HEAD"
+
+        gate_runner = runner or CIGateRunner(
+            poll_interval_s=config.poll_interval_s,
+        )
+        return gate_runner.wait_for_workflow(
+            provider=config.provider,
+            workflow=config.workflow,
+            branch=resolved_branch,
+            commit_sha=resolved_sha,
+            timeout_s=config.timeout_s,
+        )
 
     # ── Policy enforcement helpers ───────────────────────────────────────────
 
@@ -1066,6 +1231,8 @@ class ExecutionEngine:
             current_phase=0,
             current_step_index=0,
             status=initial_status,
+            force_override=self._force_override,
+            override_justification=self._override_justification,
         )
 
         # Initialise trace (in-memory; committed to disk on complete()).
@@ -1255,12 +1422,12 @@ class ExecutionEngine:
             | interacting_ids
         )
 
-        actions: list[ExecutionAction] = []
+        # First pass: discover which steps would dispatch this wave so we
+        # can decide isolation BEFORE building prompts.  Building first
+        # then rewriting would force a re-render to inject the Worktree
+        # Discipline block and relativize paths.
+        dispatchable_steps: list[tuple[PlanStep, bool]] = []
         for step in phase_obj.steps:
-            # Team steps can be re-entered while still in dispatched state
-            # when the team_dispatch tool has added new sub-team members
-            # mid-flight; _team_dispatch_action handles the "nothing ready"
-            # case by returning WAIT.
             is_in_flight_team = (
                 step.team
                 and step.step_id in dispatched
@@ -1273,12 +1440,20 @@ class ExecutionEngine:
                 dep in completed for dep in step.depends_on
             ):
                 continue
-            # Team steps route through _team_dispatch_action so nested
-            # sub-teams are expanded and the team_registry is populated.
+            dispatchable_steps.append((step, bool(is_in_flight_team)))
+
+        # Concurrent dispatch contract (Fix C, worktree-isolation-fix.md):
+        # 2+ steps in the wave -> each runs in its own worktree.  Pass
+        # isolation through _dispatch_action so the prompt includes the
+        # Worktree Discipline block and uses relativized paths.
+        wave_isolation = "worktree" if len(dispatchable_steps) >= 2 else ""
+
+        actions: list[ExecutionAction] = []
+        for step, is_in_flight_team in dispatchable_steps:
             if step.team:
-                team_action = self._team_dispatch_action(step, state)
-                # Skip the WAIT result when the step is already in flight —
-                # it adds nothing and would confuse batch callers.
+                team_action = self._team_dispatch_action(
+                    step, state, wave_isolation=wave_isolation,
+                )
                 if (
                     is_in_flight_team
                     and team_action.action_type == ActionType.WAIT
@@ -1286,7 +1461,11 @@ class ExecutionEngine:
                     continue
                 actions.append(team_action)
             else:
-                actions.append(self._dispatch_action(step, state))
+                actions.append(
+                    self._dispatch_action(
+                        step, state, isolation=wave_isolation,
+                    )
+                )
 
         return actions
 
@@ -1326,6 +1505,72 @@ class ExecutionEngine:
             deviations.append("\n".join(current).strip())
         return [d for d in deviations if d]
 
+    def _load_handoff_outcome(self, result: StepResult) -> str:
+        """Return the handoff text for *result*, preferring spillover content.
+
+        When a step's outcome was truncated and the full text was written
+        to the per-task spillover directory (see
+        :func:`agent_baton.core.runtime.claude_launcher._write_outcome_spillover`),
+        read that file and return up to ``_HANDOFF_SPILLOVER_MAX_BYTES``
+        of its content so the next step receives the substantive work
+        rather than the breadcrumb.
+
+        Falls back silently to ``result.outcome`` when:
+        - no spillover path is recorded,
+        - the spillover file is missing (e.g. cross-machine resume), or
+        - the file is unreadable.
+        """
+        spillover_rel = (result.outcome_spillover_path or "").strip()
+        if not spillover_rel:
+            return result.outcome
+
+        # Resolve relative path against the per-task execution dir.
+        task_id = getattr(self, "_task_id", None)
+        root = getattr(self, "_root", None)
+        if not task_id or root is None:
+            return result.outcome
+        # SECURITY (bd-c134): outcome_spillover_path is recorded by step
+        # results which originate (transitively) from agent output. A
+        # malicious or buggy spillover_rel like "../../../etc/passwd" would
+        # otherwise cause a read_bytes() outside the execution sandbox.
+        # Resolve and constrain the read to the per-task execution dir.
+        execution_dir = (Path(root) / "executions" / task_id).resolve()
+        try:
+            spillover_file = (execution_dir / spillover_rel).resolve(strict=True)
+            spillover_file.relative_to(execution_dir)
+        except (OSError, ValueError, RuntimeError) as exc:
+            logger.warning(
+                "Rejected spillover path %r for task %s (outside execution dir or unreadable: %s).",
+                spillover_rel,
+                task_id,
+                exc,
+            )
+            return result.outcome
+        if not spillover_file.is_file():
+            return result.outcome
+
+        try:
+            data = spillover_file.read_bytes()
+        except OSError as exc:
+            logger.debug(
+                "Spillover file %s unreadable (%s); falling back to inline outcome.",
+                spillover_file,
+                exc,
+            )
+            return result.outcome
+
+        if len(data) <= _HANDOFF_SPILLOVER_MAX_BYTES:
+            return data.decode("utf-8", errors="replace")
+        # Cap at the handoff budget; preserve a leading note for the agent.
+        head = data[:_HANDOFF_SPILLOVER_MAX_BYTES].decode(
+            "utf-8", errors="replace"
+        )
+        return (
+            f"[Spillover capped at {_HANDOFF_SPILLOVER_MAX_BYTES} bytes; "
+            f"full file: {spillover_rel} ({len(data)} bytes total)]\n\n"
+            f"{head}"
+        )
+
     def record_step_result(
         self,
         step_id: str,
@@ -1339,6 +1584,7 @@ class ExecutionEngine:
         error: str = "",
         session_id: str = "",
         step_started_at: str = "",
+        outcome_spillover_path: str = "",
     ) -> None:
         """Record the result of a step execution.
 
@@ -1476,6 +1722,15 @@ class ExecutionEngine:
             except Exception as _scan_exc:  # noqa: BLE001
                 _log.debug("JSONL scanner failed (non-fatal): %s", _scan_exc)
 
+        # Auto-detect spillover path from outcome breadcrumb when caller
+        # did not pass it explicitly.  This keeps legacy callers (e.g. the
+        # CLI _run_loop in execute.py) compatible without signature edits.
+        _spillover = outcome_spillover_path
+        if not _spillover and outcome:
+            _m = _SPILLOVER_BREADCRUMB_RE.match(outcome)
+            if _m:
+                _spillover = _m.group(1)
+
         result = StepResult(
             step_id=step_id,
             agent_name=agent_name,
@@ -1496,6 +1751,7 @@ class ExecutionEngine:
             model_id=real_model,
             session_id=_sid,
             step_started_at=_started,
+            outcome_spillover_path=_spillover,
         )
         # Replace any existing result for this step_id (e.g. a prior
         # "dispatched" row written by mark_dispatched) instead of appending.
@@ -1700,6 +1956,35 @@ class ExecutionEngine:
             result.deviations.append(f"TOKEN_BUDGET_WARNING: {warning}")
 
         self._save_execution(state)
+
+        # ── Context harvest (Wave 2.2) ────────────────────────────────────────
+        # Best-effort: write a compact (agent_name, domain) learning row into
+        # agent_context after every successful step.  The dispatcher reads
+        # this on the next dispatch to prepend a "Prior Context" block,
+        # eliminating cold-start re-discovery costs.
+        # Feature flag: BATON_HARVEST_CONTEXT (default on; "0" disables).
+        # Failures are swallowed inside the harvester — never blocks recording.
+        if status == "complete" and self._storage is not None:
+            try:
+                from agent_baton.core.intel.context_harvester import (
+                    ContextHarvester,
+                    is_enabled as _harvest_enabled,
+                )
+                if _harvest_enabled():
+                    _conn = self._storage._conn()
+                    _gate_outcomes = {
+                        gr.gate_id: gr.status
+                        for gr in getattr(state, "gate_results", []) or []
+                    }
+                    ContextHarvester().harvest(
+                        result,
+                        _conn,
+                        plan_step=_plan_step,
+                        task_id=state.task_id,
+                        gate_outcomes=_gate_outcomes,
+                    )
+            except Exception as _hv_exc:  # noqa: BLE001
+                _log.debug("ContextHarvester invocation failed (non-fatal): %s", _hv_exc)
 
         # ── Domain event publication ──────────────────────────────────────────
         # Publish step-level domain events to the event bus so that CLI-driven
@@ -2071,8 +2356,25 @@ class ExecutionEngine:
         # Reuse self._retro_engine in file mode; create a transient one for
         # storage mode (persist is handled by _save_retro).
         _gen_engine = self._retro_engine or RetrospectiveEngine(
-            retrospectives_dir=self._root / "retrospectives"
+            retrospectives_dir=self._root / "retrospectives",
+            telemetry=_build_knowledge_telemetry_store(),
         )
+        # bd-a313 — assemble (doc_name, pack_name) pairs for every knowledge
+        # attachment that appeared on a plan step.  Deduplicated across the
+        # whole plan so each doc only generates one outcome row.
+        _attached_docs: list[tuple[str, str]] = []
+        try:
+            _seen_pairs: set[tuple[str, str]] = set()
+            for _phase in state.plan.phases:
+                for _step in _phase.steps:
+                    for _att in getattr(_step, "knowledge", []) or []:
+                        _pair = (_att.document_name, _att.pack_name or "")
+                        if _pair not in _seen_pairs:
+                            _seen_pairs.add(_pair)
+                            _attached_docs.append(_pair)
+        except Exception as _att_exc:
+            logger.debug("attached_docs assembly skipped (non-fatal): %s", _att_exc)
+
         retro = _gen_engine.generate_from_usage(
             usage=usage_record,
             task_name=retro_data.get("task_name", state.plan.task_summary),
@@ -2083,6 +2385,7 @@ class ExecutionEngine:
             sequencing_notes=retro_data.get("sequencing_notes"),
             team_compositions=retro_data.get("team_compositions"),
             conflicts=retro_data.get("conflicts"),
+            attached_docs=_attached_docs or None,
         )
         retro_path = self._save_retro(retro)
 
@@ -2240,6 +2543,9 @@ class ExecutionEngine:
             "step_results": [r.to_dict() for r in state.step_results],
             "step_plan": step_plan,
             "gate_results": [g.to_dict() for g in state.gate_results],
+            # F0.3 — VETO override (bd-f606): expose for diagnostics
+            "force_override": state.force_override,
+            "override_justification": state.override_justification,
         }
 
     def resume(self) -> ExecutionAction:
@@ -2539,11 +2845,20 @@ class ExecutionEngine:
         status: str = "complete",
         outcome: str = "",
         files_changed: list[str] | None = None,
+        outcome_spillover_path: str = "",
     ) -> None:
         """Record the result of a single team member within a team step.
 
         When all members have completed, the parent step is automatically
         marked as complete.  If any member fails, the parent step fails.
+
+        ``outcome_spillover_path``: relative path (under the per-task
+        execution dir) to a spillover file holding the FULL member outcome
+        when ``outcome`` was truncated.  When empty, an attempt is made to
+        auto-detect it from a ``[TRUNCATED — full output: ...]`` breadcrumb
+        in ``outcome``.  The most recent non-empty spillover path is mirrored
+        onto the parent ``StepResult`` so that handoff assembly can recover
+        the full member output.
         """
         state = self._require_execution("record_team_member_result")
 
@@ -2555,6 +2870,14 @@ class ExecutionEngine:
             )
             state.step_results.append(parent)
 
+        # Auto-detect spillover path from outcome breadcrumb when caller
+        # did not pass it explicitly (mirrors record_step_result).
+        _spillover = outcome_spillover_path
+        if not _spillover and outcome:
+            _m = _SPILLOVER_BREADCRUMB_RE.match(outcome)
+            if _m:
+                _spillover = _m.group(1)
+
         member_result = TeamStepResult(
             member_id=member_id,
             agent_name=agent_name,
@@ -2563,6 +2886,12 @@ class ExecutionEngine:
             files_changed=files_changed or [],
         )
         parent.member_results.append(member_result)
+
+        # Bubble the spillover path onto the parent StepResult so that
+        # downstream handoff assembly (which reads parent.outcome_spillover_path)
+        # can recover the full text.  Most recent wins.
+        if _spillover:
+            parent.outcome_spillover_path = _spillover
 
         # Check if all team members are done.  For nested teams the
         # expected set includes the lead AND every recursively-flattened
@@ -2801,6 +3130,33 @@ class ExecutionEngine:
             severity="medium",
             resolution="unresolved",
         )
+
+    def _effective_timeout(self, step: PlanStep) -> int:
+        """Return the effective timeout in seconds for *step*.
+
+        Resolution order:
+        1. ``step.timeout_seconds`` when non-zero (explicit per-step override).
+        2. ``BATON_DEFAULT_STEP_TIMEOUT_S`` env var when set to a positive int.
+        3. 0 (no timeout) — default, fully backward-compatible.
+
+        Args:
+            step: The plan step to evaluate.
+
+        Returns:
+            Effective timeout in seconds; ``0`` means no timeout enforced.
+        """
+        import os
+        if step.timeout_seconds > 0:
+            return step.timeout_seconds
+        env_val = os.environ.get("BATON_DEFAULT_STEP_TIMEOUT_S", "")
+        if env_val:
+            try:
+                parsed = int(env_val)
+                if parsed > 0:
+                    return parsed
+            except ValueError:
+                pass
+        return 0
 
     def _check_token_budget(self, state: ExecutionState) -> str | None:
         """Return a warning string if cumulative tokens exceed the budget limit.
@@ -3119,6 +3475,40 @@ class ExecutionEngine:
             outcome=outcome,
         )
 
+    # bd-a313 — F0.4 KnowledgeUsed emission ----------------------------------
+
+    def _emit_knowledge_used(self, task_id: str, step) -> None:  # noqa: ANN001
+        """Emit a ``KnowledgeUsed`` row for every attachment on *step*.
+
+        Lazily constructs (and caches on the engine) a default
+        ``KnowledgeTelemetryStore`` pointed at ``~/.baton/central.db``.  Any
+        failure during construction or write is swallowed — telemetry is a
+        best-effort side-channel.
+        """
+        attachments = getattr(step, "knowledge", None)
+        if not attachments:
+            return
+        store = getattr(self, "_runtime_knowledge_telemetry", None)
+        if store is None:
+            store = _build_knowledge_telemetry_store()
+            self._runtime_knowledge_telemetry = store
+        if store is None:
+            return
+        for att in attachments:
+            try:
+                store.record_used(
+                    doc_name=att.document_name,
+                    pack_name=att.pack_name or "",
+                    task_id=task_id or "",
+                    step_id=getattr(step, "step_id", "") or "",
+                    delivery=getattr(att, "delivery", "inline") or "inline",
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "KnowledgeTelemetry.record_used failed for %s/%s: %s",
+                    att.pack_name, att.document_name, exc,
+                )
+
     def _build_retrospective_data(self, state: ExecutionState) -> dict:
         """Build a rich data dict for the retrospective from execution state.
 
@@ -3369,6 +3759,152 @@ class ExecutionEngine:
 
     # ── State machine logic ─────────────────────────────────────────────────
 
+    # ── F0.3 — VETO enforcement (bd-f606) ─────────────────────────────────
+    @staticmethod
+    def _is_high_risk(plan_risk_level: str) -> bool:
+        """Return True when the plan's risk level enforces VETO blocks."""
+        return (plan_risk_level or "").upper() in _HIGH_RISK_LEVELS
+
+    def _scan_phase_for_veto(
+        self, state: ExecutionState, phase_obj: PlanPhase | None
+    ) -> tuple[AuditorVerdict | None, str, str]:
+        """Scan a finished phase's step results for an auditor verdict.
+
+        Looks at every completed step in *phase_obj*.  Auditor-style steps
+        (agent name contains ``"auditor"``) are scanned first; otherwise any
+        step outcome that contains a fenced verdict block is considered.
+
+        Returns a tuple ``(verdict, rationale, source_step_id)`` where
+        ``verdict`` is ``None`` when no verdict can be parsed.  When more
+        than one verdict is found, the most blocking one wins (VETO >
+        REQUEST_CHANGES > APPROVE_WITH_CONCERNS > APPROVE).
+        """
+        if phase_obj is None:
+            return None, "", ""
+
+        phase_step_ids = {s.step_id for s in phase_obj.steps}
+        # Sort: auditor agents first, then by step_id for deterministic order
+        candidate_results = [
+            r for r in state.step_results
+            if r.step_id in phase_step_ids and r.status == "complete"
+        ]
+        candidate_results.sort(
+            key=lambda r: (0 if "auditor" in (r.agent_name or "").lower() else 1, r.step_id)
+        )
+
+        severity = {
+            AuditorVerdict.APPROVE: 0,
+            AuditorVerdict.APPROVE_WITH_CONCERNS: 1,
+            AuditorVerdict.REQUEST_CHANGES: 2,
+            AuditorVerdict.VETO: 3,
+        }
+        best_verdict: AuditorVerdict | None = None
+        best_rationale = ""
+        best_source = ""
+        for r in candidate_results:
+            v = extract_verdict_from_text(r.outcome or "")
+            if v is None:
+                continue
+            if best_verdict is None or severity[v] > severity[best_verdict]:
+                best_verdict = v
+                best_rationale = self._extract_rationale(r.outcome or "")
+                best_source = r.step_id
+        return best_verdict, best_rationale, best_source
+
+    @staticmethod
+    def _extract_rationale(text: str) -> str:
+        """Pull a ``rationale`` field from the auditor's fenced JSON block.
+
+        Falls back to the empty string when no JSON block / rationale is
+        found.  Keeps parsing tolerant — a missing rationale must never
+        prevent VETO enforcement.
+        """
+        try:
+            fence_pattern = re.compile(
+                r"```(?:json)?\s*(\{.*?\})\s*```",
+                re.DOTALL | re.IGNORECASE,
+            )
+            for match in fence_pattern.finditer(text):
+                try:
+                    obj = json.loads(match.group(1))
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if isinstance(obj, dict) and "rationale" in obj:
+                    return str(obj.get("rationale") or "")
+        except Exception:
+            return ""
+        return ""
+
+    def _enforce_veto_before_advance(
+        self, state: ExecutionState, phase_obj: PlanPhase
+    ) -> None:
+        """Block phase-advance when the auditor returned VETO and risk is HIGH/CRITICAL.
+
+        Raises :class:`ExecutionVetoed` when:
+          - Effective phase risk is HIGH or CRITICAL, AND
+          - The just-completed phase has a VETO verdict, AND
+          - Neither ``state.force_override`` nor ``self._force_override`` is set.
+
+        Effective risk resolution (bd-5bd9): when ``phase_obj.risk_level``
+        is set, it overrides ``state.plan.risk_level`` for the gating
+        check.  This lets a CRITICAL plan contain a single LOW phase
+        whose VETO does not halt the whole plan.
+
+        When ``force_override`` is set, an Override row is appended to
+        ``compliance-audit.jsonl`` via :class:`ComplianceChainWriter` before
+        returning so the override is durably auditable.
+        """
+        effective_risk = (
+            (getattr(phase_obj, "risk_level", "") or "").strip()
+            or state.plan.risk_level
+        )
+        if not self._is_high_risk(effective_risk):
+            return
+
+        verdict, rationale, source_step = self._scan_phase_for_veto(state, phase_obj)
+        if verdict is None or not verdict.blocks_execution:
+            return
+
+        force = bool(state.force_override or self._force_override)
+        justification = (
+            state.override_justification or self._override_justification or ""
+        ).strip()
+
+        if not force:
+            raise ExecutionVetoed(
+                phase_id=phase_obj.phase_id,
+                verdict=verdict,
+                rationale=rationale,
+            )
+
+        # Force path — record an Override row in the hash-chained log.
+        try:
+            chain_path = self._root / "compliance-audit.jsonl"
+            writer = ComplianceChainWriter(log_path=chain_path)
+            actor = state.override_justification and "override-cli" or "override-engine"
+            writer.append_override(
+                task_id=state.task_id,
+                actor=actor,
+                justification=justification or "(no justification supplied)",
+                overridden_verdict=verdict.value,
+            )
+        except Exception as exc:
+            _log.warning(
+                "Failed to append Override row for task %s phase %s: %s",
+                state.task_id, phase_obj.phase_id, exc,
+            )
+
+        self._log_telemetry_event(TelemetryEvent(
+            timestamp=_utcnow(),
+            agent_name="engine",
+            event_type="execution.veto_overridden",
+            details=(
+                f"task_id={state.task_id} phase_id={phase_obj.phase_id} "
+                f"source_step={source_step} verdict={verdict.value} "
+                f"justification={justification!r}"
+            ),
+        ))
+
     def _determine_action(self, state: ExecutionState) -> ExecutionAction:
         """Core state machine — inspect *state* and return the next action.
 
@@ -3545,6 +4081,8 @@ class ExecutionEngine:
                 phase_id=phase_obj.phase_id,
                 phase_name=phase_obj.name,
             ))
+            # Post-phase: refresh the bead knowledge graph (Wave 2.1).
+            self._synthesize_beads_post_phase()
             state.current_phase += 1
             state.current_step_index = 0
             if state.current_phase < len(state.plan.phases):
@@ -3631,6 +4169,92 @@ class ExecutionEngine:
                 if plan_step is not None:
                     return self._dispatch_action(plan_step, state)
 
+        # ── Step timeout enforcement ──────────────────────────────────────────
+        # Before returning WAIT, check whether any dispatched step has exceeded
+        # its timeout.  When a step times out it is immediately marked failed
+        # (so the next _determine_action call returns FAILED) and a warning
+        # bead is filed.  The loop continues to catch multiple simultaneous
+        # timeouts — the first one will flip state.status to "failed" on the
+        # next iteration.
+        for result in state.step_results:
+            if result.status != "dispatched":
+                continue
+            plan_step = self._find_step(state, result.step_id)
+            if plan_step is None:
+                continue
+            effective_timeout = self._effective_timeout(plan_step)
+            if effective_timeout <= 0:
+                continue
+            elapsed = _elapsed_seconds(result.step_started_at or state.started_at)
+            if elapsed > effective_timeout:
+                timeout_msg = (
+                    f"TIMEOUT after {effective_timeout}s"
+                    f" (elapsed {int(elapsed)}s)"
+                )
+                _log.warning(
+                    "Step %s timed out after %ss (elapsed %.1fs); marking failed.",
+                    result.step_id,
+                    effective_timeout,
+                    elapsed,
+                )
+                # Best-effort warning bead — must not block timeout handling.
+                try:
+                    if self._bead_store is not None:
+                        from agent_baton.models.bead import Bead, _generate_bead_id
+                        _ts = _utcnow()
+                        _bead_count = len(
+                            self._bead_store.query(task_id=state.task_id, limit=10000)
+                        )
+                        _bead = Bead(
+                            bead_id=_generate_bead_id(
+                                state.task_id,
+                                result.step_id,
+                                timeout_msg,
+                                _ts,
+                                _bead_count,
+                            ),
+                            task_id=state.task_id,
+                            step_id=result.step_id,
+                            agent_name=result.agent_name,
+                            bead_type="warning",
+                            content=(
+                                f"Step {result.step_id} timed out after "
+                                f"{effective_timeout}s"
+                            ),
+                            tags=["timeout"],
+                            created_at=_ts,
+                            source="agent-signal",
+                        )
+                        self._bead_store.write(_bead)
+                except Exception as _bead_exc:  # noqa: BLE001
+                    _log.debug(
+                        "Timeout bead write failed (non-fatal): %s", _bead_exc
+                    )
+                # Mark the step failed in the in-memory state so the final
+                # _save_execution() call in next_action() persists the correct
+                # status.  record_step_result() also loads/saves independently,
+                # but the caller (next_action) overwrites disk after
+                # _determine_action returns — so we must update state too.
+                result.status = "failed"
+                result.outcome = timeout_msg
+                result.error = timeout_msg
+                result.completed_at = _utcnow()
+                result.updated_at = _utcnow()
+                state.status = "failed"
+                self.record_step_result(
+                    step_id=result.step_id,
+                    agent_name=result.agent_name,
+                    status="failed",
+                    outcome=timeout_msg,
+                    error=timeout_msg,
+                )
+                msg = f"Step {result.step_id} timed out after {effective_timeout}s."
+                return ExecutionAction(
+                    action_type=ActionType.FAILED,
+                    message=msg,
+                    summary=msg,
+                )
+
         # If no step is dispatchable but some are still pending (dispatched or
         # blocked by dependencies), return WAIT.
         # Interrupted steps are excluded: they have been superseded by amended
@@ -3642,6 +4266,10 @@ class ExecutionEngine:
             - state.interrupted_step_ids
         )
         if pending:
+            # bd-7312: Check for timed-out dispatched steps before returning WAIT.
+            timeout_action = self._check_timeout(state)
+            if timeout_action is not None:
+                return timeout_action
             return ExecutionAction(
                 action_type=ActionType.WAIT,
                 message="Waiting for in-flight steps to complete before proceeding.",
@@ -3671,12 +4299,22 @@ class ExecutionEngine:
                 phase_id=phase_obj.phase_id,
             )
 
+        # F0.3 — VETO enforcement (bd-f606).  Before advancing past a
+        # HIGH/CRITICAL phase, scan for an auditor VETO verdict and either
+        # halt (raise ExecutionVetoed) or record an Override audit row.
+        # LOW/MEDIUM phases are not enforced — VETO only applies to the
+        # regulated tier.
+        self._enforce_veto_before_advance(state, phase_obj)
+
         # Gate passed (or no gate) — move to next phase.
         self._publish(evt.phase_completed(
             task_id=state.task_id,
             phase_id=phase_obj.phase_id,
             phase_name=phase_obj.name,
         ))
+        # Post-phase: refresh the bead knowledge graph (Wave 2.1).
+        # Best-effort — failure here must never block phase advancement.
+        self._synthesize_beads_post_phase()
         state.current_phase += 1
         state.current_step_index = 0
         state.status = "running"
@@ -3696,7 +4334,13 @@ class ExecutionEngine:
             ))
         return self._determine_action(state)
 
-    def _dispatch_action(self, step: PlanStep, state: ExecutionState) -> ExecutionAction:
+    def _dispatch_action(
+        self,
+        step: PlanStep,
+        state: ExecutionState,
+        *,
+        isolation: str = "",
+    ) -> ExecutionAction:
         """Build a DISPATCH action for *step*.
 
         Before building the prompt, runs a policy check against the active
@@ -3778,13 +4422,14 @@ class ExecutionEngine:
                 path_enforcement=enforcement or "",
                 interactive=True,
                 interact_max_turns=step.max_turns,
+                expected_outcome=step.expected_outcome,
             )
 
         # Find the most recent completed step (different step_id) for handoff.
         handoff = ""
         for result in reversed(state.step_results):
             if result.step_id != step.step_id and result.status == "complete" and result.outcome:
-                handoff = result.outcome
+                handoff = self._load_handoff_outcome(result)
                 break
 
         # Append resolved decisions to the handoff so the agent does not re-litigate
@@ -3828,6 +4473,57 @@ class ExecutionEngine:
                 task_summary=state.plan.task_summary,
             )
         else:
+            # Wave 2.2 — fetch prior context for this (agent_name, domain).
+            # Best-effort: any failure leaves the block empty so the prompt
+            # is unchanged from pre-harvester behavior.
+            _prior_context_block = ""
+            if self._storage is not None:
+                try:
+                    from agent_baton.core.intel.context_harvester import (
+                        ContextHarvester,
+                        derive_domain,
+                        is_enabled as _harvest_enabled,
+                    )
+                    if _harvest_enabled():
+                        _hv_conn = self._storage._conn()
+                        # derive_domain takes a step_result-shaped first arg;
+                        # at dispatch time we only have the PlanStep so pass
+                        # an empty stand-in for files_changed and rely on
+                        # plan_step.allowed_paths.
+                        _hv_domain = derive_domain(
+                            type("_S", (), {"files_changed": []})(),
+                            plan_step=step,
+                        )
+                        _hv_row = ContextHarvester.fetch_one(
+                            _hv_conn, step.agent_name, _hv_domain
+                        )
+                        if _hv_row:
+                            _prior_context_block = (
+                                ContextHarvester.render_prior_context_block(_hv_row)
+                            )
+                except Exception as _hv_exc:  # noqa: BLE001
+                    _log.debug(
+                        "Prior context lookup failed (non-fatal): %s", _hv_exc
+                    )
+
+            # Wave 3.2 — locate the most recent completed step (different
+            # step_id) for handoff synthesis.  This is the same lookup
+            # used above to derive ``handoff`` (the free-text summary)
+            # but here we hand the StepResult itself to the dispatcher
+            # so HandoffSynthesizer can compress files / discoveries /
+            # blockers into the prompt.
+            _prior_step_result = None
+            for _r in reversed(state.step_results):
+                if _r.step_id != step.step_id and _r.status == "complete":
+                    _prior_step_result = _r
+                    break
+            _handoff_conn = None
+            if self._storage is not None:
+                try:
+                    _handoff_conn = self._storage._conn()
+                except Exception:  # noqa: BLE001
+                    _handoff_conn = None
+
             prompt = dispatcher.build_delegation_prompt(
                 step,
                 shared_context=state.plan.shared_context,
@@ -3836,12 +4532,27 @@ class ExecutionEngine:
                 task_type=state.plan.task_type or "",
                 prior_beads=prior_beads or None,
                 delivered_knowledge=state.delivered_knowledge,
+                isolation=isolation or None,
+                project_root=self._project_root() if isolation else None,
+                prior_context_block=_prior_context_block,
+                prior_step_result=_prior_step_result,
+                handoff_conn=_handoff_conn,
+                handoff_task_id=state.task_id or "",
             )
             # Persist the updated delivered_knowledge map so subsequent
             # dispatches in this run know which docs are already inlined.
             if self._persistence is not None:
                 self._persistence.save(state)
         enforcement = PromptDispatcher.build_path_enforcement(step)
+
+        # bd-a313 — emit F0.4 KnowledgeUsed telemetry for every attachment on
+        # this step.  The resolver was likely invoked at plan time (without a
+        # task_id), so we record the actual delivery here where task_id and
+        # step_id are known.  Best-effort — never raise from the dispatch path.
+        try:
+            self._emit_knowledge_used(state.task_id, step)
+        except Exception as _kt_exc:
+            logger.debug("knowledge telemetry emission skipped (non-fatal): %s", _kt_exc)
 
         # ── Compliance audit: record dispatch event ──────────────────────────
         preset_name = _risk_level_to_preset(state.plan.risk_level)
@@ -3867,7 +4578,18 @@ class ExecutionEngine:
             path_enforcement=enforcement or "",
             interactive=step.interactive,
             interact_max_turns=step.max_turns if step.interactive else 10,
+            isolation=isolation,
+            expected_outcome=step.expected_outcome,
         )
+
+    def _project_root(self) -> Path:
+        """Return the resolved project root.
+
+        ``self._root`` is ``<project>/.claude/team-context`` in normal use,
+        so the project root is two parents up.  Used for path
+        relativization in worktree-isolation dispatch (Fix A).
+        """
+        return self._root.parent.parent
 
     def _interact_action(
         self,
@@ -4287,7 +5009,11 @@ class ExecutionEngine:
         return None
 
     def _team_dispatch_action(
-        self, step: PlanStep, state: ExecutionState,
+        self,
+        step: PlanStep,
+        state: ExecutionState,
+        *,
+        wave_isolation: str = "",
     ) -> ExecutionAction:
         """Build a DISPATCH action with parallel_actions for each team member.
 
@@ -4403,6 +5129,17 @@ class ExecutionEngine:
                 summary=f"Team step {step.step_id} has members in flight.",
             )
 
+        # Concurrent dispatch contract (Fix C, worktree-isolation-fix.md):
+        # mark isolation when (a) this team has 2+ members dispatching in
+        # parallel, OR (b) the enclosing phase wave already has 2+
+        # dispatchable steps (signaled via wave_isolation).
+        effective_iso = wave_isolation or (
+            "worktree" if len(member_actions) >= 2 else ""
+        )
+        if effective_iso:
+            for ma in member_actions:
+                ma.isolation = effective_iso
+
         # Return the first member action with the rest as parallel_actions.
         first = member_actions[0]
         if len(member_actions) > 1:
@@ -4441,6 +5178,131 @@ class ExecutionEngine:
             trigger_phase_id=phase_id,
             feedback=feedback,
         )
+
+    # ── Step-timeout enforcement (bd-7312) ────────────────────────────────────
+
+    def _effective_timeout(self, step: PlanStep) -> int:
+        """Return the effective timeout in seconds for *step*.
+
+        Priority:
+        1. ``step.timeout_seconds`` if > 0.
+        2. ``BATON_DEFAULT_STEP_TIMEOUT_S`` env var if parseable as a positive int.
+        3. 0 — unlimited (no enforcement).
+        """
+        if step.timeout_seconds > 0:
+            return step.timeout_seconds
+        import os
+        raw = os.environ.get("BATON_DEFAULT_STEP_TIMEOUT_S", "")
+        if raw:
+            try:
+                val = int(raw)
+                if val > 0:
+                    return val
+            except ValueError:
+                pass
+        return 0
+
+    def _check_timeout(self, state: ExecutionState) -> ExecutionAction | None:
+        """Check in-flight dispatched steps for timeout violations.
+
+        Walks ``state.step_results`` looking for steps with
+        ``status == "dispatched"``.  For each, computes the effective timeout.
+        If elapsed time exceeds the timeout the step result is mutated to
+        ``status="failed"`` with a TIMEOUT outcome, state is persisted, a
+        best-effort warning bead is filed, and a FAILED action is returned.
+
+        Returns ``None`` when no timeout breach is detected.
+        """
+        now = datetime.now(tz=timezone.utc)
+
+        for result in state.step_results:
+            if result.status != "dispatched":
+                continue
+
+            plan_step = self._find_step(state, result.step_id)
+            if plan_step is None:
+                continue
+
+            effective = self._effective_timeout(plan_step)
+            if effective == 0:
+                continue
+
+            if not result.step_started_at:
+                continue
+
+            try:
+                started_at = datetime.fromisoformat(result.step_started_at)
+                if started_at.tzinfo is None:
+                    started_at = started_at.replace(tzinfo=timezone.utc)
+                elapsed = (now - started_at).total_seconds()
+            except (ValueError, TypeError):
+                continue
+
+            if elapsed <= effective:
+                continue
+
+            # Timeout breached — mark step failed.
+            result.status = "failed"
+            result.outcome = (
+                f"TIMEOUT after {effective}s (elapsed {int(elapsed)}s)"
+            )
+            state.status = "failed"
+            self._save_execution(state)
+
+            # Best-effort warning bead — must not block timeout enforcement.
+            try:
+                if self._bead_store is not None:
+                    from agent_baton.models.bead import Bead, _generate_bead_id
+                    import hashlib  # noqa: F401 — used inside _generate_bead_id
+                    _ts = _utcnow()
+                    _content = (
+                        f"Step {result.step_id} timed out after {effective}s "
+                        f"(elapsed {int(elapsed)}s)."
+                    )
+                    _bead_count = len(
+                        self._bead_store.query(
+                            task_id=state.task_id, limit=10000
+                        )
+                    )
+                    _bead_id = _generate_bead_id(
+                        task_id=state.task_id,
+                        step_id=result.step_id,
+                        content=_content,
+                        timestamp=_ts,
+                        bead_count=_bead_count,
+                    )
+                    _bead = Bead(
+                        bead_id=_bead_id,
+                        task_id=state.task_id,
+                        step_id=result.step_id,
+                        agent_name=result.agent_name,
+                        bead_type="warning",
+                        content=_content,
+                        confidence="high",
+                        scope="step",
+                        tags=["timeout"],
+                        created_at=_ts,
+                        source="agent-signal",
+                    )
+                    self._bead_store.write(_bead)
+            except Exception as _bead_exc:
+                _log.debug(
+                    "Timeout bead write failed (non-fatal) for step %s: %s",
+                    result.step_id,
+                    _bead_exc,
+                )
+
+            msg = (
+                f"Step {result.step_id} timed out after {effective}s "
+                f"(elapsed {int(elapsed)}s)."
+            )
+            return ExecutionAction(
+                action_type=ActionType.FAILED,
+                message=msg,
+                summary=msg,
+            )
+
+        return None
 
     @staticmethod
     def _find_step(state: ExecutionState, step_id: str) -> PlanStep | None:
@@ -4674,6 +5536,7 @@ class ExecutionEngine:
                             context_files=list(original_plan_step.context_files),
                             allowed_paths=list(original_plan_step.allowed_paths),
                             blocked_paths=list(original_plan_step.blocked_paths),
+                            expected_outcome=original_plan_step.expected_outcome,
                         )
                         containing_phase.steps.append(re_dispatch_step)
 
@@ -4780,9 +5643,14 @@ class ExecutionEngine:
 
         if resolver is not None:
             try:
+                # bd-a313 — pass task_id/step_id so the resolver's F0.4
+                # telemetry side-channel can record KnowledgeUsed rows tied
+                # back to the actual execution.
                 attachments = resolver.resolve(
                     agent_name=agent_name,
                     task_description=signal.description,
+                    task_id=state.task_id,
+                    step_id=step_id,
                 )
                 if attachments:
                     resolution_found = True

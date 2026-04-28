@@ -649,6 +649,21 @@ objects:
   under `## Knowledge References`. Retrieval hint is either
   `Read <path>` or `query RAG server` depending on `retrieval` field.
 
+### ContextHarvester (Wave 2.2)
+
+**Source:** `agent_baton/core/intel/context_harvester.py`
+
+Runs after every successful step (`record_step_result` →
+`ContextHarvester.harvest`) and writes a compact 3-5 line summary into
+the `agent_context` table keyed by `(agent_name, domain)`. Domain is
+derived from `PlanStep.allowed_paths[0]` (or `files_changed[0]`),
+falling back to `"general"`. On the next dispatch the executor reads
+the row via `ContextHarvester.fetch_one` and passes it through
+`build_delegation_prompt(prior_context_block=...)`, prepending a
+`## Prior Context` block (capped at 400 chars) so the agent skips
+cold-start re-discovery. Best-effort — disabled by
+`BATON_HARVEST_CONTEXT=0`. Inspected via `baton context show <agent>`.
+
 ---
 
 ## 6. Gate System

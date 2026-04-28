@@ -2,17 +2,39 @@ import { useState, useCallback, useMemo, useRef } from 'react';
 import { KanbanBoard } from './components/KanbanBoard';
 import { ForgePanel } from './components/ForgePanel';
 import { BackOfHousePanel } from './components/BackOfHousePanel';
+import { SpecsPanel } from './components/SpecsPanel';
+import { AgentWorkforceView } from './views/AgentWorkforceView';
+import { BeadGraphView } from './views/BeadGraphView';
+import { BeadTimelineView } from './views/BeadTimelineView';
 import { KeyboardShortcutsDialog } from './components/KeyboardShortcutsDialog';
+import { RoleBasedDashboard } from './views/RoleBasedDashboard';
+import { DeveloperScorecard } from './views/DeveloperScorecard';
+import { ArchReviewPanel } from './views/ArchReviewPanel';
+import { PlaybookGallery } from './views/PlaybookGallery';
+import { CRPWizard } from './views/CRPWizard';
 import { useHotkeys } from './hooks/useHotkeys';
 import { usePersistedState } from './hooks/usePersistedState';
 import { T, FONTS, SHADOWS } from './styles/tokens';
 import { ToastProvider } from './contexts/ToastContext';
 import type { PmoCard, PmoSignal } from './api/types';
 
-type View = 'kanban' | 'forge' | 'boh';
+type View =
+  | 'kanban'
+  | 'forge'
+  | 'boh'
+  | 'specs'
+  | 'workforce'
+  | 'beads'
+  | 'role'
+  | 'scorecard'
+  | 'arch-review'
+  | 'playbooks'
+  | 'crp';
+type BeadsSubView = 'graph' | 'timeline';
 
 export default function App() {
   const [view, setView] = usePersistedState<View>('pmo:active-view', 'kanban');
+  const [beadsSubView, setBeadsSubView] = usePersistedState<BeadsSubView>('pmo:beads-subview', 'graph');
   const [forgeSignal, setForgeSignal] = useState<PmoSignal | null>(null);
   const [showSignals, setShowSignals] = usePersistedState('pmo:show-signals', false);
   const [showShortcuts, setShowShortcuts] = useState(false);
@@ -69,9 +91,16 @@ export default function App() {
   useHotkeys(hotkeyBindings);
 
   const NAV_TABS = [
-    { id: 'kanban' as const, label: 'The Rail',       emoji: '🥟' },
-    { id: 'forge'  as const, label: 'The Forge',      emoji: '🍳' },
-    { id: 'boh'    as const, label: 'Back of House',  emoji: '🚪' },
+    { id: 'kanban'      as const, label: 'The Rail',       emoji: '🥟' },
+    { id: 'forge'       as const, label: 'The Forge',      emoji: '🍳' },
+    { id: 'specs'       as const, label: 'Specs',          emoji: '📋' },
+    { id: 'workforce'   as const, label: 'Workforce',      emoji: '📡' },
+    { id: 'boh'         as const, label: 'Back of House',  emoji: '🚪' },
+    { id: 'role'        as const, label: 'Role View',      emoji: '👤' },
+    { id: 'scorecard'   as const, label: 'Scorecard',      emoji: '📊' },
+    { id: 'arch-review' as const, label: 'Arch Review',    emoji: '🏛️' },
+    { id: 'playbooks'   as const, label: 'Playbooks',      emoji: '📖' },
+    { id: 'crp'         as const, label: 'CRP',            emoji: '📝' },
   ];
 
   return (
@@ -146,7 +175,7 @@ export default function App() {
                 onClick={() => {
                   if (tab.id === 'kanban') backToBoard();
                   else if (tab.id === 'forge') openForge();
-                  else setView('boh');
+                  else setView(tab.id);
                 }}
                 style={{
                   display: 'flex', alignItems: 'center', gap: 5,
@@ -216,6 +245,75 @@ export default function App() {
           />
         </div>
         <div
+          id="panel-specs"
+          role="tabpanel"
+          aria-labelledby="tab-specs"
+          aria-hidden={view !== 'specs'}
+          style={{ display: view === 'specs' ? 'block' : 'none', height: '100%' }}
+        >
+          <SpecsPanel onBack={backToBoard} />
+        </div>
+        <div
+          id="panel-workforce"
+          role="tabpanel"
+          aria-labelledby="tab-workforce"
+          aria-hidden={view !== 'workforce'}
+          style={{ display: view === 'workforce' ? 'block' : 'none', height: '100%' }}
+        >
+          <AgentWorkforceView onBack={backToBoard} />
+        </div>
+        <div
+          id="panel-beads"
+          role="tabpanel"
+          aria-labelledby="tab-beads"
+          aria-hidden={view !== 'beads'}
+          style={{ display: view === 'beads' ? 'flex' : 'none', flexDirection: 'column', height: '100%' }}
+        >
+          {/* Sub-tab toggle: graph vs timeline */}
+          <div
+            role="tablist"
+            aria-label="Beads view mode"
+            style={{
+              display: 'flex',
+              gap: 6,
+              padding: '8px 14px',
+              borderBottom: `2px solid ${T.border}`,
+              background: T.ink,
+              flexShrink: 0,
+            }}
+          >
+            {(['graph', 'timeline'] as const).map(sub => {
+              const active = beadsSubView === sub;
+              return (
+                <button
+                  key={sub}
+                  type="button"
+                  role="tab"
+                  aria-selected={active}
+                  onClick={() => setBeadsSubView(sub)}
+                  style={{
+                    padding: '4px 12px',
+                    borderRadius: 6,
+                    border: active ? `2px solid ${T.butter}` : `2px solid ${T.inkSoft}`,
+                    background: active ? T.butter : 'transparent',
+                    color: active ? T.ink : T.text4,
+                    fontFamily: FONTS.body,
+                    fontSize: 11, fontWeight: 800,
+                    cursor: 'pointer',
+                    textTransform: 'capitalize',
+                    letterSpacing: '.02em',
+                  }}
+                >
+                  {sub === 'graph' ? '🕸 Graph' : '📅 Timeline'}
+                </button>
+              );
+            })}
+          </div>
+          <div style={{ flex: 1, minHeight: 0 }}>
+            {beadsSubView === 'graph' ? <BeadGraphView /> : <BeadTimelineView />}
+          </div>
+        </div>
+        <div
           id="panel-boh"
           role="tabpanel"
           aria-labelledby="tab-boh"
@@ -224,6 +322,56 @@ export default function App() {
         >
           <BackOfHousePanel onBack={backToBoard} />
         </div>
+        {view === 'role' && (
+          <div
+            id="panel-role"
+            role="tabpanel"
+            aria-labelledby="tab-role"
+            style={{ height: '100%', overflowY: 'auto' }}
+          >
+            <RoleBasedDashboard />
+          </div>
+        )}
+        {view === 'scorecard' && (
+          <div
+            id="panel-scorecard"
+            role="tabpanel"
+            aria-labelledby="tab-scorecard"
+            style={{ height: '100%', overflowY: 'auto' }}
+          >
+            <DeveloperScorecard />
+          </div>
+        )}
+        {view === 'arch-review' && (
+          <div
+            id="panel-arch-review"
+            role="tabpanel"
+            aria-labelledby="tab-arch-review"
+            style={{ height: '100%', overflowY: 'auto' }}
+          >
+            <ArchReviewPanel />
+          </div>
+        )}
+        {view === 'playbooks' && (
+          <div
+            id="panel-playbooks"
+            role="tabpanel"
+            aria-labelledby="tab-playbooks"
+            style={{ height: '100%', overflowY: 'auto' }}
+          >
+            <PlaybookGallery />
+          </div>
+        )}
+        {view === 'crp' && (
+          <div
+            id="panel-crp"
+            role="tabpanel"
+            aria-labelledby="tab-crp"
+            style={{ height: '100%', overflowY: 'auto' }}
+          >
+            <CRPWizard />
+          </div>
+        )}
       </div>
     </div>
 

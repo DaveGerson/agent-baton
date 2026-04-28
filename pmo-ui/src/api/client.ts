@@ -36,10 +36,108 @@ import type {
   PoliciesResponse,
   Webhook,
   WebhooksResponse,
+  Spec,
+  SpecState,
+  SpecScore,
+  SpecListResponse,
+  SpecApproveResponse,
+  SpecMarkReviewedResponse,
+  SpecArchiveResponse,
+  DeveloperScorecard,
+  ArchBead,
+  ArchReviewBody,
+  ArchReviewResponse,
+  Playbook,
+  CRPRequestBody,
+  CRPResponse,
 } from './types';
+import { beadsApi, type BeadListParams, type BeadListResponse, type Bead } from './beads';
 
 const BASE = '/api/v1/pmo';
 const BASE_V1 = '/api/v1';
+
+// ---------------------------------------------------------------------------
+// TODO(F0.1): Remove once backend agent 3.1.a ships /api/v1/specs routes.
+// Mocks let the Specs UI render while the backend is being built in parallel.
+// ---------------------------------------------------------------------------
+const _MOCK_SPECS: Spec[] = [
+  {
+    spec_id: 'spec-f01-001',
+    title: 'F0.1 — First-Class Spec Entity',
+    state: 'approved' as SpecState,
+    task_type: 'feature',
+    author_id: 'djiv',
+    template_id: 'feature.yaml',
+    content: [
+      'spec_id: spec-f01-001',
+      'title: F0.1 — First-Class Spec Entity',
+      'task_type: feature',
+      'state: approved',
+      '',
+      'summary: |',
+      '  Add a first-class Spec entity backed by SQLite.',
+      '  New CLI group `baton spec`, PMO API routes, and PMO UI surface.',
+      '',
+      'linked_plans:',
+      '  - plan-2026-04-25-strategic-phase0',
+    ].join('\n'),
+    linked_plan_ids: ['plan-2026-04-25-strategic-phase0'],
+    score: { clarity: 0.9, completeness: 0.85, feasibility: 0.95, testability: 0.8 } as SpecScore,
+    created_at: '2026-04-25T08:00:00Z',
+    updated_at: '2026-04-25T10:00:00Z',
+  },
+  {
+    spec_id: 'spec-f02-001',
+    title: 'F0.2 — Tenancy & Cost Attribution Hierarchy',
+    state: 'draft' as SpecState,
+    task_type: 'feature',
+    author_id: 'djiv',
+    template_id: 'feature.yaml',
+    content: [
+      'spec_id: spec-f02-001',
+      'title: F0.2 — Tenancy & Cost Attribution Hierarchy',
+      'task_type: feature',
+      'state: draft',
+      '',
+      'summary: |',
+      '  Add org/team/user/agent tags to usage_events and task_executions.',
+      '  New TenancyStore + CLI group `baton tenancy`.',
+    ].join('\n'),
+    linked_plan_ids: [],
+    score: { clarity: 0.7, completeness: 0.6, feasibility: 0.9, testability: 0.65 } as SpecScore,
+    created_at: '2026-04-25T08:30:00Z',
+    updated_at: '2026-04-25T08:30:00Z',
+  },
+  {
+    spec_id: 'spec-bug-001',
+    title: 'Fix planner concern splitting for 4+ file phases',
+    state: 'reviewed' as SpecState,
+    task_type: 'bug-fix',
+    author_id: 'djiv',
+    template_id: 'bug-fix.yaml',
+    content: [
+      'spec_id: spec-bug-001',
+      'title: Fix planner concern splitting for 4+ file phases',
+      'task_type: bug-fix',
+      'state: reviewed',
+      '',
+      'summary: |',
+      '  Planner should split 4+ file implementation phases into parallel',
+      '  steps by concern. Tracked in feedback_planner_parallelization.md.',
+    ].join('\n'),
+    linked_plan_ids: [],
+    score: null,
+    created_at: '2026-04-24T15:00:00Z',
+    updated_at: '2026-04-25T09:00:00Z',
+  },
+];
+
+function _mockSpecsList(params?: { state?: string; task_type?: string }): SpecListResponse {
+  let specs = _MOCK_SPECS;
+  if (params?.state)     specs = specs.filter(s => s.state === params.state);
+  if (params?.task_type) specs = specs.filter(s => s.task_type === params.task_type);
+  return { specs, total: specs.length };
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const controller = new AbortController();
@@ -256,6 +354,101 @@ export const api = {
       });
   },
 
+  // Specs (F0.1) — /api/v1/specs
+  listSpecs(params?: { state?: string; task_type?: string }): Promise<SpecListResponse> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10_000);
+    const qs = params
+      ? '?' + new URLSearchParams(
+          Object.entries(params).filter(([, v]) => v !== undefined) as [string, string][]
+        ).toString()
+      : '';
+    return fetch(`${BASE_V1}/specs${qs}`, { signal: controller.signal })
+      .then(res => {
+        clearTimeout(timeout);
+        if (!res.ok) throw new Error(`API ${res.status}`);
+        return res.json() as Promise<SpecListResponse>;
+      })
+      .catch(() => {
+        clearTimeout(timeout);
+        return _mockSpecsList(params);
+      });
+  },
+
+  getSpec(specId: string): Promise<Spec> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10_000);
+    return fetch(`${BASE_V1}/specs/${encodeURIComponent(specId)}`, { signal: controller.signal })
+      .then(res => {
+        clearTimeout(timeout);
+        if (!res.ok) throw new Error(`API ${res.status}`);
+        return res.json() as Promise<Spec>;
+      })
+      .catch(() => {
+        clearTimeout(timeout);
+        const found = _MOCK_SPECS.find(s => s.spec_id === specId);
+        if (!found) throw new Error(`Spec ${specId} not found`);
+        return Promise.resolve(found);
+      });
+  },
+
+  approveSpec(specId: string): Promise<SpecApproveResponse> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10_000);
+    return fetch(`${BASE_V1}/specs/${encodeURIComponent(specId)}/approve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: controller.signal,
+    })
+      .then(res => {
+        clearTimeout(timeout);
+        if (!res.ok) throw new Error(`API ${res.status}`);
+        return res.json() as Promise<SpecApproveResponse>;
+      })
+      .catch(() => {
+        clearTimeout(timeout);
+        return Promise.resolve({ spec_id: specId, state: 'approved' as SpecState, updated_at: new Date().toISOString() });
+      });
+  },
+
+  markSpecReviewed(specId: string): Promise<SpecMarkReviewedResponse> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10_000);
+    return fetch(`${BASE_V1}/specs/${encodeURIComponent(specId)}/review`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: controller.signal,
+    })
+      .then(res => {
+        clearTimeout(timeout);
+        if (!res.ok) throw new Error(`API ${res.status}`);
+        return res.json() as Promise<SpecMarkReviewedResponse>;
+      })
+      .catch(() => {
+        clearTimeout(timeout);
+        return Promise.resolve({ spec_id: specId, state: 'reviewed' as SpecState, updated_at: new Date().toISOString() });
+      });
+  },
+
+  archiveSpec(specId: string): Promise<SpecArchiveResponse> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10_000);
+    return fetch(`${BASE_V1}/specs/${encodeURIComponent(specId)}/archive`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: controller.signal,
+    })
+      .then(res => {
+        clearTimeout(timeout);
+        if (!res.ok) throw new Error(`API ${res.status}`);
+        return res.json() as Promise<SpecArchiveResponse>;
+      })
+      .catch(() => {
+        clearTimeout(timeout);
+        return Promise.resolve({ spec_id: specId, state: 'archived' as SpecState, updated_at: new Date().toISOString() });
+      });
+  },
+
   // Webhooks
   getWebhooks(): Promise<WebhooksResponse> {
     const controller = new AbortController();
@@ -267,6 +460,47 @@ export const api = {
         return res.json() as Promise<WebhooksResponse>;
       })
       .catch(err => { clearTimeout(timeout); throw err; });
+  },
+
+  // -------------------------------------------------------------------------
+  // H3 endpoints — scorecards, arch review, playbooks, CRP
+  // -------------------------------------------------------------------------
+
+  getDeveloperScorecard(userId: string): Promise<DeveloperScorecard> {
+    return request(`/scorecard/${encodeURIComponent(userId)}`);
+  },
+
+  listArchBeads(status: string = 'open'): Promise<ArchBead[]> {
+    return request(`/arch-beads?status=${encodeURIComponent(status)}`);
+  },
+
+  reviewArchBead(beadId: string, body: ArchReviewBody): Promise<ArchReviewResponse> {
+    return request(`/arch-beads/${encodeURIComponent(beadId)}/review`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  },
+
+  listPlaybooks(): Promise<Playbook[]> {
+    return request('/playbooks');
+  },
+
+  submitCrp(body: CRPRequestBody): Promise<CRPResponse> {
+    return request('/crp', { method: 'POST', body: JSON.stringify(body) });
+  },
+
+  // -------------------------------------------------------------------------
+  // DX.6 — Beads (graph + timeline) — wraps the dedicated beadsApi module.
+  // -------------------------------------------------------------------------
+
+  /** List beads from the project's bead store with optional filters. */
+  getBeads(params?: BeadListParams): Promise<BeadListResponse> {
+    return beadsApi.list(params);
+  },
+
+  /** Fetch a single bead by ID. */
+  getBead(beadId: string): Promise<Bead | null> {
+    return beadsApi.get(beadId);
   },
 
   /**
@@ -291,4 +525,4 @@ export const api = {
 };
 
 // Re-export types for convenience
-export type { PmoCard, PmoProject, ProgramHealth, PmoSignal, BoardResponse, PlanResponse, ForgePlanBody, ForgePlanResponse, ForgePlanWrappedResponse, ForgeApproveBody, ForgeApproveResponse, InterviewResponse, RegenerateBody, AdoSearchResponse, ExecuteCardBody, ExecuteCardResponse, ExternalItem, ExternalMapping, PendingGate, GateApproveBody, GateRejectBody, GateActionResponse, ConsolidationResult, MergeResponse, CreatePrResponse, ApprovalLogEntry, ApprovalLogResponse, RequestReviewBody, RequestReviewResponse, ExecutionControlResponse, UpdatePlanResponse, Agent, AgentsResponse, PolicyPreset, PoliciesResponse, Webhook, WebhooksResponse };
+export type { PmoCard, PmoProject, ProgramHealth, PmoSignal, BoardResponse, PlanResponse, ForgePlanBody, ForgePlanResponse, ForgePlanWrappedResponse, ForgeApproveBody, ForgeApproveResponse, InterviewResponse, RegenerateBody, AdoSearchResponse, ExecuteCardBody, ExecuteCardResponse, ExternalItem, ExternalMapping, PendingGate, GateApproveBody, GateRejectBody, GateActionResponse, ConsolidationResult, MergeResponse, CreatePrResponse, ApprovalLogEntry, ApprovalLogResponse, RequestReviewBody, RequestReviewResponse, ExecutionControlResponse, UpdatePlanResponse, Agent, AgentsResponse, PolicyPreset, PoliciesResponse, Webhook, WebhooksResponse, Spec, SpecState, SpecScore, SpecListResponse, SpecApproveResponse, SpecMarkReviewedResponse, SpecArchiveResponse, DeveloperScorecard, ArchBead, ArchReviewBody, ArchReviewResponse, Playbook, CRPRequestBody, CRPResponse };

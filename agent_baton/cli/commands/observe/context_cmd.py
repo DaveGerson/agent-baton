@@ -101,6 +101,24 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     )
     _add_shared_flags(p_gaps)
 
+    # baton context effectiveness [--limit N] [--json]  (F0.4)
+    p_eff = sub.add_parser(
+        "effectiveness",
+        help="Show knowledge document effectiveness summary (F0.4)",
+    )
+    p_eff.add_argument(
+        "--limit", type=int, default=20, metavar="N",
+        help="Max rows to show (default: 20)",
+    )
+    p_eff.add_argument(
+        "--json", dest="output_json", action="store_true",
+        help="Machine-readable JSON output",
+    )
+    p_eff.add_argument(
+        "--db", metavar="PATH", default=None,
+        help="Path to central.db (default: ~/.baton/central.db)",
+    )
+
     return p
 
 
@@ -138,6 +156,10 @@ def handler(args: argparse.Namespace) -> None:
             _briefing(args, engine)
         elif sub == "gaps":
             _gaps(args, engine)
+        elif sub == "effectiveness":
+            engine.close()
+            _effectiveness(args)
+            return
         else:
             _print_help()
     finally:
@@ -262,3 +284,42 @@ def _print_help() -> None:
         "  --json          Machine-readable JSON output\n",
         end="",
     )
+
+
+def _effectiveness(args: argparse.Namespace) -> None:
+    """Print the knowledge document effectiveness summary (F0.4).
+
+    Queries ``v_knowledge_effectiveness`` in central.db and renders a
+    human-readable table (or JSON with ``--json``).
+    """
+    from agent_baton.core.engine.knowledge_telemetry import KnowledgeTelemetryStore
+
+    db_path = Path(args.db) if getattr(args, "db", None) else None
+    store = KnowledgeTelemetryStore(db_path=db_path)
+    limit = getattr(args, "limit", 20)
+    rows = store.effectiveness_summary(limit=limit)
+
+    if getattr(args, "output_json", False):
+        print(json.dumps(rows, indent=2))
+        return
+
+    if not rows:
+        print("No knowledge telemetry recorded yet.")
+        print("Run executions to accumulate telemetry, then re-run this command.")
+        return
+
+    print(f"Knowledge Effectiveness ({len(rows)} docs):")
+    print(f"  {'Document':<30}  {'Pack':<20}  {'Uses':>5}  {'Score':>6}  {'Days Old':>8}")
+    print("  " + "-" * 78)
+    for r in rows:
+        score = r.get("avg_outcome_score")
+        score_str = f"{score:.3f}" if score is not None else "  N/A"
+        days = r.get("days_since_modified")
+        days_str = str(days) if days is not None else "  N/A"
+        print(
+            f"  {str(r.get('doc_name','')):<30}  "
+            f"{str(r.get('pack_name','')):<20}  "
+            f"{r.get('total_uses', 0):>5}  "
+            f"{score_str:>6}  "
+            f"{days_str:>8}"
+        )

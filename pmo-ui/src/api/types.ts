@@ -424,3 +424,139 @@ export interface Webhook {
 export interface WebhooksResponse {
   webhooks: Webhook[];
 }
+
+// ---------------------------------------------------------------------------
+// Spec types (F0.1 — First-Class Spec Entity)
+// ---------------------------------------------------------------------------
+
+export type SpecState =
+  | 'draft'
+  | 'reviewed'
+  | 'approved'
+  | 'executing'
+  | 'completed'
+  | 'archived';
+
+export interface SpecScore {
+  clarity?: number;
+  completeness?: number;
+  feasibility?: number;
+  testability?: number;
+  [key: string]: number | undefined;
+}
+
+export interface Spec {
+  spec_id: string;
+  title: string;
+  state: SpecState;
+  task_type: string;
+  author_id: string;
+  template_id: string | null;
+  content: string;
+  linked_plan_ids: string[];
+  score: SpecScore | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SpecListResponse {
+  specs: Spec[];
+  total: number;
+}
+
+export interface SpecApproveResponse {
+  spec_id: string;
+  state: SpecState;
+  updated_at: string;
+}
+
+export interface SpecMarkReviewedResponse {
+  spec_id: string;
+  state: SpecState;
+  updated_at: string;
+}
+
+export interface SpecArchiveResponse {
+  spec_id: string;
+  state: SpecState;
+  updated_at: string;
+}
+
+// ---------------------------------------------------------------------------
+// H3 view types — scorecards, arch beads, playbooks, CRP, and bead graph
+// ---------------------------------------------------------------------------
+
+export interface DeveloperScorecard {
+  user_id: string;
+  window_days: number;
+  tasks_completed: number;
+  avg_cycle_time_minutes: number;
+  gate_pass_rate: number;
+  incidents_authored: number;
+  incidents_resolved: number;
+  knowledge_contributions: number;
+}
+
+export interface ArchBead {
+  bead_id: string;
+  bead_type: string;
+  agent_name: string;
+  content: string;
+  affected_files: string[];
+  status: string;
+  created_at: string;
+  tags: string[];
+}
+
+export interface ArchReviewBody {
+  action: 'approve' | 'reject';
+  reason?: string;
+  reviewer?: string;
+}
+
+export interface ArchReviewResponse {
+  bead_id: string;
+  follow_up_bead_id: string;
+  action: string;
+}
+
+export interface Playbook {
+  slug: string;
+  title: string;
+  body: string;
+}
+
+export interface CRPRequestBody {
+  title: string;
+  scope: string[];
+  rationale: string;
+  risk_level: 'low' | 'medium' | 'high' | 'critical';
+  suggested_agent: string;
+}
+
+export interface CRPResponse {
+  crp_id: string;
+  plan_summary: string;
+  suggested_phases: string[];
+  risk_level: string;
+  submitted_at: string;
+}
+
+/** Lightweight bead representation used by BeadGraphView and BeadTimelineView. */
+export interface BeadNode {
+  bead_id: string;
+  bead_type: string;
+  agent_name: string;
+  content: string;
+  status: string;
+  created_at: string;
+  tags: string[];
+}
+
+export type HumanRole =
+  | 'junior'
+  | 'senior'
+  | 'tech_lead'
+  | 'architect'
+  | 'eng_manager'
+  | 'qa';

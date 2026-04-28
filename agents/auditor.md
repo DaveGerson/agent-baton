@@ -164,10 +164,27 @@ After all agents complete. Full review of everything that was done.
 
 **Output:**
 
+Emit your machine-readable verdict as a fenced JSON block **before** any prose.
+The executor parses this block to enforce VETO at HIGH/CRITICAL risk gates.
+
+```json
+{"verdict": "APPROVE", "rationale": "All checks passed."}
+```
+
+Valid verdict values: `APPROVE` | `APPROVE_WITH_CONCERNS` | `REQUEST_CHANGES` | `VETO`
+
+Mapping from legacy values (still accepted by the parser):
+- `SHIP` → `APPROVE`
+- `SHIP WITH NOTES` → `APPROVE_WITH_CONCERNS`
+- `REVISE` → `REQUEST_CHANGES`
+- `BLOCK` → `VETO`
+
+Then provide the full audit report:
+
 ```
 ## Post-Execution Audit
 
-Verdict: [SHIP | SHIP WITH NOTES | REVISE | BLOCK]
+Verdict: [APPROVE | APPROVE_WITH_CONCERNS | REQUEST_CHANGES | VETO]
 
 ### Files Changed
 | File | Agent | Expected | Actual | Status |
@@ -178,6 +195,10 @@ Verdict: [SHIP | SHIP WITH NOTES | REVISE | BLOCK]
 ### Domain accuracy: [business rules correct?]
 ### Recommendations: [what before production]
 ```
+
+**IMPORTANT:** A `VETO` verdict halts execution of HIGH/CRITICAL risk phases.
+The executor will refuse to advance until the verdict changes or an operator
+uses `--force` with a written justification (which is logged to the audit chain).
 
 ---
 
@@ -241,6 +262,18 @@ The auditor assigns one of these trust levels per agent in the manifest:
 | **Supervised** | Agent can proceed but output requires auditor verification before handoff | `auto-edit` + checkpoint |
 | **Restricted** | Agent needs explicit approval for writes | `default` |
 | **Plan Only** | Agent may only read and propose — no execution | read-only tools |
+
+---
+
+## Pre-Phase-0 compliance logs
+
+If `baton compliance verify` returns non-zero on a project that was
+created before the F0.3 hash-chain shipped, the failure is almost
+certainly missing chain columns on legacy rows — not tampering.  Direct
+the user (or the orchestrator) to the rechain procedure documented in
+`docs/architecture/phase-0-foundations/rollback-recipe.md` (section 6,
+"Upgrade procedure: rechain a pre-Phase-0 compliance log").  Do not
+issue a `VETO` on this signal alone.
 
 ---
 

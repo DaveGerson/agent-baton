@@ -1,0 +1,38 @@
+# Mentor Script Template (from agent-development.txt SE 3.0 vocabulary)
+# A MentorScript is a structured knowledge-transfer artifact — the institutional
+# memory an experienced agent or human would give a new team member.
+spec_id: ""
+task_type: mentor-script
+template_id: mentor-script
+title: "<Mentor Script: domain or subsystem name>"
+
+## Domain Overview
+domain: |
+  <What this domain is and why it matters>
+
+## Architecture Decisions
+architecture_decisions:
+  - decision: "<Decision>"
+    rationale: "<Why this was chosen>"
+    alternatives_rejected: []
+
+## Gotchas and Anti-Patterns
+gotchas:
+  - "<Common mistake or surprising behavior>"
+
+## Testing Conventions
+testing:
+  framework: "<e.g. pytest>"
+  coverage_target: 0.80
+  key_fixtures: []
+  anti_patterns: []
+
+## On-Call / Incident Patterns
+incident_patterns:
+  - symptom: "<Symptom>"
+    diagnosis: "<How to diagnose>"
+    fix: "<How to fix>"
+
+## Evolution History
+evolution: |
+  <How this domain has changed over time and key refactors>

@@ -182,6 +182,25 @@ team. Record each member separately with `baton execute team-record`.
 For the full command reference, error list, and file layout, read
 `.claude/references/baton-engine.md`.
 
+## Concurrent Dispatch (MANDATORY)
+
+When you dispatch two or more `Agent` subagents in a single message that
+modify code in this repo, **every** Agent call MUST include
+`isolation:"worktree"`. Single-agent or strictly sequential dispatch may
+omit it. Without isolation, parallel agents share the project root,
+contaminate each other's branches, and stage each other's files into the
+wrong commits.
+
+The engine signals this for you. Each DISPATCH action returned by
+`baton execute next` (or emitted in a `parallel_actions` batch) carries
+an `isolation` field. When it is `"worktree"`, forward the value
+verbatim onto the matching `Agent(...)` call. When the field is empty
+or absent, do not pass `isolation`.
+
+Inside the agent: never `cd` out of your worktree, and never act on an
+absolute path from the prompt that points back at the project root —
+use the worktree-relative paths the engine provides.
+
 ## Regulated Domain Rules
 
 Any work touching regulated data, compliance systems, audit-controlled

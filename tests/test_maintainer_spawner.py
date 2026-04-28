@@ -19,12 +19,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-# Suppress DeprecationWarning for the deprecated ExperimentManager used in
-# test fixtures. Retained for backward-compatibility coverage.
-pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
-
 from agent_baton.core.improve.maintainer import MaintainerSpawner, _build_prompt
-from agent_baton.core.improve.experiments import ExperimentManager
 from agent_baton.core.improve.loop import ImprovementLoop
 from agent_baton.core.improve.proposals import ProposalManager
 from agent_baton.core.improve.rollback import RollbackManager
@@ -423,7 +418,6 @@ def _loop_with_spawner(
         trigger_evaluator=triggers,
         recommender=recommender,
         proposal_manager=ProposalManager(improvements_dir),
-        experiment_manager=ExperimentManager(improvements_dir),
         rollback_manager=rollbacks,
         scorer=scorer,
         config=ImprovementConfig(),
@@ -542,7 +536,6 @@ class TestImprovementLoopIntegration:
             trigger_evaluator=triggers,
             recommender=recommender,
             proposal_manager=ProposalManager(improvements_dir),
-            experiment_manager=ExperimentManager(improvements_dir),
             rollback_manager=rollbacks,
             scorer=scorer,
             improvements_dir=improvements_dir,

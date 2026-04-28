@@ -1,9 +1,14 @@
-"""``baton improve`` -- run or view improvement cycle reports.
+"""``baton improve`` -- DEPRECATED shim.
 
-The improvement loop is the top-level entry point for the closed-loop
-learning pipeline. A single cycle: detects anomalies, generates
-recommendations, auto-applies safe changes, escalates risky ones,
-and starts experiments.
+Use ``baton learn improve`` instead.
+
+This module keeps the old top-level ``baton improve`` command working so that
+existing scripts and CI pipelines are not broken.  A deprecation warning is
+printed to stderr on every invocation.
+
+The real implementation lives here (``handler`` / ``_improve_handler_impl``)
+and is imported directly by ``learn_cmd.py`` for the ``baton learn improve``
+subcommand path.
 
 Delegates to:
     agent_baton.core.improve.loop.ImprovementLoop
@@ -11,6 +16,7 @@ Delegates to:
 from __future__ import annotations
 
 import argparse
+import sys
 
 from agent_baton.core.improve.loop import ImprovementLoop
 
@@ -18,7 +24,8 @@ from agent_baton.core.improve.loop import ImprovementLoop
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     p = subparsers.add_parser(
         "improve",
-        help="Run the improvement loop or view reports",
+        help="[DEPRECATED] Use 'baton learn improve' instead",
+        description="DEPRECATED: Use 'baton learn improve' instead.",
     )
     group = p.add_mutually_exclusive_group()
     group.add_argument(
@@ -71,6 +78,16 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
 
 
 def handler(args: argparse.Namespace) -> None:
+    """Deprecated top-level entry point — prints warning then delegates."""
+    print(
+        "WARN: 'baton improve' is deprecated, use 'baton learn improve'",
+        file=sys.stderr,
+    )
+    _improve_handler_impl(args)
+
+
+def _improve_handler_impl(args: argparse.Namespace) -> None:
+    """Real implementation shared by top-level shim and 'baton learn improve'."""
     from pathlib import Path
     from agent_baton.core.improve.triggers import TriggerEvaluator
     from agent_baton.core.storage import get_project_storage

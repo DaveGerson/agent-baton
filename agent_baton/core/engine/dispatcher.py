@@ -63,6 +63,88 @@ _KNOWLEDGE_GAPS_LINE = _SIGNALS_BLOCK
 _BEAD_SIGNALS_LINE = _SIGNALS_BLOCK
 _FLAG_SIGNALS_LINE = _SIGNALS_BLOCK
 
+
+# Worktree Discipline contract (Fix A from proposals/worktree-isolation-fix.md).
+# Prepended to the delegation prompt whenever the engine signals
+# ``isolation="worktree"``.  Text is verbatim from the proposal and must NOT
+# diverge — the orchestrator template references this exact block.
+_WORKTREE_DISCIPLINE_BLOCK = (
+    "## Worktree Discipline (MANDATORY)\n"
+    "You are running in an isolated git worktree. Your cwd at spawn is your\n"
+    "worktree root. ALL file operations must be relative to your cwd.\n"
+    "- Before EVERY Bash call: prepend `cd \"$PWD\" &&` or use absolute paths\n"
+    "  rooted at your worktree, NOT the project root.\n"
+    "- For Read/Write/Edit: convert any absolute path you see in this prompt\n"
+    "  that begins with the project root to a path relative to your worktree.\n"
+    "- Run `git rev-parse --show-toplevel` once. That is your root. All git\n"
+    "  commands MUST report this path. If they don't, STOP and report.\n"
+    "- Never `cd` out of your worktree. Never reference `/home/.../<project>/`\n"
+    "  paths outside your worktree even if they appear in this prompt."
+)
+
+
+def _relativize_path(raw: str, project_root: Path) -> tuple[str, bool]:
+    """Return ``(rendered_path, is_outside_root)``.
+
+    Absolute paths under *project_root* are rewritten to project-relative
+    form (e.g. ``/abs/proj/agent_baton/foo.py`` -> ``agent_baton/foo.py``).
+    Already-relative paths are returned unchanged.  Absolute paths that
+    fall outside *project_root* are returned unchanged with the second
+    element set to ``True`` so the caller can flag them in the prompt.
+    """
+    if not raw:
+        return raw, False
+    candidate = Path(raw)
+    if not candidate.is_absolute():
+        return raw, False
+    try:
+        rel = candidate.resolve().relative_to(project_root.resolve())
+    except ValueError:
+        return raw, True
+    return rel.as_posix(), False
+
+
+def _render_path_list(
+    paths: list[str], project_root: Path | None,
+) -> list[str]:
+    """Render *paths* as bullet items, relativizing under *project_root*.
+
+    Out-of-root absolutes are kept verbatim and tagged with a
+    ``# WARNING: outside project root, do not modify`` comment so the
+    agent treats them as read-only references rather than write targets.
+    """
+    out: list[str] = []
+    for p in paths:
+        if project_root is None:
+            out.append(f"- `{p}`")
+            continue
+        rendered, outside = _relativize_path(p, project_root)
+        if outside:
+            out.append(
+                f"- `{rendered}`  # WARNING: outside project root, do not modify"
+            )
+        else:
+            out.append(f"- `{rendered}`")
+    return out
+
+
+def _render_path_csv(
+    paths: list[str], project_root: Path | None,
+) -> str:
+    """Render *paths* as a comma-separated list, relativized under root."""
+    if not paths:
+        return ""
+    if project_root is None:
+        return ", ".join(paths)
+    rendered: list[str] = []
+    for p in paths:
+        text, outside = _relativize_path(p, project_root)
+        if outside:
+            rendered.append(f"{text} (outside project root)")
+        else:
+            rendered.append(text)
+    return ", ".join(rendered)
+
 # Success criteria by task type — shown in the delegation prompt to make the
 # definition of done concrete.  Selected by the caller via the task_type arg.
 _SUCCESS_CRITERIA: dict[str, str] = {
@@ -296,6 +378,12 @@ class PromptDispatcher:
         task_type: str = "",
         prior_beads: "list | None" = None,
         delivered_knowledge: "dict[str, str] | None" = None,
+        isolation: str | None = None,
+        project_root: Path | None = None,
+        prior_context_block: str = "",
+        prior_step_result: "object | None" = None,
+        handoff_conn: "object | None" = None,
+        handoff_task_id: str = "",
     ) -> str:
         """Build a complete delegation prompt for an agent.
 
@@ -334,9 +422,18 @@ class PromptDispatcher:
             len(prior_beads) if prior_beads else 0,
         )
 
+        # Path relativization: when running under worktree isolation we
+        # MUST NOT emit absolute project-root paths into the prompt — the
+        # subagent would dutifully follow them back out of its worktree
+        # and contaminate the parent branch.  Relativization is a no-op
+        # when project_root is None or when paths are already relative.
+        rel_root = project_root if isolation == "worktree" else None
+
         # Context files section
         if step.context_files:
-            context_files_text = "\n".join(f"- `{f}`" for f in step.context_files)
+            context_files_text = "\n".join(
+                _render_path_list(step.context_files, rel_root)
+            )
         else:
             context_files_text = "_No specific files specified — use your judgment._"
 
@@ -347,8 +444,8 @@ class PromptDispatcher:
             deliverables_text = "_See task description for expected outputs._"
 
         # Boundaries
-        allowed = ", ".join(step.allowed_paths) if step.allowed_paths else "any"
-        blocked = ", ".join(step.blocked_paths) if step.blocked_paths else "none"
+        allowed = _render_path_csv(step.allowed_paths, rel_root) if step.allowed_paths else "any"
+        blocked = _render_path_csv(step.blocked_paths, rel_root) if step.blocked_paths else "none"
 
         # Previous step handoff
         previous_output = handoff_from.strip() if handoff_from.strip() else "This is the first step."
@@ -372,9 +469,56 @@ class PromptDispatcher:
         knowledge_section = self._build_knowledge_section(knowledge_attachments)
 
         article = "an" if role[0:1] in "aeiouAEIOU" else "a"
-        parts = [
+        parts: list[str] = []
+
+        # Worktree Discipline goes FIRST — before any path the agent might
+        # otherwise act on naively.  Engine signals this via isolation kw.
+        if isolation == "worktree":
+            parts.extend([_WORKTREE_DISCIPLINE_BLOCK, ""])
+
+        parts += [
             f"You are {article} {role} working on {project_line}.",
             "",
+        ]
+
+        # Prior Context (Wave 2.2 — ContextHarvester).
+        # When the executor passes a non-empty prior_context_block we prepend
+        # it before Shared Context so the agent sees its own past work in
+        # this domain.  Caller is responsible for capping the block size.
+        if prior_context_block.strip():
+            parts += [prior_context_block.strip(), ""]
+
+        # Handoff from Prior Step (Wave 3.2 — HandoffSynthesizer).
+        # Synthesizes a compact summary of the prior step's git diff,
+        # discoveries (beads created), and blockers (open warnings whose
+        # files/tags overlap this step).  Persists to handoff_beads for
+        # audit.  Best-effort: any failure leaves the section out.
+        if prior_step_result is not None:
+            try:
+                from agent_baton.core.intel.handoff_synthesizer import (
+                    HANDOFF_MAX_CHARS,
+                    HandoffSynthesizer,
+                )
+                _handoff_text = HandoffSynthesizer().synthesize_for_dispatch(
+                    prior_step_result,
+                    step,
+                    handoff_conn,
+                    task_id=handoff_task_id or None,
+                )
+                if _handoff_text:
+                    if len(_handoff_text) > HANDOFF_MAX_CHARS:
+                        _handoff_text = _handoff_text[: HANDOFF_MAX_CHARS - 3].rstrip() + "..."
+                    parts += [
+                        "## Handoff from Prior Step",
+                        _handoff_text,
+                        "",
+                    ]
+            except Exception as _hf_exc:  # noqa: BLE001
+                logger.debug(
+                    "HandoffSynthesizer prepend skipped (non-fatal): %s", _hf_exc
+                )
+
+        parts += [
             "## Shared Context",
             shared_context_block,
             "",
@@ -406,6 +550,17 @@ class PromptDispatcher:
             step.task_description.strip(),
             "",
         ]
+
+        # Wave 3.1 — Expected Outcome (Demo Statement).  Anchors review on
+        # behavioral correctness rather than "no errors".  Only emitted when
+        # the planner derived an outcome (preserves prompt shape for plans
+        # built before Wave 3.1).
+        if getattr(step, "expected_outcome", "").strip():
+            parts += [
+                "## Expected Outcome",
+                step.expected_outcome.strip(),
+                "",
+            ]
 
         # Success Criteria — inline when present
         success_criteria = _SUCCESS_CRITERIA.get(task_type, "")
@@ -910,6 +1065,8 @@ class PromptDispatcher:
         project_description: str = "",
         task_summary: str = "",
         task_type: str = "",
+        isolation: str = "",
+        project_root: Path | None = None,
     ) -> ExecutionAction:
         """Build a complete ExecutionAction with DISPATCH type.
 
@@ -952,6 +1109,8 @@ class PromptDispatcher:
             project_description=project_description,
             task_summary=task_summary,
             task_type=task_type,
+            isolation=isolation or None,
+            project_root=project_root,
         )
         enforcement = self.build_path_enforcement(step)
 
@@ -964,4 +1123,5 @@ class PromptDispatcher:
             step_id=step.step_id,
             path_enforcement=enforcement or "",
             mcp_servers=step.mcp_servers,
+            isolation=isolation,
         )

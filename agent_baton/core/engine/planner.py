@@ -28,7 +28,12 @@ from agent_baton.core.improve.scoring import AgentScorecard, PerformanceScorer
 from agent_baton.core.learn.budget_tuner import BudgetTuner
 from agent_baton.core.learn.pattern_learner import PatternLearner
 from agent_baton.core.orchestration.registry import AgentRegistry
-from agent_baton.core.orchestration.router import AgentRouter, StackProfile
+from agent_baton.core.orchestration.router import (
+    AgentRouter,
+    REVIEWER_AGENTS,
+    StackProfile,
+    is_reviewer_agent,
+)
 from agent_baton.models.enums import GitStrategy, RiskLevel
 from agent_baton.models.execution import MachinePlan, PlanGate, PlanPhase, PlanStep, TeamMember
 from agent_baton.models.feedback import RetrospectiveFeedback
@@ -36,6 +41,7 @@ from agent_baton.models.pattern import LearnedPattern
 from agent_baton.models.taxonomy import ForesightInsight
 
 if TYPE_CHECKING:
+    from agent_baton.core.config import ProjectConfig
     from agent_baton.core.orchestration.knowledge_registry import KnowledgeRegistry
 
 logger = logging.getLogger(__name__)
@@ -192,7 +198,91 @@ _AGENT_STEP_TYPE: dict[str, str] = {
 _TEST_ENGINEER_DEVELOPING_KEYWORDS = ("create", "build", "scaffold")
 
 
-def _step_type_for_agent(agent_name: str, task_description: str = "") -> str:
+def _derive_expected_outcome(step: "PlanStep", task_summary: str = "") -> str:
+    """Derive a 1-sentence behavioral demo statement for a step.
+
+    Wave 3.1 (Expected Outcome / Demo Statement). Pure deterministic
+    rule-based generation — no LLM call. The output is consumed by
+    ``code-reviewer`` and ``test-engineer`` to anchor review on
+    *behavioral correctness* rather than "no errors".
+
+    Format: ``"After this step, <observable behavioral statement>."``
+    For TEST steps: describes what behavior an automated test now covers.
+    For other steps: describes what visible behavior the implementation
+    should produce.
+
+    Returns an empty string when the inputs are too thin to produce
+    anything useful (preserves back-compat for older plans).
+    """
+    desc = (step.task_description or "").strip()
+    if not desc:
+        return ""
+
+    base_agent = (step.agent_name or "").split("--")[0]
+    step_type = (step.step_type or "").lower()
+
+    # Strip leading "verb (marker):" or "Verb:" prefixes that the planner
+    # may have prepended — we want the user-facing concern, not the verb.
+    cleaned = desc
+    for sep in (": ", " — ", " - "):
+        if sep in cleaned and cleaned.index(sep) < 60:
+            cleaned = cleaned.split(sep, 1)[1].strip()
+            break
+
+    # Trim trailing planner-added cross-phase reference noise so the
+    # outcome stays focused on the step's own concern.
+    for marker in (" Build on the ", " Apply sound ", " Document your approach"):
+        if marker in cleaned:
+            cleaned = cleaned.split(marker, 1)[0].strip()
+
+    # Cap length so the outcome stays demo-statement-sized.
+    snippet = cleaned[:140].rstrip(" .,;:")
+    if not snippet:
+        return ""
+
+    # Test-style steps get a behavior-coverage framing.
+    if step_type in {"testing", "test"} or base_agent == "test-engineer":
+        outcome = (
+            f"After this step, the behavior in '{snippet}' is covered by an "
+            f"automated test that fails before the fix and passes after."
+        )
+    elif step_type == "reviewing" or base_agent in {"code-reviewer", "security-reviewer", "auditor"}:
+        outcome = (
+            f"After this step, '{snippet}' has a documented review verdict "
+            f"with any blocking issues called out."
+        )
+    elif step_type == "planning" or base_agent in {"architect", "subject-matter-expert"}:
+        outcome = (
+            f"After this step, '{snippet}' has a concrete approach the "
+            f"implementation team can build from without further clarification."
+        )
+    else:
+        # Default: implementation-style behavioral statement.
+        outcome = (
+            f"After this step, '{snippet}' is implemented and observably "
+            f"working in the running system."
+        )
+
+    # Cap final length to keep prompts compact (under ~200 chars target,
+    # but allow a small margin for the longer test-style framing).
+    if len(outcome) > 240:
+        outcome = outcome[:237] + "..."
+    return outcome
+
+
+# Phase names whose step_type must be "developing" regardless of the
+# agent's default role.  bd-b3e1: an architect (or any agent) landing on
+# an Implement phase must produce a developing-typed step, not its default
+# (e.g. "planning") — otherwise the engine treats the step as design work
+# and skips downstream code-aware behavior.
+_IMPLEMENT_PHASE_NAMES = {"implement", "fix", "draft", "build", "develop"}
+
+
+def _step_type_for_agent(
+    agent_name: str,
+    task_description: str = "",
+    phase_name: str | None = None,
+) -> str:
     """Return the appropriate step_type for a given agent role.
 
     Uses ``_AGENT_STEP_TYPE`` for the lookup with ``"developing"`` as the
@@ -200,10 +290,19 @@ def _step_type_for_agent(agent_name: str, task_description: str = "") -> str:
     task description contains build/scaffold keywords (i.e. the step is
     building test infrastructure, not running tests).
 
+    When *phase_name* is one of the implementation phases
+    (``implement``, ``fix``, ``draft``, ``build``, ``develop``), the
+    step_type is forced to ``"developing"`` regardless of the agent's
+    default — this fixes bd-b3e1 where architect-on-Implement produced
+    a ``"planning"`` step.
+
     Args:
         agent_name: Full agent name (may include ``--`` variant suffix).
         task_description: Task description text used for the test-engineer
             override check.  Optional — defaults to ``""``.
+        phase_name: Name of the phase the step belongs to.  When this is
+            an implementation phase, the agent's default step_type is
+            overridden to ``"developing"``.
 
     Returns:
         One of the step_type strings defined in ``_AGENT_STEP_TYPE``, or
@@ -215,6 +314,13 @@ def _step_type_for_agent(agent_name: str, task_description: str = "") -> str:
     if base == "test-engineer" and step_type == "testing":
         lower_desc = task_description.lower()
         if any(kw in lower_desc for kw in _TEST_ENGINEER_DEVELOPING_KEYWORDS):
+            step_type = "developing"
+    # bd-b3e1: phase context wins over agent default for Implement-class phases.
+    # Reviewer agents are deliberately left alone — a code-reviewer on an
+    # Implement phase is a routing bug (bd-0e36), not a step_type bug, and
+    # forcing them to "developing" would mask it.
+    if phase_name and phase_name.lower() in _IMPLEMENT_PHASE_NAMES:
+        if base not in {"code-reviewer", "security-reviewer", "auditor"}:
             step_type = "developing"
     return step_type
 
@@ -236,6 +342,48 @@ _SUBTASK_PHASE_NAMES: dict[str, str] = {
 # Regex to split numbered sub-tasks: (1), 1., or 1)
 _SUBTASK_SPLIT = re.compile(
     r"(?:^|(?<=\s))(?:\((\d+)\)|(\d+)[.\)])\s+",
+)
+
+# ---------------------------------------------------------------------------
+# Concern-marker detection — used to split a single implement phase into
+# parallel steps when the task summary names multiple distinct concerns.
+# ---------------------------------------------------------------------------
+#
+# Recognized markers (must appear at start-of-string or after whitespace):
+#   - ``F0.1`` / ``F1.2`` / ``f3.4`` — feature-id markers (any letter prefix
+#     followed by digits, a dot, and more digits).
+#   - ``(1)`` / ``(2)`` — parenthesized integers.
+#   - ``1.`` / ``2.`` / ``1)`` — bare-integer-with-punctuation.
+#
+# We capture the marker so we can split on it AND preserve it as the concern
+# label (useful for step descriptions and bead titles).
+_CONCERN_MARKER = re.compile(
+    r"(?:^|(?<=\s))"                        # boundary: start or whitespace
+    r"("                                    # group 1: the marker itself
+    r"[A-Za-z]\d+\.\d+"                     # F0.1, f1.2, A2.3
+    r"|\(\d+\)"                              # (1), (2)
+    r"|\d+[.\)](?!\d)"                      # 1., 2), but not 1.5 (decimals)
+    r")"
+    r"\s+"                                  # required whitespace after marker
+)
+
+# Minimum distinct concerns needed to trigger the per-concern split.
+_MIN_CONCERNS_FOR_SPLIT = 3
+
+# Constraint-clause keywords that bound the deliverable list during
+# concern-splitting.  When the planner sees one of these phrases, it
+# stops consuming further markers as deliverables — anything after is
+# treated as a constraint or non-goal, not a phantom deliverable.
+# See bd-021d for the original repro (a "Must not regress F0.3 ..."
+# trailing sentence got split into a phantom Implement step).
+_CONCERN_CONSTRAINT_KEYWORDS = (
+    "must not",
+    "do not",
+    "shall not",
+    "should not",
+    "regress",
+    "non-goal",
+    "non-goals",
 )
 
 # Maps phase names (lower-cased) to human-readable action verbs for step descriptions
@@ -498,7 +646,23 @@ class IntelligentPlanner:
         knowledge_registry: KnowledgeRegistry | None = None,
         task_classifier: TaskClassifier | None = None,
         bead_store=None,  # BeadStore | None (F4 planning capture, F7 BeadAnalyzer)
+        project_config: "ProjectConfig | None" = None,
     ) -> None:
+        # Optional baton.yaml-driven project config.  When None, the
+        # planner discovers it once via ProjectConfig.load() (best
+        # effort — failures degrade to an empty config and emit a
+        # logger warning).  Empty configs are no-ops, preserving prior
+        # behavior for projects without a baton.yaml.
+        try:
+            from agent_baton.core.config import ProjectConfig as _ProjectConfig
+            self._project_config = project_config or _ProjectConfig.load()
+        except Exception:
+            logger.warning(
+                "ProjectConfig.load() failed — continuing with empty config",
+                exc_info=True,
+            )
+            from agent_baton.core.config import ProjectConfig as _ProjectConfig
+            self._project_config = _ProjectConfig()
         self._team_context_root = team_context_root
         self._pattern_learner = PatternLearner(team_context_root)
         self._scorer = PerformanceScorer()
@@ -731,6 +895,13 @@ class IntelligentPlanner:
         Returns:
             A fully constructed MachinePlan.
         """
+        # O1.4 — opt-in OTel JSONL span around the whole call.  The
+        # branch is cheap (env lookup + dict miss) when disabled.
+        from agent_baton.core.observability import current_exporter
+
+        _otel_exporter = current_exporter()
+        _otel_started_at = datetime.now(timezone.utc) if _otel_exporter else None
+
         # Reset per-call state
         self._last_pattern_used = None
         self._last_score_warnings = []
@@ -792,6 +963,21 @@ class IntelligentPlanner:
                 resolved_agents = list(_DEFAULT_AGENTS.get(inferred_type, []))
             else:
                 resolved_agents = list(agents)
+                # Warn when an explicit override includes reviewer-class agents
+                # — they may still appear in review/gate phases, but the
+                # implement-phase team-step will filter them out (see
+                # _consolidate_team_step).  Surface this so users aren't
+                # surprised when the auditor doesn't show up as an implementer.
+                _override_reviewers = [
+                    a for a in resolved_agents if is_reviewer_agent(a)
+                ]
+                if _override_reviewers:
+                    logger.warning(
+                        "--agents override includes reviewer-class agent(s) %s; "
+                        "they will be excluded from implement-phase team steps "
+                        "(reviewers belong in review/gate phases only)",
+                        _override_reviewers,
+                    )
             logger.debug(
                 "Task classification (override path): type=%s complexity=%s agents=%s",
                 inferred_type,
@@ -887,8 +1073,23 @@ class IntelligentPlanner:
         # rosters.  The cap matches HaikuClassifier's _MAX_AGENTS_BY_COMPLEXITY.
         # Only applies to automatically-resolved agents — explicit user-
         # provided agent lists are not capped.
+        #
+        # bd-076c — when concern-splitting will fire (≥3 concerns parsed
+        # from task_summary), the cap is raised to len(concerns) so each
+        # concern can be routed to a distinct specialist instead of
+        # collapsing to duplicates.  Concern detection is idempotent so
+        # calling _parse_concerns here and again at step 12b-bis is safe.
         if agents is None:
             _agent_cap = _MAX_AGENTS_BY_COMPLEXITY.get(inferred_complexity, 5)
+            _early_concerns = self._parse_concerns(task_summary)
+            if _early_concerns and len(_early_concerns) > _agent_cap:
+                _agent_cap = len(_early_concerns)
+                logger.debug(
+                    "Concern-split detected (%d concerns) — raised agent cap "
+                    "to %d to keep one specialist per concern (bd-076c).",
+                    len(_early_concerns),
+                    _agent_cap,
+                )
             if len(resolved_agents) > _agent_cap:
                 resolved_agents = resolved_agents[:_agent_cap]
 
@@ -912,15 +1113,40 @@ class IntelligentPlanner:
         # at step 9.5 so it can iterate over actual PlanStep objects.
         # (The resolver reference is stored here for use at step 9.5 below.)
         _resolver = None
+        _ranker = None
+        _max_knowledge_per_step: int = 8
         if self.knowledge_registry is not None:
+            import os as _os
             from agent_baton.core.engine.knowledge_resolver import KnowledgeResolver
+            from agent_baton.core.engine.knowledge_telemetry import KnowledgeTelemetryStore
+            from agent_baton.core.intel.knowledge_ranker import KnowledgeRanker
+            # Wire F0.4 lifecycle telemetry (bd-a313).  Resolver records a
+            # KnowledgeUsed row per attachment whenever ``task_id``/``step_id``
+            # are passed to ``resolve()``.  Construction is best-effort.
+            try:
+                _telemetry = KnowledgeTelemetryStore()
+            except Exception:
+                _telemetry = None
             _resolver = KnowledgeResolver(
                 self.knowledge_registry,
                 agent_registry=self._registry,
                 rag_available=self._detect_rag(),
                 step_token_budget=32_000,
                 doc_token_cap=8_000,
+                telemetry=_telemetry,
             )
+            # bd-0184: effectiveness-aware ranking.  Best-effort — ranker failure
+            # never degrades planning; it simply returns the input unchanged.
+            try:
+                _ranker = KnowledgeRanker()
+            except Exception:
+                _ranker = None
+            try:
+                _max_knowledge_per_step = int(
+                    _os.environ.get("BATON_MAX_KNOWLEDGE_PER_STEP", "8")
+                )
+            except (ValueError, TypeError):
+                _max_knowledge_per_step = 8
 
         # 7. Classify task sensitivity (DataClassifier if available)
         classification: ClassificationResult | None = None
@@ -993,16 +1219,17 @@ class IntelligentPlanner:
         )
 
         # 9b. Enrich steps with cross-phase context and default deliverables
-        plan_phases = self._enrich_phases(plan_phases)
+        plan_phases = self._enrich_phases(plan_phases, task_summary=task_summary)
 
         # 9.5. Resolve knowledge attachments for each step.
         # Runs after phase building so step.agent_name and task_description are final.
         # explicit_knowledge_packs/docs come from create_plan args (CLI --knowledge flags).
+        # bd-0184: after resolving, rank by historical effectiveness and cap count.
         if _resolver is not None:
             for phase in plan_phases:
                 for step in phase.steps:
                     try:
-                        step.knowledge = _resolver.resolve(
+                        resolved = _resolver.resolve(
                             agent_name=step.agent_name,
                             task_description=step.task_description,
                             task_type=inferred_type,
@@ -1010,6 +1237,9 @@ class IntelligentPlanner:
                             explicit_packs=explicit_knowledge_packs or [],
                             explicit_docs=explicit_knowledge_docs or [],
                         )
+                        if _ranker is not None:
+                            resolved = _ranker.rank(resolved)
+                        step.knowledge = resolved[:_max_knowledge_per_step]
                     except Exception:
                         logger.debug(
                             "Knowledge resolution failed for step %s — skipping",
@@ -1066,6 +1296,7 @@ class IntelligentPlanner:
         # 9.8. Resolve knowledge for foresight-inserted steps.
         # Foresight steps are inserted after the initial knowledge resolution
         # pass (9.5), so they need their own resolution pass.
+        # bd-0184: also rank + cap foresight-step attachments.
         if _resolver is not None and self._last_foresight_insights:
             foresight_step_ids = set()
             for ins in self._last_foresight_insights:
@@ -1074,7 +1305,7 @@ class IntelligentPlanner:
                 for step in phase.steps:
                     if step.step_id in foresight_step_ids:
                         try:
-                            step.knowledge = _resolver.resolve(
+                            resolved = _resolver.resolve(
                                 agent_name=step.agent_name,
                                 task_description=step.task_description,
                                 task_type=inferred_type,
@@ -1082,6 +1313,9 @@ class IntelligentPlanner:
                                 explicit_packs=explicit_knowledge_packs or [],
                                 explicit_docs=explicit_knowledge_docs or [],
                             )
+                            if _ranker is not None:
+                                resolved = _ranker.rank(resolved)
+                            step.knowledge = resolved[:_max_knowledge_per_step]
                         except Exception:
                             logger.debug(
                                 "Knowledge resolution failed for foresight step %s — skipping",
@@ -1116,6 +1350,16 @@ class IntelligentPlanner:
             if phase.gate is None:
                 phase.gate = self._default_gate(phase.name, stack=stack_profile)
 
+        # 12.a. Apply project config (baton.yaml) defaults — additive.
+        # No-op when no baton.yaml is present in the project.
+        try:
+            self._apply_project_config(plan_phases)
+        except Exception:
+            logger.warning(
+                "Applying project config failed — continuing without it",
+                exc_info=True,
+            )
+
         # 12b. Set approval gates on critical phases for HIGH+ risk
         if risk_level_enum in (RiskLevel.HIGH, RiskLevel.CRITICAL):
             for phase in plan_phases:
@@ -1128,8 +1372,35 @@ class IntelligentPlanner:
                         f"add remediation steps."
                     )
 
-        # 12c. Consolidate multi-agent Implement/Fix phases into team steps
+        # 12b-bis. Concern-splitting: when the task summary names ≥3 distinct
+        # concerns/modules (e.g. "F0.1 ... F0.2 ... F0.3 ... F0.4 ..."), split
+        # implement-type phases into one parallel single-agent step per
+        # concern.  This runs BEFORE team consolidation so the planner emits
+        # parallel steps instead of a single bundled team step.
+        # See feedback_planner_parallelization.md.
+        _concerns = self._parse_concerns(task_summary)
+        _split_phase_ids: set[int] = set()
+        if _concerns:
+            logger.debug(
+                "Detected %d concerns in task summary: %s",
+                len(_concerns),
+                [c[0] for c in _concerns],
+            )
+            for phase in plan_phases:
+                if phase.name.lower() in ("implement", "fix", "draft", "migrate"):
+                    self._split_implement_phase_by_concerns(
+                        phase, _concerns, resolved_agents, task_summary,
+                    )
+                    _split_phase_ids.add(phase.phase_id)
+
+        # 12c. Consolidate multi-agent Implement/Fix phases into team steps.
+        # NOTE: After concern-splitting (12b-bis), an implement phase that was
+        # split now has N single-agent steps where each step is for a
+        # *different concern*.  We must NOT re-consolidate those into a team
+        # — they are intentionally parallel-by-concern.
         for phase in plan_phases:
+            if phase.phase_id in _split_phase_ids:
+                continue
             if self._is_team_phase(phase, task_summary):
                 phase.steps = [self._consolidate_team_step(phase)]
 
@@ -1297,6 +1568,27 @@ class IntelligentPlanner:
                 )
             except Exception:
                 pass
+
+        # O1.4 — emit OTel span when the exporter is enabled.
+        if _otel_exporter is not None and _otel_started_at is not None:
+            try:
+                _otel_exporter.record_span(
+                    name="plan.create",
+                    kind="INTERNAL",
+                    attributes={
+                        "task_id": task_id,
+                        "task_type": inferred_type,
+                        "complexity": inferred_complexity,
+                        "risk_level": str(risk_level),
+                        "agent_count": len(resolved_agents),
+                        "phase_count": len(plan_phases),
+                    },
+                    started_at=_otel_started_at,
+                    ended_at=datetime.now(timezone.utc),
+                )
+            except Exception:
+                # Observability must never crash the planner.
+                logger.debug("OTel span emission failed", exc_info=True)
 
         return tmp_plan
 
@@ -1773,8 +2065,12 @@ class IntelligentPlanner:
     def _extract_file_paths(self, text: str) -> list[str]:
         """Extract file path candidates from task summary text.
 
-        Scans for tokens that look like file paths — must contain a ``/``
-        or end with a known code/config extension to reduce false positives.
+        Scans for tokens that look like file paths.  bd-0960: a candidate
+        is accepted only when its final segment ends in a known
+        code/config extension (e.g. ``.py``, ``.md``).  Trailing-slash
+        phrases (e.g. ``required_role/timeout_minutes/``) and bare
+        slash-separated word lists with no extension are rejected — those
+        are typically parse artifacts from prose, not real paths.
 
         Returns:
             Deduplicated list of path-like strings found in *text*.
@@ -1782,17 +2078,31 @@ class IntelligentPlanner:
         _CODE_EXTENSIONS = {
             ".py", ".ts", ".md", ".json", ".yaml", ".yml", ".toml",
             ".cfg", ".txt", ".html", ".css", ".js", ".jsx", ".tsx",
+            ".rs", ".go", ".java", ".rb", ".sh", ".sql", ".ini",
+            ".lock", ".env", ".conf",
         }
         pattern = r'(?:^|[\s(])([a-zA-Z0-9_./-]+(?:\.[a-zA-Z0-9]+|/))'
         candidates = re.findall(pattern, text)
         seen: set[str] = set()
         result: list[str] = []
         for c in candidates:
+            # Reject trailing-slash artifacts — paths must point at a file.
+            if c.endswith("/"):
+                continue
+            # Reject leading-punctuation noise (e.g. ".foo" with no real ext).
+            if c.startswith((".", "/", "-")):
+                continue
             last_part = c.split("/")[-1]
-            ext_match = "." in last_part and f".{last_part.rsplit('.', 1)[-1]}" in _CODE_EXTENSIONS
-            if ("/" in c or ext_match) and c not in seen:
-                seen.add(c)
-                result.append(c)
+            if "." not in last_part:
+                # No extension on the basename — not a file path.
+                continue
+            ext = f".{last_part.rsplit('.', 1)[-1].lower()}"
+            if ext not in _CODE_EXTENSIONS:
+                continue
+            if c in seen:
+                continue
+            seen.add(c)
+            result.append(c)
         return result
 
     def _generate_task_id(self, summary: str) -> str:
@@ -1844,6 +2154,245 @@ class IntelligentPlanner:
                 subtasks.append((index, text))
             i += 3
         return subtasks if len(subtasks) >= 2 else []
+
+    @staticmethod
+    def _parse_concerns(summary: str) -> list[tuple[str, str]]:
+        """Parse distinct concerns from a multi-concern task description.
+
+        Recognized markers (see :data:`_CONCERN_MARKER`):
+          - Feature-id style: ``F0.1 Spec entity ... F0.2 Tenancy ...``
+          - Parenthesized:    ``(1) ... (2) ...``
+          - Bare-numbered:    ``1. ... 2. ...`` or ``1) ... 2) ...``
+
+        Returns a list of ``(marker, text)`` pairs where ``marker`` is the
+        concern label (e.g. ``"F0.1"``) and ``text`` is everything after the
+        marker up to (but not including) the next marker.
+
+        Empty list when fewer than :data:`_MIN_CONCERNS_FOR_SPLIT` concerns
+        are detected — the caller treats this as "single concern, do not split".
+        """
+        # bd-021d: bound the deliverable list at the first constraint clause
+        # (e.g. "Must not regress F0.3 ...").  Anything after is treated as a
+        # non-goal, not a phantom deliverable.
+        lower = summary.lower()
+        bound = len(summary)
+        for kw in _CONCERN_CONSTRAINT_KEYWORDS:
+            idx = lower.find(kw)
+            if idx != -1 and idx < bound:
+                bound = idx
+        bounded_summary = summary[:bound]
+
+        matches = list(_CONCERN_MARKER.finditer(bounded_summary))
+        if len(matches) < _MIN_CONCERNS_FOR_SPLIT:
+            return []
+
+        concerns: list[tuple[str, str]] = []
+        for i, m in enumerate(matches):
+            # Strip surrounding punctuation: "(1)" → "1", "F0.1" → "F0.1",
+            # "1." → "1", "1)" → "1".  ``str.strip`` removes leading/trailing
+            # only, so the dot inside "F0.1" is preserved.
+            marker = m.group(1).strip("().")
+            start = m.end()
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(bounded_summary)
+            text = bounded_summary[start:end].strip().rstrip(";,")
+            if text:
+                concerns.append((marker, text))
+
+        return concerns if len(concerns) >= _MIN_CONCERNS_FOR_SPLIT else []
+
+    def _pick_agent_for_concern(
+        self,
+        concern_text: str,
+        candidate_agents: list[str],
+    ) -> str:
+        """Choose the best agent from ``candidate_agents`` for a concern.
+
+        Uses :data:`_CROSS_CONCERN_SIGNALS` keywords to score each candidate
+        against the concern's text.  Reviewer agents are excluded.  Falls
+        back to the first non-reviewer candidate when no signal matches.
+        """
+        text_lower = concern_text.lower()
+        text_words = set(re.findall(r"\b\w+\b", text_lower))
+
+        # Filter reviewer agents out — they must not implement.
+        # bd-0e36: also filter architect-class agents — concern-split steps
+        # are implementation work and architects belong in Phase 1 design.
+        _ARCHITECT_BASES = {"architect", "ai-systems-architect"}
+        eligible = [
+            a for a in candidate_agents
+            if not is_reviewer_agent(a)
+            and a.split("--")[0] not in _ARCHITECT_BASES
+        ]
+        if not eligible:
+            # Last resort: drop only the reviewer filter, keep architect block.
+            eligible = [
+                a for a in candidate_agents
+                if a.split("--")[0] not in _ARCHITECT_BASES
+            ]
+        if not eligible:
+            eligible = list(candidate_agents) or ["backend-engineer"]
+
+        best_agent = eligible[0]
+        best_score = -1
+        for agent in eligible:
+            base = agent.split("--")[0]
+            keywords = _CROSS_CONCERN_SIGNALS.get(base, [])
+            score = 0
+            for kw in keywords:
+                if " " in kw:
+                    if kw in text_lower:
+                        score += 1
+                elif kw in text_words:
+                    score += 1
+            if score > best_score:
+                best_score = score
+                best_agent = agent
+        return best_agent
+
+    @staticmethod
+    def _score_knowledge_for_concern(
+        attachment: "KnowledgeAttachment",
+        concern_text: str,
+    ) -> int:
+        """Return a domain-match score for *attachment* against *concern_text*.
+
+        Scoring uses the same keyword lists as :data:`_CROSS_CONCERN_SIGNALS`:
+        each keyword found in *concern_text* that also appears in the
+        attachment's ``pack_name`` or ``document_name`` contributes +1.  A
+        score > 0 means the attachment has a clear domain signal for this
+        concern.
+        """
+        text_lower = concern_text.lower()
+        text_words = set(re.findall(r"\b\w+\b", text_lower))
+
+        att_signal = " ".join(filter(None, [
+            attachment.pack_name or "",
+            attachment.document_name or "",
+            attachment.path or "",
+        ])).lower()
+
+        score = 0
+        for keywords in _CROSS_CONCERN_SIGNALS.values():
+            for kw in keywords:
+                if " " in kw:
+                    if kw in att_signal and kw in text_lower:
+                        score += 1
+                else:
+                    if kw in att_signal and kw in text_words:
+                        score += 1
+        return score
+
+    @staticmethod
+    def _partition_knowledge(
+        all_knowledge: list,
+        concerns: list[tuple[str, str]],
+    ) -> list[list]:
+        """Partition *all_knowledge* across concern slots.
+
+        For each attachment, compute a domain-match score against every
+        concern text.  If only one concern scores > 0, assign the attachment
+        exclusively to that concern (domain-specific).  Otherwise broadcast
+        it to every concern (ambiguous — safer to over-share than to drop).
+
+        Returns a list of per-concern knowledge lists, in the same order as
+        *concerns*.
+        """
+        n = len(concerns)
+        partitions: list[list] = [[] for _ in range(n)]
+
+        for attachment in all_knowledge:
+            scores = [
+                IntelligentPlanner._score_knowledge_for_concern(attachment, text)
+                for _, text in concerns
+            ]
+            positive = [i for i, s in enumerate(scores) if s > 0]
+
+            if len(positive) == 1:
+                # Unambiguous domain match — assign only to that concern.
+                partitions[positive[0]].append(attachment)
+            else:
+                # Ambiguous or cross-cutting — broadcast to all.
+                for p in partitions:
+                    p.append(attachment)
+
+        return partitions
+
+    def _split_implement_phase_by_concerns(
+        self,
+        phase: PlanPhase,
+        concerns: list[tuple[str, str]],
+        candidate_agents: list[str],
+        task_summary: str,
+        knowledge_split_strategy: str = "smart",
+    ) -> None:
+        """Replace ``phase.steps`` with one parallel step per concern.
+
+        Each concern becomes a single-agent step (no team wrapper), enabling
+        true parallel execution.  Step IDs are renumbered ``<phase_id>.1``,
+        ``<phase_id>.2``, ... in concern order.
+
+        Knowledge attachments from the original steps are partitioned across
+        the new steps when *knowledge_split_strategy* is ``"smart"``
+        (default): each attachment is routed only to concerns whose text
+        matches its domain keywords (via :data:`_CROSS_CONCERN_SIGNALS`).
+        Ambiguous attachments are broadcast to all steps so no context is
+        ever dropped.  Setting *knowledge_split_strategy* to ``"broadcast"``
+        restores the legacy behaviour where every child step receives the
+        full knowledge list.
+
+        Args:
+            phase: The implement-type phase to split (mutated in place).
+            concerns: List of ``(marker, text)`` pairs from
+                :meth:`_parse_concerns`.
+            candidate_agents: Pool of agents to choose from per concern.
+            task_summary: Original task summary (used for verb selection
+                in fallback step descriptions).
+            knowledge_split_strategy: ``"smart"`` (default) or
+                ``"broadcast"``.  ``"smart"`` partitions knowledge by domain;
+                ``"broadcast"`` clones the full list to every child step.
+        """
+        all_knowledge: list = []
+        seen_paths: set[str] = set()
+        for s in phase.steps:
+            for k in s.knowledge:
+                key = k.path if k.path else id(k)
+                if key not in seen_paths:
+                    all_knowledge.append(k)
+                    seen_paths.add(key)
+
+        # Decide per-concern knowledge lists.
+        if knowledge_split_strategy == "smart":
+            per_concern_knowledge = self._partition_knowledge(all_knowledge, concerns)
+        else:
+            per_concern_knowledge = [list(all_knowledge) for _ in concerns]
+
+        new_steps: list[PlanStep] = []
+        for idx, ((marker, text), concern_knowledge) in enumerate(
+            zip(concerns, per_concern_knowledge), start=1
+        ):
+            agent = self._pick_agent_for_concern(text, candidate_agents)
+            verb = _PHASE_VERBS.get(phase.name.lower(), phase.name)
+            desc = f"{verb} ({marker}): {text}"
+            new_steps.append(
+                PlanStep(
+                    step_id=f"{phase.phase_id}.{idx}",
+                    agent_name=agent,
+                    task_description=desc,
+                    step_type=_step_type_for_agent(agent, desc, phase_name=phase.name),
+                    knowledge=concern_knowledge,
+                )
+            )
+
+        logger.info(
+            "Split %s phase into %d parallel concern-steps "
+            "(markers=%s, agents=%s, strategy=%s)",
+            phase.name,
+            len(new_steps),
+            [c[0] for c in concerns],
+            [s.agent_name for s in new_steps],
+            knowledge_split_strategy,
+        )
+        phase.steps = new_steps
 
     def _expand_agents_for_concerns(
         self,
@@ -1902,7 +2451,9 @@ class IntelligentPlanner:
                         step_id=f"{idx}.{step_idx}",
                         agent_name=routed_name,
                         task_description=_desc,
-                        step_type=_step_type_for_agent(routed_name, _desc),
+                        step_type=_step_type_for_agent(
+                            routed_name, _desc, phase_name=phase_name
+                        ),
                     )
                 )
 
@@ -1914,7 +2465,11 @@ class IntelligentPlanner:
     # Private helpers — phase building
     # ------------------------------------------------------------------
 
-    def _enrich_phases(self, phases: list[PlanPhase]) -> list[PlanPhase]:
+    def _enrich_phases(
+        self,
+        phases: list[PlanPhase],
+        task_summary: str = "",
+    ) -> list[PlanPhase]:
         """Post-process phases to add cross-phase context and default deliverables.
 
         For each step:
@@ -1922,6 +2477,11 @@ class IntelligentPlanner:
           phase so the agent knows what to build on.
         - If the step has no explicit deliverables, populates them from
           ``_AGENT_DELIVERABLES`` based on the agent's base name.
+        - If the step has no ``expected_outcome`` set, derives one from the
+          step description, agent role, and the overall task summary
+          (Wave 3.1 — Demo Statement). Pure deterministic rule-based; if
+          derivation yields nothing useful, leaves ``expected_outcome`` empty
+          for back-compat.
         """
         for phase in phases:
             for step in phase.steps:
@@ -1948,7 +2508,153 @@ class IntelligentPlanner:
                     if defaults and not self._agent_has_output_spec(step.agent_name):
                         step.deliverables = list(defaults)
 
+                # Wave 3.1 — derive expected_outcome for review/test prompting
+                if not step.expected_outcome:
+                    step.expected_outcome = _derive_expected_outcome(
+                        step, task_summary
+                    )
+
         return phases
+
+    # ------------------------------------------------------------------
+    # Project config (baton.yaml) integration
+    # ------------------------------------------------------------------
+
+    # Mapping of step agent base name -> domain key used in
+    # ProjectConfig.default_agents.  Used by _apply_project_config to
+    # resolve which default agent to substitute when a step is using a
+    # generic placeholder.
+    _DOMAIN_KEYS_BY_AGENT_BASE: dict[str, str] = {
+        "backend-engineer": "backend",
+        "frontend-engineer": "frontend",
+        "test-engineer": "test",
+        "data-engineer": "data",
+        "devops-engineer": "devops",
+        "documentation-architect": "docs",
+        "documentation-engineer": "docs",
+    }
+
+    # Track which steps received a config-driven isolation override.
+    # Exposed via :meth:`isolation_for_step` so dispatchers and tests
+    # can introspect what the planner intends without needing a new
+    # field on PlanStep.
+    @property
+    def _isolation_overrides(self) -> dict[str, str]:
+        # Lazy initializer so subclasses/older instances still work.
+        if not hasattr(self, "_isolation_overrides_map"):
+            self._isolation_overrides_map: dict[str, str] = {}
+        return self._isolation_overrides_map
+
+    def isolation_for_step(self, step_id: str) -> str:
+        """Return the configured isolation mode for *step_id*, or ``""``.
+
+        Populated by :meth:`_apply_project_config` from the active
+        ``baton.yaml``'s ``default_isolation`` value.  Dispatchers may
+        consult this when deciding whether to spawn the agent in a
+        worktree.  Returns empty string when no override is configured.
+        """
+        return self._isolation_overrides.get(step_id, "")
+
+    def _apply_project_config(self, phases: list[PlanPhase]) -> None:
+        """Apply ``baton.yaml`` defaults to *phases* in place.
+
+        Behavior (each is a no-op when the corresponding config field is
+        empty so the absence of ``baton.yaml`` does not change planner
+        output):
+
+        * ``default_agents`` — for any step whose agent matches a base
+          name in :data:`_DOMAIN_KEYS_BY_AGENT_BASE`, substitute the
+          configured agent (preserving the existing one when no config
+          entry maps to that domain).
+        * ``auto_route_rules`` — when a step's allowed_paths or
+          context_files match a rule's ``path_glob``, replace its agent
+          with the rule's agent.  Auto-routing always wins over the
+          domain default (it is the more specific signal).
+        * ``default_gates`` — append a :class:`PlanGate` for each
+          configured gate type to every phase, deduplicating by
+          ``gate_type`` within the phase.  Phases that already have a
+          matching gate are left alone.  We model multi-gate phases by
+          chaining gate descriptions onto the existing PlanGate when one
+          already exists, since PlanPhase only stores a single gate.
+        * ``excluded_paths`` — append to each step's ``blocked_paths``,
+          deduplicated.
+        * ``default_isolation`` — recorded in
+          :attr:`_isolation_overrides` keyed by step_id.  Dispatchers
+          read it via :meth:`isolation_for_step`.
+        """
+        cfg = self._project_config
+        if cfg.is_empty():
+            return
+
+        for phase in phases:
+            for step in phase.steps:
+                # Auto-route rules win over default_agents.
+                paths_for_match = list(step.allowed_paths) + list(step.context_files)
+                routed = cfg.route_agent_for_paths(paths_for_match)
+                if routed:
+                    step.agent_name = routed
+                else:
+                    base = step.agent_name.split("--")[0]
+                    domain = self._DOMAIN_KEYS_BY_AGENT_BASE.get(base)
+                    if domain:
+                        preferred = cfg.default_agents.get(domain)
+                        if preferred:
+                            step.agent_name = preferred
+
+                # Excluded paths — additive.
+                if cfg.excluded_paths:
+                    blocked = list(step.blocked_paths)
+                    seen = set(blocked)
+                    for p in cfg.excluded_paths:
+                        if p not in seen:
+                            blocked.append(p)
+                            seen.add(p)
+                    step.blocked_paths = blocked
+
+                # Isolation — recorded out-of-band so we don't touch the
+                # PlanStep schema.
+                if cfg.default_isolation:
+                    self._isolation_overrides[step.step_id] = cfg.default_isolation
+
+            # Gates — append-as-chain so we don't drop existing gate.
+            if cfg.default_gates:
+                existing_types: set[str] = set()
+                if phase.gate is not None:
+                    existing_types.add(phase.gate.gate_type)
+                for gate_type in cfg.default_gates:
+                    if gate_type in existing_types:
+                        continue
+                    new_gate = PlanGate(
+                        gate_type=gate_type,
+                        command=self._command_for_gate_type(gate_type),
+                        description=f"Project config: enforce {gate_type}",
+                    )
+                    if phase.gate is None:
+                        phase.gate = new_gate
+                    else:
+                        # Concatenate description so the dispatched gate
+                        # text references both checks.  Preserve the
+                        # primary command — multi-command gates are
+                        # outside this PR's scope.
+                        phase.gate.description = (
+                            f"{phase.gate.description}; "
+                            f"plus {gate_type} (project config)"
+                        ).strip("; ")
+                    existing_types.add(gate_type)
+
+    @staticmethod
+    def _command_for_gate_type(gate_type: str) -> str:
+        """Map a gate-type string to a sensible default command."""
+        mapping = {
+            "pytest": "pytest",
+            "test": "pytest",
+            "lint": "ruff check .",
+            "ruff": "ruff check .",
+            "mypy": "mypy .",
+            "build": "python -m build",
+            "format": "ruff format --check .",
+        }
+        return mapping.get(gate_type, "")
 
     def _agent_expertise_level(self, agent_name: str) -> str:
         """Assess agent expertise from definition richness.
@@ -2108,6 +2814,48 @@ class IntelligentPlanner:
         "review": ["code-reviewer", "security-reviewer", "auditor", "architect"],
     }
 
+    # bd-0e36: agent roles that must NOT be routed to a given phase, even
+    # by round-robin/leftover passes.  Architect-class agents are reserved
+    # for design/research/review phases — they must not own Implement or
+    # Fix steps.  bd-1974: implementer-class agents (backend/frontend/
+    # devops/data-*) must not own Review steps either — that role belongs
+    # to code-reviewer/security-reviewer/auditor.  When the only candidate
+    # for a phase is a blocked role, the planner falls back to a phase-
+    # appropriate fallback agent.
+    _PHASE_BLOCKED_ROLES: dict[str, set[str]] = {
+        "implement": {"architect", "ai-systems-architect"},
+        "fix": {"architect", "ai-systems-architect"},
+        "draft": set(),
+        "review": {
+            "backend-engineer", "frontend-engineer", "devops-engineer",
+            "data-engineer", "data-scientist", "data-analyst",
+            "visualization-expert", "test-engineer",
+        },
+    }
+
+    # Fallback agents used when a phase has no eligible candidates after
+    # blocked-role filtering.
+    _IMPLEMENT_FALLBACK_AGENT = "backend-engineer"  # bd-0e36
+    _REVIEW_FALLBACK_AGENT = "code-reviewer"        # bd-1974
+
+    # Map phase name → fallback agent.  Falls back to backend-engineer
+    # when the phase isn't listed.
+    _PHASE_FALLBACK_AGENT: dict[str, str] = {
+        "implement": _IMPLEMENT_FALLBACK_AGENT,
+        "fix": _IMPLEMENT_FALLBACK_AGENT,
+        "review": _REVIEW_FALLBACK_AGENT,
+    }
+
+    @classmethod
+    def _is_blocked_for_phase(cls, agent_name: str, phase_name: str) -> bool:
+        """Return True if *agent_name* must not be assigned to *phase_name*.
+
+        See ``_PHASE_BLOCKED_ROLES`` for the policy table.  bd-0e36.
+        """
+        base = agent_name.split("--")[0]
+        blocked = cls._PHASE_BLOCKED_ROLES.get(phase_name.lower(), set())
+        return base in blocked
+
     def _assign_agents_to_phases(
         self, phases: list[PlanPhase], agents: list[str], task_summary: str = ""
     ) -> list[PlanPhase]:
@@ -2129,7 +2877,9 @@ class IntelligentPlanner:
                             step_id=f"{phase.phase_id}.1",
                             agent_name="backend-engineer",
                             task_description=_desc,
-                            step_type=_step_type_for_agent("backend-engineer", _desc),
+                            step_type=_step_type_for_agent(
+                                "backend-engineer", _desc, phase_name=phase.name
+                            ),
                         )
                     )
             return phases
@@ -2153,26 +2903,54 @@ class IntelligentPlanner:
                 if matched:
                     break
 
-        # Pass 2: assign remaining agents to remaining phases round-robin
+        # Pass 2: assign remaining agents to remaining phases round-robin.
+        # bd-0e36: skip agents blocked for this phase (e.g. architect on
+        # Implement); rotate them to the back of the queue and try the next
+        # candidate.
         for phase in list(remaining_phases):
-            if remaining_agents:
-                agent = remaining_agents.pop(0)
-                assigned.append((phase, agent))
+            chosen: str | None = None
+            skipped: list[str] = []
+            while remaining_agents:
+                candidate = remaining_agents.pop(0)
+                if self._is_blocked_for_phase(candidate, phase.name):
+                    skipped.append(candidate)
+                    continue
+                chosen = candidate
+                break
+            # Restore skipped agents so other phases can still use them.
+            remaining_agents = skipped + remaining_agents
+            if chosen is not None:
+                assigned.append((phase, chosen))
                 remaining_phases.remove(phase)
 
-        # Pass 3: phases still unassigned — reuse the best-fit agent from pool
+        # Pass 3: phases still unassigned — reuse the best-fit agent from pool.
+        # bd-0e36: prefer ideal roles, then any non-blocked agent, then
+        # fall back to the implement-fallback agent rather than re-using
+        # a blocked role like architect.
         for phase in remaining_phases:
             ideal_roles = self._PHASE_IDEAL_ROLES.get(phase.name.lower(), [])
             best = None
             for role in ideal_roles:
                 for agent in agents:
-                    if agent.split("--")[0] == role:
+                    if agent.split("--")[0] == role and not self._is_blocked_for_phase(agent, phase.name):
                         best = agent
                         break
                 if best:
                     break
             if best is None:
-                best = agents[0]
+                # Try any non-blocked agent from the pool.
+                for agent in agents:
+                    if not self._is_blocked_for_phase(agent, phase.name):
+                        best = agent
+                        break
+            if best is None:
+                # All pool agents are blocked for this phase — synthesize the
+                # phase-appropriate fallback (backend-engineer for implement/
+                # fix, code-reviewer for review) so we don't violate the
+                # policy table.  bd-0e36, bd-1974.
+                best = self._PHASE_FALLBACK_AGENT.get(
+                    phase.name.lower(), self._IMPLEMENT_FALLBACK_AGENT
+                )
             assigned.append((phase, best))
 
         # Pass 4: leftover agents — add to work phases only.
@@ -2180,6 +2958,8 @@ class IntelligentPlanner:
         # have at most one agent from Passes 1-3.  Leftover agents are placed
         # only into implementation-like phases (implement, fix, draft) to avoid
         # bloated plans where every agent gets a redundant design/review step.
+        # bd-0e36: skip leftover agents that are blocked for every work phase
+        # (e.g. architect) — they should not be force-fit into Implement.
         _WORK_PHASES = {"implement", "fix", "draft"}
         for agent in remaining_agents:
             base = agent.split("--")[0]
@@ -2187,18 +2967,24 @@ class IntelligentPlanner:
             for phase_name, roles in self._PHASE_IDEAL_ROLES.items():
                 if phase_name not in _WORK_PHASES:
                     continue
-                if base in roles:
+                if base in roles and not self._is_blocked_for_phase(agent, phase_name):
                     best_phase = next(
                         (p for p in phases if p.name.lower() == phase_name), None
                     )
                     if best_phase:
                         break
             if best_phase is None:
-                # Fall back to the first work phase, or first phase if none
-                best_phase = next(
-                    (p for p in phases if p.name.lower() in _WORK_PHASES),
-                    phases[0],
-                )
+                # Fall back to the first non-blocked work phase, or skip if
+                # the agent is blocked from every work phase.
+                for p in phases:
+                    if p.name.lower() in _WORK_PHASES and not self._is_blocked_for_phase(agent, p.name):
+                        best_phase = p
+                        break
+            if best_phase is None:
+                # Truly nowhere to land this agent — drop it from the leftover
+                # pass.  Pass 1-3 already gave it (or its role peers) at least
+                # one assignment elsewhere if it had any phase affinity.
+                continue
             assigned.append((best_phase, agent))
 
         # Build PlanStep objects from assignments
@@ -2211,7 +2997,7 @@ class IntelligentPlanner:
                     step_id=step_id,
                     agent_name=agent,
                     task_description=_desc,
-                    step_type=_step_type_for_agent(agent, _desc),
+                    step_type=_step_type_for_agent(agent, _desc, phase_name=phase.name),
                 )
             )
 
@@ -2224,7 +3010,9 @@ class IntelligentPlanner:
                         step_id=f"{phase.phase_id}.1",
                         agent_name=agents[0],
                         task_description=_desc,
-                        step_type=_step_type_for_agent(agents[0], _desc),
+                        step_type=_step_type_for_agent(
+                            agents[0], _desc, phase_name=phase.name
+                        ),
                     )
                 )
 
@@ -2281,7 +3069,7 @@ class IntelligentPlanner:
                         step_id=f"{idx}.{step_idx}",
                         agent_name=agent,
                         task_description=_desc,
-                        step_type=_step_type_for_agent(agent, _desc),
+                        step_type=_step_type_for_agent(agent, _desc, phase_name=name),
                     )
                 )
             phases.append(PlanPhase(phase_id=idx, name=name, steps=steps, gate=gate))
@@ -2387,12 +3175,51 @@ class IntelligentPlanner:
         The first step's agent becomes the team lead; the rest become
         implementers.  The original step descriptions become member
         task descriptions.
+
+        For ``implement``/``fix``-type phases, reviewer-class agents
+        (auditor, code-reviewer, etc.) are filtered out — they belong in
+        review/gate phases, not as implementers.  See
+        :data:`agent_baton.core.orchestration.router.REVIEWER_AGENTS`.
         """
+        # Filter out reviewer agents from implement-type phases.  Reviewers
+        # belong in review/gate phases, not as implementers.  This guards
+        # against both default-routed reviewers and ``--agents`` overrides
+        # that mistakenly include them.
+        is_implement_phase = phase.name.lower() in ("implement", "fix", "draft", "migrate")
+        if is_implement_phase:
+            kept_steps: list[PlanStep] = []
+            dropped: list[str] = []
+            for step in phase.steps:
+                if is_reviewer_agent(step.agent_name):
+                    dropped.append(step.agent_name)
+                    continue
+                kept_steps.append(step)
+            if dropped:
+                logger.warning(
+                    "Filtered reviewer agent(s) %s from %s phase team-step "
+                    "(reviewers belong in review/gate phases, not as implementers)",
+                    dropped,
+                    phase.name,
+                )
+            # Guard: if filtering would empty the phase, keep the original
+            # steps so the plan remains executable.
+            if kept_steps:
+                source_steps = kept_steps
+            else:
+                logger.warning(
+                    "All members of %s phase were reviewer agents; "
+                    "keeping original list to preserve executability",
+                    phase.name,
+                )
+                source_steps = phase.steps
+        else:
+            source_steps = phase.steps
+
         members: list[TeamMember] = []
         all_deliverables: list[str] = []
         all_knowledge: list = []
         seen_knowledge_paths: set[str] = set()
-        for i, step in enumerate(phase.steps):
+        for i, step in enumerate(source_steps):
             role = "lead" if i == 0 else "implementer"
             member_id = f"{phase.phase_id}.1.{chr(97 + i)}"
             members.append(TeamMember(
@@ -2411,7 +3238,7 @@ class IntelligentPlanner:
                     all_knowledge.append(k)
                     seen_knowledge_paths.add(key)
 
-        combined_desc = "; ".join(s.task_description for s in phase.steps)
+        combined_desc = "; ".join(s.task_description for s in source_steps)
         return PlanStep(
             step_id=f"{phase.phase_id}.1",
             agent_name="team",

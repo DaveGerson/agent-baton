@@ -167,7 +167,23 @@ class ClaudeCodeConfig:
     """Base delay (seconds) for exponential-backoff retries."""
 
     max_outcome_length: int = 4000
-    """Maximum characters kept from the agent outcome string."""
+    """Maximum characters kept from the agent outcome *inline* string.
+
+    Outputs longer than ``max_outcome_length - 200`` are truncated; the
+    full text is preserved on disk under ``outcome_spillover_dir_relative``
+    and referenced via :attr:`LaunchResult.outcome_spillover_path`.
+    """
+
+    outcome_spillover_dir_relative: str = "outcome-spillover"
+    """Subdirectory (relative to the per-task execution dir) where full
+    outcome text is written when truncation occurs.  Created lazily."""
+
+    execution_dir: Path | None = None
+    """Per-task execution directory used as the parent for the spillover
+    subdirectory.  When ``None`` the launcher falls back to
+    ``$BATON_TEAM_CONTEXT_ROOT/executions/$BATON_TASK_ID`` (or the
+    canonical ``.claude/team-context/executions/<task_id>`` path) at the
+    time of writing."""
 
     prompt_file_threshold: int = 131_072
     """Byte threshold above which the prompt is delivered via stdin rather
@@ -180,6 +196,12 @@ class ClaudeCodeConfig:
     variables (plus ``PATH`` and ``HOME``) are included in the child
     environment."""
 
+    bead_db_path: Path | None = None
+    """Optional path to the project ``baton.db``.  When set and an agent
+    outcome is silently truncated by ``max_outcome_length``, a ``warning``
+    bead tagged ``outcome-truncated`` is filed so the operator can see the
+    data loss.  When ``None`` the bead is skipped (warning is still logged)."""
+
     def to_dict(self) -> dict[str, Any]:
         """Serialise to a plain dict (JSON-safe)."""
         return {
@@ -190,14 +212,19 @@ class ClaudeCodeConfig:
             "max_retries": self.max_retries,
             "base_retry_delay": self.base_retry_delay,
             "max_outcome_length": self.max_outcome_length,
+            "outcome_spillover_dir_relative": self.outcome_spillover_dir_relative,
+            "execution_dir": self.execution_dir.as_posix() if self.execution_dir else None,
             "prompt_file_threshold": self.prompt_file_threshold,
             "env_passthrough": list(self.env_passthrough),
+            "bead_db_path": self.bead_db_path.as_posix() if self.bead_db_path else None,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ClaudeCodeConfig:
         """Deserialise from a plain dict."""
         wd = data.get("working_directory")
+        ed = data.get("execution_dir")
+        bdp = data.get("bead_db_path")
         return cls(
             claude_path=data.get("claude_path", "claude"),
             working_directory=Path(wd) if wd else None,
@@ -206,9 +233,133 @@ class ClaudeCodeConfig:
             max_retries=int(data.get("max_retries", 3)),
             base_retry_delay=float(data.get("base_retry_delay", 5.0)),
             max_outcome_length=int(data.get("max_outcome_length", 4000)),
+            outcome_spillover_dir_relative=str(
+                data.get("outcome_spillover_dir_relative", "outcome-spillover")
+            ),
+            execution_dir=Path(ed) if ed else None,
             prompt_file_threshold=int(data.get("prompt_file_threshold", 131_072)),
             env_passthrough=list(data.get("env_passthrough", _DEFAULT_ENV_PASSTHROUGH)),
+            bead_db_path=Path(bdp) if bdp else None,
         )
+
+
+# ---------------------------------------------------------------------------
+# Outcome spillover
+# ---------------------------------------------------------------------------
+
+# Headroom reserved at the end of the inline outcome for the spillover
+# breadcrumb.  When raw outcome length exceeds (max_outcome_length -
+# _SPILLOVER_BREADCRUMB_HEADROOM), spillover-on-truncate is triggered.
+_SPILLOVER_BREADCRUMB_HEADROOM: int = 200
+
+
+def _resolve_execution_dir(config: ClaudeCodeConfig) -> Path | None:
+    """Return the per-task execution directory used as the spillover root.
+
+    Resolution order:
+    1. ``config.execution_dir`` if explicitly set.
+    2. ``$BATON_TASK_ID`` + ``$BATON_TEAM_CONTEXT_ROOT`` (or working_directory
+       / ``.claude/team-context``) — canonical layout
+       ``<root>/executions/<task_id>``.
+    3. ``None`` if no task id is available (caller should skip spillover).
+    """
+    if config.execution_dir is not None:
+        return config.execution_dir
+    task_id = os.environ.get("BATON_TASK_ID", "").strip()
+    if not task_id:
+        return None
+    root_env = os.environ.get("BATON_TEAM_CONTEXT_ROOT", "").strip()
+    if root_env:
+        root = Path(root_env)
+    else:
+        base = config.working_directory or Path.cwd()
+        root = base / ".claude" / "team-context"
+    return root / "executions" / task_id
+
+
+def _write_outcome_spillover(
+    *,
+    full_text: str,
+    step_id: str,
+    config: ClaudeCodeConfig,
+) -> tuple[str, str] | None:
+    """Persist the FULL untruncated outcome to disk.
+
+    Returns a ``(relative_path, breadcrumb_outcome)`` tuple on success, where
+    ``relative_path`` is the spillover file path relative to the execution
+    dir and ``breadcrumb_outcome`` is the inline string that should replace
+    ``outcome`` in the LaunchResult.  Returns ``None`` when the execution
+    directory cannot be resolved or the write fails (caller falls back to
+    legacy truncation).
+    """
+    exec_dir = _resolve_execution_dir(config)
+    if exec_dir is None:
+        return None
+
+    spillover_dir = exec_dir / config.outcome_spillover_dir_relative
+    try:
+        spillover_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:  # noqa: BLE001
+        logger.warning(
+            "Could not create spillover dir %s: %s — falling back to truncation.",
+            spillover_dir,
+            exc,
+        )
+        return None
+
+    safe_step_id = re.sub(r"[^A-Za-z0-9._-]", "_", step_id) or "unknown"
+    timestamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
+    fname = f"step-{safe_step_id}-{timestamp}.md"
+    target = spillover_dir / fname
+
+    try:
+        target.write_text(full_text, encoding="utf-8")
+    except OSError as exc:  # noqa: BLE001
+        logger.warning(
+            "Could not write spillover file %s: %s — falling back to truncation.",
+            target,
+            exc,
+        )
+        return None
+
+    rel_path = f"{config.outcome_spillover_dir_relative}/{fname}"
+    head_chars = max(0, config.max_outcome_length - _SPILLOVER_BREADCRUMB_HEADROOM)
+    head = full_text[:head_chars]
+    breadcrumb = (
+        f"[TRUNCATED — full output: {rel_path} "
+        f"({len(full_text.encode('utf-8'))} bytes total)]\n\n"
+        f"--- First {head_chars} chars ---\n"
+        f"{head}"
+    )
+    return rel_path, breadcrumb
+
+
+def _truncate_or_spillover(
+    *,
+    raw_text: str,
+    step_id: str,
+    config: ClaudeCodeConfig,
+) -> tuple[str, str]:
+    """Apply the inline cap; if exceeded, write spillover and return the
+    breadcrumb outcome.
+
+    Returns ``(outcome_string, spillover_relative_path)``.  ``spillover_relative_path``
+    is empty when no spillover was needed (or could not be written).
+    """
+    inline_cap = config.max_outcome_length
+    threshold = inline_cap - _SPILLOVER_BREADCRUMB_HEADROOM
+    if len(raw_text) <= threshold:
+        # Below the headroom-adjusted threshold: legacy behavior, no spillover.
+        return raw_text[:inline_cap], ""
+
+    spilled = _write_outcome_spillover(
+        full_text=raw_text, step_id=step_id, config=config
+    )
+    if spilled is None:
+        # Best-effort fallback: legacy hard truncation.
+        return raw_text[:inline_cap], ""
+    rel_path, breadcrumb = spilled
+    return breadcrumb, rel_path
 
 
 # ---------------------------------------------------------------------------
@@ -427,6 +578,81 @@ class ClaudeCodeLauncher:
                 return value
         return self._config.default_timeout_seconds
 
+    def _warn_truncation(
+        self,
+        agent_name: str,
+        step_id: str,
+        bytes_attempted: int,
+        bytes_written: int,
+    ) -> None:
+        """Log a WARNING and file a ``warning`` bead when outcome is truncated.
+
+        Called whenever the raw outcome text exceeds ``max_outcome_length``.
+        The truncated outcome is still returned by the caller — this method
+        only makes the data loss *visible*.
+
+        Best-effort: any exception during bead filing is caught and logged at
+        DEBUG level so a BeadStore failure never cascades into a launcher
+        failure.
+
+        Args:
+            agent_name: Name of the agent whose outcome was truncated.
+            step_id: Step identifier within the execution.
+            bytes_attempted: Length of the full (pre-truncation) outcome text.
+            bytes_written: Length of the truncated outcome text that was kept.
+        """
+        logger.warning(
+            "Outcome truncated for agent=%r step=%r: attempted=%d chars, kept=%d chars "
+            "(max_outcome_length=%d). Data loss is silent without this warning.",
+            agent_name,
+            step_id,
+            bytes_attempted,
+            bytes_written,
+            self._config.max_outcome_length,
+        )
+
+        if self._config.bead_db_path is None:
+            return
+
+        try:
+            from datetime import datetime, timezone
+
+            from agent_baton.core.engine.bead_store import BeadStore
+            from agent_baton.models.bead import Bead, _generate_bead_id  # type: ignore[attr-defined]
+
+            content = (
+                f"Outcome truncated for agent={agent_name!r} step={step_id!r}. "
+                f"Attempted {bytes_attempted} chars, kept {bytes_written} chars "
+                f"(limit={self._config.max_outcome_length})."
+            )
+            ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            bead_id = _generate_bead_id(
+                task_id="",
+                step_id=step_id,
+                content=content,
+                timestamp=ts,
+                bead_count=0,
+            )
+            bead = Bead(
+                bead_id=bead_id,
+                task_id="",
+                step_id=step_id,
+                agent_name=agent_name,
+                bead_type="warning",
+                content=content,
+                confidence="high",
+                scope="step",
+                tags=["outcome-truncated"],
+                source="agent-signal",
+                created_at=ts,
+            )
+            store = BeadStore(self._config.bead_db_path)
+            store.write(bead)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "ClaudeCodeLauncher._warn_truncation: bead write failed (non-fatal): %s", exc
+            )
+
     def _parse_output(
         self,
         stdout: bytes,
@@ -456,7 +682,19 @@ class ClaudeCodeLauncher:
             is_error: bool = bool(parsed.get("is_error", False))
             result_text: str = str(parsed.get("result", ""))
             # A5: redact sensitive patterns from outcome before storage.
-            outcome = _redact_sensitive(result_text)[: self._config.max_outcome_length]
+            redacted = _redact_sensitive(result_text)
+            outcome, spillover_path = _truncate_or_spillover(
+                raw_text=redacted, step_id=step_id, config=self._config
+            )
+            # bd-e78c: if truncation happened without spillover (write failed
+            # or spillover disabled), file a warning bead so the loss is visible.
+            if len(redacted) > self._config.max_outcome_length and not spillover_path:
+                self._warn_truncation(
+                    agent_name=agent_name,
+                    step_id=step_id,
+                    bytes_attempted=len(redacted),
+                    bytes_written=len(outcome),
+                )
 
             # Token usage
             usage = parsed.get("usage", {}) or {}
@@ -488,6 +726,7 @@ class ClaudeCodeLauncher:
                     duration_seconds=duration_seconds,
                     estimated_tokens=estimated_tokens,
                     error=error,
+                    outcome_spillover_path=spillover_path,
                 )
 
             return LaunchResult(
@@ -497,11 +736,23 @@ class ClaudeCodeLauncher:
                 outcome=outcome,
                 duration_seconds=duration_seconds,
                 estimated_tokens=estimated_tokens,
+                outcome_spillover_path=spillover_path,
             )
 
         # --- Raw text fallback -----------------------------------------------
         # A5: redact sensitive patterns from raw stdout before storage.
-        outcome = _redact_sensitive(stdout_text)[: self._config.max_outcome_length]
+        redacted_raw = _redact_sensitive(stdout_text)
+        outcome, spillover_path = _truncate_or_spillover(
+            raw_text=redacted_raw, step_id=step_id, config=self._config
+        )
+        # bd-e78c: visible warning when truncation happened without spillover.
+        if len(redacted_raw) > self._config.max_outcome_length and not spillover_path:
+            self._warn_truncation(
+                agent_name=agent_name,
+                step_id=step_id,
+                bytes_attempted=len(redacted_raw),
+                bytes_written=len(outcome),
+            )
 
         # Estimate tokens from raw output length (1 token ≈ 4 chars).
         # stdout_text is used (not truncated outcome) to keep the estimate
@@ -518,6 +769,7 @@ class ClaudeCodeLauncher:
                 duration_seconds=elapsed,
                 estimated_tokens=raw_estimated_tokens,
                 error=_redact_sensitive(stderr_text) or f"exit code {exit_code}",
+                outcome_spillover_path=spillover_path,
             )
 
         return LaunchResult(
@@ -527,6 +779,7 @@ class ClaudeCodeLauncher:
             outcome=outcome,
             duration_seconds=elapsed,
             estimated_tokens=raw_estimated_tokens,
+            outcome_spillover_path=spillover_path,
         )
 
     def _is_rate_limit(self, stderr: str) -> bool:

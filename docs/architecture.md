@@ -217,6 +217,7 @@ agent_baton/
   |  |  events.py     SSE event stream (1 endpoint)
   |  |  webhooks.py   Webhook subscriptions (3 endpoints)
   |  |  pmo.py        PMO board/project/forge/execute/gates/changelist/review/signals (36 endpoints)
+  |  |  pmo_h3.py     PMO H3 surfaces: scorecard, arch-review, playbooks, CRP, beads (6 endpoints)
   |  |  learn.py      Learning issues and auto-correction (5 endpoints)
   |  models/
   |  |  requests.py   Pydantic request bodies
@@ -261,11 +262,31 @@ pmo-ui/              React/Vite PMO frontend (served at /pmo/)
     |                 ConfirmDialog, ExecutionProgress, ForgePanel,
     |                 GateApprovalPanel, HealthBar, InterviewPanel,
     |                 KanbanBoard, KanbanCard, KeyboardShortcutsDialog,
-    |                 PlanEditor, PlanPreview, ReviewPanel, SignalsBar
+    |                 PlanEditor, PlanPreview, ReviewPanel, SignalsBar,
+    |                 BeadGraphView, BeadTimelineView
+    views/            H3 PMO views — RoleBasedDashboard (H3.2),
+    |                 DeveloperScorecard (H3.4), ArchReviewPanel (H3.7),
+    |                 PlaybookGallery (H3.8), CRPWizard (H3.9),
+    |                 BeadGraphView + BeadTimelineView (DX.6). Backed
+    |                 by /api/v1/pmo/scorecard, /arch-beads, /playbooks,
+    |                 /crp, and /beads endpoints in routes/pmo_h3.py.
+
+> **DX.6 — `GET /api/v1/pmo/beads`** (bd-aade): the PMO `BeadGraphView`
+> and `BeadTimelineView` are powered by a `GET /api/v1/pmo/beads`
+> endpoint in `routes/pmo_h3.py`.  It wraps `BeadStore.query()` and
+> returns a `{ beads, total }` envelope with the full Bead shape
+> (links, tags, affected files, quality/retrieval scores).  Optional
+> query params — `status` (default `open`, pass `all` to disable
+> filtering), `bead_type`, `tags` (comma-separated, AND semantics),
+> `task_id`, and `limit` (default 200, max 1000) — are passed through
+> to `BeadStore.query()`.  The endpoint degrades to an empty envelope
+> when the project's `baton.db` is missing or its `beads` table is
+> not yet provisioned.
     contexts/         ToastContext
     hooks/            useHotkeys, usePersistedState, usePmoBoard
     api/              client.ts, types.ts
     styles/           index.css, tokens.ts
+    test/             setup.ts (Vitest + jsdom + jest-dom matchers)
     utils/            agent-names.ts
 agents/              Distributable agent definitions (19 .md files)
 references/          Distributable reference docs (15 .md files)
@@ -372,6 +393,17 @@ for the driving session (Claude or daemon) to perform.
 | `bead_selector.py` | `BeadSelector` | Selects and ranks beads for injection into delegation prompts. Three-tier selection: dependency-chain beads (highest priority), same-phase beads, cross-phase beads. Within each tier, ranks by type priority (warning > discovery > decision > outcome > planning) and quality score. Budget-trimmed output. |
 | `bead_decay.py` | `decay_beads()` | Retention-based archival of old beads. Moves stale open beads to `archived` status based on configurable age thresholds. |
 
+#### Expected Outcome (Demo Statement, Wave 3.1)
+
+Every `PlanStep` carries an `expected_outcome` — a 1-sentence behavioral
+statement of what should be observably true after the step. The planner
+derives it deterministically from the step description, agent role, and
+step type (no LLM call). The dispatcher prepends it as a `## Expected
+Outcome` section in the delegation prompt; `plan.md` and the CLI
+`DISPATCH` action surface it on their own lines. The goal is to anchor
+`code-reviewer` and `test-engineer` on behavioral correctness rather
+than "no errors". Empty string preserves back-compat for older plans.
+
 #### ExecutionEngine Lifecycle
 
 ```
@@ -439,6 +471,18 @@ class ExecutionDriver(Protocol):
 `TaskWorker.__init__` accepts `engine: ExecutionDriver`, not the concrete
 `ExecutionEngine`. Tests inject lightweight protocol-conforming objects
 without subclassing (ADR-03).
+
+#### CI Gates (Wave 4.1)
+
+Plans may declare a `gate_type="ci"` gate whose `command` is a workflow
+filename (e.g. `"ci.yml"`) or a JSON config (`{"provider": "github",
+"workflow": "ci.yml", "timeout_s": 600}`). The CLI/executor invoke
+`agent_baton.core.gates.ci_gate.CIGateRunner`, which polls
+`gh run list/view` every 15 s for the current branch's HEAD commit and
+returns a `CIGateResult` (passed, run_id, conclusion, url, log_excerpt).
+CI gates are opt-in — default plans do not include one. Missing `gh`,
+GitLab, and timeout are reported as `passed=False` with sentinel
+conclusions (`gh_unavailable`, `not_implemented`, `timeout`).
 
 ---
 
@@ -1031,6 +1075,40 @@ Bead
  |-- retrieval_count: int
 ```
 
+#### BeadSynthesizer (Wave 2.1)
+
+`agent_baton/core/intel/bead_synthesizer.py` turns flat beads into a graph
+post-phase. It infers undirected edges into `bead_edges`
+(`file_overlap`, `tag_overlap`, `conflict`) using jaccard similarity, then
+walks connected components over file-overlap edges with weight ≥ 0.3 to
+populate `bead_clusters`. Conflict detection flags pairs of `warning` beads
+that share a primary tag but have <0.2 content-token overlap. Synthesis is
+fully deterministic (no embeddings, no LLM calls), idempotent, and
+best-effort — failures log at debug and never block phase advancement.
+CLI surface: `baton beads synthesize` (manual trigger) and `baton beads
+clusters` (list components).
+
+#### HandoffSynthesizer (Wave 3.2)
+
+`agent_baton/core/intel/handoff_synthesizer.py` synthesizes a compact
+(≤400-char) "Handoff from Prior Step" section when the dispatcher hands
+off from agent N to agent N+1: top-5 files changed, discoveries (beads
+created during the prior step), blockers (open `warning` beads whose
+files/tags overlap the next step's domain), and a one-line outcome
+summary. Persisted to `handoff_beads` (schema v29) for audit; listable
+via `baton beads handoffs --task-id <id>`. Fully deterministic, single-
+task scope, best-effort. Resolves bd-65d4 / bd-61a5.
+
+#### Multi-Agent Debate (D4, Tier-4 research)
+
+`agent_baton/core/intel/debate.py` runs a structured N-round debate
+between 2-5 specialist agents (each given a distinct framing), then
+dispatches a moderator agent to synthesize a recommendation plus a list
+of unresolved disagreements. Sequential dispatch via a pluggable
+`DebateRunner` (HeadlessClaude in production, stub in dry-run/tests).
+Persisted to `debates` (schema v30); CLI surface: `baton debate`. Opt-in
+only — never auto-invoked by the planner or engine.
+
 ### 7.4 Serialization
 
 All model types implement `to_dict()` / `from_dict()` class methods for JSON
@@ -1390,6 +1468,19 @@ All IDs are prefixed with `bd-` (e.g., `bd-a1b2`).
 
 ---
 
+## 12.5 Project Config (`baton.yaml`)
+
+Optional, additive project-level config loaded by
+`agent_baton.core.config.ProjectConfig.load()` (walks up from cwd).
+Lets a project declare `default_agents`, `default_gates`,
+`default_isolation`, `auto_route_rules`, and `excluded_paths` so
+`baton plan` doesn't need repeated CLI flags. The planner applies these
+in `_apply_project_config()` after stack-aware QA gates — empty/missing
+configs are a complete no-op. Inspect/scaffold via `baton config show`,
+`baton config init`, and `baton config validate`.
+
+---
+
 ## 13. Cross-Cutting Concerns
 
 ### 13.1 Error Handling
@@ -1464,6 +1555,18 @@ the env var name stored in its config).
   central.db                        Cross-project read replica
   .pmo-migrated                     One-time migration marker
 ```
+
+### 13.5 Dispatch Verification (bd-edbf)
+
+`baton execute verify-dispatch <step_id>` and `baton execute audit-isolation`
+provide read-only post-hoc compliance checks for the worktree-isolation
+contract. The `DispatchVerifier` (`agent_baton/core/audit/`) compares each
+recorded `StepResult.files_changed` against the dispatched `PlanStep.allowed_paths`
+(falling back to `git diff-tree` when files_changed is empty but commit_hash
+is present), and validates that any recorded commit hash resolves in the repo.
+Both commands are read-only by contract — they never mutate state, plans, or
+git — and exit non-zero on any definite violation so CI pipelines can gate on
+isolation compliance without re-running the executor.
 
 ---
 
@@ -1638,8 +1741,18 @@ models  -->  events, observe, govern, learn, improve, distribute, orchestration,
 | Attribute | Value |
 |-----------|-------|
 | Entry | `--knowledge` / `--knowledge-pack` on `baton plan`; `KNOWLEDGE_GAP` in agent output |
-| Path | `IntelligentPlanner` -> `KnowledgeRegistry` -> `KnowledgeResolver` -> `PromptDispatcher` -> `KnowledgeGap` handler |
+| Path | `IntelligentPlanner` -> `KnowledgeRegistry` -> `KnowledgeResolver` -> `KnowledgeRanker` -> `PromptDispatcher` -> `KnowledgeGap` handler |
 | Output | Knowledge blocks in delegation prompts; `KnowledgeGapRecord` in retrospectives |
+
+#### Knowledge Ranking (bd-0184)
+
+After `KnowledgeResolver` produces candidates for each step, `KnowledgeRanker`
+(`agent_baton/core/intel/knowledge_ranker.py`) re-orders them by a deterministic
+composite score: `effectiveness_score * 0.6 + recency_factor * 0.2 + usage_factor * 0.2`.
+Scores are read from `v_knowledge_effectiveness` in `central.db`; missing telemetry
+yields a neutral 0.5 so documents with no history sort stably. The planner then
+caps the list at `BATON_MAX_KNOWLEDGE_PER_STEP` (default 8) before attaching to
+the step. The full ranked table is exposed via `baton knowledge ranking`.
 
 ### Domain 4: Federated Sync
 

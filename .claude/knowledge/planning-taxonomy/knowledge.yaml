@@ -1,0 +1,7 @@
+name: planning-taxonomy
+description: Universal semantic object model for Agent Baton execution plans — element hierarchy, step intents, phase archetypes, task classification, foresight rules, and budget/gate semantics
+tags: [planning, taxonomy, decomposition, intents, archetypes, foresight, gates, budget]
+target_agents: [orchestrator, architect, ai-systems-architect, backend-engineer--python]
+default_delivery: reference
+docs:
+  - taxonomy-quick-ref

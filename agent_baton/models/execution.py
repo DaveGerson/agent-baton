@@ -281,6 +281,12 @@ class PlanStep:
         knowledge: Knowledge documents attached by the planner.
         synthesis: How to merge team member outputs.  Only meaningful
             when ``team`` is non-empty.
+        expected_outcome: One-sentence behavioral statement describing what
+            should be observably true after this step completes.  Wave 3.1
+            (Demo Statement) — used as the primary prompt anchor for
+            ``code-reviewer`` and ``test-engineer`` to shift review from
+            "no errors" to "behavioral correctness".  Empty string means
+            no outcome was derived (preserves back-compat for older plans).
     """
 
     step_id: str                          # e.g. "1.1"
@@ -301,6 +307,8 @@ class PlanStep:
     step_type: str = "developing"   # planning, developing, testing, reviewing,
                                     # consulting, task, automation
     command: str = ""               # shell command for automation steps
+    expected_outcome: str = ""      # Wave 3.1: 1-sentence demo statement (behavioral)
+    timeout_seconds: int = 0        # 0 = no timeout (backward-compat default)
 
     def to_dict(self) -> dict:
         d = {
@@ -328,6 +336,10 @@ class PlanStep:
             d["max_turns"] = self.max_turns
         if self.command:
             d["command"] = self.command
+        if self.expected_outcome:
+            d["expected_outcome"] = self.expected_outcome
+        if self.timeout_seconds:
+            d["timeout_seconds"] = self.timeout_seconds
         return d
 
     @classmethod
@@ -351,6 +363,8 @@ class PlanStep:
             max_turns=data.get("max_turns", 10),
             step_type=data.get("step_type", "developing"),
             command=data.get("command", ""),
+            expected_outcome=data.get("expected_outcome", ""),
+            timeout_seconds=data.get("timeout_seconds", 0),
         )
 
 
@@ -412,6 +426,11 @@ class PlanPhase:
         approval_required: If ``True``, pause for human approval after
             steps complete (before the gate, if any).
         approval_description: What the human should review.
+        risk_level: Optional per-phase risk override. When non-empty,
+            ``ExecutionEngine._enforce_veto_before_advance`` uses this
+            tier (LOW|MEDIUM|HIGH|CRITICAL) for VETO gating in place of
+            the plan-level value. Lets a CRITICAL plan contain a single
+            LOW phase that bypasses VETO blocks (bd-5bd9).
     """
 
     phase_id: int
@@ -421,6 +440,7 @@ class PlanPhase:
     approval_required: bool = False         # pause for human approval after steps complete
     approval_description: str = ""          # what the human should review
     feedback_questions: list[FeedbackQuestion] = field(default_factory=list)  # multiple-choice feedback gate
+    risk_level: str = ""                    # bd-5bd9: optional per-phase override
 
     def to_dict(self) -> dict:
         d: dict = {
@@ -435,6 +455,8 @@ class PlanPhase:
             d["approval_description"] = self.approval_description
         if self.feedback_questions:
             d["feedback_questions"] = [q.to_dict() for q in self.feedback_questions]
+        if self.risk_level:
+            d["risk_level"] = self.risk_level
         return d
 
     @classmethod
@@ -451,6 +473,7 @@ class PlanPhase:
                 FeedbackQuestion.from_dict(q)
                 for q in data.get("feedback_questions", [])
             ],
+            risk_level=data.get("risk_level", ""),
         )
 
 
@@ -648,6 +671,8 @@ class MachinePlan:
                     lines.append(f"### Step {step.step_id}: {step.agent_name}")
                     lines.append(f"- **Model**: {step.model}")
                     lines.append(f"- **Task**: {step.task_description}")
+                if step.expected_outcome:
+                    lines.append(f"- **Expected outcome**: {step.expected_outcome}")
                 if step.depends_on:
                     lines.append(f"- **Depends on**: {', '.join(step.depends_on)}")
                 if step.deliverables:
@@ -870,6 +895,7 @@ class StepResult:
     interaction_history: list[InteractionTurn] = field(default_factory=list)  # multi-turn exchange
     step_type: str = "developing"   # echoed from PlanStep for analytics/queries
     updated_at: str = ""            # ISO 8601 UTC; set on every status mutation; used for bi-directional split-brain reconciliation
+    outcome_spillover_path: str = ""  # relative path under execution dir to FULL outcome when truncated
 
     def to_dict(self) -> dict:
         d = {
@@ -894,6 +920,7 @@ class StepResult:
             "deviations": self.deviations,
             "step_type": self.step_type,
             "updated_at": self.updated_at,
+            "outcome_spillover_path": self.outcome_spillover_path,
         }
         if self.member_results:
             d["member_results"] = [m.to_dict() for m in self.member_results]
@@ -1310,6 +1337,13 @@ class ExecutionState:
     # None until consolidation is attempted; absent in older state files
     # (graceful default applied in from_dict).
     consolidation_result: ConsolidationResult | None = None
+    # F0.3 — auditor VETO override (bd-f606).  When True the executor
+    # advances past a VETO'd HIGH/CRITICAL phase but appends an Override
+    # row to compliance-audit.jsonl via ComplianceChainWriter.
+    # Justification is required when force_override=True; the CLI rejects
+    # --force without --justification.
+    force_override: bool = False
+    override_justification: str = ""
 
     def __post_init__(self) -> None:
         if not self.started_at:
@@ -1374,6 +1408,8 @@ class ExecutionState:
                 if self.consolidation_result is not None
                 else None
             ),
+            "force_override": self.force_override,
+            "override_justification": self.override_justification,
         }
 
     @classmethod
@@ -1396,6 +1432,8 @@ class ExecutionState:
             resolved_decisions=[ResolvedDecision.from_dict(d) for d in data.get("resolved_decisions", [])],
             delivered_knowledge=dict(data.get("delivered_knowledge", {})),
             consolidation_result=ConsolidationResult.from_dict(cr_data) if cr_data is not None else None,
+            force_override=bool(data.get("force_override", False)),
+            override_justification=data.get("override_justification", ""),
         )
 
 
@@ -1445,6 +1483,13 @@ class ExecutionAction:
     path_enforcement: str = ""
     # MCP server names to pass through to this dispatch:
     mcp_servers: list[str] = field(default_factory=list)
+    # Subagent isolation contract — set to "worktree" when the engine
+    # emits this action as part of a parallel DISPATCH wave (>=2 actions).
+    # The orchestrator MUST forward this onto the Agent invocation as
+    # ``isolation="worktree"`` so concurrent agents land in separate git
+    # worktrees and cannot contaminate the parent branch.  Empty string
+    # means no isolation contract (singleton or sequential dispatch).
+    isolation: str = ""
 
     # For GATE actions:
     gate_type: str = ""
@@ -1473,6 +1518,10 @@ class ExecutionAction:
     interact_max_turns: int = 10       # maximum allowed turns for this step
     interactive: bool = False          # True on DISPATCH when the step is interactive
 
+    # Wave 3.1 — behavioral demo statement echoed from PlanStep.expected_outcome
+    # so the CLI and the orchestrator can surface it without re-reading plan.json.
+    expected_outcome: str = ""         # DISPATCH only; empty when not derived
+
     def to_dict(self) -> dict[str, Any]:
         # action_type is serialised as a plain string so CLI / Claude output
         # is unaffected by the internal enum representation.
@@ -1499,6 +1548,10 @@ class ExecutionAction:
                 d["interact_max_turns"] = self.interact_max_turns
             if self.command:
                 d["command"] = self.command
+            if self.isolation:
+                d["isolation"] = self.isolation
+            if self.expected_outcome:
+                d["expected_outcome"] = self.expected_outcome
         elif self.action_type == ActionType.GATE:
             d.update({
                 "gate_type": self.gate_type,

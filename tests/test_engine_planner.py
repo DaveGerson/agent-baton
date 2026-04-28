@@ -477,11 +477,30 @@ class TestCreatePlanAgentOverride:
 
     def test_explicit_agents_skip_pattern(self, planner: IntelligentPlanner):
         # Even if a pattern would recommend different agents, explicit overrides win
+        # for phases the override agent is allowed to own.  bd-1974: a Review
+        # phase must still be routed to a reviewer-class agent — the planner
+        # synthesizes ``code-reviewer`` rather than letting test-engineer
+        # (an implementer) own a review step.
         plan = planner.create_plan(
             "Add user authentication",
             agents=["test-engineer"],
         )
-        assert all(a == "test-engineer" for a in plan.all_agents)
+        # Every non-review phase step must be the explicit override agent.
+        for phase in plan.phases:
+            for step in phase.steps:
+                if phase.name.lower() == "review":
+                    # Review phase enforces reviewer-class routing (bd-1974).
+                    assert step.agent_name.split("--")[0] in {
+                        "code-reviewer", "security-reviewer", "auditor",
+                    }, (
+                        f"Review phase routed to non-reviewer "
+                        f"{step.agent_name!r}"
+                    )
+                else:
+                    assert step.agent_name == "test-engineer", (
+                        f"Non-review phase {phase.name!r} should keep the "
+                        f"explicit override; got {step.agent_name!r}"
+                    )
 
 
 # ---------------------------------------------------------------------------
@@ -1933,3 +1952,289 @@ class TestIsTeamPhase:
         """A phase with no steps is not a team phase."""
         phase = PlanPhase(phase_id=1, name="Implement", steps=[])
         assert planner._is_team_phase(phase, "implement something together") is False
+
+
+# ---------------------------------------------------------------------------
+# Concern-splitting (_parse_concerns + _split_implement_phase_by_concerns)
+# Covers Bug 1: multi-concern implement phases must split into parallel steps,
+# not collapse into one team step.
+# ---------------------------------------------------------------------------
+
+class TestParseConcerns:
+    """Tests for the static _parse_concerns helper."""
+
+    def test_feature_id_markers_detected(self):
+        """F0.1/F0.2/F0.3/F0.4 patterns produce 4 concerns."""
+        summary = (
+            "Phase 0: F0.1 Spec entity, F0.2 Tenancy hierarchy, "
+            "F0.3 Hash-chain audit log, F0.4 Knowledge telemetry"
+        )
+        concerns = IntelligentPlanner._parse_concerns(summary)
+        markers = [c[0] for c in concerns]
+        assert markers == ["F0.1", "F0.2", "F0.3", "F0.4"]
+        assert concerns[0][1] == "Spec entity"
+        assert concerns[3][1] == "Knowledge telemetry"
+
+    def test_parenthesized_markers_detected(self):
+        """(1)/(2)/(3) parenthesized markers produce 3 concerns."""
+        summary = "(1) login UI; (2) backend OAuth; (3) test coverage"
+        concerns = IntelligentPlanner._parse_concerns(summary)
+        assert [c[0] for c in concerns] == ["1", "2", "3"]
+
+    def test_bare_numbered_markers_detected(self):
+        """1./2./3. bare-numbered markers produce 3 concerns."""
+        summary = "1. Refactor schema. 2. Migrate data. 3. Update API."
+        concerns = IntelligentPlanner._parse_concerns(summary)
+        assert [c[0] for c in concerns] == ["1", "2", "3"]
+
+    def test_under_threshold_returns_empty(self):
+        """Fewer than 3 markers returns no concerns (below split threshold)."""
+        summary = "Two items: (1) login, (2) signup"
+        assert IntelligentPlanner._parse_concerns(summary) == []
+
+    def test_no_markers_returns_empty(self):
+        """A plain task summary returns no concerns."""
+        summary = "Add a single OAuth2 endpoint to the API"
+        assert IntelligentPlanner._parse_concerns(summary) == []
+
+    def test_decimal_versions_not_matched(self):
+        """Decimals like '1.5.2' must not be parsed as concern markers."""
+        summary = "release version 1.5.2 today and tag the build"
+        assert IntelligentPlanner._parse_concerns(summary) == []
+
+    def test_single_feature_id_not_split(self):
+        """A single F1.5 reference must not trigger splitting."""
+        assert IntelligentPlanner._parse_concerns("Fix bug F1.5 in the parser") == []
+
+
+class TestConcernSplitting:
+    """End-to-end tests for concern-splitting in create_plan()."""
+
+    def test_four_concern_summary_produces_four_parallel_steps(
+        self, extended_planner: IntelligentPlanner
+    ):
+        """A 4-concern task must produce a 4-step parallel implement phase
+        (NOT a single team step)."""
+        summary = (
+            "Implement Phase 0 foundations: F0.1 Spec entity (DB schema "
+            "and CRUD), F0.2 Tenancy hierarchy (org/team API endpoints), "
+            "F0.3 Hash-chain audit log (verifier), F0.4 Knowledge "
+            "telemetry (UI dashboard)"
+        )
+        plan = extended_planner.create_plan(summary, task_type="new-feature")
+        impl_phases = [p for p in plan.phases if p.name.lower() == "implement"]
+        assert impl_phases, "expected at least one Implement phase"
+        impl = impl_phases[0]
+        # Bug 1 expectation: 4 parallel steps, NOT a 1-step team
+        assert len(impl.steps) == 4, (
+            f"expected 4 parallel concern-steps, got {len(impl.steps)}: "
+            f"{[(s.step_id, s.agent_name) for s in impl.steps]}"
+        )
+        # No step should be a team-wrapper
+        for s in impl.steps:
+            assert s.agent_name != "team", (
+                f"step {s.step_id} is a team-wrapper; expected single-agent "
+                f"per-concern split"
+            )
+            assert s.team == [], f"step {s.step_id} unexpectedly has team members"
+        # Step IDs renumber 1..4
+        assert [s.step_id for s in impl.steps] == [
+            f"{impl.phase_id}.{i}" for i in range(1, 5)
+        ]
+        # Concern markers preserved in descriptions
+        descriptions = " ".join(s.task_description for s in impl.steps)
+        for marker in ("F0.1", "F0.2", "F0.3", "F0.4"):
+            assert marker in descriptions, f"marker {marker} missing from step descriptions"
+
+    def test_single_concern_summary_does_not_split(
+        self, extended_planner: IntelligentPlanner
+    ):
+        """A 1-concern task must NOT produce a multi-step parallel implement
+        phase (no regression to existing single-task planning)."""
+        summary = "Add a single OAuth2 endpoint to the API"
+        plan = extended_planner.create_plan(summary, task_type="new-feature")
+        impl_phases = [p for p in plan.phases if p.name.lower() == "implement"]
+        assert impl_phases
+        impl = impl_phases[0]
+        # Existing behaviour: 1-step or a team step (concern-split must NOT
+        # have produced ≥3 steps).  Concern markers should be absent.
+        for s in impl.steps:
+            assert "F0." not in s.task_description
+            assert "(F0" not in s.task_description
+
+    def test_pick_agent_for_concern_routes_ui_to_frontend(
+        self, extended_planner: IntelligentPlanner
+    ):
+        """The picker should select frontend-engineer for a UI concern
+        when frontend-engineer is in the candidate roster."""
+        candidates = [
+            "architect",
+            "backend-engineer",
+            "frontend-engineer",
+            "test-engineer",
+        ]
+        agent = extended_planner._pick_agent_for_concern(
+            "React UI dashboard with visual layout", candidates,
+        )
+        assert agent == "frontend-engineer", (
+            f"expected frontend-engineer for UI concern, got {agent}"
+        )
+
+    def test_pick_agent_for_concern_routes_db_to_backend(
+        self, extended_planner: IntelligentPlanner
+    ):
+        """The picker should select backend-engineer for a database concern."""
+        candidates = ["architect", "backend-engineer", "frontend-engineer"]
+        agent = extended_planner._pick_agent_for_concern(
+            "Database schema migration for the audit log", candidates,
+        )
+        assert agent == "backend-engineer", (
+            f"expected backend-engineer for DB concern, got {agent}"
+        )
+
+    def test_pick_agent_for_concern_excludes_reviewers(
+        self, extended_planner: IntelligentPlanner
+    ):
+        """The picker must never return a reviewer-class agent, even when
+        only reviewers + one valid agent are in the candidate list."""
+        candidates = ["auditor", "code-reviewer", "backend-engineer"]
+        agent = extended_planner._pick_agent_for_concern(
+            "Audit and review the security log", candidates,
+        )
+        # Even though 'audit' and 'review' keywords match code-reviewer,
+        # reviewers are excluded — backend-engineer is the only eligible.
+        assert agent == "backend-engineer"
+
+
+# ---------------------------------------------------------------------------
+# Reviewer-agent filtering on team-step expansion
+# Covers Bug 2: auditor / code-reviewer / etc. must not appear as
+# implementers on an implement-type team step.
+# ---------------------------------------------------------------------------
+
+class TestReviewerAgentFilter:
+    """Tests for the REVIEWER_AGENTS filter applied in _consolidate_team_step
+    and the --agents override warning."""
+
+    def test_consolidate_drops_auditor_from_implement_phase(
+        self, planner: IntelligentPlanner
+    ):
+        """An Implement phase with auditor among its steps must not produce
+        a team member with role=implementer for the auditor."""
+        phase = PlanPhase(
+            phase_id=3,
+            name="Implement",
+            steps=[
+                PlanStep(step_id="3.1", agent_name="backend-engineer", task_description="A"),
+                PlanStep(step_id="3.2", agent_name="auditor", task_description="B"),
+                PlanStep(step_id="3.3", agent_name="test-engineer", task_description="C"),
+            ],
+        )
+        consolidated = planner._consolidate_team_step(phase)
+        assert consolidated.team, "expected consolidated team members"
+        member_agents = [m.agent_name for m in consolidated.team]
+        assert "auditor" not in member_agents, (
+            f"auditor must be filtered from implement-phase team; got {member_agents}"
+        )
+        # No member should have role=implementer for a reviewer
+        for m in consolidated.team:
+            assert not (
+                m.agent_name == "auditor" and m.role == "implementer"
+            )
+
+    def test_consolidate_keeps_auditor_in_review_phase(
+        self, planner: IntelligentPlanner
+    ):
+        """A non-implement phase (e.g. Review) keeps reviewer agents intact."""
+        phase = PlanPhase(
+            phase_id=4,
+            name="Review",
+            steps=[
+                PlanStep(step_id="4.1", agent_name="code-reviewer", task_description="A"),
+                PlanStep(step_id="4.2", agent_name="auditor", task_description="B"),
+            ],
+        )
+        consolidated = planner._consolidate_team_step(phase)
+        member_agents = [m.agent_name for m in consolidated.team]
+        # Both reviewers retained on a review-type phase
+        assert "auditor" in member_agents
+        assert "code-reviewer" in member_agents
+
+    def test_consolidate_logs_warning_when_dropping_reviewers(
+        self, planner: IntelligentPlanner, caplog
+    ):
+        """A warning must be logged when reviewer agents are filtered out."""
+        import logging
+        phase = PlanPhase(
+            phase_id=3,
+            name="Implement",
+            steps=[
+                PlanStep(step_id="3.1", agent_name="backend-engineer", task_description="A"),
+                PlanStep(step_id="3.2", agent_name="auditor", task_description="B"),
+            ],
+        )
+        with caplog.at_level(logging.WARNING, logger="agent_baton.core.engine.planner"):
+            planner._consolidate_team_step(phase)
+        assert any(
+            "auditor" in r.getMessage() and "Implement" in r.getMessage()
+            for r in caplog.records
+        ), f"expected warning mentioning auditor + Implement; got {[r.getMessage() for r in caplog.records]}"
+
+    def test_agents_override_with_auditor_logs_warning(
+        self, extended_planner: IntelligentPlanner, caplog
+    ):
+        """When --agents (the agents= kwarg) includes auditor on an implement
+        task, the planner logs a warning AND the auditor never appears as an
+        implementer on the implement phase."""
+        import logging
+        with caplog.at_level(logging.WARNING, logger="agent_baton.core.engine.planner"):
+            plan = extended_planner.create_plan(
+                "Add a new tenancy API endpoint with database migration",
+                task_type="new-feature",
+                agents=["backend-engineer", "auditor", "test-engineer"],
+            )
+        # Warning was emitted
+        assert any(
+            "auditor" in r.getMessage() and "reviewer" in r.getMessage().lower()
+            for r in caplog.records
+        ), f"expected reviewer warning; got {[r.getMessage() for r in caplog.records]}"
+
+        # Implement phase has NO auditor team member with role=implementer
+        impl_phases = [p for p in plan.phases if p.name.lower() == "implement"]
+        for impl in impl_phases:
+            for step in impl.steps:
+                # Single-agent step
+                if step.agent_name != "team":
+                    assert step.agent_name != "auditor", (
+                        f"auditor leaked as implement step agent on {step.step_id}"
+                    )
+                # Team step
+                for m in step.team:
+                    assert not (
+                        m.agent_name == "auditor" and m.role == "implementer"
+                    ), f"auditor leaked as implementer on {m.member_id}"
+
+    def test_all_reviewers_phase_keeps_executable(
+        self, planner: IntelligentPlanner, caplog
+    ):
+        """If every step in an implement phase is a reviewer, _consolidate
+        keeps the original list (degraded executability) and logs a warning,
+        rather than emitting an empty team."""
+        import logging
+        phase = PlanPhase(
+            phase_id=3,
+            name="Implement",
+            steps=[
+                PlanStep(step_id="3.1", agent_name="auditor", task_description="A"),
+                PlanStep(step_id="3.2", agent_name="code-reviewer", task_description="B"),
+            ],
+        )
+        with caplog.at_level(logging.WARNING, logger="agent_baton.core.engine.planner"):
+            consolidated = planner._consolidate_team_step(phase)
+        # Plan remains executable (members non-empty)
+        assert consolidated.team, "expected non-empty team to keep plan executable"
+        # The "all-reviewers" warning was raised
+        assert any(
+            "All members" in r.getMessage() and "reviewer" in r.getMessage().lower()
+            for r in caplog.records
+        )

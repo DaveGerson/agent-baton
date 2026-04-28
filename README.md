@@ -57,8 +57,20 @@ definitions, reference procedures, a template `CLAUDE.md`, and
 
 ### 2. Install the Python engine
 
+**From PyPI (recommended):**
+
 ```bash
-pip install -e ".[dev]"     # Core engine + CLI
+pip install agent-baton          # Core engine + CLI
+pip install agent-baton[pmo]     # + REST API and PMO server
+pip install agent-baton[classify] # + AI risk classification
+```
+
+**From source (for development):**
+
+```bash
+git clone https://github.com/DaveGerson/agent-baton.git
+cd agent-baton
+pip install -e ".[dev]"          # Core engine + CLI + test deps
 ```
 
 ### 3. Verify
@@ -463,6 +475,7 @@ The `baton` CLI provides 50+ commands organized into ten groups:
 | Command | Description |
 |---------|-------------|
 | `baton plan` | Create a data-driven execution plan |
+| `baton plan --dry-run` | Preview plan + token/cost forecast without saving |
 | `baton execute start` | Start execution from a saved plan |
 | `baton execute next [--all]` | Get next action(s) to perform |
 | `baton execute record` | Record a step completion |
@@ -704,8 +717,11 @@ Requires Python 3.10+. The only runtime dependency is PyYAML.
 | Extra | Packages | Purpose |
 |-------|----------|---------|
 | `dev` | pytest, pytest-cov | Test suite |
-| `api` | FastAPI, uvicorn, httpx, sse-starlette, pydantic | REST API and PMO server |
+| `pmo` | FastAPI, uvicorn, httpx, sse-starlette, pydantic | REST API and PMO server |
+| `api` | same as `pmo` | Backward-compatible alias |
+| `daemon` | uvicorn | Background daemon runner |
 | `classify` | anthropic | AI-powered risk classification |
+| `all` | pmo + classify | Everything except dev tools |
 
 ### Key Documentation
 

@@ -331,6 +331,54 @@ class GateRunner:
 
 
 # ---------------------------------------------------------------------------
+# Dry-run gate runner
+# ---------------------------------------------------------------------------
+
+
+class DryRunGateRunner:
+    """Gate runner used by the dry-run testing harness.
+
+    Returns a passing :class:`GateResult` for every gate without invoking the
+    underlying command, and records what *would* have run for the dry-run
+    report.  The runner is intentionally minimal: it exposes the same
+    ``evaluate_output`` entry-point as :class:`GateRunner` so callers in
+    the dry-run loop can swap in this implementation transparently.
+
+    Attributes:
+        gates_run: List of dicts ``{gate_type, command, phase_id}``
+            recording every gate the harness encountered, in order.
+    """
+
+    def __init__(self) -> None:
+        self.gates_run: list[dict] = []
+
+    def evaluate_output(
+        self,
+        gate: PlanGate,
+        command_output: str = "",
+        exit_code: int = 0,
+        *,
+        phase_id: int = 0,
+    ) -> GateResult:
+        """Always return a passing GateResult and record the would-be command."""
+        self.gates_run.append(
+            {
+                "gate_type": gate.gate_type,
+                "command": gate.command,
+                "phase_id": phase_id,
+            }
+        )
+        checked_at = datetime.now(timezone.utc).isoformat()
+        return GateResult(
+            phase_id=phase_id,
+            gate_type=gate.gate_type,
+            passed=True,
+            output=f"[dry-run] would have run: {gate.command or '(no command)'}",
+            checked_at=checked_at,
+        )
+
+
+# ---------------------------------------------------------------------------
 # CI gate helpers
 # ---------------------------------------------------------------------------
 
