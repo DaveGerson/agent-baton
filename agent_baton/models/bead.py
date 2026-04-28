@@ -43,7 +43,11 @@ AGENT_SIGNAL_BEAD_TYPES: frozenset[str] = frozenset({
 TEAM_BOARD_BEAD_TYPES: frozenset[str] = frozenset({
     "task", "message", "message_ack",
 })
-KNOWN_BEAD_TYPES: frozenset[str] = AGENT_SIGNAL_BEAD_TYPES | TEAM_BOARD_BEAD_TYPES
+# Wave 6.1 Part C — Executable Beads (bd-81b9).
+EXEC_BEAD_TYPES: frozenset[str] = frozenset({"executable"})
+KNOWN_BEAD_TYPES: frozenset[str] = (
+    AGENT_SIGNAL_BEAD_TYPES | TEAM_BOARD_BEAD_TYPES | EXEC_BEAD_TYPES
+)
 
 
 def is_known_bead_type(bead_type: str) -> bool:
@@ -199,6 +203,10 @@ class Bead:
     # signature: "ed25519:<base64>" over the canonical bead body JSON; "" means unsigned.
     signed_by: str = ""
     signature: str = ""
+    # Wave 6.1 Part C — Executable Beads (bd-81b9).
+    # exec_ref: populated on ExecutableBead subtype only.
+    # Empty string for all other bead types (backward-compatible sentinel).
+    exec_ref: str = ""
 
     def to_dict(self) -> dict:
         """Serialise to a plain dict for JSON storage."""
@@ -224,6 +232,7 @@ class Bead:
             "retrieval_count": self.retrieval_count,
             "signed_by": self.signed_by,
             "signature": self.signature,
+            "exec_ref": self.exec_ref,
         }
 
     @classmethod
@@ -253,4 +262,106 @@ class Bead:
             retrieval_count=int(data.get("retrieval_count", 0)),
             signed_by=data.get("signed_by", ""),
             signature=data.get("signature", ""),
+            exec_ref=data.get("exec_ref", ""),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Wave 6.1 Part C — Executable Beads (bd-81b9)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ExecutableBead(Bead):
+    """Bead subtype that carries verified procedural memory.
+
+    Bodies (bash scripts, AST-grep transforms, pytest harnesses) are stored
+    separately in ``refs/notes/baton-bead-scripts`` keyed by content SHA so
+    identical scripts dedup across beads.
+
+    The ``bead_type`` field is always ``"executable"`` for instances of this
+    class.  The parent :class:`Bead` fields are inherited unchanged so
+    ExecutableBeads are queryable through the normal BeadStore interface.
+
+    Attributes:
+        interpreter: Runtime to invoke — ``'bash'`` | ``'python'`` |
+            ``'ast-grep'`` | ``'pytest'``.
+        script_sha: SHA-256 hex digest of the script body.
+        script_ref: Git notes ref pointer, e.g.
+            ``'refs/notes/baton-bead-scripts:<sha>'``.
+        runtime_limits: Sandbox constraints, e.g.
+            ``{'timeout_s': 30, 'mem_mb': 256, 'net': False}``.
+        last_run_at: ISO 8601 timestamp of the most recent execution, or
+            ``""`` if never run.
+        last_exit_code: Exit code of the most recent run; ``-1`` means never
+            run.
+        last_run_bead_id: Bead ID of the child discovery bead produced by the
+            most recent run, or ``""`` if never run.
+    """
+
+    interpreter: str = ""        # 'bash' | 'python' | 'ast-grep' | 'pytest'
+    script_sha: str = ""         # SHA-256 of script body
+    script_ref: str = ""         # 'refs/notes/baton-bead-scripts:<sha>'
+    runtime_limits: dict = field(default_factory=lambda: {
+        "timeout_s": 30,
+        "mem_mb": 256,
+        "net": False,
+    })
+    last_run_at: str = ""
+    last_exit_code: int = -1
+    last_run_bead_id: str = ""
+
+    # ------------------------------------------------------------------
+    # Override to_dict / from_dict for the extra fields
+    # ------------------------------------------------------------------
+
+    def to_dict(self) -> dict:
+        """Serialise to a plain dict, including all ExecutableBead fields."""
+        d = super().to_dict()
+        d.update({
+            "interpreter": self.interpreter,
+            "script_sha": self.script_sha,
+            "script_ref": self.script_ref,
+            "runtime_limits": self.runtime_limits,
+            "last_run_at": self.last_run_at,
+            "last_exit_code": self.last_exit_code,
+            "last_run_bead_id": self.last_run_bead_id,
+        })
+        return d
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ExecutableBead":
+        """Deserialise from a plain dict, tolerating missing keys."""
+        base = Bead.from_dict(data)
+        return cls(
+            bead_id=base.bead_id,
+            task_id=base.task_id,
+            step_id=base.step_id,
+            agent_name=base.agent_name,
+            bead_type=base.bead_type,
+            content=base.content,
+            confidence=base.confidence,
+            scope=base.scope,
+            tags=base.tags,
+            affected_files=base.affected_files,
+            status=base.status,
+            created_at=base.created_at,
+            closed_at=base.closed_at,
+            summary=base.summary,
+            links=base.links,
+            source=base.source,
+            token_estimate=base.token_estimate,
+            quality_score=base.quality_score,
+            retrieval_count=base.retrieval_count,
+            signed_by=base.signed_by,
+            signature=base.signature,
+            exec_ref=base.exec_ref,
+            interpreter=data.get("interpreter", ""),
+            script_sha=data.get("script_sha", ""),
+            script_ref=data.get("script_ref", ""),
+            runtime_limits=data.get("runtime_limits", {
+                "timeout_s": 30, "mem_mb": 256, "net": False,
+            }),
+            last_run_at=data.get("last_run_at", ""),
+            last_exit_code=int(data.get("last_exit_code", -1)),
+            last_run_bead_id=data.get("last_run_bead_id", ""),
         )
