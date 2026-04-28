@@ -358,6 +358,24 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
                            help="record (default), list, or show")
     p_handoff.add_argument("handoff_id", nargs="?", default=None,
                            help="(show mode only) Handoff ID")
+    # baton execute worktree-gc  (Wave 1.3, bd-86bf)
+    p_wt_gc = sub.add_parser(
+        "worktree-gc",
+        help="Garbage-collect stale isolated worktrees (Wave 1.3)",
+    )
+    p_wt_gc.add_argument(
+        "--max-age-hours",
+        type=int,
+        default=72,
+        metavar="N",
+        help="Reclaim worktrees older than N hours (default: 72)",
+    )
+    p_wt_gc.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="Print what would be removed without actually removing",
+    )
 
     return p
 
@@ -580,6 +598,12 @@ def _print_action(action: dict, *, terse: bool = False) -> None:
             if action.get("interactive"):
                 print(f"  Interactive: yes")
                 print(f"  Max-Turns: {action.get('interact_max_turns', 10)}")
+            # Wave 1.3 (bd-86bf): emit worktree fields when present.
+            # ADDITIVE — existing field order is preserved.
+            if action.get("worktree_path"):
+                print(f"  Worktree:  {action['worktree_path']}")
+            if action.get("worktree_branch"):
+                print(f"  Branch:    {action['worktree_branch']}")
             print(f"  Message: {msg}")
             # Wave 3.1 — Expected Outcome (Demo Statement). Surfaced on its
             # own line so the orchestrator and human reviewer can see the
@@ -702,6 +726,7 @@ def _print_action(action: dict, *, terse: bool = False) -> None:
 def handler(args: argparse.Namespace) -> None:
     if args.subcommand is None:
         validation_error("supply a subcommand: start, next, record, dispatched, gate, approve, feedback, amend, team-record, interact, complete, status, resume, list, switch, cancel, run, retry-gate, fail, resume-budget, verify-dispatch, audit-isolation")
+        validation_error("supply a subcommand: start, next, record, dispatched, gate, approve, feedback, amend, team-record, interact, complete, status, resume, list, switch, cancel, run, retry-gate, fail, resume-budget, worktree-gc")
 
     if args.subcommand == "list":
         _handle_list()
@@ -709,6 +734,11 @@ def handler(args: argparse.Namespace) -> None:
 
     if args.subcommand == "switch":
         _handle_switch(args.switch_task_id)
+        return
+
+    # Wave 1.3 (bd-86bf): worktree GC subcommand — no engine / task_id required.
+    if args.subcommand == "worktree-gc":
+        _handle_worktree_gc(args)
         return
 
     if args.subcommand == "run":
@@ -2251,8 +2281,31 @@ def _run_loop(
                 if not dry_run:
                     engine.mark_dispatched(step_id=step_id, agent_name=agent_name)
 
+                # Wave 1.3 (bd-86bf): after mark_dispatched, the engine may have
+                # created a worktree and stored it in state.step_worktrees.
+                # Read the path back from the action_dict (already present if
+                # next_action() populated it) or from engine state as fallback.
+                _wt_path: str | None = action_dict.get("worktree_path") or None
+                if _wt_path is None:
+                    try:
+                        _wt_state = engine._load_execution()
+                        _wt_dict = (
+                            getattr(_wt_state, "step_worktrees", {}).get(step_id)
+                            if _wt_state else None
+                        )
+                        if _wt_dict:
+                            _wt_path = _wt_dict.get("path") or None
+                    except Exception:
+                        pass
+
                 if dry_run:
                     print(f"  [DRY RUN] Would launch {agent_name} with {len(prompt)} char prompt", file=sys.stderr)
+                    if _wt_path:
+                        print(f"  [DRY RUN] Worktree: {_wt_path}", file=sys.stderr)
+                    engine.record_step_result(
+                        step_id=step_id, agent_name=agent_name,
+                        status="complete", outcome="dry-run skip",
+                    )
                 else:
                     import asyncio as _asyncio
                     assert launcher is not None  # guarded by user_error above
@@ -2261,6 +2314,7 @@ def _run_loop(
                         model=agent_model,
                         prompt=prompt,
                         step_id=step_id,
+                        cwd_override=_wt_path,
                     ))
                     engine.record_step_result(
                         step_id=step_id,
@@ -2637,6 +2691,37 @@ def _handle_switch(task_id: str) -> None:
             _log.info("execute switch: SQLite set_active_task failed: %s", exc)
 
     print(f"Active execution switched to: {task_id}")
+
+
+# ---------------------------------------------------------------------------
+# Wave 1.3 (bd-86bf): worktree GC handler
+# ---------------------------------------------------------------------------
+
+def _handle_worktree_gc(args: argparse.Namespace) -> None:
+    """Handler for ``baton execute worktree-gc``.
+
+    Calls ``WorktreeManager.gc_stale()`` and prints a summary of reclaimed
+    and skipped worktrees.  Exits non-zero if gc raises unexpectedly.
+    """
+    max_age_hours: int = getattr(args, "max_age_hours", 72)
+    dry_run: bool = getattr(args, "dry_run", False)
+
+    context_root = _resolve_context_root()
+    # project root is two levels above team-context
+    project_root = context_root.parent.parent
+
+    try:
+        from agent_baton.core.engine.worktree_manager import WorktreeManager
+        mgr = WorktreeManager(project_root=project_root)
+        reclaimed = mgr.gc_stale(max_age_hours=max_age_hours, dry_run=dry_run)
+    except Exception as exc:
+        print(f"error: worktree-gc failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    prefix = "[DRY RUN] Would reclaim" if dry_run else "Reclaimed"
+    print(f"{prefix} {len(reclaimed)} worktree(s) (max_age_hours={max_age_hours})")
+    for h in reclaimed:
+        print(f"  step={h.step_id}  path={h.path}")
 
 
 # ---------------------------------------------------------------------------

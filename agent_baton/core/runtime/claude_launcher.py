@@ -431,10 +431,17 @@ class ClaudeCodeLauncher:
         prompt: str,
         step_id: str = "",
         mcp_servers: list[str] | None = None,
+        cwd_override: str | None = None,   # Wave 1.3 (bd-86bf): worktree path
     ) -> LaunchResult:
         """Launch a Claude Code agent and return its result.
 
         Implements the :class:`AgentLauncher` protocol.
+
+        Args:
+            cwd_override: When set, the agent subprocess is launched with this
+                directory as its working directory instead of the default
+                ``config.working_directory``.  Used by Wave 1.3 worktree
+                isolation to run each agent inside its isolated worktree.
         """
         start = time.monotonic()
         pre_commit = await self._git_rev_parse()
@@ -446,7 +453,8 @@ class ClaudeCodeLauncher:
         env = self._build_env()
         timeout = self._resolve_timeout(model)
         use_stdin = len(prompt.encode()) > self._config.prompt_file_threshold
-        cwd = str(self._config.working_directory or Path.cwd())
+        # Wave 1.3: cwd_override takes precedence over the configured directory.
+        cwd = cwd_override or str(self._config.working_directory or Path.cwd())
 
         if use_stdin:
             # Large prompt — deliver via stdin; drop the -p flag from the command.

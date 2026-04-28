@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -124,6 +125,15 @@ _log = logging.getLogger(__name__)
 def _utcnow() -> str:
     """Return the current UTC time as a seconds-precision ISO 8601 string."""
     return datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
+
+
+def _worktree_enabled() -> bool:
+    """Return True when worktree isolation is enabled (Wave 1.3, bd-86bf).
+
+    Controlled by ``BATON_WORKTREE_ENABLED`` env var.  Default is enabled (1).
+    Set to ``0`` to restore pre-Wave-1.3 behavior exactly.
+    """
+    return os.environ.get("BATON_WORKTREE_ENABLED", "1") not in ("0", "false", "False", "no")
 
 
 def _cli_actor() -> str:
@@ -454,6 +464,36 @@ class ExecutionEngine:
                 _log.debug(
                     "TeamRegistry init skipped (non-fatal): %s", _tr_init_exc
                 )
+
+        # ── Wave 1.3 (bd-86bf): WorktreeManager ─────────────────────────────
+        # Constructed when BATON_WORKTREE_ENABLED != "0".  Silently None when
+        # disabled — all call sites guard on `is not None`.
+        self._worktree_mgr = None
+        if _worktree_enabled():
+            try:
+                from agent_baton.core.engine.worktree_manager import WorktreeManager
+                # _root is .claude/team-context; project root is two levels up.
+                _project_root = self._root.parent.parent
+                self._worktree_mgr = WorktreeManager(
+                    project_root=_project_root,
+                    trace_recorder=self._tracer,
+                    bead_store=self._bead_store,
+                )
+            except Exception as _wt_init_exc:
+                _log.debug(
+                    "WorktreeManager init skipped (non-fatal): %s", _wt_init_exc
+                )
+
+        # TODO(Wave 6.x): register periodic GC task with daemon when running.
+        # For now, run a best-effort background GC on engine init.
+        if self._worktree_mgr is not None:
+            import threading as _threading
+            _gc_thread = _threading.Thread(
+                target=self._worktree_mgr.gc_stale,
+                kwargs={"max_age_hours": int(os.environ.get("BATON_WORKTREE_GC_HOURS", "72"))},
+                daemon=True,
+            )
+            _gc_thread.start()
 
     # ── Storage routing helpers ──────────────────────────────────────────────
 
@@ -1225,6 +1265,14 @@ class ExecutionEngine:
                 )
                 initial_status = "approval_pending"
 
+        # Wave 1.3 (bd-86bf): capture the working branch at start() time so all
+        # worktree create() calls use a consistent base_branch.  On detached HEAD
+        # or non-git environment, working_branch stays "" and worktree creation
+        # will fall back gracefully via _detect_branch().
+        _working_branch = ""
+        if self._worktree_mgr is not None:
+            _working_branch = self._detect_branch()
+
         state = ExecutionState(
             task_id=plan.task_id,
             plan=plan,
@@ -1233,6 +1281,7 @@ class ExecutionEngine:
             status=initial_status,
             force_override=self._force_override,
             override_justification=self._override_justification,
+            working_branch=_working_branch,
         )
 
         # Initialise trace (in-memory; committed to disk on complete()).
@@ -1955,6 +2004,94 @@ class ExecutionEngine:
             _log.warning("Budget warning: %s", warning)
             result.deviations.append(f"TOKEN_BUDGET_WARNING: {warning}")
 
+        # ── Wave 1.3 (bd-86bf): worktree fold-back / retain ──────────────────
+        # Only runs on terminal statuses (complete / failed); dispatched and
+        # interacting are skipped because the worktree is still active.
+        if status in ("complete", "failed") and self._worktree_mgr is not None:
+            _step_worktrees = getattr(state, "step_worktrees", {})
+            _handle_dict = _step_worktrees.get(step_id)
+            if _handle_dict is not None:
+                try:
+                    from agent_baton.core.engine.worktree_manager import (
+                        WorktreeCleanupError,
+                        WorktreeFoldError,
+                        WorktreeHandle,
+                    )
+                    _handle = WorktreeHandle.from_dict(_handle_dict)
+                    # Wire active trace for event emission
+                    self._worktree_mgr._trace = self._trace
+                    if status == "complete":
+                        # Fold back only when agent produced a commit
+                        if commit_hash:
+                            try:
+                                new_head = self._worktree_mgr.fold_back(
+                                    _handle, commit_hash=commit_hash
+                                )
+                                state.working_branch = getattr(state, "working_branch", "") or ""
+                            except WorktreeFoldError as fold_exc:
+                                _log.warning(
+                                    "Fold-back conflict for step %s: %s",
+                                    step_id, fold_exc,
+                                )
+                                if self._worktree_mgr._bead_store:
+                                    self._worktree_mgr._file_bead_warning(
+                                        task_id=state.task_id,
+                                        step_id=step_id,
+                                        content=(
+                                            f"BEAD_WARNING: worktree-fold-conflict "
+                                            f"step={step_id} files={fold_exc.conflict_files}"
+                                        ),
+                                    )
+                                # Treat fold conflict as step failure
+                                result.status = "failed"
+                                result.error = f"WorktreeFoldError: {fold_exc}"
+                                self._emit_worktree_error(state, step_id, "fold", str(fold_exc))
+                            else:
+                                # Success path: clean up the worktree.
+                                # bd-f2f7: retry with force=True if untracked
+                                # files (e.g. .pyc, build output) blocked the
+                                # vanilla remove. Step is complete; we already
+                                # folded back any committed work.
+                                try:
+                                    self._worktree_mgr.cleanup(_handle, on_failure=False)
+                                except WorktreeCleanupError as clean_exc:
+                                    _log.info(
+                                        "Worktree cleanup retrying with force for step %s: %s",
+                                        step_id, clean_exc,
+                                    )
+                                    try:
+                                        self._worktree_mgr.cleanup(_handle, on_failure=False, force=True)
+                                    except WorktreeCleanupError as force_exc:
+                                        _log.warning(
+                                            "Worktree force-cleanup failed for step %s (non-fatal): %s",
+                                            step_id, force_exc,
+                                        )
+                                _step_worktrees.pop(step_id, None)
+                                state.step_worktrees = _step_worktrees
+                        else:
+                            # No commit: clean up without fold.
+                            # bd-f2f7: retry with force=True on untracked-file
+                            # interference so the success path always reclaims
+                            # the worktree directory.
+                            try:
+                                self._worktree_mgr.cleanup(_handle, on_failure=False)
+                            except WorktreeCleanupError:
+                                try:
+                                    self._worktree_mgr.cleanup(_handle, on_failure=False, force=True)
+                                except WorktreeCleanupError:
+                                    pass
+                            _step_worktrees.pop(step_id, None)
+                            state.step_worktrees = _step_worktrees
+                    elif status == "failed":
+                        # Retain worktree for forensics / Wave 5.1 takeover
+                        self._worktree_mgr.cleanup(_handle, on_failure=True)
+                        # Do NOT remove from step_worktrees — kept for takeover
+                except Exception as _wt_exc:
+                    _log.warning(
+                        "Worktree lifecycle op failed for step %s (non-fatal): %s",
+                        step_id, _wt_exc,
+                    )
+
         self._save_execution(state)
 
         # ── Context harvest (Wave 2.2) ────────────────────────────────────────
@@ -2079,12 +2216,130 @@ class ExecutionEngine:
         This allows the engine to track which steps are currently running
         so it can correctly determine what to dispatch next in parallel
         execution scenarios.
+
+        Wave 1.3 (bd-86bf): also creates an isolated git worktree for the
+        step when the WorktreeManager is active.  On create failure in a
+        parallel wave, the step is marked failed.  In a single-step wave,
+        a warning is logged and execution continues in-place.
         """
+        # ── Wave 1.3: worktree creation ──────────────────────────────────────
+        if self._worktree_mgr is not None:
+            state = self._load_execution()
+            plan_step = self._find_step(state, step_id) if state else None
+            if (
+                state is not None
+                and plan_step is not None
+                and plan_step.step_type != "automation"
+            ):
+                # Check plan-level opt-out: git_strategy in {"none", "in-place"}
+                git_strategy = getattr(state.plan, "git_strategy", "") or ""
+                if git_strategy not in ("none", "in-place"):
+                    base_branch = (
+                        getattr(state, "working_branch", "")
+                        or self._detect_branch()
+                    )
+                    # If branch detection failed (non-git environment or detached
+                    # HEAD), skip worktree creation entirely — _detect_branch()
+                    # already logged a warning.
+                    if base_branch:
+                        try:
+                            from agent_baton.core.engine.worktree_manager import (
+                                WorktreeCreateError,
+                            )
+                            # Wire the active trace into the manager for event emission
+                            self._worktree_mgr._trace = self._trace
+                            handle = self._worktree_mgr.create(
+                                task_id=state.task_id,
+                                step_id=step_id,
+                                base_branch=base_branch,
+                            )
+                            step_worktrees = getattr(state, "step_worktrees", {})
+                            step_worktrees[step_id] = handle.to_dict()
+                            state.step_worktrees = step_worktrees
+                            self._save_execution(state)
+                        except WorktreeCreateError as exc:
+                            # Determine if this is a parallel wave (≥2 dispatchable steps)
+                            _is_parallel = self._is_step_in_parallel_wave(state, step_id)
+                            if _is_parallel:
+                                _log.warning(
+                                    "Worktree create failed for parallel step %s — failing step: %s",
+                                    step_id, exc,
+                                )
+                                try:
+                                    self._worktree_mgr._file_bead_warning(
+                                        task_id=state.task_id,
+                                        step_id=step_id,
+                                        content=(
+                                            f"BEAD_WARNING: worktree-create-failed step={step_id} "
+                                            f"reason={exc}"
+                                        ),
+                                    )
+                                except Exception:
+                                    pass
+                                self.record_step_result(
+                                    step_id=step_id,
+                                    agent_name=agent_name,
+                                    status="failed",
+                                    error=f"WorktreeCreateError: {exc}",
+                                )
+                                return
+                            else:
+                                _log.warning(
+                                    "Worktree create failed for step %s; running in-place: %s",
+                                    step_id, exc,
+                                )
+                        except Exception as exc:
+                            _log.warning(
+                                "Worktree create unexpected error for step %s (non-fatal): %s",
+                                step_id, exc,
+                            )
+
         self.record_step_result(
             step_id=step_id,
             agent_name=agent_name,
             status="dispatched",
         )
+
+    def _detect_branch(self) -> str:
+        """Detect the current git branch, or empty string on failure."""
+        import subprocess as _sp
+        try:
+            r = _sp.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if r.returncode == 0:
+                branch = r.stdout.strip()
+                if branch and branch != "HEAD":
+                    return branch
+        except Exception:
+            pass
+        _log.warning("WorktreeManager: could not detect git branch; worktree disabled for this run")
+        return ""
+
+    def _is_step_in_parallel_wave(self, state: ExecutionState, step_id: str) -> bool:
+        """Return True if step_id is part of a wave with ≥2 dispatchable steps."""
+        if state is None:
+            return False
+        phase_obj = state.current_phase_obj
+        if phase_obj is None:
+            return False
+        completed = state.completed_step_ids
+        failed = state.failed_step_ids
+        dispatched = state.dispatched_step_ids
+        occupied = completed | failed | dispatched
+        # Count steps (excluding step_id itself) that are not yet occupied
+        # and whose dependencies are satisfied.
+        count = 0
+        for step in phase_obj.steps:
+            if step.step_id in occupied:
+                continue
+            if step.depends_on and not all(dep in completed for dep in step.depends_on):
+                continue
+            count += 1
+        return count >= 2
 
     def record_gate_result(
         self,
@@ -2367,6 +2622,38 @@ class ExecutionEngine:
         ))
         state.status = "complete"
         state.completed_at = _utcnow()
+
+        # ── Wave 1.3 (bd-86bf): sweep straggler worktrees ────────────────────
+        # Any worktrees still registered in step_worktrees at completion time
+        # are stragglers (fold already happened in record_step_result for clean
+        # steps; failed steps are retained on disk for takeover).
+        if self._worktree_mgr is not None:
+            from agent_baton.core.engine.worktree_manager import (
+                WorktreeCleanupError,
+                WorktreeHandle,
+            )
+            self._worktree_mgr._trace = self._trace
+            for _straggler_step_id, _straggler_dict in list(
+                getattr(state, "step_worktrees", {}).items()
+            ):
+                _step_result = state.get_step_result(_straggler_step_id)
+                if _step_result and _step_result.status == "complete":
+                    _sh = WorktreeHandle.from_dict(_straggler_dict)
+                    try:
+                        self._worktree_mgr.cleanup(_sh, on_failure=False)
+                        state.step_worktrees.pop(_straggler_step_id, None)
+                    except WorktreeCleanupError as _ce:
+                        # bd-f2f7: retry with force=True for untracked-file blockers
+                        try:
+                            self._worktree_mgr.cleanup(_sh, on_failure=False, force=True)
+                            state.step_worktrees.pop(_straggler_step_id, None)
+                        except WorktreeCleanupError as _force_ce:
+                            _log.warning(
+                                "Straggler cleanup failed for step %s (non-fatal): %s / force: %s",
+                                _straggler_step_id, _ce, _force_ce,
+                            )
+                # Failed worktrees: retained — GC will handle after max_age_hours.
+
         self._save_execution(state)
 
         # Finalise trace.
@@ -5393,6 +5680,35 @@ class ExecutionEngine:
                 if step.step_id == step_id:
                     return step
         return None
+
+    def _emit_worktree_error(
+        self,
+        state: ExecutionState,
+        step_id: str,
+        op: str,
+        error: str,
+        conflict_files: list[str] | None = None,
+    ) -> None:
+        """Emit a worktree_error trace event (Wave 1.3, bd-86bf)."""
+        if self._trace is None or self._tracer is None:
+            return
+        try:
+            self._tracer.record_event(
+                self._trace,
+                "worktree_error",
+                agent_name=None,
+                phase=0,
+                step=0,
+                details={
+                    "task_id": state.task_id,
+                    "step_id": step_id,
+                    "op": op,
+                    "error": error,
+                    "conflict_files": conflict_files or [],
+                },
+            )
+        except Exception as exc:
+            _log.debug("_emit_worktree_error: trace emit failed (non-fatal): %s", exc)
 
     @staticmethod
     def _renumber_phases(state: ExecutionState) -> None:

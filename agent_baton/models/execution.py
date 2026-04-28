@@ -1345,6 +1345,14 @@ class ExecutionState:
     force_override: bool = False
     override_justification: str = ""
 
+    # Wave 1.3 (bd-86bf): Worktree isolation fields.
+    # step_worktrees maps step_id -> serialised WorktreeHandle dict.
+    # Absent from legacy state files; all accessors use getattr(..., {}).
+    step_worktrees: dict[str, dict] = field(default_factory=dict)
+    # The git branch that was current when this execution started.
+    # Used as base_branch for all worktree create() calls.
+    working_branch: str = ""
+
     def __post_init__(self) -> None:
         if not self.started_at:
             self.started_at = datetime.now(timezone.utc).isoformat()
@@ -1410,6 +1418,9 @@ class ExecutionState:
             ),
             "force_override": self.force_override,
             "override_justification": self.override_justification,
+            # Wave 1.3 (bd-86bf): worktree isolation state
+            "step_worktrees": dict(getattr(self, "step_worktrees", {})),
+            "working_branch": getattr(self, "working_branch", ""),
         }
 
     @classmethod
@@ -1434,6 +1445,9 @@ class ExecutionState:
             consolidation_result=ConsolidationResult.from_dict(cr_data) if cr_data is not None else None,
             force_override=bool(data.get("force_override", False)),
             override_justification=data.get("override_justification", ""),
+            # Wave 1.3 (bd-86bf): worktree isolation — default to empty for legacy files
+            step_worktrees=dict(data.get("step_worktrees", {})),
+            working_branch=data.get("working_branch", ""),
         )
 
 
@@ -1521,6 +1535,10 @@ class ExecutionAction:
     # Wave 3.1 — behavioral demo statement echoed from PlanStep.expected_outcome
     # so the CLI and the orchestrator can surface it without re-reading plan.json.
     expected_outcome: str = ""         # DISPATCH only; empty when not derived
+    # Wave 1.3 (bd-86bf): worktree isolation fields — empty string when no worktree.
+    # Populated at mark_dispatched() time, not at next_actions() time.
+    worktree_path: str = ""            # absolute path to isolated worktree; "" = no worktree
+    worktree_branch: str = ""          # git branch inside the worktree
 
     def to_dict(self) -> dict[str, Any]:
         # action_type is serialised as a plain string so CLI / Claude output
@@ -1552,6 +1570,11 @@ class ExecutionAction:
                 d["isolation"] = self.isolation
             if self.expected_outcome:
                 d["expected_outcome"] = self.expected_outcome
+            # Wave 1.3 (bd-86bf): include worktree fields when populated
+            if self.worktree_path:
+                d["worktree_path"] = self.worktree_path
+            if self.worktree_branch:
+                d["worktree_branch"] = self.worktree_branch
         elif self.action_type == ActionType.GATE:
             d.update({
                 "gate_type": self.gate_type,
