@@ -29,6 +29,18 @@ The engine does **not** replace Claude. It serves Claude. All judgment and natur
 
 5. **Graceful degradation.** Historical data (patterns, budget tuning, retrospectives) enriches plans when present. When no prior data exists, the planner falls back to sensible defaults. No subsystem gates execution on the availability of another.
 
+#### Executable Beads (Wave 6.1 Part C, bd-81b9)
+
+`agent_baton/core/exec/` ties together storage and execution of `ExecutableBead` (subtype of `Bead` with `bead_type="executable"`, `script_sha`, `script_ref`, `interpreter`, `runtime_limits`). The pipeline is: `ScriptLinter` (denylist of dangerous patterns) → optional soul signature when `BATON_SOULS_ENABLED=1` → `BeadStore.write()` with `status="quarantine"` → `AuditorGate.approve(bead_id)` flips status to `open` → `ExecutableBeadRunner.run()` resolves the script body from `refs/notes/baton-bead-scripts`, executes it through `Sandbox`, and writes a child `discovery` bead linked to the parent via `validates` (exit 0) or `contradicts` (non-zero). Whole subsystem is gated behind `BATON_EXEC_BEADS_ENABLED=1`. CLI surface: `baton beads create-exec` (quarantine on insert) and `baton beads exec` (operator confirmation + auditor gate + sandbox run).
+
+##### Trust Boundary
+
+The sandbox provides **process-level isolation only** — wall-clock timeout, memory limit, captured stdout/stderr — plus a static lint denylist and an operator-confirmation prompt. It does NOT provide filesystem namespacing, network namespacing, or a syscall filter. The trust model assumes scripts are locally-authored, version-controlled, and reviewed by the team running `baton`. The threat model in scope is **accidents and broken builds**, not supply-chain attacks or malicious actors.
+
+Beads from external origins (federation, downloaded packs, fork PRs, customer uploads) are NOT covered by the current sandbox. `baton beads exec` emits a one-line `[security]` warning when it detects a non-local `source` value to surface the gap; the warning is a tripwire, not a defence. If the executable-bead surface is ever extended to consume untrusted input, the sandbox must be upgraded to namespacing + seccomp **before** that use case ships.
+
+Single source of truth for the rules above: [baton-patterns: Executable Beads — Trust Boundary](references/baton-patterns.md)
+
 ## The three load-bearing invariants
 
 These are documented in detail in [`invariants.md`](invariants.md). In summary:
