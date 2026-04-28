@@ -172,9 +172,12 @@ def test_python_stack_yields_pytest_gates_not_node(tmp_path: Path) -> None:
     assert stack.language == "python"
 
     # Bypass the heavy __init__; we only need the bound _default_gate method.
+    # bd-124f: focused scope with no changed_paths falls back to import-smoke for
+    # build gates and collect-only for test gates.  Use gate_scope="full" to get
+    # the full-suite commands this test was written to verify.
     planner = IntelligentPlanner.__new__(IntelligentPlanner)
-    test_gate = planner._default_gate("Test", stack=stack)
-    build_gate = planner._default_gate("Implement", stack=stack)
+    test_gate = planner._default_gate("Test", stack=stack, gate_scope="full")
+    build_gate = planner._default_gate("Implement", stack=stack, gate_scope="full")
 
     assert test_gate is not None
     assert "pytest" in test_gate.command

@@ -393,7 +393,10 @@ class TestDefaultGate:
         expected_gate_type: str,
         expected_cmd_fragment: str,
     ):
-        gate = planner._default_gate(phase_name)
+        # bd-124f changed the default gate_scope to "focused" (import-smoke fallback
+        # when no changed_paths are provided).  Use gate_scope="full" to exercise the
+        # pre-bd-124f full-suite path that these parametrize cases were written for.
+        gate = planner._default_gate(phase_name, gate_scope="full")
         assert gate is not None
         assert gate.gate_type == expected_gate_type
         assert expected_cmd_fragment in gate.command
@@ -1456,7 +1459,9 @@ class TestStackAwareGates:
         )
 
     def test_no_stack_defaults_to_pytest(self, planner: IntelligentPlanner):
-        gate = planner._default_gate("Implement")
+        # bd-124f: focused scope with no changed_paths falls back to import-smoke.
+        # Use gate_scope="full" to exercise the full-suite default.
+        gate = planner._default_gate("Implement", gate_scope="full")
         assert gate is not None
         assert "pytest" in gate.command
 

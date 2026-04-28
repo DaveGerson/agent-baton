@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from agent_baton.models.bead import (
     AGENT_SIGNAL_BEAD_TYPES,
+    EXEC_BEAD_TYPES,
     KNOWN_BEAD_TYPES,
     TEAM_BOARD_BEAD_TYPES,
     is_known_bead_type,
@@ -27,7 +28,8 @@ class TestBeadTypeConstants:
         })
 
     def test_known_is_union(self) -> None:
-        assert KNOWN_BEAD_TYPES == AGENT_SIGNAL_BEAD_TYPES | TEAM_BOARD_BEAD_TYPES
+        # Wave 6.1 Part C added EXEC_BEAD_TYPES (bd-81b9); update union accordingly.
+        assert KNOWN_BEAD_TYPES == AGENT_SIGNAL_BEAD_TYPES | TEAM_BOARD_BEAD_TYPES | EXEC_BEAD_TYPES
 
     def test_no_overlap_between_layers(self) -> None:
         assert not AGENT_SIGNAL_BEAD_TYPES & TEAM_BOARD_BEAD_TYPES
