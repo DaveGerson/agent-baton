@@ -9,6 +9,9 @@ Patterns covered (A5):
 - GitHub personal access tokens (``ghp_*``, ``github_pat_*``)
 - Slack bot/user tokens (``xoxb-*``, ``xoxp-*``)
 - Generic JSON ``password``/``secret``/``token``/``api_key`` fields
+- HTTP header secrets: Authorization (Bearer/Basic), Cookie, Set-Cookie,
+  X-Api-Key, X-Auth-Token (bd-73a9)
+- JSON Authorization Bearer strings
 """
 from __future__ import annotations
 
@@ -32,6 +35,41 @@ _REDACT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (
         re.compile(r'"(?:secret|token|api_key|apikey)"\s*:\s*"[^"]*"', re.IGNORECASE),
         r'"***REDACTED_KEY***": "***REDACTED***"',
+    ),
+    # HTTP header: Authorization: Bearer <token>  (bd-73a9)
+    (
+        re.compile(r"(Authorization\s*:\s*Bearer\s+)\S+", re.IGNORECASE),
+        r"\1***REDACTED***",
+    ),
+    # HTTP header: Authorization: Basic <credentials>  (bd-73a9)
+    (
+        re.compile(r"(Authorization\s*:\s*Basic\s+)\S+", re.IGNORECASE),
+        r"\1***REDACTED***",
+    ),
+    # HTTP header: Cookie: <value>  (bd-73a9)
+    (
+        re.compile(r"(Cookie\s*:)[^\r\n]+", re.IGNORECASE),
+        r"\1 ***REDACTED***",
+    ),
+    # HTTP header: Set-Cookie: <value>  (bd-73a9)
+    (
+        re.compile(r"(Set-Cookie\s*:)[^\r\n]+", re.IGNORECASE),
+        r"\1 ***REDACTED***",
+    ),
+    # HTTP header: X-Api-Key: <value>  (bd-73a9)
+    (
+        re.compile(r"(X-Api-Key\s*:\s*)\S+", re.IGNORECASE),
+        r"\1***REDACTED***",
+    ),
+    # HTTP header: X-Auth-Token: <value>  (bd-73a9)
+    (
+        re.compile(r"(X-Auth-Token\s*:\s*)\S+", re.IGNORECASE),
+        r"\1***REDACTED***",
+    ),
+    # JSON Authorization Bearer strings (bd-73a9)
+    (
+        re.compile(r'("Authorization"\s*:\s*"Bearer )[^"]+(")', re.IGNORECASE),
+        r"\1***REDACTED***\2",
     ),
 )
 
