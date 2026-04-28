@@ -693,6 +693,22 @@ telemetry, context profiling, and data archival.
 | `context_profiler.py` | `ContextProfiler` | Analyzes trace data to compute per-agent context efficiency metrics (files read vs. files written, redundancy across agents). |
 | `archiver.py` | `DataArchiver` | Retention-based cleanup of old execution artifacts (traces, events, retrospectives, telemetry). Scans by age, supports archive or delete modes. |
 
+#### OTLP-shaped JSONL spans (`core/observability/`)
+
+A complementary, env-gated OTel-compatible side-channel writes one OTLP-shaped span per
+JSONL line for replay through a real OpenTelemetry collector. `OTelJSONLExporter`
+(in `core/observability/otel_exporter.py`) is reached through the `current_exporter()`
+helper, which returns `None` unless `BATON_OTEL_ENABLED=1` is set — keeping the no-op
+path branch-free. Spans are emitted at three call sites today: `Planner.create_plan`
+(`plan.create`), `ExecutionEngine.record_step_result` for terminal step statuses
+(`step.dispatch` with `step_id`, `agent_name`, `task_id`, `step_type`, `model`,
+`status`, `tokens_used`, and a 1 KiB-truncated outcome), and
+`ExecutionEngine.record_gate_result` (`gate.run` with `phase_id`, `gate_type`,
+`passed`, `exit_code`, and `decision_source`). Span emission is wrapped in
+broad `try/except` so observability failures can never crash the engine; the
+default destination is `.claude/team-context/otel-spans.jsonl`, overridable via
+`BATON_OTEL_PATH`.
+
 ---
 
 ### 5.6 Govern (`core/govern/`)
