@@ -2082,7 +2082,10 @@ class ExecutionEngine:
                                 new_head = self._worktree_mgr.fold_back(
                                     _handle, commit_hash=commit_hash
                                 )
-                                state.working_branch = getattr(state, "working_branch", "") or ""
+                                # bd-def9: persist the rebased tip SHA so
+                                # consumers can reference the exact integrated
+                                # commit without re-running git.
+                                state.working_branch_head = new_head
                             except WorktreeFoldError as fold_exc:
                                 _log.warning(
                                     "Fold-back conflict for step %s: %s",
@@ -2481,6 +2484,24 @@ class ExecutionEngine:
                 gate_type=gate_type,
                 output=output,
             ))
+            # Wave 5.2 (bd-1483): auto-enqueue self-heal cycle when enabled and
+            # we can resolve the failing step's retained worktree handle.
+            # Wired here per design line 408 ("record_gate_result failure branch
+            # short-circuits before transitioning state to failed when
+            # selfheal.enabled"). The _enqueue_selfheal method's own guards
+            # cover BATON_SELFHEAL_ENABLED check, active-takeover collision,
+            # and missing-worktree fallback.
+            if _selfheal_enabled():
+                failing_step_id = self._failing_step_for_phase(phase_id)
+                if failing_step_id:
+                    handle = None
+                    if self._worktree_mgr is not None:
+                        handle = self._worktree_mgr.handle_for(
+                            state.task_id, failing_step_id,
+                        )
+                    self._enqueue_selfheal(
+                        failing_step_id, phase_id, handle,
+                    )
             state.status = "gate_failed"
         else:
             self._publish(evt.gate_passed(
@@ -2871,6 +2892,30 @@ class ExecutionEngine:
         self._save_execution(state)
         return gate_passed
 
+    def _failing_step_for_phase(self, phase_id: int) -> str:
+        """Return the step_id of the failing step in the given phase, or "".
+
+        Used by ``record_gate_result`` to wire self-heal (bd-1483).  The
+        failing step is the most-recently-dispatched step whose phase_id
+        matches and whose status is ``failed``, ``dispatched``, or
+        ``interrupted``.  Returns ``""`` if none found (caller skips
+        self-heal).
+        """
+        try:
+            state = self._require_execution("_failing_step_for_phase")
+        except Exception:
+            return ""
+        plan = state.plan
+        if not plan or phase_id < 0 or phase_id >= len(plan.phases):
+            return ""
+        phase_step_ids = {s.step_id for s in plan.phases[phase_id].steps}
+        # Walk step_results in reverse to find the most-recent matching step.
+        for sr in reversed(state.step_results):
+            if sr.step_id in phase_step_ids:
+                if sr.status in ("failed", "dispatched", "interrupted", "complete"):
+                    return sr.step_id
+        return ""
+
     def _enqueue_selfheal(
         self,
         step_id: str,
@@ -2912,7 +2957,8 @@ class ExecutionEngine:
         # Mark pending in state for next_action pickup.
         # We store a minimal signal; the full SelfHealEscalator is constructed
         # in next_action when the status is read.
-        selfheal_pending_key = f"_selfheal_pending_{step_id}"
+        # NOTE: dead-store removed (review follow-up); full pending-state
+        # persistence lands in Wave 5.2 full-dispatch.  v1 only logs intent.
         _log.info(
             "_enqueue_selfheal: queuing self-heal for step=%s phase=%d worktree=%s",
             step_id, phase_id, handle.path,  # type: ignore[attr-defined]

@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 31
+SCHEMA_VERSION = 33
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -1065,17 +1065,24 @@ CREATE TABLE IF NOT EXISTS debates (
 CREATE INDEX IF NOT EXISTS idx_debates_created ON debates(created_at);
 """,
     31: """
--- v31: Wave 6.1 Part B — Persistent Agent Souls (bd-d975).
+-- v31: Gastown Part A (bd-2870) — bead_anchors index for git-notes-backed
+-- bead persistence.  bead_anchors maps bead_id → anchor_commit_sha for
+-- O(1) lookup during git-notes reads.  Applied to BOTH project and
+-- central databases via ConnectionManager._run_migrations().
+CREATE TABLE IF NOT EXISTS bead_anchors (
+    bead_id        TEXT PRIMARY KEY,
+    anchor_commit  TEXT NOT NULL,
+    last_seen_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_bead_anchors_commit ON bead_anchors(anchor_commit);
+""",
+    32: """
+-- v32: Wave 6.1 Part B — Persistent Agent Souls (bd-d975).
 --
 -- agent_souls and soul_expertise live in central.db ONLY (cross-project
--- federation per feedback_schema_project_id.md).  This migration adds the
--- tables to central.db when upgrading from v30; fresh central.db installs
--- get them from CENTRAL_SCHEMA_DDL directly.
---
--- Per-project baton.db: this migration is a no-op (the CREATE TABLE IF NOT
--- EXISTS statements are safe to apply but soul tables are never queried
--- from baton.db — all soul reads/writes go through SoulRegistry which
--- targets central.db exclusively).
+-- federation per feedback_schema_project_id.md).  Per-project baton.db
+-- migration is a no-op for soul tables (all soul reads/writes go through
+-- SoulRegistry which targets central.db exclusively).
 --
 -- Bead signing columns: signed_by and signature are additive columns on
 -- the beads table.  Legacy beads load with signed_by='' — no soul
@@ -1103,6 +1110,30 @@ CREATE TABLE IF NOT EXISTS soul_expertise (
     PRIMARY KEY (soul_id, scope, ref)
 );
 CREATE INDEX IF NOT EXISTS idx_soul_expertise_soul ON soul_expertise(soul_id);
+""",
+    33: """
+-- v33: add immune_queue table for Wave 6.2 Part B — Immune System (bd-be76).
+--
+-- Per-project sweep target queue used by ImmuneDaemon + SweepScheduler.
+-- Stored in per-project baton.db only — NEVER in central.db (sweep targets
+-- are project-local per feedback_schema_project_id.md).
+--
+-- (path, kind) is the natural primary key: one queue entry per file+kind.
+-- last_swept_at is an ISO-8601 UTC string; ordering by it implements the
+-- "oldest first" scheduling policy.
+-- found_issue_at records the most-recent timestamp at which a finding was
+-- returned for this entry (NULL = never found).
+-- priority is a floating-point weight for tie-breaking (higher = sooner).
+CREATE TABLE IF NOT EXISTS immune_queue (
+    path            TEXT NOT NULL,
+    kind            TEXT NOT NULL,
+    last_swept_at   TEXT NOT NULL,
+    found_issue_at  TEXT,
+    priority        REAL NOT NULL DEFAULT 1.0,
+    PRIMARY KEY (path, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_immune_queue_priority
+    ON immune_queue(last_swept_at, priority DESC);
 """,
 }
 
@@ -2050,6 +2081,18 @@ CREATE TABLE IF NOT EXISTS agent_context (
     PRIMARY KEY (agent_name, domain)
 );
 CREATE INDEX IF NOT EXISTS idx_agent_context_agent ON agent_context(agent_name);
+
+-- BEAD_ANCHORS (Gastown Part A, v31, bd-2870): bead_id → anchor_commit index
+-- for O(1) git-notes reads.  Updated on every BeadStore.write().  The
+-- rebuild_from_notes() path recreates this table from a live notes scan when
+-- it drifts.  No FK constraint — anchor entries outlive the dual-write
+-- transition window and must survive bead removal from the SQLite mirror.
+CREATE TABLE IF NOT EXISTS bead_anchors (
+    bead_id        TEXT PRIMARY KEY,
+    anchor_commit  TEXT NOT NULL,
+    last_seen_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_bead_anchors_commit ON bead_anchors(anchor_commit);
 """
 
 # =====================================================================

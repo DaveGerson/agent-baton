@@ -8,6 +8,10 @@ Caps (from wave-5-design.md):
     Self-heal per-task:  $5.00  (selfheal.per_task_cap_usd)
     Speculation daily:   $2.00  (speculate.daily_cap_usd)
 
+Wave 6.2 Part B additions (immune system):
+    Immune daily cap:    $5.00  (immune.daily_cap_usd)
+    Anomaly window:      60 min — >30% of daily cap in this window → 1 h suspension.
+
 Pricing baseline (April 2026 per design):
     Haiku:   $0.25 / $1.25 per M input/output tokens
     Sonnet:  $3.00 / $15.00 per M input/output tokens
@@ -19,8 +23,8 @@ The NEXT dispatch call is refused and a BEAD_WARNING is filed.
 from __future__ import annotations
 
 import logging
-from collections import defaultdict
-from datetime import datetime, timezone
+from collections import defaultdict, deque
+from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 _log = logging.getLogger(__name__)
@@ -88,17 +92,28 @@ class BudgetEnforcer:
     DEFAULT_PER_TASK_CAP_USD: float = 5.00
     DEFAULT_SPECULATION_DAILY_CAP_USD: float = 2.00
 
+    # ── Immune system defaults (Wave 6.2 Part B) ─────────────────────────────
+    DEFAULT_IMMUNE_DAILY_CAP_USD: float = 5.00
+    # Fraction of daily cap that triggers the anomaly burst rule.
+    IMMUNE_ANOMALY_BURST_PCT: float = 0.30
+    # Rolling window (minutes) for the anomaly burst detector.
+    IMMUNE_ANOMALY_WINDOW_MIN: int = 60
+    # Auto-fix headroom: refuse when less than this fraction of cap remains.
+    IMMUNE_AUTOFIX_HEADROOM_PCT: float = 0.05
+
     def __init__(
         self,
         per_step_cap_usd: float = DEFAULT_PER_STEP_CAP_USD,
         per_task_cap_usd: float = DEFAULT_PER_TASK_CAP_USD,
         speculation_daily_cap_usd: float = DEFAULT_SPECULATION_DAILY_CAP_USD,
+        immune_daily_cap_usd: float = DEFAULT_IMMUNE_DAILY_CAP_USD,
         bead_warning_fn: Callable[[str, str, str], None] | None = None,
         task_id: str = "",
     ) -> None:
         self._per_step_cap = per_step_cap_usd
         self._per_task_cap = per_task_cap_usd
         self._spec_daily_cap = speculation_daily_cap_usd
+        self._immune_daily_cap = immune_daily_cap_usd
         self._bead_warning = bead_warning_fn
         self._task_id = task_id
 
@@ -109,6 +124,12 @@ class BudgetEnforcer:
         self._selfheal_task_spend: float = 0.0
         # speculation: day-string (YYYY-MM-DD) → total USD spent
         self._spec_daily_spend: dict[str, float] = defaultdict(float)
+        # immune: day-string (YYYY-MM-DD) → total USD spent
+        self._immune_daily_spend: dict[str, float] = defaultdict(float)
+        # immune anomaly detector: deque of (utc_datetime, cost_usd) tuples
+        self._immune_burst_window: deque[tuple[datetime, float]] = deque()
+        # UTC timestamp at which anomaly suspension ends (None = not suspended)
+        self._immune_suspended_until: datetime | None = None
 
     # ── Self-heal API ─────────────────────────────────────────────────────────
 
@@ -206,6 +227,357 @@ class BudgetEnforcer:
     def speculation_daily_spend(self) -> float:
         """Return today's speculation spend."""
         return self._spec_daily_spend[_today_str()]
+
+    # ── Swarm API (Wave 6.2 Part A, bd-707d) ─────────────────────────────────
+
+    # Default per-swarm cap: $5.00 (matches immune daily cap)
+    DEFAULT_SWARM_CAP_USD: float = 5.00
+
+    def preflight_swarm(
+        self,
+        chunks: list,
+        model: str,
+        est_tokens_per_chunk: int,
+    ) -> bool:
+        """Return True when the swarm fits within the per-swarm budget cap.
+
+        Args:
+            chunks: List of :class:`~agent_baton.core.swarm.partitioner.CodeChunk`
+                objects (uses ``len(chunks)`` only — no direct import to avoid
+                circular dependency).
+            model: LLM model tier (used to select pricing).
+            est_tokens_per_chunk: Estimated tokens per chunk agent invocation.
+
+        Returns:
+            True if the estimated cost is within cap; False otherwise.
+        """
+        n_chunks = len(chunks)
+        # Estimate: est_tokens_per_chunk input + 25% output
+        tokens_in = n_chunks * est_tokens_per_chunk
+        tokens_out = n_chunks * (est_tokens_per_chunk // 4)
+        estimated_cost = _cost_usd(model, tokens_in, tokens_out)
+
+        cap = self.DEFAULT_SWARM_CAP_USD
+        if estimated_cost > cap:
+            msg = (
+                f"BEAD_WARNING: swarm-budget-preflight-rejected "
+                f"n_chunks={n_chunks} model={model} "
+                f"est_tokens_per_chunk={est_tokens_per_chunk} "
+                f"estimated_cost_usd={estimated_cost:.4f} cap_usd={cap:.2f}"
+            )
+            _log.warning(msg)
+            self._file_bead_warning("swarm-preflight", msg)
+            return False
+
+        _log.debug(
+            "BudgetEnforcer.preflight_swarm: OK n_chunks=%d model=%s "
+            "est_cost_usd=%.4f cap_usd=%.2f",
+            n_chunks, model, estimated_cost, cap,
+        )
+        return True
+
+    def record_swarm_spend(
+        self,
+        swarm_id: str,
+        tokens_in: int,
+        tokens_out: int,
+    ) -> None:
+        """Record actual swarm spend against the task-level ledger.
+
+        Args:
+            swarm_id: Unique identifier for the swarm execution.
+            tokens_in: Total input tokens consumed by the swarm.
+            tokens_out: Total output tokens produced by the swarm.
+        """
+        cost = _cost_usd("haiku", tokens_in, tokens_out)
+        # Record against the task-level self-heal ledger as a unified cost sink.
+        # Full Wave 2.2 persistence will add a dedicated swarm ledger.
+        self._selfheal_task_spend += cost
+        _log.info(
+            "BudgetEnforcer.record_swarm_spend: swarm_id=%s tokens_in=%d "
+            "tokens_out=%d cost_usd=%.4f (task_total=%.4f)",
+            swarm_id, tokens_in, tokens_out, cost, self._selfheal_task_spend,
+        )
+    # ── Immune system API (Wave 6.2 Part B) ──────────────────────────────────
+
+    def allow_immune_sweep(self) -> tuple[bool, str]:
+        """Return ``(True, "")`` when an immune sweep is within budget.
+
+        Returns ``(False, reason)`` when:
+        - The daily cap for immune is fully consumed.
+        - An anomaly burst was detected and the suspension window is active.
+
+        The hard-kill at 100% is enforced here; soft warns are logged only.
+        """
+        now = datetime.now(tz=timezone.utc)
+
+        # ── Anomaly suspension check ──────────────────────────────────────
+        if self._immune_suspended_until is not None:
+            if now < self._immune_suspended_until:
+                remaining = (self._immune_suspended_until - now).total_seconds()
+                reason = (
+                    f"immune-burst-suspension active for {remaining:.0f}s more"
+                )
+                _log.debug("BudgetEnforcer: %s", reason)
+                return False, reason
+            else:
+                # Suspension expired — clear it.
+                self._immune_suspended_until = None
+
+        # ── Daily cap check ───────────────────────────────────────────────
+        day = _today_str()
+        spent = self._immune_daily_spend[day]
+        if spent >= self._immune_daily_cap:
+            reason = (
+                f"immune daily cap exhausted "
+                f"(cap={self._immune_daily_cap:.2f} spent={spent:.4f})"
+            )
+            _log.warning("BudgetEnforcer: %s", reason)
+            return False, reason
+
+        # ── Soft warnings ─────────────────────────────────────────────────
+        pct = spent / self._immune_daily_cap if self._immune_daily_cap > 0 else 0.0
+        if pct >= 0.80:
+            _log.warning(
+                "BudgetEnforcer: immune budget at %.0f%% (hard cap at 100%%)", pct * 100
+            )
+        elif pct >= 0.50:
+            _log.info(
+                "BudgetEnforcer: immune budget at %.0f%%", pct * 100
+            )
+
+        return True, ""
+
+    def record_immune_spend(
+        self,
+        target_path: str,
+        kind: str,
+        tokens_in: int,
+        tokens_out: int,
+    ) -> float:
+        """Record immune sweep token spend and check for anomaly burst.
+
+        Applies the cost to the daily ledger and the 60-minute rolling window.
+        If the rolling window exceeds 30% of the daily cap, a 1-hour
+        suspension is triggered and a BEAD_WARNING is filed.
+
+        Args:
+            target_path: Path of the swept target (for log context).
+            kind: Sweep kind (for log context).
+            tokens_in: Input tokens consumed by the sweep.
+            tokens_out: Output tokens produced by the sweep.
+
+        Returns:
+            The USD cost of this sweep.
+        """
+        cost = _cost_usd("haiku", tokens_in, tokens_out)
+        day = _today_str()
+        self._immune_daily_spend[day] += cost
+
+        # ── Anomaly burst tracking ─────────────────────────────────────────
+        now = datetime.now(tz=timezone.utc)
+        self._immune_burst_window.append((now, cost))
+        # Purge entries older than the 60-min window.
+        cutoff = now - timedelta(minutes=self.IMMUNE_ANOMALY_WINDOW_MIN)
+        while self._immune_burst_window and self._immune_burst_window[0][0] < cutoff:
+            self._immune_burst_window.popleft()
+
+        window_total = sum(c for _, c in self._immune_burst_window)
+        burst_threshold = self._immune_daily_cap * self.IMMUNE_ANOMALY_BURST_PCT
+        if (
+            window_total >= burst_threshold
+            and self._immune_suspended_until is None
+        ):
+            self._immune_suspended_until = now + timedelta(hours=1)
+            msg = (
+                f"BEAD_WARNING: immune-burst-detected "
+                f"window_cost_usd={window_total:.4f} "
+                f"threshold_usd={burst_threshold:.4f} "
+                f"suspended_until={self._immune_suspended_until.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+            )
+            _log.warning(msg)
+            self._file_bead_warning("immune-sweep", msg)
+
+        _log.debug(
+            "BudgetEnforcer: immune spend path=%s kind=%s cost_usd=%.4f "
+            "(day_total=%.4f cap=%.2f)",
+            target_path, kind, cost, self._immune_daily_spend[day], self._immune_daily_cap,
+        )
+        return cost
+
+    def has_headroom_for_auto_fix(self) -> bool:
+        """Return ``True`` when there is sufficient budget for an auto-fix dispatch.
+
+        Refuses when less than 5% of the daily immune cap remains (approximately
+        one Haiku micro-agent call of budget headroom is required).
+        """
+        day = _today_str()
+        spent = self._immune_daily_spend[day]
+        remaining = self._immune_daily_cap - spent
+        headroom = self._immune_daily_cap * self.IMMUNE_AUTOFIX_HEADROOM_PCT
+        return remaining >= headroom
+
+    def daily_cap_exceeded(self) -> bool:
+        """Return ``True`` when the immune daily cap has been fully consumed."""
+        day = _today_str()
+        return self._immune_daily_spend[day] >= self._immune_daily_cap
+
+    def anomaly_burst_detected(self) -> bool:
+        """Return ``True`` when an anomaly burst suspension is currently active."""
+        if self._immune_suspended_until is None:
+            return False
+        return datetime.now(tz=timezone.utc) < self._immune_suspended_until
+
+    def immune_daily_spend(self) -> float:
+        """Return today's total immune sweep spend in USD."""
+        return self._immune_daily_spend[_today_str()]
+
+    # ── Predictive computation API (Wave 6.2 Part C, bd-03b0) ─────────────────
+
+    # Default per-project per-day cap for predictive speculation ($2/day).
+    DEFAULT_PREDICT_DAILY_CAP_USD: float = 2.00
+    # Accept-rate window size (rolling) for auto-disable logic.
+    PREDICT_ACCEPT_RATE_WINDOW: int = 50
+    # Auto-disable threshold: disable when rolling accept-rate < this.
+    PREDICT_ACCEPT_RATE_MIN: float = 0.20
+    # Auto-disable duration (hours).
+    PREDICT_AUTO_DISABLE_HOURS: int = 24
+
+    def _ensure_predict_state(self) -> None:
+        """Lazily initialise predict-specific state fields."""
+        if not hasattr(self, "_predict_daily_cap"):
+            self._predict_daily_cap: float = self.DEFAULT_PREDICT_DAILY_CAP_USD
+            self._predict_daily_spend: dict[str, float] = defaultdict(float)
+            self._predict_outcomes: list[bool] = []   # True=accepted False=rejected
+            self._predict_disabled_until: datetime | None = None
+
+    def allow_speculation_predict(self) -> tuple[bool, str]:
+        """Return ``(True, "")`` when predict speculation is within budget.
+
+        Checks the per-project daily cap ($2/day by default) and the
+        auto-disable state triggered by a rolling accept-rate < 20% over
+        the last 50 speculations.
+
+        Returns:
+            ``(allowed, reason)`` — when *allowed* is False, *reason* explains
+            why.  Both ``allow_speculation()`` (Wave 5.3) and this method
+            gate predict dispatches; callers should use this method for
+            Wave 6.2 Part C speculations.
+        """
+        self._ensure_predict_state()
+
+        # Auto-disable check.
+        now = datetime.now(tz=timezone.utc)
+        if self._predict_disabled_until is not None:
+            if now < self._predict_disabled_until:
+                remaining = (self._predict_disabled_until - now).total_seconds()
+                reason = (
+                    f"predict auto-disabled (low accept-rate); "
+                    f"re-enables in {remaining:.0f}s"
+                )
+                return False, reason
+            else:
+                self._predict_disabled_until = None
+
+        # Daily cap check.
+        day = _today_str()
+        spent = self._predict_daily_spend[day]
+        if spent >= self._predict_daily_cap:
+            reason = (
+                f"predict daily cap exhausted "
+                f"(cap={self._predict_daily_cap:.2f} spent={spent:.4f})"
+            )
+            _log.warning("BudgetEnforcer: %s", reason)
+            return False, reason
+
+        return True, ""
+
+    def record_speculation_spend_predict(
+        self,
+        spec_id: str,
+        tokens_in: int,
+        tokens_out: int,
+    ) -> float:
+        """Record predictive speculation spend and check for auto-disable.
+
+        Updates the daily ledger for the ``predict`` subsystem (distinct
+        from the Wave 5.3 speculation ledger).
+
+        Args:
+            spec_id: The speculation ID (for log context).
+            tokens_in: Input tokens consumed.
+            tokens_out: Output tokens produced.
+
+        Returns:
+            The USD cost of this speculation.
+        """
+        self._ensure_predict_state()
+        cost = _cost_usd("haiku", tokens_in, tokens_out)
+        day = _today_str()
+        self._predict_daily_spend[day] += cost
+        _log.debug(
+            "BudgetEnforcer: predict spend spec=%s cost_usd=%.4f "
+            "(day_total=%.4f cap=%.2f)",
+            spec_id, cost, self._predict_daily_spend[day], self._predict_daily_cap,
+        )
+        return cost
+
+    def record_predict_outcome(self, spec_id: str, accepted: bool) -> None:
+        """Record whether a predictive speculation was accepted by the developer.
+
+        Maintains a rolling window of the last ``PREDICT_ACCEPT_RATE_WINDOW``
+        outcomes.  When the accept-rate drops below ``PREDICT_ACCEPT_RATE_MIN``
+        after a full window, predict auto-disables for 24 hours and a
+        BEAD_WARNING is filed.
+
+        Args:
+            spec_id: The speculation ID (for log context).
+            accepted: True when the developer accepted the speculation.
+        """
+        self._ensure_predict_state()
+        self._predict_outcomes.append(accepted)
+        if len(self._predict_outcomes) > self.PREDICT_ACCEPT_RATE_WINDOW:
+            self._predict_outcomes = self._predict_outcomes[
+                -self.PREDICT_ACCEPT_RATE_WINDOW :
+            ]
+
+        # Only check auto-disable when we have a full window.
+        if len(self._predict_outcomes) >= self.PREDICT_ACCEPT_RATE_WINDOW:
+            rate = sum(self._predict_outcomes) / len(self._predict_outcomes)
+            if rate < self.PREDICT_ACCEPT_RATE_MIN and self._predict_disabled_until is None:
+                self._predict_disabled_until = datetime.now(tz=timezone.utc) + timedelta(
+                    hours=self.PREDICT_AUTO_DISABLE_HOURS
+                )
+                msg = (
+                    f"BEAD_WARNING: predict-auto-disabled "
+                    f"accept_rate={rate:.2%} over last "
+                    f"{self.PREDICT_ACCEPT_RATE_WINDOW} speculations "
+                    f"< {self.PREDICT_ACCEPT_RATE_MIN:.0%} minimum. "
+                    f"Disabled until {self._predict_disabled_until.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+                )
+                _log.warning(msg)
+                self._file_bead_warning(spec_id, msg)
+
+        _log.debug(
+            "BudgetEnforcer: predict outcome spec=%s accepted=%s "
+            "(window=%d rate=%.0f%%)",
+            spec_id, accepted,
+            len(self._predict_outcomes),
+            sum(self._predict_outcomes) / len(self._predict_outcomes) * 100
+            if self._predict_outcomes else 0,
+        )
+
+    def predict_daily_spend(self) -> float:
+        """Return today's predictive speculation spend in USD."""
+        self._ensure_predict_state()
+        return self._predict_daily_spend[_today_str()]
+
+    def predict_is_disabled(self) -> bool:
+        """Return True when the predict auto-disable is currently active."""
+        self._ensure_predict_state()
+        if self._predict_disabled_until is None:
+            return False
+        return datetime.now(tz=timezone.utc) < self._predict_disabled_until
 
     # ── Private helpers ───────────────────────────────────────────────────────
 
