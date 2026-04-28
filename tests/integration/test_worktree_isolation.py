@@ -754,3 +754,65 @@ class TestEngineSignalsIsolationPreserved:
         assert len(actions) == 1
         assert actions[0].isolation == ""
         assert "isolation" not in actions[0].to_dict()
+
+
+# ---------------------------------------------------------------------------
+# bd-def9 — working_branch_head persisted after fold_back()
+# ---------------------------------------------------------------------------
+
+
+class TestWorkingBranchHeadRecordsFoldTarget:
+    """After a successful fold-back round-trip, state.working_branch_head
+    must equal the rebased tip SHA returned by fold_back().
+
+    The executor path (record_step_result) is tested with a mocked
+    WorktreeManager so the test is not sensitive to git rebase "already
+    checked out" limitations of the live worktree.
+    """
+
+    def test_working_branch_head_records_fold_target(
+        self,
+        engine: ExecutionEngine,
+        tmp_git_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Patch _detect_branch so the engine records "main" as working_branch.
+        monkeypatch.setattr(engine, "_detect_branch", lambda: "main")
+
+        plan = _plan(task_id="task-wbh-def9")
+        engine.start(plan)
+        engine.mark_dispatched("1.1", "backend-engineer")
+
+        # Replace the WorktreeManager with one whose fold_back() returns a
+        # synthetic SHA. This avoids the git "already checked out" error that
+        # occurs when the rebase strategy tries to manipulate a branch that is
+        # still live in the worktree.
+        FAKE_NEW_HEAD = "aabbccdd" * 5  # 40-char hex stand-in
+        mock_wt_mgr = MagicMock()
+        mock_wt_mgr._enabled = True
+        mock_wt_mgr._bead_store = None
+        mock_wt_mgr.fold_back.return_value = FAKE_NEW_HEAD
+        # cleanup must succeed silently
+        mock_wt_mgr.cleanup.return_value = None
+        monkeypatch.setattr(engine, "_worktree_mgr", mock_wt_mgr)
+
+        # Record step complete with a dummy commit hash — triggers fold_back().
+        engine.record_step_result(
+            step_id="1.1",
+            agent_name="backend-engineer",
+            status="complete",
+            commit_hash="deadbeef" * 5,
+        )
+
+        # Reload state and verify working_branch_head was persisted.
+        state_final = engine._load_execution()
+        assert state_final is not None
+
+        branch_head = getattr(state_final, "working_branch_head", None)
+        assert branch_head == FAKE_NEW_HEAD, (
+            f"state.working_branch_head must equal fold_back() return value "
+            f"{FAKE_NEW_HEAD!r}; got {branch_head!r}"
+        )
+
+        # fold_back() must have been called with the commit hash.
+        assert mock_wt_mgr.fold_back.called, "fold_back() must be called on success path"
