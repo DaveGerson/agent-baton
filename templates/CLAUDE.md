@@ -197,6 +197,12 @@ an `isolation` field. When it is `"worktree"`, forward the value
 verbatim onto the matching `Agent(...)` call. When the field is empty
 or absent, do not pass `isolation`.
 
+When the action also carries a `worktree_path` field, pass that path
+as the `cwd` parameter on the `Agent(...)` invocation. The engine has
+already created the worktree at that path; the agent runs inside it
+without any additional setup. Without this, the agent boots in the
+parent project root and the worktree isolation is silently bypassed.
+
 Inside the agent: never `cd` out of your worktree, and never act on an
 absolute path from the prompt that points back at the project root —
 use the worktree-relative paths the engine provides.
