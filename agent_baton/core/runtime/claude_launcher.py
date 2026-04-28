@@ -131,6 +131,11 @@ _DEFAULT_ENV_PASSTHROUGH: list[str] = [
     "CLAUDE_CODE_USE_VERTEX",
     "AWS_PROFILE",
     "AWS_REGION",
+    # bd-37a9: baton coordination env vars — always propagated so subagents in
+    # worktrees always point at the parent baton.db and task.
+    "BATON_DB_PATH",
+    "BATON_TASK_ID",
+    "BATON_TEAM_CONTEXT_ROOT",
 ]
 
 
@@ -367,6 +372,58 @@ def _truncate_or_spillover(
 # ---------------------------------------------------------------------------
 
 
+
+def _resolve_baton_env_for_worktree(
+    config: "ClaudeCodeConfig",
+    cwd_override: str,
+) -> dict[str, str]:
+    """Derive the three BATON_* env vars that must be set when an agent runs in
+    an isolated worktree (bd-37a9).
+
+    Resolution:
+    - BATON_TEAM_CONTEXT_ROOT: from env, or walk from config.working_directory
+      upward to find the ``.claude/team-context`` directory.
+    - BATON_DB_PATH: <BATON_TEAM_CONTEXT_ROOT>/baton.db
+    - BATON_TASK_ID: from env (already set by the orchestrator session).
+
+    Returns a dict of {key: value} for vars that could be resolved.  Missing
+    values are omitted so callers can decide to skip them.
+    """
+    result: dict[str, str] = {}
+
+    # BATON_TEAM_CONTEXT_ROOT
+    root_env = os.environ.get("BATON_TEAM_CONTEXT_ROOT", "").strip()
+    if root_env:
+        team_ctx_root = Path(root_env)
+    else:
+        # Walk upward from config.working_directory looking for .claude/team-context
+        base = config.working_directory or Path(cwd_override)
+        team_ctx_root = base / ".claude" / "team-context"
+        # Try ancestors if the computed path doesn't exist
+        if not team_ctx_root.is_dir():
+            for ancestor in base.parents:
+                candidate = ancestor / ".claude" / "team-context"
+                if candidate.is_dir():
+                    team_ctx_root = candidate
+                    break
+
+    result["BATON_TEAM_CONTEXT_ROOT"] = str(team_ctx_root)
+
+    # BATON_DB_PATH
+    db_path_env = os.environ.get("BATON_DB_PATH", "").strip()
+    if db_path_env:
+        result["BATON_DB_PATH"] = db_path_env
+    else:
+        result["BATON_DB_PATH"] = str(team_ctx_root / "baton.db")
+
+    # BATON_TASK_ID
+    task_id = os.environ.get("BATON_TASK_ID", "").strip()
+    if task_id:
+        result["BATON_TASK_ID"] = task_id
+
+    return result
+
+
 class ClaudeCodeLauncher:
     """Production ``AgentLauncher`` that invokes the ``claude`` CLI.
 
@@ -451,6 +508,12 @@ class ClaudeCodeLauncher:
             agent = self._registry.get(agent_name)
         cmd = self._build_command(model, agent, mcp_servers=mcp_servers)
         env = self._build_env()
+        # bd-37a9: when launching inside an isolated worktree, inject BATON_*
+        # env vars so the subagent always connects to the parent baton.db and
+        # task, preventing the upward-walk from finding a worktree-local empty db.
+        if cwd_override:
+            baton_env = _resolve_baton_env_for_worktree(self._config, cwd_override)
+            env.update(baton_env)
         timeout = self._resolve_timeout(model)
         use_stdin = len(prompt.encode()) > self._config.prompt_file_threshold
         # Wave 1.3: cwd_override takes precedence over the configured directory.
