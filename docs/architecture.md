@@ -1044,6 +1044,17 @@ best-effort — failures log at debug and never block phase advancement.
 CLI surface: `baton beads synthesize` (manual trigger) and `baton beads
 clusters` (list components).
 
+#### HandoffSynthesizer (Wave 3.2)
+
+`agent_baton/core/intel/handoff_synthesizer.py` synthesizes a compact
+(≤400-char) "Handoff from Prior Step" section when the dispatcher hands
+off from agent N to agent N+1: top-5 files changed, discoveries (beads
+created during the prior step), blockers (open `warning` beads whose
+files/tags overlap the next step's domain), and a one-line outcome
+summary. Persisted to `handoff_beads` (schema v29) for audit; listable
+via `baton beads handoffs --task-id <id>`. Fully deterministic, single-
+task scope, best-effort. Resolves bd-65d4 / bd-61a5.
+
 ### 7.4 Serialization
 
 All model types implement `to_dict()` / `from_dict()` class methods for JSON
