@@ -85,6 +85,10 @@ class SwarmResult:
     wall_clock_sec: float
     coalesce_branch: str
     failed_chunks: list[str] = field(default_factory=list)
+    # Wave 6.2 Part A sign-off gate (bd-707d): bead_id of the approval bead
+    # filed when the operator confirmed dispatch.  Empty string when no
+    # approval bead was created (e.g. non-interactive --yes bypass).
+    approval_bead_id: str = ""
 
 
 class SwarmDispatcher:
@@ -123,6 +127,7 @@ class SwarmDispatcher:
         directive: RefactorDirective,
         max_agents: int = 100,
         model: str = "claude-haiku",
+        approval_bead_id: str = "",
     ) -> SwarmResult:
         """Partition, budget-check, synthesise plan, and execute swarm.
 
@@ -130,6 +135,10 @@ class SwarmDispatcher:
             directive: What to refactor.
             max_agents: Maximum number of parallel chunk agents.
             model: LLM model tier for chunk agents.
+            approval_bead_id: Optional bead ID of the operator approval bead
+                filed by the CLI sign-off gate (bd-707d).  Recorded on the
+                returned :class:`SwarmResult` so execution traces tie back to
+                the audit-trail bead.  Empty string when not supplied.
 
         Returns:
             :class:`SwarmResult` with outcome metrics.
@@ -193,6 +202,8 @@ class SwarmDispatcher:
             swarm_id, result.n_succeeded, result.n_failed,
             result.total_tokens, result.total_cost_usd, result.wall_clock_sec,
         )
+        # bd-707d: attach approval bead ID for audit-trail traceability.
+        result.approval_bead_id = approval_bead_id
         return result
 
     # ── Plan synthesis ────────────────────────────────────────────────────────
