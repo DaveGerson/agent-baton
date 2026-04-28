@@ -51,6 +51,7 @@ import type {
   CRPRequestBody,
   CRPResponse,
 } from './types';
+import { beadsApi, type BeadListParams, type BeadListResponse, type Bead } from './beads';
 
 const BASE = '/api/v1/pmo';
 const BASE_V1 = '/api/v1';
@@ -486,6 +487,20 @@ export const api = {
 
   submitCrp(body: CRPRequestBody): Promise<CRPResponse> {
     return request('/crp', { method: 'POST', body: JSON.stringify(body) });
+  },
+
+  // -------------------------------------------------------------------------
+  // DX.6 — Beads (graph + timeline) — wraps the dedicated beadsApi module.
+  // -------------------------------------------------------------------------
+
+  /** List beads from the project's bead store with optional filters. */
+  getBeads(params?: BeadListParams): Promise<BeadListResponse> {
+    return beadsApi.list(params);
+  },
+
+  /** Fetch a single bead by ID. */
+  getBead(beadId: string): Promise<Bead | null> {
+    return beadsApi.get(beadId);
   },
 
   /**

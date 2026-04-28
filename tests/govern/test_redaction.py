@@ -40,6 +40,47 @@ def test_redact_email_negative(redactor: Redactor) -> None:
     assert redactor.last_counts.get("email", 0) == 0
 
 
+# ---------------------------------------------------------------------------
+# bd-bdd2: noreply / Co-Authored-By emails must NOT be redacted
+# ---------------------------------------------------------------------------
+
+def test_redact_email_allowlists_anthropic_noreply(redactor: Redactor) -> None:
+    """Co-Authored-By trailers from Claude agents must survive verbatim."""
+    trailer = "Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
+    out = redactor.redact(trailer)
+    assert "noreply@anthropic.com" in out
+    assert "[REDACTED:email]" not in out
+
+
+def test_redact_email_allowlists_github_users_noreply(redactor: Redactor) -> None:
+    trailer = "Co-Authored-By: octocat <12345+octocat@users.noreply.github.com>"
+    out = redactor.redact(trailer)
+    assert "12345+octocat@users.noreply.github.com" in out
+    assert "[REDACTED:email]" not in out
+
+
+def test_redact_email_allowlists_generic_noreply_local(redactor: Redactor) -> None:
+    """``noreply@<any-domain>`` is treated as machine-generated."""
+    out = redactor.redact("from noreply@example.org reply not monitored")
+    assert "noreply@example.org" in out
+    assert "[REDACTED:email]" not in out
+
+
+def test_redact_email_still_redacts_real_addresses_alongside_allowlisted(
+    redactor: Redactor,
+) -> None:
+    """Mixed line: allowlisted address kept, real address scrubbed."""
+    line = (
+        "Author: alice@corp.example wrote\n"
+        "Co-Authored-By: bot <noreply@anthropic.com>"
+    )
+    out = redactor.redact(line)
+    assert "alice@corp.example" not in out
+    assert "[REDACTED:email]" in out
+    # Allowlisted address still survives in same payload.
+    assert "noreply@anthropic.com" in out
+
+
 def test_redact_ssn_positive(redactor: Redactor) -> None:
     out = redactor.redact("SSN is 123-45-6789 on file")
     assert "123-45-6789" not in out

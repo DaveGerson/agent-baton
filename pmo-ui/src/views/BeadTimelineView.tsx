@@ -84,7 +84,7 @@ export function BeadTimelineView() {
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    beadsApi.list().then(res => {
+    beadsApi.list({ status: 'all', limit: 500 }).then(res => {
       if (cancelled) return;
       setAllBeads(res.beads);
       setFixtureMode(!!res.fixture);

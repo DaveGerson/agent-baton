@@ -217,7 +217,7 @@ agent_baton/
   |  |  events.py     SSE event stream (1 endpoint)
   |  |  webhooks.py   Webhook subscriptions (3 endpoints)
   |  |  pmo.py        PMO board/project/forge/execute/gates/changelist/review/signals (36 endpoints)
-  |  |  pmo_h3.py     PMO H3 surfaces: scorecard, arch-review, playbooks, CRP (5 endpoints)
+  |  |  pmo_h3.py     PMO H3 surfaces: scorecard, arch-review, playbooks, CRP, beads (6 endpoints)
   |  |  learn.py      Learning issues and auto-correction (5 endpoints)
   |  models/
   |  |  requests.py   Pydantic request bodies
@@ -266,9 +266,22 @@ pmo-ui/              React/Vite PMO frontend (served at /pmo/)
     |                 BeadGraphView, BeadTimelineView
     views/            H3 PMO views — RoleBasedDashboard (H3.2),
     |                 DeveloperScorecard (H3.4), ArchReviewPanel (H3.7),
-    |                 PlaybookGallery (H3.8), CRPWizard (H3.9). Backed
+    |                 PlaybookGallery (H3.8), CRPWizard (H3.9),
+    |                 BeadGraphView + BeadTimelineView (DX.6). Backed
     |                 by /api/v1/pmo/scorecard, /arch-beads, /playbooks,
-    |                 /crp endpoints in routes/pmo_h3.py.
+    |                 /crp, and /beads endpoints in routes/pmo_h3.py.
+
+> **DX.6 — `GET /api/v1/pmo/beads`** (bd-aade): the PMO `BeadGraphView`
+> and `BeadTimelineView` are powered by a `GET /api/v1/pmo/beads`
+> endpoint in `routes/pmo_h3.py`.  It wraps `BeadStore.query()` and
+> returns a `{ beads, total }` envelope with the full Bead shape
+> (links, tags, affected files, quality/retrieval scores).  Optional
+> query params — `status` (default `open`, pass `all` to disable
+> filtering), `bead_type`, `tags` (comma-separated, AND semantics),
+> `task_id`, and `limit` (default 200, max 1000) — are passed through
+> to `BeadStore.query()`.  The endpoint degrades to an empty envelope
+> when the project's `baton.db` is missing or its `beads` table is
+> not yet provisioned.
     contexts/         ToastContext
     hooks/            useHotkeys, usePersistedState, usePmoBoard
     api/              client.ts, types.ts
@@ -679,6 +692,46 @@ telemetry, context profiling, and data archival.
 | `retrospective.py` | `RetrospectiveEngine` | Generates structured retrospectives from usage records + qualitative input. Scans narrative for implicit knowledge gap signals. Persists as markdown and JSON. |
 | `context_profiler.py` | `ContextProfiler` | Analyzes trace data to compute per-agent context efficiency metrics (files read vs. files written, redundancy across agents). |
 | `archiver.py` | `DataArchiver` | Retention-based cleanup of old execution artifacts (traces, events, retrospectives, telemetry). Scans by age, supports archive or delete modes. |
+
+#### OTLP-shaped JSONL spans (`core/observability/`)
+
+A complementary, env-gated OTel-compatible side-channel writes one OTLP-shaped span per
+JSONL line for replay through a real OpenTelemetry collector. `OTelJSONLExporter`
+(in `core/observability/otel_exporter.py`) is reached through the `current_exporter()`
+helper, which returns `None` unless `BATON_OTEL_ENABLED=1` is set — keeping the no-op
+path branch-free. Spans are emitted at three call sites today: `Planner.create_plan`
+(`plan.create`), `ExecutionEngine.record_step_result` for terminal step statuses
+(`step.dispatch` with `step_id`, `agent_name`, `task_id`, `step_type`, `model`,
+`status`, `tokens_used`, and a 1 KiB-truncated outcome), and
+`ExecutionEngine.record_gate_result` (`gate.run` with `phase_id`, `gate_type`,
+`passed`, `exit_code`, and `decision_source`). Span emission is wrapped in
+broad `try/except` so observability failures can never crash the engine; the
+default destination is `.claude/team-context/otel-spans.jsonl`, overridable via
+`BATON_OTEL_PATH`.
+
+#### FinOps chargeback (`core/observability/`)
+
+Two read-only modules turn `usage_records` into cost-attribution reports:
+
+| Module | Class | Role |
+|--------|-------|------|
+| `chargeback.py` | `ChargebackBuilder` | Groups token + USD spend by the F0.2 tenancy hierarchy (org / team / project / user / cost_center) over a configurable time window. Emits CSV or JSON via `ChargebackReport`. |
+| `attribution_coverage.py` | `CoverageScanner` | Scans `usage_records` and reports the percentage of rows that carry a non-default value per tenancy dimension. Emits a human-readable table or JSON via `AttributionCoverageReport`. |
+
+CLI surface:
+
+```
+baton finops chargeback [--since DATE] [--until DATE] [--group-by SCOPE] [--format csv|json]
+baton finops attribution-coverage [--output table|json] [--db PATH]
+```
+
+Operators must populate `~/.baton/identity.yaml` (or env vars `BATON_ORG_ID`,
+`BATON_TEAM_ID`, `BATON_USER_ID`, `BATON_COST_CENTER`) before running tasks so
+that `usage_records` rows carry meaningful attribution values.  Use
+`baton finops attribution-coverage` to verify coverage before exporting
+chargeback reports.
+
+See [docs/finops-chargeback.md](finops-chargeback.md) for the full operator walkthrough.
 
 ---
 

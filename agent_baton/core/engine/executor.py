@@ -2156,6 +2156,60 @@ class ExecutionEngine:
                 duration_seconds=duration_seconds,
             ))
 
+        # ── O1.4 — OTel JSONL span for terminal step dispatch (bd-0899) ──────
+        # Emit one ``step.dispatch`` span per terminal status (complete/failed).
+        # Mid-flight ``dispatched`` rows are intentionally skipped — they have
+        # no end timestamp yet, and the next call to record_step_result for
+        # the same step_id will replace the row and emit the span at that point.
+        # The exporter is env-gated; when disabled the call is a cheap no-op.
+        if status in ("complete", "failed"):
+            try:
+                from agent_baton.core.observability import current_exporter
+
+                _otel_exporter = current_exporter()
+                if _otel_exporter is not None:
+                    # Resolve start time: prefer the caller-supplied timestamp
+                    # so the span covers the actual agent lifecycle.  Fall
+                    # back to "now" for a zero-duration marker when absent.
+                    _otel_started = None
+                    if _started:
+                        try:
+                            _otel_started = datetime.fromisoformat(_started)
+                        except ValueError:
+                            _otel_started = None
+                    _otel_ended = datetime.now(tz=timezone.utc)
+                    if _otel_started is None:
+                        _otel_started = _otel_ended
+
+                    # Cap outcome to keep span attributes bounded.  Real
+                    # OTLP collectors warn on >256 KiB attribute payloads;
+                    # 1 KiB is plenty for an executor-level breadcrumb.
+                    _outcome_truncated = (outcome or "")[:1024]
+
+                    _otel_exporter.record_span(
+                        name="step.dispatch",
+                        kind="INTERNAL",
+                        attributes={
+                            "step_id": step_id,
+                            "agent_name": agent_name,
+                            "task_id": state.task_id,
+                            "step_type": (
+                                _plan_step.step_type if _plan_step else ""
+                            ),
+                            "model": (
+                                _plan_step.model if _plan_step else ""
+                            ),
+                            "status": status,
+                            "tokens_used": int(effective_tokens or 0),
+                            "outcome_truncated": _outcome_truncated,
+                        },
+                        started_at=_otel_started,
+                        ended_at=_otel_ended,
+                    )
+            except Exception:
+                # Observability must never crash the executor.
+                _log.debug("OTel step.dispatch span emission failed", exc_info=True)
+
     def mark_dispatched(self, step_id: str, agent_name: str) -> None:
         """Record that a step has been dispatched (in-flight, not yet complete).
 
@@ -2388,6 +2442,33 @@ class ExecutionEngine:
             state.status = "running"
 
         self._save_execution(state)
+
+        # ── O1.4 — OTel JSONL span for gate execution (bd-0899) ─────────────
+        # Emit one ``gate.run`` span per gate result.  Zero-duration —
+        # gate execution is wrapped externally by the CLI; the engine only
+        # records the outcome.  The exporter is env-gated; no-op when off.
+        try:
+            from agent_baton.core.observability import current_exporter
+
+            _otel_exporter = current_exporter()
+            if _otel_exporter is not None:
+                _otel_now = datetime.now(tz=timezone.utc)
+                _otel_exporter.record_span(
+                    name="gate.run",
+                    kind="INTERNAL",
+                    attributes={
+                        "phase_id": phase_id,
+                        "gate_type": gate_type,
+                        "passed": bool(passed),
+                        "task_id": state.task_id,
+                        "exit_code": int(exit_code) if exit_code is not None else -1,
+                        "decision_source": decision_source,
+                    },
+                    started_at=_otel_now,
+                    ended_at=_otel_now,
+                )
+        except Exception:
+            _log.debug("OTel gate.run span emission failed", exc_info=True)
 
     def reset_gate_failed(self, phase_id: int) -> None:
         """Reset a ``gate_failed`` status back to ``gate_pending`` for retry.

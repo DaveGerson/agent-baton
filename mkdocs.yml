@@ -1,0 +1,110 @@
+site_name: Agent Baton
+site_description: Multi-agent orchestration system for Claude Code — intelligent planning, delegation, and governance for complex software engineering tasks.
+site_url: https://davegerson.github.io/agent-baton/
+site_author: Dave Gerson
+repo_url: https://github.com/DaveGerson/agent-baton
+repo_name: DaveGerson/agent-baton
+edit_uri: edit/master/docs/
+copyright: Copyright &copy; 2026 Dave Gerson — All Rights Reserved
+
+docs_dir: docs
+
+theme:
+  name: material
+  custom_dir: overrides
+  language: en
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.indexes
+    - toc.follow
+    - content.code.copy
+    - content.action.edit
+    - search.suggest
+    - search.highlight
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to light mode
+  icon:
+    repo: fontawesome/brands/github
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+
+plugins:
+  - search
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/DaveGerson/agent-baton
+  # Search-engine ownership verification.
+  # Replace the empty strings below with the codes from each console
+  # (do not include the surrounding <meta ...> wrapper — the theme adds it).
+  # - Google Search Console: https://search.google.com/search-console → "URL prefix"
+  #   property → choose "HTML tag" verification → copy the content="..." value.
+  # - Bing Webmaster Tools: https://www.bing.com/webmasters → "Add a site" → choose
+  #   "HTML Meta Tag" verification → copy the content="..." value.
+  analytics:
+    google_site_verification: "inBGhoYrfGtfXZnLdCJDyO6k_Ho1Vhb5NRemQx19rfw"
+    bing_site_verification: ""
+
+nav:
+  - Home: index.md
+  - Getting Started:
+      - Orchestrator Usage: orchestrator-usage.md
+      - Agent Roster: agent-roster.md
+      - First Run: examples/first-run.md
+  - Architecture:
+      - Overview: architecture.md
+      - Engine & Runtime: engine-and-runtime.md
+      - Storage, Sync, & PMO: storage-sync-and-pmo.md
+      - Governance, Knowledge, & Events: governance-knowledge-and-events.md
+      - Observe, Learn, & Improve: observe-learn-and-improve.md
+      - Invariants: invariants.md
+      - Terminology: terminology.md
+      - Design Decisions: design-decisions.md
+  - Reference:
+      - API Reference: api-reference.md
+      - CLI Reference: cli-reference.md
+      - Troubleshooting: troubleshooting.md
+  - Operations:
+      - Production Readiness: PRODUCTION_READINESS.md
+      - Daemon Mode Evaluation: daemon-mode-evaluation.md
+      - Pyright Diagnostics Triage: pyright-diagnostics-triage.md
+      - Engine Bugs: baton-engine-bugs.md
+  - Specifications:
+      - Velocity Engine Spec: specs/velocity-engine-spec.md
+      - Strategic Remediation Roadmap: specs/strategic-remediation-roadmap.md
+      - Daemon Mode Roadmap: specs/daemon-mode-roadmap.md
+      - Interactive Team Journeys: specs/interactive-team-journeys.md
+      - Agent Teams Enablement: specs/agent-teams-enablement.md

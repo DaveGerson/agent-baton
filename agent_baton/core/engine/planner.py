@@ -425,7 +425,19 @@ def _derive_expected_outcome(step: "PlanStep", task_summary: str = "") -> str:
     return outcome
 
 
-def _step_type_for_agent(agent_name: str, task_description: str = "") -> str:
+# Phase names whose step_type must be "developing" regardless of the
+# agent's default role.  bd-b3e1: an architect (or any agent) landing on
+# an Implement phase must produce a developing-typed step, not its default
+# (e.g. "planning") — otherwise the engine treats the step as design work
+# and skips downstream code-aware behavior.
+_IMPLEMENT_PHASE_NAMES = {"implement", "fix", "draft", "build", "develop"}
+
+
+def _step_type_for_agent(
+    agent_name: str,
+    task_description: str = "",
+    phase_name: str | None = None,
+) -> str:
     """Return the appropriate step_type for a given agent role.
 
     Uses ``_AGENT_STEP_TYPE`` for the lookup with ``"developing"`` as the
@@ -433,10 +445,19 @@ def _step_type_for_agent(agent_name: str, task_description: str = "") -> str:
     task description contains build/scaffold keywords (i.e. the step is
     building test infrastructure, not running tests).
 
+    When *phase_name* is one of the implementation phases
+    (``implement``, ``fix``, ``draft``, ``build``, ``develop``), the
+    step_type is forced to ``"developing"`` regardless of the agent's
+    default — this fixes bd-b3e1 where architect-on-Implement produced
+    a ``"planning"`` step.
+
     Args:
         agent_name: Full agent name (may include ``--`` variant suffix).
         task_description: Task description text used for the test-engineer
             override check.  Optional — defaults to ``""``.
+        phase_name: Name of the phase the step belongs to.  When this is
+            an implementation phase, the agent's default step_type is
+            overridden to ``"developing"``.
 
     Returns:
         One of the step_type strings defined in ``_AGENT_STEP_TYPE``, or
@@ -448,6 +469,13 @@ def _step_type_for_agent(agent_name: str, task_description: str = "") -> str:
     if base == "test-engineer" and step_type == "testing":
         lower_desc = task_description.lower()
         if any(kw in lower_desc for kw in _TEST_ENGINEER_DEVELOPING_KEYWORDS):
+            step_type = "developing"
+    # bd-b3e1: phase context wins over agent default for Implement-class phases.
+    # Reviewer agents are deliberately left alone — a code-reviewer on an
+    # Implement phase is a routing bug (bd-0e36), not a step_type bug, and
+    # forcing them to "developing" would mask it.
+    if phase_name and phase_name.lower() in _IMPLEMENT_PHASE_NAMES:
+        if base not in {"code-reviewer", "security-reviewer", "auditor"}:
             step_type = "developing"
     return step_type
 
@@ -496,6 +524,22 @@ _CONCERN_MARKER = re.compile(
 
 # Minimum distinct concerns needed to trigger the per-concern split.
 _MIN_CONCERNS_FOR_SPLIT = 3
+
+# Constraint-clause keywords that bound the deliverable list during
+# concern-splitting.  When the planner sees one of these phrases, it
+# stops consuming further markers as deliverables — anything after is
+# treated as a constraint or non-goal, not a phantom deliverable.
+# See bd-021d for the original repro (a "Must not regress F0.3 ..."
+# trailing sentence got split into a phantom Implement step).
+_CONCERN_CONSTRAINT_KEYWORDS = (
+    "must not",
+    "do not",
+    "shall not",
+    "should not",
+    "regress",
+    "non-goal",
+    "non-goals",
+)
 
 # Maps phase names (lower-cased) to human-readable action verbs for step descriptions
 _PHASE_VERBS: dict[str, str] = {
@@ -2194,8 +2238,12 @@ class IntelligentPlanner:
     def _extract_file_paths(self, text: str) -> list[str]:
         """Extract file path candidates from task summary text.
 
-        Scans for tokens that look like file paths — must contain a ``/``
-        or end with a known code/config extension to reduce false positives.
+        Scans for tokens that look like file paths.  bd-0960: a candidate
+        is accepted only when its final segment ends in a known
+        code/config extension (e.g. ``.py``, ``.md``).  Trailing-slash
+        phrases (e.g. ``required_role/timeout_minutes/``) and bare
+        slash-separated word lists with no extension are rejected — those
+        are typically parse artifacts from prose, not real paths.
 
         Returns:
             Deduplicated list of path-like strings found in *text*.
@@ -2203,17 +2251,31 @@ class IntelligentPlanner:
         _CODE_EXTENSIONS = {
             ".py", ".ts", ".md", ".json", ".yaml", ".yml", ".toml",
             ".cfg", ".txt", ".html", ".css", ".js", ".jsx", ".tsx",
+            ".rs", ".go", ".java", ".rb", ".sh", ".sql", ".ini",
+            ".lock", ".env", ".conf",
         }
         pattern = r'(?:^|[\s(])([a-zA-Z0-9_./-]+(?:\.[a-zA-Z0-9]+|/))'
         candidates = re.findall(pattern, text)
         seen: set[str] = set()
         result: list[str] = []
         for c in candidates:
+            # Reject trailing-slash artifacts — paths must point at a file.
+            if c.endswith("/"):
+                continue
+            # Reject leading-punctuation noise (e.g. ".foo" with no real ext).
+            if c.startswith((".", "/", "-")):
+                continue
             last_part = c.split("/")[-1]
-            ext_match = "." in last_part and f".{last_part.rsplit('.', 1)[-1]}" in _CODE_EXTENSIONS
-            if ("/" in c or ext_match) and c not in seen:
-                seen.add(c)
-                result.append(c)
+            if "." not in last_part:
+                # No extension on the basename — not a file path.
+                continue
+            ext = f".{last_part.rsplit('.', 1)[-1].lower()}"
+            if ext not in _CODE_EXTENSIONS:
+                continue
+            if c in seen:
+                continue
+            seen.add(c)
+            result.append(c)
         return result
 
     def _generate_task_id(self, summary: str) -> str:
@@ -2282,7 +2344,18 @@ class IntelligentPlanner:
         Empty list when fewer than :data:`_MIN_CONCERNS_FOR_SPLIT` concerns
         are detected — the caller treats this as "single concern, do not split".
         """
-        matches = list(_CONCERN_MARKER.finditer(summary))
+        # bd-021d: bound the deliverable list at the first constraint clause
+        # (e.g. "Must not regress F0.3 ...").  Anything after is treated as a
+        # non-goal, not a phantom deliverable.
+        lower = summary.lower()
+        bound = len(summary)
+        for kw in _CONCERN_CONSTRAINT_KEYWORDS:
+            idx = lower.find(kw)
+            if idx != -1 and idx < bound:
+                bound = idx
+        bounded_summary = summary[:bound]
+
+        matches = list(_CONCERN_MARKER.finditer(bounded_summary))
         if len(matches) < _MIN_CONCERNS_FOR_SPLIT:
             return []
 
@@ -2293,8 +2366,8 @@ class IntelligentPlanner:
             # only, so the dot inside "F0.1" is preserved.
             marker = m.group(1).strip("().")
             start = m.end()
-            end = matches[i + 1].start() if i + 1 < len(matches) else len(summary)
-            text = summary[start:end].strip().rstrip(";,")
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(bounded_summary)
+            text = bounded_summary[start:end].strip().rstrip(";,")
             if text:
                 concerns.append((marker, text))
 
@@ -2315,7 +2388,20 @@ class IntelligentPlanner:
         text_words = set(re.findall(r"\b\w+\b", text_lower))
 
         # Filter reviewer agents out — they must not implement.
-        eligible = [a for a in candidate_agents if not is_reviewer_agent(a)]
+        # bd-0e36: also filter architect-class agents — concern-split steps
+        # are implementation work and architects belong in Phase 1 design.
+        _ARCHITECT_BASES = {"architect", "ai-systems-architect"}
+        eligible = [
+            a for a in candidate_agents
+            if not is_reviewer_agent(a)
+            and a.split("--")[0] not in _ARCHITECT_BASES
+        ]
+        if not eligible:
+            # Last resort: drop only the reviewer filter, keep architect block.
+            eligible = [
+                a for a in candidate_agents
+                if a.split("--")[0] not in _ARCHITECT_BASES
+            ]
         if not eligible:
             eligible = list(candidate_agents) or ["backend-engineer"]
 
@@ -2465,7 +2551,7 @@ class IntelligentPlanner:
                     step_id=f"{phase.phase_id}.{idx}",
                     agent_name=agent,
                     task_description=desc,
-                    step_type=_step_type_for_agent(agent, desc),
+                    step_type=_step_type_for_agent(agent, desc, phase_name=phase.name),
                     knowledge=concern_knowledge,
                 )
             )
@@ -2538,7 +2624,9 @@ class IntelligentPlanner:
                         step_id=f"{idx}.{step_idx}",
                         agent_name=routed_name,
                         task_description=_desc,
-                        step_type=_step_type_for_agent(routed_name, _desc),
+                        step_type=_step_type_for_agent(
+                            routed_name, _desc, phase_name=phase_name
+                        ),
                     )
                 )
 
@@ -2899,6 +2987,48 @@ class IntelligentPlanner:
         "review": ["code-reviewer", "security-reviewer", "auditor", "architect"],
     }
 
+    # bd-0e36: agent roles that must NOT be routed to a given phase, even
+    # by round-robin/leftover passes.  Architect-class agents are reserved
+    # for design/research/review phases — they must not own Implement or
+    # Fix steps.  bd-1974: implementer-class agents (backend/frontend/
+    # devops/data-*) must not own Review steps either — that role belongs
+    # to code-reviewer/security-reviewer/auditor.  When the only candidate
+    # for a phase is a blocked role, the planner falls back to a phase-
+    # appropriate fallback agent.
+    _PHASE_BLOCKED_ROLES: dict[str, set[str]] = {
+        "implement": {"architect", "ai-systems-architect"},
+        "fix": {"architect", "ai-systems-architect"},
+        "draft": set(),
+        "review": {
+            "backend-engineer", "frontend-engineer", "devops-engineer",
+            "data-engineer", "data-scientist", "data-analyst",
+            "visualization-expert", "test-engineer",
+        },
+    }
+
+    # Fallback agents used when a phase has no eligible candidates after
+    # blocked-role filtering.
+    _IMPLEMENT_FALLBACK_AGENT = "backend-engineer"  # bd-0e36
+    _REVIEW_FALLBACK_AGENT = "code-reviewer"        # bd-1974
+
+    # Map phase name → fallback agent.  Falls back to backend-engineer
+    # when the phase isn't listed.
+    _PHASE_FALLBACK_AGENT: dict[str, str] = {
+        "implement": _IMPLEMENT_FALLBACK_AGENT,
+        "fix": _IMPLEMENT_FALLBACK_AGENT,
+        "review": _REVIEW_FALLBACK_AGENT,
+    }
+
+    @classmethod
+    def _is_blocked_for_phase(cls, agent_name: str, phase_name: str) -> bool:
+        """Return True if *agent_name* must not be assigned to *phase_name*.
+
+        See ``_PHASE_BLOCKED_ROLES`` for the policy table.  bd-0e36.
+        """
+        base = agent_name.split("--")[0]
+        blocked = cls._PHASE_BLOCKED_ROLES.get(phase_name.lower(), set())
+        return base in blocked
+
     def _assign_agents_to_phases(
         self, phases: list[PlanPhase], agents: list[str], task_summary: str = ""
     ) -> list[PlanPhase]:
@@ -2920,7 +3050,9 @@ class IntelligentPlanner:
                             step_id=f"{phase.phase_id}.1",
                             agent_name="backend-engineer",
                             task_description=_desc,
-                            step_type=_step_type_for_agent("backend-engineer", _desc),
+                            step_type=_step_type_for_agent(
+                                "backend-engineer", _desc, phase_name=phase.name
+                            ),
                         )
                     )
             return phases
@@ -2944,26 +3076,54 @@ class IntelligentPlanner:
                 if matched:
                     break
 
-        # Pass 2: assign remaining agents to remaining phases round-robin
+        # Pass 2: assign remaining agents to remaining phases round-robin.
+        # bd-0e36: skip agents blocked for this phase (e.g. architect on
+        # Implement); rotate them to the back of the queue and try the next
+        # candidate.
         for phase in list(remaining_phases):
-            if remaining_agents:
-                agent = remaining_agents.pop(0)
-                assigned.append((phase, agent))
+            chosen: str | None = None
+            skipped: list[str] = []
+            while remaining_agents:
+                candidate = remaining_agents.pop(0)
+                if self._is_blocked_for_phase(candidate, phase.name):
+                    skipped.append(candidate)
+                    continue
+                chosen = candidate
+                break
+            # Restore skipped agents so other phases can still use them.
+            remaining_agents = skipped + remaining_agents
+            if chosen is not None:
+                assigned.append((phase, chosen))
                 remaining_phases.remove(phase)
 
-        # Pass 3: phases still unassigned — reuse the best-fit agent from pool
+        # Pass 3: phases still unassigned — reuse the best-fit agent from pool.
+        # bd-0e36: prefer ideal roles, then any non-blocked agent, then
+        # fall back to the implement-fallback agent rather than re-using
+        # a blocked role like architect.
         for phase in remaining_phases:
             ideal_roles = self._PHASE_IDEAL_ROLES.get(phase.name.lower(), [])
             best = None
             for role in ideal_roles:
                 for agent in agents:
-                    if agent.split("--")[0] == role:
+                    if agent.split("--")[0] == role and not self._is_blocked_for_phase(agent, phase.name):
                         best = agent
                         break
                 if best:
                     break
             if best is None:
-                best = agents[0]
+                # Try any non-blocked agent from the pool.
+                for agent in agents:
+                    if not self._is_blocked_for_phase(agent, phase.name):
+                        best = agent
+                        break
+            if best is None:
+                # All pool agents are blocked for this phase — synthesize the
+                # phase-appropriate fallback (backend-engineer for implement/
+                # fix, code-reviewer for review) so we don't violate the
+                # policy table.  bd-0e36, bd-1974.
+                best = self._PHASE_FALLBACK_AGENT.get(
+                    phase.name.lower(), self._IMPLEMENT_FALLBACK_AGENT
+                )
             assigned.append((phase, best))
 
         # Pass 4: leftover agents — add to work phases only.
@@ -2971,6 +3131,8 @@ class IntelligentPlanner:
         # have at most one agent from Passes 1-3.  Leftover agents are placed
         # only into implementation-like phases (implement, fix, draft) to avoid
         # bloated plans where every agent gets a redundant design/review step.
+        # bd-0e36: skip leftover agents that are blocked for every work phase
+        # (e.g. architect) — they should not be force-fit into Implement.
         _WORK_PHASES = {"implement", "fix", "draft"}
         for agent in remaining_agents:
             base = agent.split("--")[0]
@@ -2978,18 +3140,24 @@ class IntelligentPlanner:
             for phase_name, roles in self._PHASE_IDEAL_ROLES.items():
                 if phase_name not in _WORK_PHASES:
                     continue
-                if base in roles:
+                if base in roles and not self._is_blocked_for_phase(agent, phase_name):
                     best_phase = next(
                         (p for p in phases if p.name.lower() == phase_name), None
                     )
                     if best_phase:
                         break
             if best_phase is None:
-                # Fall back to the first work phase, or first phase if none
-                best_phase = next(
-                    (p for p in phases if p.name.lower() in _WORK_PHASES),
-                    phases[0],
-                )
+                # Fall back to the first non-blocked work phase, or skip if
+                # the agent is blocked from every work phase.
+                for p in phases:
+                    if p.name.lower() in _WORK_PHASES and not self._is_blocked_for_phase(agent, p.name):
+                        best_phase = p
+                        break
+            if best_phase is None:
+                # Truly nowhere to land this agent — drop it from the leftover
+                # pass.  Pass 1-3 already gave it (or its role peers) at least
+                # one assignment elsewhere if it had any phase affinity.
+                continue
             assigned.append((best_phase, agent))
 
         # Build PlanStep objects from assignments
@@ -3002,7 +3170,7 @@ class IntelligentPlanner:
                     step_id=step_id,
                     agent_name=agent,
                     task_description=_desc,
-                    step_type=_step_type_for_agent(agent, _desc),
+                    step_type=_step_type_for_agent(agent, _desc, phase_name=phase.name),
                 )
             )
 
@@ -3015,7 +3183,9 @@ class IntelligentPlanner:
                         step_id=f"{phase.phase_id}.1",
                         agent_name=agents[0],
                         task_description=_desc,
-                        step_type=_step_type_for_agent(agents[0], _desc),
+                        step_type=_step_type_for_agent(
+                            agents[0], _desc, phase_name=phase.name
+                        ),
                     )
                 )
 
@@ -3072,7 +3242,7 @@ class IntelligentPlanner:
                         step_id=f"{idx}.{step_idx}",
                         agent_name=agent,
                         task_description=_desc,
-                        step_type=_step_type_for_agent(agent, _desc),
+                        step_type=_step_type_for_agent(agent, _desc, phase_name=name),
                     )
                 )
             phases.append(PlanPhase(phase_id=idx, name=name, steps=steps, gate=gate))

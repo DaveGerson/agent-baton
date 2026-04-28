@@ -34,16 +34,50 @@ def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
+def _os_identity() -> str | None:
+    """Return the OS-derived identity (tamper-resistant) or ``None``.
+
+    Resolved via ``pwd.getpwuid(os.geteuid()).pw_name`` on POSIX.  Unlike
+    ``$USER``, this cannot be trivially spoofed by setting an environment
+    variable — it reflects the actual effective UID of the process.
+
+    Returns ``None`` on platforms without ``pwd`` (e.g. Windows) or when
+    the lookup fails (no passwd entry for the effective UID).
+    """
+    try:
+        import pwd  # POSIX-only
+        return pwd.getpwuid(os.geteuid()).pw_name
+    except (ImportError, KeyError, OSError):
+        return None
+
+
 def _current_actor() -> str:
     """Return the operator identity for audit attribution.
 
-    Falls back through ``USER`` → ``USERNAME`` (Windows) → ``"unknown"``.
+    Resolution order (bd-fe42 hardening):
+
+    1. The OS-derived identity from ``pwd.getpwuid(os.geteuid())`` — this
+       is tamper-resistant: setting ``USER=auditor`` in the environment
+       does NOT change the effective UID of the process.
+    2. If the OS identity is available AND ``$USER`` / ``$USERNAME`` is
+       set to a different value, the entry is tagged ``"<os>?env=<env>"``
+       so reviewers can see the spoof attempt.
+    3. ``USER`` → ``USERNAME`` (Windows fallback).
+    4. ``"unknown"``.
+
+    The audit trail is local-dev-grade (a determined attacker with shell
+    access can still escalate), but blind ``$USER`` spoofing is now
+    visibly recorded rather than silently trusted.
     """
-    return (
-        os.environ.get("USER")
-        or os.environ.get("USERNAME")
-        or "unknown"
-    )
+    os_user = _os_identity()
+    env_user = os.environ.get("USER") or os.environ.get("USERNAME")
+    if os_user:
+        if env_user and env_user != os_user:
+            # Spoof attempt: keep the trustworthy OS identity but record
+            # the divergent env value so it's visible in the audit log.
+            return f"{os_user}?env={env_user}"
+        return os_user
+    return env_user or "unknown"
 
 
 class OverrideLog:
@@ -72,6 +106,10 @@ class OverrideLog:
         if chain_log_path is None:
             chain_log_path = self._db_path.parent / "compliance-audit.jsonl"
         self._chain_log_path = Path(chain_log_path)
+        # bd-5000: cache the ConnectionManager + one-shot schema-config flag
+        # so subsequent _connect() calls don't re-issue PRAGMA / DDL setup.
+        self._cm: Any = None
+        self._schema_configured: bool = False
 
     # ------------------------------------------------------------------
     # Write path
@@ -226,21 +264,32 @@ class OverrideLog:
     # ------------------------------------------------------------------
 
     def _connect(self) -> sqlite3.Connection:
-        """Open a short-lived connection that auto-applies migrations.
+        """Return a connection, configuring schema only on first use.
 
-        Going through :class:`ConnectionManager` ensures the
+        bd-5000: previously rebuilt the :class:`ConnectionManager` and
+        re-ran ``configure_schema`` on every call, which thrashed the
+        thread-local connection cache and re-checked the schema for
+        every read (``list_recent`` / ``get`` / ``export_since``).  Now
+        the manager is built once per :class:`OverrideLog` instance and
+        ``configure_schema`` is called exactly once.
+
+        Going through :class:`ConnectionManager` still ensures the
         ``governance_overrides`` table exists on first use even when the
         caller's project DB pre-dates v17.
         """
-        from agent_baton.core.storage.connection import ConnectionManager
-        from agent_baton.core.storage.schema import (
-            PROJECT_SCHEMA_DDL,
-            SCHEMA_VERSION,
-        )
+        if self._cm is None:
+            from agent_baton.core.storage.connection import ConnectionManager
 
-        cm = ConnectionManager(self._db_path)
-        cm.configure_schema(PROJECT_SCHEMA_DDL, version=SCHEMA_VERSION)
-        return cm.get_connection()
+            self._cm = ConnectionManager(self._db_path)
+        if not self._schema_configured:
+            from agent_baton.core.storage.schema import (
+                PROJECT_SCHEMA_DDL,
+                SCHEMA_VERSION,
+            )
+
+            self._cm.configure_schema(PROJECT_SCHEMA_DDL, version=SCHEMA_VERSION)
+            self._schema_configured = True
+        return self._cm.get_connection()
 
     @staticmethod
     def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
