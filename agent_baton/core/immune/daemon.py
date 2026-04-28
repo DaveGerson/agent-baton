@@ -10,6 +10,13 @@ The daemon is disabled by default.  It activates only when:
   - ``BATON_IMMUNE_ENABLED=1`` is set, OR
   - ``immune.enabled: true`` is in ``baton.yaml``.
 
+Run-level ceiling (end-user readiness #7):
+  Before each sweep the daemon calls ``budget.check_run_ceiling()`` with the
+  estimated sweep cost.  On :class:`~agent_baton.core.govern.budget.RunTokenCeilingExceeded`
+  the daemon suspends all further sweeps for the rest of the run-window,
+  emits a BEAD_WARNING via the budget's bead-warning callback, and shuts
+  down cleanly.
+
 All state (sweep queue) is persisted to SQLite so the daemon is resumable
 after a crash.
 """
@@ -51,7 +58,7 @@ class ImmuneConfig:
         daily_cap_usd: Maximum USD spent on immune sweeps per UTC day.
         sweep_kinds: List of sweep kinds to activate.
         auto_fix: Whether to dispatch auto-fix agents for qualifying findings.
-        auto_fix_threshold: Minimum confidence for auto-fix dispatch (0.0–1.0).
+        auto_fix_threshold: Minimum confidence for auto-fix dispatch (0.0-1.0).
         tick_interval_sec: Seconds to sleep between sweep cycles.
     """
 
@@ -111,6 +118,11 @@ class ImmuneDaemon:
             files beads and optionally triggers auto-fix.
     """
 
+    # Estimated token cost per immune sweep tick (Haiku, cached context).
+    # 12K input (effective ~1.2K cached) + 1K output.
+    _SWEEP_EST_TOKENS_IN: int = 12_000
+    _SWEEP_EST_TOKENS_OUT: int = 1_000
+
     def __init__(
         self,
         config: ImmuneConfig,
@@ -129,6 +141,9 @@ class ImmuneDaemon:
         self._last_tick_at: datetime | None = None
         self._ticks_run: int = 0
         self._findings_count: int = 0
+        # Set to True when the run-level ceiling has been tripped so further
+        # sweeps are suppressed for the rest of this run-window.
+        self._ceiling_suspended: bool = False
 
     # ------------------------------------------------------------------
     # Main loop
@@ -146,11 +161,29 @@ class ImmuneDaemon:
             self._last_tick_at = datetime.now(timezone.utc)
             self._ticks_run += 1
 
-            # ── Budget gate ───────────────────────────────────────────────
+            # ── Run-level ceiling guard (end-user readiness #7) ───────────
+            if self._ceiling_suspended:
+                _log.debug(
+                    "ImmuneDaemon: run ceiling previously tripped — "
+                    "sweep suppressed for rest of run-window"
+                )
+                self._sleep(self.config.tick_interval_sec)
+                continue
+
+            # ── Budget gate (daily cap + anomaly burst) ───────────────────
             allowed, reason = self.budget.allow_immune_sweep()
             if not allowed:
                 _log.info("ImmuneDaemon: budget gate blocked sweep (%s) — waiting", reason)
                 self._sleep_until_budget_reset()
+                continue
+
+            # ── Run-level ceiling pre-flight ──────────────────────────────
+            # Check before picking a target so we never consume a scheduler
+            # slot and then abort the sweep.
+            if not self._check_run_ceiling_before_sweep():
+                # _check_run_ceiling_before_sweep() sets _ceiling_suspended
+                # and emits the bead; just sleep and loop.
+                self._sleep(self.config.tick_interval_sec)
                 continue
 
             # ── Pick next target ──────────────────────────────────────────
@@ -181,12 +214,12 @@ class ImmuneDaemon:
             found_issue = finding is not None
 
             # ── Record token spend ────────────────────────────────────────
-            # Estimate: 12K input (cached → effective ~1.2K) + 1K output Haiku.
+            # Estimate: 12K input (cached -> effective ~1.2K) + 1K output Haiku.
             self.budget.record_immune_spend(
                 target_path=str(target.path),
                 kind=target.kind,
-                tokens_in=12_000,
-                tokens_out=1_000,
+                tokens_in=self._SWEEP_EST_TOKENS_IN,
+                tokens_out=self._SWEEP_EST_TOKENS_OUT,
             )
 
             # ── Triage ────────────────────────────────────────────────────
@@ -236,6 +269,64 @@ class ImmuneDaemon:
     def findings_count(self) -> int:
         """Cumulative number of findings filed since daemon start."""
         return self._findings_count
+
+    @property
+    def ceiling_suspended(self) -> bool:
+        """True when the run-level ceiling has been tripped and further sweeps
+        are suppressed for the rest of this run-window."""
+        return self._ceiling_suspended
+
+    # ------------------------------------------------------------------
+    # Run-level ceiling helper
+    # ------------------------------------------------------------------
+
+    def _check_run_ceiling_before_sweep(self) -> bool:
+        """Check whether the next sweep would exceed the run-level ceiling.
+
+        Calls ``budget.check_run_ceiling()`` with the estimated Haiku sweep
+        cost.  On :class:`~agent_baton.core.govern.budget.RunTokenCeilingExceeded`:
+
+        - Sets ``_ceiling_suspended = True`` to suppress all further sweeps.
+        - Emits a BEAD_WARNING via the budget enforcer's internal bead-warning
+          callback (best-effort; never raises).
+        - Logs an ERROR with full ceiling/spend details.
+
+        Returns:
+            True when the sweep is permitted; False when the ceiling trips.
+        """
+        check_fn = getattr(self.budget, "check_run_ceiling", None)
+        if check_fn is None:
+            return True  # budget does not support ceiling — unlimited
+
+        try:
+            from agent_baton.core.govern.budget import _cost_usd
+            est = _cost_usd("haiku", self._SWEEP_EST_TOKENS_IN, self._SWEEP_EST_TOKENS_OUT)
+            check_fn(est, "immune sweep haiku")
+            return True
+        except Exception as exc:
+            from agent_baton.core.govern.budget import RunTokenCeilingExceeded
+            if not isinstance(exc, RunTokenCeilingExceeded):
+                raise
+
+            self._ceiling_suspended = True
+            msg = (
+                f"BEAD_WARNING: immune-run-ceiling-tripped "
+                f"current_spend=${exc.current_spend_usd:.4f} "
+                f"ceiling=${exc.ceiling_usd:.4f} "
+                f"estimated_sweep=${exc.estimated_call_usd:.4f} "
+                f"— all immune sweeps suspended for this run-window"
+            )
+            _log.error(
+                "ImmuneDaemon: %s", msg
+            )
+            # Best-effort bead filing via budget's internal callback.
+            file_bead = getattr(self.budget, "_file_bead_warning", None)
+            if file_bead is not None:
+                try:
+                    file_bead("immune-daemon", msg)
+                except Exception:
+                    pass
+            return False
 
     # ------------------------------------------------------------------
     # Sleep helpers
