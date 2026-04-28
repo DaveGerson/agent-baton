@@ -1025,3 +1025,220 @@ class TestCreateInCanonicalRepoUnchanged:
         _add_linked_worktree(canonical, linked)
         assert _is_inside_worktree(linked) is True
 
+
+# ---------------------------------------------------------------------------
+# bd-841d — _get_default_stale_hours returns 4 by default
+# ---------------------------------------------------------------------------
+
+
+class TestGcStaleDefaultFourHourThreshold:
+    """gc_stale() uses a 4-hour default when no env var is set (bd-841d)."""
+
+    def test_5h_old_worktree_reclaimed_with_default_threshold(
+        self, mgr: WorktreeManager
+    ) -> None:
+        handle = mgr.create(task_id="task-gc-4h-old", step_id="1.1", base_branch="main")
+        _make_worktree_old(handle, hours=5)
+
+        reclaimed = mgr.gc_stale()  # no max_age_hours — defaults to 4
+
+        assert any(h.step_id == "1.1" for h in reclaimed), (
+            "5h-old worktree should be reclaimed with 4h default threshold"
+        )
+
+    def test_3h_old_worktree_protected_with_default_threshold(
+        self, mgr: WorktreeManager
+    ) -> None:
+        handle = mgr.create(task_id="task-gc-4h-young", step_id="1.1", base_branch="main")
+        _make_worktree_old(handle, hours=3)
+
+        reclaimed = mgr.gc_stale()  # 3h < 4h default
+
+        assert all(h.step_id != "1.1" for h in reclaimed), (
+            "3h-old worktree must NOT be reclaimed with 4h default threshold"
+        )
+        assert handle.path.is_dir()
+
+    def test_get_default_stale_hours_returns_4(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("BATON_WORKTREE_STALE_HOURS", raising=False)
+        monkeypatch.delenv("BATON_WORKTREE_GC_HOURS", raising=False)
+        assert WorktreeManager._get_default_stale_hours() == 4
+
+
+# ---------------------------------------------------------------------------
+# bd-841d — BATON_WORKTREE_STALE_HOURS / BATON_WORKTREE_GC_HOURS env vars
+# ---------------------------------------------------------------------------
+
+
+class TestGcStaleEnvVarOverride:
+    """gc_stale() honours BATON_WORKTREE_STALE_HOURS and legacy BATON_WORKTREE_GC_HOURS."""
+
+    def test_stale_hours_2_reclaims_3h_old_worktree(
+        self, mgr: WorktreeManager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("BATON_WORKTREE_STALE_HOURS", "2")
+        monkeypatch.delenv("BATON_WORKTREE_GC_HOURS", raising=False)
+        handle = mgr.create(task_id="task-gc-env-2h", step_id="1.1", base_branch="main")
+        _make_worktree_old(handle, hours=3)
+
+        reclaimed = mgr.gc_stale()
+
+        assert any(h.step_id == "1.1" for h in reclaimed), (
+            "3h-old worktree should be reclaimed when BATON_WORKTREE_STALE_HOURS=2"
+        )
+
+    def test_stale_hours_10_protects_5h_old_worktree(
+        self, mgr: WorktreeManager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("BATON_WORKTREE_STALE_HOURS", "10")
+        monkeypatch.delenv("BATON_WORKTREE_GC_HOURS", raising=False)
+        handle = mgr.create(task_id="task-gc-env-10h", step_id="1.1", base_branch="main")
+        _make_worktree_old(handle, hours=5)
+
+        reclaimed = mgr.gc_stale()
+
+        assert all(h.step_id != "1.1" for h in reclaimed), (
+            "5h-old worktree must NOT be reclaimed when BATON_WORKTREE_STALE_HOURS=10"
+        )
+        assert handle.path.is_dir()
+
+    def test_legacy_gc_hours_honoured(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("BATON_WORKTREE_STALE_HOURS", raising=False)
+        monkeypatch.setenv("BATON_WORKTREE_GC_HOURS", "8")
+        assert WorktreeManager._get_default_stale_hours() == 8
+
+    def test_stale_hours_wins_over_gc_hours(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("BATON_WORKTREE_STALE_HOURS", "2")
+        monkeypatch.setenv("BATON_WORKTREE_GC_HOURS", "99")
+        assert WorktreeManager._get_default_stale_hours() == 2
+
+
+# ---------------------------------------------------------------------------
+# bd-841d — in-flight guard skips worktrees referenced by running executions
+# ---------------------------------------------------------------------------
+
+
+class TestGcStaleSkipsInFlightWorktrees:
+    """gc_stale() skips deletion when a running execution references the worktree."""
+
+    def test_running_execution_blocks_gc(
+        self, mgr: WorktreeManager, tmp_git_repo: Path, tmp_path: Path
+    ) -> None:
+        import sqlite3  # noqa: PLC0415
+
+        handle = mgr.create(task_id="task-inflight", step_id="1.1", base_branch="main")
+        _make_worktree_old(handle, hours=10)
+
+        fake_db = tmp_path / "baton.db"
+        state_json = json.dumps({"step_worktrees": {"1.1": handle.to_dict()}})
+        with sqlite3.connect(str(fake_db)) as conn:
+            conn.execute(
+                "CREATE TABLE executions (task_id TEXT, status TEXT, state_json TEXT)"
+            )
+            conn.execute(
+                "INSERT INTO executions VALUES (?, ?, ?)",
+                ("task-inflight", "running", state_json),
+            )
+
+        import unittest.mock  # noqa: PLC0415
+
+        with unittest.mock.patch.dict("os.environ", {"BATON_DB_PATH": str(fake_db)}):
+            reclaimed = mgr.gc_stale()
+
+        assert all(h.step_id != "1.1" for h in reclaimed), (
+            "In-flight worktree must NOT be reclaimed"
+        )
+        assert handle.path.is_dir(), "In-flight worktree directory must be retained"
+
+    def test_no_baton_db_allows_is_in_flight_false(
+        self, mgr: WorktreeManager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """_is_in_flight returns (False, '') when no baton.db is discoverable."""
+        monkeypatch.delenv("BATON_DB_PATH", raising=False)
+
+        # Deep path guaranteed to have no baton.db ancestor
+        fake_wt = mgr._worktrees_root / "task-no-db" / "1.1"
+        fake_wt.mkdir(parents=True, exist_ok=True)
+
+        fresh_mgr = WorktreeManager.__new__(WorktreeManager)
+        fresh_mgr._project_root = fake_wt.resolve()
+        fresh_mgr._worktrees_root = mgr._worktrees_root
+        fresh_mgr._enabled = True
+        fresh_mgr._tracer = None
+        fresh_mgr._bead_store = None
+        fresh_mgr._handles = {}
+        fresh_mgr._trace = None
+        fresh_mgr._semaphore = threading.Semaphore(16)
+
+        result, task_id = fresh_mgr._is_in_flight(fake_wt)
+        assert result is False
+        assert task_id == ""
+
+
+# ---------------------------------------------------------------------------
+# bd-841d — gc_stale() called from complete() (source-level verification)
+# ---------------------------------------------------------------------------
+
+
+class TestGcStaleRunsOnExecuteComplete:
+    """complete() contains gc_stale call in a daemon thread (bd-841d)."""
+
+    def test_complete_source_contains_gc_stale_call(self) -> None:
+        import inspect  # noqa: PLC0415
+
+        from agent_baton.core.engine.executor import ExecutionEngine
+
+        source = inspect.getsource(ExecutionEngine.complete)
+        assert "gc_stale" in source, (
+            "complete() must call gc_stale() as part of bd-841d aggressive GC"
+        )
+
+    def test_complete_source_gc_after_straggler_block(self) -> None:
+        import inspect  # noqa: PLC0415
+
+        from agent_baton.core.engine.executor import ExecutionEngine
+
+        source = inspect.getsource(ExecutionEngine.complete)
+        assert "_worktree_mgr" in source
+        straggler_pos = source.find("straggler")
+        gc_pos = source.find("gc_stale")
+        assert straggler_pos != -1
+        assert gc_pos != -1
+        assert straggler_pos < gc_pos, (
+            "gc_stale call must appear after the straggler cleanup block in complete()"
+        )
+
+
+# ---------------------------------------------------------------------------
+# bd-841d — errors in gc_stale are swallowed and logged, never block complete
+# ---------------------------------------------------------------------------
+
+
+class TestGcStaleSwallowsErrors:
+    """gc_stale errors in complete() are logged as BEAD_WARNING, never raised."""
+
+    def test_run_gc_on_complete_closure_in_source(self) -> None:
+        import inspect  # noqa: PLC0415
+
+        from agent_baton.core.engine.executor import ExecutionEngine
+
+        source = inspect.getsource(ExecutionEngine.complete)
+        assert "_run_gc_on_complete" in source, (
+            "complete() must define _run_gc_on_complete closure for error isolation"
+        )
+
+    def test_bead_warning_logged_on_gc_error(self) -> None:
+        import inspect  # noqa: PLC0415
+
+        from agent_baton.core.engine.executor import ExecutionEngine
+
+        source = inspect.getsource(ExecutionEngine.complete)
+        assert "BEAD_WARNING" in source, (
+            "complete() must log BEAD_WARNING when gc_stale raises"
+        )

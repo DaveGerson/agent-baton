@@ -934,9 +934,91 @@ class WorktreeManager:
             handle.step_id, handle.path,
         )
 
+    @staticmethod
+    def _get_default_stale_hours() -> int:
+        """Return the default stale threshold in hours.
+
+        Resolution order (bd-841d):
+          1. BATON_WORKTREE_STALE_HOURS (new canonical)
+          2. BATON_WORKTREE_GC_HOURS (legacy alias)
+          3. 4 (hard default — replaces old 72h)
+        """
+        stale = os.environ.get("BATON_WORKTREE_STALE_HOURS")
+        if stale is not None:
+            try:
+                return int(stale)
+            except ValueError:
+                pass
+        gc_hours = os.environ.get("BATON_WORKTREE_GC_HOURS")
+        if gc_hours is not None:
+            try:
+                return int(gc_hours)
+            except ValueError:
+                pass
+        return 4
+
+    def _is_in_flight(self, worktree_path: Path) -> tuple[bool, str]:
+        """Return (True, task_id) if worktree_path is referenced by a running execution.
+
+        Walks up from _project_root to find baton.db, queries executions
+        WHERE status='running', then checks each execution's state.json
+        step_worktrees dict for a path match.  Best-effort: any exception
+        returns (False, "").
+        """
+        import sqlite3 as _sqlite3  # noqa: PLC0415
+
+        try:
+            db_path_env = os.environ.get("BATON_DB_PATH")
+            baton_db: Path | None = None
+            if db_path_env:
+                candidate = Path(db_path_env)
+                if candidate.exists():
+                    baton_db = candidate
+            if baton_db is None:
+                search = self._project_root
+                for _ in range(8):
+                    candidate1 = search / ".claude" / "team-context" / "baton.db"
+                    candidate2 = search / "baton.db"
+                    if candidate1.exists():
+                        baton_db = candidate1
+                        break
+                    if candidate2.exists():
+                        baton_db = candidate2
+                        break
+                    parent = search.parent
+                    if parent == search:
+                        break
+                    search = parent
+
+            if baton_db is None:
+                return (False, "")
+
+            wt_str = str(worktree_path.resolve())
+
+            with _sqlite3.connect(str(baton_db), timeout=5) as _conn:
+                _conn.row_factory = _sqlite3.Row
+                rows = _conn.execute(
+                    "SELECT task_id, state_json FROM executions WHERE status = 'running'"
+                ).fetchall()
+
+            for row in rows:
+                task_id = row["task_id"]
+                try:
+                    state_data = json.loads(row["state_json"] or "{}")
+                    step_worktrees = state_data.get("step_worktrees", {})
+                    for _step_id, wt_dict in step_worktrees.items():
+                        wt_path_in_state = str(Path(wt_dict.get("path", "")).resolve())
+                        if wt_path_in_state == wt_str:
+                            return (True, task_id)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return (False, "")
+
     def gc_stale(
         self,
-        max_age_hours: int = 72,
+        max_age_hours: int | None = None,
         *,
         terminal_step_ids: set[str] | None = None,
         dry_run: bool = False,
@@ -950,7 +1032,9 @@ class WorktreeManager:
         Args:
             max_age_hours: Minimum age (in hours) before a worktree is eligible
                 for reclaim.  Use ``0`` to reclaim immediately (e.g. for
-                atomic swarm cleanup after coalescing completes).
+                atomic swarm cleanup after coalescing completes).  When
+                ``None``, resolved via ``_get_default_stale_hours()``
+                (bd-841d: defaults to 4h).
             terminal_step_ids: When set, only reclaim worktrees whose step_id
                 is in this set (safety gate for running steps).
             dry_run: List eligible worktrees without removing them.
@@ -963,6 +1047,10 @@ class WorktreeManager:
         """
         if not self._enabled:
             return []
+
+        # bd-841d: resolve None → env var → 4h default
+        if max_age_hours is None:
+            max_age_hours = self._get_default_stale_hours()
 
         reclaimed: list[WorktreeHandle] = []
         skipped = 0
@@ -1028,6 +1116,20 @@ class WorktreeManager:
                         skipped += 1
                         self._append_gc_log(gc_log, "skipped", handle, reason="not_terminal")
                         continue
+
+                # bd-841d: in-flight guard — skip if an active execution references this path
+                in_flight, active_exec_id = self._is_in_flight(handle.path)
+                if in_flight:
+                    _log.info(
+                        "gc_stale: skipping in-flight worktree %s (active execution %s)",
+                        handle.path,
+                        active_exec_id,
+                    )
+                    skipped += 1
+                    self._append_gc_log(
+                        gc_log, "skipped", handle, reason=f"in_flight:{active_exec_id}"
+                    )
+                    continue
 
                 if dry_run:
                     _log.info("gc_stale: [DRY RUN] would reclaim step=%s path=%s", handle.step_id, handle.path)

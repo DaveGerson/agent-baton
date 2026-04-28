@@ -554,7 +554,7 @@ class ExecutionEngine:
             import threading as _threading
             _gc_thread = _threading.Thread(
                 target=self._worktree_mgr.gc_stale,
-                kwargs={"max_age_hours": int(os.environ.get("BATON_WORKTREE_GC_HOURS", "72"))},
+                kwargs={"max_age_hours": None},
                 daemon=True,
             )
             _gc_thread.start()
@@ -3199,6 +3199,38 @@ class ExecutionEngine:
                                 _straggler_step_id, _ce, _force_ce,
                             )
                 # Failed worktrees: retained — GC will handle after max_age_hours.
+
+        # bd-841d: aggressive GC on every execute-complete (daemon thread, non-blocking)
+        if self._worktree_mgr is not None:
+            import threading as _gc_threading  # noqa: PLC0415
+
+            def _run_gc_on_complete() -> None:
+                try:
+                    self._worktree_mgr.gc_stale()
+                except Exception as _gc_exc:
+                    logger.warning(
+                        "BEAD_WARNING: gc_stale on execute-complete raised (non-fatal): %s",
+                        _gc_exc,
+                    )
+                    if self._bead_store is not None:
+                        try:
+                            self._worktree_mgr._file_bead_warning(
+                                task_id=state.task_id,
+                                step_id="gc",
+                                content=(
+                                    f"BEAD_WARNING: gc_stale failed on execute-complete "
+                                    f"task={state.task_id} error={_gc_exc}"
+                                ),
+                            )
+                        except Exception:
+                            pass
+
+            _gc_thread = _gc_threading.Thread(
+                target=_run_gc_on_complete,
+                daemon=True,
+                name=f"worktree-gc-{state.task_id}",
+            )
+            _gc_thread.start()
 
         self._save_execution(state)
 
