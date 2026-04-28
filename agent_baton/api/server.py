@@ -63,6 +63,7 @@ _ROUTE_MODULES: list[tuple[str, str, str, list[str]]] = [
     ("agent_baton.api.routes.events", "router", "/api/v1", ["events"]),
     ("agent_baton.api.routes.webhooks", "router", "/api/v1", ["webhooks"]),
     ("agent_baton.api.routes.pmo", "router", "/api/v1", ["pmo"]),
+    ("agent_baton.api.routes.pmo_h3", "router", "/api/v1", ["pmo"]),
     ("agent_baton.api.routes.learn", "router", "/api/v1", ["learn"]),
     ("agent_baton.api.routes.specs", "router", "/api/v1", ["specs"]),
     ("agent_baton.api.routes.noc", "router", "/api/v1", ["noc"]),
