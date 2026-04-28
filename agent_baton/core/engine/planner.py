@@ -1069,9 +1069,13 @@ class IntelligentPlanner:
         # at step 9.5 so it can iterate over actual PlanStep objects.
         # (The resolver reference is stored here for use at step 9.5 below.)
         _resolver = None
+        _ranker = None
+        _max_knowledge_per_step: int = 8
         if self.knowledge_registry is not None:
+            import os as _os
             from agent_baton.core.engine.knowledge_resolver import KnowledgeResolver
             from agent_baton.core.engine.knowledge_telemetry import KnowledgeTelemetryStore
+            from agent_baton.core.intel.knowledge_ranker import KnowledgeRanker
             # Wire F0.4 lifecycle telemetry (bd-a313).  Resolver records a
             # KnowledgeUsed row per attachment whenever ``task_id``/``step_id``
             # are passed to ``resolve()``.  Construction is best-effort.
@@ -1087,6 +1091,18 @@ class IntelligentPlanner:
                 doc_token_cap=8_000,
                 telemetry=_telemetry,
             )
+            # bd-0184: effectiveness-aware ranking.  Best-effort — ranker failure
+            # never degrades planning; it simply returns the input unchanged.
+            try:
+                _ranker = KnowledgeRanker()
+            except Exception:
+                _ranker = None
+            try:
+                _max_knowledge_per_step = int(
+                    _os.environ.get("BATON_MAX_KNOWLEDGE_PER_STEP", "8")
+                )
+            except (ValueError, TypeError):
+                _max_knowledge_per_step = 8
 
         # 7. Classify task sensitivity (DataClassifier if available)
         classification: ClassificationResult | None = None
@@ -1164,11 +1180,12 @@ class IntelligentPlanner:
         # 9.5. Resolve knowledge attachments for each step.
         # Runs after phase building so step.agent_name and task_description are final.
         # explicit_knowledge_packs/docs come from create_plan args (CLI --knowledge flags).
+        # bd-0184: after resolving, rank by historical effectiveness and cap count.
         if _resolver is not None:
             for phase in plan_phases:
                 for step in phase.steps:
                     try:
-                        step.knowledge = _resolver.resolve(
+                        resolved = _resolver.resolve(
                             agent_name=step.agent_name,
                             task_description=step.task_description,
                             task_type=inferred_type,
@@ -1176,6 +1193,9 @@ class IntelligentPlanner:
                             explicit_packs=explicit_knowledge_packs or [],
                             explicit_docs=explicit_knowledge_docs or [],
                         )
+                        if _ranker is not None:
+                            resolved = _ranker.rank(resolved)
+                        step.knowledge = resolved[:_max_knowledge_per_step]
                     except Exception:
                         logger.debug(
                             "Knowledge resolution failed for step %s — skipping",
@@ -1232,6 +1252,7 @@ class IntelligentPlanner:
         # 9.8. Resolve knowledge for foresight-inserted steps.
         # Foresight steps are inserted after the initial knowledge resolution
         # pass (9.5), so they need their own resolution pass.
+        # bd-0184: also rank + cap foresight-step attachments.
         if _resolver is not None and self._last_foresight_insights:
             foresight_step_ids = set()
             for ins in self._last_foresight_insights:
@@ -1240,7 +1261,7 @@ class IntelligentPlanner:
                 for step in phase.steps:
                     if step.step_id in foresight_step_ids:
                         try:
-                            step.knowledge = _resolver.resolve(
+                            resolved = _resolver.resolve(
                                 agent_name=step.agent_name,
                                 task_description=step.task_description,
                                 task_type=inferred_type,
@@ -1248,6 +1269,9 @@ class IntelligentPlanner:
                                 explicit_packs=explicit_knowledge_packs or [],
                                 explicit_docs=explicit_knowledge_docs or [],
                             )
+                            if _ranker is not None:
+                                resolved = _ranker.rank(resolved)
+                            step.knowledge = resolved[:_max_knowledge_per_step]
                         except Exception:
                             logger.debug(
                                 "Knowledge resolution failed for foresight step %s — skipping",
