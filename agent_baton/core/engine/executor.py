@@ -2047,22 +2047,39 @@ class ExecutionEngine:
                                 result.error = f"WorktreeFoldError: {fold_exc}"
                                 self._emit_worktree_error(state, step_id, "fold", str(fold_exc))
                             else:
-                                # Success path: clean up the worktree
+                                # Success path: clean up the worktree.
+                                # bd-f2f7: retry with force=True if untracked
+                                # files (e.g. .pyc, build output) blocked the
+                                # vanilla remove. Step is complete; we already
+                                # folded back any committed work.
                                 try:
                                     self._worktree_mgr.cleanup(_handle, on_failure=False)
                                 except WorktreeCleanupError as clean_exc:
-                                    _log.warning(
-                                        "Worktree cleanup failed for step %s (non-fatal): %s",
+                                    _log.info(
+                                        "Worktree cleanup retrying with force for step %s: %s",
                                         step_id, clean_exc,
                                     )
+                                    try:
+                                        self._worktree_mgr.cleanup(_handle, on_failure=False, force=True)
+                                    except WorktreeCleanupError as force_exc:
+                                        _log.warning(
+                                            "Worktree force-cleanup failed for step %s (non-fatal): %s",
+                                            step_id, force_exc,
+                                        )
                                 _step_worktrees.pop(step_id, None)
                                 state.step_worktrees = _step_worktrees
                         else:
-                            # No commit: clean up without fold
+                            # No commit: clean up without fold.
+                            # bd-f2f7: retry with force=True on untracked-file
+                            # interference so the success path always reclaims
+                            # the worktree directory.
                             try:
                                 self._worktree_mgr.cleanup(_handle, on_failure=False)
                             except WorktreeCleanupError:
-                                pass
+                                try:
+                                    self._worktree_mgr.cleanup(_handle, on_failure=False, force=True)
+                                except WorktreeCleanupError:
+                                    pass
                             _step_worktrees.pop(step_id, None)
                             state.step_worktrees = _step_worktrees
                     elif status == "failed":
@@ -2540,15 +2557,20 @@ class ExecutionEngine:
             ):
                 _step_result = state.get_step_result(_straggler_step_id)
                 if _step_result and _step_result.status == "complete":
+                    _sh = WorktreeHandle.from_dict(_straggler_dict)
                     try:
-                        _sh = WorktreeHandle.from_dict(_straggler_dict)
                         self._worktree_mgr.cleanup(_sh, on_failure=False)
                         state.step_worktrees.pop(_straggler_step_id, None)
                     except WorktreeCleanupError as _ce:
-                        _log.warning(
-                            "Straggler cleanup failed for step %s (non-fatal): %s",
-                            _straggler_step_id, _ce,
-                        )
+                        # bd-f2f7: retry with force=True for untracked-file blockers
+                        try:
+                            self._worktree_mgr.cleanup(_sh, on_failure=False, force=True)
+                            state.step_worktrees.pop(_straggler_step_id, None)
+                        except WorktreeCleanupError as _force_ce:
+                            _log.warning(
+                                "Straggler cleanup failed for step %s (non-fatal): %s / force: %s",
+                                _straggler_step_id, _ce, _force_ce,
+                            )
                 # Failed worktrees: retained — GC will handle after max_age_hours.
 
         self._save_execution(state)
