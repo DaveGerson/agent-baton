@@ -381,6 +381,9 @@ class PromptDispatcher:
         isolation: str | None = None,
         project_root: Path | None = None,
         prior_context_block: str = "",
+        prior_step_result: "object | None" = None,
+        handoff_conn: "object | None" = None,
+        handoff_task_id: str = "",
     ) -> str:
         """Build a complete delegation prompt for an agent.
 
@@ -484,6 +487,36 @@ class PromptDispatcher:
         # this domain.  Caller is responsible for capping the block size.
         if prior_context_block.strip():
             parts += [prior_context_block.strip(), ""]
+
+        # Handoff from Prior Step (Wave 3.2 — HandoffSynthesizer).
+        # Synthesizes a compact summary of the prior step's git diff,
+        # discoveries (beads created), and blockers (open warnings whose
+        # files/tags overlap this step).  Persists to handoff_beads for
+        # audit.  Best-effort: any failure leaves the section out.
+        if prior_step_result is not None:
+            try:
+                from agent_baton.core.intel.handoff_synthesizer import (
+                    HANDOFF_MAX_CHARS,
+                    HandoffSynthesizer,
+                )
+                _handoff_text = HandoffSynthesizer().synthesize_for_dispatch(
+                    prior_step_result,
+                    step,
+                    handoff_conn,
+                    task_id=handoff_task_id or None,
+                )
+                if _handoff_text:
+                    if len(_handoff_text) > HANDOFF_MAX_CHARS:
+                        _handoff_text = _handoff_text[: HANDOFF_MAX_CHARS - 3].rstrip() + "..."
+                    parts += [
+                        "## Handoff from Prior Step",
+                        _handoff_text,
+                        "",
+                    ]
+            except Exception as _hf_exc:  # noqa: BLE001
+                logger.debug(
+                    "HandoffSynthesizer prepend skipped (non-fatal): %s", _hf_exc
+                )
 
         parts += [
             "## Shared Context",

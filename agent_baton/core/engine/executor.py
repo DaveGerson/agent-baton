@@ -4285,6 +4285,24 @@ class ExecutionEngine:
                         "Prior context lookup failed (non-fatal): %s", _hv_exc
                     )
 
+            # Wave 3.2 — locate the most recent completed step (different
+            # step_id) for handoff synthesis.  This is the same lookup
+            # used above to derive ``handoff`` (the free-text summary)
+            # but here we hand the StepResult itself to the dispatcher
+            # so HandoffSynthesizer can compress files / discoveries /
+            # blockers into the prompt.
+            _prior_step_result = None
+            for _r in reversed(state.step_results):
+                if _r.step_id != step.step_id and _r.status == "complete":
+                    _prior_step_result = _r
+                    break
+            _handoff_conn = None
+            if self._storage is not None:
+                try:
+                    _handoff_conn = self._storage._conn()
+                except Exception:  # noqa: BLE001
+                    _handoff_conn = None
+
             prompt = dispatcher.build_delegation_prompt(
                 step,
                 shared_context=state.plan.shared_context,
@@ -4296,6 +4314,9 @@ class ExecutionEngine:
                 isolation=isolation or None,
                 project_root=self._project_root() if isolation else None,
                 prior_context_block=_prior_context_block,
+                prior_step_result=_prior_step_result,
+                handoff_conn=_handoff_conn,
+                handoff_task_id=state.task_id or "",
             )
             # Persist the updated delivered_knowledge map so subsequent
             # dispatches in this run know which docs are already inlined.
