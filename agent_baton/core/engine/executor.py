@@ -2803,7 +2803,8 @@ class ExecutionEngine:
         # Mark pending in state for next_action pickup.
         # We store a minimal signal; the full SelfHealEscalator is constructed
         # in next_action when the status is read.
-        selfheal_pending_key = f"_selfheal_pending_{step_id}"
+        # NOTE: dead-store removed (review follow-up); full pending-state
+        # persistence lands in Wave 5.2 full-dispatch.  v1 only logs intent.
         _log.info(
             "_enqueue_selfheal: queuing self-heal for step=%s phase=%d worktree=%s",
             step_id, phase_id, handle.path,  # type: ignore[attr-defined]
