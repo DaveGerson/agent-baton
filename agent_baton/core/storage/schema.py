@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 28
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -448,6 +448,46 @@ CREATE INDEX IF NOT EXISTS idx_teams_parent ON teams(task_id, parent_team_id);
 
 ALTER TABLE team_members ADD COLUMN sub_team  TEXT NOT NULL DEFAULT '[]';
 ALTER TABLE team_members ADD COLUMN synthesis TEXT NOT NULL DEFAULT '';
+""",
+    28: """
+-- v28: BeadSynthesizer — bead knowledge graph (Wave 2.1).
+--
+-- Two new tables that turn flat bead records into a graph of inferred
+-- relationships:
+--
+--   bead_edges     — typed edges between beads.  edge_type ∈
+--                    {"file_overlap", "tag_overlap", "conflict"}.
+--                    weight is jaccard-style overlap [0.0, 1.0].
+--
+--   bead_clusters  — connected components over high-weight file_overlap
+--                    edges.  bead_ids stored as JSON array.
+--
+-- Both are populated post-phase by BeadSynthesizer (see
+-- agent_baton/core/intel/bead_synthesizer.py).  All inference is
+-- deterministic: no embeddings, no LLM calls.
+--
+-- NOTE: FK constraints intentionally omitted because this migration is
+-- applied to BOTH project and central databases via
+-- ConnectionManager._run_migrations().  Fresh project DBs get the same
+-- DDL in PROJECT_SCHEMA_DDL below.
+CREATE TABLE IF NOT EXISTS bead_edges (
+    src_bead_id  TEXT NOT NULL,
+    dst_bead_id  TEXT NOT NULL,
+    edge_type    TEXT NOT NULL,
+    weight       REAL NOT NULL DEFAULT 0.0,
+    created_at   TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (src_bead_id, dst_bead_id, edge_type)
+);
+CREATE INDEX IF NOT EXISTS idx_bead_edges_src  ON bead_edges(src_bead_id);
+CREATE INDEX IF NOT EXISTS idx_bead_edges_dst  ON bead_edges(dst_bead_id);
+CREATE INDEX IF NOT EXISTS idx_bead_edges_type ON bead_edges(edge_type);
+
+CREATE TABLE IF NOT EXISTS bead_clusters (
+    cluster_id  TEXT PRIMARY KEY,
+    label       TEXT NOT NULL DEFAULT '',
+    bead_ids    TEXT NOT NULL DEFAULT '[]',
+    created_at  TEXT NOT NULL DEFAULT ''
+);
 """,
 }
 
@@ -929,6 +969,31 @@ CREATE TABLE IF NOT EXISTS bead_tags (
     FOREIGN KEY (bead_id) REFERENCES beads(bead_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_bead_tags_tag ON bead_tags(tag);
+
+-- BEAD_EDGES (v28: BeadSynthesizer — inferred typed edges between beads)
+-- edge_type ∈ {"file_overlap", "tag_overlap", "conflict"}.  weight is a
+-- jaccard-style overlap in [0.0, 1.0].  Idempotent UPSERT on PK.
+CREATE TABLE IF NOT EXISTS bead_edges (
+    src_bead_id  TEXT NOT NULL,
+    dst_bead_id  TEXT NOT NULL,
+    edge_type    TEXT NOT NULL,
+    weight       REAL NOT NULL DEFAULT 0.0,
+    created_at   TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (src_bead_id, dst_bead_id, edge_type),
+    FOREIGN KEY (src_bead_id) REFERENCES beads(bead_id) ON DELETE CASCADE,
+    FOREIGN KEY (dst_bead_id) REFERENCES beads(bead_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_bead_edges_src  ON bead_edges(src_bead_id);
+CREATE INDEX IF NOT EXISTS idx_bead_edges_dst  ON bead_edges(dst_bead_id);
+CREATE INDEX IF NOT EXISTS idx_bead_edges_type ON bead_edges(edge_type);
+
+-- BEAD_CLUSTERS (v28: BeadSynthesizer — connected components over edges)
+CREATE TABLE IF NOT EXISTS bead_clusters (
+    cluster_id  TEXT PRIMARY KEY,
+    label       TEXT NOT NULL DEFAULT '',
+    bead_ids    TEXT NOT NULL DEFAULT '[]',
+    created_at  TEXT NOT NULL DEFAULT ''
+);
 
 -- INTERACTION_TURNS (A4: persist multi-turn INTERACT exchanges)
 -- Each row is one turn in a multi-turn agent interaction step.
