@@ -1636,7 +1636,7 @@ def _handle_self_heal(args: argparse.Namespace, engine, context_root: Path) -> N
     max_tier_str = getattr(args, "selfheal_max_tier", "opus")
 
     _tier_map = {
-        "haiku": EscalationTier.OPUS,  # haiku → stop at haiku-2
+        "haiku": EscalationTier.HAIKU_2,  # cap escalation at the last haiku tier
         "sonnet": EscalationTier.SONNET_2,
         "opus": EscalationTier.OPUS,
     }
@@ -2715,6 +2715,7 @@ def _run_loop(
                         prompt=prompt,
                         step_id=step_id,
                         cwd_override=_wt_path,
+                        task_id=getattr(engine, "_task_id", "") or "",
                     ))
                     engine.record_step_result(
                         step_id=step_id,
