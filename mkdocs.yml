@@ -11,6 +11,7 @@ docs_dir: docs
 
 theme:
   name: material
+  custom_dir: overrides
   language: en
   features:
     - navigation.tabs
@@ -66,6 +67,16 @@ extra:
   social:
     - icon: fontawesome/brands/github
       link: https://github.com/DaveGerson/agent-baton
+  # Search-engine ownership verification.
+  # Replace the empty strings below with the codes from each console
+  # (do not include the surrounding <meta ...> wrapper — the theme adds it).
+  # - Google Search Console: https://search.google.com/search-console → "URL prefix"
+  #   property → choose "HTML tag" verification → copy the content="..." value.
+  # - Bing Webmaster Tools: https://www.bing.com/webmasters → "Add a site" → choose
+  #   "HTML Meta Tag" verification → copy the content="..." value.
+  analytics:
+    google_site_verification: "FZs54B52NlOUiqo6T3vIinVO5GzFtaaffm864mj7sPk"
+    bing_site_verification: ""
 
 nav:
   - Home: index.md

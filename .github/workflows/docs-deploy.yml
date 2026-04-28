@@ -25,12 +25,12 @@ jobs:
     name: Build site
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
@@ -42,7 +42,7 @@ jobs:
         run: mkdocs build --strict --site-dir _site
 
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v4
         with:
           path: _site
 
@@ -57,3 +57,28 @@ jobs:
       - name: Deploy
         id: deployment
         uses: actions/deploy-pages@v4
+
+  notify-indexnow:
+    name: Notify IndexNow (Bing/Yandex/etc.)
+    needs: deploy
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Submit URLs to IndexNow
+        run: |
+          curl -sS -X POST "https://api.indexnow.org/IndexNow" \
+            -H "Content-Type: application/json; charset=utf-8" \
+            -d '{
+              "host": "davegerson.github.io",
+              "key": "8fe40a58a84f43c8ad4b7fb082e2b995",
+              "keyLocation": "https://davegerson.github.io/agent-baton/8fe40a58a84f43c8ad4b7fb082e2b995.txt",
+              "urlList": [
+                "https://davegerson.github.io/agent-baton/",
+                "https://davegerson.github.io/agent-baton/orchestrator-usage/",
+                "https://davegerson.github.io/agent-baton/agent-roster/",
+                "https://davegerson.github.io/agent-baton/architecture/",
+                "https://davegerson.github.io/agent-baton/cli-reference/",
+                "https://davegerson.github.io/agent-baton/api-reference/"
+              ]
+            }' \
+            -w "\nHTTP %{http_code}\n"

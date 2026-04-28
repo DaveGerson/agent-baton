@@ -1,5 +1,7 @@
 # Agent Baton
 
+📖 **Docs:** <https://davegerson.github.io/agent-baton/>
+
 **Turn one prompt into a coordinated team of AI specialists.**
 
 Agent Baton is a multi-agent orchestration system for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Describe a complex task in plain language -- Baton plans it, routes it to the right specialist agents, enforces QA gates between phases, and delivers tested, reviewed code. No external services. No API keys beyond Claude. Everything runs locally.
