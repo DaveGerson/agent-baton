@@ -106,6 +106,10 @@ class OverrideLog:
         if chain_log_path is None:
             chain_log_path = self._db_path.parent / "compliance-audit.jsonl"
         self._chain_log_path = Path(chain_log_path)
+        # bd-5000: cache the ConnectionManager + one-shot schema-config flag
+        # so subsequent _connect() calls don't re-issue PRAGMA / DDL setup.
+        self._cm: Any = None
+        self._schema_configured: bool = False
 
     # ------------------------------------------------------------------
     # Write path
@@ -260,21 +264,32 @@ class OverrideLog:
     # ------------------------------------------------------------------
 
     def _connect(self) -> sqlite3.Connection:
-        """Open a short-lived connection that auto-applies migrations.
+        """Return a connection, configuring schema only on first use.
 
-        Going through :class:`ConnectionManager` ensures the
+        bd-5000: previously rebuilt the :class:`ConnectionManager` and
+        re-ran ``configure_schema`` on every call, which thrashed the
+        thread-local connection cache and re-checked the schema for
+        every read (``list_recent`` / ``get`` / ``export_since``).  Now
+        the manager is built once per :class:`OverrideLog` instance and
+        ``configure_schema`` is called exactly once.
+
+        Going through :class:`ConnectionManager` still ensures the
         ``governance_overrides`` table exists on first use even when the
         caller's project DB pre-dates v17.
         """
-        from agent_baton.core.storage.connection import ConnectionManager
-        from agent_baton.core.storage.schema import (
-            PROJECT_SCHEMA_DDL,
-            SCHEMA_VERSION,
-        )
+        if self._cm is None:
+            from agent_baton.core.storage.connection import ConnectionManager
 
-        cm = ConnectionManager(self._db_path)
-        cm.configure_schema(PROJECT_SCHEMA_DDL, version=SCHEMA_VERSION)
-        return cm.get_connection()
+            self._cm = ConnectionManager(self._db_path)
+        if not self._schema_configured:
+            from agent_baton.core.storage.schema import (
+                PROJECT_SCHEMA_DDL,
+                SCHEMA_VERSION,
+            )
+
+            self._cm.configure_schema(PROJECT_SCHEMA_DDL, version=SCHEMA_VERSION)
+            self._schema_configured = True
+        return self._cm.get_connection()
 
     @staticmethod
     def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:

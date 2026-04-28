@@ -418,6 +418,55 @@ def test_current_actor_unknown_when_no_signal(
     assert ol._current_actor() == "unknown"
 
 
+# ---------------------------------------------------------------------------
+# bd-5000: _connect must not re-issue schema config on every call
+# ---------------------------------------------------------------------------
+
+def test_connect_caches_connection_manager(log: OverrideLog) -> None:
+    """The ConnectionManager + schema-configured flag are one-shot per
+    OverrideLog instance — repeat calls reuse them."""
+    # Trigger first connect to populate caches.
+    log.record(flag="--force", command="c", args=["x"], justification="r")
+    cm_first = log._cm
+    assert cm_first is not None
+    assert log._schema_configured is True
+
+    # Subsequent reads must reuse the same manager (no rebuild storm).
+    log.list_recent(limit=5)
+    log.get("nope")
+    log.export_since(since_iso=None)
+    assert log._cm is cm_first
+    assert log._schema_configured is True
+
+
+def test_connect_calls_configure_schema_only_once(
+    log: OverrideLog, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hammer the read path; configure_schema must be invoked exactly once."""
+    # Seed one row first (this also triggers the first configure_schema).
+    log.record(flag="--force", command="c", args=["x"], justification="r")
+
+    calls = {"n": 0}
+    real_configure = log._cm.configure_schema
+
+    def _spy(ddl: str, version: int = 1) -> None:
+        calls["n"] += 1
+        return real_configure(ddl, version=version)
+
+    monkeypatch.setattr(log._cm, "configure_schema", _spy)
+
+    # Drive 10 reads — none should re-configure the schema.
+    for _ in range(10):
+        log.list_recent(limit=5)
+        log.get("missing")
+        log.export_since(since_iso=None)
+
+    assert calls["n"] == 0, (
+        "configure_schema must not be called after first connect "
+        f"(was called {calls['n']} extra times)"
+    )
+
+
 def test_record_override_strips_argv0_basename(
     db_path: Path, chain_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
