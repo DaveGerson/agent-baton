@@ -2112,12 +2112,81 @@ class IntelligentPlanner:
                 best_agent = agent
         return best_agent
 
+    @staticmethod
+    def _score_knowledge_for_concern(
+        attachment: "KnowledgeAttachment",
+        concern_text: str,
+    ) -> int:
+        """Return a domain-match score for *attachment* against *concern_text*.
+
+        Scoring uses the same keyword lists as :data:`_CROSS_CONCERN_SIGNALS`:
+        each keyword found in *concern_text* that also appears in the
+        attachment's ``pack_name`` or ``document_name`` contributes +1.  A
+        score > 0 means the attachment has a clear domain signal for this
+        concern.
+        """
+        text_lower = concern_text.lower()
+        text_words = set(re.findall(r"\b\w+\b", text_lower))
+
+        att_signal = " ".join(filter(None, [
+            attachment.pack_name or "",
+            attachment.document_name or "",
+            attachment.path or "",
+        ])).lower()
+
+        score = 0
+        for keywords in _CROSS_CONCERN_SIGNALS.values():
+            for kw in keywords:
+                if " " in kw:
+                    if kw in att_signal and kw in text_lower:
+                        score += 1
+                else:
+                    if kw in att_signal and kw in text_words:
+                        score += 1
+        return score
+
+    @staticmethod
+    def _partition_knowledge(
+        all_knowledge: list,
+        concerns: list[tuple[str, str]],
+    ) -> list[list]:
+        """Partition *all_knowledge* across concern slots.
+
+        For each attachment, compute a domain-match score against every
+        concern text.  If only one concern scores > 0, assign the attachment
+        exclusively to that concern (domain-specific).  Otherwise broadcast
+        it to every concern (ambiguous — safer to over-share than to drop).
+
+        Returns a list of per-concern knowledge lists, in the same order as
+        *concerns*.
+        """
+        n = len(concerns)
+        partitions: list[list] = [[] for _ in range(n)]
+
+        for attachment in all_knowledge:
+            scores = [
+                IntelligentPlanner._score_knowledge_for_concern(attachment, text)
+                for _, text in concerns
+            ]
+            positive = [i for i, s in enumerate(scores) if s > 0]
+
+            if len(positive) == 1:
+                # Unambiguous domain match — assign only to that concern.
+                partitions[positive[0]].append(attachment)
+            else:
+                # Ambiguous or cross-cutting — broadcast to all.
+                for p in partitions:
+                    p.append(attachment)
+
+        return partitions
+
     def _split_implement_phase_by_concerns(
         self,
         phase: PlanPhase,
         concerns: list[tuple[str, str]],
         candidate_agents: list[str],
         task_summary: str,
+        knowledge_split_strategy: str = "smart",
     ) -> None:
         """Replace ``phase.steps`` with one parallel step per concern.
 
@@ -2125,8 +2194,14 @@ class IntelligentPlanner:
         true parallel execution.  Step IDs are renumbered ``<phase_id>.1``,
         ``<phase_id>.2``, ... in concern order.
 
-        Knowledge attachments from the original steps are spread across the
-        new steps (deduplicated by path), so no knowledge context is lost.
+        Knowledge attachments from the original steps are partitioned across
+        the new steps when *knowledge_split_strategy* is ``"smart"``
+        (default): each attachment is routed only to concerns whose text
+        matches its domain keywords (via :data:`_CROSS_CONCERN_SIGNALS`).
+        Ambiguous attachments are broadcast to all steps so no context is
+        ever dropped.  Setting *knowledge_split_strategy* to ``"broadcast"``
+        restores the legacy behaviour where every child step receives the
+        full knowledge list.
 
         Args:
             phase: The implement-type phase to split (mutated in place).
@@ -2135,6 +2210,9 @@ class IntelligentPlanner:
             candidate_agents: Pool of agents to choose from per concern.
             task_summary: Original task summary (used for verb selection
                 in fallback step descriptions).
+            knowledge_split_strategy: ``"smart"`` (default) or
+                ``"broadcast"``.  ``"smart"`` partitions knowledge by domain;
+                ``"broadcast"`` clones the full list to every child step.
         """
         all_knowledge: list = []
         seen_paths: set[str] = set()
@@ -2145,8 +2223,16 @@ class IntelligentPlanner:
                     all_knowledge.append(k)
                     seen_paths.add(key)
 
+        # Decide per-concern knowledge lists.
+        if knowledge_split_strategy == "smart":
+            per_concern_knowledge = self._partition_knowledge(all_knowledge, concerns)
+        else:
+            per_concern_knowledge = [list(all_knowledge) for _ in concerns]
+
         new_steps: list[PlanStep] = []
-        for idx, (marker, text) in enumerate(concerns, start=1):
+        for idx, ((marker, text), concern_knowledge) in enumerate(
+            zip(concerns, per_concern_knowledge), start=1
+        ):
             agent = self._pick_agent_for_concern(text, candidate_agents)
             verb = _PHASE_VERBS.get(phase.name.lower(), phase.name)
             desc = f"{verb} ({marker}): {text}"
@@ -2156,17 +2242,18 @@ class IntelligentPlanner:
                     agent_name=agent,
                     task_description=desc,
                     step_type=_step_type_for_agent(agent, desc),
-                    knowledge=list(all_knowledge),
+                    knowledge=concern_knowledge,
                 )
             )
 
         logger.info(
             "Split %s phase into %d parallel concern-steps "
-            "(markers=%s, agents=%s)",
+            "(markers=%s, agents=%s, strategy=%s)",
             phase.name,
             len(new_steps),
             [c[0] for c in concerns],
             [s.agent_name for s in new_steps],
+            knowledge_split_strategy,
         )
         phase.steps = new_steps
 
