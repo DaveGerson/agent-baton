@@ -29,6 +29,7 @@ surface).
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Any, Iterable
@@ -174,8 +175,18 @@ def _query_open_warnings(conn: Any, *, task_id: str) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for r in rows:
         bead_id = r[0]
-        files_csv = r[2] or ""
-        files = [f.strip() for f in files_csv.split(",") if f.strip()]
+        # affected_files is stored as a JSON-encoded list (see BeadStore).
+        # Tolerate the legacy CSV form just in case some older data leaks
+        # through.
+        files_raw = r[2] or ""
+        files: list[str] = []
+        if files_raw:
+            try:
+                parsed = json.loads(files_raw)
+                if isinstance(parsed, list):
+                    files = [str(p).strip() for p in parsed if p]
+            except Exception:
+                files = [f.strip() for f in str(files_raw).split(",") if f.strip()]
         # Pull tags via a second mini-query — cheap, and avoids a join
         # that would require GROUP_CONCAT (not available in older SQLite
         # without compile flags on every platform).
