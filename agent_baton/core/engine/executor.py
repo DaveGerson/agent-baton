@@ -2419,7 +2419,14 @@ class ExecutionEngine:
         )
 
     def _detect_branch(self) -> str:
-        """Detect the current git branch, or empty string on failure."""
+        """Detect the current git branch, or empty string on failure.
+
+        Runs ``git rev-parse`` against the engine's project root rather than
+        the process CWD.  When the process is in a detached-HEAD worktree
+        (e.g., pytest invoked from a temporary worktree), the process CWD
+        would resolve to ``HEAD`` and disable the worktree manager even
+        though the engine's project_root is a fully-functional git repo.
+        """
         import subprocess as _sp
         try:
             r = _sp.run(
@@ -2427,6 +2434,7 @@ class ExecutionEngine:
                 capture_output=True,
                 text=True,
                 timeout=5,
+                cwd=str(self._project_root()),
             )
             if r.returncode == 0:
                 branch = r.stdout.strip()
