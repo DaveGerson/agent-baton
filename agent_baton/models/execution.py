@@ -1352,6 +1352,9 @@ class ExecutionState:
     # The git branch that was current when this execution started.
     # Used as base_branch for all worktree create() calls.
     working_branch: str = ""
+    # bd-def9: SHA of the rebased tip of working_branch after the most-recent
+    # successful fold_back().  Empty until the first fold-back completes.
+    working_branch_head: str = ""
 
     # Wave 5 (bd-e208, bd-1483, bd-9839): Human-Agent Loop fields.
     # All fields use getattr(state, "...", default) in accessors for legacy
@@ -1436,6 +1439,8 @@ class ExecutionState:
             "takeover_records": list(getattr(self, "takeover_records", [])),
             "selfheal_attempts": list(getattr(self, "selfheal_attempts", [])),
             "speculations": dict(getattr(self, "speculations", {})),
+            # bd-def9: rebased tip SHA after most-recent fold_back()
+            "working_branch_head": getattr(self, "working_branch_head", ""),
         }
 
     @classmethod
@@ -1467,6 +1472,8 @@ class ExecutionState:
             takeover_records=list(data.get("takeover_records", [])),
             selfheal_attempts=list(data.get("selfheal_attempts", [])),
             speculations=dict(data.get("speculations", {})),
+            # bd-def9: getattr guard for legacy state files that predate this field
+            working_branch_head=data.get("working_branch_head", ""),
         )
 
 

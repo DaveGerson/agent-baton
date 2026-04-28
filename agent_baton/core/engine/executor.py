@@ -2054,7 +2054,10 @@ class ExecutionEngine:
                                 new_head = self._worktree_mgr.fold_back(
                                     _handle, commit_hash=commit_hash
                                 )
-                                state.working_branch = getattr(state, "working_branch", "") or ""
+                                # bd-def9: persist the rebased tip SHA so
+                                # consumers can reference the exact integrated
+                                # commit without re-running git.
+                                state.working_branch_head = new_head
                             except WorktreeFoldError as fold_exc:
                                 _log.warning(
                                     "Fold-back conflict for step %s: %s",
