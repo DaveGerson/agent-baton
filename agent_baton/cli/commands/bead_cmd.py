@@ -417,6 +417,93 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         help="Emit machine-readable JSON instead of human text.",
     )
 
+    # -- exec (Wave 6.1 Part C — Executable Beads, bd-81b9) ------------------
+    exec_p = sub.add_parser(
+        "exec",
+        help="Run an executable bead in a sandbox (requires BATON_EXEC_BEADS_ENABLED=1).",
+    )
+    exec_p.add_argument(
+        "bead_id",
+        metavar="BEAD_ID",
+        help="Bead ID of an approved executable bead (e.g. bd-a1b2)",
+    )
+    exec_p.add_argument(
+        "--no-confirm",
+        dest="no_confirm",
+        action="store_true",
+        default=False,
+        help="Skip the interactive confirmation prompt before running.",
+    )
+
+    # -- create-exec (Wave 6.1 Part C) ----------------------------------------
+    create_exec_p = sub.add_parser(
+        "create-exec",
+        help="Create an executable bead from a script file (requires BATON_EXEC_BEADS_ENABLED=1).",
+    )
+    create_exec_p.add_argument(
+        "bead_id",
+        metavar="BEAD_ID",
+        help="Desired bead ID for the new executable bead (e.g. bd-a1b2).",
+    )
+    create_exec_p.add_argument(
+        "--interpreter",
+        dest="interpreter",
+        required=True,
+        choices=["bash", "python", "ast-grep", "pytest"],
+        help="Script interpreter: bash, python, ast-grep, or pytest.",
+    )
+    create_exec_p.add_argument(
+        "--script-file",
+        dest="script_file",
+        metavar="PATH",
+        required=True,
+        help="Path to the script file to store as an executable bead.",
+    )
+    create_exec_p.add_argument(
+        "--content",
+        dest="content",
+        metavar="TEXT",
+        default="",
+        help="Human-readable description of what this script does.",
+    )
+    create_exec_p.add_argument(
+        "--task-id",
+        dest="task_id",
+        metavar="TASK_ID",
+        default=None,
+        help="Task ID to scope this bead (defaults to $BATON_TASK_ID).",
+    )
+    create_exec_p.add_argument(
+        "--agent",
+        dest="agent_name",
+        metavar="AGENT",
+        default="orchestrator",
+        help="Agent name to record as the bead author (default: orchestrator).",
+    )
+    create_exec_p.add_argument(
+        "--timeout",
+        dest="timeout_s",
+        metavar="SECONDS",
+        type=int,
+        default=30,
+        help="Sandbox timeout in seconds (default: 30).",
+    )
+    create_exec_p.add_argument(
+        "--mem-mb",
+        dest="mem_mb",
+        metavar="MB",
+        type=int,
+        default=256,
+        help="Sandbox memory limit in MB (default: 256).",
+    )
+    create_exec_p.add_argument(
+        "--net",
+        dest="net",
+        action="store_true",
+        default=False,
+        help="Allow network access in sandbox (default: blocked).",
+    )
+
     return p
 
 
@@ -429,7 +516,11 @@ def handler(args: argparse.Namespace) -> None:
     """Dispatch to the appropriate beads subcommand handler."""
     cmd = getattr(args, "beads_cmd", None)
     if cmd is None:
-        print("Usage: baton beads <subcommand>  [create|list|show|ready|close|link|cleanup|promote|graph|synthesize|clusters|handoffs]")
+        print(
+            "Usage: baton beads <subcommand>  "
+            "[create|list|show|ready|close|link|cleanup|promote|"
+            "graph|synthesize|clusters|handoffs|exec|create-exec]"
+        )
         print("Run `baton beads --help` for details.")
         return
 
@@ -446,6 +537,8 @@ def handler(args: argparse.Namespace) -> None:
         "synthesize": _handle_synthesize,
         "clusters": _handle_clusters,
         "handoffs": _handle_handoffs,
+        "exec": _handle_exec,
+        "create-exec": _handle_create_exec,
     }
     fn = dispatch.get(cmd)
     if fn is None:
@@ -999,3 +1092,227 @@ def _handle_handoffs(args: argparse.Namespace) -> None:
         snippet = (content or "").splitlines()[0][:60] if content else ""
         arrow = f"{frm or '-'} → {to or '-'}"
         print(f"  {h_id:<16} {arrow:<14} {ts:<22} {snippet}")
+
+
+# ---------------------------------------------------------------------------
+# Wave 6.1 Part C — Executable Bead handlers (bd-81b9)
+# ---------------------------------------------------------------------------
+
+_EXEC_ENABLED_ENV = "BATON_EXEC_BEADS_ENABLED"
+
+
+def _exec_beads_enabled() -> bool:
+    """Return True when BATON_EXEC_BEADS_ENABLED=1."""
+    return os.environ.get(_EXEC_ENABLED_ENV, "0").strip() not in ("0", "false", "False", "")
+
+
+def _handle_exec(args: argparse.Namespace) -> None:
+    """Run an executable bead in the sandbox.
+
+    Steps:
+    1. Check BATON_EXEC_BEADS_ENABLED.
+    2. Load the bead and verify it is approved (not quarantined).
+    3. Confirm with the operator (skipped with --no-confirm).
+    4. Execute via ExecutableBeadRunner.run.
+    5. Print exit code + stdout tail + stderr tail.
+    """
+    if not _exec_beads_enabled():
+        print(
+            "error: executable beads disabled. "
+            "Set BATON_EXEC_BEADS_ENABLED=1 to enable.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    store = _get_bead_store()
+    if store is None:
+        print("No baton.db found in .claude/team-context/ — no beads available.", file=sys.stderr)
+        sys.exit(1)
+
+    bead_id: str = args.bead_id
+
+    # Load and validate.
+    raw = store.read(bead_id)
+    if raw is None:
+        print(f"error: bead not found: {bead_id}", file=sys.stderr)
+        sys.exit(1)
+    if raw.bead_type != "executable":
+        print(
+            f"error: bead {bead_id} has type={raw.bead_type!r}, expected 'executable'.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    from agent_baton.core.exec.auditor_gate import AuditorGate
+
+    gate = AuditorGate(store)
+    if not gate.is_approved(bead_id):
+        print(
+            f"error: bead {bead_id} is still in quarantine. "
+            "Obtain auditor approval before running.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # Operator confirmation.
+    if not args.no_confirm:
+        from agent_baton.models.bead import ExecutableBead
+        exec_bead = ExecutableBead.from_dict(raw.to_dict())
+        print(f"Executable bead: {bead_id}")
+        print(f"  interpreter : {exec_bead.interpreter}")
+        print(f"  script_sha  : {exec_bead.script_sha[:16]}...")
+        print(f"  runtime     : {exec_bead.runtime_limits}")
+        print(f"  content     : {raw.content[:120]}")
+        try:
+            answer = input("Run this bead? [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\nAborted.", file=sys.stderr)
+            sys.exit(1)
+        if answer not in ("y", "yes"):
+            print("Aborted.", file=sys.stderr)
+            sys.exit(1)
+
+    # Execute.
+    from agent_baton.core.exec.sandbox import Sandbox, SandboxConfig
+    from agent_baton.core.exec.runner import ExecutableBeadRunner
+
+    sandbox = Sandbox(
+        config=SandboxConfig(),
+        spill_dir=Path(".claude/team-context/exec-results"),
+    )
+    runner = ExecutableBeadRunner(bead_store=store, sandbox=sandbox)
+
+    try:
+        result = runner.run(bead_id)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as exc:
+        print(f"error: unexpected failure during exec: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"exit_code : {result.exit_code}")
+    print(f"duration  : {result.duration_ms}ms")
+    if result.stdout.strip():
+        print("--- stdout ---")
+        print(result.stdout[-1000:])
+    if result.stderr.strip():
+        print("--- stderr ---")
+        print(result.stderr[-500:])
+    if result.full_output_path:
+        print(f"full output: {result.full_output_path}")
+
+    sys.exit(result.exit_code)
+
+
+def _handle_create_exec(args: argparse.Namespace) -> None:
+    """Create an executable bead from a script file.
+
+    Steps:
+    1. Check BATON_EXEC_BEADS_ENABLED.
+    2. Read the script file.
+    3. Lint via ScriptLinter (errors if lint fails).
+    4. Store via ExecutableBeadRunner.store (signs if souls enabled).
+    5. Quarantine via AuditorGate.
+    6. Print script_sha + bead_id.
+    """
+    if not _exec_beads_enabled():
+        print(
+            "error: executable beads disabled. "
+            "Set BATON_EXEC_BEADS_ENABLED=1 to enable.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # Read script file.
+    script_path = Path(args.script_file)
+    if not script_path.exists():
+        print(f"error: script file not found: {script_path}", file=sys.stderr)
+        sys.exit(1)
+    try:
+        script_body = script_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"error: cannot read script file: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    # Lint first so we fail fast before touching the store.
+    from agent_baton.core.exec.script_lint import ScriptLinter
+
+    lint_result = ScriptLinter().lint(script_body, args.interpreter)
+    if not lint_result.safe:
+        print(
+            f"error: script lint failed — {len(lint_result.findings)} finding(s):",
+            file=sys.stderr,
+        )
+        for pid, msg, lineno in lint_result.findings:
+            print(f"  line {lineno}: [{pid}] {msg}", file=sys.stderr)
+        sys.exit(1)
+
+    # Build ExecutableBead.
+    from datetime import datetime, timezone
+
+    from agent_baton.core.engine.notes_adapter import NotesAdapter
+    from agent_baton.models.bead import ExecutableBead
+
+    task_id: str = args.task_id or os.environ.get("BATON_TASK_ID", "") or ""
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    content_sha = NotesAdapter.compute_script_sha(script_body)
+    script_ref = NotesAdapter.script_ref_for(content_sha)
+
+    description = args.content or f"Executable {args.interpreter} script from {script_path.name}"
+    bead = ExecutableBead(
+        bead_id=args.bead_id,
+        task_id=task_id,
+        step_id="",
+        agent_name=args.agent_name,
+        bead_type="executable",
+        content=description,
+        confidence="high",
+        scope="task" if task_id else "project",
+        tags=["executable", args.interpreter],
+        affected_files=[],
+        status="quarantine",
+        created_at=now,
+        source="manual",
+        exec_ref=script_ref,
+        interpreter=args.interpreter,
+        script_sha=content_sha,
+        script_ref=script_ref,
+        runtime_limits={
+            "timeout_s": args.timeout_s,
+            "mem_mb": args.mem_mb,
+            "net": args.net,
+        },
+    )
+
+    store = _get_or_create_bead_store()
+
+    from agent_baton.core.exec.runner import ExecutableBeadRunner
+    from agent_baton.core.exec.sandbox import Sandbox, SandboxConfig
+    from agent_baton.core.exec.auditor_gate import AuditorGate
+
+    sandbox = Sandbox(
+        config=SandboxConfig(),
+        spill_dir=Path(".claude/team-context/exec-results"),
+    )
+    runner = ExecutableBeadRunner(bead_store=store, sandbox=sandbox)
+
+    try:
+        returned_ref = runner.store(bead, script_body)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    # Quarantine.
+    gate = AuditorGate(store)
+    gate.quarantine(bead)
+
+    print(f"Created executable bead {bead.bead_id} [quarantine].")
+    print(f"  script_sha : {content_sha}")
+    print(f"  script_ref : {returned_ref}")
+    print(f"  interpreter: {args.interpreter}")
+    print()
+    print(
+        f"Next: dispatch the auditor agent to review this bead, then run "
+        f"`baton beads exec {bead.bead_id}` once approved."
+    )
