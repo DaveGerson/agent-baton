@@ -253,8 +253,9 @@ project root.
 **Cause**: `baton.db` schema is older than the installed CLI.
 
 **Fix**: `baton storage preflight` (safety check + backup), then
-`baton storage migrate` (JSON → SQLite). `migrate-storage` is a
-deprecated alias.
+`baton sync --migrate-storage` (JSON → SQLite). The standalone
+`baton migrate-storage` shim is deprecated and still works but prints
+a `DEPRECATED:` warning to stderr.
 
 ---
 
