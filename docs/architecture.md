@@ -1031,6 +1031,19 @@ Bead
  |-- retrieval_count: int
 ```
 
+#### BeadSynthesizer (Wave 2.1)
+
+`agent_baton/core/intel/bead_synthesizer.py` turns flat beads into a graph
+post-phase. It infers undirected edges into `bead_edges`
+(`file_overlap`, `tag_overlap`, `conflict`) using jaccard similarity, then
+walks connected components over file-overlap edges with weight ≥ 0.3 to
+populate `bead_clusters`. Conflict detection flags pairs of `warning` beads
+that share a primary tag but have <0.2 content-token overlap. Synthesis is
+fully deterministic (no embeddings, no LLM calls), idempotent, and
+best-effort — failures log at debug and never block phase advancement.
+CLI surface: `baton beads synthesize` (manual trigger) and `baton beads
+clusters` (list components).
+
 ### 7.4 Serialization
 
 All model types implement `to_dict()` / `from_dict()` class methods for JSON

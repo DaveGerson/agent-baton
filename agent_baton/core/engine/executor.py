@@ -653,6 +653,37 @@ class ExecutionEngine:
                 return self._retro_engine.save(retro)
             return None
 
+    # ── Bead graph synthesis (Wave 2.1) ─────────────────────────────────────
+
+    def _synthesize_beads_post_phase(self) -> None:
+        """Best-effort post-phase bead-graph refresh.
+
+        Runs after every phase boundary (both empty-phase fast-path and the
+        normal completion path).  Inferred edges + clusters land in the
+        ``bead_edges`` / ``bead_clusters`` tables (schema v28).
+
+        Failure here MUST NEVER block phase advancement — wrap everything,
+        log at debug, and return.
+        """
+        if self._bead_store is None:
+            return
+        try:
+            from agent_baton.core.intel.bead_synthesizer import BeadSynthesizer
+
+            conn = self._bead_store._conn()
+            result = BeadSynthesizer().synthesize(conn)
+            if result.edges_added or result.clusters_created or result.conflicts_flagged:
+                _log.debug(
+                    "BeadSynthesizer post-phase: %d edges, %d clusters, %d conflicts",
+                    result.edges_added,
+                    result.clusters_created,
+                    result.conflicts_flagged,
+                )
+        except Exception as exc:
+            _log.debug(
+                "BeadSynthesizer post-phase skipped (non-fatal): %s", exc
+            )
+
     # ── Split-brain reconciliation helpers ──────────────────────────────────
     # Step status advancement order: dispatched < interrupted < failed < complete.
     # Used by _reconcile_states to pick the more-advanced result when SQLite and
@@ -3920,6 +3951,8 @@ class ExecutionEngine:
                 phase_id=phase_obj.phase_id,
                 phase_name=phase_obj.name,
             ))
+            # Post-phase: refresh the bead knowledge graph (Wave 2.1).
+            self._synthesize_beads_post_phase()
             state.current_phase += 1
             state.current_step_index = 0
             if state.current_phase < len(state.plan.phases):
@@ -4059,6 +4092,9 @@ class ExecutionEngine:
             phase_id=phase_obj.phase_id,
             phase_name=phase_obj.name,
         ))
+        # Post-phase: refresh the bead knowledge graph (Wave 2.1).
+        # Best-effort — failure here must never block phase advancement.
+        self._synthesize_beads_post_phase()
         state.current_phase += 1
         state.current_step_index = 0
         state.status = "running"
