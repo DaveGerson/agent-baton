@@ -1,4 +1,5 @@
 """Wave 6.1 Part B — Persistent Agent Souls: SoulRegistry (bd-d975).
+v33 addendum — Soul Revocation + Rotation (end-user readiness concern #6).
 
 Manages cryptographic identities (souls) for agent dispatch.  Souls are
 cross-project entities stored exclusively in ``~/.baton/central.db``
@@ -11,17 +12,31 @@ Each soul is an ed25519 keypair:
 
 The soul_id format is ``<role>_<domain>_<3-char-pubkey-fingerprint>``,
 e.g. ``code_reviewer_auth_f7x``.  Suffix collisions get a 4th char.
+
+Revocation
+----------
+Revoked souls are recorded in the ``soul_revocations`` table (schema v33).
+A revocation entry is permanent — double-revoke raises ``ValueError``.
+The old notes-based heuristic (``revoked:`` prefix) is preserved for
+backward-compatibility when reading rows that pre-date v33, but all new
+revocations write to the dedicated table.
+
+Rotation
+--------
+``revoke(soul_id, ..., successor_soul_id=<new_id>)`` records a revocation
+with a pointer to the pre-existing successor.  The higher-level
+``rotate()`` convenience method mints the successor keypair and performs
+both the mint and the revocation atomically in a single transaction.
 """
 from __future__ import annotations
 
 import base64
 import hashlib
-import json
 import logging
-import os
+import socket
 import sqlite3
 import stat
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -50,6 +65,11 @@ def _role_slug(role: str) -> str:
 def _domain_slug(domain: str) -> str:
     """Normalise a domain token to a slug."""
     return domain.replace("-", "_").replace(" ", "_").lower()
+
+
+# ---------------------------------------------------------------------------
+# Data models
+# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -81,12 +101,20 @@ class AgentSoul:
     origin_project: str = ""
     notes: str = ""
 
-    # Internal revocation flag — NOT stored in the row, derived from
-    # the presence of a ``revoked:`` prefix in ``notes``.
+    # Internal revocation flag — derived from the presence of a
+    # ``revoked:`` prefix in ``notes`` (legacy) OR from soul_revocations
+    # table (v33+).  The registry sets this via the _revoked kwarg when
+    # constructing souls from a JOIN query.
+    _revoked: bool = False
+
     @property
     def is_revoked(self) -> bool:
-        """True when this soul has been revoked (compromised key)."""
-        return self.notes.startswith("revoked:")
+        """True when this soul has been revoked (compromised key).
+
+        Checks both the dedicated revocation table (v33) and the legacy
+        notes-prefix for backward compatibility.
+        """
+        return self._revoked or self.notes.startswith("revoked:")
 
     @property
     def is_active(self) -> bool:
@@ -129,7 +157,6 @@ class AgentSoul:
             if not signature.startswith("ed25519:"):
                 return False
             sig_bytes = base64.b64decode(signature[len("ed25519:"):])
-            # cryptography 3.x: Ed25519PublicKey.from_public_bytes(raw_bytes)
             public_key = Ed25519PublicKey.from_public_bytes(self.pubkey)
             public_key.verify(sig_bytes, data)
             return True
@@ -137,6 +164,30 @@ class AgentSoul:
             return False
         except Exception:
             return False
+
+
+@dataclass(frozen=True)
+class Revocation:
+    """Immutable record of a soul revocation event.
+
+    Attributes:
+        soul_id: The revoked soul.
+        revoked_at: ISO 8601 UTC timestamp.
+        revoked_by: Operator identifier (user, hostname, or tool name).
+        reason: Human-readable revocation reason.
+        successor_soul_id: ID of the replacement soul, or ``None``.
+    """
+
+    soul_id: str
+    revoked_at: str
+    revoked_by: str
+    reason: str
+    successor_soul_id: str | None
+
+
+# ---------------------------------------------------------------------------
+# Registry
+# ---------------------------------------------------------------------------
 
 
 class SoulRegistry:
@@ -177,7 +228,7 @@ class SoulRegistry:
         return conn
 
     def _ensure_tables(self) -> None:
-        """Create agent_souls / soul_expertise tables if absent."""
+        """Create agent_souls / soul_expertise / soul_revocations tables if absent."""
         ddl = """
         CREATE TABLE IF NOT EXISTS agent_souls (
             soul_id          TEXT PRIMARY KEY,
@@ -200,6 +251,15 @@ class SoulRegistry:
             PRIMARY KEY (soul_id, scope, ref)
         );
         CREATE INDEX IF NOT EXISTS idx_soul_expertise_soul ON soul_expertise(soul_id);
+        CREATE TABLE IF NOT EXISTS soul_revocations (
+            soul_id            TEXT PRIMARY KEY,
+            revoked_at         TEXT NOT NULL,
+            revoked_by         TEXT NOT NULL,
+            reason             TEXT NOT NULL,
+            successor_soul_id  TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_soul_revocations_revoked_at
+            ON soul_revocations(revoked_at);
         """
         try:
             conn = self._conn()
@@ -268,7 +328,7 @@ class SoulRegistry:
         return path
 
     @staticmethod
-    def _row_to_soul(row: sqlite3.Row) -> AgentSoul:
+    def _row_to_soul(row: sqlite3.Row, *, revoked: bool = False) -> "AgentSoul":
         privkey_path_str = row["privkey_path"]
         return AgentSoul(
             soul_id=row["soul_id"],
@@ -280,10 +340,21 @@ class SoulRegistry:
             parent_soul_id=row["parent_soul_id"] or "",
             origin_project=row["origin_project"] or "",
             notes=row["notes"] or "",
+            _revoked=revoked,
         )
 
+    def _soul_is_revoked_in_db(self, conn: sqlite3.Connection, soul_id: str) -> bool:
+        """Return True if *soul_id* has a row in soul_revocations."""
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM soul_revocations WHERE soul_id = ?", (soul_id,)
+            ).fetchone()
+            return row is not None
+        except Exception:
+            return False
+
     # ------------------------------------------------------------------
-    # Public API
+    # Public API — souls
     # ------------------------------------------------------------------
 
     def mint(self, role: str, domain: str, project: str = "") -> AgentSoul:
@@ -352,10 +423,12 @@ class SoulRegistry:
             row = conn.execute(
                 "SELECT * FROM agent_souls WHERE soul_id = ?", (soul_id,)
             ).fetchone()
-            conn.close()
             if row is None:
+                conn.close()
                 return None
-            soul = self._row_to_soul(row)
+            revoked = self._soul_is_revoked_in_db(conn, soul_id)
+            conn.close()
+            soul = self._row_to_soul(row, revoked=revoked)
             # Reattach privkey_path from local disk if it exists.
             local_path = self._privkey_path(soul_id)
             if local_path.exists() and soul.privkey_path is None:
@@ -369,6 +442,7 @@ class SoulRegistry:
                     parent_soul_id=soul.parent_soul_id,
                     origin_project=soul.origin_project,
                     notes=soul.notes,
+                    _revoked=revoked,
                 )
             return soul
         except Exception as exc:
@@ -383,9 +457,21 @@ class SoulRegistry:
                 "SELECT * FROM agent_souls WHERE role = ? AND retired_at = '' ORDER BY created_at",
                 (role,),
             ).fetchall()
+            # Build a set of revoked soul_ids for this batch.
+            revoked_ids: set[str] = set()
+            try:
+                rev_rows = conn.execute(
+                    "SELECT soul_id FROM soul_revocations"
+                ).fetchall()
+                revoked_ids = {r["soul_id"] for r in rev_rows}
+            except Exception:
+                pass
             conn.close()
-            souls = [self._row_to_soul(r) for r in rows]
-            # Filter out revoked souls (revocation is stored in notes field).
+            souls = [
+                self._row_to_soul(r, revoked=(r["soul_id"] in revoked_ids))
+                for r in rows
+            ]
+            # Filter out revoked souls (both table-based and legacy notes-based).
             return [s for s in souls if not s.is_revoked]
         except Exception as exc:
             _log.warning("SoulRegistry.list_for_role failed for %s: %s", role, exc)
@@ -404,7 +490,6 @@ class SoulRegistry:
         """
         try:
             conn = self._conn()
-            # Fetch current notes to append successor info.
             row = conn.execute(
                 "SELECT notes FROM agent_souls WHERE soul_id = ?", (soul_id,)
             ).fetchone()
@@ -425,38 +510,294 @@ class SoulRegistry:
         except Exception as exc:
             _log.warning("SoulRegistry.retire failed for %s: %s", soul_id, exc)
 
-    def revoke(self, soul_id: str) -> None:
-        """Revoke *soul_id* — marks the key as compromised.
+    # ------------------------------------------------------------------
+    # Public API — revocation
+    # ------------------------------------------------------------------
 
-        Sets a ``revoked:<timestamp>`` prefix in ``notes``.  All beads
-        signed by a revoked soul will produce signature-invalid warnings
-        on read (degrade, don't fail).  Does NOT delete the private key
-        (operator must do that manually).
+    def revoke(
+        self,
+        soul_id: str,
+        reason: str,
+        revoked_by: str = "",
+        successor_soul_id: str | None = None,
+    ) -> None:
+        """Revoke *soul_id* — marks the key as permanently compromised.
+
+        Inserts a row into ``soul_revocations``.  Raises ``ValueError`` if
+        the soul does not exist or has already been revoked (double-revoke
+        is an error — it would silently corrupt audit timestamps).
+
+        Does NOT delete the private key from disk; the operator must do that
+        manually (and destroy backups).
 
         Args:
             soul_id: Soul to revoke.
+            reason: Human-readable revocation reason (required, non-empty).
+            revoked_by: Operator identifier — defaults to ``socket.gethostname()``.
+            successor_soul_id: If the soul is being rotated, the pre-existing
+                replacement soul_id.  Pass ``None`` for plain revocations.
+
+        Raises:
+            ValueError: Soul not found, or already revoked, or empty reason.
         """
+        if not reason or not reason.strip():
+            raise ValueError("revoke() requires a non-empty reason")
+
+        effective_revoked_by = revoked_by.strip() if revoked_by.strip() else socket.gethostname()
+
         try:
             conn = self._conn()
+            # Verify the soul exists.
             row = conn.execute(
-                "SELECT notes FROM agent_souls WHERE soul_id = ?", (soul_id,)
+                "SELECT soul_id FROM agent_souls WHERE soul_id = ?", (soul_id,)
             ).fetchone()
             if row is None:
-                _log.warning("SoulRegistry.revoke: soul %s not found", soul_id)
                 conn.close()
-                return
-            existing_notes = row["notes"] or ""
-            revocation_prefix = f"revoked:{_utcnow()}"
-            new_notes = revocation_prefix + (f"|{existing_notes}" if existing_notes else "")
+                raise ValueError(f"Soul not found: {soul_id}")
+
+            # Reject double-revoke.
+            existing = conn.execute(
+                "SELECT revoked_at FROM soul_revocations WHERE soul_id = ?", (soul_id,)
+            ).fetchone()
+            if existing is not None:
+                conn.close()
+                raise ValueError(
+                    f"Soul {soul_id} is already revoked (at {existing['revoked_at']}). "
+                    "Double-revoke is not allowed."
+                )
+
+            now = _utcnow()
             conn.execute(
-                "UPDATE agent_souls SET notes = ? WHERE soul_id = ?",
-                (new_notes, soul_id),
+                """
+                INSERT INTO soul_revocations
+                    (soul_id, revoked_at, revoked_by, reason, successor_soul_id)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (soul_id, now, effective_revoked_by, reason.strip(), successor_soul_id),
             )
             conn.commit()
             conn.close()
-            _log.info("SoulRegistry.revoke: revoked soul %s", soul_id)
+            _log.warning(
+                "soul.revoked soul_id=%s revoked_by=%s reason=%r successor=%s",
+                soul_id, effective_revoked_by, reason, successor_soul_id or "none",
+            )
+        except ValueError:
+            raise
         except Exception as exc:
             _log.warning("SoulRegistry.revoke failed for %s: %s", soul_id, exc)
+            raise
+
+    def is_revoked(self, soul_id: str) -> bool:
+        """Return ``True`` if *soul_id* appears in ``soul_revocations``.
+
+        Also checks the legacy notes-based flag for souls revoked before v33.
+        Returns ``False`` for unknown soul IDs (graceful degradation).
+
+        Args:
+            soul_id: Soul to check.
+        """
+        try:
+            conn = self._conn()
+            # v33 table check.
+            row = conn.execute(
+                "SELECT 1 FROM soul_revocations WHERE soul_id = ?", (soul_id,)
+            ).fetchone()
+            if row is not None:
+                conn.close()
+                return True
+            # Legacy notes-based check.
+            soul_row = conn.execute(
+                "SELECT notes FROM agent_souls WHERE soul_id = ?", (soul_id,)
+            ).fetchone()
+            conn.close()
+            if soul_row is None:
+                return False
+            notes = soul_row["notes"] or ""
+            return notes.startswith("revoked:")
+        except Exception as exc:
+            _log.warning("SoulRegistry.is_revoked failed for %s: %s", soul_id, exc)
+            return False
+
+    def list_revocations(self) -> list[Revocation]:
+        """Return all revocation records, most recent first.
+
+        Returns:
+            List of :class:`Revocation` dataclasses.
+        """
+        try:
+            conn = self._conn()
+            rows = conn.execute(
+                "SELECT soul_id, revoked_at, revoked_by, reason, successor_soul_id "
+                "FROM soul_revocations ORDER BY revoked_at DESC"
+            ).fetchall()
+            conn.close()
+            return [
+                Revocation(
+                    soul_id=r["soul_id"],
+                    revoked_at=r["revoked_at"],
+                    revoked_by=r["revoked_by"],
+                    reason=r["reason"],
+                    successor_soul_id=r["successor_soul_id"],
+                )
+                for r in rows
+            ]
+        except Exception as exc:
+            _log.warning("SoulRegistry.list_revocations failed: %s", exc)
+            return []
+
+    def rotate(
+        self,
+        soul_id: str,
+        reason: str,
+        revoked_by: str = "",
+    ) -> AgentSoul:
+        """Rotate *soul_id* — revoke it and atomically mint a successor.
+
+        Generates a fresh ed25519 keypair for the successor soul, then
+        performs the mint INSERT and the revocation INSERT inside a single
+        SQLite transaction so both succeed or both fail.
+
+        The successor soul inherits the same ``role`` and ``domain`` (derived
+        from the original ``soul_id``'s domain token) and records the old soul
+        as its ``parent_soul_id``.
+
+        Args:
+            soul_id: The soul to rotate (must exist and not already be revoked).
+            reason: Human-readable rotation reason.
+            revoked_by: Operator identifier — defaults to ``socket.gethostname()``.
+
+        Returns:
+            The newly minted successor :class:`AgentSoul`.
+
+        Raises:
+            ValueError: Soul not found or already revoked.
+        """
+        if not reason or not reason.strip():
+            raise ValueError("rotate() requires a non-empty reason")
+
+        effective_revoked_by = revoked_by.strip() if revoked_by.strip() else socket.gethostname()
+
+        conn = self._conn()
+        try:
+            # Fetch the original soul.
+            row = conn.execute(
+                "SELECT * FROM agent_souls WHERE soul_id = ?", (soul_id,)
+            ).fetchone()
+            if row is None:
+                conn.close()
+                raise ValueError(f"Soul not found: {soul_id}")
+
+            existing_rev = conn.execute(
+                "SELECT revoked_at FROM soul_revocations WHERE soul_id = ?", (soul_id,)
+            ).fetchone()
+            if existing_rev is not None:
+                conn.close()
+                raise ValueError(
+                    f"Soul {soul_id} is already revoked (at {existing_rev['revoked_at']}). "
+                    "Cannot rotate an already-revoked soul."
+                )
+
+            original_soul = self._row_to_soul(row)
+            role = original_soul.role
+
+            # Derive domain from the soul_id: last token after role_slug + "_"
+            # soul_id format: <role_slug>_<domain_slug>_<fingerprint>
+            role_prefix = _role_slug(role) + "_"
+            remainder = soul_id[len(role_prefix):] if soul_id.startswith(role_prefix) else soul_id
+            # domain is everything between role and the fingerprint suffix
+            parts = remainder.split("_")
+            domain = parts[0] if parts else "general"
+
+            # Generate successor keypair.
+            privkey_bytes, pubkey_bytes = self._generate_keypair()
+            successor_id = self._make_soul_id_conn(conn, role, domain, pubkey_bytes)
+            privkey_path = self._write_privkey(successor_id, privkey_bytes)
+            now = _utcnow()
+
+            # Atomic transaction: mint successor + insert revocation.
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO agent_souls
+                    (soul_id, role, pubkey, privkey_path, created_at,
+                     retired_at, parent_soul_id, origin_project, notes)
+                VALUES (?, ?, ?, ?, ?, '', ?, ?, '')
+                """,
+                (
+                    successor_id,
+                    role,
+                    pubkey_bytes,
+                    str(privkey_path),
+                    now,
+                    soul_id,  # parent_soul_id
+                    original_soul.origin_project,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO soul_revocations
+                    (soul_id, revoked_at, revoked_by, reason, successor_soul_id)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (soul_id, now, effective_revoked_by, reason.strip(), successor_id),
+            )
+            conn.execute("COMMIT")
+            conn.close()
+
+            _log.warning(
+                "soul.rotated old_soul_id=%s successor_soul_id=%s reason=%r",
+                soul_id, successor_id, reason,
+            )
+
+            return AgentSoul(
+                soul_id=successor_id,
+                role=role,
+                pubkey=pubkey_bytes,
+                privkey_path=privkey_path,
+                created_at=now,
+                parent_soul_id=soul_id,
+                origin_project=original_soul.origin_project,
+            )
+        except (ValueError, sqlite3.Error) as exc:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            conn.close()
+            raise ValueError(str(exc)) from exc
+        except Exception as exc:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            conn.close()
+            _log.warning("SoulRegistry.rotate failed for %s: %s", soul_id, exc)
+            raise
+
+    def _make_soul_id_conn(
+        self,
+        conn: sqlite3.Connection,
+        role: str,
+        domain: str,
+        pubkey: bytes,
+    ) -> str:
+        """Like ``_make_soul_id`` but uses an already-open connection (for transactions)."""
+        r = _role_slug(role)
+        d = _domain_slug(domain)
+        for length in range(3, 8):
+            fp = self._pubkey_fingerprint(pubkey, length)
+            candidate = f"{r}_{d}_{fp}"
+            existing = conn.execute(
+                "SELECT 1 FROM agent_souls WHERE soul_id = ?", (candidate,)
+            ).fetchone()
+            if existing is None:
+                return candidate
+        fp = self._pubkey_fingerprint(pubkey, 8)
+        return f"{r}_{d}_{fp}"
+
+    # ------------------------------------------------------------------
+    # Public API — expertise
+    # ------------------------------------------------------------------
 
     def upsert_expertise(
         self,
