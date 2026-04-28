@@ -292,6 +292,72 @@ if [ -f "$BATON_DIR/pmo.db" ] && [ ! -f "$BATON_DIR/.pmo-migrated" ]; then
     echo "  ~ pmo.db detected — will be migrated to central.db on first use"
 fi
 
+# ── Step 5: Git-Notes Replication ────────────────────────
+# Baton stores bead anchors in git-notes (refs/notes/*).  Git does NOT
+# replicate notes refs by default — without explicit fetch/push refspecs
+# every bead note written on one clone is silently invisible to every
+# other clone.  This step configures the required refspecs so that
+# `git fetch` and `git push` carry notes alongside regular commits.
+#
+# Skip by setting BATON_SKIP_GIT_NOTES_SETUP=1 in the environment.
+echo ""
+echo "  STEP 5: Git-Notes Replication"
+echo "  ─────────────────────────────"
+
+_NOTES_REFSPEC="+refs/notes/*:refs/notes/*"
+
+if [ "${BATON_SKIP_GIT_NOTES_SETUP:-}" = "1" ]; then
+    echo "  ~ BATON_SKIP_GIT_NOTES_SETUP=1 — git-notes replication setup skipped"
+elif git rev-parse --git-dir &>/dev/null 2>&1; then
+    # Configure fetch refspec (idempotent: only add if not present)
+    if git config --local --get-all remote.origin.fetch 2>/dev/null | grep -qF "$_NOTES_REFSPEC"; then
+        echo "  ~ remote.origin.fetch: notes refspec already present"
+    else
+        git config --local --add remote.origin.fetch "$_NOTES_REFSPEC" 2>/dev/null && \
+            echo "  + remote.origin.fetch: +refs/notes/*:refs/notes/* added" || \
+            echo "  ! notes fetch refspec config failed (non-fatal)"
+    fi
+
+    # Configure push refspec (idempotent: only add if not present)
+    if git config --local --get-all remote.origin.push 2>/dev/null | grep -qF "$_NOTES_REFSPEC"; then
+        echo "  ~ remote.origin.push: notes refspec already present"
+    else
+        git config --local --add remote.origin.push "$_NOTES_REFSPEC" 2>/dev/null && \
+            echo "  + remote.origin.push: +refs/notes/*:refs/notes/* added" || \
+            echo "  ! notes push refspec config failed (non-fatal)"
+    fi
+
+    echo "  Bead notes will now replicate automatically on git fetch/push."
+    echo "  To opt out of this setup: BATON_SKIP_GIT_NOTES_SETUP=1 ./scripts/install.sh"
+else
+    echo "  ! Not inside a git repository — git-notes replication setup skipped"
+    echo "    Run from inside a git repo, or set BATON_SKIP_GIT_NOTES_SETUP=1 to silence this."
+fi
+
+# ── Step 6: Gastown (git-notes bead persistence) ─────────
+# Gated by --gastown flag.  Phase M0 default: OFF.
+# Enable in Phase M1+ once the dual-write window starts.
+if [ "$GASTOWN" = true ]; then
+    echo ""
+    echo "  STEP 6: Gastown Git-Notes Bead Persistence"
+    echo "  ───────────────────────────────────────────"
+    if git rev-parse --git-dir &>/dev/null 2>&1; then
+        # Carry bead notes across rebases
+        git config --local notes.rewriteRef "refs/notes/baton-beads" 2>/dev/null && \
+            echo "  + git config: notes.rewriteRef set" || \
+            echo "  ! notes.rewriteRef config failed (non-fatal)"
+
+        # Register the JSON-aware bead merge driver
+        git config --local merge.baton-notes.driver \
+            "scripts/baton-notes-merge %O %A %B" 2>/dev/null && \
+            echo "  + git config: merge.baton-notes.driver set" || \
+            echo "  ! merge driver config failed (non-fatal)"
+    else
+        echo "  ! Not inside a git repository — Gastown git config skipped"
+        echo "    Run 'git init' first, then re-run install.sh --gastown"
+    fi
+fi
+
 # ── Summary ────────────────────────────────────────────────
 echo ""
 echo "  ====================================="
