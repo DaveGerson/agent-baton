@@ -1,6 +1,6 @@
 """Tests for agent_baton.core.engine.soul_router — SoulRouter.
 
-Wave 6.1 Part B (bd-d975).
+Wave 6.1 Part B (bd-d975) + v33 revocation guard extension.
 
 Coverage:
 - recommend: returns ranked (soul_id, score) list
@@ -13,10 +13,18 @@ Coverage:
 - _domain_from_files: extracts leading path component as domain token
 - expertise recompute: stale rows are refreshed
 - dispatch routes to highest-expertise soul when two souls in same role
+
+v33 revocation guard:
+- test_router_rejects_revoked_signature: verify_signature returns False for revoked soul
+- test_router_logs_successor_when_revocation_includes_one: warning includes successor
+- verify_signature returns True for valid non-revoked soul
+- verify_signature returns False for unknown soul_id
+- verify_signature returns False for bad cryptographic signature
 """
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -96,7 +104,6 @@ class TestHoursSince:
         assert _hours_since("2000-01-01T00:00:00Z") > 100_000
 
     def test_future_timestamp_returns_negative_or_small(self):
-        # Should not crash; result may be small or negative.
         import datetime
         future = (
             datetime.datetime.now(datetime.timezone.utc)
@@ -406,3 +413,112 @@ class TestExpertiseRecompute:
         with patch.object(router, "_recompute_expertise") as mock_recompute:
             router._get_or_recompute_score(soul, [Path("auth.py")])
             mock_recompute.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# SoulRouter.verify_signature — revocation guard (v33)
+# ---------------------------------------------------------------------------
+
+
+class TestVerifySignatureRevocationGuard:
+    def test_verify_signature_valid_non_revoked_soul(
+        self, router: SoulRouter, registry: SoulRegistry
+    ):
+        """verify_signature returns True for a valid signature from a live soul."""
+        soul = registry.mint("code-reviewer", "auth")
+        data = b"dispatch payload"
+        sig = soul.sign(data)
+        assert router.verify_signature(soul.soul_id, data, sig) is True
+
+    def test_verify_signature_bad_signature_returns_false(
+        self, router: SoulRouter, registry: SoulRegistry
+    ):
+        """verify_signature returns False when the cryptographic check fails."""
+        soul = registry.mint("code-reviewer", "auth")
+        data = b"original payload"
+        sig = soul.sign(data)
+        # Tamper with data after signing.
+        assert router.verify_signature(soul.soul_id, b"tampered payload", sig) is False
+
+    def test_verify_signature_unknown_soul_returns_false(
+        self, router: SoulRouter
+    ):
+        """verify_signature returns False when soul_id is not in the registry."""
+        result = router.verify_signature("no_such_soul", b"data", "ed25519:abc")
+        assert result is False
+
+    def test_router_rejects_revoked_signature(
+        self, router: SoulRouter, registry: SoulRegistry
+    ):
+        """test_router_rejects_revoked_signature: verify_signature returns False after revoke."""
+        soul = registry.mint("code-reviewer", "auth")
+        data = b"sensitive dispatch"
+        sig = soul.sign(data)
+
+        # Signature is valid before revocation.
+        assert router.verify_signature(soul.soul_id, data, sig) is True
+
+        # Revoke the soul.
+        registry.revoke(soul.soul_id, reason="workstation stolen")
+
+        # Signature is now rejected unconditionally.
+        assert router.verify_signature(soul.soul_id, data, sig) is False
+
+    def test_router_logs_warning_on_revoked_signature(
+        self, router: SoulRouter, registry: SoulRegistry, caplog
+    ):
+        """verify_signature emits a WARNING log when a revoked soul's sig is checked."""
+        soul = registry.mint("code-reviewer", "auth")
+        data = b"payload"
+        sig = soul.sign(data)
+        registry.revoke(soul.soul_id, reason="key leaked")
+
+        with caplog.at_level(logging.WARNING, logger="agent_baton.core.engine.soul_router"):
+            router.verify_signature(soul.soul_id, data, sig)
+
+        assert any("revoked" in record.message.lower() for record in caplog.records)
+        assert any(soul.soul_id in record.message for record in caplog.records)
+
+    def test_router_logs_successor_when_revocation_includes_one(
+        self, router: SoulRouter, registry: SoulRegistry, caplog, capsys
+    ):
+        """test_router_logs_successor_when_revocation_includes_one: successor appears in warning."""
+        original = registry.mint("code-reviewer", "auth")
+        successor = registry.mint("code-reviewer", "auth")
+        data = b"dispatch data"
+        sig = original.sign(data)
+
+        # Revoke original with explicit successor pointer.
+        registry.revoke(
+            original.soul_id,
+            reason="rotation with explicit successor",
+            successor_soul_id=successor.soul_id,
+        )
+
+        with caplog.at_level(logging.WARNING, logger="agent_baton.core.engine.soul_router"):
+            result = router.verify_signature(original.soul_id, data, sig)
+
+        assert result is False
+
+        # Successor soul_id must appear in either the log message or the BEAD_WARNING print.
+        log_text = " ".join(r.message for r in caplog.records)
+        captured = capsys.readouterr()
+        combined = log_text + captured.out
+        assert successor.soul_id in combined
+
+    def test_router_rejects_revoked_signature_after_rotate(
+        self, router: SoulRouter, registry: SoulRegistry
+    ):
+        """After rotate(), the old soul's signatures are rejected; successor's are accepted."""
+        original = registry.mint("code-reviewer", "auth")
+        data = b"payload"
+        old_sig = original.sign(data)
+
+        successor = registry.rotate(original.soul_id, reason="scheduled key rotation")
+        new_sig = successor.sign(data)
+
+        # Old soul's signature rejected.
+        assert router.verify_signature(original.soul_id, data, old_sig) is False
+
+        # Successor's signature accepted.
+        assert router.verify_signature(successor.soul_id, data, new_sig) is True
