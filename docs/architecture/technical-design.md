@@ -136,40 +136,128 @@ The state machine has three external entry methods on
 All three converge on the private `_determine_action(state)` at
 [`executor.py:4794`](../../agent_baton/core/engine/executor.py).
 
-### 3.2 `_determine_action()` decision tree
+### 3.2 Decision pipeline (post-005b)
 
-The engine computes the next action by walking this decision tree:
+After proposal 005b, the next-action computation is a three-stage pipeline:
+
+1. **Resolve intent** — [`ActionResolver`](../../agent_baton/core/engine/resolver.py)
+   reads the immutable state and returns a `ResolverDecision`
+   (`DecisionKind` + payload). No mutation.
+2. **Dispatch on `DecisionKind`** — `_apply_resolver_decision()` on the
+   engine looks up a heavy builder in a dispatch table keyed by
+   `DecisionKind` and calls it.  Builders are responsible for the
+   final `ExecutionAction` construction and for invoking the small
+   mutation epilogue.
+3. **State-class epilogue** — `_state_handler_for(state.status).handle(state, decision)`
+   applies the small mutation epilogue (status flips like
+   ``"gate_pending"`` / ``"approval_pending"`` / ``"failed"``).
+   See §3.2.2.
+
+The classifier walks this decision tree (encoded in `ActionResolver`):
 
 ```
-                ┌─ state.status == "complete"      → COMPLETE
-                ├─ state.status == "failed"        → FAILED
-                ├─ state.status == "cancelled"     → FAILED
-state.status -->┼─ state.status == "budget_exceeded" → COMPLETE (with note)
-                ├─ state.status == "paused-takeover" → WAIT
+                ┌─ state.status == "complete"      → TERMINAL_COMPLETE
+                ├─ state.status == "failed"        → TERMINAL_FAILED
+                ├─ state.status == "cancelled"     → TERMINAL_FAILED
+state.status -->┼─ state.status == "budget_exceeded" → BUDGET_EXCEEDED
+                ├─ state.status == "paused-takeover" → PAUSED_TAKEOVER
                 └─ otherwise:
                           │
                           v
-            ┌─ pending feedback? → FEEDBACK action
-            ├─ pending approval? → APPROVAL action
-            ├─ pending interact? → INTERACT action
+            ┌─ pending feedback? → FEEDBACK_PENDING / PHASE_NEEDS_FEEDBACK
+            ├─ pending approval? → APPROVAL_PENDING / PHASE_NEEDS_APPROVAL
+            ├─ pending interact? → INTERACT / INTERACT_CONTINUE
             ├─ phase has unfinished steps?
             │     │
-            │     ├─ ready dispatchable step? → DISPATCH (or SWARM_DISPATCH)
+            │     ├─ ready dispatchable step? → DISPATCH (or TEAM_DISPATCH)
             │     ├─ dispatched in flight?    → WAIT
-            │     └─ failed?                  → FAILED
-            ├─ phase complete, gate not run? → GATE
-            ├─ gate failed, retries < cap?   → GATE (re-run)
-            ├─ gate failed, retries == cap?  → FAILED
-            └─ all phases done?              → COMPLETE
+            │     └─ failed?                  → STEP_FAILED_IN_PHASE
+            ├─ phase complete, gate not run? → PHASE_NEEDS_GATE / EMPTY_PHASE_GATE
+            ├─ gate failed, retries < cap?   → GATE_FAILED
+            ├─ gate failed, retries == cap?  → TERMINAL_FAILED
+            └─ all phases done?              → NO_PHASES_LEFT / TERMINAL_COMPLETE
 ```
 
-`_dispatch_action()` ([`executor.py:5252`](../../agent_baton/core/engine/executor.py))
-builds the actual `DISPATCH` action: it calls `PromptDispatcher`,
-attaches knowledge, selects beads via `BeadSelector`, populates
-worktree fields, and applies path-enforcement.
+`_drive_resolver_loop()` runs the resolver → dispatch loop until it
+emits a terminal `ExecutionAction`.  The two transitive
+`DecisionKind` values (`EMPTY_PHASE_ADVANCE`, `PHASE_ADVANCE_OK`) call
+`PhaseManager.advance_phase()` and re-enter the loop instead of
+returning an action.
 
-`_approval_action()` ([`executor.py:5639`](../../agent_baton/core/engine/executor.py))
-builds approval actions, including policy-violation approvals.
+#### 3.2.1 `PhaseManager` — phase-boundary evaluator + advance mutator
+
+[`PhaseManager`](../../agent_baton/core/engine/phase_manager.py) is a
+zero-arg, stateless helper that owns:
+
+- **Pure read methods**: `is_phase_complete`, `evaluate_phase_gate`,
+  `evaluate_phase_approval_gate`, `evaluate_phase_feedback_gate`.
+  These delegate to module helpers in
+  [`_executor_helpers.py`](../../agent_baton/core/engine/_executor_helpers.py)
+  and return frozen `GateOutcome` / `ApprovalGateOutcome` /
+  `FeedbackGateOutcome` records.
+- **One mutator**: `advance_phase(state, *, set_status_running: bool)`
+  bumps `state.current_phase`, resets `state.current_step_index`, and
+  optionally flips `state.status` to ``"running"``.
+
+By architectural invariant (enforced by
+`tests/test_architecture.py::test_only_phase_manager_bumps_current_phase`),
+`PhaseManager.advance_phase` is the **only** site in `agent_baton/`
+allowed to bump `state.current_phase` or reset `state.current_step_index`.
+All callers (resolver-loop arms, `record_gate_result`) must route
+through it and pair the call with `_publish_phase_started(state)` to
+emit the `phase_pre_start` + `phase_started` events.
+
+#### 3.2.2 State pattern — small mutation epilogue
+
+[`states.py`](../../agent_baton/core/engine/states.py) defines four
+state-handler singletons matched to `state.status` clusters:
+
+| Status cluster | Handler | Role |
+|----------------|---------|------|
+| `"pending"` | `PlanningState` | No-op (engine's `start()` flips to `"running"`). |
+| `"running"` | `ExecutingPhaseState` | Owns the bulk of mid-flight status flips (gate_pending, approval_pending, failed, …). |
+| `"approval_pending"`, `"feedback_pending"`, `"gate_pending"`, `"gate_failed"`, `"paused"`, `"paused-takeover"` | `AwaitingApprovalState` | Pass-through for blocked-state decisions; raises on DISPATCH-class arrivals (resolver bug surface). |
+| `"complete"`, `"failed"`, `"budget_exceeded"` | `TerminalState` | No-ops on terminal-pass-through; raises on any non-terminal `DecisionKind`. |
+
+Engine maintains a `_state_handlers: dict[str, ExecutionPhaseStateProtocol]`
+map and resolves it via `_state_handler_for(status)`.  Unknown
+statuses fall back to `ExecutingPhaseState` with a `_log.warning` —
+deliberate forward-compat for daemon/swarm/future status keys
+(see `_state_handler_for` docstring, bd-7eac).
+
+State classes import only from `agent_baton.models.*` and
+`agent_baton.core.engine.resolver`; they MUST NOT reach back into
+the engine.
+
+#### 3.2.3 Engine helpers
+
+[`_executor_helpers.py`](../../agent_baton/core/engine/_executor_helpers.py)
+holds the leaf predicates shared by `PhaseManager` and the resolver:
+`is_phase_complete`, `gate_passed_for_phase`,
+`approval_passed_for_phase`, `feedback_resolved_for_phase`.  These
+are pure reads over `ExecutionState`, kept module-level so neither
+PhaseManager nor ActionResolver imports the engine.
+
+#### 3.2.4 Heavy builders (still on `ExecutionEngine`)
+
+The engine retains the heavy action-construction methods that the
+resolver dispatch table calls into:
+
+- `_dispatch_action()` builds the `DISPATCH` action: calls
+  `PromptDispatcher`, attaches knowledge, selects beads via
+  `BeadSelector`, populates worktree fields, applies path-enforcement.
+- `_approval_action()` builds approval actions, including
+  policy-violation approvals.
+- `_feedback_action()`, `_build_gate_action()`, `_build_complete_action()`,
+  `_build_swarm_dispatch_action()` cover the remaining builders.
+
+These are single-responsibility-coherent slices that remain on the
+engine because they own real essential complexity (governance,
+prompt composition, knowledge resolution, swarm fan-out).  Further
+extraction (`DispatchBuilder`, `StepResultRecorder`, `KnowledgeResolver`)
+is tracked as 005b-phase5-future discoveries — the post-005b engine
+size of ~6,900 LOC is the realistic shape, not the proposal's
+aspirational ~300 LOC.
 
 ### 3.3 Persistence dual-write
 
