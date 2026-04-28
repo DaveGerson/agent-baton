@@ -392,6 +392,38 @@ class TestTeamAugmentedForecast:
 
 
 # ---------------------------------------------------------------------------
+# bd-47b4 — ±50% disclaimer surfaced in text + JSON
+# ---------------------------------------------------------------------------
+
+class TestEstimateDisclaimer:
+    def test_text_forecast_includes_disclaimer(
+        self, capsys: pytest.CaptureFixture
+    ) -> None:
+        plan = _make_plan()
+        out = _run_handler(_make_args(dry_run=True), plan, capsys)
+        # The disclaimer line and the inline range must both appear.
+        assert "Estimate ±50%" in out
+        assert "actual cost depends on model + retries" in out
+        assert "range ~$" in out
+
+    def test_json_forecast_includes_estimate_band(
+        self, capsys: pytest.CaptureFixture
+    ) -> None:
+        plan = _make_plan()
+        args = _make_args(dry_run=True)
+        args.json = True
+        out = _run_handler(args, plan, capsys)
+        import json as _json
+        payload = _json.loads(out)
+        assert "estimate_band" in payload["cost_forecast"]
+        band = payload["cost_forecast"]["estimate_band"]
+        assert band["confidence"] == "±50%"
+        # Sanity: low < central < high.
+        central = payload["cost_forecast"]["total_cost_usd"]
+        assert band["low_usd"] <= central <= band["high_usd"]
+
+
+# ---------------------------------------------------------------------------
 # Per-step model honoured
 # ---------------------------------------------------------------------------
 
