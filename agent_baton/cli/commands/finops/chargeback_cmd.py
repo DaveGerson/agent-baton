@@ -45,6 +45,34 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         "chargeback",
         help="Export token + USD spend attribution as CSV or JSON",
     )
+    # ------------------------------------------------------------------
+    # attribution-coverage subcommand
+    # ------------------------------------------------------------------
+    ac = sub.add_parser(
+        "attribution-coverage",
+        help="Report percentage of usage_records rows above the default attribution bucket",
+    )
+    ac.add_argument(
+        "--output",
+        choices=["table", "json"],
+        default="table",
+        dest="ac_output",
+        help="Output format (default: table).",
+    )
+    ac.add_argument(
+        "--db",
+        metavar="PATH",
+        default=None,
+        help=(
+            "SQLite database path.  Defaults to BATON_DB_PATH, then the "
+            "project baton.db (.claude/team-context/baton.db, walking up), "
+            "then ~/.baton/central.db."
+        ),
+    )
+
+    # ------------------------------------------------------------------
+    # chargeback args (continued)
+    # ------------------------------------------------------------------
     cb.add_argument(
         "--since",
         metavar="DATE",
@@ -99,6 +127,8 @@ def handler(args: argparse.Namespace) -> None:
     sub = getattr(args, "finops_cmd", None)
     if sub == "chargeback":
         _handle_chargeback(args)
+    elif sub == "attribution-coverage":
+        _handle_attribution_coverage(args)
     else:  # pragma: no cover - argparse prevents this
         raise SystemExit(f"Unknown finops subcommand: {sub!r}")
 
@@ -139,6 +169,31 @@ def _handle_chargeback(args: argparse.Namespace) -> None:
         sys.stdout.write(rendered)
         if rendered and not rendered.endswith("\n"):
             sys.stdout.write("\n")
+
+
+def _handle_attribution_coverage(args: argparse.Namespace) -> None:
+    from agent_baton.core.observability.attribution_coverage import CoverageScanner
+
+    db_path = _resolve_db_path(getattr(args, "db", None))
+    if db_path is None or not db_path.exists():
+        sys.stderr.write(
+            "ERROR: no baton.db / central.db found.  "
+            "Set BATON_DB_PATH or pass --db PATH.\n"
+        )
+        raise SystemExit(2)
+
+    scanner = CoverageScanner(db_path=db_path)
+    report = scanner.scan()
+
+    output_fmt = getattr(args, "ac_output", "table")
+    if output_fmt == "json":
+        rendered = report.to_json()
+    else:
+        rendered = report.to_table()
+
+    sys.stdout.write(rendered)
+    if rendered and not rendered.endswith("\n"):
+        sys.stdout.write("\n")
 
 
 # ---------------------------------------------------------------------------
