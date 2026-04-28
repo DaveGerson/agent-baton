@@ -919,6 +919,91 @@ class ExecutionEngine:
             "output_snippet": output[:500] if output else "",
         })
 
+    # ── CI gate dispatch (Wave 4.1) ──────────────────────────────────────────
+
+    def _run_ci_gate(
+        self,
+        gate_command_or_config: str,
+        *,
+        commit_sha: str = "",
+        branch: str = "",
+        runner: "Any" = None,
+    ):
+        """Run a CI provider gate and return a :class:`CIGateResult`.
+
+        Wave 4.1 — CI-Driven Quality Gates.  Resolves bd-b050.
+
+        Dispatched when ``gate_type == "ci"``.  The executor itself does not
+        block on the CI call (that lives in the CLI loop), but exposing the
+        helper here lets callers (CLI, future API endpoints, tests) share
+        the same parsing and provider-routing logic.
+
+        Args:
+            gate_command_or_config: The ``PlanGate.command`` field — either a
+                JSON object (full config) or a workflow file shorthand.  See
+                :func:`agent_baton.core.gates.ci_gate.parse_ci_gate_config`.
+            commit_sha: HEAD commit SHA the CI run must match.  Defaults to
+                the result of ``git rev-parse HEAD`` in the current working
+                directory.  Pass explicitly when the executor's CWD is not
+                the repo being tested (e.g. worktree dispatch).
+            branch: Branch to scope the search.  When empty or ``"auto"``,
+                resolved from ``git rev-parse --abbrev-ref HEAD``.
+            runner: Optional pre-built :class:`CIGateRunner` (test injection).
+
+        Returns:
+            A :class:`CIGateResult`.  Never raises for normal failures —
+            missing gh, timeout, and provider stubs are returned as
+            ``passed=False`` results.
+
+        Raises:
+            NotImplementedError: When the parsed provider is unsupported
+                (e.g. ``gitlab``).  Surfaced so plan authors notice the
+                gap immediately.
+        """
+        # Local imports keep the executor's import graph small for the
+        # common case (no CI gates).
+        from agent_baton.core.gates.ci_gate import (
+            CIGateRunner,
+            parse_ci_gate_config,
+        )
+        import subprocess as _sp
+
+        config = parse_ci_gate_config(gate_command_or_config)
+
+        resolved_sha = commit_sha
+        resolved_branch = branch or config.branch
+
+        if not resolved_sha:
+            try:
+                proc = _sp.run(
+                    ["git", "rev-parse", "HEAD"],
+                    capture_output=True, text=True, check=False, timeout=10,
+                )
+                resolved_sha = (proc.stdout or "").strip()
+            except (FileNotFoundError, _sp.TimeoutExpired):
+                resolved_sha = ""
+
+        if not resolved_branch or resolved_branch == "auto":
+            try:
+                proc = _sp.run(
+                    ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                    capture_output=True, text=True, check=False, timeout=10,
+                )
+                resolved_branch = (proc.stdout or "").strip() or "HEAD"
+            except (FileNotFoundError, _sp.TimeoutExpired):
+                resolved_branch = "HEAD"
+
+        gate_runner = runner or CIGateRunner(
+            poll_interval_s=config.poll_interval_s,
+        )
+        return gate_runner.wait_for_workflow(
+            provider=config.provider,
+            workflow=config.workflow,
+            branch=resolved_branch,
+            commit_sha=resolved_sha,
+            timeout_s=config.timeout_s,
+        )
+
     # ── Policy enforcement helpers ───────────────────────────────────────────
 
     def _check_policy_block(
@@ -3028,6 +3113,33 @@ class ExecutionEngine:
             resolution="unresolved",
         )
 
+    def _effective_timeout(self, step: PlanStep) -> int:
+        """Return the effective timeout in seconds for *step*.
+
+        Resolution order:
+        1. ``step.timeout_seconds`` when non-zero (explicit per-step override).
+        2. ``BATON_DEFAULT_STEP_TIMEOUT_S`` env var when set to a positive int.
+        3. 0 (no timeout) — default, fully backward-compatible.
+
+        Args:
+            step: The plan step to evaluate.
+
+        Returns:
+            Effective timeout in seconds; ``0`` means no timeout enforced.
+        """
+        import os
+        if step.timeout_seconds > 0:
+            return step.timeout_seconds
+        env_val = os.environ.get("BATON_DEFAULT_STEP_TIMEOUT_S", "")
+        if env_val:
+            try:
+                parsed = int(env_val)
+                if parsed > 0:
+                    return parsed
+            except ValueError:
+                pass
+        return 0
+
     def _check_token_budget(self, state: ExecutionState) -> str | None:
         """Return a warning string if cumulative tokens exceed the budget limit.
 
@@ -4038,6 +4150,92 @@ class ExecutionEngine:
                 plan_step = self._find_step(state, result.step_id)
                 if plan_step is not None:
                     return self._dispatch_action(plan_step, state)
+
+        # ── Step timeout enforcement ──────────────────────────────────────────
+        # Before returning WAIT, check whether any dispatched step has exceeded
+        # its timeout.  When a step times out it is immediately marked failed
+        # (so the next _determine_action call returns FAILED) and a warning
+        # bead is filed.  The loop continues to catch multiple simultaneous
+        # timeouts — the first one will flip state.status to "failed" on the
+        # next iteration.
+        for result in state.step_results:
+            if result.status != "dispatched":
+                continue
+            plan_step = self._find_step(state, result.step_id)
+            if plan_step is None:
+                continue
+            effective_timeout = self._effective_timeout(plan_step)
+            if effective_timeout <= 0:
+                continue
+            elapsed = _elapsed_seconds(result.step_started_at or state.started_at)
+            if elapsed > effective_timeout:
+                timeout_msg = (
+                    f"TIMEOUT after {effective_timeout}s"
+                    f" (elapsed {int(elapsed)}s)"
+                )
+                _log.warning(
+                    "Step %s timed out after %ss (elapsed %.1fs); marking failed.",
+                    result.step_id,
+                    effective_timeout,
+                    elapsed,
+                )
+                # Best-effort warning bead — must not block timeout handling.
+                try:
+                    if self._bead_store is not None:
+                        from agent_baton.models.bead import Bead, _generate_bead_id
+                        _ts = _utcnow()
+                        _bead_count = len(
+                            self._bead_store.query(task_id=state.task_id, limit=10000)
+                        )
+                        _bead = Bead(
+                            bead_id=_generate_bead_id(
+                                state.task_id,
+                                result.step_id,
+                                timeout_msg,
+                                _ts,
+                                _bead_count,
+                            ),
+                            task_id=state.task_id,
+                            step_id=result.step_id,
+                            agent_name=result.agent_name,
+                            bead_type="warning",
+                            content=(
+                                f"Step {result.step_id} timed out after "
+                                f"{effective_timeout}s"
+                            ),
+                            tags=["timeout"],
+                            created_at=_ts,
+                            source="agent-signal",
+                        )
+                        self._bead_store.write(_bead)
+                except Exception as _bead_exc:  # noqa: BLE001
+                    _log.debug(
+                        "Timeout bead write failed (non-fatal): %s", _bead_exc
+                    )
+                # Mark the step failed in the in-memory state so the final
+                # _save_execution() call in next_action() persists the correct
+                # status.  record_step_result() also loads/saves independently,
+                # but the caller (next_action) overwrites disk after
+                # _determine_action returns — so we must update state too.
+                result.status = "failed"
+                result.outcome = timeout_msg
+                result.error = timeout_msg
+                result.completed_at = _utcnow()
+                result.updated_at = _utcnow()
+                state.status = "failed"
+                self.record_step_result(
+                    step_id=result.step_id,
+                    agent_name=result.agent_name,
+                    status="failed",
+                    outcome=timeout_msg,
+                    error=timeout_msg,
+                )
+                msg = f"Step {result.step_id} timed out after {effective_timeout}s."
+                return ExecutionAction(
+                    action_type=ActionType.FAILED,
+                    message=msg,
+                    summary=msg,
+                )
 
         # If no step is dispatchable but some are still pending (dispatched or
         # blocked by dependencies), return WAIT.
