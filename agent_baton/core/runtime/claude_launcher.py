@@ -432,6 +432,7 @@ class ClaudeCodeLauncher:
         step_id: str = "",
         mcp_servers: list[str] | None = None,
         cwd_override: str | None = None,   # Wave 1.3 (bd-86bf): worktree path
+        task_id: str = "",                  # bd-37a9: for BATON_TASK_ID inject
     ) -> LaunchResult:
         """Launch a Claude Code agent and return its result.
 
@@ -442,6 +443,9 @@ class ClaudeCodeLauncher:
                 directory as its working directory instead of the default
                 ``config.working_directory``.  Used by Wave 1.3 worktree
                 isolation to run each agent inside its isolated worktree.
+            task_id: Optional task identifier propagated to the subprocess as
+                ``BATON_TASK_ID`` when ``cwd_override`` is set, so the
+                subagent's bead/state writes target the correct task.
         """
         start = time.monotonic()
         pre_commit = await self._git_rev_parse()
@@ -451,6 +455,11 @@ class ClaudeCodeLauncher:
             agent = self._registry.get(agent_name)
         cmd = self._build_command(model, agent, mcp_servers=mcp_servers)
         env = self._build_env()
+        # bd-37a9: when running in a Wave 1.3 worktree, inject pointers to
+        # the parent project's state so the subagent's upward-walk db
+        # discovery doesn't latch onto the worktree-local empty baton.db.
+        if cwd_override:
+            self._inject_parent_state_env(env, task_id=task_id)
         timeout = self._resolve_timeout(model)
         use_stdin = len(prompt.encode()) > self._config.prompt_file_threshold
         # Wave 1.3: cwd_override takes precedence over the configured directory.
@@ -574,6 +583,32 @@ class ClaudeCodeLauncher:
                 env[key] = val
 
         return env
+
+    def _inject_parent_state_env(self, env: dict[str, str], task_id: str = "") -> None:
+        """Add parent project state pointers to *env* in-place (bd-37a9).
+
+        Called when the subprocess will run inside a Wave 1.3 worktree so
+        it does NOT silently target the worktree-local empty baton.db via
+        upward-walk discovery. Sets:
+
+        - ``BATON_DB_PATH`` to the parent project's absolute baton.db path,
+        - ``BATON_TEAM_CONTEXT_ROOT`` to the parent's team-context dir, and
+        - ``BATON_TASK_ID`` (only when *task_id* is non-empty).
+
+        The parent root is taken from ``self._config.working_directory``,
+        which the engine sets to the project root at construction time.
+        Existing values in *env* are preserved (caller-set wins) so tests
+        and explicit overrides keep working.
+        """
+        parent_root = self._config.working_directory or Path.cwd()
+        parent_root = Path(parent_root).resolve()
+        team_context_root = parent_root / ".claude" / "team-context"
+        baton_db = team_context_root / "baton.db"
+
+        env.setdefault("BATON_DB_PATH", str(baton_db))
+        env.setdefault("BATON_TEAM_CONTEXT_ROOT", str(team_context_root))
+        if task_id:
+            env.setdefault("BATON_TASK_ID", task_id)
 
     def _resolve_timeout(self, model: str) -> float:
         """Return the timeout for *model*, falling back to the default."""
