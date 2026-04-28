@@ -15,6 +15,9 @@ Design decisions from wave-5-design.md Part B:
 - Dirty index between attempts: engine calls reset_dirty_index() before
   each next-tier attempt.
 - Auditor gating on HIGH/CRITICAL phases only (auto-merge for LOW/MEDIUM).
+- Run-level ceiling (end-user readiness #7): when BATON_RUN_TOKEN_CEILING
+  is set and the ceiling trips, the escalation cycle aborts cleanly,
+  marks the gate failure as final, and emits a clear log line.
 
 All configuration is read from env-vars or baton.yaml (via flags.py).
 The class itself is pure logic; BudgetEnforcer provides cost gating.
@@ -118,10 +121,12 @@ class SelfHealAttempt:
     ``selfheal_attempts`` SQLite table (added in this wave).
 
     Status values:
-        'success'            – gate now passes.
-        'gate-still-failing' – agent ran OK but gate still fails.
-        'agent-error'        – launcher or agent raised an exception.
-        'budget-skip'        – BudgetEnforcer refused this tier.
+        'success'            -- gate now passes.
+        'gate-still-failing' -- agent ran OK but gate still fails.
+        'agent-error'        -- launcher or agent raised an exception.
+        'budget-skip'        -- BudgetEnforcer refused this tier.
+        'ceiling-abort'      -- BATON_RUN_TOKEN_CEILING tripped; escalation
+                                halted and gate failure is marked final.
     """
 
     parent_step_id: str
@@ -173,7 +178,7 @@ class SelfHealResult:
     whether to proceed or fall through to the standard failure path.
     """
 
-    fixed: bool                     # True → gate now passes; proceed with fold-back
+    fixed: bool                     # True -> gate now passes; proceed with fold-back
     final_tier: str                 # EscalationTier.value of the last attempt
     total_attempts: int
     total_cost_usd: float
@@ -187,7 +192,7 @@ class SelfHealResult:
 
 
 class SelfHealEscalator:
-    """Manages the Haiku → Sonnet → Opus escalation ladder for self-heal.
+    """Manages the Haiku -> Sonnet -> Opus escalation ladder for self-heal.
 
     Args:
         step_id: The step whose gate failed.
@@ -283,6 +288,68 @@ class SelfHealEscalator:
                 return tier
         return None
 
+    def next_tier_with_ceiling_check(self) -> EscalationTier | None:
+        """Return the next tier to attempt after verifying the run-level ceiling.
+
+        Identical to :meth:`next_tier` but also calls
+        ``budget_enforcer.check_run_ceiling()`` with the estimated cost of
+        the next tier before returning it.  When the ceiling would be
+        exceeded, records a ``ceiling-abort`` attempt, logs a clear message,
+        and returns ``None`` so the caller treats the gate failure as final.
+
+        Returns:
+            The next :class:`EscalationTier`, or ``None`` when either the
+            ladder is exhausted or the run-level ceiling would be exceeded.
+        """
+        tier = self.next_tier()
+        if tier is None:
+            return None
+
+        if self._budget is None:
+            return tier
+
+        # Estimate cost for the pending tier.
+        tokens_in = _TIER_INPUT_CAPS.get(tier, 4_000)
+        tokens_out = _TIER_OUTPUT_CAPS.get(tier, 1_000)
+
+        try:
+            from agent_baton.core.govern.budget import RunTokenCeilingExceeded, _cost_usd
+            estimated = _cost_usd(tier.value, tokens_in, tokens_out)
+            check_fn = getattr(self._budget, "check_run_ceiling", None)
+            if check_fn is not None:
+                check_fn(estimated, f"selfheal {tier.value}")
+        except Exception as exc:
+            from agent_baton.core.govern.budget import RunTokenCeilingExceeded
+            if isinstance(exc, RunTokenCeilingExceeded):
+                _log.error(
+                    "SelfHealEscalator: run ceiling tripped — aborting escalation "
+                    "for step=%s tier=%s. Gate failure is FINAL. %s",
+                    self._step_id,
+                    tier.value,
+                    exc,
+                )
+                # Record a ceiling-abort attempt so callers and audit trails
+                # know why escalation stopped.
+                now = self._utcnow()
+                abort_attempt = SelfHealAttempt(
+                    parent_step_id=self._step_id,
+                    tier=tier.value,
+                    started_at=now,
+                    ended_at=now,
+                    status="ceiling-abort",
+                    tokens_in=0,
+                    tokens_out=0,
+                    cost_usd=0.0,
+                    gate_stderr_tail=str(exc),
+                )
+                self._attempts.append(abort_attempt)
+                return None
+            # Re-raise unexpected exceptions — they indicate a bug in
+            # check_run_ceiling, not a ceiling trip.
+            raise
+
+        return tier
+
     def build_attempt_context(
         self,
         tier: EscalationTier,
@@ -298,7 +365,7 @@ class SelfHealEscalator:
         Each tier receives a superset of the previous tier's context.
 
         T1/T2 (Haiku): diff + last 50 lines stderr + 1-line directive.
-        T3/T4 (Sonnet): T1 + 10-line windows per touched file + beads (≤5).
+        T3/T4 (Sonnet): T1 + 10-line windows per touched file + beads (<=5).
         T5 (Opus): T2 + full file contents + project summary.
 
         Context is accumulated in ``self._accumulated_context`` so the
