@@ -162,9 +162,12 @@ def init_dependencies(
     _registry.load_default_paths()
 
     # Decision manager — uses the shared bus to publish decision events.
+    # safe_read_root constrains context_files reads to the team-context
+    # directory tree, mitigating CVE-style path traversal (bd-90c4).
     _decision_manager = DecisionManager(
         decisions_dir=team_context_root / "decisions",
         bus=_bus,
+        safe_read_root=team_context_root,
     )
 
     # Dashboard — wraps the usage logger we already created.
