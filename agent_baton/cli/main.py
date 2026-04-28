@@ -33,7 +33,7 @@ _COMMAND_GROUPS: dict[str, list[str]] = {
     "Memory": ["beads", "souls"],
     "Execution (Advanced)": ["daemon", "async", "decide"],
     "Portfolio": ["pmo", "serve"],
-    "Deprecated": ["migrate-storage", "verify-package", "improve", "evolve", "experiment"],
+    "Deprecated": ["evolve", "experiment"],
 }
 
 # Deprecated top-level commands — kept for backward compatibility.
