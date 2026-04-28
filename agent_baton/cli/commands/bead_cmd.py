@@ -398,6 +398,25 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         help="Emit machine-readable JSON instead of human text.",
     )
 
+    # -- handoffs (Wave 3.2) -------------------------------------------------
+    handoffs_p = sub.add_parser(
+        "handoffs",
+        help="List automated handoff documents synthesized for a task (Wave 3.2).",
+    )
+    handoffs_p.add_argument(
+        "--task-id",
+        dest="task_id",
+        metavar="TASK_ID",
+        default=None,
+        help="Task ID whose handoff_beads to list (defaults to active task).",
+    )
+    handoffs_p.add_argument(
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help="Emit machine-readable JSON instead of human text.",
+    )
+
     return p
 
 
@@ -410,7 +429,7 @@ def handler(args: argparse.Namespace) -> None:
     """Dispatch to the appropriate beads subcommand handler."""
     cmd = getattr(args, "beads_cmd", None)
     if cmd is None:
-        print("Usage: baton beads <subcommand>  [create|list|show|ready|close|link|cleanup|promote|graph|synthesize|clusters]")
+        print("Usage: baton beads <subcommand>  [create|list|show|ready|close|link|cleanup|promote|graph|synthesize|clusters|handoffs]")
         print("Run `baton beads --help` for details.")
         return
 
@@ -426,6 +445,7 @@ def handler(args: argparse.Namespace) -> None:
         "graph": _handle_graph,
         "synthesize": _handle_synthesize,
         "clusters": _handle_clusters,
+        "handoffs": _handle_handoffs,
     }
     fn = dispatch.get(cmd)
     if fn is None:
@@ -905,3 +925,77 @@ def _handle_clusters(args: argparse.Namespace) -> None:
         print(f"  {cluster_id}  [{label}]  ({len(members)} bead(s))")
         for bid in members:
             print(f"    - {bid}")
+
+
+def _handle_handoffs(args: argparse.Namespace) -> None:
+    """List automated handoff documents synthesized for a task (Wave 3.2).
+
+    Reads ``handoff_beads`` rows directly via sqlite3 — the table is
+    populated by :class:`agent_baton.core.intel.handoff_synthesizer.
+    HandoffSynthesizer` whenever the dispatcher hands off from one step
+    to the next.  No-op when the table doesn't exist (older schema).
+    """
+    task_id: str | None = (
+        getattr(args, "task_id", None)
+        or os.environ.get("BATON_TASK_ID")
+        or _get_active_task_id()
+    )
+    if not task_id:
+        print(
+            "No task ID provided and no active task found. "
+            "Pass --task-id or set $BATON_TASK_ID.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    db = _resolve_db_path()
+    if not db.exists():
+        print(f"No baton.db found at {db}.", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        import sqlite3
+        conn = sqlite3.connect(str(db))
+        has_table = conn.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type='table' AND name='handoff_beads'"
+        ).fetchone()
+        if not has_table:
+            print("handoff_beads table not present (older schema).")
+            conn.close()
+            return
+        rows = conn.execute(
+            "SELECT handoff_id, from_step_id, to_step_id, created_at, content "
+            "FROM handoff_beads WHERE task_id = ? "
+            "ORDER BY created_at ASC, handoff_id ASC",
+            (task_id,),
+        ).fetchall()
+        conn.close()
+    except Exception as exc:  # noqa: BLE001
+        print(f"Failed to read handoff_beads: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if getattr(args, "as_json", False):
+        out = [
+            {
+                "handoff_id": h_id,
+                "from_step_id": frm,
+                "to_step_id": to,
+                "created_at": ts,
+                "content": content,
+            }
+            for (h_id, frm, to, ts, content) in rows
+        ]
+        print(json.dumps(out, indent=2))
+        return
+
+    if not rows:
+        print(f"No handoff beads found for task {task_id}.")
+        return
+
+    print(f"Handoff beads for task {task_id} ({len(rows)}):")
+    print(f"  {'HANDOFF_ID':<16} {'FROM → TO':<14} {'CREATED_AT':<22} CONTENT")
+    for h_id, frm, to, ts, content in rows:
+        snippet = (content or "").splitlines()[0][:60] if content else ""
+        arrow = f"{frm or '-'} → {to or '-'}"
+        print(f"  {h_id:<16} {arrow:<14} {ts:<22} {snippet}")
