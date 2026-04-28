@@ -41,6 +41,7 @@ from agent_baton.models.pattern import LearnedPattern
 from agent_baton.models.taxonomy import ForesightInsight
 
 if TYPE_CHECKING:
+    from agent_baton.core.config import ProjectConfig
     from agent_baton.core.orchestration.knowledge_registry import KnowledgeRegistry
 
 logger = logging.getLogger(__name__)
@@ -601,7 +602,23 @@ class IntelligentPlanner:
         knowledge_registry: KnowledgeRegistry | None = None,
         task_classifier: TaskClassifier | None = None,
         bead_store=None,  # BeadStore | None (F4 planning capture, F7 BeadAnalyzer)
+        project_config: "ProjectConfig | None" = None,
     ) -> None:
+        # Optional baton.yaml-driven project config.  When None, the
+        # planner discovers it once via ProjectConfig.load() (best
+        # effort — failures degrade to an empty config and emit a
+        # logger warning).  Empty configs are no-ops, preserving prior
+        # behavior for projects without a baton.yaml.
+        try:
+            from agent_baton.core.config import ProjectConfig as _ProjectConfig
+            self._project_config = project_config or _ProjectConfig.load()
+        except Exception:
+            logger.warning(
+                "ProjectConfig.load() failed — continuing with empty config",
+                exc_info=True,
+            )
+            from agent_baton.core.config import ProjectConfig as _ProjectConfig
+            self._project_config = _ProjectConfig()
         self._team_context_root = team_context_root
         self._pattern_learner = PatternLearner(team_context_root)
         self._scorer = PerformanceScorer()
@@ -1264,6 +1281,16 @@ class IntelligentPlanner:
         for phase in plan_phases:
             if phase.gate is None:
                 phase.gate = self._default_gate(phase.name, stack=stack_profile)
+
+        # 12.a. Apply project config (baton.yaml) defaults — additive.
+        # No-op when no baton.yaml is present in the project.
+        try:
+            self._apply_project_config(plan_phases)
+        except Exception:
+            logger.warning(
+                "Applying project config failed — continuing without it",
+                exc_info=True,
+            )
 
         # 12b. Set approval gates on critical phases for HIGH+ risk
         if risk_level_enum in (RiskLevel.HIGH, RiskLevel.CRITICAL):
@@ -2376,6 +2403,146 @@ class IntelligentPlanner:
                     )
 
         return phases
+
+    # ------------------------------------------------------------------
+    # Project config (baton.yaml) integration
+    # ------------------------------------------------------------------
+
+    # Mapping of step agent base name -> domain key used in
+    # ProjectConfig.default_agents.  Used by _apply_project_config to
+    # resolve which default agent to substitute when a step is using a
+    # generic placeholder.
+    _DOMAIN_KEYS_BY_AGENT_BASE: dict[str, str] = {
+        "backend-engineer": "backend",
+        "frontend-engineer": "frontend",
+        "test-engineer": "test",
+        "data-engineer": "data",
+        "devops-engineer": "devops",
+        "documentation-architect": "docs",
+        "documentation-engineer": "docs",
+    }
+
+    # Track which steps received a config-driven isolation override.
+    # Exposed via :meth:`isolation_for_step` so dispatchers and tests
+    # can introspect what the planner intends without needing a new
+    # field on PlanStep.
+    @property
+    def _isolation_overrides(self) -> dict[str, str]:
+        # Lazy initializer so subclasses/older instances still work.
+        if not hasattr(self, "_isolation_overrides_map"):
+            self._isolation_overrides_map: dict[str, str] = {}
+        return self._isolation_overrides_map
+
+    def isolation_for_step(self, step_id: str) -> str:
+        """Return the configured isolation mode for *step_id*, or ``""``.
+
+        Populated by :meth:`_apply_project_config` from the active
+        ``baton.yaml``'s ``default_isolation`` value.  Dispatchers may
+        consult this when deciding whether to spawn the agent in a
+        worktree.  Returns empty string when no override is configured.
+        """
+        return self._isolation_overrides.get(step_id, "")
+
+    def _apply_project_config(self, phases: list[PlanPhase]) -> None:
+        """Apply ``baton.yaml`` defaults to *phases* in place.
+
+        Behavior (each is a no-op when the corresponding config field is
+        empty so the absence of ``baton.yaml`` does not change planner
+        output):
+
+        * ``default_agents`` — for any step whose agent matches a base
+          name in :data:`_DOMAIN_KEYS_BY_AGENT_BASE`, substitute the
+          configured agent (preserving the existing one when no config
+          entry maps to that domain).
+        * ``auto_route_rules`` — when a step's allowed_paths or
+          context_files match a rule's ``path_glob``, replace its agent
+          with the rule's agent.  Auto-routing always wins over the
+          domain default (it is the more specific signal).
+        * ``default_gates`` — append a :class:`PlanGate` for each
+          configured gate type to every phase, deduplicating by
+          ``gate_type`` within the phase.  Phases that already have a
+          matching gate are left alone.  We model multi-gate phases by
+          chaining gate descriptions onto the existing PlanGate when one
+          already exists, since PlanPhase only stores a single gate.
+        * ``excluded_paths`` — append to each step's ``blocked_paths``,
+          deduplicated.
+        * ``default_isolation`` — recorded in
+          :attr:`_isolation_overrides` keyed by step_id.  Dispatchers
+          read it via :meth:`isolation_for_step`.
+        """
+        cfg = self._project_config
+        if cfg.is_empty():
+            return
+
+        for phase in phases:
+            for step in phase.steps:
+                # Auto-route rules win over default_agents.
+                paths_for_match = list(step.allowed_paths) + list(step.context_files)
+                routed = cfg.route_agent_for_paths(paths_for_match)
+                if routed:
+                    step.agent_name = routed
+                else:
+                    base = step.agent_name.split("--")[0]
+                    domain = self._DOMAIN_KEYS_BY_AGENT_BASE.get(base)
+                    if domain:
+                        preferred = cfg.default_agents.get(domain)
+                        if preferred:
+                            step.agent_name = preferred
+
+                # Excluded paths — additive.
+                if cfg.excluded_paths:
+                    blocked = list(step.blocked_paths)
+                    seen = set(blocked)
+                    for p in cfg.excluded_paths:
+                        if p not in seen:
+                            blocked.append(p)
+                            seen.add(p)
+                    step.blocked_paths = blocked
+
+                # Isolation — recorded out-of-band so we don't touch the
+                # PlanStep schema.
+                if cfg.default_isolation:
+                    self._isolation_overrides[step.step_id] = cfg.default_isolation
+
+            # Gates — append-as-chain so we don't drop existing gate.
+            if cfg.default_gates:
+                existing_types: set[str] = set()
+                if phase.gate is not None:
+                    existing_types.add(phase.gate.gate_type)
+                for gate_type in cfg.default_gates:
+                    if gate_type in existing_types:
+                        continue
+                    new_gate = PlanGate(
+                        gate_type=gate_type,
+                        command=self._command_for_gate_type(gate_type),
+                        description=f"Project config: enforce {gate_type}",
+                    )
+                    if phase.gate is None:
+                        phase.gate = new_gate
+                    else:
+                        # Concatenate description so the dispatched gate
+                        # text references both checks.  Preserve the
+                        # primary command — multi-command gates are
+                        # outside this PR's scope.
+                        phase.gate.description = (
+                            f"{phase.gate.description}; "
+                            f"plus {gate_type} (project config)"
+                        ).strip("; ")
+                    existing_types.add(gate_type)
+
+    @staticmethod
+    def _command_for_gate_type(gate_type: str) -> str:
+        """Map a gate-type string to a sensible default command."""
+        mapping = {
+            "pytest": "pytest",
+            "test": "pytest",
+            "lint": "ruff check .",
+            "ruff": "ruff check .",
+            "mypy": "mypy .",
+            "build": "python -m build",
+            "format": "ruff format --check .",
+        }
+        return mapping.get(gate_type, "")
 
     def _agent_expertise_level(self, agent_name: str) -> str:
         """Assess agent expertise from definition richness.
