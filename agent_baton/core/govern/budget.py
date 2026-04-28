@@ -432,6 +432,153 @@ class BudgetEnforcer:
         """Return today's total immune sweep spend in USD."""
         return self._immune_daily_spend[_today_str()]
 
+    # ── Predictive computation API (Wave 6.2 Part C, bd-03b0) ─────────────────
+
+    # Default per-project per-day cap for predictive speculation ($2/day).
+    DEFAULT_PREDICT_DAILY_CAP_USD: float = 2.00
+    # Accept-rate window size (rolling) for auto-disable logic.
+    PREDICT_ACCEPT_RATE_WINDOW: int = 50
+    # Auto-disable threshold: disable when rolling accept-rate < this.
+    PREDICT_ACCEPT_RATE_MIN: float = 0.20
+    # Auto-disable duration (hours).
+    PREDICT_AUTO_DISABLE_HOURS: int = 24
+
+    def _ensure_predict_state(self) -> None:
+        """Lazily initialise predict-specific state fields."""
+        if not hasattr(self, "_predict_daily_cap"):
+            self._predict_daily_cap: float = self.DEFAULT_PREDICT_DAILY_CAP_USD
+            self._predict_daily_spend: dict[str, float] = defaultdict(float)
+            self._predict_outcomes: list[bool] = []   # True=accepted False=rejected
+            self._predict_disabled_until: datetime | None = None
+
+    def allow_speculation_predict(self) -> tuple[bool, str]:
+        """Return ``(True, "")`` when predict speculation is within budget.
+
+        Checks the per-project daily cap ($2/day by default) and the
+        auto-disable state triggered by a rolling accept-rate < 20% over
+        the last 50 speculations.
+
+        Returns:
+            ``(allowed, reason)`` — when *allowed* is False, *reason* explains
+            why.  Both ``allow_speculation()`` (Wave 5.3) and this method
+            gate predict dispatches; callers should use this method for
+            Wave 6.2 Part C speculations.
+        """
+        self._ensure_predict_state()
+
+        # Auto-disable check.
+        now = datetime.now(tz=timezone.utc)
+        if self._predict_disabled_until is not None:
+            if now < self._predict_disabled_until:
+                remaining = (self._predict_disabled_until - now).total_seconds()
+                reason = (
+                    f"predict auto-disabled (low accept-rate); "
+                    f"re-enables in {remaining:.0f}s"
+                )
+                return False, reason
+            else:
+                self._predict_disabled_until = None
+
+        # Daily cap check.
+        day = _today_str()
+        spent = self._predict_daily_spend[day]
+        if spent >= self._predict_daily_cap:
+            reason = (
+                f"predict daily cap exhausted "
+                f"(cap={self._predict_daily_cap:.2f} spent={spent:.4f})"
+            )
+            _log.warning("BudgetEnforcer: %s", reason)
+            return False, reason
+
+        return True, ""
+
+    def record_speculation_spend_predict(
+        self,
+        spec_id: str,
+        tokens_in: int,
+        tokens_out: int,
+    ) -> float:
+        """Record predictive speculation spend and check for auto-disable.
+
+        Updates the daily ledger for the ``predict`` subsystem (distinct
+        from the Wave 5.3 speculation ledger).
+
+        Args:
+            spec_id: The speculation ID (for log context).
+            tokens_in: Input tokens consumed.
+            tokens_out: Output tokens produced.
+
+        Returns:
+            The USD cost of this speculation.
+        """
+        self._ensure_predict_state()
+        cost = _cost_usd("haiku", tokens_in, tokens_out)
+        day = _today_str()
+        self._predict_daily_spend[day] += cost
+        _log.debug(
+            "BudgetEnforcer: predict spend spec=%s cost_usd=%.4f "
+            "(day_total=%.4f cap=%.2f)",
+            spec_id, cost, self._predict_daily_spend[day], self._predict_daily_cap,
+        )
+        return cost
+
+    def record_predict_outcome(self, spec_id: str, accepted: bool) -> None:
+        """Record whether a predictive speculation was accepted by the developer.
+
+        Maintains a rolling window of the last ``PREDICT_ACCEPT_RATE_WINDOW``
+        outcomes.  When the accept-rate drops below ``PREDICT_ACCEPT_RATE_MIN``
+        after a full window, predict auto-disables for 24 hours and a
+        BEAD_WARNING is filed.
+
+        Args:
+            spec_id: The speculation ID (for log context).
+            accepted: True when the developer accepted the speculation.
+        """
+        self._ensure_predict_state()
+        self._predict_outcomes.append(accepted)
+        if len(self._predict_outcomes) > self.PREDICT_ACCEPT_RATE_WINDOW:
+            self._predict_outcomes = self._predict_outcomes[
+                -self.PREDICT_ACCEPT_RATE_WINDOW :
+            ]
+
+        # Only check auto-disable when we have a full window.
+        if len(self._predict_outcomes) >= self.PREDICT_ACCEPT_RATE_WINDOW:
+            rate = sum(self._predict_outcomes) / len(self._predict_outcomes)
+            if rate < self.PREDICT_ACCEPT_RATE_MIN and self._predict_disabled_until is None:
+                self._predict_disabled_until = datetime.now(tz=timezone.utc) + timedelta(
+                    hours=self.PREDICT_AUTO_DISABLE_HOURS
+                )
+                msg = (
+                    f"BEAD_WARNING: predict-auto-disabled "
+                    f"accept_rate={rate:.2%} over last "
+                    f"{self.PREDICT_ACCEPT_RATE_WINDOW} speculations "
+                    f"< {self.PREDICT_ACCEPT_RATE_MIN:.0%} minimum. "
+                    f"Disabled until {self._predict_disabled_until.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+                )
+                _log.warning(msg)
+                self._file_bead_warning(spec_id, msg)
+
+        _log.debug(
+            "BudgetEnforcer: predict outcome spec=%s accepted=%s "
+            "(window=%d rate=%.0f%%)",
+            spec_id, accepted,
+            len(self._predict_outcomes),
+            sum(self._predict_outcomes) / len(self._predict_outcomes) * 100
+            if self._predict_outcomes else 0,
+        )
+
+    def predict_daily_spend(self) -> float:
+        """Return today's predictive speculation spend in USD."""
+        self._ensure_predict_state()
+        return self._predict_daily_spend[_today_str()]
+
+    def predict_is_disabled(self) -> bool:
+        """Return True when the predict auto-disable is currently active."""
+        self._ensure_predict_state()
+        if self._predict_disabled_until is None:
+            return False
+        return datetime.now(tz=timezone.utc) < self._predict_disabled_until
+
     # ── Private helpers ───────────────────────────────────────────────────────
 
     def _file_bead_warning(self, step_id: str, content: str) -> None:
