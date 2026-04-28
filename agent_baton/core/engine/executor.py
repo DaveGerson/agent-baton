@@ -5072,16 +5072,7 @@ class ExecutionEngine:
         if kind == DecisionKind.GATE_PENDING:
             phase_obj = state.current_phase_obj
             assert phase_obj is not None and phase_obj.gate is not None
-            return ExecutionAction(
-                action_type=ActionType.GATE,
-                message=(
-                    f"Run gate '{phase_obj.gate.gate_type}' for phase "
-                    f"{phase_obj.phase_id}."
-                ),
-                gate_type=phase_obj.gate.gate_type,
-                gate_command=phase_obj.gate.command,
-                phase_id=phase_obj.phase_id,
-            )
+            return self._build_gate_action(phase_obj)
 
         # ── Status: gate_failed (retry, count below cap) ────────────────────
         if kind == DecisionKind.GATE_FAILED:
@@ -5151,16 +5142,7 @@ class ExecutionEngine:
             phase_obj = state.current_phase_obj
             assert phase_obj is not None and phase_obj.gate is not None
             self._state_handler_for(state.status).handle(state, decision)
-            return ExecutionAction(
-                action_type=ActionType.GATE,
-                message=(
-                    f"Run gate '{phase_obj.gate.gate_type}' for phase "
-                    f"{phase_obj.phase_id}."
-                ),
-                gate_type=phase_obj.gate.gate_type,
-                gate_command=phase_obj.gate.command,
-                phase_id=phase_obj.phase_id,
-            )
+            return self._build_gate_action(phase_obj)
 
         # ── Empty phase: nothing left to do, advance through ────────────────
         if kind == DecisionKind.EMPTY_PHASE_ADVANCE:
@@ -5327,16 +5309,7 @@ class ExecutionEngine:
             phase_obj = state.current_phase_obj
             assert phase_obj is not None and phase_obj.gate is not None
             self._state_handler_for(state.status).handle(state, decision)
-            return ExecutionAction(
-                action_type=ActionType.GATE,
-                message=(
-                    f"Run gate '{phase_obj.gate.gate_type}' for phase "
-                    f"{phase_obj.phase_id}."
-                ),
-                gate_type=phase_obj.gate.gate_type,
-                gate_command=phase_obj.gate.command,
-                phase_id=phase_obj.phase_id,
-            )
+            return self._build_gate_action(phase_obj)
 
         # ── PHASE_ADVANCE_OK: gate passed, walk to next phase ───────────────
         if kind == DecisionKind.PHASE_ADVANCE_OK:
