@@ -1071,6 +1071,313 @@ class IntelligentPlanner:
     # + analyzer dispatches.
     # ------------------------------------------------------------------
 
+    def _step_decompose_subtasks(
+        self,
+        *,
+        task_summary: str,
+        phases: list[dict] | None,
+        agents: list[str] | None,
+        resolved_agents: list[str],
+    ) -> tuple[list[dict] | None, list[str]]:
+        """Step 5c — compound task decomposition.
+
+        Returns ``(subtask_data, resolved_agents)``.  *subtask_data* is
+        ``None`` when no compound decomposition was triggered.  Body is
+        byte-identical to the inline version.
+        """
+        # 5c. Compound task decomposition — detect numbered sub-tasks and
+        # build independent per-subtask agent rosters.  Only activates when
+        # no explicit phases were provided and ≥2 numbered items are found.
+        _subtask_data: list[dict] | None = None
+        if phases is None:
+            subtasks = self._parse_subtasks(task_summary)
+            if len(subtasks) >= 2:
+                _subtask_data = []
+                # bd-701e: when the user passes an explicit --agents override,
+                # honour it for every subtask so compound decomposition does
+                # not silently swap the roster for type-defaulted agents and
+                # produce phases without implementer steps.  Reviewer-class
+                # agents in the override are preserved here; the implement-
+                # phase team-step (_consolidate_team_step) filters them out.
+                _explicit_agents = list(agents) if agents is not None else None
+                for sub_idx, sub_text in subtasks:
+                    st_type = self._infer_task_type(sub_text)
+                    if _explicit_agents is not None:
+                        st_agents = list(_explicit_agents)
+                    else:
+                        st_agents = list(_DEFAULT_AGENTS.get(st_type, ["backend-engineer"]))
+                        st_agents = self._expand_agents_for_concerns(st_agents, sub_text)
+                    _subtask_data.append({
+                        "index": sub_idx,
+                        "text": sub_text,
+                        "task_type": st_type,
+                        "agents": st_agents,
+                    })
+                # Override resolved_agents with the union of all sub-task agents
+                union_agents: list[str] = []
+                for st in _subtask_data:
+                    for a in st["agents"]:
+                        if a not in union_agents:
+                            union_agents.append(a)
+                resolved_agents = union_agents
+        return _subtask_data, resolved_agents
+
+    def _step_expand_concerns(
+        self,
+        *,
+        task_summary: str,
+        inferred_complexity: str,
+        agents: list[str] | None,
+        resolved_agents: list[str],
+        subtask_data: list[dict] | None,
+    ) -> list[str]:
+        """Steps 5d / 5d-cap — cross-concern expansion + complexity cap.
+
+        Returns the (possibly-expanded, possibly-capped) ``resolved_agents``.
+        Body is byte-identical to the inline version.
+        """
+        # 5d. Cross-concern agent expansion — when no compound decomposition
+        # occurred, still expand the roster based on description keywords.
+        if subtask_data is None:
+            resolved_agents = self._expand_agents_for_concerns(
+                resolved_agents, task_summary,
+            )
+
+        # 5d-cap. Enforce complexity-tier agent cap so that cross-concern
+        # expansion (or a generous classifier) cannot produce unbounded
+        # rosters.  The cap matches HaikuClassifier's _MAX_AGENTS_BY_COMPLEXITY.
+        # Only applies to automatically-resolved agents — explicit user-
+        # provided agent lists are not capped.
+        #
+        # bd-076c — when concern-splitting will fire (≥3 concerns parsed
+        # from task_summary), the cap is raised to len(concerns) so each
+        # concern can be routed to a distinct specialist instead of
+        # collapsing to duplicates.  Concern detection is idempotent so
+        # calling _parse_concerns here and again at step 12b-bis is safe.
+        if agents is None:
+            _agent_cap = _MAX_AGENTS_BY_COMPLEXITY.get(inferred_complexity, 5)
+            _early_concerns = self._parse_concerns(task_summary)
+            if _early_concerns and len(_early_concerns) > _agent_cap:
+                _agent_cap = len(_early_concerns)
+                logger.debug(
+                    "Concern-split detected (%d concerns) — raised agent cap "
+                    "to %d to keep one specialist per concern (bd-076c).",
+                    len(_early_concerns),
+                    _agent_cap,
+                )
+            if len(resolved_agents) > _agent_cap:
+                resolved_agents = resolved_agents[:_agent_cap]
+        return resolved_agents
+
+    def _step_route_agents(
+        self,
+        *,
+        resolved_agents: list[str],
+        project_root: Path | None,
+    ) -> tuple[list[str], dict[str, str]]:
+        """Steps 5e / 6 / 6a — pre-routing snapshot + routing + route map.
+
+        Returns ``(routed_agents, agent_route_map)``.  Body is
+        byte-identical to the inline version.
+        """
+        # 5e. Store pre-routing names for compound phase building
+        _pre_routing_agents = list(resolved_agents)
+
+        # 6. Route agents
+        resolved_agents = self._route_agents(resolved_agents, project_root)
+
+        # 6a. Build route map (base name → routed name) for compound phases
+        _agent_route_map = dict(zip(_pre_routing_agents, resolved_agents))
+        logger.debug(
+            "Agent routing complete: %s",
+            _agent_route_map if _agent_route_map else resolved_agents,
+        )
+        return resolved_agents, _agent_route_map
+
+    def _step_apply_pattern(
+        self,
+        *,
+        task_summary: str,
+        inferred_type: str,
+        stack_profile: StackProfile | None,
+        resolved_agents: list[str],
+        agents: list[str] | None,
+        phases: list[dict] | None,
+    ) -> tuple[LearnedPattern | None, list[str], list]:
+        """Steps 4 / 4b — pattern lookup and BeadAnalyzer bead hints.
+
+        Returns ``(pattern, resolved_agents, bead_hints)``.  ``pattern``
+        may be ``None`` and ``resolved_agents`` may be unchanged if no
+        high-confidence pattern was found.  ``self._last_pattern_used``
+        is set as a side effect when a pattern matches.  Body is
+        byte-identical to the inline version.
+        """
+        # 4. Pattern lookup — only if classifier didn't provide agents
+        pattern: LearnedPattern | None = None
+        if not self._last_task_classification and not agents and not phases:
+            try:
+                stack_key = (
+                    f"{stack_profile.language}/{stack_profile.framework}"
+                    if stack_profile and stack_profile.framework
+                    else (stack_profile.language if stack_profile else None)
+                )
+                candidates = self._pattern_learner.get_patterns_for_task(
+                    inferred_type, stack=stack_key
+                )
+                for cand in candidates:
+                    if cand.confidence >= _MIN_PATTERN_CONFIDENCE:
+                        pattern = cand
+                        self._last_pattern_used = pattern
+                        # Override agents from pattern
+                        resolved_agents = list(pattern.recommended_agents)
+                        break
+            except Exception:
+                pass
+
+        # 4b. F7 — BeadAnalyzer: mine historical beads for plan structure hints.
+        # Runs after pattern lookup so it can complement (not override) patterns.
+        # Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
+        _bead_hints: list = []
+        if self._bead_store is not None:
+            try:
+                from agent_baton.core.learn.bead_analyzer import BeadAnalyzer
+                _bead_hints = BeadAnalyzer().analyze(
+                    self._bead_store, task_description=task_summary
+                )
+            except Exception:
+                _bead_hints = []
+        return pattern, resolved_agents, _bead_hints
+
+    def _step_apply_retro(self, resolved_agents: list[str]) -> list[str]:
+        """Step 5b — retrospective feedback application.
+
+        Returns possibly-filtered ``resolved_agents``.
+        ``self._last_retro_feedback`` is set as a side effect.  Body is
+        byte-identical to the inline version.
+        """
+        # 5b. Retrospective feedback — filter dropped agents and record gaps.
+        # This is consulted before routing so the feedback applies to base names.
+        # Violations are soft: dropped agents are removed but the plan is not
+        # blocked; knowledge gaps are noted in shared_context only.
+        retro_feedback: RetrospectiveFeedback | None = None
+        if self._retro_engine is not None:
+            try:
+                retro_feedback = self._retro_engine.load_recent_feedback()
+                self._last_retro_feedback = retro_feedback
+            except Exception:
+                pass
+
+        if retro_feedback is not None and retro_feedback.has_feedback():
+            resolved_agents = self._apply_retro_feedback(resolved_agents, retro_feedback)
+        return resolved_agents
+
+    def _step_classify_task(
+        self,
+        *,
+        task_summary: str,
+        task_type: str | None,
+        complexity: str | None,
+        project_root: Path | None,
+        agents: list[str] | None,
+        phases: list[dict] | None,
+    ) -> tuple[str, str, list[str], list[str] | None]:
+        """Step 3 — task classification (auto path or explicit-override path).
+
+        Returns ``(inferred_type, inferred_complexity, resolved_agents,
+        classified_phases)``.  ``self._last_task_classification`` is set
+        as a side effect on the auto-classify branch.  Body is
+        byte-identical to the inline version.
+        """
+        # 3. Classify — determines task_type, complexity, agents, and phases.
+        # Explicit overrides take precedence over the classifier.
+        # When complexity is explicitly provided, the caller is overriding
+        # classification — use the keyword path so phases are scaled to
+        # match the explicit complexity rather than the classifier's guess.
+        classified_phases: list[str] | None = None
+        if task_type is None and agents is None and phases is None and complexity is None:
+            task_cls = self._task_classifier.classify(
+                task_summary, self._registry, project_root
+            )
+            self._last_task_classification = task_cls
+            inferred_type = task_cls.task_type
+            inferred_complexity = task_cls.complexity
+            resolved_agents = list(task_cls.agents)
+            classified_phases = list(task_cls.phases)
+            logger.debug(
+                "Task classified: type=%s complexity=%s agents=%s phases=%s source=%s",
+                inferred_type,
+                inferred_complexity,
+                resolved_agents,
+                classified_phases,
+                task_cls.source,
+            )
+        else:
+            inferred_type = task_type or self._infer_task_type(task_summary)
+            inferred_complexity = complexity or "medium"
+            classified_phases = None  # let downstream logic handle phases
+            # 5. Agent selection (legacy path for explicit overrides)
+            if agents is None:
+                resolved_agents = list(_DEFAULT_AGENTS.get(inferred_type, []))
+            else:
+                resolved_agents = list(agents)
+                # Warn when an explicit override includes reviewer-class agents
+                # — they may still appear in review/gate phases, but the
+                # implement-phase team-step will filter them out (see
+                # _consolidate_team_step).  Surface this so users aren't
+                # surprised when the auditor doesn't show up as an implementer.
+                _override_reviewers = [
+                    a for a in resolved_agents if is_reviewer_agent(a)
+                ]
+                if _override_reviewers:
+                    logger.warning(
+                        "--agents override includes reviewer-class agent(s) %s; "
+                        "they will be excluded from implement-phase team steps "
+                        "(reviewers belong in review/gate phases only)",
+                        _override_reviewers,
+                    )
+            logger.debug(
+                "Task classification (override path): type=%s complexity=%s agents=%s",
+                inferred_type,
+                inferred_complexity,
+                resolved_agents,
+            )
+        return inferred_type, inferred_complexity, resolved_agents, classified_phases
+
+    def _step_initialize_state(
+        self,
+        *,
+        task_summary: str,
+        project_root: Path | None,
+        phases: list[dict] | None,
+        agents: list[str] | None,
+    ) -> tuple[str, StackProfile | None, list[dict] | None, list[str] | None]:
+        """Steps 1 / 2 / 2b — task id, stack detection, structured parse.
+
+        Returns ``(task_id, stack_profile, phases, agents)``.  *phases*
+        and *agents* are returned because step 2b may overwrite them
+        from the structured-description parse.  Body is byte-identical
+        to the inline version.
+        """
+        # 1. Task ID
+        task_id = self._generate_task_id(task_summary)
+
+        # 2. Detect stack (best effort) — needed before agent resolution
+        stack_profile = None
+        if project_root is not None:
+            try:
+                stack_profile = self._router.detect_stack(project_root)
+            except Exception:
+                pass
+
+        # 2b. Parse structured descriptions — extract phases and agent hints
+        # before falling through to the classifier/keyword path.
+        parsed_phases, parsed_agents = self._parse_structured_description(task_summary)
+        if parsed_phases is not None:
+            phases = parsed_phases
+        if parsed_agents is not None and agents is None:
+            agents = parsed_agents
+        return task_id, stack_profile, phases, agents
+
     def _step_setup_knowledge(self) -> tuple:
         """Step 6.5 — knowledge resolver/ranker construction.
 
@@ -1982,208 +2289,69 @@ class IntelligentPlanner:
         self._last_task_classification = None
         self._last_foresight_insights = []
 
-        # 1. Task ID
-        task_id = self._generate_task_id(task_summary)
-
-        # 2. Detect stack (best effort) — needed before agent resolution
-        stack_profile = None
-        if project_root is not None:
-            try:
-                stack_profile = self._router.detect_stack(project_root)
-            except Exception:
-                pass
-
-        # 2b. Parse structured descriptions — extract phases and agent hints
-        # before falling through to the classifier/keyword path.
-        parsed_phases, parsed_agents = self._parse_structured_description(task_summary)
-        if parsed_phases is not None:
-            phases = parsed_phases
-        if parsed_agents is not None and agents is None:
-            agents = parsed_agents
+        # 1 + 2 + 2b. Task id, stack detection, structured description parsing.
+        # Extracted to ``_step_initialize_state`` (005b 1.4b).
+        task_id, stack_profile, phases, agents = self._step_initialize_state(
+            task_summary=task_summary,
+            project_root=project_root,
+            phases=phases,
+            agents=agents,
+        )
 
         # 3. Classify — determines task_type, complexity, agents, and phases.
-        # Explicit overrides take precedence over the classifier.
-        # When complexity is explicitly provided, the caller is overriding
-        # classification — use the keyword path so phases are scaled to
-        # match the explicit complexity rather than the classifier's guess.
-        classified_phases: list[str] | None = None
-        if task_type is None and agents is None and phases is None and complexity is None:
-            task_cls = self._task_classifier.classify(
-                task_summary, self._registry, project_root
+        # Extracted to ``_step_classify_task`` (005b 1.4b).
+        inferred_type, inferred_complexity, resolved_agents, classified_phases = (
+            self._step_classify_task(
+                task_summary=task_summary,
+                task_type=task_type,
+                complexity=complexity,
+                project_root=project_root,
+                agents=agents,
+                phases=phases,
             )
-            self._last_task_classification = task_cls
-            inferred_type = task_cls.task_type
-            inferred_complexity = task_cls.complexity
-            resolved_agents = list(task_cls.agents)
-            classified_phases = list(task_cls.phases)
-            logger.debug(
-                "Task classified: type=%s complexity=%s agents=%s phases=%s source=%s",
-                inferred_type,
-                inferred_complexity,
-                resolved_agents,
-                classified_phases,
-                task_cls.source,
-            )
-        else:
-            inferred_type = task_type or self._infer_task_type(task_summary)
-            inferred_complexity = complexity or "medium"
-            classified_phases = None  # let downstream logic handle phases
-            # 5. Agent selection (legacy path for explicit overrides)
-            if agents is None:
-                resolved_agents = list(_DEFAULT_AGENTS.get(inferred_type, []))
-            else:
-                resolved_agents = list(agents)
-                # Warn when an explicit override includes reviewer-class agents
-                # — they may still appear in review/gate phases, but the
-                # implement-phase team-step will filter them out (see
-                # _consolidate_team_step).  Surface this so users aren't
-                # surprised when the auditor doesn't show up as an implementer.
-                _override_reviewers = [
-                    a for a in resolved_agents if is_reviewer_agent(a)
-                ]
-                if _override_reviewers:
-                    logger.warning(
-                        "--agents override includes reviewer-class agent(s) %s; "
-                        "they will be excluded from implement-phase team steps "
-                        "(reviewers belong in review/gate phases only)",
-                        _override_reviewers,
-                    )
-            logger.debug(
-                "Task classification (override path): type=%s complexity=%s agents=%s",
-                inferred_type,
-                inferred_complexity,
-                resolved_agents,
-            )
+        )
 
-        # 4. Pattern lookup — only if classifier didn't provide agents
-        pattern: LearnedPattern | None = None
-        if not self._last_task_classification and not agents and not phases:
-            try:
-                stack_key = (
-                    f"{stack_profile.language}/{stack_profile.framework}"
-                    if stack_profile and stack_profile.framework
-                    else (stack_profile.language if stack_profile else None)
-                )
-                candidates = self._pattern_learner.get_patterns_for_task(
-                    inferred_type, stack=stack_key
-                )
-                for cand in candidates:
-                    if cand.confidence >= _MIN_PATTERN_CONFIDENCE:
-                        pattern = cand
-                        self._last_pattern_used = pattern
-                        # Override agents from pattern
-                        resolved_agents = list(pattern.recommended_agents)
-                        break
-            except Exception:
-                pass
+        # 4 + 4b. Pattern lookup + BeadAnalyzer bead hints.  Extracted to
+        # ``_step_apply_pattern`` (005b 1.4b).  Returns the matched
+        # pattern (or None), the (possibly overridden) resolved_agents,
+        # and the bead hints for later application at step 12d.
+        pattern, resolved_agents, _bead_hints = self._step_apply_pattern(
+            task_summary=task_summary,
+            inferred_type=inferred_type,
+            stack_profile=stack_profile,
+            resolved_agents=resolved_agents,
+            agents=agents,
+            phases=phases,
+        )
 
-        # 4b. F7 — BeadAnalyzer: mine historical beads for plan structure hints.
-        # Runs after pattern lookup so it can complement (not override) patterns.
-        # Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
-        _bead_hints: list = []
-        if self._bead_store is not None:
-            try:
-                from agent_baton.core.learn.bead_analyzer import BeadAnalyzer
-                _bead_hints = BeadAnalyzer().analyze(
-                    self._bead_store, task_description=task_summary
-                )
-            except Exception:
-                _bead_hints = []
+        # 5b. Retrospective feedback — extracted to ``_step_apply_retro``
+        # (005b 1.4b).
+        resolved_agents = self._step_apply_retro(resolved_agents)
 
-        # 5b. Retrospective feedback — filter dropped agents and record gaps.
-        # This is consulted before routing so the feedback applies to base names.
-        # Violations are soft: dropped agents are removed but the plan is not
-        # blocked; knowledge gaps are noted in shared_context only.
-        retro_feedback: RetrospectiveFeedback | None = None
-        if self._retro_engine is not None:
-            try:
-                retro_feedback = self._retro_engine.load_recent_feedback()
-                self._last_retro_feedback = retro_feedback
-            except Exception:
-                pass
+        # 5c. Compound task decomposition — extracted to
+        # ``_step_decompose_subtasks`` (005b 1.4b).
+        _subtask_data, resolved_agents = self._step_decompose_subtasks(
+            task_summary=task_summary,
+            phases=phases,
+            agents=agents,
+            resolved_agents=resolved_agents,
+        )
 
-        if retro_feedback is not None and retro_feedback.has_feedback():
-            resolved_agents = self._apply_retro_feedback(resolved_agents, retro_feedback)
+        # 5d + 5d-cap. Cross-concern expansion + complexity-tier agent cap.
+        # Extracted to ``_step_expand_concerns`` (005b 1.4b).
+        resolved_agents = self._step_expand_concerns(
+            task_summary=task_summary,
+            inferred_complexity=inferred_complexity,
+            agents=agents,
+            resolved_agents=resolved_agents,
+            subtask_data=_subtask_data,
+        )
 
-        # 5c. Compound task decomposition — detect numbered sub-tasks and
-        # build independent per-subtask agent rosters.  Only activates when
-        # no explicit phases were provided and ≥2 numbered items are found.
-        _subtask_data: list[dict] | None = None
-        if phases is None:
-            subtasks = self._parse_subtasks(task_summary)
-            if len(subtasks) >= 2:
-                _subtask_data = []
-                # bd-701e: when the user passes an explicit --agents override,
-                # honour it for every subtask so compound decomposition does
-                # not silently swap the roster for type-defaulted agents and
-                # produce phases without implementer steps.  Reviewer-class
-                # agents in the override are preserved here; the implement-
-                # phase team-step (_consolidate_team_step) filters them out.
-                _explicit_agents = list(agents) if agents is not None else None
-                for sub_idx, sub_text in subtasks:
-                    st_type = self._infer_task_type(sub_text)
-                    if _explicit_agents is not None:
-                        st_agents = list(_explicit_agents)
-                    else:
-                        st_agents = list(_DEFAULT_AGENTS.get(st_type, ["backend-engineer"]))
-                        st_agents = self._expand_agents_for_concerns(st_agents, sub_text)
-                    _subtask_data.append({
-                        "index": sub_idx,
-                        "text": sub_text,
-                        "task_type": st_type,
-                        "agents": st_agents,
-                    })
-                # Override resolved_agents with the union of all sub-task agents
-                union_agents: list[str] = []
-                for st in _subtask_data:
-                    for a in st["agents"]:
-                        if a not in union_agents:
-                            union_agents.append(a)
-                resolved_agents = union_agents
-
-        # 5d. Cross-concern agent expansion — when no compound decomposition
-        # occurred, still expand the roster based on description keywords.
-        if _subtask_data is None:
-            resolved_agents = self._expand_agents_for_concerns(
-                resolved_agents, task_summary,
-            )
-
-        # 5d-cap. Enforce complexity-tier agent cap so that cross-concern
-        # expansion (or a generous classifier) cannot produce unbounded
-        # rosters.  The cap matches HaikuClassifier's _MAX_AGENTS_BY_COMPLEXITY.
-        # Only applies to automatically-resolved agents — explicit user-
-        # provided agent lists are not capped.
-        #
-        # bd-076c — when concern-splitting will fire (≥3 concerns parsed
-        # from task_summary), the cap is raised to len(concerns) so each
-        # concern can be routed to a distinct specialist instead of
-        # collapsing to duplicates.  Concern detection is idempotent so
-        # calling _parse_concerns here and again at step 12b-bis is safe.
-        if agents is None:
-            _agent_cap = _MAX_AGENTS_BY_COMPLEXITY.get(inferred_complexity, 5)
-            _early_concerns = self._parse_concerns(task_summary)
-            if _early_concerns and len(_early_concerns) > _agent_cap:
-                _agent_cap = len(_early_concerns)
-                logger.debug(
-                    "Concern-split detected (%d concerns) — raised agent cap "
-                    "to %d to keep one specialist per concern (bd-076c).",
-                    len(_early_concerns),
-                    _agent_cap,
-                )
-            if len(resolved_agents) > _agent_cap:
-                resolved_agents = resolved_agents[:_agent_cap]
-
-        # 5e. Store pre-routing names for compound phase building
-        _pre_routing_agents = list(resolved_agents)
-
-        # 6. Route agents
-        resolved_agents = self._route_agents(resolved_agents, project_root)
-
-        # 6a. Build route map (base name → routed name) for compound phases
-        _agent_route_map = dict(zip(_pre_routing_agents, resolved_agents))
-        logger.debug(
-            "Agent routing complete: %s",
-            _agent_route_map if _agent_route_map else resolved_agents,
+        # 5e + 6 + 6a. Pre-routing snapshot, agent routing, route map.
+        # Extracted to ``_step_route_agents`` (005b 1.4b).
+        resolved_agents, _agent_route_map = self._step_route_agents(
+            resolved_agents=resolved_agents,
+            project_root=project_root,
         )
 
         # 6.5. Resolve knowledge attachments per step (KnowledgeRegistry if available).
