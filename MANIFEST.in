@@ -1,0 +1,23 @@
+# Include distributable runtime artifacts
+recursive-include agents *.md
+recursive-include references *.md
+recursive-include templates *
+include scripts/install.sh
+include scripts/install.ps1
+include scripts/sync_bundled_agents.sh
+include LICENSE
+include README.md
+include QUICKSTART.md
+
+# Exclude dev-only and internal paths
+prune tests
+prune docs
+prune audit-reports
+prune proposals
+prune reference_files
+prune pmo-ui/src
+prune pmo-ui/node_modules
+prune .claude
+prune .planning
+prune .github
+global-exclude .gitignore .gitattributes docker-compose.yml Dockerfile Makefile tsconfig.json
