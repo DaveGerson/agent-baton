@@ -450,26 +450,15 @@ class BeadStore:
         if not bead.signed_by or not bead.signature:
             return
         try:
-            registry = self._soul_router._registry
-            soul = registry.get(bead.signed_by)
-            if soul is None:
-                _log.warning(
-                    "BEAD_WARNING: signature-invalid bead_id=%s reason=soul-not-found signed_by=%s",
-                    bead.bead_id, bead.signed_by,
-                )
-                return
-            # Revoked souls → all their beads are treated as signature-invalid.
-            if soul.is_revoked:
-                _log.warning(
-                    "BEAD_WARNING: signature-invalid bead_id=%s reason=soul-revoked signed_by=%s",
-                    bead.bead_id, bead.signed_by,
-                )
-                return
             # Reconstruct canonical body (same logic as _sign_bead).
             body = bead.to_dict()
             body.pop("signature", None)
             canonical = json.dumps(body, sort_keys=True, ensure_ascii=False).encode()
-            if not soul.verify(canonical, bead.signature):
+            # Route through SoulRouter.verify_signature so that the revocation
+            # guard is enforced unconditionally (bd-1ca2).  The router handles
+            # soul-not-found, is_revoked, and the cryptographic check, emitting
+            # its own structured BEAD_WARNING log lines for each failure mode.
+            if not self._soul_router.verify_signature(bead.signed_by, canonical, bead.signature):
                 _log.warning(
                     "BEAD_WARNING: signature-invalid bead_id=%s signed_by=%s",
                     bead.bead_id, bead.signed_by,
