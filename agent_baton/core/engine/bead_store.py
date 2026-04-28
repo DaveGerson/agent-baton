@@ -45,14 +45,25 @@ class BeadStore:
 
     Args:
         db_path: Absolute path to the project's ``baton.db``.
+        soul_router: Optional :class:`~agent_baton.core.engine.soul_router.SoulRouter`
+            for signing writes and verifying reads.  When ``None``, signing is
+            completely skipped (backward-compatible behaviour, default when
+            ``BATON_SOULS_ENABLED`` is not set).
     """
 
-    def __init__(self, db_path: Path) -> None:
+    def __init__(
+        self,
+        db_path: Path,
+        soul_router=None,  # SoulRouter | None
+    ) -> None:
         from agent_baton.core.storage.connection import ConnectionManager
         from agent_baton.core.storage.schema import PROJECT_SCHEMA_DDL, SCHEMA_VERSION
 
         self._conn_mgr = ConnectionManager(db_path)
         self._conn_mgr.configure_schema(PROJECT_SCHEMA_DDL, SCHEMA_VERSION)
+        # Wave 6.1 Part B (bd-d975): optional SoulRouter for signing.
+        # None → signing disabled (BATON_SOULS_ENABLED=0, the default).
+        self._soul_router = soul_router
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -75,11 +86,49 @@ class BeadStore:
     # Public API
     # ------------------------------------------------------------------
 
+    def _sign_bead(self, bead: "Bead") -> "Bead":  # noqa: F821
+        """Resolve the current soul and sign *bead* in-place if souls are enabled.
+
+        Mutates ``bead.signed_by`` and ``bead.signature`` when a soul is
+        available.  Returns the (possibly mutated) bead for fluent use.
+
+        This is a no-op when ``_soul_router`` is ``None`` (BATON_SOULS_ENABLED=0).
+        """
+        if self._soul_router is None:
+            return bead
+        try:
+            from pathlib import Path as _Path
+            affected = [_Path(f) for f in (bead.affected_files or [])]
+            soul = self._soul_router.current_soul(bead.agent_name, affected)
+            if soul is None:
+                return bead
+            bead.signed_by = soul.soul_id
+            # Canonical body = to_dict() without the signature field itself.
+            body = bead.to_dict()
+            body.pop("signature", None)
+            canonical = json.dumps(body, sort_keys=True, ensure_ascii=False).encode()
+            try:
+                bead.signature = soul.sign(canonical)
+            except RuntimeError:
+                # Private key unavailable on this machine — record soul identity
+                # but omit the signature.
+                bead.signature = ""
+                _log.debug(
+                    "BEAD_WARNING: soul-delegated bead_id=%s soul_id=%s — privkey unavailable",
+                    bead.bead_id, soul.soul_id,
+                )
+        except Exception as exc:
+            _log.debug("BeadStore._sign_bead failed (non-fatal): %s", exc)
+        return bead
+
     def write(self, bead: "Bead") -> str:  # noqa: F821
         """Persist *bead* and its normalised ``bead_tags`` rows.
 
         Both writes occur in a single transaction.  If the bead already
         exists (same ``bead_id``) the row is replaced.
+
+        When a :class:`~agent_baton.core.engine.soul_router.SoulRouter` is
+        wired (``BATON_SOULS_ENABLED=1``), the bead is signed before writing.
 
         Args:
             bead: The :class:`~agent_baton.models.bead.Bead` to persist.
@@ -91,12 +140,16 @@ class BeadStore:
         if not self._table_exists():
             _log.debug("BeadStore.write: beads table not found — skipping")
             return ""
+        # Wave 6.1 Part B: sign the bead when souls are enabled.
+        bead = self._sign_bead(bead)
         try:
             conn = self._conn()
             # Use a column list that gracefully degrades on schema v4 databases
             # (which lack quality_score/retrieval_count).  We attempt the full
-            # v5 INSERT first; if it fails due to missing columns we fall back
-            # to the v4 insert.
+            # v31 INSERT first; if it fails due to missing columns (older schema)
+            # we fall back through v5, then v4.
+            signed_by = getattr(bead, "signed_by", "")
+            signature = getattr(bead, "signature", "")
             try:
                 conn.execute(
                     """
@@ -104,12 +157,13 @@ class BeadStore:
                         bead_id, task_id, step_id, agent_name, bead_type,
                         content, confidence, scope, tags, affected_files,
                         status, created_at, closed_at, summary, links,
-                        source, token_estimate, quality_score, retrieval_count
+                        source, token_estimate, quality_score, retrieval_count,
+                        signed_by, signature
                     ) VALUES (
                         ?, ?, ?, ?, ?,
                         ?, ?, ?, ?, ?,
                         ?, ?, ?, ?, ?,
-                        ?, ?, ?, ?
+                        ?, ?, ?, ?, ?, ?
                     )
                     """,
                     (
@@ -132,44 +186,85 @@ class BeadStore:
                         bead.token_estimate,
                         getattr(bead, "quality_score", 0.0),
                         getattr(bead, "retrieval_count", 0),
+                        signed_by,
+                        signature,
                     ),
                 )
             except Exception:
-                # Fall back to v4-compatible insert (no quality/retrieval cols).
-                conn.execute(
-                    """
-                    INSERT OR REPLACE INTO beads (
-                        bead_id, task_id, step_id, agent_name, bead_type,
-                        content, confidence, scope, tags, affected_files,
-                        status, created_at, closed_at, summary, links,
-                        source, token_estimate
-                    ) VALUES (
-                        ?, ?, ?, ?, ?,
-                        ?, ?, ?, ?, ?,
-                        ?, ?, ?, ?, ?,
-                        ?, ?
+                try:
+                    # Fall back to v5-compatible insert (no signed_by/signature cols).
+                    conn.execute(
+                        """
+                        INSERT OR REPLACE INTO beads (
+                            bead_id, task_id, step_id, agent_name, bead_type,
+                            content, confidence, scope, tags, affected_files,
+                            status, created_at, closed_at, summary, links,
+                            source, token_estimate, quality_score, retrieval_count
+                        ) VALUES (
+                            ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?
+                        )
+                        """,
+                        (
+                            bead.bead_id,
+                            bead.task_id or None,
+                            bead.step_id,
+                            bead.agent_name,
+                            bead.bead_type,
+                            bead.content,
+                            bead.confidence,
+                            bead.scope,
+                            json.dumps(bead.tags),
+                            json.dumps(bead.affected_files),
+                            bead.status,
+                            bead.created_at or _utcnow(),
+                            bead.closed_at,
+                            bead.summary,
+                            json.dumps([lnk.to_dict() for lnk in bead.links]),
+                            bead.source,
+                            bead.token_estimate,
+                            getattr(bead, "quality_score", 0.0),
+                            getattr(bead, "retrieval_count", 0),
+                        ),
                     )
-                    """,
-                    (
-                        bead.bead_id,
-                        bead.task_id or None,  # empty string → NULL (project-scoped bead)
-                        bead.step_id,
-                        bead.agent_name,
-                        bead.bead_type,
-                        bead.content,
-                        bead.confidence,
-                        bead.scope,
-                        json.dumps(bead.tags),
-                        json.dumps(bead.affected_files),
-                        bead.status,
-                        bead.created_at or _utcnow(),
-                        bead.closed_at,
-                        bead.summary,
-                        json.dumps([lnk.to_dict() for lnk in bead.links]),
-                        bead.source,
-                        bead.token_estimate,
-                    ),
-                )
+                except Exception:
+                    # Final fallback: v4-compatible insert (no quality/retrieval cols).
+                    conn.execute(
+                        """
+                        INSERT OR REPLACE INTO beads (
+                            bead_id, task_id, step_id, agent_name, bead_type,
+                            content, confidence, scope, tags, affected_files,
+                            status, created_at, closed_at, summary, links,
+                            source, token_estimate
+                        ) VALUES (
+                            ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?, ?,
+                            ?, ?
+                        )
+                        """,
+                        (
+                            bead.bead_id,
+                            bead.task_id or None,
+                            bead.step_id,
+                            bead.agent_name,
+                            bead.bead_type,
+                            bead.content,
+                            bead.confidence,
+                            bead.scope,
+                            json.dumps(bead.tags),
+                            json.dumps(bead.affected_files),
+                            bead.status,
+                            bead.created_at or _utcnow(),
+                            bead.closed_at,
+                            bead.summary,
+                            json.dumps([lnk.to_dict() for lnk in bead.links]),
+                            bead.source,
+                            bead.token_estimate,
+                        ),
+                    )
             # Normalised tag rows — delete existing tags for this bead first
             # so that a replace operation does not leave stale tags.
             conn.execute("DELETE FROM bead_tags WHERE bead_id = ?", (bead.bead_id,))
@@ -187,6 +282,11 @@ class BeadStore:
     def read(self, bead_id: str) -> "Bead | None":  # noqa: F821
         """Fetch a single bead by ID.
 
+        When a :class:`~agent_baton.core.engine.soul_router.SoulRouter` is
+        wired, the bead's signature is verified on load.  A mismatch emits
+        ``BEAD_WARNING: signature-invalid`` but the bead is still returned
+        (degrade, don't fail).
+
         Args:
             bead_id: The ``bead_id`` to look up.
 
@@ -202,10 +302,57 @@ class BeadStore:
             ).fetchone()
             if row is None:
                 return None
-            return self._row_to_bead(row)
+            bead = self._row_to_bead(row)
+            # Wave 6.1 Part B: verify signature when souls are wired.
+            self._verify_bead_signature(bead)
+            return bead
         except Exception as exc:
             _log.warning("BeadStore.read failed for %s: %s", bead_id, exc)
             return None
+
+    def _verify_bead_signature(self, bead: "Bead") -> None:  # noqa: F821
+        """Verify the ed25519 signature on *bead* if present.
+
+        Emits ``BEAD_WARNING: signature-invalid`` on mismatch.  Bead is NOT
+        modified — the caller receives the original record regardless.
+
+        No-op when:
+        - ``_soul_router`` is ``None`` (souls disabled).
+        - ``bead.signed_by == ""`` (unsigned bead — legacy or pre-souls).
+        - ``bead.signature == ""`` (soul identity recorded but key was
+          unavailable at write time).
+        """
+        if self._soul_router is None:
+            return
+        if not bead.signed_by or not bead.signature:
+            return
+        try:
+            registry = self._soul_router._registry
+            soul = registry.get(bead.signed_by)
+            if soul is None:
+                _log.warning(
+                    "BEAD_WARNING: signature-invalid bead_id=%s reason=soul-not-found signed_by=%s",
+                    bead.bead_id, bead.signed_by,
+                )
+                return
+            # Revoked souls → all their beads are treated as signature-invalid.
+            if soul.is_revoked:
+                _log.warning(
+                    "BEAD_WARNING: signature-invalid bead_id=%s reason=soul-revoked signed_by=%s",
+                    bead.bead_id, bead.signed_by,
+                )
+                return
+            # Reconstruct canonical body (same logic as _sign_bead).
+            body = bead.to_dict()
+            body.pop("signature", None)
+            canonical = json.dumps(body, sort_keys=True, ensure_ascii=False).encode()
+            if not soul.verify(canonical, bead.signature):
+                _log.warning(
+                    "BEAD_WARNING: signature-invalid bead_id=%s signed_by=%s",
+                    bead.bead_id, bead.signed_by,
+                )
+        except Exception as exc:
+            _log.debug("BeadStore._verify_bead_signature error: %s", exc)
 
     def query(
         self,
@@ -599,6 +746,17 @@ class BeadStore:
         except (IndexError, KeyError, TypeError):
             retrieval_count = 0
 
+        # signed_by and signature were added in schema v31 — use dict-style
+        # access with a fallback so older databases degrade gracefully.
+        try:
+            signed_by = row["signed_by"] or ""
+        except (IndexError, KeyError, TypeError):
+            signed_by = ""
+        try:
+            signature = row["signature"] or ""
+        except (IndexError, KeyError, TypeError):
+            signature = ""
+
         return Bead(
             bead_id=row["bead_id"],
             task_id=row["task_id"] or "",  # NULL in DB → empty string in model (project-scoped)
@@ -619,4 +777,6 @@ class BeadStore:
             token_estimate=int(row["token_estimate"] or 0),
             quality_score=quality_score,
             retrieval_count=retrieval_count,
+            signed_by=signed_by,
+            signature=signature,
         )
