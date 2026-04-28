@@ -16,6 +16,7 @@ from agent_baton.core.engine._executor_helpers import (
     feedback_resolved_for_phase,
     find_step,
     gate_passed_for_phase,
+    is_phase_complete,
 )
 from agent_baton.models.execution import (
     ApprovalResult,
@@ -26,6 +27,7 @@ from agent_baton.models.execution import (
     MachinePlan,
     PlanPhase,
     PlanStep,
+    StepResult,
 )
 
 
@@ -56,6 +58,10 @@ def _make_step(step_id: str, *, timeout_seconds: int = 0) -> PlanStep:
 
 def _make_state(plan: MachinePlan, **kwargs) -> ExecutionState:
     return ExecutionState(task_id="t-test", plan=plan, **kwargs)
+
+
+def _step_result(step_id: str, status: str) -> StepResult:
+    return StepResult(step_id=step_id, agent_name="backend-engineer", status=status)
 
 
 # ---------------------------------------------------------------------------
@@ -331,3 +337,97 @@ class TestFeedbackResolvedForPhase:
             feedback_results=[_fr(2, "q1")],  # wrong phase_id
         )
         assert feedback_resolved_for_phase(state, 1) is False
+class TestIsPhaseComplete:
+    def test_all_steps_complete(self):
+        step_a = _make_step("1.1")
+        step_b = _make_step("1.2")
+        phase = _make_phase(1, step_a, step_b)
+        state = _make_state(
+            _make_plan(phase),
+            step_results=[
+                _step_result("1.1", "complete"),
+                _step_result("1.2", "complete"),
+            ],
+        )
+        assert is_phase_complete(state, 1) is True
+
+    def test_one_step_still_dispatched(self):
+        step_a = _make_step("1.1")
+        step_b = _make_step("1.2")
+        phase = _make_phase(1, step_a, step_b)
+        state = _make_state(
+            _make_plan(phase),
+            step_results=[
+                _step_result("1.1", "complete"),
+                _step_result("1.2", "dispatched"),  # in-flight
+            ],
+        )
+        assert is_phase_complete(state, 1) is False
+
+    def test_step_interacting_not_terminal(self):
+        step = _make_step("1.1")
+        phase = _make_phase(1, step)
+        state = _make_state(
+            _make_plan(phase),
+            step_results=[_step_result("1.1", "interacting")],
+        )
+        assert is_phase_complete(state, 1) is False
+
+    def test_step_interact_dispatched_not_terminal(self):
+        step = _make_step("1.1")
+        phase = _make_phase(1, step)
+        state = _make_state(
+            _make_plan(phase),
+            step_results=[_step_result("1.1", "interact_dispatched")],
+        )
+        assert is_phase_complete(state, 1) is False
+
+    def test_failed_steps_are_terminal(self):
+        step = _make_step("1.1")
+        phase = _make_phase(1, step)
+        state = _make_state(
+            _make_plan(phase),
+            step_results=[_step_result("1.1", "failed")],
+        )
+        assert is_phase_complete(state, 1) is True
+
+    def test_interrupted_steps_are_terminal(self):
+        step = _make_step("1.1")
+        phase = _make_phase(1, step)
+        state = _make_state(
+            _make_plan(phase),
+            step_results=[_step_result("1.1", "interrupted")],
+        )
+        assert is_phase_complete(state, 1) is True
+
+    def test_mixed_terminal_statuses_all_done(self):
+        step_a = _make_step("1.1")
+        step_b = _make_step("1.2")
+        step_c = _make_step("1.3")
+        phase = _make_phase(1, step_a, step_b, step_c)
+        state = _make_state(
+            _make_plan(phase),
+            step_results=[
+                _step_result("1.1", "complete"),
+                _step_result("1.2", "failed"),
+                _step_result("1.3", "interrupted"),
+            ],
+        )
+        assert is_phase_complete(state, 1) is True
+
+    def test_missing_phase_id_returns_false(self):
+        state = _make_state(_make_plan())
+        assert is_phase_complete(state, 99) is False
+
+    def test_empty_phase_vacuously_complete(self):
+        # A phase with no steps is trivially complete (all([]) is True).
+        phase = _make_phase(1)  # no steps
+        state = _make_state(_make_plan(phase))
+        assert is_phase_complete(state, 1) is True
+
+    def test_no_results_recorded_yet(self):
+        step = _make_step("1.1")
+        phase = _make_phase(1, step)
+        state = _make_state(_make_plan(phase))
+        # No step_results → step_id not in any terminal set
+        assert is_phase_complete(state, 1) is False
