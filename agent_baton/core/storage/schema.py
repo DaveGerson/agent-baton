@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 29
+SCHEMA_VERSION = 30
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -1044,6 +1044,26 @@ CREATE INDEX IF NOT EXISTS idx_handoff_beads_task ON handoff_beads(task_id);
 CREATE INDEX IF NOT EXISTS idx_handoff_beads_from ON handoff_beads(from_step_id);
 CREATE INDEX IF NOT EXISTS idx_handoff_beads_to   ON handoff_beads(to_step_id);
 """,
+    30: """
+-- v30: add debates table for D4 — Multi-Agent Debate (Tier-4 research feature).
+--
+-- Persists structured multi-agent debates run via ``baton debate``.  Each
+-- row captures the question, full transcript (JSON-encoded list of
+-- DebateTurn dicts), the moderator-synthesized recommendation, and a
+-- JSON-encoded list of unresolved disagreements.
+--
+-- NOTE: FK constraints intentionally omitted — debates are independent
+-- of the executions table and may be invoked outside of any task.
+CREATE TABLE IF NOT EXISTS debates (
+    debate_id        TEXT PRIMARY KEY,
+    question         TEXT NOT NULL DEFAULT '',
+    transcript_json  TEXT NOT NULL DEFAULT '[]',
+    recommendation   TEXT NOT NULL DEFAULT '',
+    unresolved_json  TEXT NOT NULL DEFAULT '[]',
+    created_at       TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_debates_created ON debates(created_at);
+""",
 }
 
 # =====================================================================
@@ -1695,6 +1715,23 @@ CREATE TABLE IF NOT EXISTS handoff_beads (
 CREATE INDEX IF NOT EXISTS idx_handoff_beads_task ON handoff_beads(task_id);
 CREATE INDEX IF NOT EXISTS idx_handoff_beads_from ON handoff_beads(from_step_id);
 CREATE INDEX IF NOT EXISTS idx_handoff_beads_to   ON handoff_beads(to_step_id);
+
+-- DEBATES (v30: D4 Multi-Agent Debate — Tier-4 research feature)
+-- Persists structured multi-agent debates run via ``baton debate``.
+-- Each row captures the question, full transcript (JSON-encoded list of
+-- DebateTurn dicts: {agent_name, round_number, content, timestamp}),
+-- the moderator-synthesized recommendation, and a JSON list of
+-- unresolved disagreements.  Independent of the executions table —
+-- debates may be invoked outside any task.
+CREATE TABLE IF NOT EXISTS debates (
+    debate_id        TEXT PRIMARY KEY,
+    question         TEXT NOT NULL DEFAULT '',
+    transcript_json  TEXT NOT NULL DEFAULT '[]',
+    recommendation   TEXT NOT NULL DEFAULT '',
+    unresolved_json  TEXT NOT NULL DEFAULT '[]',
+    created_at       TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_debates_created ON debates(created_at);
 
 -- INTERACTION_TURNS (A4: persist multi-turn INTERACT exchanges)
 -- Each row is one turn in a multi-turn agent interaction step.
