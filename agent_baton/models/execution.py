@@ -308,6 +308,7 @@ class PlanStep:
                                     # consulting, task, automation
     command: str = ""               # shell command for automation steps
     expected_outcome: str = ""      # Wave 3.1: 1-sentence demo statement (behavioral)
+    timeout_seconds: int = 0        # 0 = no timeout (backward-compat default)
 
     def to_dict(self) -> dict:
         d = {
@@ -337,6 +338,8 @@ class PlanStep:
             d["command"] = self.command
         if self.expected_outcome:
             d["expected_outcome"] = self.expected_outcome
+        if self.timeout_seconds:
+            d["timeout_seconds"] = self.timeout_seconds
         return d
 
     @classmethod
@@ -361,6 +364,7 @@ class PlanStep:
             step_type=data.get("step_type", "developing"),
             command=data.get("command", ""),
             expected_outcome=data.get("expected_outcome", ""),
+            timeout_seconds=data.get("timeout_seconds", 0),
         )
 
 
