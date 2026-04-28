@@ -301,9 +301,9 @@ and surfaces anomalies. The learning pipeline includes:
   in agent behavior
 - **Experiments** -- `baton experiment` manages controlled trials to
   validate improvement recommendations
-- **Full-cycle improvement** -- `baton improve --run` executes the complete
-  loop: detect anomalies, generate recommendations, auto-apply safe
-  changes, escalate risky ones, start experiments
+- **Full-cycle improvement** -- `baton learn improve --run` executes the
+  complete loop: detect anomalies, generate recommendations, auto-apply
+  safe changes, escalate risky ones, start experiments
 
 ### Learning Automation
 
@@ -521,7 +521,7 @@ The `baton` CLI provides 50+ commands organized into ten groups:
 | `baton context current/briefing/gaps` | Situational awareness for agents |
 | `baton query <subcommand>` | SQL queries against this project's baton.db |
 | `baton cleanup` | Archive old execution artifacts |
-| `baton migrate-storage` | Migrate JSON flat files to SQLite |
+| `baton sync --migrate-storage` | Migrate JSON flat files to SQLite |
 
 </details>
 
@@ -552,7 +552,7 @@ The `baton` CLI provides 50+ commands organized into ten groups:
 | `baton changelog` | Agent changelog and backup management |
 | `baton anomalies [--watch]` | Detect system anomalies |
 | `baton experiment list/show/conclude/rollback` | Manage improvement experiments |
-| `baton improve --run/--force/--report` | Run the full improvement loop |
+| `baton learn improve --run/--force/--report` | Run the full improvement loop |
 | `baton learn status` | Dashboard of open learning issues |
 | `baton learn issues` | List issues with filters (`--type`, `--severity`, `--status`) |
 | `baton learn analyze` | Detect patterns across issues, propose fixes |
@@ -573,7 +573,7 @@ The `baton` CLI provides 50+ commands organized into ten groups:
 | `baton package` | Create or install package archives |
 | `baton publish` | Publish to a local registry |
 | `baton pull` | Pull from a registry |
-| `baton verify-package` | Verify a package archive |
+| `baton sync --verify ARCHIVE` | Verify a package archive |
 | `baton transfer` | Transfer between projects |
 
 </details>
@@ -628,6 +628,20 @@ The `baton` CLI provides 50+ commands organized into ten groups:
 | `baton pmo add` | Register a project with the PMO |
 | `baton pmo health` | Program health bar summary |
 | `baton serve` | Start the HTTP API server (API only) |
+
+</details>
+
+<details>
+<summary><strong>Deprecated aliases (still work, removal in a future release)</strong></summary>
+
+These top-level commands still execute but print a deprecation warning to
+stderr on every invocation. Update scripts to use the new paths.
+
+| Old command | New canonical path | Bead |
+|-------------|-------------------|------|
+| `baton migrate-storage` | `baton sync --migrate-storage` | bd-8eef |
+| `baton verify-package ARCHIVE` | `baton sync --verify ARCHIVE` | bd-7eec |
+| `baton improve` | `baton learn improve` | bd-5049 |
 
 </details>
 

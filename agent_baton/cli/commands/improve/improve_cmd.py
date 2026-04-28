@@ -80,7 +80,8 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
 def handler(args: argparse.Namespace) -> None:
     """Deprecated top-level entry point — prints warning then delegates."""
     print(
-        "WARN: 'baton improve' is deprecated, use 'baton learn improve'",
+        "warning: `baton improve` is deprecated; use `baton learn improve` instead."
+        " This alias will be removed in a future release.",
         file=sys.stderr,
     )
     _improve_handler_impl(args)
