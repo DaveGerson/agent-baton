@@ -132,3 +132,27 @@ def feedback_resolved_for_phase(state: ExecutionState, phase_id: int) -> bool:
         if r.phase_id == phase_id
     }
     return question_ids <= answered_ids
+
+
+def is_phase_complete(state: ExecutionState, phase_id: int) -> bool:
+    """Return True when all steps in *phase_id* have a terminal result.
+
+    A step is terminal when its step_id appears in one of the three
+    terminal sets: completed_step_ids, failed_step_ids, or
+    interrupted_step_ids. In-flight statuses (dispatched, interacting,
+    interact_dispatched) do NOT satisfy completion.
+
+    An empty phase (phase.steps == []) trivially returns True because
+    all() over an empty sequence is vacuously true.
+
+    Returns False when the phase_id is not found in the plan.
+    """
+    phase = next((p for p in state.plan.phases if p.phase_id == phase_id), None)
+    if phase is None:
+        return False
+    terminal = (
+        state.completed_step_ids
+        | state.failed_step_ids
+        | state.interrupted_step_ids
+    )
+    return all(s.step_id in terminal for s in phase.steps)
