@@ -12,6 +12,16 @@ Wave 6.2 Part B additions (immune system):
     Immune daily cap:    $5.00  (immune.daily_cap_usd)
     Anomaly window:      60 min — >30% of daily cap in this window → 1 h suspension.
 
+End-user readiness #7 — Run-level token ceiling (BATON_RUN_TOKEN_CEILING):
+    A single run-level kill-switch that caps the total USD spend across all
+    subsystems (self-heal escalations, speculative pipelining, immune sweeps).
+    Set via the ``BATON_RUN_TOKEN_CEILING`` environment variable (USD float).
+    When unset on a HIGH-risk run, a warning is logged at engine start.
+    Raises :class:`RunTokenCeilingExceeded` before any LLM call that would
+    push cumulative spend past the ceiling.
+    The cumulative counter is persisted in ``ExecutionState.run_cumulative_spend_usd``
+    so resumed runs continue counting correctly.
+
 Pricing baseline (April 2026 per design):
     Haiku:   $0.25 / $1.25 per M input/output tokens
     Sonnet:  $3.00 / $15.00 per M input/output tokens
@@ -23,13 +33,50 @@ The NEXT dispatch call is refused and a BEAD_WARNING is filed.
 from __future__ import annotations
 
 import logging
+import os
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 _log = logging.getLogger(__name__)
 
-__all__ = ["BudgetEnforcer"]
+__all__ = ["BudgetEnforcer", "RunTokenCeilingExceeded"]
+
+
+# ---------------------------------------------------------------------------
+# RunTokenCeilingExceeded exception
+# ---------------------------------------------------------------------------
+
+
+class RunTokenCeilingExceeded(Exception):
+    """Raised when a pending LLM call would push cumulative spend past the
+    ``BATON_RUN_TOKEN_CEILING`` for this run.
+
+    Attributes:
+        current_spend_usd: Total USD spent so far in this run.
+        ceiling_usd: The configured ceiling from ``BATON_RUN_TOKEN_CEILING``.
+        estimated_call_usd: Cost of the refused call.
+        intent: Short description of the refused call (e.g. "selfheal haiku-1").
+    """
+
+    def __init__(
+        self,
+        current_spend_usd: float,
+        ceiling_usd: float,
+        estimated_call_usd: float,
+        intent: str,
+    ) -> None:
+        self.current_spend_usd = current_spend_usd
+        self.ceiling_usd = ceiling_usd
+        self.estimated_call_usd = estimated_call_usd
+        self.intent = intent
+        super().__init__(
+            f"BATON_RUN_TOKEN_CEILING exceeded: intent={intent!r} "
+            f"current_spend=${current_spend_usd:.4f} "
+            f"estimated_call=${estimated_call_usd:.4f} "
+            f"ceiling=${ceiling_usd:.4f} "
+            f"(would reach ${current_spend_usd + estimated_call_usd:.4f})"
+        )
 
 # ---------------------------------------------------------------------------
 # Per-tier pricing (USD per 1M tokens)
@@ -64,6 +111,31 @@ def _cost_usd(tier: str, tokens_in: int, tokens_out: int) -> float:
     price_in = _PRICING_INPUT.get(tier_key, _PRICING_INPUT["haiku"])
     price_out = _PRICING_OUTPUT.get(tier_key, _PRICING_OUTPUT["haiku"])
     return tokens_in * price_in + tokens_out * price_out
+
+
+def _read_run_token_ceiling() -> float | None:
+    """Read ``BATON_RUN_TOKEN_CEILING`` from env on every call (never cached).
+
+    Returns:
+        The ceiling as a float (USD), or ``None`` when the env var is unset
+        or empty.  Logs a warning when the value cannot be parsed as a float.
+    """
+    raw = os.environ.get("BATON_RUN_TOKEN_CEILING", "").strip()
+    if not raw:
+        return None
+    try:
+        val = float(raw)
+        if val <= 0:
+            _log.warning(
+                "BATON_RUN_TOKEN_CEILING=%r is not positive — treating as unset", raw
+            )
+            return None
+        return val
+    except ValueError:
+        _log.warning(
+            "BATON_RUN_TOKEN_CEILING=%r cannot be parsed as float — treating as unset", raw
+        )
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +181,7 @@ class BudgetEnforcer:
         immune_daily_cap_usd: float = DEFAULT_IMMUNE_DAILY_CAP_USD,
         bead_warning_fn: Callable[[str, str, str], None] | None = None,
         task_id: str = "",
+        initial_run_spend_usd: float = 0.0,
     ) -> None:
         self._per_step_cap = per_step_cap_usd
         self._per_task_cap = per_task_cap_usd
@@ -130,6 +203,12 @@ class BudgetEnforcer:
         self._immune_burst_window: deque[tuple[datetime, float]] = deque()
         # UTC timestamp at which anomaly suspension ends (None = not suspended)
         self._immune_suspended_until: datetime | None = None
+
+        # ── Run-level ceiling (end-user readiness #7) ─────────────────────────
+        # Cumulative USD spent across ALL subsystems in this run.
+        # Restored from ExecutionState when resuming a crashed run so the
+        # counter is never reset mid-execution.
+        self._run_cumulative_spend_usd: float = initial_run_spend_usd
 
     # ── Self-heal API ─────────────────────────────────────────────────────────
 
@@ -171,11 +250,13 @@ class BudgetEnforcer:
     ) -> float:
         """Record self-heal spend for *step_id* and return the cost.
 
-        Updates both per-step and per-task ledgers.
+        Updates both per-step and per-task ledgers, and the run-level
+        cumulative counter.
         """
         cost = _cost_usd(tier, tokens_in, tokens_out)
         self._selfheal_step_spend[step_id] += cost
         self._selfheal_task_spend += cost
+        self.add_run_spend(cost)
         _log.debug(
             "BudgetEnforcer: self-heal spend step=%s tier=%s tokens_in=%d "
             "tokens_out=%d cost_usd=%.4f (step_total=%.4f task_total=%.4f)",
@@ -217,6 +298,7 @@ class BudgetEnforcer:
         cost = _cost_usd("speculation", tokens_in, tokens_out)
         day = _today_str()
         self._spec_daily_spend[day] += cost
+        self.add_run_spend(cost)
         _log.debug(
             "BudgetEnforcer: speculation spend spec=%s cost_usd=%.4f "
             "(daily_total=%.4f cap=%.2f)",
@@ -373,6 +455,7 @@ class BudgetEnforcer:
         cost = _cost_usd("haiku", tokens_in, tokens_out)
         day = _today_str()
         self._immune_daily_spend[day] += cost
+        self.add_run_spend(cost)
 
         # ── Anomaly burst tracking ─────────────────────────────────────────
         now = datetime.now(tz=timezone.utc)
@@ -578,6 +661,96 @@ class BudgetEnforcer:
         if self._predict_disabled_until is None:
             return False
         return datetime.now(tz=timezone.utc) < self._predict_disabled_until
+
+    # ── Run-level ceiling API (end-user readiness #7) ─────────────────────────
+
+    def check_run_ceiling(
+        self,
+        estimated_call_usd: float,
+        intent: str,
+    ) -> None:
+        """Raise :class:`RunTokenCeilingExceeded` if this call would exceed
+        the run-level ceiling set via ``BATON_RUN_TOKEN_CEILING``.
+
+        The ceiling is re-read from the environment on every call so that
+        operators can adjust it without restarting the daemon.
+
+        This method is a no-op when ``BATON_RUN_TOKEN_CEILING`` is unset.
+
+        Args:
+            estimated_call_usd: Estimated USD cost of the pending LLM call.
+            intent: Human-readable description of the call (for the exception
+                message and logs), e.g. ``"selfheal haiku-1"`` or
+                ``"speculation haiku"``.
+
+        Raises:
+            RunTokenCeilingExceeded: When cumulative spend + estimated cost
+                would exceed the configured ceiling.
+        """
+        ceiling = _read_run_token_ceiling()
+        if ceiling is None:
+            return  # no ceiling configured — unlimited
+
+        projected = self._run_cumulative_spend_usd + estimated_call_usd
+        if projected > ceiling:
+            _log.error(
+                "BudgetEnforcer: run ceiling exceeded — intent=%r "
+                "current_spend=%.4f estimated_call=%.4f ceiling=%.4f",
+                intent,
+                self._run_cumulative_spend_usd,
+                estimated_call_usd,
+                ceiling,
+            )
+            raise RunTokenCeilingExceeded(
+                current_spend_usd=self._run_cumulative_spend_usd,
+                ceiling_usd=ceiling,
+                estimated_call_usd=estimated_call_usd,
+                intent=intent,
+            )
+
+    def add_run_spend(self, cost_usd: float) -> None:
+        """Add *cost_usd* to the run-level cumulative counter.
+
+        Called automatically by the per-subsystem record methods
+        (``record_self_heal_spend``, ``record_speculation_spend``,
+        ``record_immune_spend``).  May also be called directly by callers
+        that track cost outside the standard subsystem methods.
+
+        Args:
+            cost_usd: USD amount to add to the cumulative counter.
+        """
+        self._run_cumulative_spend_usd += cost_usd
+        _log.debug(
+            "BudgetEnforcer: run cumulative spend += %.4f → %.4f",
+            cost_usd,
+            self._run_cumulative_spend_usd,
+        )
+
+    @property
+    def run_cumulative_spend_usd(self) -> float:
+        """Total USD spent in this run across all subsystems."""
+        return self._run_cumulative_spend_usd
+
+    def warn_if_ceiling_unset_for_high_risk(self, risk_level: str) -> None:
+        """Log a warning when ``BATON_RUN_TOKEN_CEILING`` is unset on a HIGH
+        or CRITICAL risk run.
+
+        Called once at engine start.  Uses ``risk_level`` from the plan to
+        determine whether the warning is warranted.
+
+        Args:
+            risk_level: Plan risk level string, e.g. ``"HIGH"`` or
+                ``"CRITICAL"``.
+        """
+        if risk_level.upper() not in ("HIGH", "CRITICAL"):
+            return
+        if _read_run_token_ceiling() is None:
+            _log.warning(
+                "BATON_RUN_TOKEN_CEILING is unset for a %s-risk run. "
+                "Self-heal escalation and immune sweeps have no run-level kill-switch. "
+                "Set BATON_RUN_TOKEN_CEILING=<usd> to cap total spend for this run.",
+                risk_level.upper(),
+            )
 
     # ── Private helpers ───────────────────────────────────────────────────────
 
