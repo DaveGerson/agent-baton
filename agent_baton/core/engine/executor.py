@@ -1401,6 +1401,17 @@ class ExecutionEngine:
             details=f"task_id={plan.task_id} risk={plan.risk_level}",
         ))
 
+        # ── Run-token ceiling warning (bd-3f80) ──────────────────────────────
+        # Warn once at engine start when BATON_RUN_TOKEN_CEILING is unset on a
+        # HIGH/CRITICAL risk run.  Uses a transient BudgetEnforcer so the
+        # warn_if_ceiling_unset_for_high_risk() helper can stay encapsulated.
+        try:
+            from agent_baton.core.govern.budget import BudgetEnforcer as _BE
+            self._budget_enforcer = _BE()
+            self._budget_enforcer.warn_if_ceiling_unset_for_high_risk(plan.risk_level)
+        except Exception as _be_warn_exc:  # pragma: no cover
+            _log.debug("BudgetEnforcer ceiling-warning skipped (non-fatal): %s", _be_warn_exc)
+
         self._publish(evt.task_started(
             task_id=plan.task_id,
             task_summary=plan.task_summary,
@@ -3554,6 +3565,18 @@ class ExecutionEngine:
                 )
 
         self.recover_dispatched_steps()
+
+        # ── Resume: restore run-level spend counter (bd-3f80) ────────────────
+        # Reconstruct BudgetEnforcer seeded with the persisted cumulative spend
+        # so the run-token ceiling continues counting from where it left off
+        # rather than resetting to zero on every resume.
+        try:
+            from agent_baton.core.govern.budget import BudgetEnforcer as _BE
+            self._budget_enforcer = _BE(
+                initial_run_spend_usd=state.run_cumulative_spend_usd,
+            )
+        except Exception as _be_resume_exc:  # pragma: no cover
+            _log.debug("BudgetEnforcer resume restore skipped (non-fatal): %s", _be_resume_exc)
 
         return self._determine_action(state)
 
