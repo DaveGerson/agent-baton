@@ -17,6 +17,9 @@ Design decisions from wave-5-design.md Part C:
 - Handoff: on accept, SpeculativePipeliner.accept(spec_id) dispatches the
   next-step agent into the SAME worktree with the handoff prompt.
   Pickup billed against next-step budget, not speculation budget.
+- Run-level ceiling (end-user readiness #7): when BATON_RUN_TOKEN_CEILING
+  is set and the ceiling would be exceeded, should_speculate() returns False
+  and start_speculation() aborts cleanly with a log line.
 
 The module is pure logic; BudgetEnforcer provides daily cap gating.
 WorktreeManager provides worktree lifecycle.
@@ -233,11 +236,33 @@ class SpeculativePipeliner:
         for spec in self._speculations.values():
             if spec.target_step_id == next_step_id and spec.is_active():
                 return False
-        # Budget check.
+        # Budget check (daily cap).
         if self._budget is not None:
             allow = getattr(self._budget, "allow_speculation", lambda: True)
             if not allow():
                 return False
+
+        # Run-level ceiling check (end-user readiness #7).
+        # Speculations use Haiku: estimate 4K input + 1K output.
+        if self._budget is not None:
+            check_fn = getattr(self._budget, "check_run_ceiling", None)
+            if check_fn is not None:
+                try:
+                    from agent_baton.core.govern.budget import _cost_usd
+                    est = _cost_usd("speculation", 4_000, 1_000)
+                    check_fn(est, "speculation haiku")
+                except Exception as exc:
+                    from agent_baton.core.govern.budget import RunTokenCeilingExceeded
+                    if isinstance(exc, RunTokenCeilingExceeded):
+                        _log.warning(
+                            "SpeculativePipeliner.should_speculate: run ceiling "
+                            "blocks new speculation for step=%s: %s",
+                            next_step_id,
+                            exc,
+                        )
+                        return False
+                    raise
+
         return True
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────

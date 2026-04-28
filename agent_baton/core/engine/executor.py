@@ -554,7 +554,7 @@ class ExecutionEngine:
             import threading as _threading
             _gc_thread = _threading.Thread(
                 target=self._worktree_mgr.gc_stale,
-                kwargs={"max_age_hours": int(os.environ.get("BATON_WORKTREE_GC_HOURS", "72"))},
+                kwargs={"max_age_hours": None},
                 daemon=True,
             )
             _gc_thread.start()
@@ -1400,6 +1400,17 @@ class ExecutionEngine:
             event_type="execution.started",
             details=f"task_id={plan.task_id} risk={plan.risk_level}",
         ))
+
+        # ── Run-token ceiling warning (bd-3f80) ──────────────────────────────
+        # Warn once at engine start when BATON_RUN_TOKEN_CEILING is unset on a
+        # HIGH/CRITICAL risk run.  Uses a transient BudgetEnforcer so the
+        # warn_if_ceiling_unset_for_high_risk() helper can stay encapsulated.
+        try:
+            from agent_baton.core.govern.budget import BudgetEnforcer as _BE
+            self._budget_enforcer = _BE()
+            self._budget_enforcer.warn_if_ceiling_unset_for_high_risk(plan.risk_level)
+        except Exception as _be_warn_exc:  # pragma: no cover
+            _log.debug("BudgetEnforcer ceiling-warning skipped (non-fatal): %s", _be_warn_exc)
 
         self._publish(evt.task_started(
             task_id=plan.task_id,
@@ -2551,6 +2562,23 @@ class ExecutionEngine:
                     self._enqueue_selfheal(
                         failing_step_id, phase_id, handle,
                     )
+            else:
+                # bd-878e: when self-heal is explicitly suppressed, write a
+                # compliance audit entry so regulated environments can prove
+                # the disable was honoured.  Read each time (not cached) so
+                # a runtime toggle is respected immediately.
+                self._write_compliance_entry({
+                    "timestamp": _utcnow(),
+                    "event_type": "selfheal_suppressed",
+                    "task_id": state.task_id,
+                    "plan_id": state.plan.task_id,
+                    "step_id": "",
+                    "agent_name": "engine",
+                    "risk_level": state.plan.risk_level,
+                    "phase_id": phase_id,
+                    "gate_type": gate_type,
+                    "reason": "BATON_SELFHEAL_ENABLED not set; self-heal disabled",
+                })
             state.status = "gate_failed"
         else:
             self._publish(evt.gate_passed(
@@ -3172,6 +3200,38 @@ class ExecutionEngine:
                             )
                 # Failed worktrees: retained — GC will handle after max_age_hours.
 
+        # bd-841d: aggressive GC on every execute-complete (daemon thread, non-blocking)
+        if self._worktree_mgr is not None:
+            import threading as _gc_threading  # noqa: PLC0415
+
+            def _run_gc_on_complete() -> None:
+                try:
+                    self._worktree_mgr.gc_stale()
+                except Exception as _gc_exc:
+                    logger.warning(
+                        "BEAD_WARNING: gc_stale on execute-complete raised (non-fatal): %s",
+                        _gc_exc,
+                    )
+                    if self._bead_store is not None:
+                        try:
+                            self._worktree_mgr._file_bead_warning(
+                                task_id=state.task_id,
+                                step_id="gc",
+                                content=(
+                                    f"BEAD_WARNING: gc_stale failed on execute-complete "
+                                    f"task={state.task_id} error={_gc_exc}"
+                                ),
+                            )
+                        except Exception:
+                            pass
+
+            _gc_thread = _gc_threading.Thread(
+                target=_run_gc_on_complete,
+                daemon=True,
+                name=f"worktree-gc-{state.task_id}",
+            )
+            _gc_thread.start()
+
         self._save_execution(state)
 
         # Finalise trace.
@@ -3537,6 +3597,18 @@ class ExecutionEngine:
                 )
 
         self.recover_dispatched_steps()
+
+        # ── Resume: restore run-level spend counter (bd-3f80) ────────────────
+        # Reconstruct BudgetEnforcer seeded with the persisted cumulative spend
+        # so the run-token ceiling continues counting from where it left off
+        # rather than resetting to zero on every resume.
+        try:
+            from agent_baton.core.govern.budget import BudgetEnforcer as _BE
+            self._budget_enforcer = _BE(
+                initial_run_spend_usd=state.run_cumulative_spend_usd,
+            )
+        except Exception as _be_resume_exc:  # pragma: no cover
+            _log.debug("BudgetEnforcer resume restore skipped (non-fatal): %s", _be_resume_exc)
 
         return self._determine_action(state)
 

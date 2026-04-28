@@ -1368,6 +1368,13 @@ class ExecutionState:
     # bd-9839: Speculation records — keyed by spec_id.
     speculations: dict[str, dict] = field(default_factory=dict)
 
+    # End-user readiness #7: cumulative USD spent across all subsystems
+    # (self-heal, speculation, immune sweeps) for this run.  Persisted so a
+    # resumed run picks up counting where it left off rather than resetting
+    # to zero and allowing the ceiling to be exceeded.
+    # Default 0.0 for legacy state files (getattr guard in all accessors).
+    run_cumulative_spend_usd: float = 0.0
+
     def __post_init__(self) -> None:
         if not self.started_at:
             self.started_at = datetime.now(timezone.utc).isoformat()
@@ -1442,6 +1449,8 @@ class ExecutionState:
             "speculations": dict(getattr(self, "speculations", {})),
             # bd-def9: rebased tip SHA after most-recent fold_back()
             "working_branch_head": getattr(self, "working_branch_head", ""),
+            # end-user readiness #7: run-level cumulative spend for ceiling tracking
+            "run_cumulative_spend_usd": float(getattr(self, "run_cumulative_spend_usd", 0.0)),
         }
 
     @classmethod
@@ -1475,6 +1484,8 @@ class ExecutionState:
             speculations=dict(data.get("speculations", {})),
             # bd-def9: getattr guard for legacy state files that predate this field
             working_branch_head=data.get("working_branch_head", ""),
+            # end-user readiness #7: default 0.0 for legacy state files
+            run_cumulative_spend_usd=float(data.get("run_cumulative_spend_usd", 0.0)),
         )
 
 

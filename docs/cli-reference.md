@@ -1908,6 +1908,54 @@ baton serve --port 9000 --host 0.0.0.0 --token my-secret-token
 
 ---
 
+## Swarm Commands
+
+> **EXPERIMENTAL** — `baton swarm` requires `BATON_EXPERIMENTAL=swarm` to run.
+> The Wave 6.2 Part A dispatcher is a v1 stub: partition plans are real but
+> agent dispatch is **not yet wired** end-to-end. See bd-c925 / bd-2b9f for the
+> integration roadmap.
+
+### `baton swarm refactor DIRECTIVE_JSON`
+
+Partition a codebase into AST-independent chunks and (eventually) dispatch one
+Haiku agent per chunk to apply a refactor directive.
+
+**Requires:**
+- `BATON_EXPERIMENTAL=swarm` (stub gate, bd-18f6)
+- `BATON_SWARM_ENABLED=1` (feature gate)
+
+```bash
+# Opt in to the experimental stub
+export BATON_EXPERIMENTAL=swarm
+export BATON_SWARM_ENABLED=1
+
+# Preview without dispatching
+baton swarm refactor --dry-run '{"kind":"replace-import","old":"requests","new":"httpx"}'
+
+# Rename a symbol (interactive sign-off prompt)
+baton swarm refactor '{"kind":"rename-symbol","old":"mymod.OldName","new":"mymod.NewName"}'
+
+# CI mode (skip interactive prompt, preview still printed)
+baton swarm refactor --yes '{"kind":"replace-import","old":"requests","new":"httpx"}'
+```
+
+**Options:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `DIRECTIVE_JSON` | (required) | JSON directive: `kind` + directive fields |
+| `--max-agents N` | 100 | Max parallel chunk agents (cap: 100) |
+| `--language` | `python` | AST language (v1: python only) |
+| `--model` | `claude-haiku` | LLM tier for chunk agents |
+| `--codebase-root PATH` | `cwd` | Root of the project to refactor |
+| `--dry-run` | false | Print preview and exit, no dispatch |
+| `-y / --yes` | false | Skip interactive confirmation prompt |
+| `--require-approval-bead [BEAD_ID]` | — | Require a pre-filed approval bead |
+
+**Exit codes:** `2` = experimental flag not set; `1` = swarm disabled or gate failure.
+
+---
+
 ## Common Workflows
 
 ### Full Orchestrated Task (Sequential)
@@ -2051,6 +2099,7 @@ on every CLI call when driving concurrent executions from an agent context.
 |------|---------|
 | `0` | Success |
 | `1` | Error: missing prerequisites, validation failure, failed gate, or invalid arguments |
+| `2` | Experimental feature not opted in (e.g. `baton swarm` without `BATON_EXPERIMENTAL=swarm`) |
 
 Commands that exit with code 1:
 - `baton execute start` -- plan file not found

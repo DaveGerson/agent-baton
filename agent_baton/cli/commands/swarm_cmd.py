@@ -7,11 +7,22 @@ Exposes swarm refactoring via:
                                           [-y | --yes]
                                           [--dry-run]
                                           [--require-approval-bead [BEAD_ID]]
+                                          [--no-require-approval-bead]
 
 The directive is passed as a JSON string to avoid argparse juggling complex
 types.  Example:
 
     baton swarm refactor '{"kind":"rename-symbol","old":"mymod.Foo","new":"mymod.Bar"}'
+
+EXPERIMENTAL gate (bd-18f6)
+----------------------------
+``baton swarm`` is gated behind ``BATON_EXPERIMENTAL=swarm``.  The current
+dispatcher (Wave 6.2 Part A) is a v1 stub: partition plans are real but
+agent dispatch is **not yet wired** end-to-end (see bd-c925, bd-2b9f).
+
+Without the flag the command exits immediately with exit code 2 and an
+explanatory message.  This keeps the stub off the happy-path for users who
+have not opted in.
 
 Feature gate: ``BATON_SWARM_ENABLED=1`` required (in env or baton.yaml).
 When disabled the command exits with a clear error message.
@@ -33,6 +44,16 @@ store.  Even ``--yes`` cannot bypass this check.
 
 On interactive confirmation an approval bead is automatically filed so
 every dispatch has a permanent audit-trail entry.
+
+Team-mode enforcement (end-user readiness #8)
+---------------------------------------------
+When ``BATON_APPROVAL_MODE=team`` is set in the environment, ``--require-
+approval-bead`` is **on by default** to enforce the second-reviewer pattern
+teams need.  Operators can override this with ``--no-require-approval-bead``,
+but doing so files an audit WARNING bead so the override is traceable.
+
+When ``BATON_APPROVAL_MODE=local`` (or unset), the opt-in behavior from
+PR #59 is preserved.
 """
 from __future__ import annotations
 
@@ -51,6 +72,17 @@ _SWARM_ENABLED_ENV = "BATON_SWARM_ENABLED"
 _DISABLED_MSG = (
     "Swarm is disabled; set BATON_SWARM_ENABLED=1 in baton.yaml or the "
     "BATON_SWARM_ENABLED environment variable to enable it."
+)
+
+_EXPERIMENTAL_ENV = "BATON_EXPERIMENTAL"
+_EXPERIMENTAL_BLOCKED_MSG = (
+    "error: `baton swarm` is experimental — current dispatcher does not invoke real agents.\n"
+    "To opt in (development/testing only), set BATON_EXPERIMENTAL=swarm.\n"
+    "See bd-c925 / bd-2b9f for the integration roadmap."
+)
+_EXPERIMENTAL_WARNING_MSG = (
+    "[EXPERIMENTAL] swarm dispatcher is a v1 stub — chunk plans are real but "
+    "agent dispatch is not yet wired (bd-c925)."
 )
 
 # Conservative cost model (Wave 6.2 Part A design, bd-707d).
@@ -74,6 +106,7 @@ _PRICING: dict[str, tuple[float, float]] = {
 _DEFAULT_EST_TOKENS_PER_CHUNK = 8_000
 _APPROVAL_BEAD_TAG = "swarm-refactor"
 _APPROVAL_BEAD_MAX_AGE_MINUTES = 5
+_APPROVAL_MODE_ENV = "BATON_APPROVAL_MODE"
 
 
 # ---------------------------------------------------------------------------
@@ -85,11 +118,16 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     """Register the ``swarm`` subcommand and its sub-subcommands."""
     parser: argparse.ArgumentParser = subparsers.add_parser(
         "swarm",
-        help="Massive parallel AST-aware swarm refactoring (Wave 6.2, bd-707d).",
+        help=(
+            "[EXPERIMENTAL] Massive parallel AST-aware swarm refactoring "
+            "(Wave 6.2, bd-707d). Requires BATON_EXPERIMENTAL=swarm to run."
+        ),
         description=(
-            "Dispatch up to 100 Haiku agents in parallel to apply a single "
-            "refactor directive across provably-independent code chunks.  "
-            "Requires BATON_SWARM_ENABLED=1."
+            "[EXPERIMENTAL] Dispatch up to 100 Haiku agents in parallel to apply "
+            "a single refactor directive across provably-independent code chunks.  "
+            "The v1 dispatcher stub produces real partition plans but does NOT yet "
+            "invoke real agents end-to-end (see bd-c925 / bd-2b9f).  "
+            "Requires BATON_EXPERIMENTAL=swarm and BATON_SWARM_ENABLED=1."
         ),
     )
     swarm_sub = parser.add_subparsers(dest="swarm_command", metavar="COMMAND")
@@ -181,7 +219,21 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
             "With BEAD_ID: verifies the named bead exists, has "
             "bead_type='approval', tag 'swarm-refactor', and status='open'.  "
             "Even --yes cannot bypass this check.  "
-            "Intended for regulated environments."
+            "Intended for regulated environments.  "
+            "Always on by default when BATON_APPROVAL_MODE=team."
+        ),
+    )
+    refactor_parser.add_argument(
+        "--no-require-approval-bead",
+        action="store_true",
+        default=False,
+        dest="no_require_approval_bead",
+        help=(
+            "Explicitly disable the approval-bead requirement.  "
+            "In local mode (default) this is already the default behavior.  "
+            "In team mode (BATON_APPROVAL_MODE=team) using this flag overrides "
+            "the team-mode default and files an audit WARNING bead so the "
+            "override is traceable."
         ),
     )
 
@@ -216,12 +268,16 @@ Examples:
     baton swarm refactor '{"kind":"migrate-api","old_call_pattern":"requests.get(...)","new_call_template":"httpx.get(...)"}'
 
 Environment:
-  BATON_SWARM_ENABLED=1   Required to enable swarm dispatch.
+  BATON_EXPERIMENTAL=swarm   Required to run (stub — real dispatch not wired).
+  BATON_SWARM_ENABLED=1      Required to enable swarm dispatch.
 """
 
 
 def handler(args: argparse.Namespace) -> None:
     """Dispatch the appropriate swarm sub-command handler."""
+    # Experimental gate must fire BEFORE the sign-off gate so blocked users
+    # never see the sign-off prompt (bd-18f6).
+    _check_experimental()
     _check_enabled()
     if args.swarm_command == "refactor":
         _handle_refactor(args)
@@ -287,10 +343,40 @@ def _handle_refactor(args: argparse.Namespace) -> None:
     preview_text = _build_preview_text(chunks, directive, args.model)
     print(preview_text)
 
+    # Resolve approval mode (read fresh from env — never from a cached object).
+    approval_mode = _get_approval_mode()
+    no_require = getattr(args, "no_require_approval_bead", False)
+    explicit_require = getattr(args, "require_approval_bead", None)
+
+    # Print the mode notice at launch so operators always know which regime
+    # is active and how to change it.
+    _print_approval_mode_notice(approval_mode, no_require)
+
+    # Resolve the effective require_approval value:
+    #   team mode  → on by default (sentinel), unless --no-require-approval-bead
+    #   local mode → honour whatever the operator passed (opt-in, PR #59 compat)
+    if approval_mode == "team" and not no_require:
+        # Default to sentinel lookup when the operator did not explicitly pass
+        # --require-approval-bead with a specific bead ID.
+        effective_require: str | None = (
+            explicit_require if explicit_require is not None
+            else _SENTINEL_REQUIRE_APPROVAL
+        )
+    else:
+        effective_require = explicit_require
+
+    # When team mode is overridden via --no-require-approval-bead, file an
+    # audit bead so the bypass is permanently traceable.
+    if approval_mode == "team" and no_require:
+        operator = _get_operator_identity()
+        _file_team_override_audit_bead(
+            operator=operator,
+            directive=directive,
+        )
+
     # --require-approval-bead gate (cannot be bypassed by --yes).
-    require_approval = getattr(args, "require_approval_bead", None)
-    if require_approval is not None:
-        _check_approval_bead(require_approval)
+    if effective_require is not None:
+        _check_approval_bead(effective_require)
 
     # Determine approval_bead_id to pass to dispatcher.
     approval_bead_id = ""
@@ -572,6 +658,98 @@ def _get_operator_identity() -> str:
         return "unknown"
 
 
+def _get_approval_mode() -> str:
+    """Return the current approval mode, read fresh from env each call.
+
+    Returns 'team' when BATON_APPROVAL_MODE=team; 'local' otherwise (default).
+    Never cached — callers rely on seeing the live env value.
+    """
+    return os.environ.get(_APPROVAL_MODE_ENV, "local").strip().lower()
+
+
+def _print_approval_mode_notice(approval_mode: str, no_require: bool) -> None:
+    """Print the mode notice at swarm-launch time.
+
+    Describes which approval regime is active and how the operator can
+    change it, so there is never any ambiguity about what will happen.
+    """
+    if approval_mode == "team":
+        if no_require:
+            print(
+                "[swarm] approval mode: team (second-reviewer enforced). "
+                "--no-require-approval-bead override active — audit bead will be filed."
+            )
+        else:
+            print(
+                "[swarm] approval mode: team (second-reviewer enforced). "
+                "Pass --no-require-approval-bead to override (audited)."
+            )
+    else:
+        print(
+            "[swarm] approval mode: local (single-reviewer). "
+            "Set BATON_APPROVAL_MODE=team for second-reviewer enforcement."
+        )
+
+
+def _file_team_override_audit_bead(
+    operator: str,
+    directive: object,
+) -> None:
+    """File a WARNING audit bead when team-mode approval is overridden.
+
+    Non-fatal — if the bead store is unavailable the override still proceeds,
+    but a log warning is emitted so the gap is visible.
+    """
+    bead_store = _get_bead_store()
+    if bead_store is None:
+        _log.warning(
+            "_file_team_override_audit_bead: no bead store available; "
+            "team-mode override by '%s' will not be recorded",
+            operator,
+        )
+        return
+
+    try:
+        from agent_baton.models.bead import Bead
+        import datetime as _dt
+        import hashlib as _hashlib
+
+        directive_kind = getattr(directive, "kind", "unknown")
+        now = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        bead_id = "bd-" + _hashlib.sha256(
+            f"team-override:{now}:{operator}:{directive_kind}".encode()
+        ).hexdigest()[:8]
+
+        content = (
+            f"WARNING: team-mode approval requirement overridden by user "
+            f"'{operator}' for swarm task '{directive_kind}' at {now}."
+        )
+
+        bead = Bead(
+            bead_id=bead_id,
+            task_id="",
+            step_id="swarm-team-override",
+            agent_name="operator",
+            bead_type="warning",
+            content=content,
+            confidence="high",
+            scope="project",
+            tags=[_APPROVAL_BEAD_TAG, "team-override", "audit"],
+            affected_files=[],
+            status="open",
+            created_at=now,
+            source="manual",
+            token_estimate=len(content) // 4,
+        )
+        written_id = bead_store.write(bead)
+        if written_id:
+            print(
+                f"[swarm] AUDIT: team-mode override bead filed: {written_id}"
+            )
+    except Exception as exc:
+        _log.warning("_file_team_override_audit_bead: non-fatal error: %s", exc)
+
+
 def _get_bead_store():
     """Return a BeadStore for the project baton.db, or None on failure.
 
@@ -770,6 +948,27 @@ def _run_with_engine(
 # ---------------------------------------------------------------------------
 # Feature gate
 # ---------------------------------------------------------------------------
+
+
+def _check_experimental() -> None:
+    """Block execution unless BATON_EXPERIMENTAL contains 'swarm' (bd-18f6).
+
+    Parses BATON_EXPERIMENTAL as a comma-separated list so multiple flags
+    can coexist (e.g. BATON_EXPERIMENTAL=swarm,immune).
+
+    - If 'swarm' is absent: print error to stderr and exit 2.
+    - If 'swarm' is present: print a one-line warning to stderr so the
+      operator is reminded the dispatcher is a stub, then return normally.
+    """
+    flags = {
+        f.strip()
+        for f in os.environ.get(_EXPERIMENTAL_ENV, "").split(",")
+        if f.strip()
+    }
+    if "swarm" not in flags:
+        print(_EXPERIMENTAL_BLOCKED_MSG, file=sys.stderr)
+        sys.exit(2)
+    print(_EXPERIMENTAL_WARNING_MSG, file=sys.stderr)
 
 
 def _check_enabled() -> None:

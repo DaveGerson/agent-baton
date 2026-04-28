@@ -211,9 +211,11 @@ class TestWorktreeCreateDiskFullSimulated:
             return original_run(cmd, **kwargs)
 
         with patch("agent_baton.core.engine.worktree_manager.subprocess.run", side_effect=mock_run):
-            # Need a fresh manager since __init__ also calls subprocess.run
+            # Need a fresh manager since __init__ also calls subprocess.run.
+            # bd-c071: _canonical_repo must be set alongside _project_root.
             fresh_mgr = WorktreeManager.__new__(WorktreeManager)
             fresh_mgr._project_root = tmp_git_repo.resolve()
+            fresh_mgr._canonical_repo = tmp_git_repo.resolve()
             fresh_mgr._worktrees_root = (tmp_git_repo / ".claude" / "worktrees").resolve()
             fresh_mgr._enabled = True
             fresh_mgr._tracer = None
@@ -813,4 +815,430 @@ class TestParseConflictFilesReturnsPaths:
         result = WorktreeManager._parse_conflict_files(output)
         assert result == ["src/api/routes.py", "src/models/user.py"], (
             f"Expected ['src/api/routes.py', 'src/models/user.py'], got {result}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# bd-c071 / bd-b7c9 / bd-0a0f — parent-repo detection when project_dir is worktree
+# ---------------------------------------------------------------------------
+
+
+def _init_repo_for_wt_tests(path: Path) -> None:
+    """Initialise a git repo with one empty commit at *path*."""
+    subprocess.run(["git", "init", "-b", "main"], cwd=path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"],
+                   cwd=path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test User"],
+                   cwd=path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "--allow-empty", "-m", "initial"],
+                   cwd=path, check=True, capture_output=True)
+
+
+def _add_linked_worktree(canonical: Path, linked: Path) -> None:
+    """Add a detached linked worktree at *linked* off *canonical* HEAD.
+
+    Uses --detach to avoid branch-checkout conflicts when main is already
+    checked out in the canonical repo.
+    """
+    sha_r = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=canonical, check=True, capture_output=True, text=True,
+    )
+    sha = sha_r.stdout.strip()
+    subprocess.run(
+        ["git", "worktree", "add", "--detach", str(linked), sha],
+        cwd=canonical, check=True, capture_output=True,
+    )
+
+
+class TestCreateAgentWorktreeWhenProjectDirIsWorktree:
+    """WorktreeManager constructed from inside a linked worktree must still be
+    able to create new agent worktrees, using the canonical repo as the git
+    operations root (bd-c071 / bd-b7c9 / bd-0a0f)."""
+
+    def test_create_agent_worktree_when_project_dir_is_worktree(
+        self, tmp_path: Path
+    ) -> None:
+        from agent_baton.core.engine.worktree_manager import _is_inside_worktree
+
+        canonical = tmp_path / "canonical"
+        canonical.mkdir()
+        _init_repo_for_wt_tests(canonical)
+
+        linked = tmp_path / "linked"
+        _add_linked_worktree(canonical, linked)
+
+        # Confirm linked has a .git *file* (gitlink), not a directory
+        assert (linked / ".git").is_file(), "linked worktree must have a .git gitlink file"
+        assert _is_inside_worktree(linked) is True
+
+        # Construct WorktreeManager from inside the linked worktree
+        mgr = WorktreeManager(project_root=linked)
+
+        # The manager must be enabled (not auto-disabled)
+        assert mgr._enabled, "WorktreeManager must stay enabled when project_dir is a linked worktree"
+
+        # It must have resolved the canonical repo correctly
+        assert mgr._canonical_repo == canonical.resolve(), (
+            f"canonical_repo should be {canonical.resolve()}, got {mgr._canonical_repo}"
+        )
+
+        # create() must successfully materialise a new agent worktree
+        handle = mgr.create(task_id="task-wt-detect", step_id="1.1", base_branch="main")
+        assert handle.path != Path("/dev/null"), "create() must not return a dummy handle"
+        assert handle.path.is_dir(), "agent worktree directory must exist on disk"
+        assert (handle.path / ".git").exists(), "agent worktree must be a real git checkout"
+
+        # The new worktree must be registered in the canonical repo
+        wt_list = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            cwd=canonical, capture_output=True, text=True, check=True,
+        )
+        assert str(handle.path) in wt_list.stdout, (
+            "new agent worktree must appear in canonical repo's worktree list"
+        )
+
+    def test_canonical_repo_stored_on_handle_parent_repo(self, tmp_path: Path) -> None:
+        """handle.parent_repo reflects project_root (user-facing), not canonical_repo."""
+        canonical = tmp_path / "canonical"
+        canonical.mkdir()
+        _init_repo_for_wt_tests(canonical)
+
+        linked = tmp_path / "linked"
+        _add_linked_worktree(canonical, linked)
+
+        mgr = WorktreeManager(project_root=linked)
+        handle = mgr.create(task_id="task-parent-repo", step_id="1.1", base_branch="main")
+
+        # parent_repo on the handle is the user-supplied project_root
+        assert handle.parent_repo == linked.resolve(), (
+            "handle.parent_repo must be the user-supplied project_root, not canonical_repo"
+        )
+
+
+class TestCanonicalRepoPorcelainParse:
+    """_resolve_canonical_repo() correctly identifies the canonical repo path
+    from various git worktree list --porcelain layouts (bd-c071)."""
+
+    def test_canonical_repo_resolution_porcelain_parse_simple(
+        self, tmp_path: Path
+    ) -> None:
+        """Single-repo case: canonical is the only entry, returns its path."""
+        from agent_baton.core.engine.worktree_manager import _resolve_canonical_repo
+
+        canonical = tmp_path / "myrepo"
+        canonical.mkdir()
+        _init_repo_for_wt_tests(canonical)
+
+        result = _resolve_canonical_repo(canonical)
+        assert result == canonical.resolve()
+
+    def test_canonical_repo_resolution_porcelain_parse_with_linked_worktree(
+        self, tmp_path: Path
+    ) -> None:
+        """With a linked worktree present, still resolves to the main repo."""
+        from agent_baton.core.engine.worktree_manager import _resolve_canonical_repo
+
+        canonical = tmp_path / "main_repo"
+        canonical.mkdir()
+        _init_repo_for_wt_tests(canonical)
+
+        linked = tmp_path / "agent_wt"
+        _add_linked_worktree(canonical, linked)
+
+        result = _resolve_canonical_repo(linked)
+        assert result == canonical.resolve(), (
+            f"Expected canonical at {canonical.resolve()}, got {result}"
+        )
+
+    def test_canonical_repo_resolution_from_canonical_itself(
+        self, tmp_path: Path
+    ) -> None:
+        """Calling _resolve_canonical_repo on the canonical repo itself is idempotent."""
+        from agent_baton.core.engine.worktree_manager import _resolve_canonical_repo
+
+        canonical = tmp_path / "idempotent_repo"
+        canonical.mkdir()
+        _init_repo_for_wt_tests(canonical)
+
+        linked = tmp_path / "wt_idempotent"
+        _add_linked_worktree(canonical, linked)
+
+        result = _resolve_canonical_repo(canonical)
+        assert result == canonical.resolve()
+
+    def test_resolve_canonical_repo_raises_on_non_git_dir(
+        self, tmp_path: Path
+    ) -> None:
+        """_resolve_canonical_repo raises WorktreeError on a non-git directory."""
+        from agent_baton.core.engine.worktree_manager import (
+            WorktreeError,
+            _resolve_canonical_repo,
+        )
+
+        with pytest.raises(WorktreeError):
+            _resolve_canonical_repo(tmp_path)
+
+
+class TestCreateInCanonicalRepoUnchanged:
+    """When project_dir IS the canonical repo, WorktreeManager behavior is
+    unchanged — _canonical_repo == _project_root and create() works as before
+    (bd-c071 regression guard)."""
+
+    def test_canonical_repo_equals_project_root_when_not_worktree(
+        self, tmp_git_repo: Path
+    ) -> None:
+        mgr = WorktreeManager(project_root=tmp_git_repo)
+        assert mgr._canonical_repo == tmp_git_repo.resolve(), (
+            "_canonical_repo must equal project_root when project_root is the main repo"
+        )
+
+    def test_create_in_canonical_repo_produces_correct_handle(
+        self, tmp_git_repo: Path
+    ) -> None:
+        mgr = WorktreeManager(project_root=tmp_git_repo)
+        handle = mgr.create(task_id="task-canon", step_id="2.1", base_branch="main")
+
+        expected_path = tmp_git_repo / ".claude" / "worktrees" / "task-canon" / "2.1"
+        assert handle.path == expected_path.resolve()
+        assert handle.branch == "worktree/task-canon/2.1"
+        assert handle.path.is_dir()
+
+    def test_is_inside_worktree_false_for_canonical_repo(
+        self, tmp_git_repo: Path
+    ) -> None:
+        """_is_inside_worktree returns False when .git is a directory."""
+        from agent_baton.core.engine.worktree_manager import _is_inside_worktree
+
+        assert _is_inside_worktree(tmp_git_repo) is False
+
+    def test_is_inside_worktree_true_for_linked_worktree(
+        self, tmp_path: Path
+    ) -> None:
+        """_is_inside_worktree returns True when .git is a file (gitlink)."""
+        from agent_baton.core.engine.worktree_manager import _is_inside_worktree
+
+        canonical = tmp_path / "canon"
+        canonical.mkdir()
+        _init_repo_for_wt_tests(canonical)
+        linked = tmp_path / "linked_wt"
+        _add_linked_worktree(canonical, linked)
+        assert _is_inside_worktree(linked) is True
+
+
+# ---------------------------------------------------------------------------
+# bd-841d — _get_default_stale_hours returns 4 by default
+# ---------------------------------------------------------------------------
+
+
+class TestGcStaleDefaultFourHourThreshold:
+    """gc_stale() uses a 4-hour default when no env var is set (bd-841d)."""
+
+    def test_5h_old_worktree_reclaimed_with_default_threshold(
+        self, mgr: WorktreeManager
+    ) -> None:
+        handle = mgr.create(task_id="task-gc-4h-old", step_id="1.1", base_branch="main")
+        _make_worktree_old(handle, hours=5)
+
+        reclaimed = mgr.gc_stale()  # no max_age_hours — defaults to 4
+
+        assert any(h.step_id == "1.1" for h in reclaimed), (
+            "5h-old worktree should be reclaimed with 4h default threshold"
+        )
+
+    def test_3h_old_worktree_protected_with_default_threshold(
+        self, mgr: WorktreeManager
+    ) -> None:
+        handle = mgr.create(task_id="task-gc-4h-young", step_id="1.1", base_branch="main")
+        _make_worktree_old(handle, hours=3)
+
+        reclaimed = mgr.gc_stale()  # 3h < 4h default
+
+        assert all(h.step_id != "1.1" for h in reclaimed), (
+            "3h-old worktree must NOT be reclaimed with 4h default threshold"
+        )
+        assert handle.path.is_dir()
+
+    def test_get_default_stale_hours_returns_4(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("BATON_WORKTREE_STALE_HOURS", raising=False)
+        monkeypatch.delenv("BATON_WORKTREE_GC_HOURS", raising=False)
+        assert WorktreeManager._get_default_stale_hours() == 4
+
+
+# ---------------------------------------------------------------------------
+# bd-841d — BATON_WORKTREE_STALE_HOURS / BATON_WORKTREE_GC_HOURS env vars
+# ---------------------------------------------------------------------------
+
+
+class TestGcStaleEnvVarOverride:
+    """gc_stale() honours BATON_WORKTREE_STALE_HOURS and legacy BATON_WORKTREE_GC_HOURS."""
+
+    def test_stale_hours_2_reclaims_3h_old_worktree(
+        self, mgr: WorktreeManager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("BATON_WORKTREE_STALE_HOURS", "2")
+        monkeypatch.delenv("BATON_WORKTREE_GC_HOURS", raising=False)
+        handle = mgr.create(task_id="task-gc-env-2h", step_id="1.1", base_branch="main")
+        _make_worktree_old(handle, hours=3)
+
+        reclaimed = mgr.gc_stale()
+
+        assert any(h.step_id == "1.1" for h in reclaimed), (
+            "3h-old worktree should be reclaimed when BATON_WORKTREE_STALE_HOURS=2"
+        )
+
+    def test_stale_hours_10_protects_5h_old_worktree(
+        self, mgr: WorktreeManager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("BATON_WORKTREE_STALE_HOURS", "10")
+        monkeypatch.delenv("BATON_WORKTREE_GC_HOURS", raising=False)
+        handle = mgr.create(task_id="task-gc-env-10h", step_id="1.1", base_branch="main")
+        _make_worktree_old(handle, hours=5)
+
+        reclaimed = mgr.gc_stale()
+
+        assert all(h.step_id != "1.1" for h in reclaimed), (
+            "5h-old worktree must NOT be reclaimed when BATON_WORKTREE_STALE_HOURS=10"
+        )
+        assert handle.path.is_dir()
+
+    def test_legacy_gc_hours_honoured(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("BATON_WORKTREE_STALE_HOURS", raising=False)
+        monkeypatch.setenv("BATON_WORKTREE_GC_HOURS", "8")
+        assert WorktreeManager._get_default_stale_hours() == 8
+
+    def test_stale_hours_wins_over_gc_hours(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("BATON_WORKTREE_STALE_HOURS", "2")
+        monkeypatch.setenv("BATON_WORKTREE_GC_HOURS", "99")
+        assert WorktreeManager._get_default_stale_hours() == 2
+
+
+# ---------------------------------------------------------------------------
+# bd-841d — in-flight guard skips worktrees referenced by running executions
+# ---------------------------------------------------------------------------
+
+
+class TestGcStaleSkipsInFlightWorktrees:
+    """gc_stale() skips deletion when a running execution references the worktree."""
+
+    def test_running_execution_blocks_gc(
+        self, mgr: WorktreeManager, tmp_git_repo: Path, tmp_path: Path
+    ) -> None:
+        import sqlite3  # noqa: PLC0415
+
+        handle = mgr.create(task_id="task-inflight", step_id="1.1", base_branch="main")
+        _make_worktree_old(handle, hours=10)
+
+        fake_db = tmp_path / "baton.db"
+        state_json = json.dumps({"step_worktrees": {"1.1": handle.to_dict()}})
+        with sqlite3.connect(str(fake_db)) as conn:
+            conn.execute(
+                "CREATE TABLE executions (task_id TEXT, status TEXT, state_json TEXT)"
+            )
+            conn.execute(
+                "INSERT INTO executions VALUES (?, ?, ?)",
+                ("task-inflight", "running", state_json),
+            )
+
+        import unittest.mock  # noqa: PLC0415
+
+        with unittest.mock.patch.dict("os.environ", {"BATON_DB_PATH": str(fake_db)}):
+            reclaimed = mgr.gc_stale()
+
+        assert all(h.step_id != "1.1" for h in reclaimed), (
+            "In-flight worktree must NOT be reclaimed"
+        )
+        assert handle.path.is_dir(), "In-flight worktree directory must be retained"
+
+    def test_no_baton_db_allows_is_in_flight_false(
+        self, mgr: WorktreeManager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """_is_in_flight returns (False, '') when no baton.db is discoverable."""
+        monkeypatch.delenv("BATON_DB_PATH", raising=False)
+
+        # Deep path guaranteed to have no baton.db ancestor
+        fake_wt = mgr._worktrees_root / "task-no-db" / "1.1"
+        fake_wt.mkdir(parents=True, exist_ok=True)
+
+        fresh_mgr = WorktreeManager.__new__(WorktreeManager)
+        fresh_mgr._project_root = fake_wt.resolve()
+        fresh_mgr._worktrees_root = mgr._worktrees_root
+        fresh_mgr._enabled = True
+        fresh_mgr._tracer = None
+        fresh_mgr._bead_store = None
+        fresh_mgr._handles = {}
+        fresh_mgr._trace = None
+        fresh_mgr._semaphore = threading.Semaphore(16)
+
+        result, task_id = fresh_mgr._is_in_flight(fake_wt)
+        assert result is False
+        assert task_id == ""
+
+
+# ---------------------------------------------------------------------------
+# bd-841d — gc_stale() called from complete() (source-level verification)
+# ---------------------------------------------------------------------------
+
+
+class TestGcStaleRunsOnExecuteComplete:
+    """complete() contains gc_stale call in a daemon thread (bd-841d)."""
+
+    def test_complete_source_contains_gc_stale_call(self) -> None:
+        import inspect  # noqa: PLC0415
+
+        from agent_baton.core.engine.executor import ExecutionEngine
+
+        source = inspect.getsource(ExecutionEngine.complete)
+        assert "gc_stale" in source, (
+            "complete() must call gc_stale() as part of bd-841d aggressive GC"
+        )
+
+    def test_complete_source_gc_after_straggler_block(self) -> None:
+        import inspect  # noqa: PLC0415
+
+        from agent_baton.core.engine.executor import ExecutionEngine
+
+        source = inspect.getsource(ExecutionEngine.complete)
+        assert "_worktree_mgr" in source
+        straggler_pos = source.find("straggler")
+        gc_pos = source.find("gc_stale")
+        assert straggler_pos != -1
+        assert gc_pos != -1
+        assert straggler_pos < gc_pos, (
+            "gc_stale call must appear after the straggler cleanup block in complete()"
+        )
+
+
+# ---------------------------------------------------------------------------
+# bd-841d — errors in gc_stale are swallowed and logged, never block complete
+# ---------------------------------------------------------------------------
+
+
+class TestGcStaleSwallowsErrors:
+    """gc_stale errors in complete() are logged as BEAD_WARNING, never raised."""
+
+    def test_run_gc_on_complete_closure_in_source(self) -> None:
+        import inspect  # noqa: PLC0415
+
+        from agent_baton.core.engine.executor import ExecutionEngine
+
+        source = inspect.getsource(ExecutionEngine.complete)
+        assert "_run_gc_on_complete" in source, (
+            "complete() must define _run_gc_on_complete closure for error isolation"
+        )
+
+    def test_bead_warning_logged_on_gc_error(self) -> None:
+        import inspect  # noqa: PLC0415
+
+        from agent_baton.core.engine.executor import ExecutionEngine
+
+        source = inspect.getsource(ExecutionEngine.complete)
+        assert "BEAD_WARNING" in source, (
+            "complete() must log BEAD_WARNING when gc_stale raises"
         )

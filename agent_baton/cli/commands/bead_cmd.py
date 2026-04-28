@@ -1100,10 +1100,52 @@ def _handle_handoffs(args: argparse.Namespace) -> None:
 
 _EXEC_ENABLED_ENV = "BATON_EXEC_BEADS_ENABLED"
 
+# Bead `source` values that indicate the bead was produced locally (in the
+# operator's own project, by the operator's own agents/tooling).  Anything
+# outside this set is treated as an "external origin" by
+# ``_emit_trust_boundary_warning_if_external`` and triggers a one-line
+# trust-boundary warning before sandbox execution.
+#
+# See: references/baton-patterns.md, "Pattern: Executable Beads —
+# Trust Boundary" (end-user readiness #10, bd-18f6).
+_LOCAL_BEAD_SOURCES: frozenset[str] = frozenset(
+    {"agent-signal", "planning-capture", "retrospective", "manual"}
+)
+
 
 def _exec_beads_enabled() -> bool:
     """Return True when BATON_EXEC_BEADS_ENABLED=1."""
     return os.environ.get(_EXEC_ENABLED_ENV, "0").strip() not in ("0", "false", "False", "")
+
+
+def _emit_trust_boundary_warning_if_external(bead: object) -> None:
+    """Print a one-line `[security]` warning for non-local executable beads.
+
+    The sandbox in :mod:`agent_baton.core.exec` is process-level only — no
+    filesystem namespacing, no syscall filter.  That is fine for beads the
+    local team authored, version-controlled, and reviewed; it is NOT fine
+    for beads from federation, downloaded packs, or fork PRs.
+
+    This function is a *tripwire*, not a security feature: it surfaces the
+    gap to the operator so they can read the script body and decide
+    whether to run it under the current trust assumptions.  See
+    ``references/baton-patterns.md`` for the full pattern.
+
+    Args:
+        bead: A :class:`agent_baton.models.bead.Bead` (or subclass) whose
+            ``source`` attribute is checked against
+            :data:`_LOCAL_BEAD_SOURCES`.  For locally-produced beads this
+            function is silent.
+    """
+    source = getattr(bead, "source", "") or ""
+    if source in _LOCAL_BEAD_SOURCES:
+        return
+    print(
+        f"[security] executable bead from external origin: {source!r}. "
+        "Sandbox is process-level only — see "
+        "references/baton-patterns.md#executable-beads-trust-boundary.",
+        file=sys.stderr,
+    )
 
 
 def _handle_exec(args: argparse.Namespace) -> None:
@@ -1153,6 +1195,13 @@ def _handle_exec(args: argparse.Namespace) -> None:
             file=sys.stderr,
         )
         sys.exit(1)
+
+    # Trust-boundary tripwire (end-user readiness #10, bd-18f6).
+    # The sandbox is process-level only — see references/baton-patterns.md.
+    # Beads whose `source` field falls outside the locally-produced set
+    # (agent-signal | planning-capture | retrospective | manual) are
+    # treated as having an external origin and surface a one-line warning.
+    _emit_trust_boundary_warning_if_external(raw)
 
     # Operator confirmation.
     if not args.no_confirm:

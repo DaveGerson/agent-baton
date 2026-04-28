@@ -272,3 +272,130 @@ which agents are dispatched, which gates are run, or which knowledge is
 attached — only how aggressively `KNOWLEDGE_GAP` signals are escalated.
 Users can re-run with a different intervention level to get a different
 autonomy profile on the same plan.
+
+---
+
+<a id="executable-beads-trust-boundary"></a>
+
+## Pattern: Executable Beads — Trust Boundary
+
+**Reference**: bd-18f6 ship-ready audit lineage (end-user readiness #10).
+
+**Intent**: Set explicit expectations about what the executable-bead sandbox
+does and does not protect against, before the feature is exposed to any
+shareable / federated / pull-request code path.
+
+### What is an executable bead?
+
+An *executable bead* is a `Bead` with `bead_type="executable"` (modelled by
+`agent_baton.models.bead.ExecutableBead`) that carries a script body
+(referenced by `script_sha` / `script_ref`), an interpreter
+(`bash` / `python`), and runtime limits (`timeout_s`, `mem_mb`, `net`).
+It is created via `baton beads create-exec` and run via `baton beads exec`.
+Executable beads exist so that an agent's reproducer steps, validation
+scripts, or smoke checks can be committed to the bead graph alongside the
+discoveries they validate, and re-run on demand.
+
+### What sandboxing is in place
+
+The runner (`agent_baton/core/exec/runner.py`) and sandbox
+(`agent_baton/core/exec/sandbox.py`) provide:
+
+- **Process-level isolation only.** The script runs in a child process with
+  a wall-clock timeout (default `30s`), a memory limit (default `256 MB`),
+  and a captured stdout/stderr stream that spills to disk when large.
+- **Static lint pre-flight.** `ScriptLinter` (`script_lint.py`) refuses to
+  store scripts that match a denylist of obviously dangerous patterns
+  (e.g. `cat /etc/passwd`, `curl | sh`, fork bombs, `dd` overwrites,
+  writes into `.claude/souls/`, writes into `baton.db` / `central.db`).
+- **Auditor gate.** `auditor_gate.py` quarantines newly-stored beads;
+  `baton beads exec` refuses to run a bead until an auditor approves it.
+- **Operator confirmation.** `baton beads exec <bead-id>` prints the
+  interpreter, script SHA, runtime limits, and content preview, then
+  requires a `y` to proceed (skip with `--no-confirm`).
+- **Optional soul signing.** When `BATON_SOULS_ENABLED=1`, the bead must be
+  signed by a soul before storage; tampering invalidates the signature.
+- **Feature flag.** The whole subsystem is gated behind
+  `BATON_EXEC_BEADS_ENABLED=1`; the default install cannot run scripts at
+  all.
+
+The runner does NOT provide:
+
+- Filesystem namespacing / chroot / mount isolation.
+- Network namespacing (`net=False` is enforced only at the linter level).
+- A syscall filter (no seccomp, no AppArmor / SELinux profile).
+- User-namespace / UID remapping.
+- A read-only working tree — the script can write anywhere the parent
+  process can write, modulo what `ScriptLinter` rejects up front.
+
+### What scripts are SAFE to run as executable beads
+
+The trust model assumes the script comes from the same operator who is
+running `baton`. Specifically:
+
+- **Locally-authored** by the operator or a teammate working in the same
+  repository.
+- **Version-controlled** in the same git project the bead lives in
+  (the `anchor_commit` field on the bead pins it to a tree the operator
+  can audit before approving).
+- **Reviewed-by-team** as part of the auditor-gate quarantine — i.e. the
+  reviewer has read the script and decided it is appropriate to run with
+  the same privileges as the operator's shell.
+
+Under those assumptions the sandbox is sufficient: it stops the script
+from running away with the machine, and it surfaces obvious mistakes.
+
+### What scripts are NOT SAFE
+
+Any executable bead whose script body did not originate with the local team
+must be treated as untrusted code on a trusted machine. In particular:
+
+- **Downloaded beads** — anything pulled in from another operator's bead
+  store, a published bead pack, or a curated catalogue.
+- **Beads from untrusted sources** — third-party agents, scraped issues,
+  customer-supplied repros.
+- **Beads received over federation** — anything the (future) federation
+  pipeline syncs in from `central.db` of a project the operator does not
+  own end-to-end.
+- **Beads from pull requests on public repos** — including bot-generated
+  beads, fork-PR beads, or beads that arrived as part of an attached
+  patch.
+
+For all of these, do not run `baton beads exec`. Read the script body
+(`baton beads show --script`), reproduce the intent manually if it is
+worth keeping, then re-create the bead locally so its `anchor_commit`
+points at code the operator vouches for.
+
+### Threat model in scope
+
+The sandbox is designed to catch:
+
+- **Accidents** — a teammate's reproducer script that loops forever, fills
+  the disk, or wedges the terminal.
+- **Broken builds** — a regression-check script that needs to fail
+  cleanly and surface logs without taking down the host.
+
+The sandbox is explicitly NOT designed to defend against:
+
+- **Supply-chain attacks** — a script body that was modified between the
+  author and the operator.
+- **Malicious actors** — a script that was authored with the intent of
+  exfiltrating data, persisting access, or escalating privilege.
+
+If the threat model needs to expand to include either of those, the
+sandbox needs to grow first.
+
+### Future-state
+
+If executable beads ever need to handle untrusted input — federated bead
+sync, public bead packs, fork-PR beads, customer-uploaded reproducers, or
+any other "shareable bead" use case — the sandbox MUST be upgraded to
+namespacing (mount + network + user) and a syscall filter (seccomp or
+equivalent) BEFORE that use case ships. The CLI warning emitted by
+`baton beads exec` for non-local origins (see
+`agent_baton/cli/commands/bead_cmd.py::_handle_exec`) is the tripwire
+that surfaces the gap; it is not a substitute for the upgrade.
+
+**Operational rule**: do not extend the runner to consume any bead source
+other than `agent-signal | planning-capture | retrospective | manual`
+without first delivering the sandbox upgrade described above.

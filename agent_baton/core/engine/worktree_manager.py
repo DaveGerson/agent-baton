@@ -143,6 +143,77 @@ def _utcnow() -> str:
     return datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
 
 
+def _is_inside_worktree(project_dir: Path) -> bool:
+    """Return True if *project_dir* is a linked git worktree (not the main repo).
+
+    A linked worktree has a ``.git`` *file* (a gitlink pointing back to the
+    main ``<repo>/.git/worktrees/<name>``), whereas the main repo has a
+    ``.git`` *directory*.
+    """
+    git_path = project_dir / ".git"
+    return git_path.is_file()
+
+
+def _resolve_canonical_repo(project_dir: Path) -> Path:
+    """Return the canonical (main) repo root for *project_dir*.
+
+    Works whether *project_dir* is the main repo or a linked worktree.
+
+    The canonical repo is identified by parsing ``git worktree list --porcelain``
+    and finding the entry whose path contains a real ``.git/`` *directory*
+    (not a file gitlink).  On a fresh repo with no linked worktrees that is
+    always the first entry.
+
+    Raises:
+        WorktreeError: if *project_dir* is not inside any git repository, or
+            if the canonical repo cannot be determined from the porcelain output.
+    """
+    result = subprocess.run(
+        ["git", "worktree", "list", "--porcelain"],
+        capture_output=True,
+        text=True,
+        cwd=str(project_dir),
+    )
+    if result.returncode != 0:
+        raise WorktreeError(
+            f"_resolve_canonical_repo: 'git worktree list --porcelain' failed "
+            f"in {project_dir}: {result.stderr.strip() or result.stdout.strip()}"
+        )
+
+    # Parse porcelain output.  Each entry is separated by a blank line and
+    # starts with "worktree <absolute-path>".  Check for a bare repo first.
+    current_path: str | None = None
+    for line in result.stdout.splitlines():
+        line = line.rstrip()
+        if line.startswith("worktree "):
+            current_path = line[len("worktree "):]
+        elif line == "bare":
+            # Bare repo — its path *is* the canonical root
+            if current_path is not None:
+                return Path(current_path).resolve()
+        elif line == "":
+            current_path = None
+
+    # Second pass: find the entry whose path contains a real .git *directory*
+    current_path = None
+    for line in result.stdout.splitlines():
+        line = line.rstrip()
+        if line.startswith("worktree "):
+            current_path = line[len("worktree "):]
+        elif line == "":
+            current_path = None
+        if current_path is not None:
+            candidate = Path(current_path)
+            if (candidate / ".git").is_dir():
+                return candidate.resolve()
+
+    raise WorktreeError(
+        f"_resolve_canonical_repo: could not identify canonical repo from "
+        f"'git worktree list' output in {project_dir}. "
+        f"Output was:\n{result.stdout}"
+    )
+
+
 def _run_git(args: list[str], cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess:
     """Run a git command, returning CompletedProcess.
 
@@ -240,8 +311,15 @@ class WorktreeManager:
     (``enabled=False`` or ``BATON_WORKTREE_ENABLED=0``), all methods are
     no-ops that preserve backward compatibility.
 
+    When ``project_root`` is itself a linked git worktree (common when baton
+    runs from inside an agent worktree), the manager automatically resolves
+    the canonical repo root and uses it for all ``git worktree add/remove/prune``
+    operations.  This fixes the dogfood failure tracked in bd-c071 / bd-b7c9 /
+    bd-0a0f where running baton from inside a worktree silently disabled isolation.
+
     Args:
-        project_root: The parent repository root (where ``.git`` lives).
+        project_root: The project root supplied by the caller.  May be the
+            canonical repo root OR a linked worktree — both are handled.
         worktrees_root: Where worktree directories are created.
             Defaults to ``project_root / ".claude/worktrees"``.
         enabled: Global kill switch.  When ``False``, ``create()`` returns
@@ -275,6 +353,14 @@ class WorktreeManager:
         # Active trace reference (set by engine before calls)
         self._trace: object | None = None  # TaskTrace | None
 
+        # _canonical_repo is the path used for all repo-level git operations
+        # (worktree add/remove/prune, branch ops, rebase).  When project_root
+        # is the main repo it equals project_root.  When project_root is a
+        # linked worktree it is resolved to the main repo root.
+        # Initialised to project_root; updated below if a worktree is detected.
+        # bd-c071 / bd-b7c9 / bd-0a0f.
+        self._canonical_repo: Path = self._project_root
+
         # Auto-disable when project_root is not a git repository.
         # This protects test suites that use temp directories as roots.
         if self._enabled:
@@ -289,6 +375,25 @@ class WorktreeManager:
                     self._project_root,
                 )
                 self._enabled = False
+            elif _is_inside_worktree(self._project_root):
+                # project_root is a linked worktree.  Resolve the canonical repo
+                # so that all `git worktree add/remove/prune` commands are issued
+                # from the real .git directory, not from a gitlink stub.
+                try:
+                    self._canonical_repo = _resolve_canonical_repo(self._project_root)
+                    _log.info(
+                        "WorktreeManager: project_root %s is a linked worktree; "
+                        "using canonical repo %s for git operations (bd-c071)",
+                        self._project_root,
+                        self._canonical_repo,
+                    )
+                except WorktreeError as exc:
+                    _log.warning(
+                        "WorktreeManager: could not resolve canonical repo from %s "
+                        "(%s) — falling back to project_root for git operations",
+                        self._project_root,
+                        exc,
+                    )
 
     # ── Trace helpers ────────────────────────────────────────────────────────
 
@@ -455,13 +560,14 @@ class WorktreeManager:
 
             # ── Resolve base SHA ─────────────────────────────────────────────
             if base_sha is None:
-                r = _run_git(["rev-parse", "HEAD"], cwd=self._project_root)
+                r = _run_git(["rev-parse", "HEAD"], cwd=self._canonical_repo)
                 base_sha = r.stdout.strip()
 
             # ── Create worktree directory parent ────────────────────────────
             worktree_path.parent.mkdir(parents=True, exist_ok=True)
 
             # ── git worktree add --detach ────────────────────────────────────
+            # Always run from _canonical_repo (never from a linked worktree).
             _log.info(
                 "WorktreeManager.create: adding worktree path=%s branch=%s sha=%s",
                 worktree_path, branch_name, base_sha[:8],
@@ -469,7 +575,7 @@ class WorktreeManager:
             try:
                 _run_git(
                     ["worktree", "add", "--detach", str(worktree_path), base_sha],
-                    cwd=self._project_root,
+                    cwd=self._canonical_repo,
                 )
             except WorktreeCreateError as exc:
                 raise WorktreeCreateError(
@@ -487,7 +593,7 @@ class WorktreeManager:
                 try:
                     _run_git(
                         ["worktree", "remove", "--force", str(worktree_path)],
-                        cwd=self._project_root,
+                        cwd=self._canonical_repo,
                         check=False,
                     )
                 except Exception:
@@ -587,7 +693,7 @@ class WorktreeManager:
         elapsed_ms = int((time.monotonic() - t_start) * 1000)
         files_r = _run_git(
             ["diff", "--name-only", handle.base_sha, new_head],
-            cwd=self._project_root,
+            cwd=self._canonical_repo,
             check=False,
         )
         files_count = len([f for f in files_r.stdout.splitlines() if f.strip()])
@@ -606,10 +712,10 @@ class WorktreeManager:
 
     def _rebase_fold(self, handle: WorktreeHandle, commit_hash: str) -> str:
         """Rebase worktree branch onto current working branch tip and FF."""
-        # Step 1: fetch the worktree's branch ref into the parent repo
+        # Step 1: fetch the worktree's branch ref into the canonical repo
         _run_git(
             ["fetch", str(handle.path), f"{handle.branch}:{handle.branch}"],
-            cwd=self._project_root,
+            cwd=self._canonical_repo,
         )
 
         # Step 2: rebase agent's commits onto current working-branch tip
@@ -617,7 +723,7 @@ class WorktreeManager:
             ["git", "rebase", "--onto", handle.base_branch, handle.base_sha, handle.branch],
             capture_output=True,
             text=True,
-            cwd=str(self._project_root),
+            cwd=str(self._canonical_repo),
         )
 
         if rebase_result.returncode != 0:
@@ -625,7 +731,7 @@ class WorktreeManager:
             subprocess.run(
                 ["git", "rebase", "--abort"],
                 capture_output=True,
-                cwd=str(self._project_root),
+                cwd=str(self._canonical_repo),
             )
             # Find conflict files from rebase output
             conflict_files = self._parse_conflict_files(rebase_result.stdout + rebase_result.stderr)
@@ -635,13 +741,13 @@ class WorktreeManager:
             )
 
         # Step 3: resolve new tip of the rebased branch
-        tip_r = _run_git(["rev-parse", handle.branch], cwd=self._project_root)
+        tip_r = _run_git(["rev-parse", handle.branch], cwd=self._canonical_repo)
         new_tip = tip_r.stdout.strip()
 
         # Step 4: fast-forward working branch to new tip
         _run_git(
             ["update-ref", f"refs/heads/{handle.base_branch}", new_tip],
-            cwd=self._project_root,
+            cwd=self._canonical_repo,
         )
 
         return new_tip
@@ -650,34 +756,34 @@ class WorktreeManager:
         """Merge worktree branch into working branch."""
         _run_git(
             ["fetch", str(handle.path), f"{handle.branch}:{handle.branch}"],
-            cwd=self._project_root,
+            cwd=self._canonical_repo,
         )
         merge_result = subprocess.run(
             ["git", "merge", "--no-ff", handle.branch, "-m",
              f"Merge worktree/{handle.step_id} into {handle.base_branch}"],
             capture_output=True,
             text=True,
-            cwd=str(self._project_root),
+            cwd=str(self._canonical_repo),
         )
         if merge_result.returncode != 0:
             subprocess.run(
                 ["git", "merge", "--abort"],
                 capture_output=True,
-                cwd=str(self._project_root),
+                cwd=str(self._canonical_repo),
             )
             conflict_files = self._parse_conflict_files(merge_result.stdout + merge_result.stderr)
             raise WorktreeFoldError(
                 f"Merge conflict for step={handle.step_id}: {merge_result.stderr.strip()}",
                 conflict_files=conflict_files,
             )
-        tip_r = _run_git(["rev-parse", handle.base_branch], cwd=self._project_root)
+        tip_r = _run_git(["rev-parse", handle.base_branch], cwd=self._canonical_repo)
         return tip_r.stdout.strip()
 
     def _fast_forward(self, handle: WorktreeHandle, commit_hash: str) -> str:
         """Fast-forward working branch directly to commit_hash."""
         _run_git(
             ["update-ref", f"refs/heads/{handle.base_branch}", commit_hash],
-            cwd=self._project_root,
+            cwd=self._canonical_repo,
         )
         return commit_hash
 
@@ -774,13 +880,13 @@ class WorktreeManager:
         except Exception:
             pass
 
-        # git worktree remove
+        # git worktree remove — must run from canonical repo
         if handle.path.exists():
             result = subprocess.run(
                 ["git", "worktree", "remove", str(handle.path)],
                 capture_output=True,
                 text=True,
-                cwd=str(self._project_root),
+                cwd=str(self._canonical_repo),
             )
             if result.returncode != 0:
                 if not force:
@@ -793,7 +899,7 @@ class WorktreeManager:
                     ["git", "worktree", "remove", "--force", str(handle.path)],
                     capture_output=True,
                     text=True,
-                    cwd=str(self._project_root),
+                    cwd=str(self._canonical_repo),
                 )
                 if result2.returncode != 0:
                     self._file_bead_warning(
@@ -813,14 +919,14 @@ class WorktreeManager:
         subprocess.run(
             ["git", "branch", "-D", handle.branch],
             capture_output=True,
-            cwd=str(self._project_root),
+            cwd=str(self._canonical_repo),
         )
 
         # Prune stale registry entries
         subprocess.run(
             ["git", "worktree", "prune"],
             capture_output=True,
-            cwd=str(self._project_root),
+            cwd=str(self._canonical_repo),
         )
 
         _log.info(
@@ -828,9 +934,91 @@ class WorktreeManager:
             handle.step_id, handle.path,
         )
 
+    @staticmethod
+    def _get_default_stale_hours() -> int:
+        """Return the default stale threshold in hours.
+
+        Resolution order (bd-841d):
+          1. BATON_WORKTREE_STALE_HOURS (new canonical)
+          2. BATON_WORKTREE_GC_HOURS (legacy alias)
+          3. 4 (hard default — replaces old 72h)
+        """
+        stale = os.environ.get("BATON_WORKTREE_STALE_HOURS")
+        if stale is not None:
+            try:
+                return int(stale)
+            except ValueError:
+                pass
+        gc_hours = os.environ.get("BATON_WORKTREE_GC_HOURS")
+        if gc_hours is not None:
+            try:
+                return int(gc_hours)
+            except ValueError:
+                pass
+        return 4
+
+    def _is_in_flight(self, worktree_path: Path) -> tuple[bool, str]:
+        """Return (True, task_id) if worktree_path is referenced by a running execution.
+
+        Walks up from _project_root to find baton.db, queries executions
+        WHERE status='running', then checks each execution's state.json
+        step_worktrees dict for a path match.  Best-effort: any exception
+        returns (False, "").
+        """
+        import sqlite3 as _sqlite3  # noqa: PLC0415
+
+        try:
+            db_path_env = os.environ.get("BATON_DB_PATH")
+            baton_db: Path | None = None
+            if db_path_env:
+                candidate = Path(db_path_env)
+                if candidate.exists():
+                    baton_db = candidate
+            if baton_db is None:
+                search = self._project_root
+                for _ in range(8):
+                    candidate1 = search / ".claude" / "team-context" / "baton.db"
+                    candidate2 = search / "baton.db"
+                    if candidate1.exists():
+                        baton_db = candidate1
+                        break
+                    if candidate2.exists():
+                        baton_db = candidate2
+                        break
+                    parent = search.parent
+                    if parent == search:
+                        break
+                    search = parent
+
+            if baton_db is None:
+                return (False, "")
+
+            wt_str = str(worktree_path.resolve())
+
+            with _sqlite3.connect(str(baton_db), timeout=5) as _conn:
+                _conn.row_factory = _sqlite3.Row
+                rows = _conn.execute(
+                    "SELECT task_id, state_json FROM executions WHERE status = 'running'"
+                ).fetchall()
+
+            for row in rows:
+                task_id = row["task_id"]
+                try:
+                    state_data = json.loads(row["state_json"] or "{}")
+                    step_worktrees = state_data.get("step_worktrees", {})
+                    for _step_id, wt_dict in step_worktrees.items():
+                        wt_path_in_state = str(Path(wt_dict.get("path", "")).resolve())
+                        if wt_path_in_state == wt_str:
+                            return (True, task_id)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return (False, "")
+
     def gc_stale(
         self,
-        max_age_hours: int = 72,
+        max_age_hours: int | None = None,
         *,
         terminal_step_ids: set[str] | None = None,
         dry_run: bool = False,
@@ -844,7 +1032,9 @@ class WorktreeManager:
         Args:
             max_age_hours: Minimum age (in hours) before a worktree is eligible
                 for reclaim.  Use ``0`` to reclaim immediately (e.g. for
-                atomic swarm cleanup after coalescing completes).
+                atomic swarm cleanup after coalescing completes).  When
+                ``None``, resolved via ``_get_default_stale_hours()``
+                (bd-841d: defaults to 4h).
             terminal_step_ids: When set, only reclaim worktrees whose step_id
                 is in this set (safety gate for running steps).
             dry_run: List eligible worktrees without removing them.
@@ -857,6 +1047,10 @@ class WorktreeManager:
         """
         if not self._enabled:
             return []
+
+        # bd-841d: resolve None → env var → 4h default
+        if max_age_hours is None:
+            max_age_hours = self._get_default_stale_hours()
 
         reclaimed: list[WorktreeHandle] = []
         skipped = 0
@@ -923,6 +1117,20 @@ class WorktreeManager:
                         self._append_gc_log(gc_log, "skipped", handle, reason="not_terminal")
                         continue
 
+                # bd-841d: in-flight guard — skip if an active execution references this path
+                in_flight, active_exec_id = self._is_in_flight(handle.path)
+                if in_flight:
+                    _log.info(
+                        "gc_stale: skipping in-flight worktree %s (active execution %s)",
+                        handle.path,
+                        active_exec_id,
+                    )
+                    skipped += 1
+                    self._append_gc_log(
+                        gc_log, "skipped", handle, reason=f"in_flight:{active_exec_id}"
+                    )
+                    continue
+
                 if dry_run:
                     _log.info("gc_stale: [DRY RUN] would reclaim step=%s path=%s", handle.step_id, handle.path)
                     reclaimed.append(handle)
@@ -943,7 +1151,7 @@ class WorktreeManager:
         subprocess.run(
             ["git", "worktree", "prune"],
             capture_output=True,
-            cwd=str(self._project_root),
+            cwd=str(self._canonical_repo),
         )
 
         self._emit("worktree_gc", {
