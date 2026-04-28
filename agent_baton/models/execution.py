@@ -1352,6 +1352,9 @@ class ExecutionState:
     # The git branch that was current when this execution started.
     # Used as base_branch for all worktree create() calls.
     working_branch: str = ""
+    # bd-def9: SHA of the rebased tip of working_branch after the most-recent
+    # successful fold_back().  Empty until the first fold-back completes.
+    working_branch_head: str = ""
 
     def __post_init__(self) -> None:
         if not self.started_at:
@@ -1421,6 +1424,8 @@ class ExecutionState:
             # Wave 1.3 (bd-86bf): worktree isolation state
             "step_worktrees": dict(getattr(self, "step_worktrees", {})),
             "working_branch": getattr(self, "working_branch", ""),
+            # bd-def9: rebased tip SHA after most-recent fold_back()
+            "working_branch_head": getattr(self, "working_branch_head", ""),
         }
 
     @classmethod
@@ -1448,6 +1453,8 @@ class ExecutionState:
             # Wave 1.3 (bd-86bf): worktree isolation — default to empty for legacy files
             step_worktrees=dict(data.get("step_worktrees", {})),
             working_branch=data.get("working_branch", ""),
+            # bd-def9: getattr guard for legacy state files that predate this field
+            working_branch_head=data.get("working_branch_head", ""),
         )
 
 
