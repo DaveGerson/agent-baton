@@ -8,6 +8,7 @@ Covers the operator confirmation workflow added to baton swarm refactor:
   - --dry-run does not dispatch
   - auto-filing approval bead on operator confirmation
   - approval_bead_id threaded onto SwarmResult
+  - team-mode default enforcement (end-user readiness #8)
 """
 from __future__ import annotations
 
@@ -32,6 +33,8 @@ from agent_baton.cli.commands.swarm_cmd import (
     _check_approval_bead,
     _directive_summary,
     _estimate_cost,
+    _get_approval_mode,
+    _print_approval_mode_notice,
     _prompt_confirm,
 )
 from agent_baton.core.swarm.partitioner import (
@@ -631,3 +634,228 @@ def test_find_recent_approvals_returns_empty_on_no_table() -> None:
     result = store.find_recent_approvals(tag="swarm-refactor", max_age_minutes=5)
     assert result == []
     db_path.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# 20. Team-mode default enforcement (end-user readiness #8)
+# ---------------------------------------------------------------------------
+
+
+def test_team_mode_defaults_require_approval_bead(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """BATON_APPROVAL_MODE=team makes --require-approval-bead on by default.
+
+    Without any explicit --require-approval-bead flag, the team-mode path
+    must call _check_approval_bead with the sentinel so a recent bead is
+    looked up, even though the operator did not pass the flag.
+    """
+    chunks = _make_chunks(2)
+    mock_bead = MagicMock()
+    mock_bead.bead_id = "bd-teamtest1"
+    mock_bead.created_at = "2026-04-28T10:00:00Z"
+
+    mock_store = MagicMock()
+    mock_store.find_recent_approvals.return_value = [mock_bead]
+
+    mock_dispatch = MagicMock(return_value=MagicMock(
+        swarm_id="sw-team1",
+        n_succeeded=2,
+        n_failed=0,
+        total_tokens=16000,
+        total_cost_usd=0.004,
+        wall_clock_sec=1.0,
+        coalesce_branch="swarm-coalesce-team1",
+        approval_bead_id="",
+        failed_chunks=[],
+    ))
+
+    with (
+        patch.dict("os.environ", {"BATON_APPROVAL_MODE": "team"}, clear=False),
+        patch.object(swarm_cmd, "_partition", return_value=chunks),
+        patch.object(swarm_cmd, "_run_with_engine", mock_dispatch),
+        patch.object(swarm_cmd, "_get_bead_store", return_value=mock_store),
+        patch("builtins.input", return_value="y"),
+        patch.object(swarm_cmd, "_get_operator_identity", return_value="teamuser"),
+    ):
+        args = SimpleNamespace(
+            directive_json='{"kind":"rename-symbol","old":"a.Foo","new":"a.Bar"}',
+            max_agents=100,
+            language="python",
+            model="claude-haiku",
+            codebase_root=None,
+            dry_run=False,
+            yes=True,
+            require_approval_bead=None,       # NOT explicitly passed
+            no_require_approval_bead=False,   # NOT overridden
+        )
+        swarm_cmd._handle_refactor(args)
+
+    # The bead store must have been queried for a recent approval bead.
+    mock_store.find_recent_approvals.assert_called_once_with(
+        tag=_APPROVAL_BEAD_TAG,
+        max_age_minutes=_APPROVAL_BEAD_MAX_AGE_MINUTES,
+    )
+
+    captured = capsys.readouterr()
+    assert "approval mode: team" in captured.out
+
+
+def test_local_mode_keeps_opt_in_behavior(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """BATON_APPROVAL_MODE=local (or unset) preserves PR #59 opt-in behavior.
+
+    Without an explicit --require-approval-bead flag the bead check must NOT
+    run in local mode.
+    """
+    chunks = _make_chunks(2)
+    mock_store = MagicMock()
+
+    mock_dispatch = MagicMock(return_value=MagicMock(
+        swarm_id="sw-local1",
+        n_succeeded=2,
+        n_failed=0,
+        total_tokens=16000,
+        total_cost_usd=0.004,
+        wall_clock_sec=1.0,
+        coalesce_branch="swarm-coalesce-local1",
+        approval_bead_id="",
+        failed_chunks=[],
+    ))
+
+    with (
+        patch.dict("os.environ", {"BATON_APPROVAL_MODE": "local"}, clear=False),
+        patch.object(swarm_cmd, "_partition", return_value=chunks),
+        patch.object(swarm_cmd, "_run_with_engine", mock_dispatch),
+        patch.object(swarm_cmd, "_get_bead_store", return_value=mock_store),
+        patch("builtins.input", return_value="y"),
+        patch.object(swarm_cmd, "_get_operator_identity", return_value="localuser"),
+    ):
+        args = SimpleNamespace(
+            directive_json='{"kind":"rename-symbol","old":"a.Foo","new":"a.Bar"}',
+            max_agents=100,
+            language="python",
+            model="claude-haiku",
+            codebase_root=None,
+            dry_run=False,
+            yes=True,
+            require_approval_bead=None,       # NOT explicitly passed
+            no_require_approval_bead=False,
+        )
+        swarm_cmd._handle_refactor(args)
+
+    # In local mode with no explicit flag, the bead store must NOT be queried
+    # for approvals (find_recent_approvals should never be called).
+    mock_store.find_recent_approvals.assert_not_called()
+
+    captured = capsys.readouterr()
+    assert "approval mode: local" in captured.out
+    assert "BATON_APPROVAL_MODE=team" in captured.out
+
+
+def test_team_mode_explicit_override_files_audit_bead(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """--no-require-approval-bead in team mode files a WARNING audit bead.
+
+    The override must succeed (no SystemExit), but a warning bead must be
+    written recording the bypass so the trail is permanent.
+    """
+    chunks = _make_chunks(2)
+
+    filed_beads: list = []
+
+    def _capture_write(bead):
+        filed_beads.append(bead)
+        return bead.bead_id
+
+    mock_store = MagicMock()
+    mock_store.write.side_effect = _capture_write
+
+    mock_dispatch = MagicMock(return_value=MagicMock(
+        swarm_id="sw-override1",
+        n_succeeded=2,
+        n_failed=0,
+        total_tokens=16000,
+        total_cost_usd=0.004,
+        wall_clock_sec=1.0,
+        coalesce_branch="swarm-coalesce-override1",
+        approval_bead_id="",
+        failed_chunks=[],
+    ))
+
+    with (
+        patch.dict("os.environ", {"BATON_APPROVAL_MODE": "team"}, clear=False),
+        patch.object(swarm_cmd, "_partition", return_value=chunks),
+        patch.object(swarm_cmd, "_run_with_engine", mock_dispatch),
+        patch.object(swarm_cmd, "_get_bead_store", return_value=mock_store),
+        patch("builtins.input", return_value="y"),
+        patch.object(swarm_cmd, "_get_operator_identity", return_value="overrideuser"),
+    ):
+        args = SimpleNamespace(
+            directive_json='{"kind":"rename-symbol","old":"a.Foo","new":"a.Bar"}',
+            max_agents=100,
+            language="python",
+            model="claude-haiku",
+            codebase_root=None,
+            dry_run=False,
+            yes=True,
+            require_approval_bead=None,
+            no_require_approval_bead=True,    # explicit override
+        )
+        swarm_cmd._handle_refactor(args)   # must not raise
+
+    # The audit bead must have been filed.
+    assert len(filed_beads) >= 1, "Expected at least one bead to be filed"
+    # Find the warning/audit bead (may also include the approval bead from --yes+confirm).
+    warning_beads = [b for b in filed_beads if b.bead_type == "warning"]
+    assert len(warning_beads) == 1, f"Expected exactly one warning bead; got {warning_beads}"
+    wb = warning_beads[0]
+    assert "overrideuser" in wb.content
+    assert "team-override" in wb.tags
+    assert "audit" in wb.tags
+
+    # Bead store must NOT have been queried for approvals (bypass is active).
+    mock_store.find_recent_approvals.assert_not_called()
+
+    captured = capsys.readouterr()
+    assert "override" in captured.out.lower()
+
+
+def test_team_mode_notice_printed_at_launch(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """The mode notice is always printed at swarm-launch time.
+
+    Verifies both team-mode and local-mode notices contain the required text
+    as specified in the end-user readiness requirements.
+    """
+    import io
+
+    # Team mode notice (no override)
+    with patch("sys.stdout", new_callable=io.StringIO) as mock_out:
+        _print_approval_mode_notice("team", no_require=False)
+        team_output = mock_out.getvalue()
+
+    assert "approval mode: team" in team_output
+    assert "second-reviewer enforced" in team_output
+    assert "--no-require-approval-bead" in team_output
+    assert "audited" in team_output
+
+    # Team mode notice (with override)
+    with patch("sys.stdout", new_callable=io.StringIO) as mock_out:
+        _print_approval_mode_notice("team", no_require=True)
+        team_override_output = mock_out.getvalue()
+
+    assert "approval mode: team" in team_override_output
+    assert "override" in team_override_output.lower()
+
+    # Local mode notice
+    with patch("sys.stdout", new_callable=io.StringIO) as mock_out:
+        _print_approval_mode_notice("local", no_require=False)
+        local_output = mock_out.getvalue()
+
+    assert "approval mode: local" in local_output
+    assert "single-reviewer" in local_output
+    assert "BATON_APPROVAL_MODE=team" in local_output
