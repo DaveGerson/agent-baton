@@ -4216,6 +4216,39 @@ class ExecutionEngine:
                 task_summary=state.plan.task_summary,
             )
         else:
+            # Wave 2.2 — fetch prior context for this (agent_name, domain).
+            # Best-effort: any failure leaves the block empty so the prompt
+            # is unchanged from pre-harvester behavior.
+            _prior_context_block = ""
+            if self._storage is not None:
+                try:
+                    from agent_baton.core.intel.context_harvester import (
+                        ContextHarvester,
+                        derive_domain,
+                        is_enabled as _harvest_enabled,
+                    )
+                    if _harvest_enabled():
+                        _hv_conn = self._storage._conn()
+                        # derive_domain takes a step_result-shaped first arg;
+                        # at dispatch time we only have the PlanStep so pass
+                        # an empty stand-in for files_changed and rely on
+                        # plan_step.allowed_paths.
+                        _hv_domain = derive_domain(
+                            type("_S", (), {"files_changed": []})(),
+                            plan_step=step,
+                        )
+                        _hv_row = ContextHarvester.fetch_one(
+                            _hv_conn, step.agent_name, _hv_domain
+                        )
+                        if _hv_row:
+                            _prior_context_block = (
+                                ContextHarvester.render_prior_context_block(_hv_row)
+                            )
+                except Exception as _hv_exc:  # noqa: BLE001
+                    _log.debug(
+                        "Prior context lookup failed (non-fatal): %s", _hv_exc
+                    )
+
             prompt = dispatcher.build_delegation_prompt(
                 step,
                 shared_context=state.plan.shared_context,
@@ -4226,6 +4259,7 @@ class ExecutionEngine:
                 delivered_knowledge=state.delivered_knowledge,
                 isolation=isolation or None,
                 project_root=self._project_root() if isolation else None,
+                prior_context_block=_prior_context_block,
             )
             # Persist the updated delivered_knowledge map so subsequent
             # dispatches in this run know which docs are already inlined.

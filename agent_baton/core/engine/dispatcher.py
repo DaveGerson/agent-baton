@@ -380,6 +380,7 @@ class PromptDispatcher:
         delivered_knowledge: "dict[str, str] | None" = None,
         isolation: str | None = None,
         project_root: Path | None = None,
+        prior_context_block: str = "",
     ) -> str:
         """Build a complete delegation prompt for an agent.
 
@@ -475,6 +476,16 @@ class PromptDispatcher:
         parts += [
             f"You are {article} {role} working on {project_line}.",
             "",
+        ]
+
+        # Prior Context (Wave 2.2 — ContextHarvester).
+        # When the executor passes a non-empty prior_context_block we prepend
+        # it before Shared Context so the agent sees its own past work in
+        # this domain.  Caller is responsible for capping the block size.
+        if prior_context_block.strip():
+            parts += [prior_context_block.strip(), ""]
+
+        parts += [
             "## Shared Context",
             shared_context_block,
             "",
