@@ -629,23 +629,27 @@ class TestIdempotentRunAfterApproval:
             approvals=[(1, "approve")],
         )
 
-        # Track which agents were "dispatched" by counting record_step_result
-        # calls that reference the architect.  Easier: capture the engine
-        # actions by patching mark_dispatched.
+        # Track which steps are processed by this run by spying on
+        # record_step_result.  In dry_run mode mark_dispatched is intentionally
+        # skipped (it has git-worktree side effects), so record_step_result is
+        # the correct interception point — it is called for every step that
+        # _run_loop actually processes (including the dry-run skip path).
         dispatched_step_ids: list[str] = []
 
-        original_mark = ExecutionEngine.mark_dispatched
+        original_record = ExecutionEngine.record_step_result
 
-        def _spy_mark(self, step_id: str, agent_name: str = "", **kwargs):
+        def _spy_record(self, step_id: str, agent_name: str = "", **kwargs):
             dispatched_step_ids.append(step_id)
-            return original_mark(self, step_id=step_id, agent_name=agent_name, **kwargs)
+            return original_record(
+                self, step_id=step_id, agent_name=agent_name, **kwargs
+            )
 
         args = _make_args(str(plan_path), task_id=None, dry_run=True)
         patches = _patches_for_run(tmp_path)
         with (
             patches[0], patches[1], patches[2], patches[3],
             patches[4], patches[5], patches[6],
-            patch.object(ExecutionEngine, "mark_dispatched", _spy_mark),
+            patch.object(ExecutionEngine, "record_step_result", _spy_record),
         ):
             _handle_run(args)
 
