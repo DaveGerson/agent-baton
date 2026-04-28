@@ -1071,6 +1071,158 @@ class IntelligentPlanner:
     # + analyzer dispatches.
     # ------------------------------------------------------------------
 
+    def _step_apply_gates(
+        self,
+        plan_phases: list[PlanPhase],
+        *,
+        stack_profile: StackProfile | None,
+        gate_scope: GateScope,
+        project_root: Path | None,
+    ) -> None:
+        """Steps 12 / 12.a — QA gate decoration + project-config overlay.
+
+        Mutates *plan_phases* in place.  Body is byte-identical to the
+        inline version it replaced.
+        """
+        # 12. Add QA gates (stack-aware, bd-124f: scoped to changed paths)
+        for phase in plan_phases:
+            if phase.gate is None:
+                # Collect changed source paths from all steps in this phase.
+                # Use allowed_paths (sandbox write paths) as the best signal
+                # for what files the phase will modify.
+                phase_changed: list[str] = []
+                for _step in phase.steps:
+                    phase_changed.extend(_step.allowed_paths)
+                phase.gate = self._default_gate(
+                    phase.name,
+                    stack=stack_profile,
+                    changed_paths=phase_changed or None,
+                    gate_scope=gate_scope,
+                    project_root=project_root,
+                )
+
+        # 12.a. Apply project config (baton.yaml) defaults — additive.
+        # No-op when no baton.yaml is present in the project.
+        try:
+            self._apply_project_config(plan_phases)
+        except Exception:
+            logger.warning(
+                "Applying project config failed — continuing without it",
+                exc_info=True,
+            )
+
+    def _step_apply_approval_gates(
+        self,
+        plan_phases: list[PlanPhase],
+        *,
+        risk_level_enum: RiskLevel,
+        task_summary: str,
+        resolved_agents: list[str],
+    ) -> set[int]:
+        """Steps 12b / 12b-bis — approval gates and concern-splitting.
+
+        Mutates *plan_phases* in place.  Returns the set of phase ids
+        that were split (so step 12c can skip team-consolidation on
+        them).  Body is byte-identical to the inline version.
+        """
+        # 12b. Set approval gates on critical phases for HIGH+ risk
+        if risk_level_enum in (RiskLevel.HIGH, RiskLevel.CRITICAL):
+            for phase in plan_phases:
+                if phase.name.lower() in ("design", "research"):
+                    phase.approval_required = True
+                    phase.approval_description = (
+                        f"Review {phase.name.lower()} output before "
+                        f"implementation begins. Approve to continue, "
+                        f"reject to stop, or approve-with-feedback to "
+                        f"add remediation steps."
+                    )
+
+        # 12b-bis. Concern-splitting: when the task summary names ≥3 distinct
+        # concerns/modules (e.g. "F0.1 ... F0.2 ... F0.3 ... F0.4 ..."), split
+        # implement-type phases into one parallel single-agent step per
+        # concern.  This runs BEFORE team consolidation so the planner emits
+        # parallel steps instead of a single bundled team step.
+        # See feedback_planner_parallelization.md.
+        _concerns = self._parse_concerns(task_summary)
+        _split_phase_ids: set[int] = set()
+        if _concerns:
+            logger.debug(
+                "Detected %d concerns in task summary: %s",
+                len(_concerns),
+                [c[0] for c in _concerns],
+            )
+            for phase in plan_phases:
+                if phase.name.lower() in ("implement", "fix", "draft", "migrate"):
+                    self._split_implement_phase_by_concerns(
+                        phase, _concerns, resolved_agents, task_summary,
+                    )
+                    _split_phase_ids.add(phase.phase_id)
+        return _split_phase_ids
+
+    def _step_consolidate_team(
+        self,
+        plan_phases: list[PlanPhase],
+        *,
+        task_id: str,
+        task_summary: str,
+        risk_level: str,
+        inferred_type: str,
+        inferred_complexity: str,
+        split_phase_ids: set[int],
+    ) -> list[str]:
+        """Steps 12c / 12c.4 / 12c.5 — team consolidation, file-path
+        extraction, and plan reviewer pass.
+
+        Mutates *plan_phases* in place.  Returns ``extracted_paths`` so
+        the downstream context-richness step can re-use them.  Body is
+        byte-identical to the inline version.
+        """
+        # 12c. Consolidate multi-agent Implement/Fix phases into team steps.
+        # NOTE: After concern-splitting (12b-bis), an implement phase that was
+        # split now has N single-agent steps where each step is for a
+        # *different concern*.  We must NOT re-consolidate those into a team
+        # — they are intentionally parallel-by-concern.
+        for phase in plan_phases:
+            if phase.phase_id in split_phase_ids:
+                continue
+            if self._is_team_phase(phase, task_summary):
+                phase.steps = [self._consolidate_team_step(phase)]
+
+        # 12c.4. Extract file paths early — needed by plan reviewer (12c.5)
+        # and context richness (13c).
+        extracted_paths = self._extract_file_paths(task_summary)
+
+        # 12c.5. Plan structure review — detect overly broad single-agent
+        # steps and split them into parallel concern-scoped steps.
+        # Skips light-complexity plans (nothing to split).  Uses Haiku
+        # for medium+ plans, with heuristic fallback when unavailable.
+        try:
+            self._last_review_result = self._plan_reviewer.review(
+                plan=MachinePlan(
+                    task_id=task_id,
+                    task_summary=task_summary,
+                    risk_level=risk_level,
+                    budget_tier="standard",
+                    phases=plan_phases,
+                    task_type=inferred_type,
+                    complexity=inferred_complexity,
+                ),
+                task_summary=task_summary,
+                file_paths=extracted_paths,
+                complexity=inferred_complexity,
+            )
+            if self._last_review_result.splits_applied > 0:
+                logger.info(
+                    "Plan review applied %d split(s) (source=%s)",
+                    self._last_review_result.splits_applied,
+                    self._last_review_result.source,
+                )
+        except Exception:
+            logger.debug(
+                "Plan review failed — skipping", exc_info=True,
+            )
+        return extracted_paths
+
     def _step_inject_context_files(
         self,
         plan_phases: list[PlanPhase],
@@ -1940,110 +2092,38 @@ class IntelligentPlanner:
             except Exception:
                 pass
 
-        # 12. Add QA gates (stack-aware, bd-124f: scoped to changed paths)
-        for phase in plan_phases:
-            if phase.gate is None:
-                # Collect changed source paths from all steps in this phase.
-                # Use allowed_paths (sandbox write paths) as the best signal
-                # for what files the phase will modify.
-                phase_changed: list[str] = []
-                for _step in phase.steps:
-                    phase_changed.extend(_step.allowed_paths)
-                phase.gate = self._default_gate(
-                    phase.name,
-                    stack=stack_profile,
-                    changed_paths=phase_changed or None,
-                    gate_scope=gate_scope,
-                    project_root=project_root,
-                )
+        # 12 + 12.a. Add QA gates and apply project-config defaults.
+        # Extracted to ``_step_apply_gates`` (005b 1.4b).
+        self._step_apply_gates(
+            plan_phases,
+            stack_profile=stack_profile,
+            gate_scope=gate_scope,
+            project_root=project_root,
+        )
 
-        # 12.a. Apply project config (baton.yaml) defaults — additive.
-        # No-op when no baton.yaml is present in the project.
-        try:
-            self._apply_project_config(plan_phases)
-        except Exception:
-            logger.warning(
-                "Applying project config failed — continuing without it",
-                exc_info=True,
-            )
+        # 12b + 12b-bis. Approval gates on Design/Research at HIGH+ risk
+        # and concern-splitting for implement-class phases.  Extracted to
+        # ``_step_apply_approval_gates`` (005b 1.4b).
+        _split_phase_ids = self._step_apply_approval_gates(
+            plan_phases,
+            risk_level_enum=risk_level_enum,
+            task_summary=task_summary,
+            resolved_agents=resolved_agents,
+        )
 
-        # 12b. Set approval gates on critical phases for HIGH+ risk
-        if risk_level_enum in (RiskLevel.HIGH, RiskLevel.CRITICAL):
-            for phase in plan_phases:
-                if phase.name.lower() in ("design", "research"):
-                    phase.approval_required = True
-                    phase.approval_description = (
-                        f"Review {phase.name.lower()} output before "
-                        f"implementation begins. Approve to continue, "
-                        f"reject to stop, or approve-with-feedback to "
-                        f"add remediation steps."
-                    )
-
-        # 12b-bis. Concern-splitting: when the task summary names ≥3 distinct
-        # concerns/modules (e.g. "F0.1 ... F0.2 ... F0.3 ... F0.4 ..."), split
-        # implement-type phases into one parallel single-agent step per
-        # concern.  This runs BEFORE team consolidation so the planner emits
-        # parallel steps instead of a single bundled team step.
-        # See feedback_planner_parallelization.md.
-        _concerns = self._parse_concerns(task_summary)
-        _split_phase_ids: set[int] = set()
-        if _concerns:
-            logger.debug(
-                "Detected %d concerns in task summary: %s",
-                len(_concerns),
-                [c[0] for c in _concerns],
-            )
-            for phase in plan_phases:
-                if phase.name.lower() in ("implement", "fix", "draft", "migrate"):
-                    self._split_implement_phase_by_concerns(
-                        phase, _concerns, resolved_agents, task_summary,
-                    )
-                    _split_phase_ids.add(phase.phase_id)
-
-        # 12c. Consolidate multi-agent Implement/Fix phases into team steps.
-        # NOTE: After concern-splitting (12b-bis), an implement phase that was
-        # split now has N single-agent steps where each step is for a
-        # *different concern*.  We must NOT re-consolidate those into a team
-        # — they are intentionally parallel-by-concern.
-        for phase in plan_phases:
-            if phase.phase_id in _split_phase_ids:
-                continue
-            if self._is_team_phase(phase, task_summary):
-                phase.steps = [self._consolidate_team_step(phase)]
-
-        # 12c.4. Extract file paths early — needed by plan reviewer (12c.5)
-        # and context richness (13c).
-        extracted_paths = self._extract_file_paths(task_summary)
-
-        # 12c.5. Plan structure review — detect overly broad single-agent
-        # steps and split them into parallel concern-scoped steps.
-        # Skips light-complexity plans (nothing to split).  Uses Haiku
-        # for medium+ plans, with heuristic fallback when unavailable.
-        try:
-            self._last_review_result = self._plan_reviewer.review(
-                plan=MachinePlan(
-                    task_id=task_id,
-                    task_summary=task_summary,
-                    risk_level=risk_level,
-                    budget_tier="standard",
-                    phases=plan_phases,
-                    task_type=inferred_type,
-                    complexity=inferred_complexity,
-                ),
-                task_summary=task_summary,
-                file_paths=extracted_paths,
-                complexity=inferred_complexity,
-            )
-            if self._last_review_result.splits_applied > 0:
-                logger.info(
-                    "Plan review applied %d split(s) (source=%s)",
-                    self._last_review_result.splits_applied,
-                    self._last_review_result.source,
-                )
-        except Exception:
-            logger.debug(
-                "Plan review failed — skipping", exc_info=True,
-            )
+        # 12c + 12c.4 + 12c.5. Team consolidation, file-path extraction,
+        # and plan-reviewer pass.  Extracted to ``_step_consolidate_team``
+        # (005b 1.4b) without semantic change.  Returns the extracted file
+        # paths, which downstream steps reuse for context enrichment.
+        extracted_paths = self._step_consolidate_team(
+            plan_phases,
+            task_id=task_id,
+            task_summary=task_summary,
+            risk_level=risk_level,
+            inferred_type=inferred_type,
+            inferred_complexity=inferred_complexity,
+            split_phase_ids=_split_phase_ids,
+        )
 
         # 12d. Apply bead hints from BeadAnalyzer (F7).
         # Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
