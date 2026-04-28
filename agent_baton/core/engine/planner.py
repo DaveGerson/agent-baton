@@ -1071,6 +1071,79 @@ class IntelligentPlanner:
     # + analyzer dispatches.
     # ------------------------------------------------------------------
 
+    def _step_inject_context_files(
+        self,
+        plan_phases: list[PlanPhase],
+        *,
+        default_model: str | None,
+        extracted_paths: list[str],
+    ) -> None:
+        """Steps 13 / 13b / 13c — context files, model inheritance, richness.
+
+        Mutates *plan_phases* in place.  Body is byte-identical to the
+        inline version.
+        """
+        # 13. Populate context_files — every agent should read CLAUDE.md
+        for phase in plan_phases:
+            for step in phase.steps:
+                if not step.context_files:
+                    step.context_files = ["CLAUDE.md"]
+
+        # 13b. Model inheritance — inherit model preference from agent definition.
+        # Priority: agent definition model > explicit default_model > "sonnet".
+        for phase in plan_phases:
+            for step in phase.steps:
+                agent_def = self._registry.get(step.agent_name)
+                if agent_def and agent_def.model:
+                    step.model = agent_def.model
+                elif default_model:
+                    step.model = default_model
+                # Also propagate to team members
+                for member in step.team:
+                    member_def = self._registry.get(member.agent_name)
+                    if member_def and member_def.model:
+                        member.model = member_def.model
+                    elif default_model:
+                        member.model = default_model
+
+        # 13c. Context richness — append extracted file paths (from 12c.4)
+        # to every step's context_files (deduplicated).
+        if extracted_paths:
+            for phase in plan_phases:
+                for step in phase.steps:
+                    existing = set(step.context_files)
+                    for path in extracted_paths:
+                        if path not in existing:
+                            step.context_files.append(path)
+                            existing.add(path)
+
+    def _step_attach_prior_beads(
+        self,
+        plan_phases: list[PlanPhase],
+        *,
+        task_id: str,
+        task_summary: str,
+    ) -> str | None:
+        """E7 dependency detection (step 13d).
+
+        Returns the detected ``depends_on_task_id`` (or ``None``) and, when
+        present, attaches the prior task's outcome beads to *plan_phases*
+        in-place.  Extracted from ``create_plan`` without semantic change.
+        """
+        depends_on_task_id: str | None = None
+        if self._bead_store is not None:
+            depends_on_task_id = self._detect_task_dependency(task_summary)
+            if depends_on_task_id is not None:
+                logger.info(
+                    "E7 dependency detected: task_id=%s depends on prior task %s",
+                    task_id,
+                    depends_on_task_id,
+                )
+                self._attach_prior_task_beads(
+                    plan_phases, depends_on_task_id
+                )
+        return depends_on_task_id
+
     def _step_build_shared_context(
         self,
         *,
@@ -1977,54 +2050,23 @@ class IntelligentPlanner:
         if _bead_hints:
             plan_phases = self._apply_bead_hints(plan_phases, _bead_hints)
 
-        # 13. Populate context_files — every agent should read CLAUDE.md
-        for phase in plan_phases:
-            for step in phase.steps:
-                if not step.context_files:
-                    step.context_files = ["CLAUDE.md"]
-
-        # 13b. Model inheritance — inherit model preference from agent definition.
-        # Priority: agent definition model > explicit default_model > "sonnet".
-        for phase in plan_phases:
-            for step in phase.steps:
-                agent_def = self._registry.get(step.agent_name)
-                if agent_def and agent_def.model:
-                    step.model = agent_def.model
-                elif default_model:
-                    step.model = default_model
-                # Also propagate to team members
-                for member in step.team:
-                    member_def = self._registry.get(member.agent_name)
-                    if member_def and member_def.model:
-                        member.model = member_def.model
-                    elif default_model:
-                        member.model = default_model
-
-        # 13c. Context richness — append extracted file paths (from 12c.4)
-        # to every step's context_files (deduplicated).
-        if extracted_paths:
-            for phase in plan_phases:
-                for step in phase.steps:
-                    existing = set(step.context_files)
-                    for path in extracted_paths:
-                        if path not in existing:
-                            step.context_files.append(path)
-                            existing.add(path)
+        # 13 + 13b + 13c. Inject context files, propagate model preferences,
+        # and enrich context with extracted paths.  Extracted to
+        # ``_step_inject_context_files`` (005b 1.4b) without semantic change.
+        self._step_inject_context_files(
+            plan_phases,
+            default_model=default_model,
+            extracted_paths=extracted_paths,
+        )
 
         # 13d. E7 — Dependency detection: scan task summary for references to
-        # prior task outputs and attach their outcome beads as knowledge context.
-        depends_on_task_id: str | None = None
-        if self._bead_store is not None:
-            depends_on_task_id = self._detect_task_dependency(task_summary)
-            if depends_on_task_id is not None:
-                logger.info(
-                    "E7 dependency detected: task_id=%s depends on prior task %s",
-                    task_id,
-                    depends_on_task_id,
-                )
-                self._attach_prior_task_beads(
-                    plan_phases, depends_on_task_id
-                )
+        # prior task outputs and attach their outcome beads as knowledge
+        # context.  Extracted to ``_step_attach_prior_beads`` (005b 1.4b).
+        depends_on_task_id = self._step_attach_prior_beads(
+            plan_phases,
+            task_id=task_id,
+            task_summary=task_summary,
+        )
 
         # 14 + 16. Final assembly — build the MachinePlan, compute team
         # cost estimates, and attach shared_context.  Extracted to
