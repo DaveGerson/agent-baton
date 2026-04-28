@@ -1,7 +1,7 @@
 """CLI command: ``baton souls`` — manage persistent agent soul identities.
 
 Wave 6.1 Part B (bd-d975).
-v33 addendum — revocation + rotation subcommands (end-user readiness #6).
+v34 addendum — revocation + rotation subcommands (end-user readiness #6).
 
 Subcommands
 -----------

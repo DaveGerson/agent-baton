@@ -1,6 +1,6 @@
 """Tests for agent_baton.core.engine.soul_registry — SoulRegistry + AgentSoul.
 
-Wave 6.1 Part B (bd-d975).
+Wave 6.1 Part B (bd-d975) + v34 revocation extension.
 
 Coverage:
 - ed25519 sign/verify round-trip
@@ -12,8 +12,16 @@ Coverage:
 - list_for_role: returns active souls for role; excludes retired, excludes revoked
 - retire: sets retired_at; soul no longer in list_for_role
 - retire with successor: records successor in notes
-- revoke: sets revoked: prefix in notes; is_revoked == True
-- revoked soul is excluded from list_for_role
+- revoke (v34 table-based):
+  - inserts row in soul_revocations
+  - double-revoke raises ValueError
+  - is_revoked returns True after revoke
+  - revoked soul is excluded from list_for_role
+- is_revoked: checks table first, then legacy notes prefix
+- list_revocations: returns Revocation dataclasses with all fields
+- rotate: atomic — inserts soul_revocations + new agent_souls row in one tx
+  successor inherits role + parent_soul_id; fresh keypair (distinct from old)
+- revocations persist across DB reopen
 - upsert_expertise / get_expertise round-trip
 - federation: pubkey written to central.db and readable from a separate connection
 - graceful degradation: get() returns None for missing soul
@@ -22,12 +30,17 @@ from __future__ import annotations
 
 import sqlite3
 import stat
-import json
 from pathlib import Path
 
 import pytest
 
-from agent_baton.core.engine.soul_registry import AgentSoul, SoulRegistry, _role_slug, _domain_slug
+from agent_baton.core.engine.soul_registry import (
+    AgentSoul,
+    Revocation,
+    SoulRegistry,
+    _domain_slug,
+    _role_slug,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -254,7 +267,7 @@ class TestSoulRegistryListForRole:
 
     def test_list_for_role_excludes_revoked(self, registry: SoulRegistry):
         soul = registry.mint("code-reviewer", "auth")
-        registry.revoke(soul.soul_id)
+        registry.revoke(soul.soul_id, reason="compromised in test")
         ids = {s.soul_id for s in registry.list_for_role("code-reviewer")}
         assert soul.soul_id not in ids
 
@@ -297,7 +310,6 @@ class TestSoulRegistryRetire:
 
     def test_retire_idempotent(self, registry: SoulRegistry, soul: AgentSoul):
         registry.retire(soul.soul_id)
-        first_retired_at = registry.get(soul.soul_id).retired_at
         # Retiring again overwrites retired_at but should not crash.
         registry.retire(soul.soul_id)
         # Still retired.
@@ -305,40 +317,235 @@ class TestSoulRegistryRetire:
 
 
 # ---------------------------------------------------------------------------
-# SoulRegistry.revoke
+# SoulRegistry.revoke — v34 table-based
 # ---------------------------------------------------------------------------
 
 
 class TestSoulRegistryRevoke:
-    def test_revoke_sets_revoked_prefix(self, registry: SoulRegistry, soul: AgentSoul):
-        registry.revoke(soul.soul_id)
-        updated = registry.get(soul.soul_id)
-        assert updated is not None
-        assert updated.is_revoked is True
-        assert updated.notes.startswith("revoked:")
+    def test_revoke_inserts_row(self, registry: SoulRegistry, soul: AgentSoul):
+        """test_revoke_inserts_row: row appears in soul_revocations after revoke()."""
+        registry.revoke(soul.soul_id, reason="key found on pastebin")
+        conn = sqlite3.connect(str(registry._db_path))
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM soul_revocations WHERE soul_id = ?", (soul.soul_id,)
+        ).fetchone()
+        conn.close()
+        assert row is not None
+        assert row["soul_id"] == soul.soul_id
+        assert row["reason"] == "key found on pastebin"
+        assert row["revoked_at"] != ""
+
+    def test_revoke_idempotent_raises_on_double_revoke(
+        self, registry: SoulRegistry, soul: AgentSoul
+    ):
+        """test_revoke_idempotent_or_raises_on_double_revoke: double-revoke raises ValueError."""
+        registry.revoke(soul.soul_id, reason="first revocation")
+        with pytest.raises(ValueError, match="already revoked"):
+            registry.revoke(soul.soul_id, reason="second revocation attempt")
+
+    def test_is_revoked_returns_true_after_revoke(
+        self, registry: SoulRegistry, soul: AgentSoul
+    ):
+        """test_is_revoked_returns_true_after_revoke."""
+        assert registry.is_revoked(soul.soul_id) is False
+        registry.revoke(soul.soul_id, reason="workstation compromised")
+        assert registry.is_revoked(soul.soul_id) is True
+
+    def test_revoke_raises_for_nonexistent_soul(self, registry: SoulRegistry):
+        with pytest.raises(ValueError, match="not found"):
+            registry.revoke("nonexistent_soul_xyz", reason="test")
+
+    def test_revoke_raises_for_empty_reason(
+        self, registry: SoulRegistry, soul: AgentSoul
+    ):
+        with pytest.raises(ValueError, match="non-empty reason"):
+            registry.revoke(soul.soul_id, reason="")
 
     def test_revoked_soul_is_not_active(self, registry: SoulRegistry, soul: AgentSoul):
-        registry.revoke(soul.soul_id)
+        registry.revoke(soul.soul_id, reason="test revocation")
         updated = registry.get(soul.soul_id)
+        assert updated is not None
         assert updated.is_active is False
+        assert updated.is_revoked is True
 
-    def test_revoke_nonexistent_is_noop(self, registry: SoulRegistry):
-        registry.revoke("nonexistent_soul_xyz")
+    def test_revoke_stores_revoked_by(self, registry: SoulRegistry, soul: AgentSoul):
+        registry.revoke(soul.soul_id, reason="audit", revoked_by="ops-bot")
+        conn = sqlite3.connect(str(registry._db_path))
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT revoked_by FROM soul_revocations WHERE soul_id = ?", (soul.soul_id,)
+        ).fetchone()
+        conn.close()
+        assert row["revoked_by"] == "ops-bot"
 
-    def test_revoke_preserves_existing_notes(self, registry: SoulRegistry):
+    def test_revoke_with_successor_stores_it(
+        self, registry: SoulRegistry
+    ):
+        s1 = registry.mint("code-reviewer", "auth")
+        s2 = registry.mint("code-reviewer", "auth")
+        registry.revoke(s1.soul_id, reason="key rotation", successor_soul_id=s2.soul_id)
+        conn = sqlite3.connect(str(registry._db_path))
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT successor_soul_id FROM soul_revocations WHERE soul_id = ?",
+            (s1.soul_id,),
+        ).fetchone()
+        conn.close()
+        assert row["successor_soul_id"] == s2.soul_id
+
+    def test_is_revoked_returns_false_for_unknown_soul(self, registry: SoulRegistry):
+        assert registry.is_revoked("totally_unknown_soul") is False
+
+    def test_is_revoked_legacy_notes_fallback(self, registry: SoulRegistry):
+        """is_revoked() falls back to notes-prefix for pre-v34 revocations."""
         soul = registry.mint("code-reviewer", "auth")
-        # Manually set notes.
+        # Simulate a legacy revocation (notes prefix, no table row).
         conn = sqlite3.connect(str(registry._db_path))
         conn.execute(
-            "UPDATE agent_souls SET notes = ? WHERE soul_id = ?",
-            ("original note", soul.soul_id),
+            "UPDATE agent_souls SET notes = 'revoked:2025-01-01T00:00:00Z' WHERE soul_id = ?",
+            (soul.soul_id,),
         )
         conn.commit()
         conn.close()
-        registry.revoke(soul.soul_id)
-        updated = registry.get(soul.soul_id)
-        assert updated.is_revoked is True
-        assert "original note" in updated.notes
+        assert registry.is_revoked(soul.soul_id) is True
+
+
+# ---------------------------------------------------------------------------
+# SoulRegistry.list_revocations
+# ---------------------------------------------------------------------------
+
+
+class TestSoulRegistryListRevocations:
+    def test_list_revocations_empty_initially(self, registry: SoulRegistry):
+        assert registry.list_revocations() == []
+
+    def test_list_revocations_returns_revocation_dataclass(
+        self, registry: SoulRegistry, soul: AgentSoul
+    ):
+        registry.revoke(soul.soul_id, reason="unit test reason", revoked_by="ci")
+        revs = registry.list_revocations()
+        assert len(revs) == 1
+        rev = revs[0]
+        assert isinstance(rev, Revocation)
+        assert rev.soul_id == soul.soul_id
+        assert rev.reason == "unit test reason"
+        assert rev.revoked_by == "ci"
+        assert rev.revoked_at != ""
+        assert rev.successor_soul_id is None
+
+    def test_list_revocations_ordered_most_recent_first(self, registry: SoulRegistry):
+        s1 = registry.mint("code-reviewer", "auth")
+        s2 = registry.mint("code-reviewer", "db")
+        registry.revoke(s1.soul_id, reason="first")
+        registry.revoke(s2.soul_id, reason="second")
+        revs = registry.list_revocations()
+        # Most recent first — s2 was revoked after s1.
+        assert revs[0].soul_id == s2.soul_id
+        assert revs[1].soul_id == s1.soul_id
+
+
+# ---------------------------------------------------------------------------
+# SoulRegistry.rotate — atomic revoke + mint
+# ---------------------------------------------------------------------------
+
+
+class TestSoulRegistryRotate:
+    def test_rotate_creates_successor_keypair_atomically(self, registry: SoulRegistry):
+        """test_rotate_creates_successor_keypair_atomically: both soul row + revocation
+        row exist after rotate; they are written in one transaction."""
+        original = registry.mint("code-reviewer", "auth")
+        successor = registry.rotate(original.soul_id, reason="scheduled rotation")
+
+        # Successor is a valid soul.
+        assert successor is not None
+        assert successor.soul_id != original.soul_id
+        assert successor.role == original.role
+        assert successor.parent_soul_id == original.soul_id
+
+        # Successor keypair is genuinely different from original.
+        assert successor.pubkey != original.pubkey
+
+        # Original is revoked.
+        assert registry.is_revoked(original.soul_id) is True
+
+        # Revocation row links to successor.
+        revs = registry.list_revocations()
+        rev = next((r for r in revs if r.soul_id == original.soul_id), None)
+        assert rev is not None
+        assert rev.successor_soul_id == successor.soul_id
+
+    def test_rotate_successor_has_fresh_privkey(self, registry: SoulRegistry):
+        original = registry.mint("code-reviewer", "auth")
+        successor = registry.rotate(original.soul_id, reason="key rotation test")
+        assert successor.privkey_path is not None
+        assert successor.privkey_path.exists()
+        # Successor private key is 32 bytes.
+        assert len(successor.privkey_path.read_bytes()) == 32
+        # Private keys are distinct.
+        assert successor.privkey_path != original.privkey_path
+
+    def test_rotate_successor_can_sign_and_verify(self, registry: SoulRegistry):
+        original = registry.mint("code-reviewer", "auth")
+        successor = registry.rotate(original.soul_id, reason="test signing after rotate")
+        data = b"post-rotation payload"
+        sig = successor.sign(data)
+        assert successor.verify(data, sig) is True
+
+    def test_rotate_raises_if_soul_not_found(self, registry: SoulRegistry):
+        with pytest.raises(ValueError, match="not found"):
+            registry.rotate("no_such_soul_id", reason="test")
+
+    def test_rotate_raises_if_already_revoked(self, registry: SoulRegistry):
+        soul = registry.mint("code-reviewer", "auth")
+        registry.revoke(soul.soul_id, reason="pre-revoked")
+        with pytest.raises(ValueError, match="already revoked"):
+            registry.rotate(soul.soul_id, reason="cannot rotate revoked")
+
+    def test_rotate_raises_for_empty_reason(self, registry: SoulRegistry):
+        soul = registry.mint("code-reviewer", "auth")
+        with pytest.raises(ValueError, match="non-empty reason"):
+            registry.rotate(soul.soul_id, reason="")
+
+
+# ---------------------------------------------------------------------------
+# Persistence across DB reopen
+# ---------------------------------------------------------------------------
+
+
+class TestRevocationPersistence:
+    def test_revocations_persist_across_db_reopen(self, tmp_path: Path):
+        """test_revocations_persist_across_db_reopen: close registry, reopen, still revoked."""
+        central_db = tmp_path / "central.db"
+        souls_dir = tmp_path / "souls"
+
+        # First registry instance.
+        reg1 = SoulRegistry(central_db_path=central_db, souls_dir=souls_dir)
+        soul = reg1.mint("code-reviewer", "auth")
+        reg1.revoke(soul.soul_id, reason="persistence test")
+        # Explicitly del to close connections.
+        del reg1
+
+        # Second registry instance — fresh object, same DB file.
+        reg2 = SoulRegistry(central_db_path=central_db, souls_dir=souls_dir)
+        assert reg2.is_revoked(soul.soul_id) is True
+        revs = reg2.list_revocations()
+        assert any(r.soul_id == soul.soul_id for r in revs)
+
+    def test_rotate_persists_across_db_reopen(self, tmp_path: Path):
+        central_db = tmp_path / "central.db"
+        souls_dir = tmp_path / "souls"
+
+        reg1 = SoulRegistry(central_db_path=central_db, souls_dir=souls_dir)
+        original = reg1.mint("code-reviewer", "auth")
+        successor = reg1.rotate(original.soul_id, reason="rotate persistence test")
+        del reg1
+
+        reg2 = SoulRegistry(central_db_path=central_db, souls_dir=souls_dir)
+        assert reg2.is_revoked(original.soul_id) is True
+        fetched_successor = reg2.get(successor.soul_id)
+        assert fetched_successor is not None
+        assert fetched_successor.parent_soul_id == original.soul_id
 
 
 # ---------------------------------------------------------------------------

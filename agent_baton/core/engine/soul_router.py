@@ -1,5 +1,5 @@
 """Wave 6.1 Part B — Persistent Agent Souls: SoulRouter (bd-d975).
-v33 addendum — Revocation check in signature-verification path.
+v34 addendum — Revocation check in signature-verification path.
 
 Routes agent dispatches to the best-matching soul for a given
 (role, affected_files) pair based on two signals:
@@ -15,7 +15,7 @@ Expertise weights are lazily recomputed when the ``soul_expertise`` row is
 older than 24 h.  Background recomputation is Wave 6.2 territory; here we
 recompute synchronously on the first read after the TTL expires.
 
-Revocation guard (v33)
+Revocation guard (v34)
 ----------------------
 ``verify_signature(soul_id, data, signature)`` is the single entry point for
 signature verification.  It calls ``registry.is_revoked()`` *before* the
@@ -181,7 +181,7 @@ class SoulRouter:
             return None
 
     # ------------------------------------------------------------------
-    # Signature verification with revocation guard (v33)
+    # Signature verification with revocation guard (v34)
     # ------------------------------------------------------------------
 
     def verify_signature(

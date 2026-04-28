@@ -1,5 +1,5 @@
 """Wave 6.1 Part B — Persistent Agent Souls: SoulRegistry (bd-d975).
-v33 addendum — Soul Revocation + Rotation (end-user readiness concern #6).
+v34 addendum — Soul Revocation + Rotation (end-user readiness concern #6).
 
 Manages cryptographic identities (souls) for agent dispatch.  Souls are
 cross-project entities stored exclusively in ``~/.baton/central.db``
@@ -15,10 +15,10 @@ e.g. ``code_reviewer_auth_f7x``.  Suffix collisions get a 4th char.
 
 Revocation
 ----------
-Revoked souls are recorded in the ``soul_revocations`` table (schema v33).
+Revoked souls are recorded in the ``soul_revocations`` table (schema v34).
 A revocation entry is permanent — double-revoke raises ``ValueError``.
 The old notes-based heuristic (``revoked:`` prefix) is preserved for
-backward-compatibility when reading rows that pre-date v33, but all new
+backward-compatibility when reading rows that pre-date v34, but all new
 revocations write to the dedicated table.
 
 Rotation
@@ -103,7 +103,7 @@ class AgentSoul:
 
     # Internal revocation flag — derived from the presence of a
     # ``revoked:`` prefix in ``notes`` (legacy) OR from soul_revocations
-    # table (v33+).  The registry sets this via the _revoked kwarg when
+    # table (v34+).  The registry sets this via the _revoked kwarg when
     # constructing souls from a JOIN query.
     _revoked: bool = False
 
@@ -111,7 +111,7 @@ class AgentSoul:
     def is_revoked(self) -> bool:
         """True when this soul has been revoked (compromised key).
 
-        Checks both the dedicated revocation table (v33) and the legacy
+        Checks both the dedicated revocation table (v34) and the legacy
         notes-prefix for backward compatibility.
         """
         return self._revoked or self.notes.startswith("revoked:")
@@ -590,7 +590,7 @@ class SoulRegistry:
     def is_revoked(self, soul_id: str) -> bool:
         """Return ``True`` if *soul_id* appears in ``soul_revocations``.
 
-        Also checks the legacy notes-based flag for souls revoked before v33.
+        Also checks the legacy notes-based flag for souls revoked before v34.
         Returns ``False`` for unknown soul IDs (graceful degradation).
 
         Args:
@@ -598,7 +598,7 @@ class SoulRegistry:
         """
         try:
             conn = self._conn()
-            # v33 table check.
+            # v34 table check.
             row = conn.execute(
                 "SELECT 1 FROM soul_revocations WHERE soul_id = ?", (soul_id,)
             ).fetchone()
