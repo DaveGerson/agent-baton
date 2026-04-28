@@ -122,10 +122,16 @@ def _verify_install(base: Path, agents_dir: Path, refs_dir: Path, team_ctx: Path
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     p = subparsers.add_parser("install", help="Install agents and references")
+    sub = p.add_subparsers(dest="install_command", metavar="COMMAND")
+
+    # ---- (default) install -------------------------------------------------
+    # We keep all the install flags on the parent parser so that the existing
+    # ``baton install --scope project`` invocation continues to work when no
+    # subcommand is given.
     p.add_argument(
         "--scope",
-        required=True,
         choices=["user", "project"],
+        default=None,
         help="Install to user (~/.claude/) or project (.claude/) scope",
     )
     p.add_argument(
@@ -149,17 +155,52 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         action="store_true",
         help="Run post-install verification: check agents load, references readable, dirs writable",
     )
+
+    # ---- verify subcommand -------------------------------------------------
+    verify_p = sub.add_parser(
+        "verify",
+        help="Validate a .tar.gz agent-baton package before distribution",
+        description=(
+            "Runs structural and content checks on a package archive: verifies "
+            "the manifest, checks agent frontmatter, validates references, and "
+            "optionally displays per-file SHA-256 checksums."
+        ),
+    )
+    verify_p.add_argument(
+        "archive",
+        metavar="ARCHIVE",
+        help="Path to the .tar.gz package to verify",
+    )
+    verify_p.add_argument(
+        "--checksums",
+        action="store_true",
+        default=False,
+        help="Display per-file SHA-256 checksums alongside validation results",
+    )
+
     return p
 
 
 def handler(args: argparse.Namespace) -> None:
+    cmd = getattr(args, "install_command", None)
+    if cmd == "verify":
+        _cmd_verify(args)
+        return
+    _cmd_install(args)
+
+
+def _cmd_install(args: argparse.Namespace) -> None:
     """Non-interactive installer: copy agents, references, and templates.
 
     --upgrade mode: overwrites agents + references (they improve between
     versions), merges hooks into settings.json (preserving user keys),
     and preserves CLAUDE.md, knowledge/, and team-context/.
     """
-    scope: str = args.scope
+    scope: str | None = getattr(args, "scope", None)
+    if scope is None:
+        print("error: --scope is required (choices: user, project)", file=sys.stderr)
+        sys.exit(1)
+
     source = Path(args.source).resolve()
     force: bool = args.force
     upgrade: bool = args.upgrade
@@ -229,3 +270,43 @@ def handler(args: argparse.Namespace) -> None:
 
     if args.verify:
         _verify_install(base, agent_target, ref_target, team_ctx)
+
+
+def _cmd_verify(args: argparse.Namespace) -> None:
+    """Shared implementation for 'baton install verify' and the shim."""
+    from pathlib import Path as _Path
+    from agent_baton.core.distribute.packager import PackageVerifier
+
+    archive_path = _Path(args.archive)
+    verifier = PackageVerifier()
+
+    result = verifier.validate_package(archive_path)
+
+    status_label = "PASS" if result.valid else "FAIL"
+    print(f"Package: {archive_path.name}  [{status_label}]")
+    print(
+        f"Contents: {result.agent_count} agent(s), "
+        f"{result.reference_count} reference(s), "
+        f"{result.knowledge_count} knowledge pack(s)"
+    )
+
+    if result.errors:
+        print(f"\nErrors ({len(result.errors)}):")
+        for err in result.errors:
+            print(f"  [ERROR] {err}")
+
+    if result.warnings:
+        print(f"\nWarnings ({len(result.warnings)}):")
+        for warn in result.warnings:
+            print(f"  [WARN]  {warn}")
+
+    if args.checksums and result.checksums:
+        print(f"\nChecksums ({len(result.checksums)} files):")
+        for member_name, digest in sorted(result.checksums.items()):
+            print(f"  {digest}  {member_name}")
+
+    if not result.errors and not result.warnings:
+        print("\nAll checks passed.")
+
+    if not result.valid:
+        sys.exit(1)
