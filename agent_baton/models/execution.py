@@ -658,6 +658,8 @@ class MachinePlan:
                     lines.append(f"### Step {step.step_id}: {step.agent_name}")
                     lines.append(f"- **Model**: {step.model}")
                     lines.append(f"- **Task**: {step.task_description}")
+                if step.expected_outcome:
+                    lines.append(f"- **Expected outcome**: {step.expected_outcome}")
                 if step.depends_on:
                     lines.append(f"- **Depends on**: {', '.join(step.depends_on)}")
                 if step.deliverables:
