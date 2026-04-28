@@ -30,7 +30,7 @@ _DEPRECATED_HELP: dict[str, str] = {
 _COMMAND_GROUPS: dict[str, list[str]] = {
     "Core Workflow": ["quickstart", "plan", "execute", "status"],
     "Observability": ["dashboard", "trace", "usage", "telemetry", "context-profile", "retro", "context", "export"],
-    "Agents & Routing": ["agents", "route", "events", "incident"],
+    "Agents & Routing": ["agents", "route", "events", "incident", "context"],
     "Memory": ["beads"],
     "Knowledge": ["knowledge"],
     "Improvement": ["scores", "patterns", "budget", "changelog", "anomalies", "improve", "learn", "assess", "metrics", "cost-anomalies", "conflicts"],
