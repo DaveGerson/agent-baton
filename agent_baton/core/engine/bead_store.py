@@ -424,6 +424,10 @@ class BeadStore:
                 "SELECT * FROM beads WHERE bead_id = ?", (bead_id,)
             ).fetchone()
             if row is None:
+                # Gastown Part A fallback: consult git-notes when SQLite misses
+                # and dual-write is enabled (bd-971d).
+                if self._gastown_dual_write and self._notes_adapter is not None:
+                    return self._read_from_notes(bead_id)
                 return None
             bead = self._row_to_bead(row)
             # Wave 6.1 Part B: verify signature when souls are wired.
@@ -431,6 +435,43 @@ class BeadStore:
             return bead
         except Exception as exc:
             _log.warning("BeadStore.read failed for %s: %s", bead_id, exc)
+            return None
+
+    def _read_from_notes(self, bead_id: str) -> "Bead | None":  # noqa: F821
+        """Attempt to reconstruct a bead from git-notes when the SQLite row is absent.
+
+        Requires ``gastown_dual_write=True`` and a wired ``_notes_adapter``.
+        Uses ``_anchor_index`` to look up the anchor commit, then calls
+        ``_notes_adapter.read()`` to fetch the JSON blob.
+
+        Returns the reconstructed :class:`~agent_baton.models.bead.Bead` or
+        ``None`` on any failure (missing anchor, no note, parse error).
+        """
+        try:
+            anchor_commit = None
+            if self._anchor_index is not None:
+                anchor_commit = self._anchor_index.get(bead_id)
+            if not anchor_commit:
+                _log.debug(
+                    "BeadStore._read_from_notes: no anchor commit for %s — cannot consult notes",
+                    bead_id,
+                )
+                return None
+            blob = self._notes_adapter.read(bead_id, anchor_commit)
+            if blob is None:
+                return None
+            from agent_baton.models.bead import Bead  # noqa: PLC0415
+            bead = Bead.from_dict(blob)
+            _log.debug(
+                "BeadStore._read_from_notes: reconstructed %s from git-notes anchor=%s",
+                bead_id,
+                anchor_commit[:8],
+            )
+            return bead
+        except Exception as exc:
+            _log.warning(
+                "BeadStore._read_from_notes: failed for %s: %s", bead_id, exc
+            )
             return None
 
     def _verify_bead_signature(self, bead: "Bead") -> None:  # noqa: F821
