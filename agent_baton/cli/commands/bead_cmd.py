@@ -12,7 +12,9 @@ close    Close a bead with a summary.
 link     Add a typed link between two beads.
 cleanup  Archive old closed beads (memory decay).
 promote  Promote a bead to a persistent knowledge document.
-graph    Show the dependency graph for a task's beads.
+graph        Show the dependency graph for a task's beads.
+synthesize   Run the BeadSynthesizer manually (refresh bead_edges/clusters).
+clusters     List bead clusters discovered by the synthesizer.
 
 All subcommands degrade gracefully when the bead store is unavailable
 (older schema, no baton.db in the current project).
@@ -323,6 +325,30 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         help="Task ID whose bead graph to display (defaults to active task)",
     )
 
+    # -- synthesize ----------------------------------------------------------
+    synth_p = sub.add_parser(
+        "synthesize",
+        help="Refresh inferred bead edges and clusters (Wave 2.1).",
+    )
+    synth_p.add_argument(
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help="Emit machine-readable JSON instead of human text.",
+    )
+
+    # -- clusters ------------------------------------------------------------
+    clusters_p = sub.add_parser(
+        "clusters",
+        help="List bead clusters discovered by the synthesizer.",
+    )
+    clusters_p.add_argument(
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help="Emit machine-readable JSON instead of human text.",
+    )
+
     return p
 
 
@@ -335,7 +361,7 @@ def handler(args: argparse.Namespace) -> None:
     """Dispatch to the appropriate beads subcommand handler."""
     cmd = getattr(args, "beads_cmd", None)
     if cmd is None:
-        print("Usage: baton beads <subcommand>  [create|list|show|ready|close|link|cleanup|promote|graph]")
+        print("Usage: baton beads <subcommand>  [create|list|show|ready|close|link|cleanup|promote|graph|synthesize|clusters]")
         print("Run `baton beads --help` for details.")
         return
 
@@ -349,6 +375,8 @@ def handler(args: argparse.Namespace) -> None:
         "cleanup": _handle_cleanup,
         "promote": _handle_promote,
         "graph": _handle_graph,
+        "synthesize": _handle_synthesize,
+        "clusters": _handle_clusters,
     }
     fn = dispatch.get(cmd)
     if fn is None:
@@ -695,3 +723,136 @@ def _handle_graph(args: argparse.Namespace) -> None:
         print("Run `baton beads list --tag conflict:unresolved` to inspect.")
     else:
         print("No unresolved conflicts.")
+
+    # Synthesizer-derived edges (Wave 2.1) — pulled directly from
+    # bead_edges so we don't need to widen the BeadStore API surface.
+    bead_id_set = {b.bead_id for b in beads}
+    synth_rows = _query_bead_edges_for(bead_id_set)
+    if synth_rows:
+        print()
+        print(f"Synthesized edges ({len(synth_rows)}):")
+        for src, dst, etype, weight in synth_rows:
+            print(f"  {src} --[{etype} w={weight:.2f}]--> {dst}")
+
+
+def _query_bead_edges_for(bead_ids: set[str]) -> list[tuple[str, str, str, float]]:
+    """Fetch bead_edges where both endpoints are in *bead_ids*.
+
+    Defensive: returns ``[]`` when the table is missing or the query fails.
+    """
+    if not bead_ids:
+        return []
+    db = _DEFAULT_DB_PATH.resolve()
+    if not db.exists():
+        return []
+    try:
+        import sqlite3
+        conn = sqlite3.connect(str(db))
+        # Detect table presence to stay graceful on older schemas.
+        has_table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='bead_edges'"
+        ).fetchone()
+        if not has_table:
+            conn.close()
+            return []
+        placeholders = ",".join("?" * len(bead_ids))
+        ids_list = list(bead_ids)
+        rows = conn.execute(
+            f"SELECT src_bead_id, dst_bead_id, edge_type, weight "
+            f"FROM bead_edges "
+            f"WHERE src_bead_id IN ({placeholders}) "
+            f"AND dst_bead_id IN ({placeholders}) "
+            f"ORDER BY edge_type, weight DESC, src_bead_id",
+            ids_list + ids_list,
+        ).fetchall()
+        conn.close()
+        return [(r[0], r[1], r[2], float(r[3])) for r in rows]
+    except Exception:
+        return []
+
+
+def _handle_synthesize(args: argparse.Namespace) -> None:
+    """Run the BeadSynthesizer manually and print counts."""
+    store = _get_bead_store()
+    if store is None:
+        print("No baton.db found in .claude/team-context/.", file=sys.stderr)
+        sys.exit(1)
+
+    from agent_baton.core.intel.bead_synthesizer import BeadSynthesizer
+
+    conn = store._conn()
+    result = BeadSynthesizer().synthesize(conn)
+
+    if getattr(args, "as_json", False):
+        print(json.dumps(result.to_dict(), indent=2))
+        return
+
+    print("BeadSynthesizer completed.")
+    print(f"  pairs_examined:    {result.pairs_examined}")
+    print(f"  edges_added:       {result.edges_added}")
+    print(f"  clusters_created:  {result.clusters_created}")
+    print(f"  conflicts_flagged: {result.conflicts_flagged}")
+    if result.errors:
+        print(f"  errors:            {len(result.errors)}")
+        for err in result.errors:
+            print(f"    - {err}")
+
+
+def _handle_clusters(args: argparse.Namespace) -> None:
+    """List bead clusters discovered by the synthesizer."""
+    db = _DEFAULT_DB_PATH.resolve()
+    if not db.exists():
+        print("No baton.db found in .claude/team-context/.", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        import sqlite3
+        conn = sqlite3.connect(str(db))
+        has_table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='bead_clusters'"
+        ).fetchone()
+        if not has_table:
+            print("bead_clusters table not present (older schema).")
+            conn.close()
+            return
+        rows = conn.execute(
+            "SELECT cluster_id, label, bead_ids, created_at "
+            "FROM bead_clusters ORDER BY created_at DESC, cluster_id"
+        ).fetchall()
+        conn.close()
+    except Exception as exc:
+        print(f"Failed to read bead_clusters: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if not rows:
+        if getattr(args, "as_json", False):
+            print("[]")
+        else:
+            print("No bead clusters found. Run `baton beads synthesize` first.")
+        return
+
+    if getattr(args, "as_json", False):
+        out = []
+        for cluster_id, label, bead_ids_json, created_at in rows:
+            try:
+                members = json.loads(bead_ids_json)
+            except Exception:
+                members = []
+            out.append({
+                "cluster_id": cluster_id,
+                "label": label,
+                "bead_ids": members,
+                "created_at": created_at,
+            })
+        print(json.dumps(out, indent=2))
+        return
+
+    print(f"Bead clusters ({len(rows)}):")
+    for cluster_id, label, bead_ids_json, _created_at in rows:
+        try:
+            members = json.loads(bead_ids_json)
+        except Exception:
+            members = []
+        print(f"  {cluster_id}  [{label}]  ({len(members)} bead(s))")
+        for bid in members:
+            print(f"    - {bid}")
