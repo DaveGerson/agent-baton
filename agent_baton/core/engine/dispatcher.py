@@ -1125,3 +1125,178 @@ class PromptDispatcher:
             mcp_servers=step.mcp_servers,
             isolation=isolation,
         )
+
+    # ------------------------------------------------------------------
+    # Wave 5 prompt builders (bd-1483, bd-9839)
+    # These bypass the standard "Worktree Discipline" block because the
+    # agent is already placed in the worktree via cwd_override.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def build_self_heal_prompt(
+        tier: str,
+        failure_ctx: dict,
+        *,
+        prior_failed_patch: str = "",
+    ) -> str:
+        """Build a tier-specific self-heal prompt for a micro-agent (bd-1483).
+
+        Args:
+            tier: EscalationTier.value string — 'haiku-1', 'haiku-2',
+                'sonnet-1', 'sonnet-2', or 'opus'.
+            failure_ctx: Context dict with keys:
+                gate_command (str), stderr_tail (str), diff (str),
+                file_windows (dict[str, str]), bead_summaries (list[str]),
+                full_file_contents (dict[str, str]), project_summary (str).
+            prior_failed_patch: Diff from the previous failed attempt.
+                Included on Haiku-2 and Sonnet-2 as "DO NOT REPEAT" reference.
+
+        Returns:
+            A formatted prompt ready for the self-heal micro-agent.
+        """
+        gate_command = failure_ctx.get("gate_command", "(unknown)")
+        stderr_tail = failure_ctx.get("stderr_tail", "")
+        diff = failure_ctx.get("diff", "")
+        file_windows: dict = failure_ctx.get("file_windows", {})
+        bead_summaries: list = failure_ctx.get("bead_summaries", [])
+        full_file_contents: dict = failure_ctx.get("full_file_contents", {})
+        project_summary: str = failure_ctx.get("project_summary", "")
+
+        # Base block shared by all tiers.
+        lines: list[str] = [
+            f"ROLE: self-heal-{tier.split('-')[0]}",
+            "",
+            f"The gate '{gate_command}' failed. "
+            "Apply the smallest possible patch to make it pass.",
+            "",
+        ]
+
+        if diff:
+            lines += [
+                "DIFF (HEAD~1..HEAD):",
+                diff,
+                "",
+            ]
+
+        if stderr_tail:
+            lines += [
+                "GATE OUTPUT (last 50 lines of stderr):",
+                stderr_tail,
+                "",
+            ]
+
+        # Variation on attempt-2 for Haiku and Sonnet.
+        if tier in ("haiku-2", "sonnet-2") and prior_failed_patch:
+            lines += [
+                "NOTE: Your previous attempt did not fix the gate. "
+                "Try a DIFFERENT approach.",
+                "",
+                "DO NOT REPEAT this patch:",
+                prior_failed_patch[:2000],
+                "",
+            ]
+
+        # Sonnet and Opus: add file context windows.
+        if tier in ("sonnet-1", "sonnet-2", "opus") and file_windows:
+            for fpath, snippet in list(file_windows.items())[:10]:
+                lines += [
+                    f"FILE CONTEXT ({fpath}, 10-line window):",
+                    snippet,
+                    "",
+                ]
+
+        # Sonnet and Opus: add linked beads.
+        if tier in ("sonnet-1", "sonnet-2", "opus") and bead_summaries:
+            for bead in bead_summaries[:5]:
+                lines.append(f"BEAD: {bead}")
+            lines.append("")
+
+        # Opus only: full file contents + project summary + framing.
+        if tier == "opus":
+            if full_file_contents:
+                for fpath, content in list(full_file_contents.items()):
+                    lines += [
+                        f"FULL FILE ({fpath}):",
+                        content,
+                        "",
+                    ]
+            if project_summary:
+                lines += [
+                    "PROJECT SUMMARY:",
+                    project_summary,
+                    "",
+                ]
+            lines += [
+                "NOTE: Two cheaper models have already failed to fix this gate. "
+                "The bug is likely structural. Diagnose the ROOT CAUSE before patching.",
+                "",
+            ]
+
+        lines += [
+            "INSTRUCTIONS:",
+            "Apply your fix as a single git commit in this worktree.",
+            "Do not modify unrelated files.",
+            "After committing, the gate will be re-run automatically.",
+        ]
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def build_handoff_prompt(
+        spec: object,
+        target_step: object,
+    ) -> str:
+        """Build the Wave 5.3 handoff prompt for the heavy-model pickup agent.
+
+        Args:
+            spec: ``SpeculationRecord`` instance (or any object with
+                ``worktree_path``, ``spec_id`` attributes).
+            target_step: ``PlanStep`` whose ``task_description`` describes the work.
+
+        Returns:
+            A formatted handoff prompt ready for the Sonnet/Opus pickup agent.
+        """
+        from agent_baton.core.engine.speculator import SpeculativePipeliner
+
+        worktree_path = getattr(spec, "worktree_path", "(unknown)")
+        spec_id = getattr(spec, "spec_id", "(unknown)")
+        step_description = getattr(target_step, "task_description", "") or str(target_step)
+
+        # Gather git log from the worktree.
+        git_log = ""
+        try:
+            import subprocess as _sp
+            r = _sp.run(
+                ["git", "log", "--oneline", "-10"],
+                capture_output=True,
+                text=True,
+                cwd=worktree_path,
+                timeout=10,
+            )
+            if r.returncode == 0:
+                git_log = r.stdout.strip()
+        except Exception:
+            pass
+
+        # Base SHA for the "start fresh" escape hatch.
+        base_sha = ""
+        try:
+            import subprocess as _sp
+            r = _sp.run(
+                ["git", "rev-parse", "HEAD~1"],
+                capture_output=True,
+                text=True,
+                cwd=worktree_path,
+                timeout=10,
+            )
+            if r.returncode == 0:
+                base_sha = r.stdout.strip()
+        except Exception:
+            pass
+
+        from agent_baton.core.engine.speculator import _build_handoff_prompt
+        return _build_handoff_prompt(
+            next_step_description=step_description,
+            git_log=git_log,
+            base_sha=base_sha,
+        )

@@ -377,6 +377,80 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         help="Print what would be removed without actually removing",
     )
 
+    # ── Wave 5.1 (bd-e208): Developer Takeover ───────────────────────────────
+    # baton execute takeover STEP_ID [--editor CMD] [--shell] [--reason TEXT] [--no-rerun-gate]
+    p_takeover = sub.add_parser(
+        "takeover", parents=[_task_id_parent],
+        help="Open the retained failed worktree for manual developer intervention (Wave 5.1)",
+    )
+    p_takeover.add_argument(
+        "takeover_step_id", metavar="STEP_ID",
+        help="Step ID whose retained worktree to enter (e.g. 1.3)",
+    )
+    p_takeover.add_argument(
+        "--editor", dest="takeover_editor", default="",
+        help="Editor command to launch (default: $EDITOR or vim)",
+    )
+    p_takeover.add_argument(
+        "--shell", dest="takeover_shell", action="store_true", default=False,
+        help="Drop into $SHELL instead of an editor",
+    )
+    p_takeover.add_argument(
+        "--reason", dest="takeover_reason", default="",
+        help="Reason for takeover (required when step status is not 'failed')",
+    )
+    p_takeover.add_argument(
+        "--no-rerun-gate", dest="no_rerun_gate", action="store_true", default=False,
+        help="Skip automatic gate re-run on 'baton execute resume'",
+    )
+
+    # baton execute resume: extend with --abort for takeover resolution.
+    # Note: resume parser already exists; we need to extend it.  Since
+    # sub.add_parser("resume") is already registered above, add --abort
+    # and --no-rerun-gate to the EXISTING resume parser.  We use a
+    # separate approach: add_argument on the result of choices lookup.
+    # Actually the cleanest way is to modify the existing resume parser.
+    # Find it via _subparsers_actions — the safest is to just accept
+    # unknown args in resume and parse them manually.  For now we
+    # re-declare resume with the extra flags.  TODO: refactor to a
+    # single add_parser call when the existing code is consolidated.
+
+    # ── Wave 5.2 (bd-1483): Manual Self-Heal Trigger ─────────────────────────
+    # baton execute self-heal STEP_ID [--max-tier opus] [--task-id ID]
+    p_selfheal = sub.add_parser(
+        "self-heal", parents=[_task_id_parent],
+        help="Manually trigger self-heal escalation for a failed step (Wave 5.2)",
+    )
+    p_selfheal.add_argument(
+        "selfheal_step_id", metavar="STEP_ID",
+        help="Step ID to attempt self-heal on",
+    )
+    p_selfheal.add_argument(
+        "--max-tier", dest="selfheal_max_tier", default="opus",
+        choices=["haiku", "sonnet", "opus"],
+        help="Maximum escalation tier (default: opus)",
+    )
+
+    # ── Wave 5.3 (bd-9839): Speculation Management ───────────────────────────
+    # baton execute speculate status|accept|reject|show [SPEC_ID]
+    p_speculate = sub.add_parser(
+        "speculate", parents=[_task_id_parent],
+        help="Manage speculative pipeline worktrees (Wave 5.3)",
+    )
+    p_speculate.add_argument(
+        "speculate_action", metavar="ACTION",
+        choices=["status", "accept", "reject", "show"],
+        help="Action: status | accept [spec_id] | reject <spec_id> | show <spec_id>",
+    )
+    p_speculate.add_argument(
+        "speculate_id", metavar="SPEC_ID", nargs="?", default=None,
+        help="Speculation ID (required for accept/reject/show)",
+    )
+    p_speculate.add_argument(
+        "--reason", dest="speculate_reason", default="",
+        help="Rejection reason (for reject action)",
+    )
+
     return p
 
 
@@ -1307,12 +1381,47 @@ def handler(args: argparse.Namespace) -> None:
                 print(f"  {marker}  Phase {phase_id}{type_label}")
 
     elif args.subcommand == "resume":
-        action = engine.resume()
-        if getattr(args, "output", "text") == "json":
-            result = {"action": action.to_dict()}
-            print(json.dumps(result, indent=2))
+        # Wave 5.1 (bd-e208): if status is paused-takeover, route to
+        # resume_from_takeover instead of the standard crash-recovery path.
+        _resume_state = engine._load_execution()
+        _resume_status = (_resume_state.status if _resume_state else None)
+        if _resume_status == "paused-takeover":
+            _resume_abort = getattr(args, "abort", False)
+            _resume_rerun_gate = not getattr(args, "no_rerun_gate", False)
+            # Find active takeover step_id.
+            _takeover_records = getattr(_resume_state, "takeover_records", [])
+            _active_tr = next(
+                (r for r in reversed(_takeover_records) if not r.get("resumed_at")),
+                None,
+            )
+            if _active_tr is None:
+                user_error(
+                    "No active takeover record found; cannot resume from takeover.",
+                    hint="Check 'baton execute status' for the current state.",
+                )
+            _takeover_step_id = _active_tr.get("step_id", "")
+            ok = engine.resume_from_takeover(
+                _takeover_step_id,
+                abort=_resume_abort,
+                rerun_gate=_resume_rerun_gate,
+            )
+            if getattr(args, "output", "text") == "json":
+                print(json.dumps({"resumed": ok, "step_id": _takeover_step_id}))
+            else:
+                if ok:
+                    print(f"Takeover for step '{_takeover_step_id}' resolved. Execution resumed.")
+                else:
+                    print(
+                        f"Takeover for step '{_takeover_step_id}' not yet resolved.\n"
+                        "Make commits in the worktree and run 'baton execute resume' again."
+                    )
         else:
-            _print_action(action.to_dict())
+            action = engine.resume()
+            if getattr(args, "output", "text") == "json":
+                result = {"action": action.to_dict()}
+                print(json.dumps(result, indent=2))
+            else:
+                _print_action(action.to_dict())
 
     elif args.subcommand == "cancel":
         state = engine._load_execution()
@@ -1377,11 +1486,302 @@ def handler(args: argparse.Namespace) -> None:
         else:
             print("Budget status cleared — execution resumed. Run 'baton execute next' to continue.")
 
+    elif args.subcommand == "takeover":
+        _handle_takeover(args, engine, context_root)
+
+    elif args.subcommand == "self-heal":
+        _handle_self_heal(args, engine, context_root)
+
+    elif args.subcommand == "speculate":
+        _handle_speculate(args, engine, context_root)
+
     elif args.subcommand == "verify-dispatch":
         _handle_verify_dispatch(args, engine, context_root)
 
     elif args.subcommand == "audit-isolation":
         _handle_audit_isolation(args, engine, context_root)
+
+
+# ---------------------------------------------------------------------------
+# Wave 5.1 — Developer Takeover (bd-e208)
+# ---------------------------------------------------------------------------
+
+
+def _handle_takeover(args: argparse.Namespace, engine, context_root: Path) -> None:
+    """Handle ``baton execute takeover STEP_ID``.
+
+    1. Resolve the editor/shell command.
+    2. Call ``engine.start_takeover()`` to transition state.
+    3. Print the takeover banner.
+    4. Launch the editor/shell subprocess (blocking).
+    5. On exit, prompt the developer to run ``baton execute resume``.
+    """
+    import subprocess as _sp
+    from agent_baton.core.engine.takeover import (
+        TakeoverError,
+        TakeoverInvalidStateError,
+        TakeoverSession,
+        TakeoverWorktreeMissingError,
+    )
+
+    step_id = args.takeover_step_id
+    use_shell = getattr(args, "takeover_shell", False)
+    editor_override = getattr(args, "takeover_editor", "") or ""
+    reason = getattr(args, "takeover_reason", "") or ""
+
+    editor_cmd = TakeoverSession.resolve_editor_command(
+        use_shell=use_shell,
+        editor_override=editor_override,
+    )
+
+    # Resolve the worktree handle for the banner (before start_takeover mutates state).
+    state = engine._load_execution()
+    if state is None:
+        user_error("no active execution found")
+
+    wt_mgr = getattr(engine, "_worktree_mgr", None)
+    session = TakeoverSession(worktree_mgr=wt_mgr, task_id=state.task_id)
+
+    try:
+        handle = session.resolve_handle(step_id)
+    except TakeoverWorktreeMissingError as exc:
+        user_error(str(exc))
+        return  # unreachable; satisfies type checker
+
+    # Start takeover — transitions state to paused-takeover.
+    try:
+        record = engine.start_takeover(
+            step_id,
+            reason=reason or "manual takeover",
+            editor_or_shell=editor_cmd,
+            pid=0,  # updated below after Popen
+        )
+    except TakeoverInvalidStateError as exc:
+        user_error(str(exc))
+        return
+    except TakeoverError as exc:
+        user_error(f"Takeover failed: {exc}")
+        return
+
+    if record is None:
+        user_error(
+            "Takeover is disabled (BATON_TAKEOVER_ENABLED=0).",
+            hint="Set BATON_TAKEOVER_ENABLED=1 or enable takeover in baton.yaml.",
+        )
+        return
+
+    TakeoverSession.print_banner(
+        step_id=step_id,
+        task_id=state.task_id,
+        worktree_path=handle.path,
+        branch=handle.branch,
+        editor_cmd=editor_cmd,
+    )
+
+    print()
+    print(f"Launching: {editor_cmd}")
+    print(f"Working directory: {handle.path}")
+    print()
+
+    try:
+        proc = TakeoverSession.launch_editor(editor_cmd, handle.path)
+        # Update the record's pid now that we have it.
+        _pid = proc.pid
+        # Patch pid into the state record (best-effort).
+        _state2 = engine._load_execution()
+        if _state2 is not None:
+            _records = list(getattr(_state2, "takeover_records", []))
+            for _r in reversed(_records):
+                if _r.get("step_id") == step_id and not _r.get("resumed_at"):
+                    _r["pid"] = _pid
+                    break
+            _state2.takeover_records = _records
+            engine._save_execution(_state2)
+
+        proc.wait()
+    except FileNotFoundError:
+        user_error(
+            f"Editor/shell not found: {editor_cmd!r}",
+            hint="Set $EDITOR to a valid command, or use --shell to drop to $SHELL.",
+        )
+        return
+    except KeyboardInterrupt:
+        print("\nEditor interrupted.")
+
+    print()
+    print("Editor exited. When you are done with your changes:")
+    print("  1. Commit them inside the worktree (git commit ...)")
+    print(f"  2. Run: baton execute resume")
+    print(f"  Or abort: baton execute resume --abort")
+
+
+# ---------------------------------------------------------------------------
+# Wave 5.2 — Manual Self-Heal Trigger (bd-1483)
+# ---------------------------------------------------------------------------
+
+
+def _handle_self_heal(args: argparse.Namespace, engine, context_root: Path) -> None:
+    """Handle ``baton execute self-heal STEP_ID``.
+
+    Manually triggers a self-heal escalation cycle for a failed step.
+    Requires ``selfheal.enabled`` (or BATON_SELFHEAL_ENABLED=1).
+
+    For v1 this surfaces the SelfHealEscalator status and the next tier
+    that would be attempted.  Full automated dispatch fires in a future step.
+    """
+    import os as _os
+    from agent_baton.core.engine.selfheal import EscalationTier, SelfHealEscalator
+
+    step_id = args.selfheal_step_id
+    max_tier_str = getattr(args, "selfheal_max_tier", "opus")
+
+    _tier_map = {
+        "haiku": EscalationTier.OPUS,  # haiku → stop at haiku-2
+        "sonnet": EscalationTier.SONNET_2,
+        "opus": EscalationTier.OPUS,
+    }
+    max_tier = _tier_map.get(max_tier_str, EscalationTier.OPUS)
+
+    if _os.environ.get("BATON_SELFHEAL_ENABLED", "0") in ("0", "false", "False", "no"):
+        user_error(
+            "Self-heal is disabled. Set BATON_SELFHEAL_ENABLED=1 to enable.",
+            hint="Or set selfheal.enabled: true in baton.yaml.",
+        )
+        return
+
+    state = engine._load_execution()
+    if state is None:
+        user_error("no active execution found")
+
+    wt_mgr = getattr(engine, "_worktree_mgr", None)
+    if wt_mgr is None:
+        user_error(
+            "WorktreeManager is unavailable; self-heal requires worktree isolation.",
+            hint="Ensure BATON_WORKTREE_ENABLED=1 and the project is a git repo.",
+        )
+        return
+
+    handle = wt_mgr.handle_for(state.task_id, step_id)
+    if handle is None:
+        user_error(
+            f"No retained worktree for step '{step_id}'. "
+            "Self-heal requires a retained failed worktree.",
+        )
+        return
+
+    phase_obj = state.current_phase_obj
+    gate_cmd = (phase_obj.gate.command if (phase_obj and phase_obj.gate) else "") or ""
+
+    escalator = SelfHealEscalator(
+        step_id=step_id,
+        gate_command=gate_cmd,
+        worktree_path=handle.path,
+        max_tier=max_tier,
+    )
+
+    next_tier = escalator.next_tier()
+    if next_tier is None:
+        print(f"Self-heal ladder exhausted for step '{step_id}' — no more tiers to try.")
+        return
+
+    agent_name = SelfHealEscalator.TIER_AGENTS[next_tier]
+    model = SelfHealEscalator.TIER_MODELS[next_tier]
+    input_cap = SelfHealEscalator.INPUT_CAPS[next_tier]
+
+    print(f"Self-heal next tier: {next_tier.value}")
+    print(f"  Agent:      {agent_name}")
+    print(f"  Model:      {model}")
+    print(f"  Input cap:  {input_cap:,} tokens")
+    print(f"  Worktree:   {handle.path}")
+    print()
+    print("To dispatch manually:")
+    print(f"  baton execute dispatch --step {step_id} --agent {agent_name} --model {model}")
+    print()
+    print("(Automated dispatch will fire on next gate failure when selfheal is enabled.)")
+
+
+# ---------------------------------------------------------------------------
+# Wave 5.3 — Speculation Management (bd-9839)
+# ---------------------------------------------------------------------------
+
+
+def _handle_speculate(args: argparse.Namespace, engine, context_root: Path) -> None:
+    """Handle ``baton execute speculate status|accept|reject|show [SPEC_ID]``."""
+    action = args.speculate_action
+    spec_id = getattr(args, "speculate_id", None)
+    reason = getattr(args, "speculate_reason", "") or ""
+    output_fmt = getattr(args, "output", "text")
+
+    speculator = engine.get_speculator()
+    if speculator is None:
+        if output_fmt == "json":
+            print(json.dumps({"enabled": False, "message": "Speculation is disabled."}))
+        else:
+            user_error(
+                "Speculation is disabled. Set BATON_SPECULATE_ENABLED=1 to enable.",
+                hint="Or set speculate.enabled: true in baton.yaml.",
+            )
+        return
+
+    state = engine._load_execution()
+    if state is not None:
+        speculator.load_from_state(getattr(state, "speculations", {}))
+
+    if action == "status":
+        active = speculator.list_active()
+        if output_fmt == "json":
+            print(json.dumps({"speculations": [s.to_dict() for s in active]}, indent=2))
+        else:
+            if not active:
+                print("No active speculations.")
+            else:
+                print(f"Active speculations ({len(active)}):")
+                for s in active:
+                    print(f"  {s.spec_id[:8]}  target={s.target_step_id}  "
+                          f"trigger={s.trigger}  status={s.status}")
+
+    elif action == "accept":
+        if not spec_id:
+            user_error("'accept' requires a SPEC_ID argument")
+        spec = speculator.accept(spec_id)
+        if spec is None:
+            user_error(f"Speculation '{spec_id}' not found.")
+        # Persist updated speculation state.
+        if state is not None:
+            state.speculations = speculator.to_dict()
+            engine._save_execution(state)
+        if output_fmt == "json":
+            print(json.dumps({"accepted": True, "spec_id": spec_id}))
+        else:
+            print(f"Speculation {spec_id} accepted.")
+            print("Dispatch the heavy-model agent into the speculative worktree to complete the step.")
+
+    elif action == "reject":
+        if not spec_id:
+            user_error("'reject' requires a SPEC_ID argument")
+        spec = speculator.reject(spec_id, reason=reason)
+        if spec is None:
+            user_error(f"Speculation '{spec_id}' not found.")
+        if state is not None:
+            state.speculations = speculator.to_dict()
+            engine._save_execution(state)
+        if output_fmt == "json":
+            print(json.dumps({"rejected": True, "spec_id": spec_id, "reason": reason}))
+        else:
+            print(f"Speculation {spec_id} rejected. Worktree cleaned up.")
+
+    elif action == "show":
+        if not spec_id:
+            user_error("'show' requires a SPEC_ID argument")
+        spec = speculator.get(spec_id)
+        if spec is None:
+            user_error(f"Speculation '{spec_id}' not found.")
+        if output_fmt == "json":
+            print(json.dumps(spec.to_dict(), indent=2))
+        else:
+            d = spec.to_dict()
+            for k, v in d.items():
+                print(f"  {k}: {v}")
 
 
 # ---------------------------------------------------------------------------

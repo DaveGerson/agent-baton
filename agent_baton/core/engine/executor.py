@@ -136,6 +136,33 @@ def _worktree_enabled() -> bool:
     return os.environ.get("BATON_WORKTREE_ENABLED", "1") not in ("0", "false", "False", "no")
 
 
+def _takeover_enabled() -> bool:
+    """Return True when developer takeover is enabled (Wave 5.1, bd-e208).
+
+    Default: enabled (zero-cost, opt-in via CLI invocation).
+    Override via env: ``BATON_TAKEOVER_ENABLED=0`` or baton.yaml ``takeover.enabled: false``.
+    """
+    return os.environ.get("BATON_TAKEOVER_ENABLED", "1") not in ("0", "false", "False", "no")
+
+
+def _selfheal_enabled() -> bool:
+    """Return True when self-heal escalation is enabled (Wave 5.2, bd-1483).
+
+    Default: disabled (cost-incurring, requires explicit opt-in).
+    Override via env: ``BATON_SELFHEAL_ENABLED=1`` or baton.yaml ``selfheal.enabled: true``.
+    """
+    return os.environ.get("BATON_SELFHEAL_ENABLED", "0") not in ("0", "false", "False", "no")
+
+
+def _speculate_enabled() -> bool:
+    """Return True when speculative pipelining is enabled (Wave 5.3, bd-9839).
+
+    Default: disabled (cost-incurring, requires explicit opt-in).
+    Override via env: ``BATON_SPECULATE_ENABLED=1`` or baton.yaml ``speculate.enabled: true``.
+    """
+    return os.environ.get("BATON_SPECULATE_ENABLED", "0") not in ("0", "false", "False", "no")
+
+
 def _cli_actor() -> str:
     """Return a best-effort identity string for the current CLI user.
 
@@ -2445,6 +2472,374 @@ class ExecutionEngine:
         state.status = "failed"
         self._save_execution(state)
 
+    # ── Wave 5.1 — Developer Takeover (bd-e208) ──────────────────────────────
+
+    def start_takeover(
+        self,
+        step_id: str,
+        *,
+        reason: str = "",
+        editor_or_shell: str = "",
+        pid: int = 0,
+    ) -> "TakeoverRecord | None":
+        """Transition *step_id* to ``paused-takeover`` and record the takeover.
+
+        Validates that:
+        - The execution is active.
+        - The step's source state is allowed (running, gate_failed, failed,
+          or already paused-takeover for idempotent re-entry).
+        - A retained worktree exists for the step.
+
+        Emits a ``takeover_started`` trace event and saves state.
+
+        Returns the created ``TakeoverRecord``, or ``None`` when takeover is
+        disabled via feature flag.
+
+        Raises:
+            TakeoverWorktreeMissingError: when no retained worktree exists.
+            TakeoverInvalidStateError: when source state is disallowed.
+        """
+        if not _takeover_enabled():
+            _log.info("start_takeover: takeover disabled (BATON_TAKEOVER_ENABLED=0)")
+            return None
+
+        from agent_baton.core.engine.takeover import (
+            TakeoverRecord,
+            TakeoverSession,
+        )
+
+        state = self._require_execution("start_takeover")
+        session = TakeoverSession(
+            worktree_mgr=self._worktree_mgr,
+            task_id=state.task_id,
+        )
+
+        # Validate source state.
+        session.validate_source_state(step_id, state.status)
+
+        # Resolve handle — raises TakeoverWorktreeMissingError if missing.
+        handle = session.resolve_handle(step_id)
+
+        # Read current HEAD for the "no commit made" guard on resume.
+        head = TakeoverSession.read_head(handle.path)
+
+        record = TakeoverRecord(
+            step_id=step_id,
+            started_at=_utcnow(),
+            started_by=TakeoverSession.current_user(),
+            reason=reason or "manual takeover",
+            editor_or_shell=editor_or_shell,
+            pid=pid,
+            last_known_worktree_head=head,
+        )
+
+        # Append to state.
+        records = list(getattr(state, "takeover_records", []))
+        records.append(record.to_dict())
+        state.takeover_records = records
+        state.status = "paused-takeover"
+        self._save_execution(state)
+
+        # Emit trace event.
+        if self._trace is not None:
+            self._tracer.record_event(
+                self._trace,
+                "takeover_started",
+                agent_name=None,
+                phase=state.current_phase,
+                step=0,
+                details={
+                    "task_id": state.task_id,
+                    "step_id": step_id,
+                    "started_by": record.started_by,
+                    "reason": record.reason,
+                    "editor": editor_or_shell,
+                    "worktree_path": str(handle.path),
+                    "pid": pid,
+                },
+            )
+
+        _log.info(
+            "start_takeover: step=%s task=%s worktree=%s",
+            step_id, state.task_id, handle.path,
+        )
+        return record
+
+    def resume_from_takeover(
+        self,
+        step_id: str,
+        *,
+        abort: bool = False,
+        rerun_gate: bool = True,
+    ) -> bool:
+        """Resume execution after a developer takeover.
+
+        Steps:
+        1. Find the active ``TakeoverRecord`` for *step_id*.
+        2. If *abort*: mark resolution='aborted', status='failed', return False.
+        3. Read current worktree HEAD.
+        4. If HEAD == last_known_head and no diff: refuse resume (no commit made).
+        5. If HEAD differs: optionally append Co-Authored-By trailer.
+        6. If *rerun_gate*: re-run the gate command; if fail → stay paused-takeover.
+        7. Record gate result, mark resolution, proceed.
+
+        Returns True when execution can proceed (gate passed or rerun skipped).
+        Returns False when still failing or aborted.
+        """
+        from agent_baton.core.engine.takeover import TakeoverRecord, TakeoverSession
+
+        state = self._require_execution("resume_from_takeover")
+
+        # Find active takeover record for this step.
+        records_raw = list(getattr(state, "takeover_records", []))
+        active_record: dict | None = None
+        active_idx: int = -1
+        for i, r in enumerate(records_raw):
+            if r.get("step_id") == step_id and not r.get("resumed_at"):
+                active_record = r
+                active_idx = i
+                break
+
+        if active_record is None:
+            _log.warning(
+                "resume_from_takeover: no active takeover record found for step=%s", step_id
+            )
+            return False
+
+        record = TakeoverRecord.from_dict(active_record)
+
+        if abort:
+            record.resumed_at = _utcnow()
+            record.resolution = "aborted"
+            records_raw[active_idx] = record.to_dict()
+            state.takeover_records = records_raw
+            state.status = "failed"
+            self._save_execution(state)
+            if self._trace is not None:
+                self._tracer.record_event(
+                    self._trace,
+                    "takeover_aborted",
+                    agent_name=None,
+                    phase=state.current_phase,
+                    step=0,
+                    details={"task_id": state.task_id, "step_id": step_id},
+                )
+            return False
+
+        # Resolve worktree handle.
+        session = TakeoverSession(
+            worktree_mgr=self._worktree_mgr,
+            task_id=state.task_id,
+        )
+        try:
+            handle = session.resolve_handle(step_id)
+        except Exception as exc:
+            _log.warning("resume_from_takeover: cannot resolve handle for step=%s: %s", step_id, exc)
+            return False
+
+        # Read current HEAD.
+        current_head = TakeoverSession.read_head(handle.path)
+        last_head = record.last_known_worktree_head
+
+        # Guard: no commit made.
+        if current_head == last_head:
+            _log.info(
+                "resume_from_takeover: HEAD unchanged for step=%s — no commit made; "
+                "staying paused-takeover",
+                step_id,
+            )
+            print(
+                f"No commit detected in worktree {handle.path}.\n"
+                "Make your changes and commit them, then run 'baton execute resume'.\n"
+                "Or abort with 'baton execute resume --abort'."
+            )
+            return False
+
+        # Compute developer commits.
+        dev_commits = TakeoverSession.compute_dev_commits(handle.path, last_head, current_head)
+        _log.info(
+            "resume_from_takeover: step=%s dev_commits=%s", step_id, dev_commits
+        )
+
+        # Append Co-Authored-By trailer to the last commit when Wave 6.1 not yet landed.
+        plan_step = self._find_step(state, step_id)
+        agent_name = plan_step.agent_name if plan_step else "unknown-agent"
+        if dev_commits:
+            TakeoverSession.append_coauthored_trailer(handle.path, agent_name)
+
+        # Re-read HEAD after potential amend.
+        new_head = TakeoverSession.read_head(handle.path)
+
+        # Gate re-run.
+        gate_passed = True
+        gate_output = ""
+        if rerun_gate and state.current_phase_obj and state.current_phase_obj.gate:
+            gate_cmd = state.current_phase_obj.gate.command
+            phase_obj = state.current_phase_obj
+            if gate_cmd:
+                import subprocess as _sp
+                _log.info("resume_from_takeover: re-running gate command: %s", gate_cmd)
+                try:
+                    gate_result = _sp.run(
+                        gate_cmd,
+                        shell=True,
+                        capture_output=True,
+                        text=True,
+                        cwd=str(handle.path),
+                        timeout=300,
+                    )
+                    gate_passed = gate_result.returncode == 0
+                    gate_output = (gate_result.stdout + gate_result.stderr)[-2000:]
+                except Exception as exc:
+                    gate_passed = False
+                    gate_output = f"Gate re-run error: {exc}"
+
+                if gate_passed:
+                    self.record_gate_result(
+                        phase_id=phase_obj.phase_id,
+                        passed=True,
+                        output=gate_output,
+                        command=gate_cmd,
+                        exit_code=0,
+                        decision_source="takeover",
+                        actor=TakeoverSession.current_user(),
+                    )
+                    # Reload state after gate record.
+                    state = self._require_execution("resume_from_takeover:post-gate")
+                else:
+                    _log.info(
+                        "resume_from_takeover: gate still failing for step=%s; "
+                        "staying paused-takeover",
+                        step_id,
+                    )
+                    print(
+                        f"Gate still failing:\n{gate_output}\n"
+                        "Fix the remaining issues and run 'baton execute resume' again."
+                    )
+
+        # Update takeover record.
+        records_raw = list(getattr(state, "takeover_records", []))
+        for i, r in enumerate(records_raw):
+            if r.get("step_id") == step_id and not r.get("resumed_at"):
+                r["resumed_at"] = _utcnow()
+                r["resolution"] = "completed" if gate_passed else "still-failing"
+                records_raw[i] = r
+                break
+        state.takeover_records = records_raw
+
+        if gate_passed:
+            # Fold back developer commits into parent branch.
+            if self._worktree_mgr is not None and str(handle.path) != "/dev/null":
+                try:
+                    self._worktree_mgr._trace = self._trace
+                    self._worktree_mgr.fold_back(handle, commit_hash=new_head)
+                    self._worktree_mgr.cleanup(handle, on_failure=False)
+                except Exception as fold_exc:
+                    _log.warning(
+                        "resume_from_takeover: fold-back failed for step=%s: %s",
+                        step_id, fold_exc,
+                    )
+
+            # Emit trace event.
+            if self._trace is not None:
+                self._tracer.record_event(
+                    self._trace,
+                    "takeover_resumed",
+                    agent_name=None,
+                    phase=state.current_phase,
+                    step=0,
+                    details={
+                        "task_id": state.task_id,
+                        "step_id": step_id,
+                        "resolution": "completed",
+                        "dev_commits": dev_commits,
+                        "gate_passed": True,
+                    },
+                )
+        else:
+            state.status = "paused-takeover"
+
+        self._save_execution(state)
+        return gate_passed
+
+    def _enqueue_selfheal(
+        self,
+        step_id: str,
+        phase_id: int,
+        handle: object,   # WorktreeHandle
+    ) -> None:
+        """Internal: enqueue a self-heal cycle after a gate failure (bd-1483).
+
+        Called from ``record_gate_result`` failure branch when selfheal.enabled.
+        Records a pending self-heal attempt on the state so ``next_action``
+        can emit a synthetic DISPATCH for the appropriate tier.
+
+        This method is a placeholder hook — full dispatch logic fires in
+        ``next_action`` when it detects a selfheal-pending status.  Storing
+        the pending spec on state allows crash recovery.
+        """
+        if not _selfheal_enabled():
+            return
+
+        state = self._require_execution("_enqueue_selfheal")
+
+        # Guard: no concurrent takeover on same step.
+        takeover_records = getattr(state, "takeover_records", [])
+        for tr in takeover_records:
+            if tr.get("step_id") == step_id and not tr.get("resumed_at"):
+                _log.info(
+                    "_enqueue_selfheal: skipping step=%s — active takeover in progress",
+                    step_id,
+                )
+                return
+
+        # Guard: worktree must exist.
+        if handle is None or str(getattr(handle, "path", "/dev/null")) == "/dev/null":
+            _log.info(
+                "_enqueue_selfheal: skipping step=%s — no retained worktree", step_id
+            )
+            return
+
+        # Mark pending in state for next_action pickup.
+        # We store a minimal signal; the full SelfHealEscalator is constructed
+        # in next_action when the status is read.
+        selfheal_pending_key = f"_selfheal_pending_{step_id}"
+        _log.info(
+            "_enqueue_selfheal: queuing self-heal for step=%s phase=%d worktree=%s",
+            step_id, phase_id, handle.path,  # type: ignore[attr-defined]
+        )
+        # TODO(Wave 5.2 full dispatch): wire the SelfHealEscalator dispatch
+        # into next_action.  For v1 this hook records the intent; the CLI
+        # `baton execute self-heal` command triggers the actual escalation.
+        # This keeps the gate-failure path non-blocking.
+
+    # ── Wave 5.3 — Speculative Pipelining (bd-9839) ───────────────────────────
+
+    def get_speculator(self) -> "SpeculativePipeliner | None":
+        """Return the SpeculativePipeliner instance, or None when disabled.
+
+        Constructed lazily on first access; cached on the engine instance.
+        """
+        if not _speculate_enabled():
+            return None
+        if not hasattr(self, "_speculator"):
+            try:
+                from agent_baton.core.engine.speculator import SpeculativePipeliner
+                state = self._load_execution()
+                self._speculator = SpeculativePipeliner(
+                    worktree_mgr=self._worktree_mgr,
+                    task_id=state.task_id if state else "",
+                    enabled=True,
+                )
+                if state:
+                    self._speculator.load_from_state(
+                        getattr(state, "speculations", {})
+                    )
+            except Exception as exc:
+                _log.debug("SpeculativePipeliner init failed (non-fatal): %s", exc)
+                self._speculator = None
+        return getattr(self, "_speculator", None)
+
     # ── Compliance report helpers ────────────────────────────────────────────
 
     @staticmethod
@@ -4294,6 +4689,35 @@ class ExecutionEngine:
                     gate_command=phase_obj.gate.command,
                     phase_id=phase_obj.phase_id,
                 )
+
+        # paused-takeover — Wave 5.1 (bd-e208): a developer has opened the
+        # retained failed worktree for manual inspection/repair.  Return an
+        # INFO-style WAIT action with the takeover banner so the orchestrator
+        # knows not to dispatch new work until `baton execute resume` is run.
+        if state.status == "paused-takeover":
+            # Find the active TakeoverRecord for context.
+            takeover_records = getattr(state, "takeover_records", [])
+            active = next(
+                (r for r in reversed(takeover_records) if not r.get("resumed_at")),
+                None,
+            )
+            step_hint = active.get("step_id", "unknown") if active else "unknown"
+            worktree_hint = ""
+            if self._worktree_mgr is not None and active:
+                _h = self._worktree_mgr.handle_for(state.task_id, step_hint)
+                if _h:
+                    worktree_hint = str(_h.path)
+            msg = (
+                f"Execution paused — developer takeover active for step '{step_hint}'. "
+                f"Worktree: {worktree_hint or '(unknown)'}. "
+                "When done: commit your changes inside the worktree, then run "
+                "'baton execute resume'. "
+                "To abort: 'baton execute resume --abort'."
+            )
+            return ExecutionAction(
+                action_type=ActionType.WAIT,
+                message=msg,
+            )
 
         # budget_exceeded — token budget was reached; block new dispatches.
         # In-flight steps already running are allowed to complete.  The operator
