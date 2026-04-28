@@ -67,6 +67,65 @@ _IMPLICIT_GAP_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"lack(?:ed|ing) information", re.IGNORECASE),
 )
 
+# Compiled patterns used by the section-aware parser.
+_HEADER_RE: re.Pattern[str] = re.compile(r"^(#{2,3})\s+(.+)", re.MULTILINE)
+_BULLET_RE: re.Pattern[str] = re.compile(r"^[ \t]*[-*]\s+(.+)")
+
+
+def parse_markdown_sections(text: str) -> dict[str, list[str]]:
+    """Parse retrospective Markdown into a section-title \u2192 bullets mapping.
+
+    Splits the document on H2 (``## \u2026``) and H3 (``### \u2026``) headers, then
+    collects bullet lines (``- \u2026`` or ``* \u2026``, with any leading whitespace)
+    within each section.  The result is a dict keyed by the section title
+    (stripped of leading/trailing whitespace) whose values are lists of
+    stripped bullet texts.
+
+    Tolerances built in:
+
+    - Windows-style line endings (``\\r\\n``) are normalised before parsing.
+    - Multiple consecutive blank lines are ignored.
+    - Leading indentation before bullet markers is accepted.
+    - Both ``-`` and ``*`` list markers are recognised.
+    - Nested bullets (extra leading whitespace) are included as flat entries
+      in the enclosing section.
+
+    Args:
+        text: Raw Markdown content of a retrospective file.
+
+    Returns:
+        ``dict[section_title, list[bullet_text]]``.  Headers with no bullets
+        are included with an empty list.  Returns an empty dict when the
+        document contains no H2/H3 headers.
+    """
+    # Normalise line endings.
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+
+    sections: dict[str, list[str]] = {}
+    current_title: str | None = None
+    current_bullets: list[str] = []
+
+    for line in text.splitlines():
+        header_match = _HEADER_RE.match(line)
+        if header_match:
+            # Flush the previous section.
+            if current_title is not None:
+                sections[current_title] = current_bullets
+            current_title = header_match.group(2).strip()
+            current_bullets = []
+            continue
+
+        if current_title is not None:
+            bullet_match = _BULLET_RE.match(line)
+            if bullet_match:
+                current_bullets.append(bullet_match.group(1).strip())
+
+    # Flush the last section.
+    if current_title is not None:
+        sections[current_title] = current_bullets
+
+    return sections
+
 
 class RetrospectiveEngine:
     """Generate structured retrospectives and store them on disk.
@@ -393,11 +452,14 @@ class RetrospectiveEngine:
     def extract_recommendations(self) -> list[RosterRecommendation]:
         """Extract all roster recommendations across all retrospectives.
 
-        Parses the ``## Roster Recommendations`` Markdown section from each
-        retrospective file, looking for lines matching the pattern
-        ``- **Action:** target-name``.  This is a legacy fallback used when
-        no JSON sidecars exist; prefer :meth:`load_recent_feedback` which
-        reads structured JSON when available.
+        Uses :func:`parse_markdown_sections` to locate the
+        ``Roster Recommendations`` section (tolerates H2 or H3, varying
+        whitespace, and Windows line endings), then parses each bullet for
+        the pattern ``**Action:** target-name``.
+
+        This is a legacy fallback used when no JSON sidecars exist; prefer
+        :meth:`load_recent_feedback` which reads structured JSON when
+        available.
 
         Returns:
             Aggregated list of roster recommendations extracted from all
@@ -405,29 +467,26 @@ class RetrospectiveEngine:
             planning phase and the talent-builder agent for agent roster
             evolution.
         """
+        # Pattern: **Create:** target  (bold action followed by colon)
+        _rec_re = re.compile(r"\*\*([^*]+):\*\*\s*(.+)")
+
         recommendations: list[RosterRecommendation] = []
         for path in self.list_retrospectives():
             try:
                 content = path.read_text(encoding="utf-8")
             except OSError:
                 continue
-            # Parse recommendations from markdown
-            in_roster_section = False
-            for line in content.splitlines():
-                if line.startswith("## Roster Recommendations"):
-                    in_roster_section = True
-                    continue
-                if line.startswith("## ") and in_roster_section:
-                    break
-                if in_roster_section and line.startswith("- **"):
-                    # Parse: - **Create:** target-name
-                    try:
-                        action_end = line.index(":**")
-                        action = line[4:action_end].lower()
-                        target = line[action_end + 3:].strip()
-                        recommendations.append(
-                            RosterRecommendation(action=action, target=target)
-                        )
-                    except (ValueError, IndexError):
-                        continue
+            sections = parse_markdown_sections(content)
+            # Find the roster section regardless of exact title casing/spacing.
+            for title, bullets in sections.items():
+                if "roster recommendation" in title.lower():
+                    for bullet in bullets:
+                        m = _rec_re.match(bullet)
+                        if m:
+                            recommendations.append(
+                                RosterRecommendation(
+                                    action=m.group(1).strip().lower(),
+                                    target=m.group(2).strip(),
+                                )
+                            )
         return recommendations

@@ -196,6 +196,12 @@ class ClaudeCodeConfig:
     variables (plus ``PATH`` and ``HOME``) are included in the child
     environment."""
 
+    bead_db_path: Path | None = None
+    """Optional path to the project ``baton.db``.  When set and an agent
+    outcome is silently truncated by ``max_outcome_length``, a ``warning``
+    bead tagged ``outcome-truncated`` is filed so the operator can see the
+    data loss.  When ``None`` the bead is skipped (warning is still logged)."""
+
     def to_dict(self) -> dict[str, Any]:
         """Serialise to a plain dict (JSON-safe)."""
         return {
@@ -210,6 +216,7 @@ class ClaudeCodeConfig:
             "execution_dir": self.execution_dir.as_posix() if self.execution_dir else None,
             "prompt_file_threshold": self.prompt_file_threshold,
             "env_passthrough": list(self.env_passthrough),
+            "bead_db_path": self.bead_db_path.as_posix() if self.bead_db_path else None,
         }
 
     @classmethod
@@ -217,6 +224,7 @@ class ClaudeCodeConfig:
         """Deserialise from a plain dict."""
         wd = data.get("working_directory")
         ed = data.get("execution_dir")
+        bdp = data.get("bead_db_path")
         return cls(
             claude_path=data.get("claude_path", "claude"),
             working_directory=Path(wd) if wd else None,
@@ -231,6 +239,7 @@ class ClaudeCodeConfig:
             execution_dir=Path(ed) if ed else None,
             prompt_file_threshold=int(data.get("prompt_file_threshold", 131_072)),
             env_passthrough=list(data.get("env_passthrough", _DEFAULT_ENV_PASSTHROUGH)),
+            bead_db_path=Path(bdp) if bdp else None,
         )
 
 
@@ -569,6 +578,81 @@ class ClaudeCodeLauncher:
                 return value
         return self._config.default_timeout_seconds
 
+    def _warn_truncation(
+        self,
+        agent_name: str,
+        step_id: str,
+        bytes_attempted: int,
+        bytes_written: int,
+    ) -> None:
+        """Log a WARNING and file a ``warning`` bead when outcome is truncated.
+
+        Called whenever the raw outcome text exceeds ``max_outcome_length``.
+        The truncated outcome is still returned by the caller — this method
+        only makes the data loss *visible*.
+
+        Best-effort: any exception during bead filing is caught and logged at
+        DEBUG level so a BeadStore failure never cascades into a launcher
+        failure.
+
+        Args:
+            agent_name: Name of the agent whose outcome was truncated.
+            step_id: Step identifier within the execution.
+            bytes_attempted: Length of the full (pre-truncation) outcome text.
+            bytes_written: Length of the truncated outcome text that was kept.
+        """
+        logger.warning(
+            "Outcome truncated for agent=%r step=%r: attempted=%d chars, kept=%d chars "
+            "(max_outcome_length=%d). Data loss is silent without this warning.",
+            agent_name,
+            step_id,
+            bytes_attempted,
+            bytes_written,
+            self._config.max_outcome_length,
+        )
+
+        if self._config.bead_db_path is None:
+            return
+
+        try:
+            from datetime import datetime, timezone
+
+            from agent_baton.core.engine.bead_store import BeadStore
+            from agent_baton.models.bead import Bead, _generate_bead_id  # type: ignore[attr-defined]
+
+            content = (
+                f"Outcome truncated for agent={agent_name!r} step={step_id!r}. "
+                f"Attempted {bytes_attempted} chars, kept {bytes_written} chars "
+                f"(limit={self._config.max_outcome_length})."
+            )
+            ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            bead_id = _generate_bead_id(
+                task_id="",
+                step_id=step_id,
+                content=content,
+                timestamp=ts,
+                bead_count=0,
+            )
+            bead = Bead(
+                bead_id=bead_id,
+                task_id="",
+                step_id=step_id,
+                agent_name=agent_name,
+                bead_type="warning",
+                content=content,
+                confidence="high",
+                scope="step",
+                tags=["outcome-truncated"],
+                source="agent-signal",
+                created_at=ts,
+            )
+            store = BeadStore(self._config.bead_db_path)
+            store.write(bead)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "ClaudeCodeLauncher._warn_truncation: bead write failed (non-fatal): %s", exc
+            )
+
     def _parse_output(
         self,
         stdout: bytes,
@@ -602,6 +686,15 @@ class ClaudeCodeLauncher:
             outcome, spillover_path = _truncate_or_spillover(
                 raw_text=redacted, step_id=step_id, config=self._config
             )
+            # bd-e78c: if truncation happened without spillover (write failed
+            # or spillover disabled), file a warning bead so the loss is visible.
+            if len(redacted) > self._config.max_outcome_length and not spillover_path:
+                self._warn_truncation(
+                    agent_name=agent_name,
+                    step_id=step_id,
+                    bytes_attempted=len(redacted),
+                    bytes_written=len(outcome),
+                )
 
             # Token usage
             usage = parsed.get("usage", {}) or {}
@@ -652,6 +745,14 @@ class ClaudeCodeLauncher:
         outcome, spillover_path = _truncate_or_spillover(
             raw_text=redacted_raw, step_id=step_id, config=self._config
         )
+        # bd-e78c: visible warning when truncation happened without spillover.
+        if len(redacted_raw) > self._config.max_outcome_length and not spillover_path:
+            self._warn_truncation(
+                agent_name=agent_name,
+                step_id=step_id,
+                bytes_attempted=len(redacted_raw),
+                bytes_written=len(outcome),
+            )
 
         # Estimate tokens from raw output length (1 token ≈ 4 chars).
         # stdout_text is used (not truncated outcome) to keep the estimate
