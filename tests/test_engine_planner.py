@@ -477,11 +477,30 @@ class TestCreatePlanAgentOverride:
 
     def test_explicit_agents_skip_pattern(self, planner: IntelligentPlanner):
         # Even if a pattern would recommend different agents, explicit overrides win
+        # for phases the override agent is allowed to own.  bd-1974: a Review
+        # phase must still be routed to a reviewer-class agent — the planner
+        # synthesizes ``code-reviewer`` rather than letting test-engineer
+        # (an implementer) own a review step.
         plan = planner.create_plan(
             "Add user authentication",
             agents=["test-engineer"],
         )
-        assert all(a == "test-engineer" for a in plan.all_agents)
+        # Every non-review phase step must be the explicit override agent.
+        for phase in plan.phases:
+            for step in phase.steps:
+                if phase.name.lower() == "review":
+                    # Review phase enforces reviewer-class routing (bd-1974).
+                    assert step.agent_name.split("--")[0] in {
+                        "code-reviewer", "security-reviewer", "auditor",
+                    }, (
+                        f"Review phase routed to non-reviewer "
+                        f"{step.agent_name!r}"
+                    )
+                else:
+                    assert step.agent_name == "test-engineer", (
+                        f"Non-review phase {phase.name!r} should keep the "
+                        f"explicit override; got {step.agent_name!r}"
+                    )
 
 
 # ---------------------------------------------------------------------------
