@@ -23,6 +23,23 @@ from agent_baton.core.engine.classifier import (
     _MAX_AGENTS_BY_COMPLEXITY,
     _score_task_type,
 )
+# 005b Phase 1.4 — analyzer pipeline + strategy wiring.  These are imported
+# eagerly so test code that references them via `IntelligentPlanner._heuristic_strategy`
+# etc. does not have to import twice.  The pipeline runs alongside the legacy
+# create_plan body in this commit; Phase 1.4 step 2 will switch the body over.
+from agent_baton.core.engine.analyzers import (
+    CapabilityAnalyzer,
+    DependencyAnalyzer,
+    DepthAnalyzer,
+    RiskAnalyzer,
+    SubscalePlanError,
+)
+from agent_baton.core.engine.strategies import (
+    HeuristicStrategy,
+    PlanContext,
+    RefinementStrategy,
+    TemplateStrategy,
+)
 from agent_baton.core.govern.classifier import ClassificationResult, DataClassifier
 from agent_baton.core.govern.policy import PolicyEngine, PolicySet, PolicyViolation
 from agent_baton.core.improve.scoring import AgentScorecard, PerformanceScorer
@@ -866,6 +883,80 @@ class IntelligentPlanner:
         from agent_baton.core.engine.plan_reviewer import PlanReviewer, PlanReviewResult
         self._plan_reviewer = PlanReviewer()
         self._last_review_result: PlanReviewResult | None = None
+
+        # ------------------------------------------------------------------
+        # 005b Phase 1.4 — Strategy + Analyzer pipeline wiring.
+        #
+        # The pipeline is constructed here so that ``create_plan`` can
+        # delegate draft generation to ``HeuristicStrategy`` and validation
+        # to the analyzer chain.  In this commit (step 1) the wiring lives
+        # alongside the legacy procedural body; step 2 of 1.4 switches the
+        # body to delegate.
+        #
+        # BEAD_WARNING: Knowledge resolution, gate decoration, and foresight
+        # remain owned by ``IntelligentPlanner`` itself.  The design called
+        # for ``KnowledgeAnalyzer`` and ``GateAnalyzer`` (design §2.5) but
+        # those analyzers were not implemented in Step 1.2 — only the four
+        # named in the original proposal exist today (Capability, Risk,
+        # Dependency, Depth).  Knowledge/Gate/Foresight run as inline phases
+        # inside ``create_plan`` between strategy and the analyzer loop;
+        # see the ``_apply_knowledge``/``_apply_gates``/``_apply_foresight``
+        # private methods.  TODO(005b-phase1.5): extract these to dedicated
+        # analyzers.
+        # ------------------------------------------------------------------
+        self._heuristic_strategy = HeuristicStrategy()
+        self._template_strategy = TemplateStrategy()        # Phase 1.5 stub
+        self._refinement_strategy = RefinementStrategy()    # Phase 1.5 stub
+
+        self._analyzer_pipeline: list = [
+            CapabilityAnalyzer(
+                registry=self._registry,
+                router=self._router,
+                scorer=self._scorer,
+                bead_store=self._bead_store,
+                policy_engine=self._policy_engine,
+            ),
+            RiskAnalyzer(),
+            # KnowledgeAnalyzer + GateAnalyzer are NOT in scope for Step 1.4
+            # (design §2.5) — Knowledge resolution + gate scoping run inline
+            # in create_plan via _apply_knowledge / _apply_gates.
+            DependencyAnalyzer(),
+            DepthAnalyzer(),
+        ]
+
+    # ------------------------------------------------------------------
+    # 005b Phase 1.4 — pipeline helpers
+    # ------------------------------------------------------------------
+
+    def _reset_explainability_state(self) -> None:
+        """Reset the per-call ``_last_*`` introspection fields.
+
+        Extracted from the create_plan prologue so the pipeline body
+        (when wired in Phase 1.4 step 2) shares a single reset path with
+        the legacy body.  Resets every field listed in design §1.5
+        except ``_last_team_cost_estimates``, which is set lazily during
+        final assembly inside ``create_plan``.
+        """
+        self._last_pattern_used = None
+        self._last_score_warnings = []
+        self._last_routing_notes = []
+        self._last_classification = None
+        self._last_policy_violations = []
+        self._last_retro_feedback = None
+        self._last_task_classification = None
+        self._last_foresight_insights = []
+        # _last_review_result is not reset — PlanReviewer.review() always
+        # assigns to it explicitly when it runs (or stays at the previous
+        # value when the call is skipped, which matches legacy behaviour).
+
+    def _select_strategy(self, task_summary: str, ctx: PlanContext):
+        """Pick a plan-generation strategy for *task_summary* + *ctx*.
+
+        Phase 1 always returns ``self._heuristic_strategy``.  Template
+        and Refinement strategies are forward-port stubs (design §3.2/3.3)
+        and are wired but not yet routed to.
+        """
+        return self._heuristic_strategy
 
     # ------------------------------------------------------------------
     # Structured description parsing
