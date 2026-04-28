@@ -380,3 +380,120 @@ class TestForceFlagRejectsWithoutJustification:
         assert rc != 0, (rc, out, err)
         combined = (out + err).lower()
         assert "justification" in combined, combined
+
+
+# ---------------------------------------------------------------------------
+# bd-ec30 — --force + --justification MUST persist a governance_overrides row
+# ---------------------------------------------------------------------------
+
+class TestForceFlagRecordsOverrideRow:
+    """Regression coverage for bd-ec30.
+
+    The CLI rejects ``--force`` without ``--justification`` (covered by
+    :class:`TestForceFlagRejectsWithoutJustification`).  When both
+    flags are supplied the executor must:
+
+      * not exit non-zero on the flag-validation path, AND
+      * append a row to the ``governance_overrides`` SQLite table so the
+        override is auditable.
+
+    We point ``BATON_DB_PATH`` at a temporary database, run the CLI
+    in-process, and inspect the table directly.
+    """
+
+    def _run_cli_with_db(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        *cli_args: str,
+    ) -> tuple[int, str, str]:
+        """Invoke ``execute`` in-process with ``BATON_DB_PATH`` redirected."""
+        import argparse as _argparse
+        import contextlib
+        import io as _io
+
+        from agent_baton.cli.commands.execution import execute as ex_mod
+
+        db_path = tmp_path / "baton.db"
+        monkeypatch.setenv("BATON_DB_PATH", str(db_path))
+
+        parser = _argparse.ArgumentParser()
+        sub = parser.add_subparsers(dest="root")
+        ex_mod.register(sub)
+
+        ns = parser.parse_args(["execute", *cli_args])
+        if not hasattr(ns, "output"):
+            ns.output = "text"
+
+        stderr_buf = _io.StringIO()
+        stdout_buf = _io.StringIO()
+        rc = 0
+        try:
+            with contextlib.redirect_stdout(stdout_buf), contextlib.redirect_stderr(stderr_buf):
+                ex_mod.handler(ns)
+        except SystemExit as exc:
+            rc = int(exc.code) if exc.code is not None else 0
+        return rc, stdout_buf.getvalue(), stderr_buf.getvalue()
+
+    def test_force_with_justification_records_governance_override_row(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # We exercise ``execute next`` instead of ``execute run`` because
+        # ``run`` would loop on a real plan; ``next`` is one-shot and
+        # short-circuits when no active task exists, while still hitting
+        # the override-record path under test (line ~761 of execute.py).
+        self._run_cli_with_db(
+            tmp_path,
+            monkeypatch,
+            "next",
+            "--force",
+            "--justification", "Hot-fix override for blocked deploy (test)",
+            "--task-id", "nonexistent-task-for-override-row-test",
+        )
+
+        # The override row lives in the SQLite path BATON_DB_PATH points at.
+        db_path = tmp_path / "baton.db"
+        assert db_path.exists(), f"baton.db not created at {db_path}"
+
+        import sqlite3 as _sql
+        with _sql.connect(db_path) as conn:
+            rows = conn.execute(
+                "SELECT flag, command, justification "
+                "FROM governance_overrides "
+                "ORDER BY created_at DESC"
+            ).fetchall()
+
+        assert rows, "governance_overrides table has no rows after --force"
+        flag, command, justification = rows[0]
+        assert flag == "--force"
+        assert "execute" in command and "next" in command
+        assert "Hot-fix override" in justification
+
+    def test_force_without_justification_writes_no_override_row(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Symmetric: without --justification, the CLI bails out *before*
+        # the override is recorded, so the table must stay empty.
+        rc, out, err = self._run_cli_with_db(
+            tmp_path,
+            monkeypatch,
+            "next",
+            "--force",
+            "--task-id", "nonexistent-task-for-no-row-test",
+        )
+        assert rc != 0, (rc, out, err)
+
+        db_path = tmp_path / "baton.db"
+        if not db_path.exists():
+            # No DB created at all is also acceptable evidence.
+            return
+        import sqlite3 as _sql
+        with _sql.connect(db_path) as conn:
+            # The table may not exist yet; either way, no row should be present.
+            try:
+                rows = conn.execute(
+                    "SELECT 1 FROM governance_overrides"
+                ).fetchall()
+            except _sql.OperationalError:
+                rows = []
+        assert rows == [], f"unexpected override rows: {rows}"
