@@ -21,6 +21,14 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
             "The 'experiment' command has been consolidated into 'baton learn'."
         ),
     )
+    # Accept any unknown flags/positionals so old scripts using e.g.
+    # `baton experiment --id foo` get the deprecation message instead of an
+    # argparse "unrecognized arguments" error (bd-ed80).
+    p.add_argument(
+        "args",
+        nargs=argparse.REMAINDER,
+        help=argparse.SUPPRESS,
+    )
     return p
 
 
