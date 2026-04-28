@@ -164,27 +164,16 @@ def _improve_handler_impl(args: argparse.Namespace) -> None:
         return
 
     if args.experiments:
-        import warnings
-        from agent_baton.core.improve.experiments import ExperimentManager
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            mgr = ExperimentManager()
-        active = mgr.active()
-        if not active:
-            print("No active experiments.")
-            return
-        print(f"Active Experiments ({len(active)}):")
-        print()
-        for exp in active:
-            print(f"  {exp.experiment_id}")
-            print(f"    Recommendation: {exp.recommendation_id}")
-            print(f"    Agent:    {exp.agent_name}")
-            print(f"    Metric:   {exp.metric}")
-            print(f"    Baseline: {exp.baseline_value:.4f}")
-            print(f"    Target:   {exp.target_value:.4f}")
-            print(f"    Samples:  {len(exp.samples)}/{exp.min_samples}")
-            print(f"    Started:  {exp.started_at}")
-            print()
+        # ExperimentManager was retired by L2.1 (bd-362f).  Per-cycle experiment
+        # tracking now flows through the learning-analyst agent dispatched via
+        # `baton learn run-cycle`.  This flag is kept so existing scripts do not
+        # break on unrecognised arguments; it prints a removal notice instead.
+        print(
+            "warning: --experiments is no longer supported. "
+            "ExperimentManager was retired (L2.1, bd-362f). "
+            "Use 'baton learn run-cycle' for impact validation.",
+            file=sys.stderr,
+        )
         return
 
     if args.history:
