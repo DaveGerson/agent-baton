@@ -1060,6 +1060,79 @@ class IntelligentPlanner:
         return self._heuristic_strategy
 
     # ------------------------------------------------------------------
+    # 005b Phase 1.4b — extracted create_plan step methods
+    #
+    # Each ``_step_*`` method below is a contiguous block lifted out of
+    # the legacy ``create_plan`` body without any semantic change.  Each
+    # accepts whatever local state the block read; mutates ``self`` /
+    # the supplied phases/plan as the original code did; and returns the
+    # locals that subsequent blocks need.  These are pure structural
+    # extractions — Phase 1.4c will replace the call sites with strategy
+    # + analyzer dispatches.
+    # ------------------------------------------------------------------
+
+    def _step_emit_telemetry(
+        self,
+        tmp_plan: MachinePlan,
+        *,
+        task_id: str,
+        task_summary: str,
+        inferred_type: str,
+        inferred_complexity: str,
+        risk_level: str,
+        resolved_agents: list[str],
+        plan_phases: list[PlanPhase],
+        budget_tier: str,
+        git_strategy: str,
+        otel_exporter,
+        otel_started_at: datetime | None,
+    ) -> None:
+        """Emit planning bead + OTel span — pure observability side-effects.
+
+        Extracted from the tail of ``create_plan`` (steps F4 and O1.4).
+        Body is byte-identical to the inline version it replaced; signature
+        threads in every local the original block read.
+        """
+        # F4 — Planning Decision Capture: persist key planner decisions as beads.
+        # Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
+        if self._bead_store is not None:
+            try:
+                self._capture_planning_bead(
+                    task_id=task_id,
+                    content=(
+                        f"Plan created for: {task_summary}. "
+                        f"Type={inferred_type}, complexity={inferred_complexity}, "
+                        f"risk={risk_level}, agents={resolved_agents}, "
+                        f"phases={[p.name for p in plan_phases]}, "
+                        f"budget_tier={budget_tier}, git_strategy={git_strategy}."
+                    ),
+                    tags=["planning", "plan-complete", inferred_type],
+                )
+            except Exception:
+                pass
+
+        # O1.4 — emit OTel span when the exporter is enabled.
+        if otel_exporter is not None and otel_started_at is not None:
+            try:
+                otel_exporter.record_span(
+                    name="plan.create",
+                    kind="INTERNAL",
+                    attributes={
+                        "task_id": task_id,
+                        "task_type": inferred_type,
+                        "complexity": inferred_complexity,
+                        "risk_level": str(risk_level),
+                        "agent_count": len(resolved_agents),
+                        "phase_count": len(plan_phases),
+                    },
+                    started_at=otel_started_at,
+                    ended_at=datetime.now(timezone.utc),
+                )
+            except Exception:
+                # Observability must never crash the planner.
+                logger.debug("OTel span emission failed", exc_info=True)
+
+    # ------------------------------------------------------------------
     # Structured description parsing
     # ------------------------------------------------------------------
 
@@ -1926,44 +1999,24 @@ class IntelligentPlanner:
         shared_context = self._build_shared_context(tmp_plan)
         tmp_plan.shared_context = shared_context
 
-        # F4 — Planning Decision Capture: persist key planner decisions as beads.
-        # Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
-        if self._bead_store is not None:
-            try:
-                self._capture_planning_bead(
-                    task_id=task_id,
-                    content=(
-                        f"Plan created for: {task_summary}. "
-                        f"Type={inferred_type}, complexity={inferred_complexity}, "
-                        f"risk={risk_level}, agents={resolved_agents}, "
-                        f"phases={[p.name for p in plan_phases]}, "
-                        f"budget_tier={budget_tier}, git_strategy={git_strategy}."
-                    ),
-                    tags=["planning", "plan-complete", inferred_type],
-                )
-            except Exception:
-                pass
-
-        # O1.4 — emit OTel span when the exporter is enabled.
-        if _otel_exporter is not None and _otel_started_at is not None:
-            try:
-                _otel_exporter.record_span(
-                    name="plan.create",
-                    kind="INTERNAL",
-                    attributes={
-                        "task_id": task_id,
-                        "task_type": inferred_type,
-                        "complexity": inferred_complexity,
-                        "risk_level": str(risk_level),
-                        "agent_count": len(resolved_agents),
-                        "phase_count": len(plan_phases),
-                    },
-                    started_at=_otel_started_at,
-                    ended_at=datetime.now(timezone.utc),
-                )
-            except Exception:
-                # Observability must never crash the planner.
-                logger.debug("OTel span emission failed", exc_info=True)
+        # F4 — Planning Decision Capture / O1.4 — OTel span emission.
+        # Both are observability side effects with no impact on the returned
+        # plan; extracted to ``_step_emit_telemetry`` (005b 1.4b) to free the
+        # tail of create_plan from inline branching.
+        self._step_emit_telemetry(
+            tmp_plan,
+            task_id=task_id,
+            task_summary=task_summary,
+            inferred_type=inferred_type,
+            inferred_complexity=inferred_complexity,
+            risk_level=risk_level,
+            resolved_agents=resolved_agents,
+            plan_phases=plan_phases,
+            budget_tier=budget_tier,
+            git_strategy=git_strategy,
+            otel_exporter=_otel_exporter,
+            otel_started_at=_otel_started_at,
+        )
 
         return tmp_plan
 
