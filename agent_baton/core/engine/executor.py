@@ -1823,6 +1823,35 @@ class ExecutionEngine:
 
         self._save_execution(state)
 
+        # ── Context harvest (Wave 2.2) ────────────────────────────────────────
+        # Best-effort: write a compact (agent_name, domain) learning row into
+        # agent_context after every successful step.  The dispatcher reads
+        # this on the next dispatch to prepend a "Prior Context" block,
+        # eliminating cold-start re-discovery costs.
+        # Feature flag: BATON_HARVEST_CONTEXT (default on; "0" disables).
+        # Failures are swallowed inside the harvester — never blocks recording.
+        if status == "complete" and self._storage is not None:
+            try:
+                from agent_baton.core.intel.context_harvester import (
+                    ContextHarvester,
+                    is_enabled as _harvest_enabled,
+                )
+                if _harvest_enabled():
+                    _conn = self._storage._conn()
+                    _gate_outcomes = {
+                        gr.gate_id: gr.status
+                        for gr in getattr(state, "gate_results", []) or []
+                    }
+                    ContextHarvester().harvest(
+                        result,
+                        _conn,
+                        plan_step=_plan_step,
+                        task_id=state.task_id,
+                        gate_outcomes=_gate_outcomes,
+                    )
+            except Exception as _hv_exc:  # noqa: BLE001
+                _log.debug("ContextHarvester invocation failed (non-fatal): %s", _hv_exc)
+
         # ── Domain event publication ──────────────────────────────────────────
         # Publish step-level domain events to the event bus so that CLI-driven
         # execution (which does not go through TaskWorker) still emits these
