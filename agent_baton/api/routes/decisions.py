@@ -117,19 +117,50 @@ async def get_decision(
     response = DecisionResponse.from_dataclass(req)
 
     # Enrich with context file contents so remote UIs are self-contained.
+    # SECURITY (bd-90c4): context_files originates from data that the API
+    # caller may control, so unconstrained Path(...).read_text() is a
+    # path-traversal vector (e.g. /etc/passwd, ../../etc/shadow). Each path
+    # is resolved and verified to live inside the manager's safe_read_root
+    # (the team-context dir). Anything outside, any symlink that escapes,
+    # or any non-file is silently dropped from the enrichment.
     context_contents: dict[str, str] = {}
+    safe_root = decision_manager.safe_read_root
     for file_path in req.context_files:
-        try:
-            contents = Path(file_path).read_text(encoding="utf-8")
+        contents = _safe_read_context_file(file_path, safe_root)
+        if contents is not None:
             context_contents[file_path] = contents
-        except (OSError, PermissionError):
-            # Silently omit files that cannot be read.
-            pass
 
     if context_contents:
         response.context_file_contents = context_contents
 
     return response
+
+
+def _safe_read_context_file(file_path: str, safe_root: Path | None) -> str | None:
+    """Return the file contents if *file_path* is safe to read, else ``None``.
+
+    A path is "safe" when:
+      * ``safe_root`` is configured (defensive default: refuse all reads),
+      * the path resolves to an existing regular file,
+      * and the resolved path is inside ``safe_root`` (symlinks that escape
+        the tree are rejected because we resolve before comparing).
+    """
+    if safe_root is None:
+        return None
+    try:
+        target = Path(file_path).resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    try:
+        target.relative_to(safe_root)
+    except ValueError:
+        return None
+    if not target.is_file():
+        return None
+    try:
+        return target.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
 
 
 # ---------------------------------------------------------------------------
