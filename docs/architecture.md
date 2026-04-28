@@ -1555,6 +1555,38 @@ Both commands are read-only by contract — they never mutate state, plans, or
 git — and exit non-zero on any definite violation so CI pipelines can gate on
 isolation compliance without re-running the executor.
 
+### 13.6 Wave 1.3 — Worktree Isolation
+
+**Module:** `agent_baton/core/engine/worktree_manager.py` — `WorktreeManager`
+
+Public API: `create(task_id, step_id, base_branch) -> WorktreeHandle`,
+`fold_back(handle, commit_hash, strategy) -> str`,
+`cleanup(handle, on_failure, force)`,
+`handle_for(task_id, step_id) -> WorktreeHandle | None`,
+`gc(max_age_hours, dry_run) -> list[str]`.
+
+**Lifecycle:** `mark_dispatched()` calls `create()` to materialise a git
+worktree under `.claude/worktrees/<task_id>/<step_id>/`.  On step completion,
+`record_step_result()` calls `fold_back()` then `cleanup()`.  On step failure,
+the worktree is **retained** for forensics / Wave 5.1 takeover (`on_failure=True`
+is a no-op in `cleanup()`).
+
+**State fields (ExecutionState):**
+- `step_worktrees: dict[str, dict]` — maps `step_id` to serialised `WorktreeHandle`; absent in legacy files (all accessors use `getattr(..., {})`)
+- `working_branch: str` — git branch captured at `start()` time, used as `base_branch` for every `create()` call
+- `working_branch_head: str` — SHA of the rebased tip after the most-recent successful `fold_back()` (bd-def9)
+
+**ExecutionAction additions:** `worktree_path: str` and `worktree_branch: str`
+are populated on DISPATCH actions when isolation is `"worktree"`.
+
+**CLI:** `baton execute worktree-gc [--max-age-hours N] [--dry-run]` reclaims
+stale worktrees (retained failures older than N hours).
+
+**Backward-compat toggle:** set `BATON_WORKTREE_ENABLED=0` to disable worktree
+creation entirely; all lifecycle methods become no-ops.
+
+See `docs/specs/velocity-engine-spec.md` (Wave 1.3) for the full design.
+
 ---
 
 ## 14. Extension Points
