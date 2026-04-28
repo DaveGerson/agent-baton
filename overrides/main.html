@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+
+{% block extrahead %}
+  {{ super() }}
+  {% if config.extra.analytics.google_site_verification %}
+  <meta name="google-site-verification" content="{{ config.extra.analytics.google_site_verification }}">
+  {% endif %}
+  {% if config.extra.analytics.bing_site_verification %}
+  <meta name="msvalidate.01" content="{{ config.extra.analytics.bing_site_verification }}">
+  {% endif %}
+{% endblock %}
