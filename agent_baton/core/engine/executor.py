@@ -2551,6 +2551,23 @@ class ExecutionEngine:
                     self._enqueue_selfheal(
                         failing_step_id, phase_id, handle,
                     )
+            else:
+                # bd-878e: when self-heal is explicitly suppressed, write a
+                # compliance audit entry so regulated environments can prove
+                # the disable was honoured.  Read each time (not cached) so
+                # a runtime toggle is respected immediately.
+                self._write_compliance_entry({
+                    "timestamp": _utcnow(),
+                    "event_type": "selfheal_suppressed",
+                    "task_id": state.task_id,
+                    "plan_id": state.plan.task_id,
+                    "step_id": "",
+                    "agent_name": "engine",
+                    "risk_level": state.plan.risk_level,
+                    "phase_id": phase_id,
+                    "gate_type": gate_type,
+                    "reason": "BATON_SELFHEAL_ENABLED not set; self-heal disabled",
+                })
             state.status = "gate_failed"
         else:
             self._publish(evt.gate_passed(
