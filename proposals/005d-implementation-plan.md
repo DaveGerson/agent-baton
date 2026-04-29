@@ -10,16 +10,17 @@ This document outlines the phased implementation strategy for **Proposal 005d**.
 
 ---
 
-## 2. Phase 1: Weighted Stack Detection (Weeks 1-2)
+## 2. Phase 1: Weighted Stack Detection & LLM Fallback (Weeks 1-2)
 
-**Goal:** Build a robust, depth-aware workspace scanner.
+**Goal:** Build a robust, depth-aware workspace scanner that leverages cost-effective LLMs when heuristics are ambiguous.
 
 1.  **Create Detector:** Create `agent_baton/core/orchestration/detector.py`.
 2.  **Implement Weighted Scoring:** Instead of halting at the first manifest (e.g., `pyproject.toml`), scan the workspace to a configurable depth.
     *   `pyproject.toml` (root): +10 Python
     *   `package.json` (depth > 1, e.g., `ui/`): +3 Node
     *   `.go` files presence: +5 Go
-3.  **Define `CompositeStackProfile`:** Instead of returning a single string, the detector returns an object containing all identified stacks and their confidence scores, with the highest score designated as the primary.
+3.  **LLM-Assisted Disambiguation:** When heuristics yield close scores (e.g., Python: 10, Node: 10) or when no clear primary stack emerges, invoke a cost-effective LLM (like Claude 3 Haiku or Sonnet) with a scoped view of the directory structure to determine the stack intent. This avoids the fragility of pure heuristics while remaining cost-neutral.
+4.  **Define `CompositeStackProfile`:** Instead of returning a single string, the detector returns an object containing all identified stacks and their confidence scores, with the highest score designated as the primary.
 
 ---
 
@@ -47,9 +48,10 @@ This document outlines the phased implementation strategy for **Proposal 005d**.
 
 ---
 
-## 5. Phase 4: Routing Resolution (Week 6)
+## 5. Phase 4: Routing Resolution & Fast Inference Fallback (Week 6)
 
-**Goal:** Ensure the router correctly translates base agent names into flavored instances.
+**Goal:** Ensure the router correctly translates base agent names into flavored instances, leveraging LLMs for edge cases.
 
 1.  **Update `AgentRouter`:** Modify `agent_baton/core/orchestration/router.py` to accept a `CompositeStackProfile`.
-2.  **Flavor Matching:** When routing an agent (e.g., `backend-engineer`), the router should check the requested step's context against the composite profile to determine if it should route to the primary flavor (Python) or a secondary flavor (Node/Go) based on the specific path the step operates in.
+2.  **Flavor Matching Heuristics:** When routing an agent (e.g., `backend-engineer`), the router should check the requested step's context against the composite profile to determine if it should route to the primary flavor (Python) or a secondary flavor (Node/Go) based on the specific path the step operates in.
+3.  **Fast LLM Fallback:** If a step's path is ambiguous regarding the requested flavor (e.g., a shared `scripts/` directory in a polyglot monorepo), fallback to a fast, cost-neutral Haiku/Sonnet inference call. Provide the LLM with the step description and a scoped directory listing to choose the optimal agent flavor dynamically.
