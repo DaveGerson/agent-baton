@@ -2242,8 +2242,11 @@ class ExecutionEngine:
                             except WorktreeCleanupError:
                                 try:
                                     self._worktree_mgr.cleanup(_handle, on_failure=False, force=True)
-                                except WorktreeCleanupError:
-                                    pass
+                                except WorktreeCleanupError as _force_exc:
+                                    _log.debug(
+                                        "Worktree force-cleanup failed for step %s (non-fatal): %s",
+                                        step_id, _force_exc,
+                                    )
                             _step_worktrees.pop(step_id, None)
                             state.step_worktrees = _step_worktrees
                     elif status == "failed":
@@ -2438,8 +2441,11 @@ class ExecutionEngine:
                                             f"reason={exc}"
                                         ),
                                     )
-                                except Exception:
-                                    pass
+                                except Exception as _bead_exc:
+                                    _log.debug(
+                                        "BEAD_WARNING write failed for step %s (non-fatal): %s",
+                                        step_id, _bead_exc,
+                                    )
                                 self.record_step_result(
                                     step_id=step_id,
                                     agent_name=agent_name,
@@ -2486,8 +2492,8 @@ class ExecutionEngine:
                 branch = r.stdout.strip()
                 if branch and branch != "HEAD":
                     return branch
-        except Exception:
-            pass
+        except Exception as _branch_exc:
+            _log.debug("git rev-parse failed during branch detection: %s", _branch_exc)
         _log.warning("WorktreeManager: could not detect git branch; worktree disabled for this run")
         return ""
 
@@ -3277,8 +3283,11 @@ class ExecutionEngine:
                                     f"task={state.task_id} error={_gc_exc}"
                                 ),
                             )
-                        except Exception:
-                            pass
+                        except Exception as _bead_exc:
+                            logger.debug(
+                                "BEAD_WARNING write failed during gc_stale reporting (non-fatal): %s",
+                                _bead_exc,
+                            )
 
             _gc_thread = _gc_threading.Thread(
                 target=_run_gc_on_complete,
@@ -6116,8 +6125,11 @@ class ExecutionEngine:
                     _team_beads = _TBS().select(
                         self._bead_store, step, state.plan,
                     )
-                except Exception:
-                    pass
+                except Exception as _bs_exc:
+                    _log.debug(
+                        "BeadSelector.select failed for team step %s (non-fatal, dispatching without prior beads): %s",
+                        step.step_id, _bs_exc,
+                    )
             prompt = dispatcher.build_team_delegation_prompt(
                 step=step,
                 member=member,
