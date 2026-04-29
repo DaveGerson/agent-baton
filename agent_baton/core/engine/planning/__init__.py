@@ -21,7 +21,14 @@ from __future__ import annotations
 
 from .draft import PlanDraft
 from .pipeline import Pipeline
+from .planner import IntelligentPlanner
 from .protocols import Stage
 from .services import PlannerServices
 
-__all__ = ["PlanDraft", "Pipeline", "PlannerServices", "Stage"]
+__all__ = [
+    "IntelligentPlanner",
+    "PlanDraft",
+    "Pipeline",
+    "PlannerServices",
+    "Stage",
+]
