@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from agent_baton.core.improve.retrospective import RetrospectiveFeedback
     from agent_baton.models.execution import (
         GateScope,
+        MachinePlan,
         PlanPhase,
         RiskLevel,
     )
@@ -102,6 +103,7 @@ class PlanDraft:
     budget_tier: str = "standard"
 
     # --- AssemblyStage outputs ---
+    assembled_plan: "MachinePlan | None" = None
     classification_signals: str | None = None
     classification_confidence: float | None = None
 
