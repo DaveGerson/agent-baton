@@ -49,15 +49,13 @@ class FeedbackGateOutcome:
         pending_question_ids: Tuple of question IDs that have not yet been
             answered.  Empty when ``satisfied`` is ``True``.
 
-    Note (bd-f4e3):
-        ``evaluate_phase_feedback_gate`` delegates to
-        ``feedback_resolved_for_phase``, which reads from
-        ``state.current_phase_obj`` rather than the phase identified by
-        ``phase_id``.  For ``phase_id != state.current_phase`` the
-        ``satisfied`` field and ``pending_question_ids`` reflect the
-        *current* phase's state, not the queried phase.  This bug is
-        preserved through Phase 3 to keep cutover behaviour-neutral;
-        fix deferred to Phase 5.
+    Note (bd-f4e3 — fixed in commit ``bb83587``):
+        Earlier in 005b, ``feedback_resolved_for_phase`` read from
+        ``state.current_phase_obj`` rather than scanning by ``phase_id``.
+        That bug is fixed: the helper now resolves the phase by its
+        ``phase_id`` field, so ``satisfied`` and ``pending_question_ids``
+        accurately reflect the queried phase regardless of
+        ``state.current_phase``.
     """
 
     required: bool
@@ -176,12 +174,12 @@ class PhaseManager:
     ) -> FeedbackGateOutcome:
         """Evaluate whether all feedback questions for *phase_id* are answered.
 
-        NOTE (bd-f4e3): When *phase_id* != ``state.current_phase``, this
-        method's inspection is best-effort only.  The underlying helper
-        :func:`feedback_resolved_for_phase` reads from
-        ``state.current_phase_obj``, so for non-current-phase queries it
-        returns the current-phase result.  Phase 5 will fix this; Phase 3
-        preserves the latent bug for cutover behaviour-neutrality.
+        bd-f4e3 was fixed in ``bb83587``:
+        :func:`feedback_resolved_for_phase` now resolves the phase by its
+        ``phase_id`` field instead of dereferencing
+        ``state.current_phase_obj``, so this method returns the correct
+        answer for any ``phase_id`` regardless of
+        ``state.current_phase``.
 
         Args:
             state: Current execution state (not mutated).
@@ -193,8 +191,7 @@ class PhaseManager:
             - ``required``: ``True`` iff the phase has at least one
               feedback question.
             - ``satisfied``: ``True`` iff all questions have answers.
-            - ``pending_question_ids``: Tuple of unanswered question IDs
-              (best-effort; see bd-f4e3 note).
+            - ``pending_question_ids``: Tuple of unanswered question IDs.
         """
         phase = next(
             (p for p in state.plan.phases if p.phase_id == phase_id),
@@ -210,8 +207,8 @@ class PhaseManager:
         required = True
         satisfied = feedback_resolved_for_phase(state, phase_id)
 
-        # Compute pending question IDs on a best-effort basis.
-        # (Subject to the bd-f4e3 latent bug when phase_id != current_phase.)
+        # Compute pending question IDs by inspecting the phase resolved
+        # by phase_id (bd-f4e3 fixed in bb83587).
         answered_ids = {
             r.question_id
             for r in state.feedback_results
