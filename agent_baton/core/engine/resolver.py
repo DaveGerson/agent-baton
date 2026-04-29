@@ -29,7 +29,6 @@ See :file:`docs/internal/005b-phase2-design.md` §2.7.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from enum import Enum
 
 from agent_baton.models.execution import (
@@ -40,31 +39,16 @@ from agent_baton.models.execution import (
 
 # Pure helpers shared with ExecutionEngine live in _executor_helpers.
 # Imported with aliases to preserve the resolver's _-prefixed call-site names.
+# bd-8083 sub-item 4: elapsed_seconds was duplicated here; now consolidated
+# in _executor_helpers and imported under the same alias the call sites used.
 from agent_baton.core.engine._executor_helpers import (
     find_step as _find_step,
     effective_timeout as _effective_timeout,
     gate_passed_for_phase as _gate_passed,
     approval_passed_for_phase as _approval_passed,
     feedback_resolved_for_phase as _feedback_resolved,
+    elapsed_seconds as _elapsed_seconds,
 )
-
-
-def _elapsed_seconds(started_at: str) -> float:
-    """Return elapsed wall-clock seconds since *started_at* (ISO string).
-
-    Returns 0.0 when *started_at* is empty or unparseable, mirroring the
-    existing helper in ``executor.py:201``.
-    """
-    if not started_at:
-        return 0.0
-    try:
-        start = datetime.fromisoformat(started_at)
-        now = datetime.now(tz=timezone.utc)
-        if start.tzinfo is None:
-            start = start.replace(tzinfo=timezone.utc)
-        return max(0.0, (now - start).total_seconds())
-    except (ValueError, TypeError):
-        return 0.0
 
 
 # === DecisionKind / ResolverDecision ========================================
@@ -152,7 +136,7 @@ class ActionResolver:
     def determine_next(self, state: ExecutionState) -> ResolverDecision:
         """Compute the next ``ResolverDecision`` for *state*.
 
-        Translates each branch of the legacy ``_determine_action`` method
+        Translates each branch of state inspection
         (``executor.py:4866-5322``) into a small intent object.
         """
         # ── Terminal states: report immediately ─────────────────────────────

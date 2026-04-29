@@ -337,6 +337,42 @@ class TestFeedbackResolvedForPhase:
             feedback_results=[_fr(2, "q1")],  # wrong phase_id
         )
         assert feedback_resolved_for_phase(state, 1) is False
+
+    def test_feedback_resolved_uses_phase_id_not_current_phase(self):
+        # Regression for bd-f4e3: when current_phase has advanced to phase 2
+        # (index 1), calling feedback_resolved_for_phase(state, phase_id=1)
+        # must still evaluate phase 1's questions — NOT phase 2's.
+        phase1 = _make_phase(
+            1, _make_step("1.1"),
+            feedback_questions=[_fq("q1")],
+        )
+        phase2 = _make_phase(2, _make_step("2.1"))
+        state = _make_state(
+            _make_plan(phase1, phase2),
+            current_phase=1,
+            feedback_results=[],
+        )
+        assert feedback_resolved_for_phase(state, 1) is False
+
+    def test_feedback_resolved_correctly_satisfied_for_past_phase(self):
+        phase1 = _make_phase(
+            1, _make_step("1.1"),
+            feedback_questions=[_fq("q1")],
+        )
+        phase2 = _make_phase(2, _make_step("2.1"))
+        state = _make_state(
+            _make_plan(phase1, phase2),
+            current_phase=1,
+            feedback_results=[_fr(1, "q1")],
+        )
+        assert feedback_resolved_for_phase(state, 1) is True
+
+    def test_feedback_resolved_phase_id_not_in_plan_returns_true(self):
+        phase1 = _make_phase(1, _make_step("1.1"))
+        state = _make_state(_make_plan(phase1), current_phase=0)
+        assert feedback_resolved_for_phase(state, 99) is True
+
+
 class TestIsPhaseComplete:
     def test_all_steps_complete(self):
         step_a = _make_step("1.1")

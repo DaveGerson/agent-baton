@@ -122,6 +122,7 @@ from agent_baton.core.engine.resolver import (
 from agent_baton.core.engine._executor_helpers import (
     find_step as _exec_helpers_find_step,
     effective_timeout as _exec_helpers_effective_timeout,
+    elapsed_seconds as _elapsed_seconds,
 )
 # 005b Phase 3: PhaseManager + state-class dispatch table.  PhaseManager owns
 # the crisp phase-advance mutator; state classes own the small mutation
@@ -222,17 +223,9 @@ def _cli_actor() -> str:
     return f"{user}@{hostname}" if hostname else user
 
 
-def _elapsed_seconds(started_at: str) -> float:
-    """Return elapsed wall-clock seconds since started_at (ISO string)."""
-    try:
-        start = datetime.fromisoformat(started_at)
-        now = datetime.now(tz=timezone.utc)
-        # Make start timezone-aware if it isn't already.
-        if start.tzinfo is None:
-            start = start.replace(tzinfo=timezone.utc)
-        return max(0.0, (now - start).total_seconds())
-    except (ValueError, TypeError):
-        return 0.0
+# bd-8083 sub-item 4: _elapsed_seconds is now imported from _executor_helpers
+# (canonical implementation).  The local copy was deleted; the alias above
+# preserves all existing call sites.
 
 
 # ---------------------------------------------------------------------------
@@ -448,8 +441,9 @@ class ExecutionEngine:
         # Token budget enforcement (B1).
         # When enforce_token_budget is True and the cumulative token count
         # exceeds the plan tier threshold (or the explicit token_budget cap),
-        # _determine_action() will set state.status = "budget_exceeded" and
-        # return a COMPLETE action rather than dispatching new steps.
+        # the resolver will signal ``DecisionKind.BUDGET_EXCEEDED`` and the
+        # engine will set state.status = "budget_exceeded" and return a
+        # COMPLETE action rather than dispatching new steps.
         # In-flight work is never aborted — only NEW dispatches are blocked.
         self._enforce_token_budget: bool = enforce_token_budget
         # Explicit per-session token cap (overrides the tier threshold).
@@ -4151,7 +4145,7 @@ class ExecutionEngine:
 
         When ``_enforce_token_budget`` is True *and* the budget is exceeded,
         this method also sets ``state.status = "budget_exceeded"`` so that
-        :meth:`_determine_action` will stop dispatching new steps.  In-flight
+        :meth:`_drive_resolver_loop` will stop dispatching new steps.  In-flight
         work (steps already dispatched) is never aborted.
 
         Tier thresholds (used when no explicit cap is set):
@@ -5405,7 +5399,7 @@ class ExecutionEngine:
         # "interact_dispatched" status, build a continuation prompt that
         # includes the accumulated interaction history instead of a fresh
         # delegation prompt.  Also reset the step status to "dispatched" so
-        # _determine_action treats it as in-flight.
+        # the resolver treats it as in-flight.
         existing_result = state.get_step_result(step.step_id)
         is_continuation = (
             step.interactive
@@ -5621,8 +5615,8 @@ class ExecutionEngine:
     ) -> ExecutionAction:
         """Build an INTERACT action for a step in ``interacting`` status.
 
-        Called by :meth:`_determine_action` when a step has responded but is
-        waiting for human input to continue.
+        Called by :meth:`_apply_resolver_decision` when a step has responded
+        but is waiting for human input to continue.
 
         Args:
             step: The :class:`PlanStep` that is interacting.
@@ -5657,7 +5651,7 @@ class ExecutionEngine:
 
         Called by ``baton execute interact --step-id X --input "..."`` to
         record the human's response to the agent's latest output.  After this
-        call the next ``_determine_action()`` will find the step in
+        call the next resolver pass will find the step in
         ``interact_dispatched`` status and return a DISPATCH continuation.
 
         Args:
@@ -6512,7 +6506,7 @@ class ExecutionEngine:
 
         * ``ESCALATE_TO_INTERACT:`` — Tier 2 promotion.  Set the consulting
           :class:`PlanStep` to ``interactive=True`` and the :class:`StepResult`
-          status to ``"interacting"`` so the next ``_determine_action()`` cycle
+          status to ``"interacting"`` so the next resolver cycle
           returns an INTERACT action.
 
         * Neither marker — the consulting step completed normally.  The
@@ -6606,7 +6600,7 @@ class ExecutionEngine:
         if has_escalate_to_interact(outcome):
             # ── Tier 2 promotion ────────────────────────────────────────────
             # Flip the consulting PlanStep to interactive mode so
-            # _determine_action() returns INTERACT on the next cycle.
+            # the resolver returns INTERACT on the next cycle.
             consulting_plan_step = self._find_step(state, step_id)
             if consulting_plan_step is not None:
                 consulting_plan_step.interactive = True
@@ -6735,7 +6729,7 @@ class ExecutionEngine:
             # Amend the plan: insert a re-dispatch step for the same agent
             # immediately after the interrupted step.  The interrupted step
             # result is already in state.step_results (status="interrupted"),
-            # so _determine_action will skip it via interrupted_step_ids.
+            # so the resolver will skip it via interrupted_step_ids.
             #
             # We mutate state directly here instead of calling amend_plan()
             # because record_step_result() has not yet flushed state to disk —

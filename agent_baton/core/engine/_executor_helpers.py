@@ -3,7 +3,7 @@
 This module owns nothing — it is a stateless utility surface. Functions
 here MUST:
   - take only data inputs (ExecutionState, PlanStep, primitives)
-  - return only data outputs (bool, int, PlanStep | None)
+  - return only data outputs (bool, float, int, PlanStep | None)
   - never mutate inputs
   - never perform I/O beyond `logger.debug` / `logger.warning`
 
@@ -17,10 +17,42 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime, timezone
 
 from agent_baton.models.execution import ExecutionState, PlanStep
 
 logger = logging.getLogger(__name__)
+
+
+def elapsed_seconds(started_at: str) -> float:
+    """Return elapsed wall-clock seconds since *started_at* (ISO 8601 string).
+
+    Consolidated from the duplicate implementations that previously lived in
+    ``executor.py`` and ``resolver.py`` (bd-8083 sub-item 4).  Both copies
+    have been removed; this is now the single source of truth.
+
+    Resolution:
+    - Returns ``0.0`` when *started_at* is empty or ``None``.
+    - Returns ``0.0`` when *started_at* cannot be parsed (ValueError/TypeError).
+    - Normalises a naive datetime to UTC before computing the delta.
+    - Always returns a non-negative value (``max(0.0, delta)``).
+
+    Args:
+        started_at: ISO 8601 timestamp string (e.g. ``"2026-04-28T10:00:00+00:00"``).
+
+    Returns:
+        Elapsed seconds as a float; ``0.0`` on any error or empty input.
+    """
+    if not started_at:
+        return 0.0
+    try:
+        start = datetime.fromisoformat(started_at)
+        now = datetime.now(tz=timezone.utc)
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        return max(0.0, (now - start).total_seconds())
+    except (ValueError, TypeError):
+        return 0.0
 
 
 def find_step(state: ExecutionState, step_id: str) -> PlanStep | None:
@@ -110,8 +142,16 @@ def approval_passed_for_phase(state: ExecutionState, phase_id: int) -> bool:
 def feedback_resolved_for_phase(state: ExecutionState, phase_id: int) -> bool:
     """Return True if all feedback questions for *phase_id* have been answered.
 
-    Retrieves the question IDs from the current phase object and compares
-    them against the IDs of recorded feedback results for *phase_id*.
+    Looks up the phase in the plan by *phase_id* (not by the engine's
+    ``current_phase`` index) so that the result is correct even when the
+    engine has already advanced ``state.current_phase`` past the phase being
+    checked.
+
+    Fix for bd-f4e3: the previous implementation read ``state.current_phase_obj``
+    (index-based) instead of looking up the phase by its ``phase_id`` field.
+    When ``current_phase`` advanced past the queried phase, the wrong phase's
+    feedback questions were consulted, causing the function to return ``True``
+    prematurely (the new current phase typically has no questions).
 
     Args:
         state: Current execution state (not mutated).
@@ -119,11 +159,13 @@ def feedback_resolved_for_phase(state: ExecutionState, phase_id: int) -> bool:
 
     Returns:
         ``True`` when every question in the phase's feedback gate has a
-        recorded answer, or when the current phase has no feedback
-        questions.  ``True`` is also returned when *state.current_phase_obj*
-        is ``None`` (no current phase, nothing to wait for).
+        recorded answer, or when the phase has no feedback questions.
+        ``True`` is also returned when *phase_id* is not found in the plan
+        (nothing to block on).
     """
-    phase_obj = state.current_phase_obj
+    phase_obj = next(
+        (p for p in state.plan.phases if p.phase_id == phase_id), None
+    )
     if phase_obj is None:
         return True
     question_ids = {q.question_id for q in phase_obj.feedback_questions}
