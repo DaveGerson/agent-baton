@@ -337,37 +337,30 @@ class TestEvalPhaseFeedbackGate:
         assert outcome.satisfied is True
 
     def test_bd_f4e3_latent_bug_non_current_phase(self):
-        """bd-f4e3: querying a non-current phase returns current-phase state.
+        """bd-f4e3 (FIXED): querying a non-current phase returns the correct
+        phase's feedback state.
 
-        The underlying helper reads state.current_phase_obj, not the phase
-        identified by phase_id.  When phase_id points to a different phase
-        than the current one, the result reflects the current phase's
-        feedback state.
-
-        This test documents the CURRENT (buggy) behaviour and is marked as
-        an expected-to-pass assertion of that behaviour so the suite stays
-        green.  It acts as a canary: if Phase 5 fixes the bug, the assertion
-        must be updated to reflect correct semantics.
+        Before the fix the helper read state.current_phase_obj, ignoring
+        phase_id and returning the wrong phase's resolution.  After the
+        fix (commit bb83587) the helper looks up the phase by its
+        phase_id field, so a non-current phase with unanswered questions
+        correctly reports satisfied=False with the pending question IDs.
         """
-        # Phase 1 is current (index 0); phase 2 has feedback questions.
         phase1 = _make_phase(1, _make_step("1.1"))  # no feedback questions
         phase2 = _make_phase(
             2, _make_step("2.1"),
             feedback_questions=[_fq("q1")],
         )
-        # current_phase=0 → current_phase_obj is phase1 (no questions).
         state = _make_state(
             _make_plan(phase1, phase2),
             current_phase=0,
         )
-        # Querying phase 2 (non-current): feedback_resolved_for_phase reads
-        # current_phase_obj (phase1) which has no questions → True.
-        # The correct answer should be False (q1 is unanswered in phase 2),
-        # but the helper returns True due to the bd-f4e3 bug.
+        # Querying phase 2 (non-current) now correctly reports its
+        # unanswered question — independent of state.current_phase.
         outcome = self.pm.evaluate_phase_feedback_gate(state, 2)
-        # Assert CURRENT (buggy) behaviour — not what is semantically correct.
-        # bd-f4e3: this returns True because current phase has no questions.
-        assert outcome.satisfied is True  # BUG: should be False after Phase 5 fix
+        assert outcome.satisfied is False
+        assert outcome.required is True
+        assert outcome.pending_question_ids == ("q1",)
 
 
 # ---------------------------------------------------------------------------
