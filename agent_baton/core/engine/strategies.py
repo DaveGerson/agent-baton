@@ -756,6 +756,9 @@ class ZeroShotStrategy:
             git_strategy="commit-per-agent",  # RiskAnalyzer overwrites this
             budget_tier=budget_tier,
         )
+        # bd-a379: annotate parallel_safe on intra-phase siblings with
+        # disjoint allowed_paths so orchestrators can dispatch concurrently.
+        annotate_parallel_safe(plan.phases)
         return plan
 
     # ------------------------------------------------------------------
@@ -1716,6 +1719,50 @@ class ZeroShotStrategy:
 # ---------------------------------------------------------------------------
 
 HeuristicStrategy = ZeroShotStrategy
+
+
+# ---------------------------------------------------------------------------
+# bd-a379: Parallel-safe annotation pass
+# ---------------------------------------------------------------------------
+
+def annotate_parallel_safe(phases: list[PlanPhase]) -> None:
+    """Annotate each step's ``parallel_safe`` flag in-place.
+
+    A step is marked ``parallel_safe=True`` if and only if:
+
+    1. It has at least one intra-phase sibling whose ``depends_on`` set is
+       identical (same prerequisite steps — they can start at the same time).
+    2. Every such sibling has an ``allowed_paths`` set that is **disjoint**
+       from this step's ``allowed_paths`` (no shared write targets).
+    3. Both this step and every sibling have a non-empty ``allowed_paths``
+       list (empty paths → unknown scope → conservatively sequential).
+
+    Phase boundaries are respected: only steps within the same
+    ``PlanPhase`` are considered siblings.
+
+    Args:
+        phases: The list of ``PlanPhase`` objects from the assembled plan.
+            Modified in-place; returns ``None``.
+    """
+    for phase in phases:
+        steps = phase.steps
+        for step in steps:
+            step.parallel_safe = False
+            if not step.allowed_paths:
+                continue
+            dep_set = frozenset(step.depends_on)
+            siblings = [
+                s for s in steps
+                if s.step_id != step.step_id
+                and frozenset(s.depends_on) == dep_set
+            ]
+            if not siblings:
+                continue
+            if any(not s.allowed_paths for s in siblings):
+                continue
+            my_paths = set(step.allowed_paths)
+            if all(my_paths.isdisjoint(s.allowed_paths) for s in siblings):
+                step.parallel_safe = True
 
 
 # ---------------------------------------------------------------------------

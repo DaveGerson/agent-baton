@@ -157,3 +157,37 @@ def test_phase_manager_module_exists() -> None:
         "Update the _PHASE_ADVANCE_ALLOWED / _STEP_INDEX_RESET_ALLOWED sets "
         "in tests/test_architecture.py if the module was relocated."
     )
+
+
+# ── bd-ab1d: _executor_helpers must be a pure leaf module ────────────────────
+
+
+def test_executor_helpers_no_back_imports() -> None:
+    """_executor_helpers must NEVER import from executor.py / resolver.py /
+    phase_manager.py to keep it a pure leaf module.  Only stdlib + models.
+
+    resolver.py imports from _executor_helpers.py — any import from
+    resolver.py back into _executor_helpers.py would create a circular
+    dependency.  Same risk for executor.py and phase_manager.py.
+    """
+    helpers_path = _PACKAGE_ROOT / "core" / "engine" / "_executor_helpers.py"
+    assert helpers_path.is_file(), "_executor_helpers.py is missing"
+
+    text = helpers_path.read_text(encoding="utf-8")
+
+    forbidden = [
+        "from agent_baton.core.engine.executor",
+        "from agent_baton.core.engine.resolver",
+        "from agent_baton.core.engine.phase_manager",
+        "import agent_baton.core.engine.executor",
+        "import agent_baton.core.engine.resolver",
+        "import agent_baton.core.engine.phase_manager",
+    ]
+
+    violations = [pattern for pattern in forbidden if pattern in text]
+
+    assert not violations, (
+        "_executor_helpers.py back-imports from an upstream engine module, "
+        "which would create a circular import.  "
+        f"Remove the following forbidden imports: {violations!r}"
+    )

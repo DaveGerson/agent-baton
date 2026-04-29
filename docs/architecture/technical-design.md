@@ -7,6 +7,13 @@
 > the runtime's async dispatch model. For high-level orientation see
 > [high-level-design.md](high-level-design.md). For the action enum and
 > transition table see [state-machine.md](state-machine.md).
+>
+> **005b decomposition.** The resolver/PhaseManager/state-pattern split
+> introduced in proposal 005b is documented here in §3.2–3.2.4. Detailed
+> extraction maps are in
+> [docs/internal/005b-phase1-design.md](../internal/005b-phase1-design.md),
+> [docs/internal/005b-phase2-design.md](../internal/005b-phase2-design.md),
+> and [docs/internal/005b-phase3-design.md](../internal/005b-phase3-design.md).
 
 ---
 
@@ -133,8 +140,9 @@ The state machine has three external entry methods on
 | `next_action()` | Single-action poll. Used by the CLI. |
 | `next_actions()` | Multi-action poll for parallel dispatch. Used by `TaskWorker`. |
 
-All three converge on the private `_determine_action(state)` at
-[`executor.py:4794`](../../agent_baton/core/engine/executor.py).
+All three converge on the private `_drive_resolver_loop(state)`.
+The former `_determine_action` god-method was deleted in proposal 005b
+(step 2.3d) and replaced by the three-stage pipeline described in §3.2.
 
 ### 3.2 Decision pipeline (post-005b)
 
@@ -153,7 +161,17 @@ After proposal 005b, the next-action computation is a three-stage pipeline:
    ``"gate_pending"`` / ``"approval_pending"`` / ``"failed"``).
    See §3.2.2.
 
-The classifier walks this decision tree (encoded in `ActionResolver`):
+`DecisionKind` is a 22-value enum in
+[`resolver.py`](../../agent_baton/core/engine/resolver.py):
+`TERMINAL_COMPLETE`, `TERMINAL_FAILED`, `APPROVAL_PENDING`,
+`FEEDBACK_PENDING`, `GATE_PENDING`, `GATE_FAILED`, `PAUSED_TAKEOVER`,
+`BUDGET_EXCEEDED`, `NO_PHASES_LEFT`, `EMPTY_PHASE_GATE`,
+`EMPTY_PHASE_ADVANCE`, `STEP_FAILED_IN_PHASE`, `DISPATCH`,
+`TEAM_DISPATCH`, `INTERACT`, `INTERACT_CONTINUE`, `TIMEOUT`, `WAIT`,
+`PHASE_NEEDS_APPROVAL`, `PHASE_NEEDS_FEEDBACK`, `PHASE_NEEDS_GATE`,
+`PHASE_ADVANCE_OK`.
+
+The resolver walks this decision tree:
 
 ```
                 ┌─ state.status == "complete"      → TERMINAL_COMPLETE
@@ -206,6 +224,8 @@ allowed to bump `state.current_phase` or reset `state.current_step_index`.
 All callers (resolver-loop arms, `record_gate_result`) must route
 through it and pair the call with `_publish_phase_started(state)` to
 emit the `phase_pre_start` + `phase_started` events.
+
+Design rationale: [docs/internal/005b-phase3-design.md §1](../internal/005b-phase3-design.md).
 
 #### 3.2.2 State pattern — small mutation epilogue
 
@@ -828,7 +848,11 @@ to `state.amendments` so `resume()` reconstructs the amended plan.
 
 | Pattern | Test root |
 |---------|-----------|
-| Action determination | `tests/engine/test_executor_*.py` |
+| Action determination (`ActionResolver`) | `tests/engine/test_action_resolver.py` |
+| Phase-boundary logic (`PhaseManager`) | `tests/test_phase_manager.py` |
+| State-class epilogues (`states.py`) | `tests/test_execution_states.py` |
+| Executor helpers | `tests/engine/test_executor_helpers.py` |
+| Engine API contract (canary) | `tests/test_engine_api_contract.py` |
 | Plan creation pipeline | `tests/engine/test_planner_*.py` |
 | Gate evaluation | `tests/engine/test_gate_runner.py` |
 | Persistence dual-write | `tests/storage/test_sqlite_backend.py`, `tests/storage/test_file_backend.py` |
@@ -838,6 +862,7 @@ to `state.amendments` so `resume()` reconstructs the amended plan.
 | Closed-loop learning | `tests/learn/test_engine.py`, `tests/learn/test_resolvers.py` |
 | API factory | `tests/api/test_server.py`, `tests/api/test_*_routes.py` |
 | Worktree isolation | `tests/engine/test_worktree_manager.py` |
+| Phase advance invariant | `tests/test_architecture.py` |
 | `_print_action()` contract | `tests/cli/test_execute_*.py` |
 
 `tests/cli/test_execute_*.py` covers the wire format Claude depends on;

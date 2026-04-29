@@ -381,8 +381,8 @@ Mitigated by hybrid dispatch (§2.5). **Kill switch:** if any state class needs 
 
 ### Q6. Test coverage
 
-- `tests/test_phase_manager.py` (new) — pure-method coverage.
-- `tests/test_execution_states.py` (new) — state-class coverage; assert each class raises on illegal transitions.
+- `tests/test_phase_manager.py` — pure-method coverage; 38 tests.
+- `tests/test_execution_states.py` — state-class coverage; asserts each class raises on illegal transitions; 67 tests.
 - Existing `tests/test_executor.py` exercises the dispatch table — runs unchanged.
 
 ### Q7. Recursion bound
@@ -460,3 +460,7 @@ Total wall-time: ~2.5 days with parallel 3.2/3.3.
 - `tests/test_phase_manager.py` (NEW)
 - `tests/test_execution_states.py` (NEW)
 - `docs/internal/005b-phase1-design.md`, `docs/internal/005b-phase2-design.md`
+
+---
+
+*Test counts updated 2026-04-28 to match implementation: `test_phase_manager.py` has 38 tests, `test_execution_states.py` has 67 tests (verified by grep -c "def test_").*

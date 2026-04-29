@@ -288,6 +288,12 @@ class PlanStep:
             ``code-reviewer`` and ``test-engineer`` to shift review from
             "no errors" to "behavioral correctness".  Empty string means
             no outcome was derived (preserves back-compat for older plans).
+        parallel_safe: Annotated ``True`` by the planner (bd-a379) when this
+            step shares its ``depends_on`` set with at least one sibling and
+            every such sibling has a disjoint ``allowed_paths`` set.  Defaults
+            to ``False`` (conservative — sequential) for any step the planner
+            cannot prove is safe to run concurrently.  Orchestrators SHOULD
+            dispatch concurrent worktree-isolated agents when this is ``True``.
     """
 
     step_id: str                          # e.g. "1.1"
@@ -310,6 +316,7 @@ class PlanStep:
     command: str = ""               # shell command for automation steps
     expected_outcome: str = ""      # Wave 3.1: 1-sentence demo statement (behavioral)
     timeout_seconds: int = 0        # 0 = no timeout (backward-compat default)
+    parallel_safe: bool = False     # bd-a379: True when sibling steps have disjoint allowed_paths
 
     def to_dict(self) -> dict:
         d = {
@@ -341,6 +348,8 @@ class PlanStep:
             d["expected_outcome"] = self.expected_outcome
         if self.timeout_seconds:
             d["timeout_seconds"] = self.timeout_seconds
+        if self.parallel_safe:
+            d["parallel_safe"] = self.parallel_safe
         return d
 
     @classmethod
@@ -366,6 +375,7 @@ class PlanStep:
             command=data.get("command", ""),
             expected_outcome=data.get("expected_outcome", ""),
             timeout_seconds=data.get("timeout_seconds", 0),
+            parallel_safe=data.get("parallel_safe", False),
         )
 
 
@@ -660,8 +670,9 @@ class MachinePlan:
                 lines.append(f"> {phase.approval_description}")
                 lines.append("")
             for step in phase.steps:
+                _parallel_tag = " (parallel)" if step.parallel_safe else ""
                 if step.team:
-                    lines.append(f"### Step {step.step_id}: Team")
+                    lines.append(f"### Step {step.step_id}: Team{_parallel_tag}")
                     lines.append(f"- **Task**: {step.task_description}")
                     lines.append(f"- **Members**:")
                     for member in step.team:
@@ -669,7 +680,7 @@ class MachinePlan:
                         if member.task_description:
                             lines.append(f"    {member.task_description}")
                 else:
-                    lines.append(f"### Step {step.step_id}: {step.agent_name}")
+                    lines.append(f"### Step {step.step_id}: {step.agent_name}{_parallel_tag}")
                     lines.append(f"- **Model**: {step.model}")
                     lines.append(f"- **Task**: {step.task_description}")
                 if step.expected_outcome:
