@@ -12,9 +12,10 @@ import json
 import logging
 import re
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from agent_baton.core.engine.classifier import (
     FallbackClassifier,
@@ -22,6 +23,23 @@ from agent_baton.core.engine.classifier import (
     TaskClassifier,
     _MAX_AGENTS_BY_COMPLEXITY,
     _score_task_type,
+)
+# 005b Phase 1.4 — analyzer pipeline + strategy wiring.  These are imported
+# eagerly so test code that references them via `IntelligentPlanner._heuristic_strategy`
+# etc. does not have to import twice.  The pipeline runs alongside the legacy
+# create_plan body in this commit; Phase 1.4 step 2 will switch the body over.
+from agent_baton.core.engine.analyzers import (
+    CapabilityAnalyzer,
+    DependencyAnalyzer,
+    DepthAnalyzer,
+    RiskAnalyzer,
+    SubscalePlanError,
+)
+from agent_baton.core.engine.strategies import (
+    HeuristicStrategy,
+    PlanContext,
+    RefinementStrategy,
+    TemplateStrategy,
 )
 from agent_baton.core.govern.classifier import ClassificationResult, DataClassifier
 from agent_baton.core.govern.policy import PolicyEngine, PolicySet, PolicyViolation
@@ -754,6 +772,106 @@ class RetroEngine(Protocol):
 
 
 # ---------------------------------------------------------------------------
+# 005b Phase 1.4b — _CreatePlanState
+# ---------------------------------------------------------------------------
+#
+# Internal mutable state container threaded through ``IntelligentPlanner``'s
+# ``_step_*`` methods.  Each field corresponds 1:1 with a local variable
+# that previously lived inside the monolithic ``create_plan`` body.  The
+# refactor is purely structural — no semantics changed; the same locals are
+# now accessed as attributes on this dataclass so they can flow between
+# extracted step methods.
+#
+# DO NOT rename a field without updating every ``_step_*`` reader and
+# writer.  Adding a new field is fine; removing one means the corresponding
+# locality of reference vanished from ``create_plan``.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _CreatePlanState:
+    """Per-call state for ``IntelligentPlanner.create_plan``.
+
+    Holds every local variable that flows between the extracted ``_step_*``
+    helper methods.  The dataclass is private and not part of the public
+    planner API — callers should never construct or inspect it.
+    """
+
+    # --- create_plan call arguments (snapshotted on entry) ---
+    task_summary: str = ""
+    task_type: str | None = None
+    complexity: str | None = None
+    project_root: Path | None = None
+    agents: list[str] | None = None
+    phases: list[dict] | None = None
+    explicit_knowledge_packs: list[str] | None = None
+    explicit_knowledge_docs: list[str] | None = None
+    intervention_level: str = "low"
+    default_model: str | None = None
+    gate_scope: GateScope = "focused"
+
+    # --- observability ---
+    otel_exporter: Any = None
+    otel_started_at: datetime | None = None
+
+    # --- step 1/2/2b: identity, stack, structured parse ---
+    task_id: str = ""
+    stack_profile: StackProfile | None = None
+
+    # --- step 3: classification ---
+    classified_phases: list[str] | None = None
+    inferred_type: str = ""
+    inferred_complexity: str = "medium"
+    resolved_agents: list[str] = field(default_factory=list)
+
+    # --- step 4: pattern + 4b: bead hints ---
+    pattern: LearnedPattern | None = None
+    bead_hints: list = field(default_factory=list)
+
+    # --- step 5b: retro feedback ---
+    retro_feedback: RetrospectiveFeedback | None = None
+
+    # --- step 5c: compound subtasks ---
+    subtask_data: list[dict] | None = None
+
+    # --- step 5e/6: routing ---
+    pre_routing_agents: list[str] = field(default_factory=list)
+    agent_route_map: dict[str, str] = field(default_factory=dict)
+
+    # --- step 6.5: knowledge resolver ---
+    resolver: Any = None
+    ranker: Any = None
+    max_knowledge_per_step: int = 8
+
+    # --- step 7/8/8b: classification + risk ---
+    classification: ClassificationResult | None = None
+    keyword_risk_level: str = ""
+    risk_level: str = ""
+    risk_level_enum: RiskLevel = RiskLevel.LOW
+    git_strategy: str = ""
+
+    # --- step 9: phases ---
+    plan_phases: list[PlanPhase] = field(default_factory=list)
+
+    # --- step 11: budget ---
+    budget_tier: str = "standard"
+
+    # --- step 12b-bis: concerns ---
+    concerns: list = field(default_factory=list)
+    split_phase_ids: set[int] = field(default_factory=set)
+
+    # --- step 12c.4: extracted file paths ---
+    extracted_paths: list[str] = field(default_factory=list)
+
+    # --- step 13d: prior-task dependency ---
+    depends_on_task_id: str | None = None
+
+    # --- step 14: shared context derivation ---
+    classification_signals: str | None = None
+    classification_confidence: float | None = None
+
+
+# ---------------------------------------------------------------------------
 # IntelligentPlanner
 # ---------------------------------------------------------------------------
 
@@ -866,6 +984,1104 @@ class IntelligentPlanner:
         from agent_baton.core.engine.plan_reviewer import PlanReviewer, PlanReviewResult
         self._plan_reviewer = PlanReviewer()
         self._last_review_result: PlanReviewResult | None = None
+
+        # ------------------------------------------------------------------
+        # 005b Phase 1.4 — Strategy + Analyzer pipeline wiring.
+        #
+        # The pipeline is constructed here so that ``create_plan`` can
+        # delegate draft generation to ``HeuristicStrategy`` and validation
+        # to the analyzer chain.  In this commit (step 1) the wiring lives
+        # alongside the legacy procedural body; step 2 of 1.4 switches the
+        # body to delegate.
+        #
+        # BEAD_WARNING: Knowledge resolution, gate decoration, and foresight
+        # remain owned by ``IntelligentPlanner`` itself.  The design called
+        # for ``KnowledgeAnalyzer`` and ``GateAnalyzer`` (design §2.5) but
+        # those analyzers were not implemented in Step 1.2 — only the four
+        # named in the original proposal exist today (Capability, Risk,
+        # Dependency, Depth).  Knowledge/Gate/Foresight run as inline phases
+        # inside ``create_plan`` between strategy and the analyzer loop;
+        # see the ``_apply_knowledge``/``_apply_gates``/``_apply_foresight``
+        # private methods.  TODO(005b-phase1.5): extract these to dedicated
+        # analyzers.
+        # ------------------------------------------------------------------
+        self._heuristic_strategy = HeuristicStrategy()
+        self._template_strategy = TemplateStrategy()        # Phase 1.5 stub
+        self._refinement_strategy = RefinementStrategy()    # Phase 1.5 stub
+
+        self._analyzer_pipeline: list = [
+            CapabilityAnalyzer(
+                registry=self._registry,
+                router=self._router,
+                scorer=self._scorer,
+                bead_store=self._bead_store,
+                policy_engine=self._policy_engine,
+            ),
+            RiskAnalyzer(),
+            # KnowledgeAnalyzer + GateAnalyzer are NOT in scope for Step 1.4
+            # (design §2.5) — Knowledge resolution + gate scoping run inline
+            # in create_plan via _apply_knowledge / _apply_gates.
+            DependencyAnalyzer(),
+            DepthAnalyzer(),
+        ]
+
+    # ------------------------------------------------------------------
+    # 005b Phase 1.4 — pipeline helpers
+    # ------------------------------------------------------------------
+
+    def _reset_explainability_state(self) -> None:
+        """Reset the per-call ``_last_*`` introspection fields.
+
+        Extracted from the create_plan prologue so the pipeline body
+        (when wired in Phase 1.4 step 2) shares a single reset path with
+        the legacy body.  Resets every field listed in design §1.5
+        except ``_last_team_cost_estimates``, which is set lazily during
+        final assembly inside ``create_plan``.
+        """
+        self._last_pattern_used = None
+        self._last_score_warnings = []
+        self._last_routing_notes = []
+        self._last_classification = None
+        self._last_policy_violations = []
+        self._last_retro_feedback = None
+        self._last_task_classification = None
+        self._last_foresight_insights = []
+        # _last_review_result is not reset — PlanReviewer.review() always
+        # assigns to it explicitly when it runs (or stays at the previous
+        # value when the call is skipped, which matches legacy behaviour).
+
+    def _select_strategy(self, task_summary: str, ctx: PlanContext):
+        """Pick a plan-generation strategy for *task_summary* + *ctx*.
+
+        Phase 1 always returns ``self._heuristic_strategy``.  Template
+        and Refinement strategies are forward-port stubs (design §3.2/3.3)
+        and are wired but not yet routed to.
+        """
+        return self._heuristic_strategy
+
+    # ------------------------------------------------------------------
+    # 005b Phase 1.4b — extracted create_plan step methods
+    #
+    # Each ``_step_*`` method below is a contiguous block lifted out of
+    # the legacy ``create_plan`` body without any semantic change.  Each
+    # accepts whatever local state the block read; mutates ``self`` /
+    # the supplied phases/plan as the original code did; and returns the
+    # locals that subsequent blocks need.  These are pure structural
+    # extractions — Phase 1.4c will replace the call sites with strategy
+    # + analyzer dispatches.
+    # ------------------------------------------------------------------
+
+    def _step_decompose_subtasks(
+        self,
+        *,
+        task_summary: str,
+        phases: list[dict] | None,
+        agents: list[str] | None,
+        resolved_agents: list[str],
+    ) -> tuple[list[dict] | None, list[str]]:
+        """Step 5c — compound task decomposition.
+
+        Returns ``(subtask_data, resolved_agents)``.  *subtask_data* is
+        ``None`` when no compound decomposition was triggered.  Body is
+        byte-identical to the inline version.
+        """
+        # 5c. Compound task decomposition — detect numbered sub-tasks and
+        # build independent per-subtask agent rosters.  Only activates when
+        # no explicit phases were provided and ≥2 numbered items are found.
+        _subtask_data: list[dict] | None = None
+        if phases is None:
+            subtasks = self._parse_subtasks(task_summary)
+            if len(subtasks) >= 2:
+                _subtask_data = []
+                # bd-701e: when the user passes an explicit --agents override,
+                # honour it for every subtask so compound decomposition does
+                # not silently swap the roster for type-defaulted agents and
+                # produce phases without implementer steps.  Reviewer-class
+                # agents in the override are preserved here; the implement-
+                # phase team-step (_consolidate_team_step) filters them out.
+                _explicit_agents = list(agents) if agents is not None else None
+                for sub_idx, sub_text in subtasks:
+                    st_type = self._infer_task_type(sub_text)
+                    if _explicit_agents is not None:
+                        st_agents = list(_explicit_agents)
+                    else:
+                        st_agents = list(_DEFAULT_AGENTS.get(st_type, ["backend-engineer"]))
+                        st_agents = self._expand_agents_for_concerns(st_agents, sub_text)
+                    _subtask_data.append({
+                        "index": sub_idx,
+                        "text": sub_text,
+                        "task_type": st_type,
+                        "agents": st_agents,
+                    })
+                # Override resolved_agents with the union of all sub-task agents
+                union_agents: list[str] = []
+                for st in _subtask_data:
+                    for a in st["agents"]:
+                        if a not in union_agents:
+                            union_agents.append(a)
+                resolved_agents = union_agents
+        return _subtask_data, resolved_agents
+
+    def _step_expand_concerns(
+        self,
+        *,
+        task_summary: str,
+        inferred_complexity: str,
+        agents: list[str] | None,
+        resolved_agents: list[str],
+        subtask_data: list[dict] | None,
+    ) -> list[str]:
+        """Steps 5d / 5d-cap — cross-concern expansion + complexity cap.
+
+        Returns the (possibly-expanded, possibly-capped) ``resolved_agents``.
+        Body is byte-identical to the inline version.
+        """
+        # 5d. Cross-concern agent expansion — when no compound decomposition
+        # occurred, still expand the roster based on description keywords.
+        if subtask_data is None:
+            resolved_agents = self._expand_agents_for_concerns(
+                resolved_agents, task_summary,
+            )
+
+        # 5d-cap. Enforce complexity-tier agent cap so that cross-concern
+        # expansion (or a generous classifier) cannot produce unbounded
+        # rosters.  The cap matches HaikuClassifier's _MAX_AGENTS_BY_COMPLEXITY.
+        # Only applies to automatically-resolved agents — explicit user-
+        # provided agent lists are not capped.
+        #
+        # bd-076c — when concern-splitting will fire (≥3 concerns parsed
+        # from task_summary), the cap is raised to len(concerns) so each
+        # concern can be routed to a distinct specialist instead of
+        # collapsing to duplicates.  Concern detection is idempotent so
+        # calling _parse_concerns here and again at step 12b-bis is safe.
+        if agents is None:
+            _agent_cap = _MAX_AGENTS_BY_COMPLEXITY.get(inferred_complexity, 5)
+            _early_concerns = self._parse_concerns(task_summary)
+            if _early_concerns and len(_early_concerns) > _agent_cap:
+                _agent_cap = len(_early_concerns)
+                logger.debug(
+                    "Concern-split detected (%d concerns) — raised agent cap "
+                    "to %d to keep one specialist per concern (bd-076c).",
+                    len(_early_concerns),
+                    _agent_cap,
+                )
+            if len(resolved_agents) > _agent_cap:
+                resolved_agents = resolved_agents[:_agent_cap]
+        return resolved_agents
+
+    def _step_route_agents(
+        self,
+        *,
+        resolved_agents: list[str],
+        project_root: Path | None,
+    ) -> tuple[list[str], dict[str, str]]:
+        """Steps 5e / 6 / 6a — pre-routing snapshot + routing + route map.
+
+        Returns ``(routed_agents, agent_route_map)``.  Body is
+        byte-identical to the inline version.
+        """
+        # 5e. Store pre-routing names for compound phase building
+        _pre_routing_agents = list(resolved_agents)
+
+        # 6. Route agents
+        resolved_agents = self._route_agents(resolved_agents, project_root)
+
+        # 6a. Build route map (base name → routed name) for compound phases
+        _agent_route_map = dict(zip(_pre_routing_agents, resolved_agents))
+        logger.debug(
+            "Agent routing complete: %s",
+            _agent_route_map if _agent_route_map else resolved_agents,
+        )
+        return resolved_agents, _agent_route_map
+
+    def _step_apply_pattern(
+        self,
+        *,
+        task_summary: str,
+        inferred_type: str,
+        stack_profile: StackProfile | None,
+        resolved_agents: list[str],
+        agents: list[str] | None,
+        phases: list[dict] | None,
+    ) -> tuple[LearnedPattern | None, list[str], list]:
+        """Steps 4 / 4b — pattern lookup and BeadAnalyzer bead hints.
+
+        Returns ``(pattern, resolved_agents, bead_hints)``.  ``pattern``
+        may be ``None`` and ``resolved_agents`` may be unchanged if no
+        high-confidence pattern was found.  ``self._last_pattern_used``
+        is set as a side effect when a pattern matches.  Body is
+        byte-identical to the inline version.
+        """
+        # 4. Pattern lookup — only if classifier didn't provide agents
+        pattern: LearnedPattern | None = None
+        if not self._last_task_classification and not agents and not phases:
+            try:
+                stack_key = (
+                    f"{stack_profile.language}/{stack_profile.framework}"
+                    if stack_profile and stack_profile.framework
+                    else (stack_profile.language if stack_profile else None)
+                )
+                candidates = self._pattern_learner.get_patterns_for_task(
+                    inferred_type, stack=stack_key
+                )
+                for cand in candidates:
+                    if cand.confidence >= _MIN_PATTERN_CONFIDENCE:
+                        pattern = cand
+                        self._last_pattern_used = pattern
+                        # Override agents from pattern
+                        resolved_agents = list(pattern.recommended_agents)
+                        break
+            except Exception:
+                pass
+
+        # 4b. F7 — BeadAnalyzer: mine historical beads for plan structure hints.
+        # Runs after pattern lookup so it can complement (not override) patterns.
+        # Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
+        _bead_hints: list = []
+        if self._bead_store is not None:
+            try:
+                from agent_baton.core.learn.bead_analyzer import BeadAnalyzer
+                _bead_hints = BeadAnalyzer().analyze(
+                    self._bead_store, task_description=task_summary
+                )
+            except Exception:
+                _bead_hints = []
+        return pattern, resolved_agents, _bead_hints
+
+    def _step_apply_retro(self, resolved_agents: list[str]) -> list[str]:
+        """Step 5b — retrospective feedback application.
+
+        Returns possibly-filtered ``resolved_agents``.
+        ``self._last_retro_feedback`` is set as a side effect.  Body is
+        byte-identical to the inline version.
+        """
+        # 5b. Retrospective feedback — filter dropped agents and record gaps.
+        # This is consulted before routing so the feedback applies to base names.
+        # Violations are soft: dropped agents are removed but the plan is not
+        # blocked; knowledge gaps are noted in shared_context only.
+        retro_feedback: RetrospectiveFeedback | None = None
+        if self._retro_engine is not None:
+            try:
+                retro_feedback = self._retro_engine.load_recent_feedback()
+                self._last_retro_feedback = retro_feedback
+            except Exception:
+                pass
+
+        if retro_feedback is not None and retro_feedback.has_feedback():
+            resolved_agents = self._apply_retro_feedback(resolved_agents, retro_feedback)
+        return resolved_agents
+
+    def _step_classify_task(
+        self,
+        *,
+        task_summary: str,
+        task_type: str | None,
+        complexity: str | None,
+        project_root: Path | None,
+        agents: list[str] | None,
+        phases: list[dict] | None,
+    ) -> tuple[str, str, list[str], list[str] | None]:
+        """Step 3 — task classification (auto path or explicit-override path).
+
+        Returns ``(inferred_type, inferred_complexity, resolved_agents,
+        classified_phases)``.  ``self._last_task_classification`` is set
+        as a side effect on the auto-classify branch.  Body is
+        byte-identical to the inline version.
+        """
+        # 3. Classify — determines task_type, complexity, agents, and phases.
+        # Explicit overrides take precedence over the classifier.
+        # When complexity is explicitly provided, the caller is overriding
+        # classification — use the keyword path so phases are scaled to
+        # match the explicit complexity rather than the classifier's guess.
+        classified_phases: list[str] | None = None
+        if task_type is None and agents is None and phases is None and complexity is None:
+            task_cls = self._task_classifier.classify(
+                task_summary, self._registry, project_root
+            )
+            self._last_task_classification = task_cls
+            inferred_type = task_cls.task_type
+            inferred_complexity = task_cls.complexity
+            resolved_agents = list(task_cls.agents)
+            classified_phases = list(task_cls.phases)
+            logger.debug(
+                "Task classified: type=%s complexity=%s agents=%s phases=%s source=%s",
+                inferred_type,
+                inferred_complexity,
+                resolved_agents,
+                classified_phases,
+                task_cls.source,
+            )
+        else:
+            inferred_type = task_type or self._infer_task_type(task_summary)
+            inferred_complexity = complexity or "medium"
+            classified_phases = None  # let downstream logic handle phases
+            # 5. Agent selection (legacy path for explicit overrides)
+            if agents is None:
+                resolved_agents = list(_DEFAULT_AGENTS.get(inferred_type, []))
+            else:
+                resolved_agents = list(agents)
+                # Warn when an explicit override includes reviewer-class agents
+                # — they may still appear in review/gate phases, but the
+                # implement-phase team-step will filter them out (see
+                # _consolidate_team_step).  Surface this so users aren't
+                # surprised when the auditor doesn't show up as an implementer.
+                _override_reviewers = [
+                    a for a in resolved_agents if is_reviewer_agent(a)
+                ]
+                if _override_reviewers:
+                    logger.warning(
+                        "--agents override includes reviewer-class agent(s) %s; "
+                        "they will be excluded from implement-phase team steps "
+                        "(reviewers belong in review/gate phases only)",
+                        _override_reviewers,
+                    )
+            logger.debug(
+                "Task classification (override path): type=%s complexity=%s agents=%s",
+                inferred_type,
+                inferred_complexity,
+                resolved_agents,
+            )
+        return inferred_type, inferred_complexity, resolved_agents, classified_phases
+
+    def _step_initialize_state(
+        self,
+        *,
+        task_summary: str,
+        project_root: Path | None,
+        phases: list[dict] | None,
+        agents: list[str] | None,
+    ) -> tuple[str, StackProfile | None, list[dict] | None, list[str] | None]:
+        """Steps 1 / 2 / 2b — task id, stack detection, structured parse.
+
+        Returns ``(task_id, stack_profile, phases, agents)``.  *phases*
+        and *agents* are returned because step 2b may overwrite them
+        from the structured-description parse.  Body is byte-identical
+        to the inline version.
+        """
+        # 1. Task ID
+        task_id = self._generate_task_id(task_summary)
+
+        # 2. Detect stack (best effort) — needed before agent resolution
+        stack_profile = None
+        if project_root is not None:
+            try:
+                stack_profile = self._router.detect_stack(project_root)
+            except Exception:
+                pass
+
+        # 2b. Parse structured descriptions — extract phases and agent hints
+        # before falling through to the classifier/keyword path.
+        parsed_phases, parsed_agents = self._parse_structured_description(task_summary)
+        if parsed_phases is not None:
+            phases = parsed_phases
+        if parsed_agents is not None and agents is None:
+            agents = parsed_agents
+        return task_id, stack_profile, phases, agents
+
+    def _step_setup_knowledge(self) -> tuple:
+        """Step 6.5 — knowledge resolver/ranker construction.
+
+        Returns ``(resolver, ranker, max_knowledge_per_step)`` for use
+        at step 9.5.  Body is byte-identical to the inline version.
+        """
+        _resolver = None
+        _ranker = None
+        _max_knowledge_per_step: int = 8
+        if self.knowledge_registry is not None:
+            import os as _os
+            from agent_baton.core.engine.knowledge_resolver import KnowledgeResolver
+            from agent_baton.core.engine.knowledge_telemetry import KnowledgeTelemetryStore
+            from agent_baton.core.intel.knowledge_ranker import KnowledgeRanker
+            # Wire F0.4 lifecycle telemetry (bd-a313).  Resolver records a
+            # KnowledgeUsed row per attachment whenever ``task_id``/``step_id``
+            # are passed to ``resolve()``.  Construction is best-effort.
+            try:
+                _telemetry = KnowledgeTelemetryStore()
+            except Exception:
+                _telemetry = None
+            _resolver = KnowledgeResolver(
+                self.knowledge_registry,
+                agent_registry=self._registry,
+                rag_available=self._detect_rag(),
+                step_token_budget=32_000,
+                doc_token_cap=8_000,
+                telemetry=_telemetry,
+            )
+            # bd-0184: effectiveness-aware ranking.  Best-effort — ranker failure
+            # never degrades planning; it simply returns the input unchanged.
+            try:
+                _ranker = KnowledgeRanker()
+            except Exception:
+                _ranker = None
+            try:
+                _max_knowledge_per_step = int(
+                    _os.environ.get("BATON_MAX_KNOWLEDGE_PER_STEP", "8")
+                )
+            except (ValueError, TypeError):
+                _max_knowledge_per_step = 8
+        return _resolver, _ranker, _max_knowledge_per_step
+
+    def _step_classify_data(
+        self,
+        *,
+        task_id: str,
+        task_summary: str,
+        resolved_agents: list[str],
+    ) -> tuple[ClassificationResult | None, str, RiskLevel, str]:
+        """Steps 7 / 8 / 8b — DataClassifier dispatch, risk merging, and
+        git-strategy selection.
+
+        Returns ``(classification, risk_level, risk_level_enum, git_strategy)``.
+        ``self._last_classification`` is set as a side effect (matching
+        legacy behaviour).  Body is byte-identical to the inline version.
+        """
+        # 7. Classify task sensitivity (DataClassifier if available)
+        classification: ClassificationResult | None = None
+        if self._classifier is not None:
+            try:
+                classification = self._classifier.classify(task_summary)
+                self._last_classification = classification
+            except Exception:
+                pass
+
+        # 8. Risk — combines DataClassifier output with keyword/structural signals.
+        # The classifier's risk level is the floor; keyword/structural signals can
+        # raise it further but cannot lower it below what the classifier detected.
+        keyword_risk_level = self._assess_risk(task_summary, resolved_agents)
+        if classification is not None:
+            # Take the higher of the two assessments
+            classifier_ordinal = _RISK_ORDINAL[classification.risk_level]
+            keyword_ordinal = _RISK_ORDINAL[RiskLevel(keyword_risk_level)]
+            if classifier_ordinal > keyword_ordinal:
+                risk_level = classification.risk_level.value
+            else:
+                risk_level = keyword_risk_level
+        else:
+            risk_level = keyword_risk_level
+        risk_level_enum = RiskLevel(risk_level)
+
+        logger.info(
+            "Risk classification: task_id=%s risk=%s (keyword=%s classifier=%s) git_strategy=%s",
+            task_id,
+            risk_level,
+            keyword_risk_level,
+            classification.risk_level.value if classification else "n/a",
+            _select_git_strategy(risk_level_enum).value,
+        )
+
+        # 8b. Git strategy — derived from risk
+        git_strategy = _select_git_strategy(risk_level_enum).value
+        return classification, risk_level, risk_level_enum, git_strategy
+
+    def _step_build_phases(
+        self,
+        *,
+        task_id: str,
+        task_summary: str,
+        inferred_type: str,
+        inferred_complexity: str,
+        complexity: str | None,
+        resolved_agents: list[str],
+        phases: list[dict] | None,
+        classified_phases: list[str] | None,
+        pattern: LearnedPattern | None,
+        subtask_data: list[dict] | None,
+        agent_route_map: dict[str, str],
+    ) -> list[PlanPhase]:
+        """Steps 9 / 9b — phase construction and enrichment.
+
+        Returns the constructed-and-enriched ``plan_phases`` list.  Body
+        is byte-identical to the inline version.
+        """
+        # 9. Build phases
+        if subtask_data is not None:
+            # Compound task — each sub-task becomes its own phase
+            plan_phases = self._build_compound_phases(
+                subtask_data, agent_route_map,
+            )
+        elif phases is not None:
+            plan_phases = self._phases_from_dicts(phases, resolved_agents, task_summary)
+        elif classified_phases is not None:
+            # Use classifier-provided phase names
+            plan_phases = self._build_phases_for_names(
+                classified_phases, resolved_agents, task_summary
+            )
+        elif pattern is not None:
+            plan_phases = self._apply_pattern(pattern, inferred_type, task_summary)
+            # Apply routed agent names to pattern-derived phases
+            plan_phases = self._assign_agents_to_phases(plan_phases, resolved_agents, task_summary)
+        elif complexity is not None:
+            # Explicit complexity override — scale phases to match.
+            # Use KeywordClassifier phase scaling so light/heavy produces
+            # the right number of phases even in the legacy path.
+            from agent_baton.core.engine.classifier import KeywordClassifier as _KC
+            complexity_phases = _KC()._select_phases(inferred_type, inferred_complexity, _PHASE_NAMES)
+            plan_phases = self._build_phases_for_names(complexity_phases, resolved_agents, task_summary)
+        else:
+            plan_phases = self._default_phases(inferred_type, resolved_agents, task_summary)
+
+        logger.info(
+            "Plan phases selected for task_id=%s: %s",
+            task_id,
+            [(p.name, [s.agent_name for s in p.steps]) for p in plan_phases],
+        )
+
+        # 9b. Enrich steps with cross-phase context and default deliverables
+        plan_phases = self._enrich_phases(plan_phases, task_summary=task_summary)
+        return plan_phases
+
+    def _step_resolve_knowledge(
+        self,
+        plan_phases: list[PlanPhase],
+        *,
+        resolver,
+        ranker,
+        max_knowledge_per_step: int,
+        inferred_type: str,
+        risk_level: str,
+        explicit_knowledge_packs: list[str] | None,
+        explicit_knowledge_docs: list[str] | None,
+    ) -> None:
+        """Steps 9.5 + 9.6 — knowledge resolution and gap-suggested
+        attachments.
+
+        Mutates *plan_phases* steps in place by setting ``step.knowledge``.
+        Body is byte-identical to the inline version.
+        """
+        # 9.5. Resolve knowledge attachments for each step.
+        # Runs after phase building so step.agent_name and task_description are final.
+        # explicit_knowledge_packs/docs come from create_plan args (CLI --knowledge flags).
+        # bd-0184: after resolving, rank by historical effectiveness and cap count.
+        if resolver is not None:
+            for phase in plan_phases:
+                for step in phase.steps:
+                    try:
+                        resolved = resolver.resolve(
+                            agent_name=step.agent_name,
+                            task_description=step.task_description,
+                            task_type=inferred_type,
+                            risk_level=risk_level,
+                            explicit_packs=explicit_knowledge_packs or [],
+                            explicit_docs=explicit_knowledge_docs or [],
+                        )
+                        if ranker is not None:
+                            resolved = ranker.rank(resolved)
+                        step.knowledge = resolved[:max_knowledge_per_step]
+                    except Exception:
+                        logger.debug(
+                            "Knowledge resolution failed for step %s — skipping",
+                            step.step_id,
+                            exc_info=True,
+                        )
+
+        # 9.6. Gap-suggested attachments — query pattern learner for prior gaps
+        # matching each step's agent + task type. Only runs when both resolver
+        # and pattern learner are available.
+        if resolver is not None and self._pattern_learner is not None:
+            for phase in plan_phases:
+                for step in phase.steps:
+                    try:
+                        prior_gaps = self._pattern_learner.knowledge_gaps_for(
+                            step.agent_name, inferred_type
+                        )
+                        for gap in prior_gaps:
+                            matches = resolver.resolve(
+                                agent_name=step.agent_name,
+                                task_description=gap.description,
+                            )
+                            existing_paths = {a.path for a in step.knowledge if a.path}
+                            for match in matches:
+                                if match.path and match.path in existing_paths:
+                                    continue
+                                match.source = "gap-suggested"
+                                step.knowledge.append(match)
+                                if match.path:
+                                    existing_paths.add(match.path)
+                    except Exception:
+                        logger.debug(
+                            "Gap-suggested resolution failed for step %s — skipping",
+                            step.step_id,
+                            exc_info=True,
+                        )
+
+    def _step_apply_foresight(
+        self,
+        plan_phases: list[PlanPhase],
+        *,
+        task_summary: str,
+        risk_level: str,
+        resolved_agents: list[str],
+        resolver,
+        ranker,
+        max_knowledge_per_step: int,
+        inferred_type: str,
+        explicit_knowledge_packs: list[str] | None,
+        explicit_knowledge_docs: list[str] | None,
+    ) -> list[PlanPhase]:
+        """Steps 9.7 + 9.8 — foresight insertion and post-foresight
+        knowledge resolution for inserted steps.
+
+        Foresight may rebuild *plan_phases*, so this returns the new
+        list.  ``self._last_foresight_insights`` is set as a side effect
+        (matching legacy behaviour).  Body is byte-identical to the inline
+        version.
+        """
+        # 9.7. Foresight analysis — proactively insert preparatory steps
+        # for predicted capability gaps, prerequisites, and edge cases.
+        try:
+            plan_phases, foresight_insights = self._foresight_engine.analyze(
+                plan_phases,
+                task_summary,
+                risk_level=risk_level,
+                existing_agents=resolved_agents,
+            )
+            self._last_foresight_insights = foresight_insights
+        except Exception:
+            logger.debug(
+                "Foresight analysis failed — skipping",
+                exc_info=True,
+            )
+
+        # 9.8. Resolve knowledge for foresight-inserted steps.
+        # Foresight steps are inserted after the initial knowledge resolution
+        # pass (9.5), so they need their own resolution pass.
+        # bd-0184: also rank + cap foresight-step attachments.
+        if resolver is not None and self._last_foresight_insights:
+            foresight_step_ids = set()
+            for ins in self._last_foresight_insights:
+                foresight_step_ids.update(ins.inserted_step_ids)
+            for phase in plan_phases:
+                for step in phase.steps:
+                    if step.step_id in foresight_step_ids:
+                        try:
+                            resolved = resolver.resolve(
+                                agent_name=step.agent_name,
+                                task_description=step.task_description,
+                                task_type=inferred_type,
+                                risk_level=risk_level,
+                                explicit_packs=explicit_knowledge_packs or [],
+                                explicit_docs=explicit_knowledge_docs or [],
+                            )
+                            if ranker is not None:
+                                resolved = ranker.rank(resolved)
+                            step.knowledge = resolved[:max_knowledge_per_step]
+                        except Exception:
+                            logger.debug(
+                                "Knowledge resolution failed for foresight step %s — skipping",
+                                step.step_id,
+                                exc_info=True,
+                            )
+        return plan_phases
+
+    def _step_check_scores(
+        self,
+        plan_phases: list[PlanPhase],
+        *,
+        resolved_agents: list[str],
+        inferred_type: str,
+        classification: ClassificationResult | None,
+    ) -> str:
+        """Steps 10 / 11 / 11b — score warnings, budget tier, policy check.
+
+        Returns the selected budget tier.  Mutates ``self._last_policy_violations``
+        and emits score warnings via ``_check_agent_scores`` (which mutates
+        ``self._last_score_warnings``).  Body is byte-identical to the
+        inline version it replaced.
+        """
+        # 10. Score check — warn about low-health agents
+        self._check_agent_scores(resolved_agents)
+
+        # 11. Budget tier
+        budget_tier = self._select_budget_tier(inferred_type, len(resolved_agents))
+
+        # 11b. Policy validation — check agent assignments against active policy set.
+        # Violations are recorded as warnings; they never hard-block plan creation.
+        if self._policy_engine is not None:
+            try:
+                preset_name = self._classify_to_preset_key(classification)
+                policy_set = self._policy_engine.load_preset(preset_name)
+                if policy_set is not None:
+                    self._last_policy_violations = self._validate_agents_against_policy(
+                        resolved_agents, policy_set, plan_phases
+                    )
+                    # Enforce structural require_agent rules by injecting missing
+                    # required agents into the plan's shared context as warnings.
+                    # (We cannot silently add phases here — the user decides.)
+            except Exception:
+                pass
+        return budget_tier
+
+    def _step_apply_gates(
+        self,
+        plan_phases: list[PlanPhase],
+        *,
+        stack_profile: StackProfile | None,
+        gate_scope: GateScope,
+        project_root: Path | None,
+    ) -> None:
+        """Steps 12 / 12.a — QA gate decoration + project-config overlay.
+
+        Mutates *plan_phases* in place.  Body is byte-identical to the
+        inline version it replaced.
+        """
+        # 12. Add QA gates (stack-aware, bd-124f: scoped to changed paths)
+        for phase in plan_phases:
+            if phase.gate is None:
+                # Collect changed source paths from all steps in this phase.
+                # Use allowed_paths (sandbox write paths) as the best signal
+                # for what files the phase will modify.
+                phase_changed: list[str] = []
+                for _step in phase.steps:
+                    phase_changed.extend(_step.allowed_paths)
+                phase.gate = self._default_gate(
+                    phase.name,
+                    stack=stack_profile,
+                    changed_paths=phase_changed or None,
+                    gate_scope=gate_scope,
+                    project_root=project_root,
+                )
+
+        # 12.a. Apply project config (baton.yaml) defaults — additive.
+        # No-op when no baton.yaml is present in the project.
+        try:
+            self._apply_project_config(plan_phases)
+        except Exception:
+            logger.warning(
+                "Applying project config failed — continuing without it",
+                exc_info=True,
+            )
+
+    def _step_apply_approval_gates(
+        self,
+        plan_phases: list[PlanPhase],
+        *,
+        risk_level_enum: RiskLevel,
+        task_summary: str,
+        resolved_agents: list[str],
+    ) -> set[int]:
+        """Steps 12b / 12b-bis — approval gates and concern-splitting.
+
+        Mutates *plan_phases* in place.  Returns the set of phase ids
+        that were split (so step 12c can skip team-consolidation on
+        them).  Body is byte-identical to the inline version.
+        """
+        # 12b. Set approval gates on critical phases for HIGH+ risk
+        if risk_level_enum in (RiskLevel.HIGH, RiskLevel.CRITICAL):
+            for phase in plan_phases:
+                if phase.name.lower() in ("design", "research"):
+                    phase.approval_required = True
+                    phase.approval_description = (
+                        f"Review {phase.name.lower()} output before "
+                        f"implementation begins. Approve to continue, "
+                        f"reject to stop, or approve-with-feedback to "
+                        f"add remediation steps."
+                    )
+
+        # 12b-bis. Concern-splitting: when the task summary names ≥3 distinct
+        # concerns/modules (e.g. "F0.1 ... F0.2 ... F0.3 ... F0.4 ..."), split
+        # implement-type phases into one parallel single-agent step per
+        # concern.  This runs BEFORE team consolidation so the planner emits
+        # parallel steps instead of a single bundled team step.
+        # See feedback_planner_parallelization.md.
+        _concerns = self._parse_concerns(task_summary)
+        _split_phase_ids: set[int] = set()
+        if _concerns:
+            logger.debug(
+                "Detected %d concerns in task summary: %s",
+                len(_concerns),
+                [c[0] for c in _concerns],
+            )
+            for phase in plan_phases:
+                if phase.name.lower() in ("implement", "fix", "draft", "migrate"):
+                    self._split_implement_phase_by_concerns(
+                        phase, _concerns, resolved_agents, task_summary,
+                    )
+                    _split_phase_ids.add(phase.phase_id)
+        return _split_phase_ids
+
+    def _step_consolidate_team(
+        self,
+        plan_phases: list[PlanPhase],
+        *,
+        task_id: str,
+        task_summary: str,
+        risk_level: str,
+        inferred_type: str,
+        inferred_complexity: str,
+        split_phase_ids: set[int],
+    ) -> list[str]:
+        """Steps 12c / 12c.4 / 12c.5 — team consolidation, file-path
+        extraction, and plan reviewer pass.
+
+        Mutates *plan_phases* in place.  Returns ``extracted_paths`` so
+        the downstream context-richness step can re-use them.  Body is
+        byte-identical to the inline version.
+        """
+        # 12c. Consolidate multi-agent Implement/Fix phases into team steps.
+        # NOTE: After concern-splitting (12b-bis), an implement phase that was
+        # split now has N single-agent steps where each step is for a
+        # *different concern*.  We must NOT re-consolidate those into a team
+        # — they are intentionally parallel-by-concern.
+        for phase in plan_phases:
+            if phase.phase_id in split_phase_ids:
+                continue
+            if self._is_team_phase(phase, task_summary):
+                phase.steps = [self._consolidate_team_step(phase)]
+
+        # 12c.4. Extract file paths early — needed by plan reviewer (12c.5)
+        # and context richness (13c).
+        extracted_paths = self._extract_file_paths(task_summary)
+
+        # 12c.5. Plan structure review — detect overly broad single-agent
+        # steps and split them into parallel concern-scoped steps.
+        # Skips light-complexity plans (nothing to split).  Uses Haiku
+        # for medium+ plans, with heuristic fallback when unavailable.
+        try:
+            self._last_review_result = self._plan_reviewer.review(
+                plan=MachinePlan(
+                    task_id=task_id,
+                    task_summary=task_summary,
+                    risk_level=risk_level,
+                    budget_tier="standard",
+                    phases=plan_phases,
+                    task_type=inferred_type,
+                    complexity=inferred_complexity,
+                ),
+                task_summary=task_summary,
+                file_paths=extracted_paths,
+                complexity=inferred_complexity,
+            )
+            if self._last_review_result.splits_applied > 0:
+                logger.info(
+                    "Plan review applied %d split(s) (source=%s)",
+                    self._last_review_result.splits_applied,
+                    self._last_review_result.source,
+                )
+        except Exception:
+            logger.debug(
+                "Plan review failed — skipping", exc_info=True,
+            )
+        return extracted_paths
+
+    def _step_inject_context_files(
+        self,
+        plan_phases: list[PlanPhase],
+        *,
+        default_model: str | None,
+        extracted_paths: list[str],
+    ) -> None:
+        """Steps 13 / 13b / 13c — context files, model inheritance, richness.
+
+        Mutates *plan_phases* in place.  Body is byte-identical to the
+        inline version.
+        """
+        # 13. Populate context_files — every agent should read CLAUDE.md
+        for phase in plan_phases:
+            for step in phase.steps:
+                if not step.context_files:
+                    step.context_files = ["CLAUDE.md"]
+
+        # 13b. Model inheritance — inherit model preference from agent definition.
+        # Priority: agent definition model > explicit default_model > "sonnet".
+        for phase in plan_phases:
+            for step in phase.steps:
+                agent_def = self._registry.get(step.agent_name)
+                if agent_def and agent_def.model:
+                    step.model = agent_def.model
+                elif default_model:
+                    step.model = default_model
+                # Also propagate to team members
+                for member in step.team:
+                    member_def = self._registry.get(member.agent_name)
+                    if member_def and member_def.model:
+                        member.model = member_def.model
+                    elif default_model:
+                        member.model = default_model
+
+        # 13c. Context richness — append extracted file paths (from 12c.4)
+        # to every step's context_files (deduplicated).
+        if extracted_paths:
+            for phase in plan_phases:
+                for step in phase.steps:
+                    existing = set(step.context_files)
+                    for path in extracted_paths:
+                        if path not in existing:
+                            step.context_files.append(path)
+                            existing.add(path)
+
+    def _step_attach_prior_beads(
+        self,
+        plan_phases: list[PlanPhase],
+        *,
+        task_id: str,
+        task_summary: str,
+    ) -> str | None:
+        """E7 dependency detection (step 13d).
+
+        Returns the detected ``depends_on_task_id`` (or ``None``) and, when
+        present, attaches the prior task's outcome beads to *plan_phases*
+        in-place.  Extracted from ``create_plan`` without semantic change.
+        """
+        depends_on_task_id: str | None = None
+        if self._bead_store is not None:
+            depends_on_task_id = self._detect_task_dependency(task_summary)
+            if depends_on_task_id is not None:
+                logger.info(
+                    "E7 dependency detected: task_id=%s depends on prior task %s",
+                    task_id,
+                    depends_on_task_id,
+                )
+                self._attach_prior_task_beads(
+                    plan_phases, depends_on_task_id
+                )
+        return depends_on_task_id
+
+    def _step_build_shared_context(
+        self,
+        *,
+        task_id: str,
+        task_summary: str,
+        inferred_type: str,
+        inferred_complexity: str,
+        risk_level: str,
+        budget_tier: str,
+        git_strategy: str,
+        plan_phases: list[PlanPhase],
+        pattern: LearnedPattern | None,
+        explicit_knowledge_packs: list[str] | None,
+        explicit_knowledge_docs: list[str] | None,
+        intervention_level: str,
+        stack_profile: StackProfile | None,
+        classification: ClassificationResult | None,
+        depends_on_task_id: str | None,
+    ) -> MachinePlan:
+        """Final-assembly step (steps 14 + 16).
+
+        Builds the ``MachinePlan`` from accumulated planner state,
+        computes team-cost estimates, and attaches the shared-context
+        string.  Body is byte-identical to the inline version it replaced
+        in ``create_plan``.
+        """
+        # 14. Shared context
+        # A3: Derive classification_signals (JSON) and classification_confidence
+        # from the DataClassifier result when available.
+        _classification_signals: str | None = None
+        _classification_confidence: float | None = None
+        if classification is not None:
+            _classification_signals = json.dumps(
+                {
+                    "signals": classification.signals_found,
+                    "risk_level": classification.risk_level.value,
+                    "guardrail_preset": classification.guardrail_preset,
+                    "explanation": classification.explanation,
+                }
+            )
+            # ClassificationResult.confidence is "high" | "low" (string).
+            # Map to float so callers can order/threshold numerically.
+            _classification_confidence = 1.0 if classification.confidence == "high" else 0.5
+
+        tmp_plan = MachinePlan(
+            task_id=task_id,
+            task_summary=task_summary,
+            risk_level=risk_level,
+            budget_tier=budget_tier,
+            git_strategy=git_strategy,
+            phases=plan_phases,
+            pattern_source=pattern.pattern_id if pattern else None,
+            task_type=inferred_type,
+            explicit_knowledge_packs=list(explicit_knowledge_packs or []),
+            explicit_knowledge_docs=list(explicit_knowledge_docs or []),
+            intervention_level=intervention_level,
+            complexity=inferred_complexity,
+            classification_source=(
+                self._last_task_classification.source
+                if self._last_task_classification
+                else "cli-override"
+            ),
+            detected_stack=(
+                f"{stack_profile.language}/{stack_profile.framework}"
+                if stack_profile and stack_profile.framework
+                else (stack_profile.language if stack_profile else None)
+            ),
+            foresight_insights=list(self._last_foresight_insights),
+            depends_on_task=depends_on_task_id,
+            classification_signals=_classification_signals,
+            classification_confidence=_classification_confidence,
+        )
+        # 16. Team cost estimation — look up historical cost data for team steps.
+        self._last_team_cost_estimates: dict[str, int] = {}
+        for phase in tmp_plan.phases:
+            for step in phase.steps:
+                if step.team and len(step.team) >= 2:
+                    agents = [m.agent_name for m in step.team]
+                    estimate = self._pattern_learner.get_team_cost_estimate(agents)
+                    if estimate is not None:
+                        self._last_team_cost_estimates[step.step_id] = estimate
+
+        shared_context = self._build_shared_context(tmp_plan)
+        tmp_plan.shared_context = shared_context
+        return tmp_plan
+
+    def _step_emit_telemetry(
+        self,
+        tmp_plan: MachinePlan,
+        *,
+        task_id: str,
+        task_summary: str,
+        inferred_type: str,
+        inferred_complexity: str,
+        risk_level: str,
+        resolved_agents: list[str],
+        plan_phases: list[PlanPhase],
+        budget_tier: str,
+        git_strategy: str,
+        otel_exporter,
+        otel_started_at: datetime | None,
+    ) -> None:
+        """Emit planning bead + OTel span — pure observability side-effects.
+
+        Extracted from the tail of ``create_plan`` (steps F4 and O1.4).
+        Body is byte-identical to the inline version it replaced; signature
+        threads in every local the original block read.
+        """
+        # F4 — Planning Decision Capture: persist key planner decisions as beads.
+        # Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
+        if self._bead_store is not None:
+            try:
+                self._capture_planning_bead(
+                    task_id=task_id,
+                    content=(
+                        f"Plan created for: {task_summary}. "
+                        f"Type={inferred_type}, complexity={inferred_complexity}, "
+                        f"risk={risk_level}, agents={resolved_agents}, "
+                        f"phases={[p.name for p in plan_phases]}, "
+                        f"budget_tier={budget_tier}, git_strategy={git_strategy}."
+                    ),
+                    tags=["planning", "plan-complete", inferred_type],
+                )
+            except Exception:
+                pass
+
+        # O1.4 — emit OTel span when the exporter is enabled.
+        if otel_exporter is not None and otel_started_at is not None:
+            try:
+                otel_exporter.record_span(
+                    name="plan.create",
+                    kind="INTERNAL",
+                    attributes={
+                        "task_id": task_id,
+                        "task_type": inferred_type,
+                        "complexity": inferred_complexity,
+                        "risk_level": str(risk_level),
+                        "agent_count": len(resolved_agents),
+                        "phase_count": len(plan_phases),
+                    },
+                    started_at=otel_started_at,
+                    ended_at=datetime.now(timezone.utc),
+                )
+            except Exception:
+                # Observability must never crash the planner.
+                logger.debug("OTel span emission failed", exc_info=True)
 
     # ------------------------------------------------------------------
     # Structured description parsing
@@ -1063,715 +2279,244 @@ class IntelligentPlanner:
         _otel_exporter = current_exporter()
         _otel_started_at = datetime.now(timezone.utc) if _otel_exporter else None
 
-        # Reset per-call state
-        self._last_pattern_used = None
-        self._last_score_warnings = []
-        self._last_routing_notes = []
-        self._last_classification = None
-        self._last_policy_violations = []
-        self._last_retro_feedback = None
-        self._last_task_classification = None
-        self._last_foresight_insights = []
+        # Reset per-call state (extracted to _reset_explainability_state
+        # in 005b 1.4 commit 1).
+        self._reset_explainability_state()
 
-        # 1. Task ID
-        task_id = self._generate_task_id(task_summary)
-
-        # 2. Detect stack (best effort) — needed before agent resolution
-        stack_profile = None
-        if project_root is not None:
-            try:
-                stack_profile = self._router.detect_stack(project_root)
-            except Exception:
-                pass
-
-        # 2b. Parse structured descriptions — extract phases and agent hints
-        # before falling through to the classifier/keyword path.
-        parsed_phases, parsed_agents = self._parse_structured_description(task_summary)
-        if parsed_phases is not None:
-            phases = parsed_phases
-        if parsed_agents is not None and agents is None:
-            agents = parsed_agents
+        # 1 + 2 + 2b. Task id, stack detection, structured description parsing.
+        # Extracted to ``_step_initialize_state`` (005b 1.4b).
+        task_id, stack_profile, phases, agents = self._step_initialize_state(
+            task_summary=task_summary,
+            project_root=project_root,
+            phases=phases,
+            agents=agents,
+        )
 
         # 3. Classify — determines task_type, complexity, agents, and phases.
-        # Explicit overrides take precedence over the classifier.
-        # When complexity is explicitly provided, the caller is overriding
-        # classification — use the keyword path so phases are scaled to
-        # match the explicit complexity rather than the classifier's guess.
-        classified_phases: list[str] | None = None
-        if task_type is None and agents is None and phases is None and complexity is None:
-            task_cls = self._task_classifier.classify(
-                task_summary, self._registry, project_root
+        # Extracted to ``_step_classify_task`` (005b 1.4b).
+        inferred_type, inferred_complexity, resolved_agents, classified_phases = (
+            self._step_classify_task(
+                task_summary=task_summary,
+                task_type=task_type,
+                complexity=complexity,
+                project_root=project_root,
+                agents=agents,
+                phases=phases,
             )
-            self._last_task_classification = task_cls
-            inferred_type = task_cls.task_type
-            inferred_complexity = task_cls.complexity
-            resolved_agents = list(task_cls.agents)
-            classified_phases = list(task_cls.phases)
-            logger.debug(
-                "Task classified: type=%s complexity=%s agents=%s phases=%s source=%s",
-                inferred_type,
-                inferred_complexity,
-                resolved_agents,
-                classified_phases,
-                task_cls.source,
-            )
-        else:
-            inferred_type = task_type or self._infer_task_type(task_summary)
-            inferred_complexity = complexity or "medium"
-            classified_phases = None  # let downstream logic handle phases
-            # 5. Agent selection (legacy path for explicit overrides)
-            if agents is None:
-                resolved_agents = list(_DEFAULT_AGENTS.get(inferred_type, []))
-            else:
-                resolved_agents = list(agents)
-                # Warn when an explicit override includes reviewer-class agents
-                # — they may still appear in review/gate phases, but the
-                # implement-phase team-step will filter them out (see
-                # _consolidate_team_step).  Surface this so users aren't
-                # surprised when the auditor doesn't show up as an implementer.
-                _override_reviewers = [
-                    a for a in resolved_agents if is_reviewer_agent(a)
-                ]
-                if _override_reviewers:
-                    logger.warning(
-                        "--agents override includes reviewer-class agent(s) %s; "
-                        "they will be excluded from implement-phase team steps "
-                        "(reviewers belong in review/gate phases only)",
-                        _override_reviewers,
-                    )
-            logger.debug(
-                "Task classification (override path): type=%s complexity=%s agents=%s",
-                inferred_type,
-                inferred_complexity,
-                resolved_agents,
-            )
+        )
 
-        # 4. Pattern lookup — only if classifier didn't provide agents
-        pattern: LearnedPattern | None = None
-        if not self._last_task_classification and not agents and not phases:
-            try:
-                stack_key = (
-                    f"{stack_profile.language}/{stack_profile.framework}"
-                    if stack_profile and stack_profile.framework
-                    else (stack_profile.language if stack_profile else None)
-                )
-                candidates = self._pattern_learner.get_patterns_for_task(
-                    inferred_type, stack=stack_key
-                )
-                for cand in candidates:
-                    if cand.confidence >= _MIN_PATTERN_CONFIDENCE:
-                        pattern = cand
-                        self._last_pattern_used = pattern
-                        # Override agents from pattern
-                        resolved_agents = list(pattern.recommended_agents)
-                        break
-            except Exception:
-                pass
+        # 4 + 4b. Pattern lookup + BeadAnalyzer bead hints.  Extracted to
+        # ``_step_apply_pattern`` (005b 1.4b).  Returns the matched
+        # pattern (or None), the (possibly overridden) resolved_agents,
+        # and the bead hints for later application at step 12d.
+        pattern, resolved_agents, _bead_hints = self._step_apply_pattern(
+            task_summary=task_summary,
+            inferred_type=inferred_type,
+            stack_profile=stack_profile,
+            resolved_agents=resolved_agents,
+            agents=agents,
+            phases=phases,
+        )
 
-        # 4b. F7 — BeadAnalyzer: mine historical beads for plan structure hints.
-        # Runs after pattern lookup so it can complement (not override) patterns.
-        # Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
-        _bead_hints: list = []
-        if self._bead_store is not None:
-            try:
-                from agent_baton.core.learn.bead_analyzer import BeadAnalyzer
-                _bead_hints = BeadAnalyzer().analyze(
-                    self._bead_store, task_description=task_summary
-                )
-            except Exception:
-                _bead_hints = []
+        # 5b. Retrospective feedback — extracted to ``_step_apply_retro``
+        # (005b 1.4b).
+        resolved_agents = self._step_apply_retro(resolved_agents)
 
-        # 5b. Retrospective feedback — filter dropped agents and record gaps.
-        # This is consulted before routing so the feedback applies to base names.
-        # Violations are soft: dropped agents are removed but the plan is not
-        # blocked; knowledge gaps are noted in shared_context only.
-        retro_feedback: RetrospectiveFeedback | None = None
-        if self._retro_engine is not None:
-            try:
-                retro_feedback = self._retro_engine.load_recent_feedback()
-                self._last_retro_feedback = retro_feedback
-            except Exception:
-                pass
+        # 5c. Compound task decomposition — extracted to
+        # ``_step_decompose_subtasks`` (005b 1.4b).
+        _subtask_data, resolved_agents = self._step_decompose_subtasks(
+            task_summary=task_summary,
+            phases=phases,
+            agents=agents,
+            resolved_agents=resolved_agents,
+        )
 
-        if retro_feedback is not None and retro_feedback.has_feedback():
-            resolved_agents = self._apply_retro_feedback(resolved_agents, retro_feedback)
+        # 5d + 5d-cap. Cross-concern expansion + complexity-tier agent cap.
+        # Extracted to ``_step_expand_concerns`` (005b 1.4b).
+        resolved_agents = self._step_expand_concerns(
+            task_summary=task_summary,
+            inferred_complexity=inferred_complexity,
+            agents=agents,
+            resolved_agents=resolved_agents,
+            subtask_data=_subtask_data,
+        )
 
-        # 5c. Compound task decomposition — detect numbered sub-tasks and
-        # build independent per-subtask agent rosters.  Only activates when
-        # no explicit phases were provided and ≥2 numbered items are found.
-        _subtask_data: list[dict] | None = None
-        if phases is None:
-            subtasks = self._parse_subtasks(task_summary)
-            if len(subtasks) >= 2:
-                _subtask_data = []
-                # bd-701e: when the user passes an explicit --agents override,
-                # honour it for every subtask so compound decomposition does
-                # not silently swap the roster for type-defaulted agents and
-                # produce phases without implementer steps.  Reviewer-class
-                # agents in the override are preserved here; the implement-
-                # phase team-step (_consolidate_team_step) filters them out.
-                _explicit_agents = list(agents) if agents is not None else None
-                for sub_idx, sub_text in subtasks:
-                    st_type = self._infer_task_type(sub_text)
-                    if _explicit_agents is not None:
-                        st_agents = list(_explicit_agents)
-                    else:
-                        st_agents = list(_DEFAULT_AGENTS.get(st_type, ["backend-engineer"]))
-                        st_agents = self._expand_agents_for_concerns(st_agents, sub_text)
-                    _subtask_data.append({
-                        "index": sub_idx,
-                        "text": sub_text,
-                        "task_type": st_type,
-                        "agents": st_agents,
-                    })
-                # Override resolved_agents with the union of all sub-task agents
-                union_agents: list[str] = []
-                for st in _subtask_data:
-                    for a in st["agents"]:
-                        if a not in union_agents:
-                            union_agents.append(a)
-                resolved_agents = union_agents
-
-        # 5d. Cross-concern agent expansion — when no compound decomposition
-        # occurred, still expand the roster based on description keywords.
-        if _subtask_data is None:
-            resolved_agents = self._expand_agents_for_concerns(
-                resolved_agents, task_summary,
-            )
-
-        # 5d-cap. Enforce complexity-tier agent cap so that cross-concern
-        # expansion (or a generous classifier) cannot produce unbounded
-        # rosters.  The cap matches HaikuClassifier's _MAX_AGENTS_BY_COMPLEXITY.
-        # Only applies to automatically-resolved agents — explicit user-
-        # provided agent lists are not capped.
-        #
-        # bd-076c — when concern-splitting will fire (≥3 concerns parsed
-        # from task_summary), the cap is raised to len(concerns) so each
-        # concern can be routed to a distinct specialist instead of
-        # collapsing to duplicates.  Concern detection is idempotent so
-        # calling _parse_concerns here and again at step 12b-bis is safe.
-        if agents is None:
-            _agent_cap = _MAX_AGENTS_BY_COMPLEXITY.get(inferred_complexity, 5)
-            _early_concerns = self._parse_concerns(task_summary)
-            if _early_concerns and len(_early_concerns) > _agent_cap:
-                _agent_cap = len(_early_concerns)
-                logger.debug(
-                    "Concern-split detected (%d concerns) — raised agent cap "
-                    "to %d to keep one specialist per concern (bd-076c).",
-                    len(_early_concerns),
-                    _agent_cap,
-                )
-            if len(resolved_agents) > _agent_cap:
-                resolved_agents = resolved_agents[:_agent_cap]
-
-        # 5e. Store pre-routing names for compound phase building
-        _pre_routing_agents = list(resolved_agents)
-
-        # 6. Route agents
-        resolved_agents = self._route_agents(resolved_agents, project_root)
-
-        # 6a. Build route map (base name → routed name) for compound phases
-        _agent_route_map = dict(zip(_pre_routing_agents, resolved_agents))
-        logger.debug(
-            "Agent routing complete: %s",
-            _agent_route_map if _agent_route_map else resolved_agents,
+        # 5e + 6 + 6a. Pre-routing snapshot, agent routing, route map.
+        # Extracted to ``_step_route_agents`` (005b 1.4b).
+        resolved_agents, _agent_route_map = self._step_route_agents(
+            resolved_agents=resolved_agents,
+            project_root=project_root,
         )
 
         # 6.5. Resolve knowledge attachments per step (KnowledgeRegistry if available).
-        # This runs after routing so step.agent_name reflects the routed variant.
-        # Phases and steps are not built yet at this point — knowledge resolution
-        # happens after phase building (step 9). We defer it to a post-phase hook
-        # at step 9.5 so it can iterate over actual PlanStep objects.
-        # (The resolver reference is stored here for use at step 9.5 below.)
-        _resolver = None
-        _ranker = None
-        _max_knowledge_per_step: int = 8
-        if self.knowledge_registry is not None:
-            import os as _os
-            from agent_baton.core.engine.knowledge_resolver import KnowledgeResolver
-            from agent_baton.core.engine.knowledge_telemetry import KnowledgeTelemetryStore
-            from agent_baton.core.intel.knowledge_ranker import KnowledgeRanker
-            # Wire F0.4 lifecycle telemetry (bd-a313).  Resolver records a
-            # KnowledgeUsed row per attachment whenever ``task_id``/``step_id``
-            # are passed to ``resolve()``.  Construction is best-effort.
-            try:
-                _telemetry = KnowledgeTelemetryStore()
-            except Exception:
-                _telemetry = None
-            _resolver = KnowledgeResolver(
-                self.knowledge_registry,
-                agent_registry=self._registry,
-                rag_available=self._detect_rag(),
-                step_token_budget=32_000,
-                doc_token_cap=8_000,
-                telemetry=_telemetry,
-            )
-            # bd-0184: effectiveness-aware ranking.  Best-effort — ranker failure
-            # never degrades planning; it simply returns the input unchanged.
-            try:
-                _ranker = KnowledgeRanker()
-            except Exception:
-                _ranker = None
-            try:
-                _max_knowledge_per_step = int(
-                    _os.environ.get("BATON_MAX_KNOWLEDGE_PER_STEP", "8")
-                )
-            except (ValueError, TypeError):
-                _max_knowledge_per_step = 8
+        # Extracted to ``_step_setup_knowledge`` (005b 1.4b).  Returns the
+        # resolver/ranker references and the per-step cap for later use
+        # at step 9.5.
+        _resolver, _ranker, _max_knowledge_per_step = self._step_setup_knowledge()
 
-        # 7. Classify task sensitivity (DataClassifier if available)
-        classification: ClassificationResult | None = None
-        if self._classifier is not None:
-            try:
-                classification = self._classifier.classify(task_summary)
-                self._last_classification = classification
-            except Exception:
-                pass
-
-        # 8. Risk — combines DataClassifier output with keyword/structural signals.
-        # The classifier's risk level is the floor; keyword/structural signals can
-        # raise it further but cannot lower it below what the classifier detected.
-        keyword_risk_level = self._assess_risk(task_summary, resolved_agents)
-        if classification is not None:
-            # Take the higher of the two assessments
-            classifier_ordinal = _RISK_ORDINAL[classification.risk_level]
-            keyword_ordinal = _RISK_ORDINAL[RiskLevel(keyword_risk_level)]
-            if classifier_ordinal > keyword_ordinal:
-                risk_level = classification.risk_level.value
-            else:
-                risk_level = keyword_risk_level
-        else:
-            risk_level = keyword_risk_level
-        risk_level_enum = RiskLevel(risk_level)
-
-        logger.info(
-            "Risk classification: task_id=%s risk=%s (keyword=%s classifier=%s) git_strategy=%s",
-            task_id,
-            risk_level,
-            keyword_risk_level,
-            classification.risk_level.value if classification else "n/a",
-            _select_git_strategy(risk_level_enum).value,
-        )
-
-        # 8b. Git strategy — derived from risk
-        git_strategy = _select_git_strategy(risk_level_enum).value
-
-        # 9. Build phases
-        if _subtask_data is not None:
-            # Compound task — each sub-task becomes its own phase
-            plan_phases = self._build_compound_phases(
-                _subtask_data, _agent_route_map,
-            )
-        elif phases is not None:
-            plan_phases = self._phases_from_dicts(phases, resolved_agents, task_summary)
-        elif classified_phases is not None:
-            # Use classifier-provided phase names
-            plan_phases = self._build_phases_for_names(
-                classified_phases, resolved_agents, task_summary
-            )
-        elif pattern is not None:
-            plan_phases = self._apply_pattern(pattern, inferred_type, task_summary)
-            # Apply routed agent names to pattern-derived phases
-            plan_phases = self._assign_agents_to_phases(plan_phases, resolved_agents, task_summary)
-        elif complexity is not None:
-            # Explicit complexity override — scale phases to match.
-            # Use KeywordClassifier phase scaling so light/heavy produces
-            # the right number of phases even in the legacy path.
-            from agent_baton.core.engine.classifier import KeywordClassifier as _KC
-            complexity_phases = _KC()._select_phases(inferred_type, inferred_complexity, _PHASE_NAMES)
-            plan_phases = self._build_phases_for_names(complexity_phases, resolved_agents, task_summary)
-        else:
-            plan_phases = self._default_phases(inferred_type, resolved_agents, task_summary)
-
-        logger.info(
-            "Plan phases selected for task_id=%s: %s",
-            task_id,
-            [(p.name, [s.agent_name for s in p.steps]) for p in plan_phases],
-        )
-
-        # 9b. Enrich steps with cross-phase context and default deliverables
-        plan_phases = self._enrich_phases(plan_phases, task_summary=task_summary)
-
-        # 9.5. Resolve knowledge attachments for each step.
-        # Runs after phase building so step.agent_name and task_description are final.
-        # explicit_knowledge_packs/docs come from create_plan args (CLI --knowledge flags).
-        # bd-0184: after resolving, rank by historical effectiveness and cap count.
-        if _resolver is not None:
-            for phase in plan_phases:
-                for step in phase.steps:
-                    try:
-                        resolved = _resolver.resolve(
-                            agent_name=step.agent_name,
-                            task_description=step.task_description,
-                            task_type=inferred_type,
-                            risk_level=risk_level,
-                            explicit_packs=explicit_knowledge_packs or [],
-                            explicit_docs=explicit_knowledge_docs or [],
-                        )
-                        if _ranker is not None:
-                            resolved = _ranker.rank(resolved)
-                        step.knowledge = resolved[:_max_knowledge_per_step]
-                    except Exception:
-                        logger.debug(
-                            "Knowledge resolution failed for step %s — skipping",
-                            step.step_id,
-                            exc_info=True,
-                        )
-
-        # 9.6. Gap-suggested attachments — query pattern learner for prior gaps
-        # matching each step's agent + task type. Only runs when both resolver
-        # and pattern learner are available.
-        if _resolver is not None and self._pattern_learner is not None:
-            for phase in plan_phases:
-                for step in phase.steps:
-                    try:
-                        prior_gaps = self._pattern_learner.knowledge_gaps_for(
-                            step.agent_name, inferred_type
-                        )
-                        for gap in prior_gaps:
-                            matches = _resolver.resolve(
-                                agent_name=step.agent_name,
-                                task_description=gap.description,
-                            )
-                            existing_paths = {a.path for a in step.knowledge if a.path}
-                            for match in matches:
-                                if match.path and match.path in existing_paths:
-                                    continue
-                                match.source = "gap-suggested"
-                                step.knowledge.append(match)
-                                if match.path:
-                                    existing_paths.add(match.path)
-                    except Exception:
-                        logger.debug(
-                            "Gap-suggested resolution failed for step %s — skipping",
-                            step.step_id,
-                            exc_info=True,
-                        )
-
-        # 9.7. Foresight analysis — proactively insert preparatory steps
-        # for predicted capability gaps, prerequisites, and edge cases.
-        try:
-            plan_phases, foresight_insights = self._foresight_engine.analyze(
-                plan_phases,
-                task_summary,
-                risk_level=risk_level,
-                existing_agents=resolved_agents,
-            )
-            self._last_foresight_insights = foresight_insights
-        except Exception:
-            logger.debug(
-                "Foresight analysis failed — skipping",
-                exc_info=True,
-            )
-
-        # 9.8. Resolve knowledge for foresight-inserted steps.
-        # Foresight steps are inserted after the initial knowledge resolution
-        # pass (9.5), so they need their own resolution pass.
-        # bd-0184: also rank + cap foresight-step attachments.
-        if _resolver is not None and self._last_foresight_insights:
-            foresight_step_ids = set()
-            for ins in self._last_foresight_insights:
-                foresight_step_ids.update(ins.inserted_step_ids)
-            for phase in plan_phases:
-                for step in phase.steps:
-                    if step.step_id in foresight_step_ids:
-                        try:
-                            resolved = _resolver.resolve(
-                                agent_name=step.agent_name,
-                                task_description=step.task_description,
-                                task_type=inferred_type,
-                                risk_level=risk_level,
-                                explicit_packs=explicit_knowledge_packs or [],
-                                explicit_docs=explicit_knowledge_docs or [],
-                            )
-                            if _ranker is not None:
-                                resolved = _ranker.rank(resolved)
-                            step.knowledge = resolved[:_max_knowledge_per_step]
-                        except Exception:
-                            logger.debug(
-                                "Knowledge resolution failed for foresight step %s — skipping",
-                                step.step_id,
-                                exc_info=True,
-                            )
-
-        # 10. Score check — warn about low-health agents
-        self._check_agent_scores(resolved_agents)
-
-        # 11. Budget tier
-        budget_tier = self._select_budget_tier(inferred_type, len(resolved_agents))
-
-        # 11b. Policy validation — check agent assignments against active policy set.
-        # Violations are recorded as warnings; they never hard-block plan creation.
-        if self._policy_engine is not None:
-            try:
-                preset_name = self._classify_to_preset_key(classification)
-                policy_set = self._policy_engine.load_preset(preset_name)
-                if policy_set is not None:
-                    self._last_policy_violations = self._validate_agents_against_policy(
-                        resolved_agents, policy_set, plan_phases
-                    )
-                    # Enforce structural require_agent rules by injecting missing
-                    # required agents into the plan's shared context as warnings.
-                    # (We cannot silently add phases here — the user decides.)
-            except Exception:
-                pass
-
-        # 12. Add QA gates (stack-aware, bd-124f: scoped to changed paths)
-        for phase in plan_phases:
-            if phase.gate is None:
-                # Collect changed source paths from all steps in this phase.
-                # Use allowed_paths (sandbox write paths) as the best signal
-                # for what files the phase will modify.
-                phase_changed: list[str] = []
-                for _step in phase.steps:
-                    phase_changed.extend(_step.allowed_paths)
-                phase.gate = self._default_gate(
-                    phase.name,
-                    stack=stack_profile,
-                    changed_paths=phase_changed or None,
-                    gate_scope=gate_scope,
-                    project_root=project_root,
-                )
-
-        # 12.a. Apply project config (baton.yaml) defaults — additive.
-        # No-op when no baton.yaml is present in the project.
-        try:
-            self._apply_project_config(plan_phases)
-        except Exception:
-            logger.warning(
-                "Applying project config failed — continuing without it",
-                exc_info=True,
-            )
-
-        # 12b. Set approval gates on critical phases for HIGH+ risk
-        if risk_level_enum in (RiskLevel.HIGH, RiskLevel.CRITICAL):
-            for phase in plan_phases:
-                if phase.name.lower() in ("design", "research"):
-                    phase.approval_required = True
-                    phase.approval_description = (
-                        f"Review {phase.name.lower()} output before "
-                        f"implementation begins. Approve to continue, "
-                        f"reject to stop, or approve-with-feedback to "
-                        f"add remediation steps."
-                    )
-
-        # 12b-bis. Concern-splitting: when the task summary names ≥3 distinct
-        # concerns/modules (e.g. "F0.1 ... F0.2 ... F0.3 ... F0.4 ..."), split
-        # implement-type phases into one parallel single-agent step per
-        # concern.  This runs BEFORE team consolidation so the planner emits
-        # parallel steps instead of a single bundled team step.
-        # See feedback_planner_parallelization.md.
-        _concerns = self._parse_concerns(task_summary)
-        _split_phase_ids: set[int] = set()
-        if _concerns:
-            logger.debug(
-                "Detected %d concerns in task summary: %s",
-                len(_concerns),
-                [c[0] for c in _concerns],
-            )
-            for phase in plan_phases:
-                if phase.name.lower() in ("implement", "fix", "draft", "migrate"):
-                    self._split_implement_phase_by_concerns(
-                        phase, _concerns, resolved_agents, task_summary,
-                    )
-                    _split_phase_ids.add(phase.phase_id)
-
-        # 12c. Consolidate multi-agent Implement/Fix phases into team steps.
-        # NOTE: After concern-splitting (12b-bis), an implement phase that was
-        # split now has N single-agent steps where each step is for a
-        # *different concern*.  We must NOT re-consolidate those into a team
-        # — they are intentionally parallel-by-concern.
-        for phase in plan_phases:
-            if phase.phase_id in _split_phase_ids:
-                continue
-            if self._is_team_phase(phase, task_summary):
-                phase.steps = [self._consolidate_team_step(phase)]
-
-        # 12c.4. Extract file paths early — needed by plan reviewer (12c.5)
-        # and context richness (13c).
-        extracted_paths = self._extract_file_paths(task_summary)
-
-        # 12c.5. Plan structure review — detect overly broad single-agent
-        # steps and split them into parallel concern-scoped steps.
-        # Skips light-complexity plans (nothing to split).  Uses Haiku
-        # for medium+ plans, with heuristic fallback when unavailable.
-        try:
-            self._last_review_result = self._plan_reviewer.review(
-                plan=MachinePlan(
-                    task_id=task_id,
-                    task_summary=task_summary,
-                    risk_level=risk_level,
-                    budget_tier="standard",
-                    phases=plan_phases,
-                    task_type=inferred_type,
-                    complexity=inferred_complexity,
-                ),
+        # 7 + 8 + 8b. Classify task sensitivity, merge risk signals, derive
+        # git strategy.  Extracted to ``_step_classify_data`` (005b 1.4b).
+        classification, risk_level, risk_level_enum, git_strategy = (
+            self._step_classify_data(
+                task_id=task_id,
                 task_summary=task_summary,
-                file_paths=extracted_paths,
-                complexity=inferred_complexity,
+                resolved_agents=resolved_agents,
             )
-            if self._last_review_result.splits_applied > 0:
-                logger.info(
-                    "Plan review applied %d split(s) (source=%s)",
-                    self._last_review_result.splits_applied,
-                    self._last_review_result.source,
-                )
-        except Exception:
-            logger.debug(
-                "Plan review failed — skipping", exc_info=True,
-            )
+        )
+
+        # 9 + 9b. Build phases (compound / explicit / classifier / pattern /
+        # complexity / default) and enrich them.  Extracted to
+        # ``_step_build_phases`` (005b 1.4b).
+        plan_phases = self._step_build_phases(
+            task_id=task_id,
+            task_summary=task_summary,
+            inferred_type=inferred_type,
+            inferred_complexity=inferred_complexity,
+            complexity=complexity,
+            resolved_agents=resolved_agents,
+            phases=phases,
+            classified_phases=classified_phases,
+            pattern=pattern,
+            subtask_data=_subtask_data,
+            agent_route_map=_agent_route_map,
+        )
+
+        # 9.5 + 9.6. Resolve knowledge attachments + gap-suggested
+        # attachments per step.  Extracted to ``_step_resolve_knowledge``
+        # (005b 1.4b) without semantic change.
+        self._step_resolve_knowledge(
+            plan_phases,
+            resolver=_resolver,
+            ranker=_ranker,
+            max_knowledge_per_step=_max_knowledge_per_step,
+            inferred_type=inferred_type,
+            risk_level=risk_level,
+            explicit_knowledge_packs=explicit_knowledge_packs,
+            explicit_knowledge_docs=explicit_knowledge_docs,
+        )
+
+        # 9.7 + 9.8. Foresight analysis + knowledge resolution for
+        # foresight-inserted steps.  Extracted to ``_step_apply_foresight``
+        # (005b 1.4b) without semantic change.  Returns the (possibly new)
+        # plan_phases list since foresight may rebuild the structure.
+        plan_phases = self._step_apply_foresight(
+            plan_phases,
+            task_summary=task_summary,
+            risk_level=risk_level,
+            resolved_agents=resolved_agents,
+            resolver=_resolver,
+            ranker=_ranker,
+            max_knowledge_per_step=_max_knowledge_per_step,
+            inferred_type=inferred_type,
+            explicit_knowledge_packs=explicit_knowledge_packs,
+            explicit_knowledge_docs=explicit_knowledge_docs,
+        )
+
+        # 10 + 11 + 11b. Score check, budget tier selection, and policy
+        # validation.  Extracted to ``_step_check_scores`` (005b 1.4b)
+        # without semantic change.  Returns the selected budget tier.
+        budget_tier = self._step_check_scores(
+            plan_phases,
+            resolved_agents=resolved_agents,
+            inferred_type=inferred_type,
+            classification=classification,
+        )
+
+        # 12 + 12.a. Add QA gates and apply project-config defaults.
+        # Extracted to ``_step_apply_gates`` (005b 1.4b).
+        self._step_apply_gates(
+            plan_phases,
+            stack_profile=stack_profile,
+            gate_scope=gate_scope,
+            project_root=project_root,
+        )
+
+        # 12b + 12b-bis. Approval gates on Design/Research at HIGH+ risk
+        # and concern-splitting for implement-class phases.  Extracted to
+        # ``_step_apply_approval_gates`` (005b 1.4b).
+        _split_phase_ids = self._step_apply_approval_gates(
+            plan_phases,
+            risk_level_enum=risk_level_enum,
+            task_summary=task_summary,
+            resolved_agents=resolved_agents,
+        )
+
+        # 12c + 12c.4 + 12c.5. Team consolidation, file-path extraction,
+        # and plan-reviewer pass.  Extracted to ``_step_consolidate_team``
+        # (005b 1.4b) without semantic change.  Returns the extracted file
+        # paths, which downstream steps reuse for context enrichment.
+        extracted_paths = self._step_consolidate_team(
+            plan_phases,
+            task_id=task_id,
+            task_summary=task_summary,
+            risk_level=risk_level,
+            inferred_type=inferred_type,
+            inferred_complexity=inferred_complexity,
+            split_phase_ids=_split_phase_ids,
+        )
 
         # 12d. Apply bead hints from BeadAnalyzer (F7).
         # Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
         if _bead_hints:
             plan_phases = self._apply_bead_hints(plan_phases, _bead_hints)
 
-        # 13. Populate context_files — every agent should read CLAUDE.md
-        for phase in plan_phases:
-            for step in phase.steps:
-                if not step.context_files:
-                    step.context_files = ["CLAUDE.md"]
-
-        # 13b. Model inheritance — inherit model preference from agent definition.
-        # Priority: agent definition model > explicit default_model > "sonnet".
-        for phase in plan_phases:
-            for step in phase.steps:
-                agent_def = self._registry.get(step.agent_name)
-                if agent_def and agent_def.model:
-                    step.model = agent_def.model
-                elif default_model:
-                    step.model = default_model
-                # Also propagate to team members
-                for member in step.team:
-                    member_def = self._registry.get(member.agent_name)
-                    if member_def and member_def.model:
-                        member.model = member_def.model
-                    elif default_model:
-                        member.model = default_model
-
-        # 13c. Context richness — append extracted file paths (from 12c.4)
-        # to every step's context_files (deduplicated).
-        if extracted_paths:
-            for phase in plan_phases:
-                for step in phase.steps:
-                    existing = set(step.context_files)
-                    for path in extracted_paths:
-                        if path not in existing:
-                            step.context_files.append(path)
-                            existing.add(path)
+        # 13 + 13b + 13c. Inject context files, propagate model preferences,
+        # and enrich context with extracted paths.  Extracted to
+        # ``_step_inject_context_files`` (005b 1.4b) without semantic change.
+        self._step_inject_context_files(
+            plan_phases,
+            default_model=default_model,
+            extracted_paths=extracted_paths,
+        )
 
         # 13d. E7 — Dependency detection: scan task summary for references to
-        # prior task outputs and attach their outcome beads as knowledge context.
-        depends_on_task_id: str | None = None
-        if self._bead_store is not None:
-            depends_on_task_id = self._detect_task_dependency(task_summary)
-            if depends_on_task_id is not None:
-                logger.info(
-                    "E7 dependency detected: task_id=%s depends on prior task %s",
-                    task_id,
-                    depends_on_task_id,
-                )
-                self._attach_prior_task_beads(
-                    plan_phases, depends_on_task_id
-                )
-
-        # 14. Shared context
-        # A3: Derive classification_signals (JSON) and classification_confidence
-        # from the DataClassifier result when available.
-        _classification_signals: str | None = None
-        _classification_confidence: float | None = None
-        if classification is not None:
-            _classification_signals = json.dumps(
-                {
-                    "signals": classification.signals_found,
-                    "risk_level": classification.risk_level.value,
-                    "guardrail_preset": classification.guardrail_preset,
-                    "explanation": classification.explanation,
-                }
-            )
-            # ClassificationResult.confidence is "high" | "low" (string).
-            # Map to float so callers can order/threshold numerically.
-            _classification_confidence = 1.0 if classification.confidence == "high" else 0.5
-
-        tmp_plan = MachinePlan(
+        # prior task outputs and attach their outcome beads as knowledge
+        # context.  Extracted to ``_step_attach_prior_beads`` (005b 1.4b).
+        depends_on_task_id = self._step_attach_prior_beads(
+            plan_phases,
             task_id=task_id,
             task_summary=task_summary,
+        )
+
+        # 14 + 16. Final assembly — build the MachinePlan, compute team
+        # cost estimates, and attach shared_context.  Extracted to
+        # ``_step_build_shared_context`` (005b 1.4b) without semantic change.
+        tmp_plan = self._step_build_shared_context(
+            task_id=task_id,
+            task_summary=task_summary,
+            inferred_type=inferred_type,
+            inferred_complexity=inferred_complexity,
             risk_level=risk_level,
             budget_tier=budget_tier,
             git_strategy=git_strategy,
-            phases=plan_phases,
-            pattern_source=pattern.pattern_id if pattern else None,
-            task_type=inferred_type,
-            explicit_knowledge_packs=list(explicit_knowledge_packs or []),
-            explicit_knowledge_docs=list(explicit_knowledge_docs or []),
+            plan_phases=plan_phases,
+            pattern=pattern,
+            explicit_knowledge_packs=explicit_knowledge_packs,
+            explicit_knowledge_docs=explicit_knowledge_docs,
             intervention_level=intervention_level,
-            complexity=inferred_complexity,
-            classification_source=(
-                self._last_task_classification.source
-                if self._last_task_classification
-                else "cli-override"
-            ),
-            detected_stack=(
-                f"{stack_profile.language}/{stack_profile.framework}"
-                if stack_profile and stack_profile.framework
-                else (stack_profile.language if stack_profile else None)
-            ),
-            foresight_insights=list(self._last_foresight_insights),
-            depends_on_task=depends_on_task_id,
-            classification_signals=_classification_signals,
-            classification_confidence=_classification_confidence,
+            stack_profile=stack_profile,
+            classification=classification,
+            depends_on_task_id=depends_on_task_id,
         )
-        # 16. Team cost estimation — look up historical cost data for team steps.
-        self._last_team_cost_estimates: dict[str, int] = {}
-        for phase in tmp_plan.phases:
-            for step in phase.steps:
-                if step.team and len(step.team) >= 2:
-                    agents = [m.agent_name for m in step.team]
-                    estimate = self._pattern_learner.get_team_cost_estimate(agents)
-                    if estimate is not None:
-                        self._last_team_cost_estimates[step.step_id] = estimate
 
-        shared_context = self._build_shared_context(tmp_plan)
-        tmp_plan.shared_context = shared_context
-
-        # F4 — Planning Decision Capture: persist key planner decisions as beads.
-        # Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
-        if self._bead_store is not None:
-            try:
-                self._capture_planning_bead(
-                    task_id=task_id,
-                    content=(
-                        f"Plan created for: {task_summary}. "
-                        f"Type={inferred_type}, complexity={inferred_complexity}, "
-                        f"risk={risk_level}, agents={resolved_agents}, "
-                        f"phases={[p.name for p in plan_phases]}, "
-                        f"budget_tier={budget_tier}, git_strategy={git_strategy}."
-                    ),
-                    tags=["planning", "plan-complete", inferred_type],
-                )
-            except Exception:
-                pass
-
-        # O1.4 — emit OTel span when the exporter is enabled.
-        if _otel_exporter is not None and _otel_started_at is not None:
-            try:
-                _otel_exporter.record_span(
-                    name="plan.create",
-                    kind="INTERNAL",
-                    attributes={
-                        "task_id": task_id,
-                        "task_type": inferred_type,
-                        "complexity": inferred_complexity,
-                        "risk_level": str(risk_level),
-                        "agent_count": len(resolved_agents),
-                        "phase_count": len(plan_phases),
-                    },
-                    started_at=_otel_started_at,
-                    ended_at=datetime.now(timezone.utc),
-                )
-            except Exception:
-                # Observability must never crash the planner.
-                logger.debug("OTel span emission failed", exc_info=True)
+        # F4 — Planning Decision Capture / O1.4 — OTel span emission.
+        # Both are observability side effects with no impact on the returned
+        # plan; extracted to ``_step_emit_telemetry`` (005b 1.4b) to free the
+        # tail of create_plan from inline branching.
+        self._step_emit_telemetry(
+            tmp_plan,
+            task_id=task_id,
+            task_summary=task_summary,
+            inferred_type=inferred_type,
+            inferred_complexity=inferred_complexity,
+            risk_level=risk_level,
+            resolved_agents=resolved_agents,
+            plan_phases=plan_phases,
+            budget_tier=budget_tier,
+            git_strategy=git_strategy,
+            otel_exporter=_otel_exporter,
+            otel_started_at=_otel_started_at,
+        )
 
         return tmp_plan
 
