@@ -105,6 +105,10 @@ class PlanDraft:
     classification_signals: str | None = None
     classification_confidence: float | None = None
 
+    # --- ValidationStage outputs ---
+    # Populated by ValidationStage.  See ``planning.stages.validation.PlanDefect``.
+    plan_defects: list = field(default_factory=list)
+
     @classmethod
     def from_inputs(
         cls,

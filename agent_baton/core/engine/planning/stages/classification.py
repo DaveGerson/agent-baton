@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from agent_baton.core.engine.planning.draft import PlanDraft
 from agent_baton.core.engine.planning.services import PlannerServices
+from agent_baton.core.engine.planning.structured_spec import enrich_phase_titles
 
 
 class ClassificationStage:
@@ -38,6 +39,17 @@ class ClassificationStage:
         draft.stack_profile = stack_profile
         draft.phases = phases_after
         draft.agents = agents_after
+
+        # QUALITY FIX #1 — enrich phase titles parsed from a structured
+        # spec.  The legacy parser detects "Phase 1: Authentication" but
+        # produces a phase named just "Phase 1", losing the title.
+        # ``enrich_phase_titles`` replaces those generic names with
+        # "Phase 1: Authentication" so the operator can correlate baton
+        # phases with their spec phases — addressing one root cause of
+        # the plan-explosion incident
+        # (docs/internal/competitive-audit/INCIDENT-plan-explosion.md).
+        if draft.phases:
+            draft.phases = enrich_phase_titles(draft.phases, draft.task_summary)
 
         # Step 3 — classify task: infer task_type, complexity, agents,
         # phases (Haiku classifier when available, keyword fallback
