@@ -110,7 +110,9 @@ class TestHardGate:
     def test_critical_defect_raises_under_hard_gate(self) -> None:
         os.environ["BATON_PLANNER_HARD_GATE"] = "1"
         stage = ValidationStage()
-        # Stub the legacy delegations so we control the draft state.
+        # Stub the native stage helpers so we control the draft state —
+        # we want this test to exercise only the hard-gate raise path,
+        # not the score/team-consolidation logic.
         with patch.object(stage, "_detect_defects") as detect:
             detect.return_value = [
                 PlanDefect(code="empty_plan", severity="critical", message="x")
@@ -119,8 +121,8 @@ class TestHardGate:
             services = _stub_services(planner)
             draft = PlanDraft.from_inputs("Add foo")
             draft.plan_phases = []  # placeholder
-            with patch.object(services.planner, "_step_check_scores", return_value="standard"):
-                with patch.object(services.planner, "_step_consolidate_team", return_value=[]):
+            with patch.object(stage, "_check_scores", return_value="standard"):
+                with patch.object(stage, "_consolidate_team", return_value=[]):
                     services.planner._last_review_result = None  # type: ignore[attr-defined]
                     with pytest.raises(PlanQualityError) as ei:
                         stage.run(draft, services)
