@@ -55,6 +55,12 @@ The engine drives this. Each DISPATCH action carries an `isolation`
 field — when set to `"worktree"`, forward it verbatim onto the matching
 `Agent(...)` invocation. When empty or absent, do not pass `isolation`.
 
+When the action also carries a `worktree_path` field, pass that path
+as the `cwd` parameter on the `Agent(...)` invocation. The engine has
+already created the worktree at that path; the agent runs inside it
+without any additional setup. Without this, the agent boots in the
+parent project root and the worktree isolation is silently bypassed.
+
 Inside the agent: never `cd` out of your worktree, and never trust an
 absolute path from the prompt that points back at the project root.
 Use the worktree-relative paths the engine renders.

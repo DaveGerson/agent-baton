@@ -103,20 +103,16 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     # ---- verify-package (formerly 'baton verify-package') ------------------
     p.add_argument(
         "--verify",
-        action="store_true",
         dest="verify_package",
+        metavar="ARCHIVE",
+        nargs="?",
+        const=True,
+        default=False,
         help=(
             "Validate a .tar.gz agent-baton package before distribution. "
-            "Requires ARCHIVE positional argument. "
+            "Pass the archive path as the flag value: --verify path/to/pkg.tar.gz. "
             "Formerly 'baton verify-package'."
         ),
-    )
-    p.add_argument(
-        "archive",
-        nargs="?",
-        default=None,
-        metavar="ARCHIVE",
-        help="(with --verify) Path to the .tar.gz package to verify",
     )
     p.add_argument(
         "--checksums",
@@ -185,17 +181,20 @@ def _sync_verify_package(args: argparse.Namespace) -> None:
     import argparse as _ap
     from agent_baton.cli.commands.distribute.install import _cmd_verify
 
-    archive = getattr(args, "archive", None)
-    if not archive:
+    # verify_package holds the archive path string when supplied as
+    # `--verify path/to/pkg.tar.gz`, True when the flag is bare (const),
+    # or False when the flag is absent.
+    verify_package = getattr(args, "verify_package", None)
+    if not verify_package or verify_package is True:
         print(
-            "error: --verify requires an ARCHIVE positional argument.\n"
+            "error: --verify requires an ARCHIVE path.\n"
             "Usage: baton sync --verify path/to/package.tar.gz",
             file=sys.stderr,
         )
         sys.exit(1)
 
     inner = _ap.Namespace(
-        archive=archive,
+        archive=verify_package,
         checksums=getattr(args, "checksums", False),
     )
     _cmd_verify(inner)

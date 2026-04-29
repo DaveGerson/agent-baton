@@ -2614,6 +2614,12 @@ def _run_loop(
     """Inner execution loop extracted so _handle_run can wrap it in try/finally."""
     import subprocess as _subprocess
 
+    # bd-92bc: In dry-run mode next_action() always returns the same pending
+    # step (because we must not persist state).  Track previewed step/gate ids
+    # locally so we can detect the repeat and break cleanly.
+    _dry_run_previewed_steps: set[str] = set()
+    _dry_run_previewed_gates: set[str] = set()
+
     while True:
         atype = action_dict.get("action_type", "")
 
@@ -2654,6 +2660,17 @@ def _run_loop(
                     engine.mark_dispatched(step_id=step_id, agent_name="automation")
 
                 if dry_run:
+                    # bd-ae75: guard against infinite loop — automation steps
+                    # also need deduplication in dry-run mode, same as the LLM
+                    # path.  Without this, next_action() returns the same
+                    # DISPATCH forever and the loop hits max_steps + exit 1.
+                    if step_id in _dry_run_previewed_steps:
+                        print(
+                            f"\n{success('COMPLETE')}: dry-run preview finished"
+                            " — execution state unchanged",
+                        )
+                        return
+                    _dry_run_previewed_steps.add(step_id)
                     print(f"  [DRY RUN] Would run: {command}", file=sys.stderr)
                 else:
                     import subprocess as _subprocess
@@ -2712,13 +2729,21 @@ def _run_loop(
                         pass
 
                 if dry_run:
+                    # bd-92bc: guard against infinite loop — next_action()
+                    # returns the same DISPATCH repeatedly in dry-run mode
+                    # because we must not persist state.  If this step_id was
+                    # already previewed this pass, we've exhausted pending work.
+                    if step_id in _dry_run_previewed_steps:
+                        print(
+                            f"\n{success('COMPLETE')}: dry-run preview finished"
+                            " — execution state unchanged",
+                        )
+                        return
+                    _dry_run_previewed_steps.add(step_id)
                     print(f"  [DRY RUN] Would launch {agent_name} with {len(prompt)} char prompt", file=sys.stderr)
                     if _wt_path:
                         print(f"  [DRY RUN] Worktree: {_wt_path}", file=sys.stderr)
-                    engine.record_step_result(
-                        step_id=step_id, agent_name=agent_name,
-                        status="complete", outcome="dry-run skip",
-                    )
+                    # Do NOT call engine.record_step_result() — dry-run is read-only.
                 else:
                     import asyncio as _asyncio
                     assert launcher is not None  # guarded by user_error above
@@ -2769,6 +2794,18 @@ def _run_loop(
             print(f"\n  [GATE] Phase {phase_id} ({gate_type}): {gate_cmd}", file=sys.stderr)
 
             if dry_run:
+                # bd-92bc: same loop-guard as DISPATCH — gates also loop
+                # infinitely without state persistence.
+                # bd-145f: include gate_cmd in the key so two phases with the
+                # same phase_id + gate_type but different commands don't collide.
+                _gate_key = f"{phase_id}:{gate_type}:{gate_cmd}"
+                if _gate_key in _dry_run_previewed_gates:
+                    print(
+                        f"\n{success('COMPLETE')}: dry-run preview finished"
+                        " — execution state unchanged",
+                    )
+                    return
+                _dry_run_previewed_gates.add(_gate_key)
                 print(f"  [DRY RUN] Would run: {gate_cmd}", file=sys.stderr)
             elif gate_type == "ci":
                 # Wave 4.1 — CI provider gate.  Polls GitHub Actions for the

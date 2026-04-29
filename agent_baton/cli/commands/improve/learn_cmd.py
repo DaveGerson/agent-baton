@@ -463,7 +463,7 @@ def _cmd_run_cycle(args: argparse.Namespace) -> None:
             print(f"  {phase.get('phase_id', '?')}. {phase_name} [{gate_type.upper()} GATE]")
         else:
             steps = phase.get("steps", [])
-            agents = ", ".join(s.get("agent", "?") for s in steps)
+            agents = ", ".join(s.get("agent_name", s.get("agent", "?")) for s in steps)
             print(f"  {phase.get('phase_id', '?')}. {phase_name} ({agents})")
         if phase_desc:
             print(f"     {phase_desc}")

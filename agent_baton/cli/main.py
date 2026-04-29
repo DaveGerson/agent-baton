@@ -27,20 +27,23 @@ _COMMAND_GROUPS: dict[str, list[str]] = {
     "Observability": ["dashboard", "trace", "usage", "telemetry", "context-profile", "retro", "context", "export"],
     "Integrations": ["webhook"],
     "Governance": ["classify", "compliance", "policy", "escalations", "validate", "spec-check", "detect"],
-    "Improvement": ["scores", "evolve", "patterns", "budget", "changelog", "experiment", "anomalies", "learn"],
+    "Improvement": ["scores", "patterns", "budget", "changelog", "anomalies", "learn"],
     "Distribution": ["install", "uninstall", "package", "publish", "pull", "transfer"],
     "Storage & Sync": ["sync", "source", "cquery", "storage", "cleanup"],
     "Memory": ["beads", "souls"],
     "Execution (Advanced)": ["daemon", "async", "decide"],
     "Portfolio": ["pmo", "serve"],
+    "Deprecated": ["evolve", "experiment"],
 }
 
 # Deprecated top-level commands — kept for backward compatibility.
 # These still work but print a WARN to stderr on each invocation.
 _DEPRECATED_HELP: dict[str, str] = {
-    "migrate-storage": "use 'baton storage migrate' instead",
-    "verify-package": "use 'baton install verify' instead",
+    "migrate-storage": "use 'baton sync --migrate-storage' instead",
+    "verify-package": "use 'baton sync --verify ARCHIVE' instead",
     "improve": "use 'baton learn improve' instead",
+    "evolve": "use 'baton learn run-cycle' instead",
+    "experiment": "use 'baton learn run-cycle' instead",
 }
 
 
@@ -137,7 +140,14 @@ def main(argv: list[str] | None = None) -> None:
         dispatch[subcommand] = mod
 
     # Build grouped help epilog
-    lines = ["\nCommand groups:"]
+    lines = ["\nCommon workflows:"]
+    lines.append(f"  1. baton plan \"task description\" --save --explain")
+    lines.append(f"  2. baton execute start")
+    lines.append(f"  3. baton execute next")
+    lines.append(f"  4. Repeat step 3 until ACTION: COMPLETE")
+    lines.append(f"  5. baton execute complete")
+    lines.append(f"")
+    lines.append(f"\nCommand groups:")
     for group_name, cmd_names in _COMMAND_GROUPS.items():
         # Only include commands that actually exist
         available = [c for c in cmd_names if c in dispatch]
@@ -169,7 +179,26 @@ def main(argv: list[str] | None = None) -> None:
     parser.epilog = "\n".join(lines)
     parser.formatter_class = argparse.RawDescriptionHelpFormatter
 
-    args = parser.parse_args(argv)
+    # Emit deprecation banner to stderr *before* parse_args so it appears even
+    # when --help is passed (argparse prints help then sys.exit(0), never
+    # reaching the handler).
+    import sys as _sys
+    _argv = argv if argv is not None else _sys.argv[1:]
+    if _argv and _argv[0] in _DEPRECATED_HELP:
+        _cmd = _argv[0]
+        print(
+            f"DEPRECATED: 'baton {_cmd}' is deprecated — {_DEPRECATED_HELP[_cmd]}",
+            file=_sys.stderr,
+        )
+
+    # For deprecated shim commands, use parse_known_args so that legacy scripts
+    # passing old flags (e.g. `baton evolve --run`, `baton experiment --id foo`)
+    # still reach the handler's deprecation message instead of getting an argparse
+    # "unrecognized arguments" error (bd-ed80).
+    if _argv and _argv[0] in _DEPRECATED_HELP:
+        args, _unknown = parser.parse_known_args(argv)
+    else:
+        args = parser.parse_args(argv)
 
     if getattr(args, "no_color", False):
         from agent_baton.cli.colors import set_color_enabled

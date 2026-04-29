@@ -319,3 +319,189 @@ class TestDryRunOnStartedExecution:
         assert next_act.action_type.value == "dispatch", (
             f"Expected dispatch after start+dry-run, got {next_act.action_type!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# bd-ae75: automation steps in dry-run must show COMPLETE, not exhaust max_steps
+# ---------------------------------------------------------------------------
+
+_PLAN_WITH_AUTOMATION = {
+    "task_id": "bd-ae75-automation-dry-run",
+    "task_summary": "dry-run automation step regression",
+    "risk_level": "LOW",
+    "budget_tier": "lean",
+    "execution_mode": "phased",
+    "git_strategy": "commit-per-agent",
+    "phases": [
+        {
+            "phase_id": 1,
+            "name": "Automation Phase",
+            "steps": [
+                {
+                    "step_id": "1.1",
+                    "agent_name": "automation",
+                    "task_description": "Run linter",
+                    "step_type": "automation",
+                    "command": "echo hello",
+                    "model": "sonnet",
+                }
+            ],
+        }
+    ],
+}
+
+
+class TestDryRunAutomationSteps:
+    """bd-ae75: automation steps must not loop until max_steps in dry-run mode."""
+
+    def test_dry_run_completes_cleanly_with_automation_steps(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture
+    ) -> None:
+        """Dry-run a plan with an automation step exits with COMPLETE, not exit 1."""
+        plan_path = tmp_path / "plan.json"
+        plan_path.write_text(json.dumps(_PLAN_WITH_AUTOMATION), encoding="utf-8")
+        # Small max_steps so the old bug (looping until limit) fails fast.
+        args = _make_args(str(plan_path), dry_run=True, max_steps=5)
+
+        real_engine = ExecutionEngine(team_context_root=tmp_path)
+
+        with (
+            patch(f"{_EXECUTE_MOD}.get_project_storage", return_value=_FakeStorage()),
+            patch(f"{_EXECUTE_MOD}.ExecutionEngine", return_value=real_engine),
+            patch(f"{_EXECUTE_MOD}.ContextManager"),
+            patch("agent_baton.core.storage.sync.auto_sync_current_project", return_value=None),
+        ):
+            # Must NOT raise SystemExit(1) from max-steps exhaustion.
+            _handle_run(args)
+
+        captured = capsys.readouterr()
+        output = captured.out + captured.err
+        assert "COMPLETE" in output, (
+            "Expected COMPLETE banner in dry-run output for automation plan; "
+            f"got: {output[:500]}"
+        )
+        assert "ABORTED" not in output, (
+            "Dry-run hit max-steps limit on automation plan — bd-ae75 not fixed"
+        )
+
+    def test_dry_run_automation_leaves_no_state(
+        self, tmp_path: Path
+    ) -> None:
+        """Dry-run with an automation step must not mutate execution state."""
+        plan_path = tmp_path / "plan.json"
+        plan_path.write_text(json.dumps(_PLAN_WITH_AUTOMATION), encoding="utf-8")
+        args = _make_args(str(plan_path), dry_run=True, max_steps=5)
+
+        real_engine = ExecutionEngine(team_context_root=tmp_path)
+
+        with (
+            patch(f"{_EXECUTE_MOD}.get_project_storage", return_value=_FakeStorage()),
+            patch(f"{_EXECUTE_MOD}.ExecutionEngine", return_value=real_engine),
+            patch(f"{_EXECUTE_MOD}.ContextManager"),
+            patch("agent_baton.core.storage.sync.auto_sync_current_project", return_value=None),
+        ):
+            _handle_run(args)
+
+        status = real_engine.status()
+        assert status.get("status") == "no_active_execution", (
+            f"automation dry-run mutated state to {status.get('status')!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# bd-145f: duplicate (phase_id, gate_type) gate keys must not collide
+# ---------------------------------------------------------------------------
+
+class TestDryRunDuplicateGateKeys:
+    """bd-145f: gates with same phase_id+gate_type but different commands are distinct."""
+
+    def test_dry_run_handles_duplicate_gate_keys(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture
+    ) -> None:
+        """Two gates sharing phase_id and gate_type but different commands both appear."""
+        from agent_baton.cli.commands.execution.execute import _run_loop
+        from agent_baton.models.execution import ActionType
+
+        # Build a sequence of actions that simulates the engine returning two
+        # GATE actions with the same phase_id + gate_type but different commands,
+        # then COMPLETE.  We drive _run_loop directly with a mock engine whose
+        # next_action() pops from this queue.
+        gate_cmd_a = "pytest tests/unit"
+        gate_cmd_b = "pytest tests/integration"
+
+        actions = [
+            {
+                "action_type": ActionType.GATE.value,
+                "phase_id": 1,
+                "gate_type": "test",
+                "gate_command": gate_cmd_a,
+            },
+            {
+                "action_type": ActionType.GATE.value,
+                "phase_id": 1,
+                "gate_type": "test",
+                "gate_command": gate_cmd_b,
+            },
+            {
+                "action_type": ActionType.COMPLETE.value,
+                "summary": "done",
+            },
+        ]
+        action_iter = iter(actions)
+
+        mock_engine = MagicMock()
+        mock_action = MagicMock()
+        mock_action.to_dict.side_effect = lambda: next(action_iter)
+        mock_engine.next_action.return_value = mock_action
+
+        # _run_loop receives the first action_dict directly, then calls
+        # engine.next_action() for subsequent ones.
+        first_action = next(iter(actions))  # reuse reference — but iter already advanced
+
+        # Re-build iterator so _run_loop gets all three actions in order.
+        action_queue = [
+            {
+                "action_type": ActionType.GATE.value,
+                "phase_id": 1,
+                "gate_type": "test",
+                "gate_command": gate_cmd_a,
+            },
+            {
+                "action_type": ActionType.GATE.value,
+                "phase_id": 1,
+                "gate_type": "test",
+                "gate_command": gate_cmd_b,
+            },
+            {
+                "action_type": ActionType.COMPLETE.value,
+                "summary": "done",
+            },
+        ]
+        q_iter = iter(action_queue)
+        first_dict = next(q_iter)
+
+        subsequent = MagicMock()
+        subsequent.to_dict.side_effect = lambda: next(q_iter)
+        mock_engine.next_action.return_value = subsequent
+
+        _run_loop(
+            engine=mock_engine,
+            launcher=None,
+            action_dict=first_dict,
+            max_steps=20,
+            dry_run=True,
+            model_override="sonnet",
+            task_id="bd-145f-test",
+        )
+
+        captured = capsys.readouterr()
+        output = captured.out + captured.err
+        # Both gate commands must appear in the preview output.
+        assert gate_cmd_a in output, (
+            f"First gate command missing from dry-run output: {output[:500]}"
+        )
+        assert gate_cmd_b in output, (
+            f"Second gate command (same phase_id+gate_type) silently dropped — "
+            f"bd-145f not fixed. Output: {output[:500]}"
+        )
+        assert "COMPLETE" in output

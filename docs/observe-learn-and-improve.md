@@ -1438,10 +1438,10 @@ Rollback audit entries are stored at:
 | `baton scores --agent NAME` | Show scorecard for a specific agent |
 | `baton scores --trends` | Show performance trends for all agents |
 | `baton scores --write` | Write scorecard report to disk |
-| `baton evolve` | Show prompt evolution report |
-| `baton evolve --agent NAME` | Show proposal for a specific agent |
-| `baton evolve --save` | Write proposals to disk |
-| `baton evolve --write` | Write summary report to disk |
+| `baton learn run-cycle` | Instantiate the learning-cycle plan template (proposes prompt evolutions and pattern updates as part of the cycle) |
+| `baton learn run-cycle --run` | Execute the learning cycle immediately after instantiating the plan |
+| `baton learn analyze` | Run analysis: compute confidence, mark auto-apply candidates |
+| `baton learn apply --all-safe` | Apply all proposed fixes that meet auto-apply thresholds |
 | `baton patterns` | Show all learned patterns |
 | `baton patterns --refresh` | Re-analyse usage log and update patterns |
 | `baton patterns --task-type TYPE` | Show patterns for a specific task type |
@@ -1454,17 +1454,13 @@ Rollback audit entries are stored at:
 | `baton changelog` | Show agent changelog entries |
 | `baton changelog --agent NAME` | Show history for a specific agent |
 | `baton changelog --backups [NAME]` | List backup files |
-| `baton improve` | Show latest improvement report |
-| `baton improve --run` | Run a full improvement cycle |
-| `baton improve --force` | Force-run cycle (skip trigger check) |
-| `baton improve --experiments` | Show active experiments |
-| `baton improve --history` | Show all improvement reports |
+| `baton learn improve` | Show latest improvement report (formerly `baton improve`) |
+| `baton learn improve --run` | Run a full improvement cycle |
+| `baton learn improve --force` | Force-run cycle (skip trigger check) |
+| `baton learn improve --experiments` | Show active experiments |
+| `baton learn improve --history` | Show all improvement reports |
 | `baton anomalies` | Detect and display system anomalies |
 | `baton anomalies --watch` | Show trigger readiness and anomaly status |
-| `baton experiment list` | List all experiments |
-| `baton experiment show ID` | Show experiment details |
-| `baton experiment conclude ID --result RESULT` | Manually conclude an experiment |
-| `baton experiment rollback ID` | Roll back an experiment |
 
 ---
 
@@ -1744,8 +1740,8 @@ baton scores --trends
 # Context efficiency
 baton context-profile --agent architect
 
-# Any evolution proposals?
-baton evolve --agent architect
+# Any evolution proposals? (folded into the learning loop)
+baton learn run-cycle
 
 # Changelog history
 baton changelog --agent architect
@@ -1753,18 +1749,21 @@ baton changelog --agent architect
 
 ### Review and manage experiments
 
+Experiment tracking is folded into `baton learn`:
+
 ```bash
 # What experiments are running?
-baton experiment list
+baton learn improve --experiments
 
-# Check details
-baton experiment show exp-abc12345
+# Run the analysis loop (auto-applies safe fixes, escalates the rest)
+baton learn analyze
+baton learn apply --all-safe
 
-# Manually conclude if you have enough signal
-baton experiment conclude exp-abc12345 --result improved
+# Drive a full improvement cycle (auto-rollback runs if a change degrades)
+baton learn improve --run
 
-# Roll back if something went wrong
-baton experiment rollback exp-abc12345
+# Reopen an issue / rollback its applied override
+baton learn reset --issue ISSUE_ID
 ```
 
 ### Clean up old data
