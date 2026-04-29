@@ -34,10 +34,15 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from agent_baton.core.engine.planning.draft import PlanDraft
 from agent_baton.core.engine.planning.rules.phase_roles import PHASE_BLOCKED_ROLES
 from agent_baton.core.engine.planning.services import PlannerServices
+
+if TYPE_CHECKING:
+    from agent_baton.core.govern.classifier import ClassificationResult
+    from agent_baton.models.execution import MachinePlan, PlanPhase
 
 logger = logging.getLogger(__name__)
 
@@ -72,32 +77,17 @@ class ValidationStage:
     _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
     def run(self, draft: PlanDraft, services: PlannerServices) -> PlanDraft:
-        legacy = services.planner
-
         # Step 10+11+11b — score check, budget tier, policy validation.
-        budget_tier = legacy._step_check_scores(
-            draft.plan_phases,
-            resolved_agents=draft.resolved_agents,
-            inferred_type=draft.inferred_type,
-            classification=draft.classification,
-        )
+        budget_tier = self._check_scores(draft=draft, services=services)
         draft.budget_tier = budget_tier
 
         # Step 12c+12c.4+12c.5 — team consolidation, file-path
-        # extraction, plan reviewer pass.  The legacy method runs
-        # PlanReviewer internally and stores the result on
-        # ``legacy._last_review_result``.
-        extracted_paths = legacy._step_consolidate_team(
-            draft.plan_phases,
-            task_id=draft.task_id,
-            task_summary=draft.task_summary,
-            risk_level=draft.risk_level,
-            inferred_type=draft.inferred_type,
-            inferred_complexity=draft.inferred_complexity,
-            split_phase_ids=draft.split_phase_ids,
-        )
+        # extraction, plan reviewer pass.  The native method writes
+        # ``services.planner._last_review_result`` as a side effect so
+        # downstream bridge stages can still read it.
+        extracted_paths = self._consolidate_team(draft=draft, services=services)
         draft.extracted_paths = extracted_paths
-        draft.review_result = legacy._last_review_result
+        draft.review_result = services.planner._last_review_result
 
         # Compute defects from the assembled plan + reviewer result.
         defects = self._detect_defects(draft)
@@ -119,6 +109,141 @@ class ValidationStage:
                     + "; ".join(str(d) for d in critical[:5])
                 )
         return draft
+
+    # ------------------------------------------------------------------
+    # Private helpers — ported bodies of the two legacy _step_* methods
+    # ------------------------------------------------------------------
+
+    def _check_scores(
+        self,
+        *,
+        draft: PlanDraft,
+        services: PlannerServices,
+    ) -> str:
+        """Steps 10 / 11 / 11b — score warnings, budget tier, policy check.
+
+        Port of ``_LegacyIntelligentPlanner._step_check_scores``.
+        Returns the selected budget tier.  Writes
+        ``services.planner._last_policy_violations`` as a side effect
+        (matching legacy behaviour so ``explain_plan`` can still read it).
+        Score warnings are written to ``services.planner._last_score_warnings``
+        via the legacy ``_check_agent_scores`` helper.
+
+        Non-``_step_*`` helpers (``_check_agent_scores``,
+        ``_select_budget_tier``, ``_classify_to_preset_key``,
+        ``_validate_agents_against_policy``) stay on the legacy object and
+        are called through ``services.planner``.
+        """
+        plan_phases = draft.plan_phases
+        resolved_agents = draft.resolved_agents
+        inferred_type = draft.inferred_type
+        classification: ClassificationResult | None = draft.classification
+
+        legacy = services.planner
+
+        # 10. Score check — warn about low-health agents
+        legacy._check_agent_scores(resolved_agents)
+
+        # 11. Budget tier
+        budget_tier = legacy._select_budget_tier(inferred_type, len(resolved_agents))
+
+        # 11b. Policy validation — check agent assignments against active policy set.
+        # Violations are recorded as warnings; they never hard-block plan creation.
+        if services.policy_engine is not None:
+            try:
+                preset_name = legacy._classify_to_preset_key(classification)
+                policy_set = services.policy_engine.load_preset(preset_name)
+                if policy_set is not None:
+                    legacy._last_policy_violations = (
+                        legacy._validate_agents_against_policy(
+                            resolved_agents, policy_set, plan_phases
+                        )
+                    )
+                    # Enforce structural require_agent rules by injecting missing
+                    # required agents into the plan's shared context as warnings.
+                    # (We cannot silently add phases here — the user decides.)
+            except Exception:
+                pass
+        return budget_tier
+
+    def _consolidate_team(
+        self,
+        *,
+        draft: PlanDraft,
+        services: PlannerServices,
+    ) -> list[str]:
+        """Steps 12c / 12c.4 / 12c.5 — team consolidation, file-path
+        extraction, and plan reviewer pass.
+
+        Port of ``_LegacyIntelligentPlanner._step_consolidate_team``.
+        Mutates ``draft.plan_phases`` in place.  Returns ``extracted_paths``
+        so the downstream context-richness step can re-use them.
+
+        Writes ``services.planner._last_review_result`` as a side effect so
+        bridge stages and ``explain_plan`` can read it unchanged.
+
+        Non-``_step_*`` helpers (``_is_team_phase``,
+        ``_consolidate_team_step``, ``_extract_file_paths``) stay on the
+        legacy object and are called through ``services.planner``.
+        """
+        from agent_baton.models.execution import MachinePlan
+
+        plan_phases = draft.plan_phases
+        task_id = draft.task_id
+        task_summary = draft.task_summary
+        risk_level = draft.risk_level
+        inferred_type = draft.inferred_type
+        inferred_complexity = draft.inferred_complexity
+        split_phase_ids = draft.split_phase_ids
+
+        legacy = services.planner
+        plan_reviewer = services.plan_reviewer
+
+        # 12c. Consolidate multi-agent Implement/Fix phases into team steps.
+        # NOTE: After concern-splitting (12b-bis), an implement phase that was
+        # split now has N single-agent steps where each step is for a
+        # *different concern*.  We must NOT re-consolidate those into a team
+        # — they are intentionally parallel-by-concern.
+        for phase in plan_phases:
+            if phase.phase_id in split_phase_ids:
+                continue
+            if legacy._is_team_phase(phase, task_summary):
+                phase.steps = [legacy._consolidate_team_step(phase)]
+
+        # 12c.4. Extract file paths early — needed by plan reviewer (12c.5)
+        # and context richness (13c).
+        extracted_paths = legacy._extract_file_paths(task_summary)
+
+        # 12c.5. Plan structure review — detect overly broad single-agent
+        # steps and split them into parallel concern-scoped steps.
+        # Skips light-complexity plans (nothing to split).  Uses Haiku
+        # for medium+ plans, with heuristic fallback when unavailable.
+        try:
+            legacy._last_review_result = plan_reviewer.review(
+                plan=MachinePlan(
+                    task_id=task_id,
+                    task_summary=task_summary,
+                    risk_level=risk_level,
+                    budget_tier="standard",
+                    phases=plan_phases,
+                    task_type=inferred_type,
+                    complexity=inferred_complexity,
+                ),
+                task_summary=task_summary,
+                file_paths=extracted_paths,
+                complexity=inferred_complexity,
+            )
+            if legacy._last_review_result.splits_applied > 0:
+                logger.info(
+                    "Plan review applied %d split(s) (source=%s)",
+                    legacy._last_review_result.splits_applied,
+                    legacy._last_review_result.source,
+                )
+        except Exception:
+            logger.debug(
+                "Plan review failed — skipping", exc_info=True,
+            )
+        return extracted_paths
 
     # ------------------------------------------------------------------
 
