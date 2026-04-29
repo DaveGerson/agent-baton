@@ -1,15 +1,36 @@
 """Planning pipeline stages.
 
-Each stage is a small class that implements the ``Stage`` protocol:
-takes a ``PlanDraft`` + ``PlannerServices``, returns a ``PlanDraft``.
+Each stage is a small class implementing the ``Stage`` protocol:
+``run(draft: PlanDraft, services: PlannerServices) -> PlanDraft``.
 
-Order (matches the legacy ``create_plan`` body):
+Stage order (preserves legacy create_plan ordering — see comments in
+each stage for the legacy step numbers):
 
-1. ClassificationStage — task_id, stack, task_type, complexity, risk
-2. DecompositionStage  — phases, subtasks, concern splitting, structured-spec parsing
-3. RoutingStage        — agent selection, retro filtering, phase assignment
-4. EnrichmentStage     — knowledge, foresight, gates, context files, beads
-5. ValidationStage     — score check, policy validation, plan review (hard gate)
-6. AssemblyStage       — MachinePlan construction, shared_context, telemetry
+1. ClassificationStage — initialize state, classify task
+2. RosterStage        — pattern, retro, decompose, expand, route agents
+3. RiskStage          — knowledge resolver setup, sensitivity, risk
+4. DecompositionStage — build phases, resolve knowledge, foresight
+5. EnrichmentStage    — gates, approvals, bead hints, context, prior beads
+6. ValidationStage    — score check, budget tier, plan review (HARD GATE)
+7. AssemblyStage      — build MachinePlan, emit telemetry
 """
 from __future__ import annotations
+
+from .assembly import AssemblyStage
+from .classification import ClassificationStage
+from .decomposition import DecompositionStage
+from .enrichment import EnrichmentStage
+from .risk import RiskStage
+from .roster import RosterStage
+from .validation import PlanQualityError, ValidationStage
+
+__all__ = [
+    "AssemblyStage",
+    "ClassificationStage",
+    "DecompositionStage",
+    "EnrichmentStage",
+    "PlanQualityError",
+    "RiskStage",
+    "RosterStage",
+    "ValidationStage",
+]

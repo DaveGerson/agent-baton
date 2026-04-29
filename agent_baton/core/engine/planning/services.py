@@ -64,3 +64,11 @@ class PlannerServices:
     knowledge_registry: "KnowledgeRegistry | None" = None
     bead_store: Any = None
     team_context_root: Path | None = None
+
+    # --- Transitional ---
+    # Reference to the IntelligentPlanner instance.  Bridge stages call
+    # through to legacy ``_step_*`` methods on it.  Each stage commit
+    # that ports its logic in-place removes one of those calls; once no
+    # bridges remain, this field is dropped along with the inheritance
+    # from the legacy class.
+    planner: Any = None
