@@ -507,8 +507,9 @@ class TestEndToEndClassification:
         planner = IntelligentPlanner(task_classifier=KeywordClassifier())
         plan = planner.create_plan("Move 3 files to docs/historical")
         assert plan.complexity == "light"
-        assert len(plan.phases) == 1
-        assert plan.total_steps == 1
+        assert plan.archetype == "direct"
+        assert len(plan.phases) == 2  # DIRECT: Implement + Review
+        assert plan.total_steps == 2
 
     def test_complex_task_produces_heavy_plan(self):
         from agent_baton.core.engine.planner import IntelligentPlanner

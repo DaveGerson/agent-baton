@@ -185,7 +185,7 @@ def _score_task_type(
 # ---------------------------------------------------------------------------
 
 _DIRECT_SIGNALS = re.compile(
-    r"\b(?:rename|move|delete|remove|add|update|change|fix typo|swap|toggle|bump|"
+    r"\b(?:rename|move|delete|remove|add|update|change|typo|swap|toggle|bump|"
     r"set|enable|disable|configure|adjust|tweak|correct)\b",
     re.IGNORECASE,
 )
@@ -250,14 +250,19 @@ class KeywordClassifier:
 
     @staticmethod
     def _detect_archetype(summary: str, task_type: str, complexity: str) -> str:
-        """Infer planning archetype from task signals."""
-        # Investigative: debugging, RCA, triage
-        if task_type == "bug-fix" and _INVESTIGATIVE_SIGNALS.search(summary):
-            return "investigative"
-        if _INVESTIGATIVE_SIGNALS.search(summary) and not _DIRECT_SIGNALS.search(summary):
+        """Infer planning archetype from task signals.
+
+        Precedence: investigative > direct > phased.
+        Investigative intent (debugging, RCA) always wins when present,
+        even if direct signals also match.
+        """
+        has_investigative = _INVESTIGATIVE_SIGNALS.search(summary)
+        has_direct = _DIRECT_SIGNALS.search(summary)
+        # Investigative: debugging, RCA, triage — highest priority
+        if has_investigative:
             return "investigative"
         # Direct: simple, low-complexity, single-concern
-        if complexity == "light" and _DIRECT_SIGNALS.search(summary):
+        if complexity == "light" and has_direct:
             return "direct"
         if complexity == "light" and task_type in ("bug-fix", "refactor", "documentation"):
             return "direct"

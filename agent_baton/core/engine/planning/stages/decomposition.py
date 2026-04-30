@@ -358,7 +358,7 @@ class DecompositionStage:
         from agent_baton.models.execution import PlanPhase, PlanStep, PlanGate
 
         task = draft.task_summary
-        investigate_agent = "general-purpose"
+        investigate_agent = draft.resolved_agents[0] if draft.resolved_agents else "general-purpose"
         fix_agent = draft.resolved_agents[0] if draft.resolved_agents else "backend-engineer"
 
         phases = [

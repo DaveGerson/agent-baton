@@ -102,6 +102,10 @@ class AssemblyStage:
             depends_on_task=draft.depends_on_task_id,
             classification_signals=_classification_signals,
             classification_confidence=_classification_confidence,
+            archetype=draft.planning_archetype,
+            max_retry_phases=(
+                3 if draft.planning_archetype == "investigative" else 0
+            ),
         )
 
         # Step 16 — team cost estimation.

@@ -81,6 +81,8 @@ class ClassificationStage:
         draft.classified_phases = classified_phases
         # Write task classification to draft so AssemblyStage can read it.
         draft.task_classification = task_cls
+        if task_cls is not None and hasattr(task_cls, 'archetype'):
+            draft.planning_archetype = task_cls.archetype
         return draft
 
     # ------------------------------------------------------------------
