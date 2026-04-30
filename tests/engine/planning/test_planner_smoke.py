@@ -132,6 +132,60 @@ class TestComplexityClassification:
         assert infer_task_type("Write documentation for the API") == "documentation"
         assert infer_task_type("Refactor the payment module") == "refactor"
 
+    def test_regression_test_phrase_infers_test_not_bug_fix(self):
+        """'regression' alone is ambiguous; 'regression tests' must map to 'test'.
+
+        Root cause: 'regression' was a bare keyword in the bug-fix list.
+        It fired on 'regression tests', 'regression test suite', etc., causing
+        compound-task decomposition to assign backend-engineer instead of
+        test-engineer to test subtasks.  Fixed by changing to 'regression bug'
+        (a precise two-word phrase that requires substring match).
+        """
+        from agent_baton.core.engine.planning.utils.text_parsers import infer_task_type
+        assert infer_task_type("Write regression tests") == "test"
+        assert infer_task_type("Add regression test coverage") == "test"
+        assert infer_task_type("regression test suite for the parser") == "test"
+
+    def test_regression_bug_phrase_still_infers_bug_fix(self):
+        """'regression bug' (the unambiguous form) still classifies as bug-fix."""
+        from agent_baton.core.engine.planning.utils.text_parsers import infer_task_type
+        assert infer_task_type("Fix the regression bug in payment flow") == "bug-fix"
+
+    def test_compound_task_test_subtask_gets_test_engineer(self):
+        """Compound-task decomposition assigns test-engineer to test subtasks.
+
+        Verifies the full agent-diversity fix: when a numbered compound task
+        contains a 'Write tests' subtask, the roster must include test-engineer,
+        not a duplicate backend-engineer.
+        """
+        from agent_baton.core.engine.planning.utils.text_parsers import (
+            infer_task_type,
+            parse_subtasks,
+        )
+        from agent_baton.core.engine.planning.rules.default_agents import DEFAULT_AGENTS
+
+        summary = (
+            "(1) Implement the new payment endpoint "
+            "(2) Write regression tests for the payment flow"
+        )
+        subtasks = parse_subtasks(summary)
+        assert len(subtasks) >= 2, "Expected at least 2 subtasks"
+
+        subtask_types = [infer_task_type(text) for _, text in subtasks]
+        assert "test" in subtask_types, (
+            f"Expected at least one subtask to be typed 'test', got {subtask_types}"
+        )
+
+        # Collect the default agents for each subtask type and verify diversity.
+        union: list[str] = []
+        for st_type in subtask_types:
+            for a in DEFAULT_AGENTS.get(st_type, ["backend-engineer"]):
+                if a not in union:
+                    union.append(a)
+        assert "test-engineer" in union, (
+            f"test-engineer missing from compound-task union roster: {union}"
+        )
+
 
 # ===================================================================
 # 2. TASK DEPENDENCY DETECTION
