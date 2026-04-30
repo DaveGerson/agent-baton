@@ -296,14 +296,15 @@ class TestApplyResolverDecisionCoversAllKinds:
             "intentionally absent via the defensive RuntimeError at the end)."
         )
 
-    def test_decision_kind_has_exactly_22_members(self) -> None:
-        """DecisionKind must have exactly 22 members — the contract from bd-8083.
+    def test_decision_kind_has_exactly_23_members(self) -> None:
+        """DecisionKind must have exactly 23 members.
 
-        If this number changes (a new kind is added or an old one removed),
-        this test fails fast so the change is reviewed intentionally rather
-        than silently landing an uncovered arm.
+        Originally 22 (bd-8083); RETRY_PHASE added for the investigative
+        archetype.  If this number changes, the test fails fast so the change
+        is reviewed intentionally rather than silently landing an uncovered
+        arm.
         """
-        assert len(DecisionKind) == 22, (
-            f"Expected 22 DecisionKind members, found {len(DecisionKind)}: "
+        assert len(DecisionKind) == 23, (
+            f"Expected 23 DecisionKind members, found {len(DecisionKind)}: "
             f"{[d.name for d in DecisionKind]}"
         )

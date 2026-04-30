@@ -5263,6 +5263,16 @@ class ExecutionEngine:
             self._publish_phase_started(state)
             return None  # loop
 
+        # ── RETRY_PHASE: investigative archetype loops back to step 0 ───────
+        if kind == DecisionKind.RETRY_PHASE:
+            # Resolver enforces the max_retry_phases ceiling before emitting
+            # this decision.  phase_manager.retry_phase tracks the retry count
+            # in state.speculations["_phase_retries"] so it persists across
+            # CLI calls.
+            self._phase_manager.retry_phase(state)
+            self._persistence.save(state)
+            return None  # loop — next determine_next() re-dispatches step 0
+
         # Defensive: should be unreachable — every DecisionKind is handled.
         raise RuntimeError(
             f"_apply_resolver_decision received unhandled DecisionKind: {kind!r}"
