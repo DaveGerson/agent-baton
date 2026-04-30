@@ -63,25 +63,11 @@ cymbal impact <symbol>          # blast radius before edits
 | Variable | Purpose | Default |
 |----------|---------|---------|
 | `BATON_TASK_ID` | Target a specific execution in multi-task scenarios | auto-detected |
-| `BATON_APPROVAL_MODE` | `local` (self-approve) or `team` (different reviewer required). In `team` mode, `baton swarm` defaults `--require-approval-bead` ON. | `local` |
+| `BATON_APPROVAL_MODE` | `local` (self-approve) or `team` (different reviewer required) | `local` |
 | `BATON_DB_PATH` | Override per-project `baton.db` location | discovered |
-| `BATON_SELFHEAL_ENABLED` | Enable speculator/selfheal escalation on gate failure. Falsy values (`0`, `false`, `no`) are honoured and emit a `selfheal_suppressed` row to `compliance-audit.jsonl`. | `0` |
-| `BATON_RUN_TOKEN_CEILING` | Per-run cumulative spend cap (USD float). Read fresh on every check; restored on `baton execute resume`. Selfheal/speculator/immune respect it; main `Executor.dispatch()` only warns at HIGH/CRITICAL run start (bd-3f80). | unset |
-| `BATON_WORKTREE_STALE_HOURS` | Worktree GC stale threshold in hours; legacy alias `BATON_WORKTREE_GC_HOURS`. GC runs on every `baton execute complete` (PR #72). | `4` |
-| `BATON_EXPERIMENTAL` | CSV opt-in for experimental subsystems. Required for `baton swarm` (`BATON_EXPERIMENTAL=swarm`). | unset |
-| `BATON_SWARM_ENABLED` | Required in addition to `BATON_EXPERIMENTAL=swarm` to dispatch a swarm refactor. | unset |
-| `BATON_SOULS_ENABLED` | Wave 6.1 Part B persistent agent souls (signing + revocation). | `0` |
-| `BATON_EXEC_BEADS_ENABLED` | Wave 6.1 Part C executable beads. Sandbox is process-level only — see `references/baton-patterns.md` trust-boundary section before extending to external-origin input. | `0` |
-| `BATON_SKIP_GIT_NOTES_SETUP` | Silence install-time git-notes refspec setup and the runtime warning emitted by `NotesAdapter.write()` when the wildcard refspec is missing. | unset |
+| `BATON_RUN_TOKEN_CEILING` | Hard kill the loop above N tokens | unset |
+| `BATON_EXPERIMENTAL` | Comma list to enable experimental subsystems (e.g., `swarm`) | unset |
 | `ANTHROPIC_API_KEY` | Required for AI risk classification and Haiku classifier | unset |
-
-### Known integration gaps as of 2026-04-28
-
-| Gap | Bead | Surface |
-|-----|------|---------|
-| Executor wiring of `BATON_RUN_TOKEN_CEILING` | bd-3f80 | Selfheal/speculator/immune respect the cap; `Executor.dispatch()` only warns at run start. |
-| Soul caller migration | bd-1ca2 | Existing `soul.verify` callers not yet routed through revocation-aware `SoulRouter.verify_signature()`. |
-| Wave 6.1 Part A integration | bd-971d | Git-notes bead persistence + executor BeadStore handoff is partial. |
 
 ## Regulated-domain rules
 
