@@ -14,6 +14,7 @@ PHASE_NAMES: dict[str, list[str]] = {
     "audit": ["Prepare", "Audit", "Synthesize", "Review"],
     "assessment": ["Research", "Assess", "Synthesize", "Review"],
     "generic": ["Investigate", "Implement", "Test", "Review"],
+    "investigation": ["Investigate", "Hypothesize", "Fix", "Verify"],
 }
 
 # Used when the task type is unknown and no other source supplies a list.
@@ -32,6 +33,7 @@ SUBTASK_PHASE_NAMES: dict[str, str] = {
     "documentation": "Document",
     "audit": "Audit",
     "assessment": "Assess",
+    "investigation": "Investigate",
 }
 
 # Phase name (lower-cased) → human-readable verb used in step descriptions.
@@ -48,6 +50,8 @@ PHASE_VERBS: dict[str, str] = {
     "audit": "Audit and evaluate",
     "assess": "Assess and evaluate",
     "synthesize": "Synthesize findings and produce recommendations for",
+    "hypothesize": "Form and test hypotheses about",
+    "verify": "Verify root-cause resolution of",
 }
 
 
