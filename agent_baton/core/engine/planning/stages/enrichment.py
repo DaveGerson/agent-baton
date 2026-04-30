@@ -72,6 +72,15 @@ class EnrichmentStage:
             risk_level_enum=draft.risk_level_enum,
         )
 
+        # Decision-capture INTERACT injection for PHASED HIGH/CRITICAL plans
+        self._apply_decision_capture(
+            draft.plan_phases,
+            archetype=getattr(draft, 'planning_archetype', 'phased'),
+            risk_level_enum=draft.risk_level_enum,
+            resolved_agents=draft.resolved_agents,
+            services=services,
+        )
+
         # Step 12b+12b-bis — approval gates + concern-split.
         split_phase_ids = self._apply_approval_gates(
             draft.plan_phases,
@@ -447,3 +456,104 @@ class EnrichmentStage:
                 if hasattr(step, 'max_estimated_minutes'):
                     if step.max_estimated_minutes == 0 or step.max_estimated_minutes > max_minutes:
                         step.max_estimated_minutes = max_minutes
+
+    # Canonical header used as idempotency sentinel — checked in both injection
+    # and duplicate detection.
+    _DECISION_CAPTURE_HEADER = (
+        "Before design begins, capture upfront decisions to prevent drift. Please answer:"
+    )
+
+    def _apply_decision_capture(
+        self,
+        plan_phases: list["PlanPhase"],
+        *,
+        archetype: str,
+        risk_level_enum: "RiskLevel | None",
+        resolved_agents: list[str],
+        services: PlannerServices,
+    ) -> None:
+        """Inject a decision-capture INTERACT step at the head of the Design phase.
+
+        Trigger condition — all three must hold:
+        - archetype is "phased"
+        - risk_level is HIGH or CRITICAL
+        - the phase list contains a "Design" phase (PHASED_CONFIG's first phase)
+
+        The injected step asks three upfront questions before any agent begins
+        coding, preventing premature drift caused by unrecorded decisions.
+        """
+        from agent_baton.models.enums import RiskLevel
+        from agent_baton.models.execution import PlanStep
+
+        # Gate 1: only PHASED archetype has decision_capture=True
+        config = get_archetype_config(archetype)
+        if not config.decision_capture:
+            return
+
+        # Gate 2: only HIGH and CRITICAL risk
+        if risk_level_enum not in (RiskLevel.HIGH, RiskLevel.CRITICAL):
+            return
+
+        # Gate 3: find the Design phase (first phase of PHASED_CONFIG template)
+        design_phase = next(
+            (p for p in plan_phases if p.name.lower().split(":")[0].strip() == "design"),
+            None,
+        )
+        if design_phase is None:
+            return
+
+        # Idempotency: skip if an interact step with the canonical header already exists
+        for step in design_phase.steps:
+            if (
+                getattr(step, 'step_type', '') == "consulting"
+                and getattr(step, 'interactive', False)
+                and self._DECISION_CAPTURE_HEADER in getattr(step, 'task_description', '')
+            ):
+                logger.debug(
+                    "_apply_decision_capture: decision-capture step already present "
+                    "in Design phase — skipping injection"
+                )
+                return
+
+        # Resolve the agent: prefer "architect" when available in the registry
+        registry = services.registry
+        agent_name = "architect" if registry.get("architect") is not None else (
+            resolved_agents[0] if resolved_agents else "architect"
+        )
+
+        description = (
+            f"{self._DECISION_CAPTURE_HEADER}\n\n"
+            "1. What are the explicit success criteria for this task?\n"
+            "2. What constraints or non-goals must we respect?\n"
+            "3. Any decisions already made (architecture, library, API shape) "
+            "we should not relitigate?"
+        )
+
+        # Shift existing step IDs to make room at position 0
+        for step in design_phase.steps:
+            parts = step.step_id.split(".")
+            if len(parts) == 2 and parts[0] == str(design_phase.phase_id):
+                try:
+                    step.step_id = f"{parts[0]}.{int(parts[1]) + 1}"
+                except ValueError:
+                    pass
+
+        capture_step = PlanStep(
+            step_id=f"{design_phase.phase_id}.1",
+            agent_name=agent_name,
+            task_description=description,
+            step_type="consulting",
+            interactive=True,
+            max_turns=3,
+            max_estimated_minutes=5,
+        )
+        design_phase.steps.insert(0, capture_step)
+
+        logger.info(
+            "_apply_decision_capture: injected decision-capture step %s "
+            "into Design phase (phase_id=%d, agent=%s, risk=%s)",
+            capture_step.step_id,
+            design_phase.phase_id,
+            agent_name,
+            risk_level_enum.value if risk_level_enum else "?",
+        )
