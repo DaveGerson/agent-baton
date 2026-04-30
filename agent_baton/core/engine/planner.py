@@ -920,6 +920,7 @@ class IntelligentPlanner:
         task_classifier: TaskClassifier | None = None,
         bead_store=None,  # BeadStore | None (F4 planning capture, F7 BeadAnalyzer)
         project_config: "ProjectConfig | None" = None,
+        emit_beads: bool = True,
     ) -> None:
         # Optional baton.yaml-driven project config.  When None, the
         # planner discovers it once via ProjectConfig.load() (best
@@ -960,6 +961,12 @@ class IntelligentPlanner:
         # F7 BeadAnalyzer plan enrichment.
         # Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
         self._bead_store = bead_store
+
+        # When False, suppress all planning-bead emission from _step_emit_telemetry.
+        # Intended for test contexts where a real bead_store is injected but bead
+        # pollution of the active store must be prevented.  Default True preserves
+        # all production behaviour.  bd-9de9.
+        self._emit_beads: bool = emit_beads
 
         # Populated during create_plan for use in explain_plan
         self._last_pattern_used: LearnedPattern | None = None
@@ -2046,7 +2053,9 @@ class IntelligentPlanner:
         """
         # F4 — Planning Decision Capture: persist key planner decisions as beads.
         # Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
-        if self._bead_store is not None:
+        # bd-9de9: guarded by self._emit_beads so test contexts can suppress
+        # pollution of the active store via IntelligentPlanner(emit_beads=False).
+        if self._bead_store is not None and self._emit_beads:
             try:
                 self._capture_planning_bead(
                     task_id=task_id,
