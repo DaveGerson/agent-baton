@@ -56,7 +56,7 @@ def render_compact(snapshot: PlanSnapshot, console: Console | None = None) -> No
             return
 
     _render_phase_bar(console, snapshot, current)
-    _render_step_chips(console, current)
+    _render_all_steps(console, snapshot)
 
 
 def _render_phase_bar(
@@ -68,105 +68,135 @@ def _render_phase_bar(
     total_phases = len(snap.phases)
     pct = snap.progress_pct
 
-    # Status marker
     markers: dict[str, tuple[str, str]] = {
-        "running": ("●", "cyan"),
-        "gate_pending": ("●", "yellow"),
-        "complete": ("✓", "green"),
-        "failed": ("✗", "red"),
-        "pending": ("○", "dim"),
+        "running": ("🔥", "bold yellow"),
+        "gate_pending": ("🛎", "bold yellow"),
+        "complete": ("🍽", "bold green"),
+        "failed": ("💥", "bold red"),
+        "pending": ("🥟", "dim"),
     }
-    marker_char, marker_style = markers.get(phase.status, ("○", "dim"))
+    marker_char, marker_style = markers.get(phase.status, ("🥟", "dim"))
+
+    # Phase progress pips: ■ for done, ▪ for current, □ for pending
+    pips = Text()
+    for i, p in enumerate(snap.phases):
+        if p.status == "complete":
+            pips.append("■", style="green")
+        elif p.status in ("running", "gate_pending"):
+            pips.append("▣", style="bold cyan")
+        elif p.status == "failed":
+            pips.append("■", style="red")
+        else:
+            pips.append("□", style="dim")
 
     line = Text()
-    line.append("── ", style="dim")
-    line.append(marker_char, style=marker_style)
-    line.append(f" Phase {phase.phase_id}/{total_phases}: ", style="bold")
-    line.append(_truncate(phase.name, 25))
-    line.append(" ─── ", style="dim")
-    line.append(f"{pct:.0f}% ", style="bold cyan")
-
-    # Progress bar (20 chars)
-    bar_width = 20
-    filled = int(pct / 100 * bar_width)
-    line.append("█" * filled, style="cyan")
-    line.append("░" * (bar_width - filled), style="dim")
-
-    line.append(" ── ", style="dim")
-    line.append(f"{snap.steps_complete}/{snap.total_steps} done", style="white")
-
-    if snap.steps_running > 0:
-        line.append(f" · {snap.steps_running} running", style="cyan")
-    if snap.steps_failed > 0:
-        line.append(f" · {snap.steps_failed} failed", style="red")
-    if snap.total_cost_usd > 0:
-        line.append(f" · ${snap.total_cost_usd:.2f}", style="dim")
-
-    line.append(" ──", style="dim")
-
+    line.append("  ")
+    line.append(marker_char)
+    line.append(f" Phase {phase.phase_id}/{total_phases} ", style="bold")
+    line.append_text(pips)
+    line.append(f"  {_truncate(phase.name, 30)}", style="bold white")
     console.print(line)
 
+    # Progress bar line
+    bar_width = 32
+    filled = int(pct / 100 * bar_width)
+    bar = Text("  ")
+    bar.append("  ")
+    bar.append("▓" * filled, style="bold cyan")
+    bar.append("░" * (bar_width - filled), style="dim")
+    bar.append(f" {pct:.0f}%", style="bold white")
+    bar.append(f"  {snap.steps_complete}/{snap.total_steps} done", style="white")
+    if snap.steps_running > 0:
+        bar.append(f" · {snap.steps_running} baking", style="yellow")
+    if snap.steps_failed > 0:
+        bar.append(f" · {snap.steps_failed} burnt", style="red")
+    if snap.total_cost_usd > 0:
+        bar.append(f"  ${snap.total_cost_usd:.2f}", style="dim")
+    if snap.elapsed_seconds > 0:
+        bar.append(f"  {_format_duration(snap.elapsed_seconds)}", style="dim")
+    console.print(bar)
 
-def _render_step_chips(console: Console, phase: PhaseSnapshot) -> None:
-    """Render step status chips on the second line."""
+
+def _render_all_steps(console: Console, snap: PlanSnapshot) -> None:
+    """Render ALL steps across ALL phases as the full pipeline chain."""
     markers: dict[str, tuple[str, str]] = {
         "complete": ("✓", "green"),
-        "running": ("●", "cyan"),
-        "dispatched": ("●", "cyan"),
-        "failed": ("✗", "red"),
-        "pending": ("○", "dim"),
-        "skipped": ("⊘", "dim"),
-        "interrupted": ("●", "yellow"),
-        "interacting": ("●", "bright_cyan"),
+        "running": ("◉", "bold cyan"),
+        "dispatched": ("◉", "bold cyan"),
+        "failed": ("✗", "bold red"),
+        "pending": ("·", "dim"),
+        "skipped": ("—", "dim"),
+        "interrupted": ("!", "yellow"),
+        "interacting": ("↔", "bright_cyan"),
     }
 
-    line = Text("   ")
-    for i, step in enumerate(phase.steps):
-        if i > 0:
-            line.append("  ")
-        char, style = markers.get(step.status, ("○", "dim"))
-        line.append(char, style=style)
-        line.append(f" {step.step_id} ", style=style)
-        # Truncate agent name to fit
-        agent = step.agent_name
-        if agent == "team" and step.team:
-            agent = step.team[0].agent_name
-        agent_short = agent[:15]
-        line.append(agent_short, style=style)
+    phase_emoji: dict[str, str] = {
+        "complete": "🍽",
+        "running": "🔥",
+        "gate_pending": "👅",
+        "failed": "💥",
+        "pending": "🥟",
+    }
 
-    console.print(line)
+    for phase in snap.phases:
+        emoji = phase_emoji.get(phase.status, "🥟")
+        p_style = "bold white" if phase.status in ("running", "gate_pending") else "dim" if phase.status == "pending" else "green" if phase.status == "complete" else "red"
+
+        line = Text("     ")
+        line.append(emoji)
+        line.append(f" {phase.phase_id}.", style=p_style)
+
+        for i, step in enumerate(phase.steps):
+            if i > 0:
+                line.append(" ", style="dim")
+            char, style = markers.get(step.status, ("·", "dim"))
+            line.append(char, style=style)
+            agent = step.agent_name
+            if agent == "team" and step.team:
+                agent = step.team[0].agent_name
+            line.append(f"{agent[:12]}", style=style)
+
+        # Gate indicator
+        if phase.gate:
+            g = phase.gate
+            if g.status == "passed":
+                line.append(" ✓gate", style="green")
+            elif g.status == "failed":
+                line.append(" ✗gate", style="bold red")
+
+        console.print(line)
 
 
 def _render_complete_bar(console: Console, snap: PlanSnapshot) -> None:
     """Render completion summary bar."""
     if snap.execution_status == "complete":
-        marker = "✓"
-        marker_style = "green"
-        label = "COMPLETE"
+        emoji = "🍽"
+        marker_style = "bold green"
+        label = "SERVED"
     elif snap.execution_status == "failed":
-        marker = "✗"
-        marker_style = "red"
-        label = "FAILED"
+        emoji = "💥"
+        marker_style = "bold red"
+        label = "BURNT"
     else:
-        marker = "⊘"
-        marker_style = "yellow"
+        emoji = "🛎"
+        marker_style = "bold yellow"
         label = snap.execution_status.upper()
 
     elapsed = _format_duration(snap.elapsed_seconds)
 
     line = Text()
-    line.append("═══ ", style="dim")
-    line.append(marker, style=marker_style)
-    line.append(f" {label} ", style=f"bold {marker_style}")
-    line.append("═══ ", style="dim")
+    line.append("  ")
+    line.append(emoji)
+    line.append(f" {label} ", style=marker_style)
+    line.append("━━ ", style="dim")
     line.append(f"{len(snap.phases)} phases · {snap.total_steps} steps", style="white")
     if snap.total_tokens > 0:
-        line.append(f" · {snap.total_tokens:,} tokens", style="dim")
+        line.append(f" · {snap.total_tokens:,} tok", style="dim")
     if snap.total_cost_usd > 0:
         line.append(f" · ${snap.total_cost_usd:.2f}", style="dim")
     if snap.elapsed_seconds > 0:
         line.append(f" · {elapsed}", style="dim")
-    line.append(" ═══", style="dim")
+    line.append(" ━━", style="dim")
 
     console.print(line)
 

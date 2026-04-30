@@ -132,11 +132,13 @@ def handler(args: argparse.Namespace) -> None:
     if args.compact:
         from agent_baton.visualize.compact import render_compact
         render_compact(snapshot)
+        _print_viz_path()
         return
 
     from agent_baton.visualize.cli_renderer import render
 
     render(snapshot)
+    _print_viz_path()
 
 
 def _serve_web(snapshot: PlanSnapshot, port: int) -> None:
@@ -170,6 +172,31 @@ def _serve_web(snapshot: PlanSnapshot, port: int) -> None:
         server.serve_forever()
     except KeyboardInterrupt:
         server.shutdown()
+
+
+def _print_viz_path() -> None:
+    """Print the path to viz.html if it exists."""
+    from pathlib import Path as P
+
+    from agent_baton.cli._context import resolve_context_root
+
+    ctx = resolve_context_root()
+    viz = ctx / "viz.html"
+    if viz.exists():
+        try:
+            from rich.console import Console
+            from rich.text import Text
+
+            c = Console(stderr=True)
+            line = Text()
+            line.append("  📊 ", style="dim")
+            line.append("Open in browser: ", style="dim")
+            line.append(f"file://{viz.resolve()}", style="underline cyan")
+            c.print(line)
+        except ImportError:
+            import sys
+
+            print(f"  Viz: file://{viz.resolve()}", file=sys.stderr)
 
 
 def _find_free_port() -> int:

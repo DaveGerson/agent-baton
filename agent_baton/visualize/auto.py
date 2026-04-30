@@ -46,10 +46,12 @@ def auto_viz(
         except Exception as exc:
             _log.debug("auto_viz: compact render failed: %s", exc)
 
-    # 2. Auto-save HTML snapshot
+    # 2. Auto-save HTML snapshot and print link
     if context_root is not None:
         try:
-            _save_html_snapshot(snapshot, context_root, getattr(state, "task_id", ""))
+            viz_path = _save_html_snapshot(snapshot, context_root, getattr(state, "task_id", ""))
+            if viz_path and not quiet:
+                _print_viz_link(viz_path)
         except Exception as exc:
             _log.debug("auto_viz: HTML save failed: %s", exc)
 
@@ -81,7 +83,9 @@ def auto_viz_from_plan(
     if context_root is not None:
         try:
             task_id = getattr(plan, "task_id", "")
-            _save_html_snapshot(snapshot, context_root, task_id)
+            viz_path = _save_html_snapshot(snapshot, context_root, task_id)
+            if viz_path:
+                _print_viz_link(viz_path)
         except Exception as exc:
             _log.debug("auto_viz_from_plan: HTML save failed: %s", exc)
 
@@ -90,13 +94,15 @@ def _save_html_snapshot(
     snapshot: object,
     context_root: Path,
     task_id: str,
-) -> None:
+) -> Path | None:
     """Save HTML visualization to a predictable location.
 
     Writes to two locations:
 
     1. ``.claude/team-context/viz.html`` -- latest execution (always overwritten)
     2. ``.claude/team-context/executions/<task_id>/viz.html`` -- per-execution archive
+
+    Returns the path to the latest viz.html, or None on failure.
     """
     from agent_baton.visualize.web_renderer import render_html
 
@@ -112,3 +118,23 @@ def _save_html_snapshot(
         if exec_dir.is_dir():
             exec_path = exec_dir / "viz.html"
             exec_path.write_text(html, encoding="utf-8")
+
+    return latest_path
+
+
+def _print_viz_link(viz_path: Path) -> None:
+    """Print a clickable link to the viz HTML file."""
+    import sys
+
+    try:
+        from rich.console import Console
+        from rich.text import Text
+
+        c = Console(stderr=True)
+        line = Text()
+        line.append("  📊 ", style="dim")
+        line.append("Viz: ", style="dim")
+        line.append(f"file://{viz_path.resolve()}", style="underline cyan")
+        c.print(line)
+    except ImportError:
+        print(f"  Viz: file://{viz_path.resolve()}", file=sys.stderr)
