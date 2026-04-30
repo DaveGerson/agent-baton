@@ -47,6 +47,12 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         metavar="PATH",
         help="Write HTML to file instead of serving",
     )
+    p.add_argument(
+        "--compact",
+        action="store_true",
+        default=False,
+        help="Show compact 2-line status summary",
+    )
     return p
 
 
@@ -121,6 +127,11 @@ def handler(args: argparse.Namespace) -> None:
 
     if args.web:
         _serve_web(snapshot, args.port)
+        return
+
+    if args.compact:
+        from agent_baton.visualize.compact import render_compact
+        render_compact(snapshot)
         return
 
     from agent_baton.visualize.cli_renderer import render

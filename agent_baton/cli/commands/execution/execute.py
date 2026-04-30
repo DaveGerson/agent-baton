@@ -965,6 +965,12 @@ def handler(args: argparse.Namespace) -> None:
                 print(_DRY_RUN_BANNER)
             print(f"Session binding: export BATON_TASK_ID={task_id}\n")
             _print_action(action.to_dict())
+            # Auto-viz: show initial plan status
+            try:
+                from agent_baton.visualize.auto import auto_viz
+                auto_viz(engine._state, context_root=context_root)
+            except Exception:
+                pass
 
     elif args.subcommand == "next":
         terse = getattr(args, "terse", False)
@@ -1110,6 +1116,12 @@ def handler(args: argparse.Namespace) -> None:
             print(json.dumps(payload))
         else:
             print(f"Recorded: step {args.step_id} ({args.agent}) — {args.status}")
+            # Auto-viz: update status display and HTML snapshot
+            try:
+                from agent_baton.visualize.auto import auto_viz
+                auto_viz(engine._state, context_root=context_root)
+            except Exception:
+                pass
 
     elif args.subcommand == "gate":
         # Wave 4.1 — opt-in CI gate via manual CLI.  When --type=ci is
@@ -1189,6 +1201,13 @@ def handler(args: argparse.Namespace) -> None:
             # remind the operator to record a session handoff.
             if not passed:
                 _maybe_handoff_nudge({"action_type": "gate_fail"}, task_id, context_root)
+        # Auto-viz: update status display and HTML snapshot after gate
+        if getattr(args, "output", "text") != "json":
+            try:
+                from agent_baton.visualize.auto import auto_viz
+                auto_viz(engine._state, context_root=context_root)
+            except Exception:
+                pass
 
     elif args.subcommand == "approve":
         engine.record_approval_result(
@@ -1309,6 +1328,14 @@ def handler(args: argparse.Namespace) -> None:
         # session handoff if they have not already done so.
         if getattr(args, "output", "text") != "json":
             _maybe_handoff_nudge({"action_type": "complete"}, task_id, context_root)
+
+        # Auto-viz: final execution visualization + HTML snapshot
+        if getattr(args, "output", "text") != "json":
+            try:
+                from agent_baton.visualize.auto import auto_viz
+                auto_viz(engine._state, context_root=context_root)
+            except Exception:
+                pass
 
     elif args.subcommand == "status":
         st = engine.status()
