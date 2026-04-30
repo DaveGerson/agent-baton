@@ -215,6 +215,18 @@ records, or industry-specific business rules MUST:
 - Involve the `auditor` agent for pre-execution and post-execution review
 - Follow the Regulated Data guardrail preset
 
+## Code Navigation
+
+If `cymbal` is installed, prefer it over grep for symbol lookup:
+
+```bash
+cymbal investigate <symbol>     # source, callers, callees
+cymbal impact <symbol>          # blast radius before edits
+cymbal refs <symbol>            # find references
+```
+
+Falls back to grep if cymbal is not available.
+
 ## Agent Invocation
 
 For complex tasks involving 3+ files across different domains, use the
