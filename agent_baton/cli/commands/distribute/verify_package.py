@@ -1,6 +1,6 @@
 """``baton verify-package`` -- DEPRECATED alias.
 
-Use ``baton sync --verify ARCHIVE`` instead.
+Use ``baton install verify ARCHIVE`` instead.
 
 This module keeps the old top-level ``baton verify-package`` command working
 so that existing scripts and CI pipelines are not broken.  A deprecation
@@ -15,9 +15,9 @@ import sys
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     p = subparsers.add_parser(
         "verify-package",
-        help="[DEPRECATED] Use 'baton sync --verify ARCHIVE' instead",
+        help="[DEPRECATED] Use 'baton install verify ARCHIVE' instead",
         description=(
-            "DEPRECATED: Use 'baton sync --verify ARCHIVE' instead.\n\n"
+            "DEPRECATED: Use 'baton install verify ARCHIVE' instead.\n\n"
             "Validates a .tar.gz agent-baton package before distribution."
         ),
     )
@@ -37,7 +37,7 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
 
 def handler(args: argparse.Namespace) -> None:
     print(
-        "warning: `baton verify-package` is deprecated; use `baton sync --verify ARCHIVE`"
+        "warning: `baton verify-package` is deprecated; use `baton install verify ARCHIVE`"
         " instead. This alias will be removed in a future release.",
         file=sys.stderr,
     )
