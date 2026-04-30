@@ -22,7 +22,7 @@ RISK_SIGNALS: dict[str, RiskLevel] = {
     "terraform": RiskLevel.HIGH,
     "compliance": RiskLevel.HIGH,
     "regulated": RiskLevel.HIGH,
-    "audit": RiskLevel.HIGH,
+    "audit": RiskLevel.MEDIUM,
     "migration": RiskLevel.MEDIUM,
     "database": RiskLevel.MEDIUM,
     "schema": RiskLevel.MEDIUM,

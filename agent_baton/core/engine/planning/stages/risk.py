@@ -156,7 +156,7 @@ class RiskStage:
             if classifier_ordinal > keyword_ordinal:
                 risk_level = classification.risk_level.value
 
-        # CLI-validated classifier attaches a risk hint from its AI review.
+        # TalentAgentClassifier attaches a risk hint from its AI review.
         # Use max(current, hint) so AI judgment can escalate but not lower.
         cli_risk_hint = getattr(
             services.task_classifier, "_last_cli_risk_hint", None

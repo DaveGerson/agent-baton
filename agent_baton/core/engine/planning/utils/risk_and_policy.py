@@ -60,10 +60,6 @@ def assess_risk(task_summary: str, agents: list[str]) -> str:
     if len(agents) > 5:
         score = max(score, 1)
 
-    _SENSITIVE_AGENTS = {"security-reviewer", "auditor", "devops-engineer"}
-    if any(a in _SENSITIVE_AGENTS or a.startswith("devops") for a in agents):
-        score = max(score, 1)
-
     _DESTRUCTIVE_VERBS = {
         "delete", "remove", "drop", "destroy", "reset",
         "purge", "wipe", "truncate",
@@ -75,15 +71,17 @@ def assess_risk(task_summary: str, agents: list[str]) -> str:
     _READONLY_FIRST_WORDS = {
         "review", "analyze", "analyse", "investigate", "audit",
         "inspect", "check", "examine", "read", "list",
-        "show", "report", "summarize",
+        "show", "report", "summarize", "assess", "evaluate",
+        "explore", "document", "describe", "compare", "summarise",
     }
     desc_lower_words = task_summary.lower().split()
     first_word = desc_lower_words[0] if desc_lower_words else ""
-    sensitive_agents_present = any(
-        a in _SENSITIVE_AGENTS or a.startswith("devops") for a in agents
-    )
-    if first_word in _READONLY_FIRST_WORDS and not sensitive_agents_present:
-        score = min(score, 0)
+    if first_word in _READONLY_FIRST_WORDS:
+        score = max(score - 1, 0)
+
+    _SENSITIVE_AGENTS = {"security-reviewer", "auditor", "devops-engineer"}
+    if any(a in _SENSITIVE_AGENTS or a.startswith("devops") for a in agents):
+        score = max(score, 1)
 
     _LEVELS = {0: "LOW", 1: "MEDIUM", 2: "HIGH"}
     return _LEVELS[score]

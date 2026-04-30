@@ -136,16 +136,12 @@ class TestClassifierFallback:
             f"Word-boundary check failed: got {result!r} for substring-containing input"
         )
 
-    def test_keyword_classifier_does_not_call_haiku(self) -> None:
+    def test_keyword_classifier_is_deterministic(self) -> None:
         registry = MagicMock()
         registry.agents = {}
 
-        with patch(
-            "agent_baton.core.engine.classifier._call_haiku",
-            side_effect=AssertionError("KeywordClassifier must not call Haiku"),
-        ):
-            clf = KeywordClassifier()
-            result = clf.classify("Fix the broken auth endpoint", registry)
+        clf = KeywordClassifier()
+        result = clf.classify("Fix the broken auth endpoint", registry)
 
         assert result.task_type == "bug-fix"
         assert result.source == "keyword-fallback"

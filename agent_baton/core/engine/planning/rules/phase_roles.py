@@ -21,7 +21,10 @@ PHASE_IDEAL_ROLES: dict[str, list[str]] = {
     # auditor are on the safety roster.  code-reviewer takes "Review"; auditor
     # takes "Audit".  Keeping them in separate phases avoids the one-agent-per-
     # phase limit in Pass 1 of assign_agents_to_phases().
-    "audit": ["auditor", "code-reviewer", "security-reviewer"],
+    "audit": ["auditor", "code-reviewer", "security-reviewer", "architect"],
+    "prepare": ["architect", "subject-matter-expert", "data-analyst"],
+    "assess": ["architect", "auditor", "code-reviewer", "data-analyst"],
+    "synthesize": ["architect", "data-analyst", "subject-matter-expert"],
 }
 
 # Phase → set of agent roles that must NOT land on this phase.

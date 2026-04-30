@@ -164,7 +164,10 @@ def default_gate(
 ) -> PlanGate | None:
     """Return an appropriate QA gate for a phase name."""
     name_lower = phase_name.lower()
-    if name_lower in ("investigate", "research", "review", "design", "feedback"):
+    if name_lower in (
+        "investigate", "research", "review", "design", "feedback",
+        "prepare", "audit", "assess", "synthesize",
+    ):
         return None
 
     language = stack.language if stack else None

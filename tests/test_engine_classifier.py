@@ -2,17 +2,15 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from agent_baton.core.engine.classifier import (
     FallbackClassifier,
-    HaikuClassifier,
     KeywordClassifier,
+    TalentAgentClassifier,
     TaskClassification,
-    _haiku_available,
     _score_task_type,
 )
 from agent_baton.core.orchestration.registry import AgentRegistry
@@ -205,228 +203,140 @@ class TestKeywordClassifierRegistryAwareness:
 
 
 # ---------------------------------------------------------------------------
-# Task 3: HaikuClassifier
+# Task 3 / Task 4: TalentAgentClassifier
 # ---------------------------------------------------------------------------
 
-class TestHaikuClassifier:
-    def setup_method(self):
-        self.registry = _make_registry()
-
-    def test_builds_prompt_with_all_agents(self):
-        classifier = HaikuClassifier()
-        prompt = classifier._build_prompt("Move 3 files", self.registry)
-        assert "Move 3 files" in prompt
-        assert "backend-engineer:" in prompt or "backend-engineer --" in prompt
-        assert "data-engineer--databricks:" in prompt or "data-engineer--databricks --" in prompt
-
-    def test_parses_valid_json_response(self):
-        classifier = HaikuClassifier()
-        response_json = json.dumps({
-            "task_type": "migration",
-            "complexity": "light",
-            "agents": ["backend-engineer"],
-            "phases": ["Implement"],
-            "reasoning": "Simple file move, no architecture needed",
-        })
-        result = classifier._parse_response(response_json, self.registry)
-        assert result.task_type == "migration"
-        assert result.complexity == "light"
-        assert result.agents == ["backend-engineer"]
-        assert result.source == "haiku"
-
-    def test_rejects_agents_not_in_registry(self):
-        classifier = HaikuClassifier()
-        response_json = json.dumps({
-            "task_type": "migration",
-            "complexity": "light",
-            "agents": ["made-up-agent", "backend-engineer"],
-            "phases": ["Implement"],
-            "reasoning": "test",
-        })
-        result = classifier._parse_response(response_json, self.registry)
-        assert "made-up-agent" not in result.agents
-        assert "backend-engineer" in result.agents
-
-    def test_raises_on_empty_agents_after_filtering(self):
-        classifier = HaikuClassifier()
-        response_json = json.dumps({
-            "task_type": "migration",
-            "complexity": "light",
-            "agents": ["made-up-agent"],
-            "phases": ["Implement"],
-            "reasoning": "test",
-        })
-        with pytest.raises(ValueError, match="agents"):
-            classifier._parse_response(response_json, self.registry)
-
-    def test_raises_on_invalid_json(self):
-        classifier = HaikuClassifier()
-        with pytest.raises(ValueError):
-            classifier._parse_response("not json", self.registry)
-
-    @patch("agent_baton.core.engine.classifier._call_haiku")
-    def test_classify_calls_api(self, mock_call):
-        mock_call.return_value = json.dumps({
-            "task_type": "migration",
-            "complexity": "light",
-            "agents": ["backend-engineer"],
-            "phases": ["Implement"],
-            "reasoning": "Simple file move",
-        })
-        classifier = HaikuClassifier()
-        result = classifier.classify("Move 3 files", self.registry)
-        assert result.complexity == "light"
-        assert result.source == "haiku"
-        mock_call.assert_called_once()
-
-
-# ---------------------------------------------------------------------------
-# Task 4: FallbackClassifier
-# ---------------------------------------------------------------------------
-
-class TestFallbackClassifier:
-    """Tests for FallbackClassifier.classify() — API-call-level behavior.
-
-    These tests assume Haiku is structurally available (SDK + key present),
-    so they patch both ``_haiku_available`` to return ``(True, "")`` and
-    ``_call_haiku`` to control what the API returns.  Tests for the
-    pre-flight (no SDK / no key) path live in TestFallbackClassifierPreFlight.
-    """
+class TestTalentAgentClassifier:
+    """Tests for TalentAgentClassifier._parse_response."""
 
     def setup_method(self):
         self.registry = _make_registry()
-        # Patch _haiku_available so all tests in this class see Haiku as
-        # structurally available.  Individual tests then control _call_haiku
-        # to exercise success and transient-failure paths.
-        self._avail_patcher = patch(
-            "agent_baton.core.engine.classifier._haiku_available",
-            return_value=(True, ""),
-        )
-        self._avail_patcher.start()
+        self.classifier = TalentAgentClassifier()
 
-    def teardown_method(self):
-        self._avail_patcher.stop()
-
-    @patch("agent_baton.core.engine.classifier._call_haiku")
-    def test_uses_haiku_when_available(self, mock_call):
-        mock_call.return_value = json.dumps({
-            "task_type": "migration",
-            "complexity": "light",
-            "agents": ["backend-engineer"],
-            "phases": ["Implement"],
-            "reasoning": "Simple move",
+    def test_parses_valid_json(self):
+        raw = json.dumps({
+            "task_type": "audit",
+            "complexity": "heavy",
+            "risk": "LOW",
+            "agents": ["architect", "code-reviewer"],
+            "phases": ["Prepare", "Audit", "Synthesize", "Review"],
+            "reasoning": "Codebase audit needs architect and reviewer",
         })
-        classifier = FallbackClassifier()
-        result = classifier.classify("Move 3 files", self.registry)
-        assert result.source == "haiku"
-        mock_call.assert_called_once()
+        result = self.classifier._parse_response(raw, self.registry)
+        assert result is not None
+        assert result.task_type == "audit"
+        assert result.complexity == "heavy"
+        assert result.source == "talent-agent"
+        assert result.agents == ["architect", "code-reviewer"]
 
-    @patch("agent_baton.core.engine.classifier._call_haiku", side_effect=Exception("API error"))
-    def test_falls_back_on_api_error(self, mock_call):
-        classifier = FallbackClassifier()
-        result = classifier.classify("Move 3 files", self.registry)
-        assert result.source == "keyword-fallback"
-
-    @patch("agent_baton.core.engine.classifier._call_haiku", side_effect=Exception("connection timeout"))
-    def test_falls_back_on_network_timeout(self, mock_call):
-        classifier = FallbackClassifier()
-        result = classifier.classify("Move 3 files", self.registry)
-        assert result.source == "keyword-fallback"
-
-    @patch("agent_baton.core.engine.classifier._call_haiku", return_value="not json")
-    def test_falls_back_on_bad_response(self, mock_call):
-        classifier = FallbackClassifier()
-        result = classifier.classify("Move 3 files", self.registry)
-        assert result.source == "keyword-fallback"
-
-    @patch("agent_baton.core.engine.classifier._call_haiku", side_effect=Exception("API error"))
-    def test_fallback_result_is_valid_task_classification(self, _mock_call):
-        classifier = FallbackClassifier()
-        result = classifier.classify("Fix the login bug", self.registry)
-        assert isinstance(result, TaskClassification)
-        assert result.complexity in ("light", "medium", "heavy")
-        assert len(result.agents) >= 1
-        assert len(result.phases) >= 1
-
-    @patch("agent_baton.core.engine.classifier._call_haiku")
-    def test_source_is_haiku_on_success(self, mock_call):
-        mock_call.return_value = json.dumps({
-            "task_type": "bug-fix",
+    def test_attaches_risk_hint(self):
+        raw = json.dumps({
+            "task_type": "audit",
             "complexity": "medium",
-            "agents": ["backend-engineer", "test-engineer"],
-            "phases": ["Implement", "Test"],
-            "reasoning": "Bug needs implementation and tests",
+            "risk": "LOW",
+            "agents": ["architect"],
+            "phases": ["Audit"],
+            "reasoning": "test",
         })
-        classifier = FallbackClassifier()
-        result = classifier.classify("Fix the auth crash", self.registry)
-        assert result.source == "haiku"
+        result = self.classifier._parse_response(raw, self.registry)
+        assert result is not None
+        assert getattr(result, "_cli_risk_hint", None) == "LOW"
 
-    @patch("agent_baton.core.engine.classifier._call_haiku", side_effect=Exception("5xx"))
-    def test_source_is_keyword_fallback_on_failure(self, _mock_call):
-        classifier = FallbackClassifier()
-        result = classifier.classify("Fix the auth crash", self.registry)
-        assert result.source == "keyword-fallback"
+    def test_rejects_invalid_agents(self):
+        raw = json.dumps({
+            "task_type": "audit",
+            "complexity": "medium",
+            "agents": ["made-up-agent", "architect"],
+            "phases": ["Audit"],
+            "reasoning": "test",
+        })
+        result = self.classifier._parse_response(raw, self.registry)
+        assert result is not None
+        assert "made-up-agent" not in result.agents
+        assert "architect" in result.agents
+
+    def test_returns_none_on_no_valid_agents(self):
+        raw = json.dumps({
+            "task_type": "audit",
+            "complexity": "medium",
+            "agents": ["fake-agent"],
+            "phases": ["Audit"],
+            "reasoning": "test",
+        })
+        result = self.classifier._parse_response(raw, self.registry)
+        assert result is None
+
+    def test_returns_none_on_bad_json(self):
+        result = self.classifier._parse_response("not json at all", self.registry)
+        assert result is None
+
+    def test_strips_markdown_fences(self):
+        payload = json.dumps({
+            "task_type": "bug-fix",
+            "complexity": "light",
+            "agents": ["backend-engineer"],
+            "phases": ["Implement"],
+            "reasoning": "test",
+        })
+        raw = f"```json\n{payload}\n```"
+        result = self.classifier._parse_response(raw, self.registry)
+        assert result is not None
+        assert result.task_type == "bug-fix"
+
+    def test_unknown_task_type_becomes_generic(self):
+        raw = json.dumps({
+            "task_type": "invented-type",
+            "complexity": "medium",
+            "agents": ["architect"],
+            "phases": ["Design"],
+            "reasoning": "test",
+        })
+        result = self.classifier._parse_response(raw, self.registry)
+        assert result is not None
+        assert result.task_type == "generic"
+
+    def test_caps_agents_by_complexity(self):
+        raw = json.dumps({
+            "task_type": "new-feature",
+            "complexity": "light",
+            "agents": ["architect", "backend-engineer", "test-engineer"],
+            "phases": ["Implement"],
+            "reasoning": "test",
+        })
+        result = self.classifier._parse_response(raw, self.registry)
+        assert result is not None
+        assert len(result.agents) == 1
+
+    def test_prompt_includes_agent_list_and_type_map(self):
+        prompt = self.classifier._build_prompt("Audit the codebase", self.registry)
+        assert "architect" in prompt
+        assert "backend-engineer" in prompt
+        assert "audit:" in prompt.lower() or "audit" in prompt.lower()
+        assert "Prepare" in prompt
 
 
-# ---------------------------------------------------------------------------
-# Pre-flight availability check
-# ---------------------------------------------------------------------------
+class TestFallbackClassifierKeywordPath:
+    """Tests for FallbackClassifier's keyword fallback path.
 
-class TestHaikuAvailable:
-    """Unit tests for _haiku_available() — no API calls made."""
-
-    def test_returns_false_when_sdk_not_installed(self):
-        import importlib
-        with patch.object(importlib.util, "find_spec", return_value=None):
-            available, reason = _haiku_available()
-        assert available is False
-        assert "anthropic" in reason.lower()
-
-class TestFallbackClassifierPreFlight:
-    """Tests for FallbackClassifier's pre-flight path.
-
-    These tests verify behavior when _haiku_available() returns False
-    (no SDK installed or no API key set), which should go directly to
-    KeywordClassifier without ever calling _call_haiku.
+    TalentAgent is mocked to return None so keyword fallback is exercised.
     """
 
     def setup_method(self):
         self.registry = _make_registry()
 
-    def test_no_sdk_uses_keyword_without_calling_haiku(self):
-        """When SDK is absent, _call_haiku must never be invoked."""
-        with patch(
-            "agent_baton.core.engine.classifier._haiku_available",
-            return_value=(False, "anthropic SDK not installed"),
-        ):
-            with patch(
-                "agent_baton.core.engine.classifier._call_haiku",
-                side_effect=AssertionError("_call_haiku must not be called when SDK absent"),
-            ):
-                classifier = FallbackClassifier()
-                result = classifier.classify("Fix the login bug", self.registry)
-        assert result.source == "keyword-fallback"
-
-    def test_preflight_unavailable_returns_valid_classification(self):
-        """Keyword fallback when pre-flight fails must still produce valid output."""
-        with patch(
-            "agent_baton.core.engine.classifier._haiku_available",
-            return_value=(False, "anthropic SDK not installed"),
-        ):
+    def test_keyword_fallback_returns_valid_classification(self):
+        with patch.object(TalentAgentClassifier, "classify", return_value=None):
             classifier = FallbackClassifier()
             result = classifier.classify("Add user authentication", self.registry)
         assert isinstance(result, TaskClassification)
+        assert result.source == "keyword-fallback"
         assert result.complexity in ("light", "medium", "heavy")
         assert len(result.agents) >= 1
         assert len(result.phases) >= 1
 
-    def test_preflight_unavailable_logs_info(self, caplog):
-        """Structural unavailability must be logged at INFO, not silently swallowed."""
+    def test_keyword_fallback_logs_info(self, caplog):
         import logging
-        with patch(
-            "agent_baton.core.engine.classifier._haiku_available",
-            return_value=(False, "anthropic SDK not installed"),
-        ):
+        with patch.object(TalentAgentClassifier, "classify", return_value=None):
             classifier = FallbackClassifier()
             with caplog.at_level(logging.INFO, logger="agent_baton.core.engine.classifier"):
                 classifier.classify("Fix the auth crash", self.registry)
@@ -434,118 +344,6 @@ class TestFallbackClassifierPreFlight:
             "unavailable" in record.message.lower() or "keyword" in record.message.lower()
             for record in caplog.records
         )
-
-    def test_preflight_unavailable_does_not_log_warning(self, caplog):
-        """Structural unavailability (no SDK/key) must not produce WARNING-level noise."""
-        import logging
-        with patch(
-            "agent_baton.core.engine.classifier._haiku_available",
-            return_value=(False, "anthropic SDK not installed"),
-        ):
-            classifier = FallbackClassifier()
-            with caplog.at_level(logging.WARNING, logger="agent_baton.core.engine.classifier"):
-                classifier.classify("Fix the auth crash", self.registry)
-        # No WARNING records from the classifier logger
-        warning_records = [
-            r for r in caplog.records
-            if r.levelno >= logging.WARNING
-            and r.name == "agent_baton.core.engine.classifier"
-        ]
-        assert warning_records == []
-
-    def test_transient_failure_logs_warning(self, caplog):
-        """A transient API failure (Haiku available but call fails) must log WARNING."""
-        import logging
-        with patch(
-            "agent_baton.core.engine.classifier._haiku_available",
-            return_value=(True, ""),
-        ):
-            with patch(
-                "agent_baton.core.engine.classifier._call_haiku",
-                side_effect=Exception("connection reset"),
-            ):
-                classifier = FallbackClassifier()
-                with caplog.at_level(logging.WARNING, logger="agent_baton.core.engine.classifier"):
-                    result = classifier.classify("Fix the auth crash", self.registry)
-        assert result.source == "keyword-fallback"
-        warning_records = [
-            r for r in caplog.records
-            if r.levelno >= logging.WARNING
-            and r.name == "agent_baton.core.engine.classifier"
-        ]
-        assert len(warning_records) >= 1
-        assert "connection reset" in warning_records[0].message
-
-    def test_same_unavailable_reason_logged_only_once(self, caplog):
-        """Repeated calls with the same unavailability reason must not repeat the INFO log."""
-        import logging
-        reason = "anthropic SDK not installed"
-        with patch(
-            "agent_baton.core.engine.classifier._haiku_available",
-            return_value=(False, reason),
-        ):
-            classifier = FallbackClassifier()
-            with caplog.at_level(logging.INFO, logger="agent_baton.core.engine.classifier"):
-                classifier.classify("Task one", self.registry)
-                classifier.classify("Task two", self.registry)
-                classifier.classify("Task three", self.registry)
-        info_records = [
-            r for r in caplog.records
-            if r.levelno == logging.INFO
-            and r.name == "agent_baton.core.engine.classifier"
-        ]
-        # The INFO message must appear exactly once, not three times.
-        assert len(info_records) == 1
-
-    def test_different_unavailable_reasons_each_logged_once(self, caplog):
-        """If the unavailability reason changes, each distinct reason is logged once."""
-        import logging
-        classifier = FallbackClassifier()
-        with caplog.at_level(logging.INFO, logger="agent_baton.core.engine.classifier"):
-            with patch(
-                "agent_baton.core.engine.classifier._haiku_available",
-                return_value=(False, "anthropic SDK not installed"),
-            ):
-                classifier.classify("Task one", self.registry)
-            with patch(
-                "agent_baton.core.engine.classifier._haiku_available",
-                return_value=(False, "HaikuClassifier unavailable"),
-            ):
-                classifier.classify("Task two", self.registry)
-        info_records = [
-            r for r in caplog.records
-            if r.levelno == logging.INFO
-            and r.name == "agent_baton.core.engine.classifier"
-        ]
-        assert len(info_records) == 2
-
-    def test_classification_source_is_keyword_fallback_when_preflight_fails(self):
-        with patch(
-            "agent_baton.core.engine.classifier._haiku_available",
-            return_value=(False, "anthropic SDK not installed"),
-        ):
-            classifier = FallbackClassifier()
-            result = classifier.classify("Redesign the entire auth system", self.registry)
-        assert result.source == "keyword-fallback"
-
-    def test_classification_source_is_haiku_when_preflight_passes_and_call_succeeds(self):
-        with patch(
-            "agent_baton.core.engine.classifier._haiku_available",
-            return_value=(True, ""),
-        ):
-            with patch(
-                "agent_baton.core.engine.classifier._call_haiku",
-                return_value=json.dumps({
-                    "task_type": "bug-fix",
-                    "complexity": "light",
-                    "agents": ["backend-engineer"],
-                    "phases": ["Implement"],
-                    "reasoning": "Simple fix",
-                }),
-            ):
-                classifier = FallbackClassifier()
-                result = classifier.classify("Fix the login bug", self.registry)
-        assert result.source == "haiku"
 
 
 # ---------------------------------------------------------------------------
@@ -615,77 +413,6 @@ class TestKeywordClassifierLongSummary:
     def test_empty_summary_does_not_crash(self):
         result = self.classifier.classify("", self.registry)
         assert isinstance(result, TaskClassification)
-
-
-# ---------------------------------------------------------------------------
-# Edge cases: HaikuClassifier markdown-wrapped JSON
-# ---------------------------------------------------------------------------
-
-class TestHaikuClassifierMarkdownWrapping:
-    """HaikuClassifier must strip markdown code fences before parsing JSON."""
-
-    def setup_method(self):
-        self.classifier = HaikuClassifier()
-        self.registry = _make_registry()
-
-    def _valid_payload(self) -> dict:
-        return {
-            "task_type": "new-feature",
-            "complexity": "medium",
-            "agents": ["backend-engineer"],
-            "phases": ["Design", "Implement"],
-            "reasoning": "Moderate new feature",
-        }
-
-    def test_json_fenced_with_backticks_parsed(self):
-        raw = "```\n" + json.dumps(self._valid_payload()) + "\n```"
-        result = self.classifier._parse_response(raw, self.registry)
-        assert result.task_type == "new-feature"
-        assert result.source == "haiku"
-
-    def test_json_fenced_with_language_tag_parsed(self):
-        raw = "```json\n" + json.dumps(self._valid_payload()) + "\n```"
-        result = self.classifier._parse_response(raw, self.registry)
-        assert result.complexity == "medium"
-        assert result.source == "haiku"
-
-    def test_invalid_complexity_in_markdown_json_defaults_to_medium(self):
-        payload = self._valid_payload()
-        payload["complexity"] = "extreme"  # invalid
-        raw = "```json\n" + json.dumps(payload) + "\n```"
-        result = self.classifier._parse_response(raw, self.registry)
-        assert result.complexity == "medium"
-
-    def test_invalid_task_type_in_markdown_json_defaults_to_generic(self):
-        payload = self._valid_payload()
-        payload["task_type"] = "unknown-type"  # invalid
-        raw = "```json\n" + json.dumps(payload) + "\n```"
-        result = self.classifier._parse_response(raw, self.registry)
-        # Phase E change: unknown types route to "generic" fallback instead of
-        # silently becoming "new-feature".
-        assert result.task_type == "generic"
-
-    def test_missing_phases_in_response_defaults_to_implement(self):
-        payload = self._valid_payload()
-        del payload["phases"]
-        raw = json.dumps(payload)
-        result = self.classifier._parse_response(raw, self.registry)
-        assert result.phases == ["Implement"]
-
-    def test_empty_phases_in_response_defaults_to_implement(self):
-        payload = self._valid_payload()
-        payload["phases"] = []
-        raw = json.dumps(payload)
-        result = self.classifier._parse_response(raw, self.registry)
-        assert result.phases == ["Implement"]
-
-    def test_missing_reasoning_uses_fallback_string(self):
-        payload = self._valid_payload()
-        del payload["reasoning"]
-        raw = json.dumps(payload)
-        result = self.classifier._parse_response(raw, self.registry)
-        assert isinstance(result.reasoning, str)
-        assert len(result.reasoning) > 0
 
 
 # ---------------------------------------------------------------------------
@@ -794,15 +521,14 @@ class TestEndToEndClassification:
         assert len(plan.phases) >= 3
         assert plan.total_steps >= 3
 
-    @patch("agent_baton.core.engine.classifier._call_haiku", side_effect=Exception("no api"))
-    def test_default_planner_uses_fallback_classifier(self, _mock):
+    def test_default_planner_uses_fallback_classifier(self):
         """Default planner (no explicit classifier) should still work via keyword fallback."""
         from agent_baton.core.engine.planner import IntelligentPlanner
 
         planner = IntelligentPlanner()
         plan = planner.create_plan("Add user authentication")
         assert plan.complexity in ("light", "medium", "heavy")
-        assert plan.classification_source in ("haiku", "keyword-fallback")
+        assert plan.classification_source in ("talent-agent", "keyword-fallback")
 
     def test_light_plan_has_single_phase_implement(self):
         from agent_baton.core.engine.planner import IntelligentPlanner
@@ -830,22 +556,6 @@ class TestEndToEndClassification:
         plan = planner.create_plan("Fix the login bug")
         assert plan.classification_source == "keyword-fallback"
 
-    @patch("agent_baton.core.engine.classifier._call_haiku")
-    def test_haiku_classifier_source_recorded_on_plan(self, mock_call):
-        from agent_baton.core.engine.planner import IntelligentPlanner
-
-        mock_call.return_value = json.dumps({
-            "task_type": "bug-fix",
-            "complexity": "light",
-            "agents": ["backend-engineer--python"],
-            "phases": ["Implement"],
-            "reasoning": "Simple fix",
-        })
-        planner = IntelligentPlanner(task_classifier=HaikuClassifier())
-        plan = planner.create_plan("Fix the login bug")
-        assert plan.classification_source == "haiku"
-        assert plan.complexity == "light"
-
     def test_explicit_complexity_override_bypasses_classifier(self):
         """Passing complexity= to create_plan should skip classification entirely."""
         from agent_baton.core.engine.planner import IntelligentPlanner
@@ -860,75 +570,11 @@ class TestEndToEndClassification:
 
 
 # ---------------------------------------------------------------------------
-# Haiku agent cap by complexity
-# ---------------------------------------------------------------------------
-
-class TestHaikuClassifierAgentCap:
-    """Haiku must cap agents based on complexity tier to prevent bloated plans."""
-
-    def setup_method(self):
-        self.classifier = HaikuClassifier()
-        self.registry = _make_registry()
-
-    def test_light_complexity_caps_at_one_agent(self):
-        response_json = json.dumps({
-            "task_type": "new-feature",
-            "complexity": "light",
-            "agents": ["backend-engineer", "architect", "test-engineer"],
-            "phases": ["Implement"],
-            "reasoning": "test",
-        })
-        result = self.classifier._parse_response(response_json, self.registry)
-        assert len(result.agents) == 1
-        assert result.agents == ["backend-engineer"]
-
-    def test_medium_complexity_caps_at_three_agents(self):
-        response_json = json.dumps({
-            "task_type": "new-feature",
-            "complexity": "medium",
-            "agents": [
-                "backend-engineer", "architect", "test-engineer",
-                "code-reviewer", "auditor",
-            ],
-            "phases": ["Design", "Implement", "Test"],
-            "reasoning": "test",
-        })
-        result = self.classifier._parse_response(response_json, self.registry)
-        assert len(result.agents) == 3
-
-    def test_heavy_complexity_caps_at_five_agents(self):
-        response_json = json.dumps({
-            "task_type": "new-feature",
-            "complexity": "heavy",
-            "agents": [
-                "backend-engineer", "architect", "test-engineer",
-                "code-reviewer", "auditor", "data-engineer",
-                "frontend-engineer--react",
-            ],
-            "phases": ["Design", "Implement", "Test", "Review"],
-            "reasoning": "test",
-        })
-        result = self.classifier._parse_response(response_json, self.registry)
-        assert len(result.agents) == 5
-
-    def test_agents_under_cap_are_not_trimmed(self):
-        response_json = json.dumps({
-            "task_type": "new-feature",
-            "complexity": "medium",
-            "agents": ["backend-engineer", "test-engineer"],
-            "phases": ["Implement", "Test"],
-            "reasoning": "test",
-        })
-        result = self.classifier._parse_response(response_json, self.registry)
-        assert len(result.agents) == 2
-
-
-# ---------------------------------------------------------------------------
-# KeywordClassifier agent cap — mirrors HaikuClassifier caps
+# KeywordClassifier agent cap
 # ---------------------------------------------------------------------------
 
 class TestKeywordClassifierAgentCap:
-    """KeywordClassifier must cap agents by complexity tier like HaikuClassifier."""
+    """KeywordClassifier must cap agents by complexity tier."""
 
     def _large_registry(self) -> AgentRegistry:
         """Build a registry with many agents that share common description words."""

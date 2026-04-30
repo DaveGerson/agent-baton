@@ -455,8 +455,23 @@ def apply_pattern(
     task_type: str,
     task_summary: str = "",
 ) -> list[PlanPhase]:
-    """Convert a LearnedPattern into PlanPhases (empty steps)."""
-    phase_names = PHASE_NAMES.get(task_type, DEFAULT_PHASE_NAMES)
+    """Convert a LearnedPattern into PlanPhases (empty steps).
+
+    Uses the pattern's ``recommended_template`` to derive phase names
+    when it contains a parseable sequence (e.g. ``"Design → Implement → Review"``
+    or ``"Design, Implement, Review"``).  Falls back to the task type's
+    default template when the pattern's template is unparseable.
+    """
+    parsed_names: list[str] | None = None
+    template = (pattern.recommended_template or "").strip()
+    if template:
+        for sep in (" → ", " -> ", ", ", "; "):
+            parts = [p.strip() for p in template.split(sep) if p.strip()]
+            if len(parts) >= 2:
+                parsed_names = parts
+                break
+
+    phase_names = parsed_names or PHASE_NAMES.get(task_type, DEFAULT_PHASE_NAMES)
     phases: list[PlanPhase] = []
     for idx, name in enumerate(phase_names, start=1):
         phases.append(PlanPhase(phase_id=idx, name=name, steps=[]))

@@ -64,6 +64,8 @@ _DEFAULT_AGENTS: dict[str, list[str]] = {
     "documentation": ["architect", "talent-builder", "code-reviewer"],
     "migration": ["architect", "backend-engineer", "test-engineer", "code-reviewer", "auditor"],
     "test": ["test-engineer"],
+    "audit": ["architect", "code-reviewer"],
+    "assessment": ["architect", "data-analyst", "code-reviewer"],
     # E3 — fallback for unknown/generic tasks: default four-phase roster
     "generic": ["architect", "backend-engineer", "test-engineer", "code-reviewer"],
 }
@@ -77,6 +79,8 @@ _PHASE_NAMES: dict[str, list[str]] = {
     "documentation": ["Research", "Draft", "Review"],
     "migration": ["Design", "Implement", "Test", "Review"],
     "test": ["Implement", "Review"],
+    "audit": ["Prepare", "Audit", "Synthesize", "Review"],
+    "assessment": ["Research", "Assess", "Synthesize", "Review"],
     # E3 — fallback phases for generic/unknown task types
     "generic": ["Investigate", "Implement", "Test", "Review"],
 }
@@ -95,6 +99,8 @@ _SUBTASK_PHASE_NAMES: dict[str, str] = {
     "migration": "Migrate",
     "data-analysis": "Analyze",
     "documentation": "Document",
+    "audit": "Audit",
+    "assessment": "Assess",
 }
 
 # Regex to split numbered sub-tasks: (1), 1., or 1)

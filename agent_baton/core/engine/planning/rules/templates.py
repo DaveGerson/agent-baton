@@ -18,6 +18,23 @@ STEP_TEMPLATES: dict[str, dict[str, str]] = {
             "Review: {task} for architectural fitness. Approve or flag "
             "structural issues."
         ),
+        "prepare": (
+            "Prepare context and materials for: {task}. Gather relevant "
+            "documentation, define evaluation criteria, and create a knowledge "
+            "pack the audit agents can reference."
+        ),
+        "audit": (
+            "Audit: {task}. Evaluate against quality, completeness, and "
+            "fitness criteria. Document findings with severity and evidence."
+        ),
+        "assess": (
+            "Assess: {task}. Evaluate current state, identify gaps, and "
+            "grade against defined criteria."
+        ),
+        "synthesize": (
+            "Synthesize findings from: {task}. Consolidate results into a "
+            "prioritized set of recommendations with a phased roadmap."
+        ),
     },
     "backend-engineer": {
         "implement": "Implement: {task}. Deliver working, tested code.",
@@ -62,6 +79,8 @@ STEP_TEMPLATES: dict[str, dict[str, str]] = {
     },
     "auditor": {
         "review": "Audit: {task}. Provide pass/fail with findings.",
+        "audit": "Audit: {task}. Evaluate against compliance and quality criteria. Document findings.",
+        "assess": "Assess: {task}. Evaluate current state and identify compliance gaps.",
     },
     "visualization-expert": {
         "implement": "Create visualizations for: {task}.",

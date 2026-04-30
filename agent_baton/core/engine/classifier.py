@@ -1,14 +1,13 @@
 """Task classifier — determines type, complexity, and agent roster for a plan.
 
-Provides a protocol (``TaskClassifier``) with two concrete implementations:
+Three implementations, tried in order by ``FallbackClassifier``:
 
-- ``HaikuClassifier`` — calls Claude Haiku for intelligent classification.
-- ``KeywordClassifier`` — deterministic fallback using keyword heuristics
-  and registry-aware agent scoring.
+1. ``TalentAgentClassifier`` — Sonnet via HeadlessClaude CLI.  Full agent
+   roster context.  Best quality, requires ``claude`` CLI.
+2. ``KeywordClassifier`` — deterministic fallback using keyword heuristics
+   and registry-aware agent scoring.  No external dependencies.
 
-The planner consumes whichever implementation is available via the
-``FallbackClassifier`` wrapper, which tries Haiku first and degrades
-gracefully to keywords.
+The planner consumes ``FallbackClassifier`` which chains these in order.
 """
 from __future__ import annotations
 
@@ -35,7 +34,7 @@ _MAX_AGENTS_BY_COMPLEXITY: dict[str, int] = {
 
 _VALID_TASK_TYPES = (
     "new-feature", "bug-fix", "refactor", "data-analysis",
-    "documentation", "migration", "test",
+    "documentation", "migration", "test", "audit", "assessment",
     # E3 — fallback type for unknown/ambiguous tasks
     "generic",
 )
@@ -115,6 +114,8 @@ _CATEGORY_AFFINITY: dict[str, set[str]] = {
     "refactor": {AgentCategory.ENGINEERING.value},
     "documentation": {AgentCategory.ENGINEERING.value, AgentCategory.META.value},
     "test": {AgentCategory.ENGINEERING.value},
+    "audit": {AgentCategory.ENGINEERING.value, AgentCategory.META.value},
+    "assessment": {AgentCategory.ENGINEERING.value, AgentCategory.META.value},
     # E3 — generic falls back to engineering category
     "generic": {AgentCategory.ENGINEERING.value},
 }
@@ -128,6 +129,8 @@ _PRIMARY_IMPLEMENTER: dict[str, str] = {
     "data-analysis": "data-analyst",
     "documentation": "architect",
     "test": "test-engineer",
+    "audit": "architect",
+    "assessment": "architect",
     # E3 — generic uses backend-engineer as its light-complexity implementer
     "generic": "backend-engineer",
 }
@@ -297,7 +300,7 @@ class KeywordClassifier:
         scored_extras.sort(reverse=True)
         all_candidates = base_agents + [name for _, name in scored_extras]
 
-        # Cap to complexity tier — matches HaikuClassifier behaviour
+        # Cap to complexity tier
         max_agents = _MAX_AGENTS_BY_COMPLEXITY.get(complexity, 5)
 
         # Scale by complexity
@@ -338,11 +341,11 @@ class KeywordClassifier:
 
 
 # ---------------------------------------------------------------------------
-# HaikuClassifier
+# HaikuClassifier — retained for plan_reviewer and backward compat
 # ---------------------------------------------------------------------------
 
 _HAIKU_MODEL = "claude-haiku-4-5-20251001"
-_HAIKU_TIMEOUT = 5.0  # seconds
+_HAIKU_TIMEOUT = 5.0
 _HAIKU_MAX_TOKENS = 256
 
 _CLASSIFIER_PROMPT_TEMPLATE = """\
@@ -356,43 +359,23 @@ Available agents:
 Classify this task and return JSON only (no markdown, no commentary):
 {{
   "task_type": one of ["new-feature", "bug-fix", "refactor", "migration", \
-"data-analysis", "documentation", "test"],
+"data-analysis", "documentation", "test", "audit", "assessment"],
   "complexity": one of ["light", "medium", "heavy"],
   "agents": [ordered list of agent names needed, from available list only],
-  "phases": [ordered list of phase names, e.g. ["Implement"] or \
-["Design", "Implement", "Test", "Review"]],
+  "phases": [ordered list of phase names],
   "reasoning": "one sentence explaining the classification"
 }}
 
-Complexity guide:
-- light: 1-3 files, single domain, simple mechanical action, no \
-architectural decisions. Exactly 1 agent, 1 phase.
-- medium: 3-6 files, may cross domains, moderate effort, some design \
-needed. 2-3 agents (MAX 3), 2-3 phases.
-- heavy: 6+ files, multi-domain, new patterns, high risk, needs review \
-gates. 3-5 agents (MAX 5), 3-4 phases.
-
 Rules:
-- Select ONLY agents from the available list above.
-- Fewer agents is better. Only add agents that have distinct work to do.
-- NEVER exceed the agent count limit for the complexity tier.
-- For light tasks, use exactly 1 implementer agent. No design or review.
-- Include review/audit agents only for heavy complexity.
-- Each agent should have a DIFFERENT job. Do not assign multiple agents \
-to the same phase unless they do genuinely different work.
+- light: 1-3 files, 1 agent, 1 phase.
+- medium: 3-6 files, 2-3 agents, 2-3 phases.
+- heavy: 6+ files, 3-5 agents, 3-4 phases.
+- Select ONLY agents from the available list.
 - Phase count should match complexity."""
 
 
 def _haiku_available() -> tuple[bool, str]:
-    """Check whether HaikuClassifier can be used without making an API call.
-
-    Returns a ``(available, reason)`` tuple.  When ``available`` is ``False``,
-    ``reason`` is a human-readable explanation suitable for a log message.
-
-    Checks:
-    1. The ``anthropic`` SDK is importable (optional dependency).
-    2. The ``ANTHROPIC_API_KEY`` environment variable is set and non-empty.
-    """
+    """Check whether HaikuClassifier can be used without making an API call."""
     import importlib
     import os
 
@@ -408,14 +391,10 @@ def _haiku_available() -> tuple[bool, str]:
 
 
 def _call_haiku(prompt: str) -> str:
-    """Call Claude Haiku via the Anthropic SDK.
+    """Call Claude Haiku via the Anthropic SDK."""
+    import anthropic
 
-    Separated into a module-level function for easy mocking in tests.
-    Raises ImportError if the SDK is not installed, or any API error.
-    """
-    import anthropic  # optional dependency
-
-    client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from env
+    client = anthropic.Anthropic()
     response = client.messages.create(
         model=_HAIKU_MODEL,
         max_tokens=_HAIKU_MAX_TOKENS,
@@ -426,12 +405,7 @@ def _call_haiku(prompt: str) -> str:
 
 
 class HaikuClassifier:
-    """Classify tasks using Claude Haiku via the Anthropic SDK.
-
-    Builds a structured prompt listing all registered agents and asks
-    Haiku to return a JSON classification. Validates the response
-    against the registry (rejects agents not in the registry).
-    """
+    """Classify tasks using Claude Haiku via the Anthropic SDK."""
 
     def classify(
         self,
@@ -449,18 +423,13 @@ class HaikuClassifier:
             cat = agent_def.category.value
             agent_lines.append(f"- {name}: {agent_def.description} [category: {cat}]")
         agent_list = "\n".join(agent_lines)
-        # Escape braces in summary/agent_list to prevent KeyError from .format()
         safe_summary = summary.replace("{", "{{").replace("}", "}}")
         safe_agent_list = agent_list.replace("{", "{{").replace("}", "}}")
         return _CLASSIFIER_PROMPT_TEMPLATE.format(
-            summary=safe_summary,
-            agent_list=safe_agent_list,
+            summary=safe_summary, agent_list=safe_agent_list,
         )
 
-    def _parse_response(
-        self, raw: str, registry: AgentRegistry
-    ) -> TaskClassification:
-        # Strip markdown code fences if present
+    def _parse_response(self, raw: str, registry: AgentRegistry) -> TaskClassification:
         cleaned = raw.strip()
         if cleaned.startswith("```"):
             lines = cleaned.split("\n")
@@ -472,22 +441,18 @@ class HaikuClassifier:
         except json.JSONDecodeError as e:
             raise ValueError(f"Haiku returned invalid JSON: {e}") from e
 
-        # Validate and filter agents against registry
         valid_names = set(registry.agents.keys())
         filtered_agents = [a for a in data.get("agents", []) if a in valid_names]
         if not filtered_agents:
             raise ValueError(
                 f"Haiku returned no valid agents. "
-                f"Raw agents: {data.get('agents', [])}, "
-                f"valid: {sorted(valid_names)}"
+                f"Raw agents: {data.get('agents', [])}, valid: {sorted(valid_names)}"
             )
 
-        # Validate complexity
         complexity = data.get("complexity", "medium")
         if complexity not in _VALID_COMPLEXITIES:
             complexity = "medium"
 
-        # Validate task_type — unknown types fall through to "generic" (E3)
         task_type = data.get("task_type", "new-feature")
         if task_type not in _VALID_TASK_TYPES:
             logger.info(
@@ -500,171 +465,133 @@ class HaikuClassifier:
         if not phases:
             phases = ["Implement"]
 
-        # Cap agents to prevent bloated plans — respect complexity tier limits
         max_agents = _MAX_AGENTS_BY_COMPLEXITY.get(complexity, 5)
         filtered_agents = filtered_agents[:max_agents]
 
         return TaskClassification(
-            task_type=task_type,
-            complexity=complexity,
-            agents=filtered_agents,
-            phases=phases,
-            reasoning=data.get("reasoning", "Haiku classification"),
+            task_type=task_type, complexity=complexity, agents=filtered_agents,
+            phases=phases, reasoning=data.get("reasoning", "Haiku classification"),
             source="haiku",
         )
 
 
 # ---------------------------------------------------------------------------
-# FallbackClassifier
+# TalentAgentClassifier — LLM-first classification via HeadlessClaude
 # ---------------------------------------------------------------------------
 
-class FallbackClassifier:
-    """Try HaikuClassifier; on any failure, fall back to KeywordClassifier.
+_TALENT_AGENT_SYSTEM = (
+    "You are the Talent Agent for a software orchestration engine. "
+    "Classify tasks and assign specialist agents. Return JSON only."
+)
 
-    Pre-flight check (``_haiku_available()``) runs at call time — not
-    construction time — so the planner works regardless of when the API
-    key or SDK becomes available in the environment.
+_TALENT_AGENT_PROMPT = """\
+You are the Talent Agent — the casting director for a multi-agent software \
+orchestration engine. Analyze the incoming task, classify it, assess risk, \
+select the right specialist agents, and choose the correct phase sequence.
 
-    Logging strategy:
-    - INFO  when Haiku is structurally unavailable (no SDK / no key).
-            Logged once per unique reason so operator logs stay clean.
-    - WARNING when Haiku is available but fails during a call (network
-            error, timeout, bad response).  Includes exc_info so the
-            root cause is always visible.
-    - DEBUG on successful Haiku classification.
+## Available Specialist Agents
+{agent_list}
 
-    ``classification_source`` on the returned ``TaskClassification`` is
-    ``"haiku"`` when Haiku succeeds, ``"keyword-fallback"`` otherwise.
-    """
+## Task Types and Phase Sequences
+Each task type maps to a specific workflow:
+{type_phase_map}
 
-    def __init__(self) -> None:
-        self._haiku = HaikuClassifier()
-        self._keyword = KeywordClassifier()
-        # Track the last unavailability reason to avoid log spam on
-        # repeated calls within the same process.
-        self._last_unavailable_reason: str = ""
+## Classification Guidelines
 
-    def classify(
-        self,
-        summary: str,
-        registry: AgentRegistry,
-        project_root: Path | None = None,
-    ) -> TaskClassification:
-        available, reason = _haiku_available()
-        if not available:
-            if reason != self._last_unavailable_reason:
-                logger.info(
-                    "HaikuClassifier unavailable — using keyword fallback. Reason: %s",
-                    reason,
-                )
-                self._last_unavailable_reason = reason
-            return self._keyword.classify(summary, registry, project_root)
+TASK TYPE — Match the task's PRIMARY intent to the best-fitting type:
+- "audit/review/evaluate existing code or system" → audit
+- "assess readiness/maturity/fitness/gaps" → assessment
+- "add/build/create/implement something new" → new-feature
+- "fix a bug/error/crash" → bug-fix
+- "refactor/clean up/restructure" → refactor
+- "analyze data/metrics/queries" → data-analysis
+- "write/update documentation" → documentation
+- "database/schema/data migration" → migration
+- "write/add tests" → test
+Don't default to "generic" if a specific type fits.
 
-        # Haiku appears available — attempt classification.
-        try:
-            result = self._haiku.classify(summary, registry, project_root)
-            logger.debug(
-                "Haiku classification succeeded: type=%s complexity=%s",
-                result.task_type,
-                result.complexity,
-            )
-            return result
-        except Exception as exc:
-            logger.warning(
-                "Haiku classification failed — falling back to keyword classifier. "
-                "Reason: %s",
-                exc,
-                exc_info=True,
-            )
-            return self._keyword.classify(summary, registry, project_root)
+COMPLEXITY:
+- light: 1-2 files, single domain, mechanical action. 1 agent, 1 phase.
+- medium: 3-6 files, may cross domains, moderate design. 2-3 agents \
+(MAX 3), 2-3 phases.
+- heavy: 6+ files, multi-domain, architectural, needs review gates. \
+3-5 agents (MAX 5), 3-4 phases.
+Numbered lists of concerns ("1) X 2) Y 3) Z") = compound, never light.
 
+RISK — Assess what the task DOES, not what it discusses:
+- HIGH: destructive data operations, production deployment, \
+compliance-critical CHANGES
+- MEDIUM: schema changes, multi-service changes, security-adjacent work
+- LOW: read-only analysis, documentation, reviews, single-service changes
+"deployment docs" = LOW (writing docs). "deploy to production" = HIGH.
+"audit the codebase" = LOW (reading code). "delete audit records" = HIGH.
 
-# ---------------------------------------------------------------------------
-# CLIValidatedClassifier — keyword draft + CLI correction (Option 2)
-# ---------------------------------------------------------------------------
+AGENTS — Select ONLY agents from the list above:
+- Each agent must have DISTINCT work. Don't double-assign the same concern.
+- Fewer is better. Only add agents who have real work to do.
+- Match agent specialties to task concerns.
+- For light tasks: exactly 1 agent.
+- Include review/audit agents only for heavy complexity or compliance work.
 
-_CLI_CORRECTION_PROMPT = """\
-You are a task classifier validator for a software orchestration engine.
+PHASES — Use the phase sequence from your chosen task type. You may add \
+a suffix to clarify (e.g. "Audit: Security", "Implement: API Layer").
 
-A keyword-based classifier produced the draft below. Your job is to \
-verify or correct each field. Return JSON only.
-
-## Original task
+## Task to Classify
 "{summary}"
 
-## Keyword draft
-- task_type: {task_type}
-- complexity: {complexity}
-- agents: {agents}
-- phases: {phases}
-
-## Validation checklist
-1. TASK_TYPE: Does "{task_type}" accurately describe the PRIMARY intent? \
-If the task has multiple parts (e.g. "add feature AND write tests AND update docs"), \
-it is NOT a single-type task — use the type of the dominant/first concern. \
-A task mentioning "test" as ONE of several concerns is NOT type "test".
-2. COMPLEXITY: Count distinct concerns/subtasks. \
-1-2 concerns with single domain = light. \
-3+ concerns OR cross-domain = medium. \
-4+ concerns with multiple domains, compliance, or architecture = heavy. \
-Numbered lists ("1) ... 2) ... 3) ...") are compound tasks — never "light".
-3. RISK: Assess independently (not in the draft). Consider: \
-destructive operations (delete/drop/purge) + data stores = HIGH. \
-Compliance keywords (GDPR/SOX/HIPAA/PCI) = HIGH. \
-Production/deploy/infrastructure (as ACTION, not documentation) = HIGH. \
-"deployment docs" or "deploy documentation" = LOW (it's docs, not deploying). \
-Pure read-only tasks = LOW.
-4. AGENTS: Are the right specialists assigned? Should any be added or removed?
-
-Return this exact JSON structure:
+Return ONLY this JSON (no markdown, no commentary):
 {{
-  "task_type": "<corrected or same>",
-  "complexity": "<corrected or same>",
+  "task_type": "<from the task types list>",
+  "complexity": "light|medium|heavy",
   "risk": "LOW|MEDIUM|HIGH",
-  "agents_add": [],
-  "agents_remove": [],
-  "phases": [<corrected phase list or same>],
-  "reasoning": "<one sentence>"
+  "agents": ["agent-1", "agent-2"],
+  "phases": ["Phase1", "Phase2"],
+  "reasoning": "one sentence explaining the classification"
 }}"""
 
 
-class CLIValidatedClassifier:
-    """Keyword draft + CLI correction via HeadlessClaude.
+def _talent_agent_available() -> "tuple[bool, object | None]":
+    """Check whether HeadlessClaude is available for TalentAgent classification.
 
-    Runs the keyword classifier first (free, instant), then sends the
-    draft to a Haiku CLI call for validation and correction.  Falls back
-    to the unvalidated keyword draft if the CLI is unavailable or fails.
+    Returns ``(available, headless_instance_or_None)``.
+    """
+    try:
+        from agent_baton.core.runtime.headless import (
+            HeadlessClaude,
+            HeadlessConfig,
+        )
+    except Exception:
+        return False, None
+
+    hc = HeadlessClaude(HeadlessConfig(model="sonnet", timeout_seconds=90.0))
+    if hc.is_available:
+        return True, hc
+    return False, None
+
+
+class TalentAgentClassifier:
+    """LLM-first task classifier using HeadlessClaude with Sonnet.
+
+    Sends the full agent roster and task-type → phase mapping to a Sonnet
+    model for holistic classification.  No keyword draft — the LLM
+    classifies from scratch with full context.
+
+    Returns ``None`` when the CLI is unavailable or the call fails,
+    signalling the ``FallbackClassifier`` to try the next strategy.
     """
 
     def __init__(self) -> None:
-        self._keyword = KeywordClassifier()
-        self._headless: Any = None
+        self._headless: object | None = None
         self._headless_checked = False
 
-    def _get_headless(self) -> Any:
+    def _get_headless(self) -> object | None:
         if not self._headless_checked:
             self._headless_checked = True
-            try:
-                from agent_baton.core.runtime.headless import (
-                    HeadlessClaude,
-                    HeadlessConfig,
-                )
-                hc = HeadlessClaude(HeadlessConfig(
-                    model="haiku",
-                    timeout_seconds=60.0,
-                ))
-                if hc.is_available:
-                    self._headless = hc
-                else:
-                    logger.info(
-                        "CLIValidatedClassifier: claude CLI not available — "
-                        "using keyword-only classification"
-                    )
-            except Exception:
-                logger.info(
-                    "CLIValidatedClassifier: HeadlessClaude import failed — "
-                    "using keyword-only classification"
-                )
+            available, hc = _talent_agent_available()
+            if available:
+                self._headless = hc
+            else:
+                logger.info("TalentAgentClassifier: claude CLI not available")
         return self._headless
 
     def classify(
@@ -672,113 +599,152 @@ class CLIValidatedClassifier:
         summary: str,
         registry: AgentRegistry,
         project_root: Path | None = None,
-    ) -> TaskClassification:
-        draft = self._keyword.classify(summary, registry, project_root)
-
+    ) -> TaskClassification | None:
         hc = self._get_headless()
         if hc is None:
-            return draft
+            return None
 
-        prompt = _CLI_CORRECTION_PROMPT.format(
-            summary=summary.replace('"', '\\"'),
-            task_type=draft.task_type,
-            complexity=draft.complexity,
-            agents=", ".join(draft.agents),
-            phases=", ".join(draft.phases),
-        )
+        prompt = self._build_prompt(summary, registry)
 
         try:
             result = hc.run_sync(
                 prompt,
-                model="haiku",
-                system_prompt="You are a task classifier. Return JSON only.",
+                model="sonnet",
+                system_prompt=_TALENT_AGENT_SYSTEM,
             )
         except Exception as exc:
-            logger.warning("CLI classification correction failed: %s", exc)
-            return draft
+            logger.warning("TalentAgent classification failed: %s", exc)
+            return None
 
         if not result.success:
-            logger.debug(
-                "CLI correction call failed (%s) — using keyword draft",
-                result.error,
-            )
-            return draft
+            logger.debug("TalentAgent call failed (%s)", result.error)
+            return None
 
-        return self._apply_corrections(draft, result.output, registry)
+        return self._parse_response(result.output, registry)
 
-    @staticmethod
-    def _apply_corrections(
-        draft: TaskClassification,
-        raw_output: str,
-        registry: AgentRegistry,
-    ) -> TaskClassification:
-        text = raw_output.strip()
-        if text.startswith("```"):
-            lines = text.splitlines()
-            lines = [l for l in lines if not l.strip().startswith("```")]
-            text = "\n".join(lines)
+    def _build_prompt(self, summary: str, registry: AgentRegistry) -> str:
+        from agent_baton.core.engine.planning.rules.phase_templates import PHASE_NAMES
 
-        try:
-            data = json.loads(text)
-        except json.JSONDecodeError:
-            start = text.find("{")
-            end = text.rfind("}")
-            if start >= 0 and end > start:
-                try:
-                    data = json.loads(text[start : end + 1])
-                except json.JSONDecodeError:
-                    return draft
-            else:
-                return draft
+        agent_lines: list[str] = []
+        for name, agent_def in sorted(registry.agents.items()):
+            cat = agent_def.category.value
+            agent_lines.append(f"- {name}: {agent_def.description} [{cat}]")
+        agent_list = "\n".join(agent_lines)
 
-        valid_names = set(registry.agents.keys())
+        type_lines: list[str] = []
+        for task_type, phases in PHASE_NAMES.items():
+            type_lines.append(f"- {task_type}: {' → '.join(phases)}")
+        type_phase_map = "\n".join(type_lines)
 
-        task_type = data.get("task_type", draft.task_type)
-        if task_type not in _VALID_TASK_TYPES:
-            task_type = draft.task_type
+        safe_summary = summary.replace("{", "{{").replace("}", "}}")
+        safe_agent_list = agent_list.replace("{", "{{").replace("}", "}}")
+        safe_type_map = type_phase_map.replace("{", "{{").replace("}", "}}")
 
-        complexity = data.get("complexity", draft.complexity)
-        if complexity not in _VALID_COMPLEXITIES:
-            complexity = draft.complexity
-
-        agents = list(draft.agents)
-        for a in data.get("agents_remove", []):
-            agents = [x for x in agents if x != a]
-        for a in data.get("agents_add", []):
-            if a in valid_names and a not in agents:
-                agents.append(a)
-        if not agents:
-            agents = list(draft.agents)
-
-        max_agents = _MAX_AGENTS_BY_COMPLEXITY.get(complexity, 5)
-        agents = agents[:max_agents]
-
-        phases = data.get("phases") or list(draft.phases)
-        if not phases:
-            phases = list(draft.phases)
-
-        reasoning = data.get("reasoning", draft.reasoning)
-
-        corrected = TaskClassification(
-            task_type=task_type,
-            complexity=complexity,
-            agents=agents,
-            phases=phases,
-            reasoning=f"[cli-validated] {reasoning}",
-            source="cli-validated",
+        return _TALENT_AGENT_PROMPT.format(
+            summary=safe_summary,
+            agent_list=safe_agent_list,
+            type_phase_map=safe_type_map,
         )
 
-        if (
-            corrected.task_type != draft.task_type
-            or corrected.complexity != draft.complexity
-            or corrected.agents != draft.agents
-        ):
-            logger.info(
-                "CLI correction applied: type=%s→%s complexity=%s→%s agents=%s→%s",
-                draft.task_type, corrected.task_type,
-                draft.complexity, corrected.complexity,
-                draft.agents, corrected.agents,
-            )
+    def _parse_response(
+        self, raw: str, registry: AgentRegistry
+    ) -> TaskClassification | None:
+        cleaned = raw.strip()
+        if cleaned.startswith("```"):
+            lines = cleaned.split("\n")
+            lines = [line for line in lines if not line.strip().startswith("```")]
+            cleaned = "\n".join(lines)
 
-        corrected._cli_risk_hint = data.get("risk")  # type: ignore[attr-defined]
-        return corrected
+        try:
+            data = json.loads(cleaned)
+        except json.JSONDecodeError:
+            start = cleaned.find("{")
+            end = cleaned.rfind("}")
+            if start >= 0 and end > start:
+                try:
+                    data = json.loads(cleaned[start : end + 1])
+                except json.JSONDecodeError:
+                    logger.warning("TalentAgent returned unparseable JSON")
+                    return None
+            else:
+                return None
+
+        task_type = data.get("task_type", "generic")
+        if task_type not in _VALID_TASK_TYPES:
+            logger.info(
+                "TalentAgent returned unknown task_type %r — using 'generic'",
+                task_type,
+            )
+            task_type = "generic"
+
+        complexity = data.get("complexity", "medium")
+        if complexity not in _VALID_COMPLEXITIES:
+            complexity = "medium"
+
+        valid_names = set(registry.agents.keys())
+        filtered_agents = [a for a in data.get("agents", []) if a in valid_names]
+        if not filtered_agents:
+            logger.warning(
+                "TalentAgent returned no valid agents: %s", data.get("agents")
+            )
+            return None
+
+        max_agents = _MAX_AGENTS_BY_COMPLEXITY.get(complexity, 5)
+        filtered_agents = filtered_agents[:max_agents]
+
+        phases = data.get("phases", ["Implement"])
+        if not phases:
+            phases = ["Implement"]
+
+        result = TaskClassification(
+            task_type=task_type,
+            complexity=complexity,
+            agents=filtered_agents,
+            phases=phases,
+            reasoning=data.get("reasoning", "TalentAgent classification"),
+            source="talent-agent",
+        )
+
+        risk = data.get("risk")
+        if risk in ("LOW", "MEDIUM", "HIGH"):
+            result._cli_risk_hint = risk  # type: ignore[attr-defined]
+
+        logger.info(
+            "TalentAgent classified: type=%s complexity=%s risk=%s agents=%s",
+            task_type,
+            complexity,
+            risk,
+            filtered_agents,
+        )
+
+        return result
+
+
+# ---------------------------------------------------------------------------
+# FallbackClassifier
+# ---------------------------------------------------------------------------
+
+class FallbackClassifier:
+    """TalentAgent (Sonnet CLI) → Keyword fallback.
+
+    Tries the TalentAgent first (Sonnet via HeadlessClaude CLI with full
+    agent roster context).  Falls back to deterministic keyword heuristics
+    when the CLI is unavailable.
+    """
+
+    def __init__(self) -> None:
+        self._talent = TalentAgentClassifier()
+        self._keyword = KeywordClassifier()
+
+    def classify(
+        self,
+        summary: str,
+        registry: AgentRegistry,
+        project_root: Path | None = None,
+    ) -> TaskClassification:
+        talent_result = self._talent.classify(summary, registry, project_root)
+        if talent_result is not None:
+            return talent_result
+
+        logger.info("TalentAgent unavailable — using keyword fallback")
+        return self._keyword.classify(summary, registry, project_root)

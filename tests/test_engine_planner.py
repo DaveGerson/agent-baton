@@ -911,13 +911,20 @@ class TestRiskAssessmentStructural:
         assert plan.risk_level in ("MEDIUM", "HIGH")
 
     @pytest.mark.parametrize("summary,agents", [
-        ("Review the production code for style issues", ["code-reviewer"]),
-        ("Analyze the production logs for anomalies", ["backend-engineer"]),
         ("Add a helper utility function", ["backend-engineer"]),
     ])
     def test_risk_stays_low(self, planner: IntelligentPlanner, summary: str, agents: list[str]):
         plan = planner.create_plan(summary, agents=agents)
         assert plan.risk_level == "LOW"
+
+    @pytest.mark.parametrize("summary,agents", [
+        ("Review the production code for style issues", ["code-reviewer"]),
+        ("Analyze the production logs for anomalies", ["backend-engineer"]),
+    ])
+    def test_readonly_production_dampened_to_medium(self, planner: IntelligentPlanner, summary: str, agents: list[str]):
+        """Read-only tasks about production are dampened one level: HIGH → MEDIUM."""
+        plan = planner.create_plan(summary, agents=agents)
+        assert plan.risk_level == "MEDIUM"
 
     def test_five_agents_not_elevated(self, planner: IntelligentPlanner):
         # Threshold is >5 — exactly 5 should not elevate
@@ -1210,13 +1217,16 @@ class TestDefaultModelOverride:
     ):
         """Agent definitions with explicit model take priority over default_model."""
         plan = planner.create_plan(
-            "Add a simple utility function",
+            "Design and implement a new authentication module",
             default_model="haiku",
+            agents=["architect", "backend-engineer"],
         )
-        # architect has model: opus in the fixture — should keep opus
-        design_step = plan.phases[0].steps[0]
-        assert design_step.agent_name == "architect"
-        assert design_step.model == "opus", (
+        architect_steps = [
+            s for phase in plan.phases for s in phase.steps
+            if s.agent_name == "architect"
+        ]
+        assert architect_steps, "Expected at least one architect step"
+        assert architect_steps[0].model == "opus", (
             "Agent definition model should take priority over default_model"
         )
 
@@ -1892,19 +1902,19 @@ class TestStructuredDescriptionParser:
 # ---------------------------------------------------------------------------
 
 class TestTaskTypeKeywords:
-    """Verify that audit/assessment/scorecard/evaluate map to data-analysis."""
+    """Verify audit/assessment route to their own types, data keywords stay data-analysis."""
 
-    def test_audit_maps_to_data_analysis(self, planner: IntelligentPlanner):
-        assert planner._infer_task_type("Audit the dashboard metrics") == "data-analysis"
+    def test_audit_maps_to_audit(self, planner: IntelligentPlanner):
+        assert planner._infer_task_type("Audit the dashboard metrics") == "audit"
 
-    def test_assessment_maps_to_data_analysis(self, planner: IntelligentPlanner):
-        assert planner._infer_task_type("Assessment of data quality") == "data-analysis"
+    def test_assessment_maps_to_assessment(self, planner: IntelligentPlanner):
+        assert planner._infer_task_type("Assessment of data quality") == "assessment"
 
-    def test_scorecard_maps_to_data_analysis(self, planner: IntelligentPlanner):
-        assert planner._infer_task_type("Executive scorecard for quarterly KPIs") == "data-analysis"
+    def test_scorecard_maps_to_audit(self, planner: IntelligentPlanner):
+        assert planner._infer_task_type("Executive scorecard for quarterly KPIs") == "audit"
 
-    def test_evaluate_maps_to_data_analysis(self, planner: IntelligentPlanner):
-        assert planner._infer_task_type("Evaluate system performance") == "data-analysis"
+    def test_evaluate_maps_to_assessment(self, planner: IntelligentPlanner):
+        assert planner._infer_task_type("Evaluate system performance") == "assessment"
 
     def test_bug_fix_still_works(self, planner: IntelligentPlanner):
         """Existing bug-fix keyword matching is unaffected by the new keywords."""
