@@ -442,6 +442,85 @@ class TestBeadsClose:
 
 
 # ---------------------------------------------------------------------------
+# baton beads annotate
+# ---------------------------------------------------------------------------
+
+
+class TestBeadsAnnotate:
+    def test_annotate_appends_to_content(
+        self, populated_db: tuple[Path, BeadStore, list[Bead]]
+    ) -> None:
+        path, store, _ = populated_db
+        code, out = _run_handler(
+            path, ["annotate", "bd-0001", "--note", "Actually uses ES256 not RS256"]
+        )
+        assert code == 0
+        fetched = store.read("bd-0001")
+        assert fetched is not None
+        assert "JWT uses RS256" in fetched.content
+        assert "Actually uses ES256 not RS256" in fetched.content
+        assert "--- annotated" in fetched.content
+
+    def test_annotate_with_agent_includes_author(
+        self, populated_db: tuple[Path, BeadStore, list[Bead]]
+    ) -> None:
+        path, store, _ = populated_db
+        code, out = _run_handler(
+            path,
+            ["annotate", "bd-0001", "--note", "Verified in prod", "--agent", "auditor"],
+        )
+        assert code == 0
+        fetched = store.read("bd-0001")
+        assert fetched is not None
+        assert "(auditor)" in fetched.content
+
+    def test_annotate_prints_confirmation(
+        self, populated_db: tuple[Path, BeadStore, list[Bead]]
+    ) -> None:
+        path, _, _ = populated_db
+        code, out = _run_handler(
+            path, ["annotate", "bd-0001", "--note", "test"]
+        )
+        assert code == 0
+        assert "bd-0001" in out
+
+    def test_annotate_unknown_bead_exits_nonzero(self, db_path: Path) -> None:
+        _build_db_with_execution(db_path, "task-c")
+        BeadStore(db_path)
+        code, _ = _run_handler(db_path, ["annotate", "bd-nonexistent", "--note", "x"])
+        assert code != 0
+
+    def test_annotate_no_db_prints_message_exits_zero(self, db_path: Path) -> None:
+        code, out = _run_handler(db_path, ["annotate", "bd-any", "--note", "x"])
+        assert code == 0
+        assert "No baton.db" in out
+
+    def test_annotate_works_on_closed_bead(
+        self, populated_db: tuple[Path, BeadStore, list[Bead]]
+    ) -> None:
+        path, store, _ = populated_db
+        code, out = _run_handler(
+            path, ["annotate", "bd-0003", "--note", "Redis confirmed in load test"]
+        )
+        assert code == 0
+        fetched = store.read("bd-0003")
+        assert fetched is not None
+        assert "Redis confirmed in load test" in fetched.content
+
+    def test_annotate_multiple_notes_append_sequentially(
+        self, populated_db: tuple[Path, BeadStore, list[Bead]]
+    ) -> None:
+        path, store, _ = populated_db
+        _run_handler(path, ["annotate", "bd-0001", "--note", "First note"])
+        _run_handler(path, ["annotate", "bd-0001", "--note", "Second note"])
+        fetched = store.read("bd-0001")
+        assert fetched is not None
+        assert "First note" in fetched.content
+        assert "Second note" in fetched.content
+        assert fetched.content.count("--- annotated") == 2
+
+
+# ---------------------------------------------------------------------------
 # baton beads link
 # ---------------------------------------------------------------------------
 

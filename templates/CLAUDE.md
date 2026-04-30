@@ -225,7 +225,7 @@ cymbal impact <symbol>          # blast radius before edits
 cymbal refs <symbol>            # find references
 ```
 
-Falls back to grep if cymbal is not available.
+Falls back to lsp or grep if cymbal is not available.
 
 ## Agent Invocation
 

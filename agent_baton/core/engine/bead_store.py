@@ -642,6 +642,30 @@ class BeadStore:
         except Exception as exc:
             _log.warning("BeadStore.close failed for %s: %s", bead_id, exc)
 
+    def annotate(self, bead_id: str, note: str, agent_name: str | None = None) -> None:
+        """Append a timestamped annotation to a bead's content.
+
+        Works on beads in any status (open, closed, archived).
+        """
+        if not self._table_exists():
+            return
+        try:
+            now = _utcnow()
+            author = f" ({agent_name})" if agent_name else ""
+            separator = f"\n\n--- annotated {now}{author} ---\n"
+            conn = self._conn()
+            conn.execute(
+                """
+                UPDATE beads
+                SET content = content || ?
+                WHERE bead_id = ?
+                """,
+                (separator + note, bead_id),
+            )
+            conn.commit()
+        except Exception as exc:
+            _log.warning("BeadStore.annotate failed for %s: %s", bead_id, exc)
+
     def link(self, source_id: str, target_id: str, link_type: str) -> None:
         """Add a typed link from *source_id* to *target_id*.
 

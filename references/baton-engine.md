@@ -837,6 +837,26 @@ baton beads close BEAD_ID [--summary TEXT]
 | `BEAD_ID` | Yes | Bead ID to close |
 | `--summary TEXT` | No | Compacted summary of the bead's outcome |
 
+#### `baton beads annotate`
+
+Append a timestamped note to an existing bead's content without
+changing its status.  Works on beads in any status (open, closed,
+archived).
+
+```
+baton beads annotate BEAD_ID --note TEXT [--agent NAME]
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `BEAD_ID` | Yes | Bead ID to annotate |
+| `--note TEXT` | Yes | Note to append (alias: `--content`) |
+| `--agent NAME` | No | Agent authoring the annotation |
+
+**When to use:** After an agent interacts with a bead — acts on it,
+discovers it's wrong, or finds new context.  Keeps beads current
+without creating a separate extension bead for every observation.
+
 #### `baton beads link`
 
 Add a typed link between two beads.

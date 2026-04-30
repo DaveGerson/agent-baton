@@ -278,6 +278,28 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         help="Compacted summary of the bead's outcome (aliases: --note, --content)",
     )
 
+    # -- annotate ------------------------------------------------------------
+    annotate_p = sub.add_parser(
+        "annotate", help="Append a note to an existing bead"
+    )
+    annotate_p.add_argument(
+        "bead_id", metavar="BEAD_ID", help="Bead ID to annotate"
+    )
+    annotate_p.add_argument(
+        "--note", "--content",
+        dest="note",
+        metavar="TEXT",
+        required=True,
+        help="Note to append (aliases: --content)",
+    )
+    annotate_p.add_argument(
+        "--agent",
+        dest="agent",
+        metavar="NAME",
+        default=None,
+        help="Agent authoring the annotation",
+    )
+
     # -- link ----------------------------------------------------------------
     link_p = sub.add_parser("link", help="Add a typed link between two beads")
     link_p.add_argument(
@@ -518,7 +540,7 @@ def handler(args: argparse.Namespace) -> None:
     if cmd is None:
         print(
             "Usage: baton beads <subcommand>  "
-            "[create|list|show|ready|close|link|cleanup|promote|"
+            "[create|list|show|ready|close|annotate|link|cleanup|promote|"
             "graph|synthesize|clusters|handoffs|exec|create-exec]"
         )
         print("Run `baton beads --help` for details.")
@@ -530,6 +552,7 @@ def handler(args: argparse.Namespace) -> None:
         "show": _handle_show,
         "ready": _handle_ready,
         "close": _handle_close,
+        "annotate": _handle_annotate,
         "link": _handle_link,
         "cleanup": _handle_cleanup,
         "promote": _handle_promote,
@@ -694,6 +717,21 @@ def _handle_close(args: argparse.Namespace) -> None:
 
     store.close(args.bead_id, args.summary)
     print(f"Closed bead {args.bead_id}.")
+
+
+def _handle_annotate(args: argparse.Namespace) -> None:
+    store = _get_bead_store()
+    if store is None:
+        print("No baton.db found in .claude/team-context/.")
+        return
+
+    bead = store.read(args.bead_id)
+    if bead is None:
+        print(f"Bead not found: {args.bead_id}", file=sys.stderr)
+        sys.exit(1)
+
+    store.annotate(args.bead_id, args.note, agent_name=args.agent)
+    print(f"Annotated bead {args.bead_id}.")
 
 
 def _handle_link(args: argparse.Namespace) -> None:

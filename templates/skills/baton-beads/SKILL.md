@@ -109,25 +109,28 @@ After an agent interacts with a bead (acts on it, discovers it's wrong,
 finds new context), enrich it immediately:
 
 ```bash
-# Add follow-up context by extending the original bead
-baton beads create --type discovery \
-    --content "Auth circular dep is only triggered under lazy-loading; eager imports are safe" \
-    --agent backend-engineer --tag architecture --tag follow-up
-baton beads link bd-NEW --extends bd-a1b2
+# Quick annotation — append a note without changing status (preferred for small updates)
+baton beads annotate bd-a1b2 --note "Only triggered under lazy-loading; eager imports are safe"
+baton beads annotate bd-a1b2 --note "Verified in load test" --agent auditor
 
 # When closing, always include a substantive summary
 baton beads close bd-a1b2 --summary "Resolved: extracted UserIdentity to shared_types.py; \
     lazy-loading path verified safe after import reorder in auth/__init__.py"
 
-# Contradict a bead that turned out to be wrong
+# For major corrections, create a linked bead to preserve the audit trail
 baton beads create --type decision \
     --content "Original assessment was incorrect — the dep is intentional for cycle detection"
 baton beads link bd-NEW --contradicts bd-a1b2
 ```
 
+**When to annotate vs. extend:**
+- `annotate` — quick context additions, corrections, status notes (lightweight, no new bead)
+- `create` + `link --extends` — significant new findings that deserve their own bead ID
+- `create` + `link --contradicts` — the original bead was wrong (preserves audit trail)
+
 **Why this matters:** Beads without post-interaction notes become noise
-after 2-3 tasks. Extension and contradiction links keep the knowledge
-graph accurate. The learning pipeline (`baton learn analyze`) weights
+after 2-3 tasks. Annotations and links keep the knowledge graph
+accurate. The learning pipeline (`baton learn analyze`) weights
 beads with richer context higher.
 
 ## When to Bead
@@ -135,7 +138,7 @@ beads with richer context higher.
 - **Always bead** incidents and failures (CLAUDE.md mandates this)
 - **Bead decisions** that would be expensive to re-derive
 - **Bead discoveries** that affect downstream steps
-- **Always enrich** beads with post-interaction context (extends, contradicts, close with summary)
+- **Always enrich** beads with post-interaction context (`annotate`, extends, contradicts, close with summary)
 - **Promote** beads that represent permanent project knowledge
 
 ## See Also
