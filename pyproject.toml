@@ -72,6 +72,9 @@ swarm = [
 predict = [
     "watchdog>=3.0",
 ]
+viz = [
+    "rich>=13.0,<14",
+]
 all = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
@@ -82,6 +85,7 @@ all = [
     "anthropic>=0.40",
     "libcst>=1.0",
     "watchdog>=3.0",
+    "rich>=13.0,<14",
 ]
 
 [project.scripts]
@@ -94,6 +98,7 @@ include = ["agent_baton*"]
 [tool.setuptools.package-data]
 agent_baton = [
     "_bundled_agents/*.md",
+    "visualize/*.html",
 ]
 
 [tool.pytest.ini_options]

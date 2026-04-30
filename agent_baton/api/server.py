@@ -67,6 +67,7 @@ _ROUTE_MODULES: list[tuple[str, str, str, list[str]]] = [
     ("agent_baton.api.routes.learn", "router", "/api/v1", ["learn"]),
     ("agent_baton.api.routes.specs", "router", "/api/v1", ["specs"]),
     ("agent_baton.api.routes.noc", "router", "/api/v1", ["noc"]),
+    ("agent_baton.api.routes.viz", "router", "/api/v1", ["viz"]),
 ]
 
 

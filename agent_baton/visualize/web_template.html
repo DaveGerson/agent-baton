@@ -1,0 +1,1022 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Execution Plan</title>
+<style>
+/* ===================================================================
+   Design tokens — GitHub Dark inspired
+   =================================================================== */
+:root {
+  --bg: #0d1117;
+  --surface: #161b22;
+  --surface-hover: #1c2128;
+  --surface-raised: #1f2530;
+  --border: #30363d;
+  --border-subtle: #21262d;
+  --text: #e6edf3;
+  --text-dim: #8b949e;
+  --text-muted: #656d76;
+
+  --green: #3fb950;
+  --green-dim: #238636;
+  --blue: #58a6ff;
+  --blue-dim: #1f6feb;
+  --red: #f85149;
+  --red-dim: #da3633;
+  --yellow: #d29922;
+  --yellow-dim: #9e6a03;
+  --purple: #bc8cff;
+  --purple-dim: #8957e5;
+  --orange: #f0883e;
+  --orange-dim: #bd561d;
+  --gray: #484f58;
+  --cyan: #79c0ff;
+  --cyan-dim: #388bfd;
+
+  --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'SF Mono', ui-monospace, monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --radius: 8px;
+  --radius-sm: 4px;
+  --radius-lg: 12px;
+  --shadow: 0 1px 3px rgba(0,0,0,.12), 0 1px 2px rgba(0,0,0,.24);
+  --shadow-lg: 0 4px 12px rgba(0,0,0,.3);
+  --transition: 150ms cubic-bezier(.4,0,.2,1);
+}
+
+/* ===================================================================
+   Reset & base
+   =================================================================== */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html {
+  font-size: 15px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  font-family: var(--font-sans);
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.5;
+  min-height: 100vh;
+}
+
+/* ===================================================================
+   Layout
+   =================================================================== */
+.container {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 32px 24px 64px;
+}
+
+/* ===================================================================
+   Header
+   =================================================================== */
+.header {
+  margin-bottom: 24px;
+}
+
+.header__title {
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 6px;
+  line-height: 1.3;
+}
+
+.header__meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.header__meta-sep {
+  color: var(--border);
+}
+
+/* Badges */
+.badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.73rem;
+  font-weight: 500;
+  font-family: var(--font-mono);
+  padding: 3px 10px;
+  border-radius: 20px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+
+.badge--risk-low     { background: rgba(63,185,80,.15); color: var(--green); }
+.badge--risk-medium  { background: rgba(210,153,34,.15); color: var(--yellow); }
+.badge--risk-high    { background: rgba(240,136,62,.15); color: var(--orange); }
+.badge--risk-critical{ background: rgba(248,81,73,.15);  color: var(--red); }
+
+.badge--budget       { background: rgba(88,166,255,.1);  color: var(--blue); }
+.badge--complexity   { background: rgba(188,140,255,.1); color: var(--purple); }
+.badge--stack        { background: rgba(121,192,255,.1); color: var(--cyan); }
+.badge--type         { background: rgba(139,148,158,.12);color: var(--text-dim); }
+.badge--source       { background: rgba(139,148,158,.08);color: var(--text-muted); }
+.badge--mode         { background: rgba(63,185,80,.08);  color: var(--green); border: 1px solid rgba(63,185,80,.15); }
+
+/* ===================================================================
+   Progress bar
+   =================================================================== */
+.progress-section {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 20px;
+  margin-bottom: 24px;
+}
+
+.progress-stats {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.progress-stats__pct {
+  font-size: 1.6rem;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  color: var(--text);
+}
+
+.progress-stats__detail {
+  display: flex;
+  gap: 16px;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  flex-wrap: wrap;
+}
+
+.progress-stats__detail span {
+  white-space: nowrap;
+}
+
+.progress-stats__label {
+  color: var(--text-muted);
+}
+
+.progress-bar {
+  height: 8px;
+  background: var(--border-subtle);
+  border-radius: 4px;
+  overflow: hidden;
+  position: relative;
+}
+
+.progress-bar__fill {
+  height: 100%;
+  border-radius: 4px;
+  background: linear-gradient(90deg, var(--blue-dim), var(--blue));
+  transition: width 600ms cubic-bezier(.22,1,.36,1);
+  position: relative;
+}
+
+.progress-bar__fill--complete {
+  background: linear-gradient(90deg, var(--green-dim), var(--green));
+}
+
+.progress-bar__fill--failed {
+  background: linear-gradient(90deg, var(--red-dim), var(--red));
+}
+
+.progress-bar__fill--running {
+  animation: progress-pulse 2s ease-in-out infinite;
+}
+
+@keyframes progress-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+/* Execution status badge beneath progress */
+.execution-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  font-size: 0.78rem;
+  font-weight: 500;
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* ===================================================================
+   Status indicators (dots)
+   =================================================================== */
+.status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.status-dot--pending    { background: var(--gray); }
+.status-dot--running    { background: var(--blue); animation: dot-pulse 1.5s ease-in-out infinite; }
+.status-dot--complete   { background: var(--green); }
+.status-dot--failed     { background: var(--red); }
+.status-dot--skipped    { background: var(--text-muted); }
+.status-dot--interrupted{ background: var(--orange); }
+.status-dot--interacting{ background: var(--purple); animation: dot-pulse 1.5s ease-in-out infinite; }
+.status-dot--gate_pending { background: var(--yellow); animation: dot-pulse 1.5s ease-in-out infinite; }
+
+@keyframes dot-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.85); }
+}
+
+/* ===================================================================
+   Phases
+   =================================================================== */
+.phases {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.phase {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.phase[open] > .phase__header {
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.phase__header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 20px;
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  transition: background var(--transition);
+}
+
+.phase__header:hover {
+  background: var(--surface-hover);
+}
+
+/* Remove default marker */
+.phase__header::-webkit-details-marker,
+.phase__header::marker {
+  display: none;
+  content: '';
+}
+
+.phase__chevron {
+  width: 16px;
+  height: 16px;
+  color: var(--text-muted);
+  transition: transform var(--transition);
+  flex-shrink: 0;
+}
+
+.phase[open] > .phase__header .phase__chevron {
+  transform: rotate(90deg);
+}
+
+.phase__label {
+  font-size: 0.73rem;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  flex-shrink: 0;
+}
+
+.phase__name {
+  font-size: 0.93rem;
+  font-weight: 600;
+  color: var(--text);
+  flex: 1;
+  min-width: 0;
+}
+
+.phase__status-text {
+  font-size: 0.73rem;
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  flex-shrink: 0;
+}
+
+.phase__status-text--pending     { color: var(--text-muted); }
+.phase__status-text--running     { color: var(--blue); }
+.phase__status-text--complete    { color: var(--green); }
+.phase__status-text--failed      { color: var(--red); }
+.phase__status-text--gate_pending { color: var(--yellow); }
+
+.phase__body {
+  padding: 12px 20px 16px;
+}
+
+/* ===================================================================
+   Step cards
+   =================================================================== */
+.steps {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.step {
+  background: var(--bg);
+  border: 1px solid var(--border-subtle);
+  border-left: 4px solid var(--gray);
+  border-radius: var(--radius-sm);
+  padding: 12px 16px;
+  transition: border-color var(--transition), background var(--transition);
+}
+
+.step:hover {
+  background: var(--surface-hover);
+}
+
+.step--pending     { border-left-color: var(--gray); }
+.step--running     { border-left-color: var(--blue); }
+.step--complete    { border-left-color: var(--green); }
+.step--failed      { border-left-color: var(--red); }
+.step--skipped     { border-left-color: var(--text-muted); }
+.step--interrupted { border-left-color: var(--orange); }
+.step--interacting { border-left-color: var(--purple); }
+
+.step__header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+  flex-wrap: wrap;
+}
+
+.step__id {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+
+.step__agent {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--cyan);
+}
+
+.step__model {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  background: rgba(139,148,158,.08);
+  padding: 1px 6px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.step__status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.step__desc {
+  font-size: 0.82rem;
+  color: var(--text-dim);
+  line-height: 1.45;
+  margin-bottom: 6px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.step__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.step__tag {
+  font-size: 0.7rem;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  background: rgba(139,148,158,.06);
+  padding: 2px 8px;
+  border-radius: 3px;
+}
+
+.step__tag--parallel {
+  color: var(--purple);
+  background: rgba(188,140,255,.1);
+}
+
+.step__tag--depends {
+  color: var(--text-muted);
+}
+
+.step__tag--type {
+  color: var(--text-muted);
+}
+
+/* Step metrics row */
+.step__metrics {
+  display: flex;
+  gap: 14px;
+  margin-top: 6px;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+.step__metric-val {
+  color: var(--text-dim);
+}
+
+/* Error display */
+.step__error {
+  margin-top: 6px;
+  font-size: 0.78rem;
+  color: var(--red);
+  font-family: var(--font-mono);
+  background: rgba(248,81,73,.06);
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(248,81,73,.15);
+}
+
+/* ===================================================================
+   Team members
+   =================================================================== */
+.team {
+  margin-top: 8px;
+  margin-left: 12px;
+  padding-left: 14px;
+  border-left: 2px solid var(--border);
+}
+
+.team__member {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  font-size: 0.8rem;
+  flex-wrap: wrap;
+}
+
+.team__member + .team__member {
+  border-top: 1px solid var(--border-subtle);
+}
+
+.team__member-id {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.team__member-agent {
+  font-weight: 600;
+  color: var(--cyan);
+}
+
+.team__member-role {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  background: rgba(139,148,158,.08);
+  padding: 1px 6px;
+  border-radius: 3px;
+  text-transform: uppercase;
+}
+
+.team__member-desc {
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  flex-basis: 100%;
+  margin-left: 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* ===================================================================
+   Gate bar
+   =================================================================== */
+.gate {
+  margin-top: 12px;
+  padding: 10px 14px;
+  background: rgba(139,148,158,.04);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.gate__icon {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+.gate__icon--pending  { color: var(--text-muted); }
+.gate__icon--passed   { color: var(--green); }
+.gate__icon--failed   { color: var(--red); }
+
+.gate__type {
+  font-family: var(--font-mono);
+  font-size: 0.73rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
+
+.gate__desc {
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  flex: 1;
+}
+
+.gate__status {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.gate__status--pending { color: var(--text-muted); }
+.gate__status--passed  { color: var(--green); }
+.gate__status--failed  { color: var(--red); }
+
+.gate__command {
+  flex-basis: 100%;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+/* ===================================================================
+   Footer
+   =================================================================== */
+.footer {
+  margin-top: 32px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.footer__agents {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.footer__agent-chip {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--cyan);
+  background: rgba(121,192,255,.08);
+  padding: 3px 10px;
+  border-radius: 20px;
+  border: 1px solid rgba(121,192,255,.12);
+}
+
+.footer__label {
+  font-size: 0.73rem;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.footer__amendments {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--text-dim);
+}
+
+/* ===================================================================
+   Responsive
+   =================================================================== */
+@media (max-width: 768px) {
+  .container {
+    padding: 16px 12px 48px;
+  }
+
+  .header__title {
+    font-size: 1.2rem;
+  }
+
+  .progress-stats {
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .progress-stats__detail {
+    gap: 10px;
+  }
+
+  .step__header {
+    gap: 6px;
+  }
+
+  .step__status {
+    margin-left: 0;
+    flex-basis: 100%;
+    margin-top: 2px;
+  }
+
+  .step__desc {
+    -webkit-line-clamp: 3;
+  }
+
+  .footer {
+    flex-direction: column;
+  }
+
+  .gate {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+  }
+}
+
+/* ===================================================================
+   Utilities
+   =================================================================== */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0,0,0,0);
+  border: 0;
+}
+</style>
+</head>
+<body>
+<script>window.__BATON_PLAN__ = __BATON_PLAN_DATA__;</script>
+
+<main class="container" id="app" role="main" aria-label="Execution Plan Visualization">
+  <!-- Populated by script below -->
+</main>
+
+<script>
+(function() {
+  'use strict';
+
+  var P = window.__BATON_PLAN__;
+  if (!P) { document.getElementById('app').textContent = 'No plan data found.'; return; }
+
+  // ---------------------------------------------------------------
+  // Helpers
+  // ---------------------------------------------------------------
+  function esc(s) {
+    if (s == null) return '';
+    var d = document.createElement('div');
+    d.appendChild(document.createTextNode(String(s)));
+    return d.innerHTML;
+  }
+
+  function truncate(s, n) {
+    if (!s) return '';
+    return s.length > n ? s.slice(0, n) + '...' : s;
+  }
+
+  function formatDuration(sec) {
+    if (!sec || sec <= 0) return '--';
+    if (sec < 60) return sec.toFixed(1) + 's';
+    var m = Math.floor(sec / 60);
+    var s = Math.round(sec % 60);
+    if (m < 60) return m + 'm ' + s + 's';
+    var h = Math.floor(m / 60);
+    m = m % 60;
+    return h + 'h ' + m + 'm';
+  }
+
+  function formatTokens(n) {
+    if (!n) return '0';
+    if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+    if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+    return String(n);
+  }
+
+  function formatCost(usd) {
+    if (!usd) return '$0.00';
+    return '$' + usd.toFixed(2);
+  }
+
+  function formatDate(iso) {
+    if (!iso) return '--';
+    try {
+      var d = new Date(iso);
+      return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) +
+        ' ' + d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+    } catch(e) { return iso; }
+  }
+
+  function statusColor(s) {
+    var map = {
+      'pending': 'var(--text-muted)', 'running': 'var(--blue)',
+      'complete': 'var(--green)', 'failed': 'var(--red)',
+      'skipped': 'var(--text-muted)', 'interrupted': 'var(--orange)',
+      'interacting': 'var(--purple)', 'gate_pending': 'var(--yellow)',
+      'not_started': 'var(--text-muted)', 'cancelled': 'var(--orange)'
+    };
+    return map[s] || 'var(--text-dim)';
+  }
+
+  // SVG icons as strings
+  var chevronSvg = '<svg class="phase__chevron" viewBox="0 0 16 16" fill="currentColor"><path d="M6.22 3.22a.75.75 0 0 1 1.06 0l4.25 4.25a.75.75 0 0 1 0 1.06l-4.25 4.25a.75.75 0 0 1-1.06-1.06L9.94 8 6.22 4.28a.75.75 0 0 1 0-1.06z"/></svg>';
+
+  function gateIconSvg(status) {
+    if (status === 'passed') {
+      return '<svg class="gate__icon gate__icon--passed" viewBox="0 0 16 16" fill="currentColor"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 0 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0z"/></svg>';
+    }
+    if (status === 'failed') {
+      return '<svg class="gate__icon gate__icon--failed" viewBox="0 0 16 16" fill="currentColor"><path d="M3.72 3.72a.75.75 0 0 1 1.06 0L8 6.94l3.22-3.22a.75.75 0 1 1 1.06 1.06L9.06 8l3.22 3.22a.75.75 0 1 1-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 0 1-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 0 1 0-1.06z"/></svg>';
+    }
+    return '<svg class="gate__icon gate__icon--pending" viewBox="0 0 16 16" fill="currentColor"><path d="M8 4a4 4 0 1 0 0 8 4 4 0 0 0 0-8zM2 8a6 6 0 1 1 12 0A6 6 0 0 1 2 8z"/><path d="M8 6.5a.75.75 0 0 1 .75.75v1.5l1.14.68a.75.75 0 1 1-.78 1.28l-1.5-.9A.75.75 0 0 1 7.25 9V7.25A.75.75 0 0 1 8 6.5z"/></svg>';
+  }
+
+  // ---------------------------------------------------------------
+  // Build HTML
+  // ---------------------------------------------------------------
+  var html = '';
+
+  // -- Header --
+  html += '<header class="header">';
+  html +=   '<h1 class="header__title">' + esc(P.task_summary || 'Execution Plan') + '</h1>';
+  html +=   '<div class="header__meta">';
+  html +=     '<span>' + esc(P.task_id) + '</span>';
+  if (P.created_at) {
+    html +=   '<span class="header__meta-sep" aria-hidden="true">/</span>';
+    html +=   '<span>' + esc(formatDate(P.created_at)) + '</span>';
+  }
+  html +=   '</div>';
+
+  // Badges
+  html +=   '<div class="badges" role="list" aria-label="Classification badges">';
+
+  var riskClass = 'badge--risk-' + (P.risk_level || 'low').toLowerCase();
+  html +=     '<span class="badge ' + riskClass + '" role="listitem">Risk: ' + esc(P.risk_level || 'LOW') + '</span>';
+  html +=     '<span class="badge badge--budget" role="listitem">Budget: ' + esc(P.budget_tier || 'standard') + '</span>';
+  html +=     '<span class="badge badge--complexity" role="listitem">Complexity: ' + esc(P.complexity || 'medium') + '</span>';
+
+  if (P.detected_stack) {
+    html +=   '<span class="badge badge--stack" role="listitem">Stack: ' + esc(P.detected_stack) + '</span>';
+  }
+  if (P.task_type) {
+    html +=   '<span class="badge badge--type" role="listitem">Type: ' + esc(P.task_type) + '</span>';
+  }
+  if (P.execution_mode) {
+    html +=   '<span class="badge badge--mode" role="listitem">Mode: ' + esc(P.execution_mode) + '</span>';
+  }
+  if (P.classification_source) {
+    html +=   '<span class="badge badge--source" role="listitem">Via: ' + esc(P.classification_source) + '</span>';
+  }
+
+  html +=   '</div>';
+  html += '</header>';
+
+  // -- Progress section --
+  var pct = P.progress_pct || 0;
+  var fillClass = 'progress-bar__fill';
+  if (P.execution_status === 'complete') fillClass += ' progress-bar__fill--complete';
+  else if (P.execution_status === 'failed') fillClass += ' progress-bar__fill--failed';
+  else if (P.execution_status === 'running') fillClass += ' progress-bar__fill--running';
+
+  html += '<section class="progress-section" aria-label="Execution progress">';
+  html +=   '<div class="progress-stats">';
+  html +=     '<span class="progress-stats__pct">' + pct.toFixed(1) + '%</span>';
+  html +=     '<div class="progress-stats__detail">';
+  html +=       '<span><span class="step__metric-val">' + (P.steps_complete || 0) + '</span> <span class="progress-stats__label">complete</span></span>';
+  html +=       '<span><span class="step__metric-val">' + (P.steps_running || 0) + '</span> <span class="progress-stats__label">running</span></span>';
+  html +=       '<span><span class="step__metric-val">' + (P.steps_failed || 0) + '</span> <span class="progress-stats__label">failed</span></span>';
+  html +=       '<span><span class="step__metric-val">' + formatDuration(P.elapsed_seconds) + '</span> <span class="progress-stats__label">elapsed</span></span>';
+  html +=       '<span><span class="step__metric-val">' + formatTokens(P.total_tokens) + '</span> <span class="progress-stats__label">tokens</span></span>';
+  html +=       '<span><span class="step__metric-val">' + formatCost(P.total_cost_usd) + '</span> <span class="progress-stats__label">cost</span></span>';
+  html +=     '</div>';
+  html +=   '</div>';
+  html +=   '<div class="progress-bar" role="progressbar" aria-valuenow="' + pct + '" aria-valuemin="0" aria-valuemax="100">';
+  html +=     '<div class="' + fillClass + '" style="width:' + Math.min(pct, 100) + '%"></div>';
+  html +=   '</div>';
+  html +=   '<div class="execution-status" style="color:' + statusColor(P.execution_status) + '">';
+  html +=     '<span class="status-dot status-dot--' + esc(P.execution_status || 'not_started') + '"></span>';
+  html +=     esc((P.execution_status || 'not_started').replace(/_/g, ' '));
+  html +=   '</div>';
+  html += '</section>';
+
+  // -- Phases --
+  html += '<div class="phases" role="list" aria-label="Execution phases">';
+
+  var phases = P.phases || [];
+  for (var pi = 0; pi < phases.length; pi++) {
+    var phase = phases[pi];
+    var phaseStatus = phase.status || 'pending';
+    var isOpen = phaseStatus !== 'complete';
+    html += '<details class="phase" role="listitem"' + (isOpen ? ' open' : '') + '>';
+
+    // Phase header (summary)
+    html += '<summary class="phase__header">';
+    html +=   chevronSvg;
+    html +=   '<span class="status-dot status-dot--' + esc(phaseStatus) + '" aria-hidden="true"></span>';
+    html +=   '<span class="phase__label">Phase ' + esc(phase.phase_id) + '</span>';
+    html +=   '<span class="phase__name">' + esc(phase.name) + '</span>';
+    if (phase.approval_required) {
+      html += '<span class="badge badge--risk-high" style="font-size:.65rem">Approval Required</span>';
+    }
+    html +=   '<span class="phase__status-text phase__status-text--' + esc(phaseStatus) + '">' + esc(phaseStatus.replace(/_/g, ' ')) + '</span>';
+    html += '</summary>';
+
+    // Phase body
+    html += '<div class="phase__body">';
+
+    // Steps
+    var steps = phase.steps || [];
+    if (steps.length > 0) {
+      html += '<div class="steps">';
+      for (var si = 0; si < steps.length; si++) {
+        var step = steps[si];
+        var stepStatus = step.status || 'pending';
+
+        html += '<div class="step step--' + esc(stepStatus) + '">';
+
+        // Step header
+        html += '<div class="step__header">';
+        html +=   '<span class="step__id">' + esc(step.step_id) + '</span>';
+        html +=   '<span class="status-dot status-dot--' + esc(stepStatus) + '" aria-hidden="true"></span>';
+        html +=   '<span class="step__agent">' + esc(step.agent_name) + '</span>';
+        if (step.model) {
+          html += '<span class="step__model">' + esc(step.model) + '</span>';
+        }
+        html +=   '<span class="step__status" style="color:' + statusColor(stepStatus) + '">' + esc(stepStatus) + '</span>';
+        html += '</div>';
+
+        // Description
+        if (step.task_description) {
+          html += '<div class="step__desc">' + esc(step.task_description) + '</div>';
+        }
+
+        // Meta tags
+        var hasMeta = step.parallel_safe || (step.depends_on && step.depends_on.length) || step.step_type;
+        if (hasMeta) {
+          html += '<div class="step__meta">';
+          if (step.parallel_safe) {
+            html += '<span class="step__tag step__tag--parallel">parallel-safe</span>';
+          }
+          if (step.depends_on && step.depends_on.length) {
+            html += '<span class="step__tag step__tag--depends">depends on: ' + esc(step.depends_on.join(', ')) + '</span>';
+          }
+          if (step.step_type) {
+            html += '<span class="step__tag step__tag--type">' + esc(step.step_type) + '</span>';
+          }
+          html += '</div>';
+        }
+
+        // Metrics (shown if step has results)
+        if (step.tokens_used || step.duration_seconds) {
+          html += '<div class="step__metrics">';
+          if (step.tokens_used) {
+            html += '<span><span class="progress-stats__label">tokens</span> <span class="step__metric-val">' + formatTokens(step.tokens_used) + '</span></span>';
+          }
+          if (step.duration_seconds) {
+            html += '<span><span class="progress-stats__label">time</span> <span class="step__metric-val">' + formatDuration(step.duration_seconds) + '</span></span>';
+          }
+          if (step.files_changed && step.files_changed.length) {
+            html += '<span><span class="progress-stats__label">files</span> <span class="step__metric-val">' + step.files_changed.length + '</span></span>';
+          }
+          html += '</div>';
+        }
+
+        // Error
+        if (step.error) {
+          html += '<div class="step__error">' + esc(truncate(step.error, 300)) + '</div>';
+        }
+
+        // Team members
+        if (step.team && step.team.length) {
+          html += '<div class="team" role="list" aria-label="Team members">';
+          for (var ti = 0; ti < step.team.length; ti++) {
+            var member = step.team[ti];
+            var mStatus = member.status || 'pending';
+            html += '<div class="team__member" role="listitem">';
+            html +=   '<span class="status-dot status-dot--' + esc(mStatus) + '" aria-hidden="true"></span>';
+            html +=   '<span class="team__member-id">' + esc(member.member_id) + '</span>';
+            html +=   '<span class="team__member-agent">' + esc(member.agent_name) + '</span>';
+            html +=   '<span class="team__member-role">' + esc(member.role) + '</span>';
+            if (member.task_description) {
+              html += '<span class="team__member-desc">' + esc(member.task_description) + '</span>';
+            }
+            html += '</div>';
+          }
+          html += '</div>';
+        }
+
+        html += '</div>'; // .step
+      }
+      html += '</div>'; // .steps
+    }
+
+    // Gate
+    if (phase.gate) {
+      var gateStatus = phase.gate.status || 'pending';
+      html += '<div class="gate">';
+      html +=   gateIconSvg(gateStatus);
+      html +=   '<span class="gate__type">' + esc(phase.gate.gate_type) + ' gate</span>';
+      if (phase.gate.description) {
+        html += '<span class="gate__desc">' + esc(phase.gate.description) + '</span>';
+      }
+      html +=   '<span class="gate__status gate__status--' + esc(gateStatus) + '">' + esc(gateStatus) + '</span>';
+      if (phase.gate.command) {
+        html += '<span class="gate__command">' + esc(phase.gate.command) + '</span>';
+      }
+      html += '</div>';
+    }
+
+    html += '</div>'; // .phase__body
+    html += '</details>'; // .phase
+  }
+
+  html += '</div>'; // .phases
+
+  // -- Footer --
+  var agents = P.total_agents || [];
+  html += '<footer class="footer">';
+
+  html += '<div>';
+  html +=   '<div class="footer__label">Agents (' + agents.length + ')</div>';
+  html +=   '<div class="footer__agents">';
+  for (var ai = 0; ai < agents.length; ai++) {
+    html += '<span class="footer__agent-chip">' + esc(agents[ai]) + '</span>';
+  }
+  html +=   '</div>';
+  html += '</div>';
+
+  html += '<div>';
+  html +=   '<div class="footer__label">Amendments</div>';
+  html +=   '<div class="footer__amendments">' + (P.amendment_count || 0) + '</div>';
+  html += '</div>';
+
+  html += '</footer>';
+
+  // Inject
+  document.getElementById('app').innerHTML = html;
+
+  // Update document title
+  if (P.task_summary) {
+    document.title = P.task_summary + ' — Baton Plan';
+  }
+
+})();
+</script>
+</body>
+</html>
