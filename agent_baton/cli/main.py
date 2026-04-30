@@ -29,7 +29,7 @@ _COMMAND_GROUPS: dict[str, list[str]] = {
     "Governance": ["classify", "compliance", "policy", "escalations", "validate", "spec-check", "detect"],
     "Improvement": ["scores", "patterns", "budget", "changelog", "anomalies", "learn"],
     "Distribution": ["install", "uninstall", "package", "publish", "pull", "transfer"],
-    "Storage & Sync": ["sync", "source", "cquery", "storage", "cleanup"],
+    "Storage & Sync": ["sync", "source", "cquery", "storage", "cleanup", "maintenance"],
     "Memory": ["beads", "souls"],
     "Execution (Advanced)": ["daemon", "async", "decide"],
     "Portfolio": ["pmo", "serve"],
