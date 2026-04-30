@@ -968,7 +968,9 @@ def handler(args: argparse.Namespace) -> None:
             # Auto-viz: show initial plan status
             try:
                 from agent_baton.visualize.auto import auto_viz
-                auto_viz(engine._state, context_root=context_root)
+                _viz_state = StatePersistence(context_root, task_id=task_id).load()
+                if _viz_state:
+                    auto_viz(_viz_state, context_root=context_root)
             except Exception:
                 pass
 
@@ -1119,7 +1121,9 @@ def handler(args: argparse.Namespace) -> None:
             # Auto-viz: update status display and HTML snapshot
             try:
                 from agent_baton.visualize.auto import auto_viz
-                auto_viz(engine._state, context_root=context_root)
+                _viz_state = StatePersistence(context_root, task_id=task_id).load()
+                if _viz_state:
+                    auto_viz(_viz_state, context_root=context_root)
             except Exception:
                 pass
 
@@ -1205,7 +1209,9 @@ def handler(args: argparse.Namespace) -> None:
         if getattr(args, "output", "text") != "json":
             try:
                 from agent_baton.visualize.auto import auto_viz
-                auto_viz(engine._state, context_root=context_root)
+                _viz_state = StatePersistence(context_root, task_id=task_id).load()
+                if _viz_state:
+                    auto_viz(_viz_state, context_root=context_root)
             except Exception:
                 pass
 
@@ -1333,7 +1339,9 @@ def handler(args: argparse.Namespace) -> None:
         if getattr(args, "output", "text") != "json":
             try:
                 from agent_baton.visualize.auto import auto_viz
-                auto_viz(engine._state, context_root=context_root)
+                _viz_state = StatePersistence(context_root, task_id=task_id).load()
+                if _viz_state:
+                    auto_viz(_viz_state, context_root=context_root)
             except Exception:
                 pass
 
