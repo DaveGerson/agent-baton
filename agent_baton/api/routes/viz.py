@@ -6,11 +6,12 @@ GET /viz/{task_id}/data  -- return PlanSnapshot as JSON for custom rendering
 from __future__ import annotations
 
 import json
-import subprocess
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import HTMLResponse
+
+from agent_baton.cli._context import resolve_context_root
 
 router = APIRouter()
 
@@ -40,7 +41,7 @@ async def viz_html(task_id: str) -> HTMLResponse:
     from agent_baton.visualize.snapshot import PlanSnapshot
     from agent_baton.visualize.web_renderer import render_html
 
-    context_root = _resolve_context_root()
+    context_root = resolve_context_root()
 
     # Try execution state first — has richer runtime data.
     try:
@@ -85,7 +86,7 @@ async def viz_data(task_id: str) -> dict:
     from agent_baton.core.engine.persistence import StatePersistence
     from agent_baton.visualize.snapshot import PlanSnapshot
 
-    context_root = _resolve_context_root()
+    context_root = resolve_context_root()
     sp = StatePersistence(context_root, task_id=task_id)
     state = sp.load()
     if state is None:
@@ -94,28 +95,3 @@ async def viz_data(task_id: str) -> dict:
     return snapshot.to_dict()
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-def _resolve_context_root() -> Path:
-    """Resolve ``.claude/team-context/`` root from git toplevel or CWD walk."""
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if result.returncode == 0:
-            ctx = Path(result.stdout.strip()) / ".claude" / "team-context"
-            if ctx.is_dir():
-                return ctx.resolve()
-    except Exception:
-        pass
-
-    cwd = Path.cwd()
-    for parent in [cwd, *cwd.parents]:
-        ctx = parent / ".claude" / "team-context"
-        if ctx.is_dir():
-            return ctx.resolve()
-
-    return (cwd / ".claude" / "team-context").resolve()

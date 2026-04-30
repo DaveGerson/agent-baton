@@ -56,6 +56,7 @@ def handler(args: argparse.Namespace) -> None:
     import sys
     from pathlib import Path
 
+    from agent_baton.cli._context import resolve_context_root
     from agent_baton.models.execution import MachinePlan
     from agent_baton.visualize.snapshot import PlanSnapshot
 
@@ -74,7 +75,7 @@ def handler(args: argparse.Namespace) -> None:
         from agent_baton.core.engine.persistence import StatePersistence
         from agent_baton.core.storage import detect_backend, get_project_storage
 
-        context_root = _resolve_context_root()
+        context_root = resolve_context_root()
         task_id = args.task_id or os.environ.get("BATON_TASK_ID")
 
         if task_id is None:
@@ -158,33 +159,6 @@ def _serve_web(snapshot: PlanSnapshot, port: int) -> None:
         server.serve_forever()
     except KeyboardInterrupt:
         server.shutdown()
-
-
-def _resolve_context_root():
-    """Resolve .claude/team-context/ root."""
-    import subprocess
-    from pathlib import Path
-
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode == 0:
-            ctx = Path(result.stdout.strip()) / ".claude" / "team-context"
-            if ctx.is_dir():
-                return ctx.resolve()
-    except Exception:
-        pass
-
-    cwd = Path.cwd()
-    for parent in [cwd, *cwd.parents]:
-        ctx = parent / ".claude" / "team-context"
-        if ctx.is_dir():
-            return ctx.resolve()
-    return (cwd / ".claude" / "team-context").resolve()
 
 
 def _find_free_port() -> int:

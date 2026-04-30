@@ -52,7 +52,7 @@ def _marker(status: str) -> Text:
     return Text(glyph, style=style)
 
 
-def _truncate(text: str, width: int = 35) -> str:
+def _truncate(text: str, width: int = 45) -> str:
     """Truncate text with '...' suffix when it exceeds *width*."""
     if len(text) <= width:
         return text
