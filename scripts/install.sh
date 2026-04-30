@@ -40,7 +40,7 @@ check_prereqs
 if ! command -v cymbal &>/dev/null; then
     echo ""
     echo "  note: 'cymbal' not found — agents use it for symbol lookup and impact analysis"
-    echo "  See docs/getting-started.md for installation instructions"
+    echo "  Install from: https://github.com/1broseidon/cymbal"
     echo "  Without it, agents fall back to LSP or grep (slower, less precise)"
     echo ""
 fi

@@ -86,7 +86,21 @@ baton agents                # List agents from Python registry
 baton detect                # Detect your project's stack
 ```
 
-### 4. Run your first task
+### 4. Optional: install cymbal (recommended)
+
+[cymbal](https://github.com/1broseidon/cymbal) is a tree-sitter
+code indexer that agents use for symbol lookup and impact analysis.
+Without it, agents fall back to LSP or grep.
+
+```bash
+# Check if cymbal is installed
+cymbal --help
+
+# If not, install the binary to ~/.local/bin/
+# (see cymbal docs for platform-specific instructions)
+```
+
+### 5. Run your first task
 
 In a Claude Code session:
 

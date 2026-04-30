@@ -782,6 +782,30 @@ by creating knowledge packs or improving agent definitions.
 Inspect and manage Bead memory -- structured agent discoveries, decisions,
 and warnings that persist across steps within and across tasks.
 
+#### `baton beads create`
+
+Create a bead manually.
+
+```
+baton beads create --type TYPE --content TEXT [--task-id TASK_ID] [--step-id STEP_ID]
+    [--agent AGENT] [--tag TAG] [--file FILE] [--confidence LEVEL]
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--type TYPE` | Yes | Bead type: `discovery`, `decision`, `warning`, `outcome`, `planning` |
+| `--content TEXT` | Yes | The bead text (alias: `--body`) |
+| `--task-id TASK_ID` | No | Task ID to scope this bead (defaults to `$BATON_TASK_ID`; omit for project-scoped) |
+| `--step-id STEP_ID` | No | Step ID within the execution |
+| `--agent AGENT` | No | Agent name to record as the bead author (default: `orchestrator`) |
+| `--tag TAG` | No | Semantic tag (repeatable) |
+| `--file FILE` | No | Affected file path (repeatable) |
+| `--confidence LEVEL` | No | Confidence level: `high`, `medium`, `low` (default: `medium`) |
+
+**When to use:** To capture discoveries, decisions, warnings, or
+incidents that future agents should know about.  Inside an execution
+loop, `--task-id` and `--step-id` are inherited automatically.
+
 #### `baton beads list`
 
 List beads with optional filters.
