@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from agent_baton.core.engine.planning.archetypes import get_archetype_config
 from agent_baton.core.engine.planning.draft import PlanDraft
 from agent_baton.core.engine.planning.rules.phase_templates import PHASE_NAMES as _PHASE_NAMES
 from agent_baton.core.engine.planning.services import PlannerServices
@@ -90,6 +91,30 @@ class DecompositionStage:
         _MIN_PHASES = {"heavy": 3, "medium": 2, "light": 1}
 
         # 9. Build phases
+        # Archetype-aware phase construction — when the classifier has determined
+        # an archetype, use it to select phase templates unless the user provided
+        # explicit phases or compound subtasks.
+        archetype = getattr(draft, 'planning_archetype', 'phased')
+        if archetype != "phased" and subtask_data is None and phases is None:
+            config = get_archetype_config(archetype)
+            if archetype == "direct":
+                plan_phases = self._build_direct_phases(draft, config, registry)
+            elif archetype == "investigative":
+                plan_phases = self._build_investigative_phases(draft, config, registry)
+            else:
+                plan_phases = build_phases_for_names(
+                    config.phase_template, resolved_agents, task_summary, registry
+                )
+            logger.info(
+                "Archetype %r selected phases for task_id=%s: %s",
+                archetype, task_id,
+                [(p.name, [s.agent_name for s in p.steps]) for p in plan_phases],
+            )
+            plan_phases = enrich_phases(plan_phases, task_summary, registry)
+            if getattr(draft, 'research_concerns', None):
+                draft.concerns = list(draft.research_concerns)
+            return plan_phases
+
         if subtask_data is not None:
             # Compound task — each sub-task becomes its own phase
             plan_phases = build_compound_phases(subtask_data, agent_route_map, registry)
@@ -279,3 +304,158 @@ class DecompositionStage:
                                 exc_info=True,
                             )
         return plan_phases
+
+    def _build_direct_phases(
+        self,
+        draft: PlanDraft,
+        config,  # ArchetypeConfig
+        registry,
+    ) -> list["PlanPhase"]:
+        """DIRECT archetype: single Implement + Review, minimal overhead."""
+        from agent_baton.models.execution import PlanPhase, PlanStep, PlanGate
+
+        # Single implement step with the best-fit agent
+        implement_agent = draft.resolved_agents[0] if draft.resolved_agents else "backend-engineer"
+        implement_step = PlanStep(
+            step_id="1.1",
+            agent_name=implement_agent,
+            task_description=draft.task_summary,
+            model=draft.default_model or "sonnet",
+            step_type="developing",
+        )
+
+        implement_phase = PlanPhase(
+            phase_id=1,
+            name="Implement",
+            steps=[implement_step],
+            gate=PlanGate(gate_type="test", command="pytest --tb=short -q", description="Run tests"),
+        )
+
+        # Lightweight review phase
+        review_step = PlanStep(
+            step_id="2.1",
+            agent_name="code-reviewer",
+            task_description=f"Review the implementation of: {draft.task_summary}",
+            model="sonnet",
+            step_type="reviewing",
+            depends_on=["1.1"],
+        )
+        review_phase = PlanPhase(
+            phase_id=2,
+            name="Review",
+            steps=[review_step],
+        )
+
+        return [implement_phase, review_phase]
+
+    def _build_investigative_phases(
+        self,
+        draft: PlanDraft,
+        config,  # ArchetypeConfig
+        registry,
+    ) -> list["PlanPhase"]:
+        """INVESTIGATIVE archetype: hypothesis-driven with structured investigation."""
+        from agent_baton.models.execution import PlanPhase, PlanStep, PlanGate
+
+        task = draft.task_summary
+        investigate_agent = "general-purpose"
+        fix_agent = draft.resolved_agents[0] if draft.resolved_agents else "backend-engineer"
+
+        phases = [
+            PlanPhase(
+                phase_id=1,
+                name="Investigate",
+                steps=[PlanStep(
+                    step_id="1.1",
+                    agent_name=investigate_agent,
+                    task_description=(
+                        f"Investigate and reproduce: {task}\n\n"
+                        "1. Read error messages and stack traces carefully\n"
+                        "2. Reproduce the issue consistently\n"
+                        "3. Check recent changes (git log/blame)\n"
+                        "4. Trace data flow backward from symptom\n"
+                        "5. Document: symptoms, timeline, affected paths, reproduction steps\n\n"
+                        "Output a structured investigation report with evidence."
+                    ),
+                    model="opus",
+                    step_type="consulting",
+                )],
+                gate=PlanGate(
+                    gate_type="review",
+                    description="Confirm reproduction achieved and evidence gathered",
+                ),
+            ),
+            PlanPhase(
+                phase_id=2,
+                name="Hypothesize",
+                steps=[PlanStep(
+                    step_id="2.1",
+                    agent_name=investigate_agent,
+                    task_description=(
+                        f"Based on investigation of: {task}\n\n"
+                        "1. Form ranked hypotheses from evidence (most likely first)\n"
+                        "2. For top hypothesis: design a minimal test that would confirm or falsify it\n"
+                        "3. State concrete prediction: 'If hypothesis X is correct, then Y should be true'\n"
+                        "4. If hypothesis is falsified, include 'RETRY_PHASE' in output to loop back\n\n"
+                        "Output: ranked hypotheses with evidence, test design, and prediction."
+                    ),
+                    model="opus",
+                    step_type="consulting",
+                    depends_on=["1.1"],
+                )],
+            ),
+            PlanPhase(
+                phase_id=3,
+                name="Fix",
+                steps=[
+                    PlanStep(
+                        step_id="3.1",
+                        agent_name="test-engineer",
+                        task_description=(
+                            f"Write a failing regression test for: {task}\n\n"
+                            "The test must fail with the current bug and pass after the fix. "
+                            "This is the RED phase of TDD."
+                        ),
+                        model="sonnet",
+                        step_type="testing",
+                        depends_on=["2.1"],
+                    ),
+                    PlanStep(
+                        step_id="3.2",
+                        agent_name=fix_agent,
+                        task_description=(
+                            f"Implement the minimal fix for: {task}\n\n"
+                            "Fix the root cause identified in the hypothesis phase. "
+                            "The regression test from step 3.1 must pass after your fix."
+                        ),
+                        model="sonnet",
+                        step_type="developing",
+                        depends_on=["3.1"],
+                    ),
+                ],
+                gate=PlanGate(
+                    gate_type="test",
+                    command="pytest --tb=short -q",
+                    description="Regression test passes, existing tests pass",
+                ),
+            ),
+            PlanPhase(
+                phase_id=4,
+                name="Verify",
+                steps=[PlanStep(
+                    step_id="4.1",
+                    agent_name="code-reviewer",
+                    task_description=(
+                        f"Verify root-cause fix for: {task}\n\n"
+                        "1. Confirm fix addresses root cause, not just symptom\n"
+                        "2. Check for related instances (same pattern elsewhere)\n"
+                        "3. Verify regression test covers the actual failure mode\n"
+                        "4. Assess if fix introduces new risks"
+                    ),
+                    model="sonnet",
+                    step_type="reviewing",
+                    depends_on=["3.2"],
+                )],
+            ),
+        ]
+        return phases
