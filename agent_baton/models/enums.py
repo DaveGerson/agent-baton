@@ -59,6 +59,14 @@ class ExecutionMode(Enum):
     PHASED = "Phased Delivery"
 
 
+class PlanningArchetype(Enum):
+    """Planning strategy archetype — determines how the pipeline decomposes and sequences work."""
+
+    DIRECT = "direct"
+    PHASED = "phased"
+    INVESTIGATIVE = "investigative"
+
+
 class GateOutcome(Enum):
     """Result of a QA gate check between execution phases."""
 

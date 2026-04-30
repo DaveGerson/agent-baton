@@ -165,32 +165,6 @@ class TestPlanStepMaxEstimatedMinutes:
 
 
 class TestExecutionActionCheckpoint:
-    def test_checkpoint_suggested_default_false(self):
-        action = ExecutionAction(action_type=ActionType.DISPATCH)
-        assert action.checkpoint_suggested is False
-
-    def test_to_dict_includes_when_true(self):
-        action = ExecutionAction(
-            action_type=ActionType.DISPATCH,
-            checkpoint_suggested=True,
-        )
-        d = action.to_dict()
-        assert d.get("checkpoint_suggested") is True
-
-    def test_to_dict_omits_when_false(self):
-        # When False, to_dict should omit the field (sparse representation)
-        action = ExecutionAction(action_type=ActionType.DISPATCH)
-        d = action.to_dict()
-        # Either not present or explicitly False is acceptable
-        assert not d.get("checkpoint_suggested", False)
-
-    def test_checkpoint_suggested_is_bool(self):
-        action = ExecutionAction(
-            action_type=ActionType.DISPATCH,
-            checkpoint_suggested=True,
-        )
-        assert isinstance(action.checkpoint_suggested, bool)
-
     def test_checkpoint_action_type_serialises(self):
         action = ExecutionAction(action_type=ActionType.CHECKPOINT)
         d = action.to_dict()

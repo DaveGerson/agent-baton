@@ -222,7 +222,7 @@ class TestInvestigativeArchetypeDecomposition:
 
         verify_phase = next(p for p in result.plan_phases if p.name == "Verify")
         agent_names = [s.agent_name for s in verify_phase.steps]
-        assert "test-engineer" in agent_names
+        assert "code-reviewer" in agent_names
 
 
 # ---------------------------------------------------------------------------

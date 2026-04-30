@@ -50,7 +50,8 @@ class TestTaskClassificationArchetypeField:
             source="test",
             archetype="custom",
         )
-        assert tc.archetype == "custom"
+        # Invalid archetypes auto-correct to "phased"
+        assert tc.archetype == "phased"
 
     def test_direct_archetype_accepted(self):
         tc = TaskClassification(
