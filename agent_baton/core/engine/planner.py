@@ -8,34 +8,38 @@ module exists so external code that still does ::
 
 keeps working.
 
-The exported ``IntelligentPlanner`` class is the new pipeline-based shell
-(see :mod:`agent_baton.core.engine.planning.planner`).  Other module-level
-symbols (``_DEFAULT_AGENTS``, ``_TASK_TYPE_KEYWORDS``,
-``_derive_expected_outcome`` etc.) are re-exported from the legacy
-implementation in :mod:`agent_baton.core.engine.planning._legacy_planner`
-while we incrementally port their callers; the legacy module will be
-deleted once the port completes.
+All symbols are re-exported from the new locations in utils/ and rules/.
 """
 from __future__ import annotations
 
-# --- Public class: NEW pipeline-based planner ---
+# --- Public class: pipeline-based planner ---
 from agent_baton.core.engine.planning.planner import IntelligentPlanner
 
-# --- Re-exports of legacy module-level symbols still imported elsewhere ---
-# These are read-only constants and pure helpers; they stay in the legacy
-# module until the corresponding stage / helper port lands.
-from agent_baton.core.engine.planning._legacy_planner import (
+# --- GateScope and gate helpers ---
+from agent_baton.core.engine.planning.utils.gates import (
     GateScope,
-    _AGENT_ALIASES,
-    _AGENT_DELIVERABLES,
-    _DEFAULT_AGENTS,
-    _PHASE_NAMES,
-    _STEP_TEMPLATES,
-    _TASK_TYPE_KEYWORDS,
+    _test_files_for_changes,
     _coverage_package_for_changes,
+)
+
+# --- Phase-builder private helpers ---
+from agent_baton.core.engine.planning.utils.phase_builder import (
     _derive_expected_outcome,
     _step_type_for_agent,
-    _test_files_for_changes,
+)
+
+# --- Text-parser constants ---
+from agent_baton.core.engine.planning.utils.text_parsers import (
+    _TASK_TYPE_KEYWORDS,
+    _AGENT_ALIASES,
+)
+
+# --- Rules constants ---
+from agent_baton.core.engine.planning.rules.default_agents import _DEFAULT_AGENTS
+from agent_baton.core.engine.planning.rules.phase_templates import _PHASE_NAMES
+from agent_baton.core.engine.planning.rules.templates import (
+    _AGENT_DELIVERABLES,
+    _STEP_TEMPLATES,
 )
 
 __all__ = [
