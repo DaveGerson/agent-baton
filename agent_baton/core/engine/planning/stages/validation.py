@@ -84,7 +84,7 @@ class ValidationStage:
         # Step 12c+12c.4+12c.5 — team consolidation, file-path
         # extraction, plan reviewer pass.  The native method writes
         # ``services.planner._last_review_result`` as a side effect so
-        # downstream bridge stages can still read it.
+        # ``explain_plan`` can read it back.
         extracted_paths = self._consolidate_team(draft=draft, services=services)
         draft.extracted_paths = extracted_paths
         draft.review_result = services.planner._last_review_result
@@ -176,11 +176,12 @@ class ValidationStage:
         extraction, and plan reviewer pass.
 
         Port of ``_LegacyIntelligentPlanner._step_consolidate_team``.
-        Mutates ``draft.plan_phases`` in place.  Returns ``extracted_paths``
-        so the downstream context-richness step can re-use them.
+        Mutates ``draft.plan_phases`` in place.  Returns ``extracted_paths``;
+        EnrichmentStage extracts the same paths independently for its
+        own use (the helper is pure, double-call is harmless).
 
         Writes ``services.planner._last_review_result`` as a side effect so
-        bridge stages and ``explain_plan`` can read it unchanged.
+        ``explain_plan`` can read it unchanged.
 
         Non-``_step_*`` helpers (``_is_team_phase``,
         ``_consolidate_team_step``, ``_extract_file_paths``) stay on the

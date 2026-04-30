@@ -77,6 +77,16 @@ class EnrichmentStage:
                 draft.plan_phases, draft.bead_hints, services=services,
             )
 
+        # Step 12c.4 — extract file paths from the task summary.  In the
+        # legacy planner this happened inside ``_step_consolidate_team``
+        # (now in ValidationStage) and was reused by ``_step_inject_context_files``
+        # below.  Stage ordering (Enrichment → Validation) means we must
+        # extract here so step 13c can see the paths; ValidationStage
+        # re-extracts independently for its own plan-reviewer call.
+        # ``_extract_file_paths`` is a pure helper still on the legacy
+        # class — safe to call twice in one create_plan.
+        draft.extracted_paths = services.planner._extract_file_paths(draft.task_summary)
+
         # Step 13+13b+13c — context file injection.
         self._inject_context_files(
             draft.plan_phases,

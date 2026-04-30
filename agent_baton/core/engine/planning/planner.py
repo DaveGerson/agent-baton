@@ -1,10 +1,13 @@
 """IntelligentPlanner — pipeline-based plan construction.
 
 Replaces the 4,721-line god-class in ``_legacy_planner.py`` with a thin
-shell that runs a seven-stage pipeline.  Today the stages **bridge**
-to the legacy ``_step_*`` methods on the inherited class; future
-commits port each stage's body in-place and remove the corresponding
-legacy methods.
+shell that runs a seven-stage pipeline.  Each stage owns its slice of
+the plan-construction work natively; stages call into a shrinking set
+of non-``_step_*`` helpers on the legacy class via
+``services.planner._helper`` (e.g. ``_route_agents``,
+``_assess_risk``, ``_capture_planning_bead``,
+``_extract_file_paths``).  Once those helpers are also extracted, the
+legacy parent class is deleted.
 
 Stage order (see ``planning.stages``):
 
@@ -61,11 +64,13 @@ def _build_default_pipeline() -> Pipeline:
 class IntelligentPlanner(_LegacyIntelligentPlanner):
     """Pipeline-based planner — replaces the legacy monolith.
 
-    Inheriting from the legacy class is transitional scaffolding that
-    keeps the seven bridge stages able to call into legacy ``_step_*``
-    methods without breaking the public API or the static methods tests
-    poke directly.  Each ported stage drops its bridge call; once no
-    bridges remain, the legacy parent class is deleted.
+    Inheriting from the legacy class is transitional scaffolding: it
+    keeps non-``_step_*`` helpers (``_route_agents``, ``_assess_risk``,
+    ``_extract_file_paths``, ``_capture_planning_bead``,
+    ``_enrich_phases``, ``_assign_agents_to_phases``, etc.) reachable
+    by stages via ``services.planner._helper`` and preserves the
+    static-method surface tests poke directly.  Once every helper is
+    extracted, the legacy parent class is deleted.
     """
 
     def __init__(
@@ -139,8 +144,10 @@ class IntelligentPlanner(_LegacyIntelligentPlanner):
             datetime.now(timezone.utc) if draft.otel_exporter else None
         )
 
-        # Build the services container, passing self as the transitional
-        # legacy planner reference for bridge stages to call into.
+        # Build the services container, passing self as the helper
+        # bridge.  Stages reach legacy non-``_step_*`` helpers through
+        # ``services.planner._helper(...)`` until those helpers are
+        # also extracted.
         services = self._build_services()
 
         # Run the pipeline.

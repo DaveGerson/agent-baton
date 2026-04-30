@@ -255,11 +255,11 @@ class DecompositionStage:
                 exc_info=True,
             )
 
-        # Write back introspection state on the legacy planner instance so
-        # downstream bridge stages (AssemblyStage → _step_build_shared_context,
-        # explain_plan, etc.) can still read ``_last_foresight_insights``.
+        # Write back introspection state on the legacy planner instance
+        # so AssemblyStage and ``explain_plan`` can read
+        # ``_last_foresight_insights``.
         services.planner._last_foresight_insights = foresight_insights
-        # Also store on the draft for future pipeline-native consumers.
+        # Also store on the draft for pipeline-native consumers.
         draft.foresight_insights = foresight_insights
 
         # 9.8. Resolve knowledge for foresight-inserted steps.

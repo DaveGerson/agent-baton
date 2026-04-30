@@ -85,9 +85,9 @@ class AssemblyStage:
                 1.0 if draft.classification.confidence == "high" else 0.5
             )
 
-        # ``_last_task_classification`` is set as a side effect of
-        # ClassificationStage → ``_step_classify_task``; it lives on the
-        # legacy planner instance until that stage is also ported.
+        # ``_last_task_classification`` is written by ClassificationStage
+        # onto the legacy planner instance for ``explain_plan`` to read
+        # back later.  We pull it from there.
         _last_task_cls = legacy._last_task_classification if legacy is not None else None
 
         tmp_plan = MachinePlan(
@@ -111,9 +111,9 @@ class AssemblyStage:
                 if draft.stack_profile and draft.stack_profile.framework
                 else (draft.stack_profile.language if draft.stack_profile else None)
             ),
-            # ``_last_foresight_insights`` is set as a side effect of
-            # DecompositionStage → ``_step_apply_foresight``; also lives on
-            # the legacy planner instance until that stage is ported.
+            # ``_last_foresight_insights`` is written by DecompositionStage
+            # onto the legacy planner instance.  Pulled from there for
+            # ``explain_plan`` continuity.
             foresight_insights=list(
                 legacy._last_foresight_insights if legacy is not None else []
             ),
