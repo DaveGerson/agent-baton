@@ -91,6 +91,7 @@ class IntelligentPlanner:
         from agent_baton.core.config import ProjectConfig
 
         self._registry = AgentRegistry()
+        self._registry.load_default_paths()
         self._router = AgentRouter(self._registry)
         self._scorer = PerformanceScorer()
         self._pattern_learner = PatternLearner(
