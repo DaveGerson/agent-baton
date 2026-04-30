@@ -489,28 +489,44 @@ class PromptDispatcher:
             parts += [prior_context_block.strip(), ""]
 
         # Handoff from Prior Step (Wave 3.2 — HandoffSynthesizer).
-        # Synthesizes a compact summary of the prior step's git diff,
-        # discoveries (beads created), and blockers (open warnings whose
-        # files/tags overlap this step).  Persists to handoff_beads for
-        # audit.  Best-effort: any failure leaves the section out.
+        # Tier 1 (compact bead) is always synthesized first so it can be
+        # persisted to handoff_beads for audit.  Tier 2 (structured 4KB
+        # block) is preferred for prompt injection when available; Tier 1
+        # text is the fallback.  Both paths are best-effort.
         if prior_step_result is not None:
             try:
                 from agent_baton.core.intel.handoff_synthesizer import (
                     HANDOFF_MAX_CHARS,
                     HandoffSynthesizer,
                 )
-                _handoff_text = HandoffSynthesizer().synthesize_for_dispatch(
+                _hs = HandoffSynthesizer()
+                _kwargs = dict(task_id=handoff_task_id or None)
+
+                # Always build the compact bead (persists to audit table).
+                _compact_text = _hs.synthesize_for_dispatch(
                     prior_step_result,
                     step,
                     handoff_conn,
-                    task_id=handoff_task_id or None,
+                    **_kwargs,
                 )
-                if _handoff_text:
-                    if len(_handoff_text) > HANDOFF_MAX_CHARS:
-                        _handoff_text = _handoff_text[: HANDOFF_MAX_CHARS - 3].rstrip() + "..."
+
+                # Prefer the structured block for prompt injection.
+                _structured_text = _hs.synthesize_structured_for_dispatch(
+                    prior_step_result,
+                    step,
+                    handoff_conn,
+                    **_kwargs,
+                )
+
+                # Pick the richer text for the prompt; fall back to compact.
+                _inject_text = _structured_text or _compact_text
+                if _inject_text:
+                    if not _structured_text and len(_inject_text) > HANDOFF_MAX_CHARS:
+                        # Compact fallback path: re-apply the 400-char cap.
+                        _inject_text = _inject_text[: HANDOFF_MAX_CHARS - 3].rstrip() + "..."
                     parts += [
                         "## Handoff from Prior Step",
-                        _handoff_text,
+                        _inject_text,
                         "",
                     ]
             except Exception as _hf_exc:  # noqa: BLE001

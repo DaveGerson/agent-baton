@@ -43,8 +43,20 @@ _log = logging.getLogger(__name__)
 # subsequent dispatch prompt.
 HANDOFF_MAX_CHARS = 400
 
+# Hard cap on the structured 4KB prompt block (Tier 2).
+HANDOFF_STRUCTURED_MAX_CHARS = 4096
+
 # Maximum number of file paths to include in the "Files" line.
 HANDOFF_MAX_FILES = 5
+
+# Maximum file paths for the structured block (higher fidelity than compact).
+HANDOFF_STRUCTURED_MAX_FILES = 20
+
+# Maximum open-question (warning) beads shown in structured block.
+HANDOFF_STRUCTURED_MAX_QUESTIONS = 5
+
+# Maximum chars per open-question message before truncation.
+HANDOFF_STRUCTURED_QUESTION_MAX_CHARS = 120
 
 
 def _safe_attr(obj: Any, name: str, default: Any = None) -> Any:
@@ -203,6 +215,49 @@ def _query_open_warnings(conn: Any, *, task_id: str) -> list[dict[str, Any]]:
     return out
 
 
+def _query_decision_beads_for_step(
+    conn: Any, *, task_id: str, step_id: str
+) -> list[dict[str, Any]]:
+    """Return decision-type beads (or decision-tagged beads) for a step.
+
+    Tries bead_type='decision' first; falls back to tag-based lookup when
+    the schema carries them only as tagged non-decision beads.
+    """
+    if conn is None or not task_id or not step_id:
+        return []
+    # Primary: explicit bead_type = 'decision'.
+    try:
+        cur = conn.execute(
+            "SELECT bead_id, content FROM beads "
+            "WHERE task_id = ? AND step_id = ? AND bead_type = 'decision' "
+            "ORDER BY created_at ASC",
+            (task_id, step_id),
+        )
+        rows = cur.fetchall()
+    except Exception as exc:  # noqa: BLE001
+        _log.debug("_query_decision_beads_for_step (type) failed: %s", exc)
+        rows = []
+
+    if rows:
+        return [{"bead_id": r[0], "content": r[1] or ""} for r in rows]
+
+    # Fallback: any bead from the step tagged 'decision'.
+    try:
+        cur = conn.execute(
+            "SELECT b.bead_id, b.content FROM beads b "
+            "JOIN bead_tags t ON t.bead_id = b.bead_id "
+            "WHERE b.task_id = ? AND b.step_id = ? AND t.tag = 'decision' "
+            "ORDER BY b.created_at ASC",
+            (task_id, step_id),
+        )
+        rows = cur.fetchall()
+    except Exception as exc:  # noqa: BLE001
+        _log.debug("_query_decision_beads_for_step (tag) failed: %s", exc)
+        return []
+
+    return [{"bead_id": r[0], "content": r[1] or ""} for r in rows]
+
+
 def _stable_handoff_id(task_id: str, from_step_id: str, to_step_id: str) -> str:
     """Deterministic handoff_id keyed on the (task, from, to) triple."""
     h = hashlib.sha256(
@@ -213,6 +268,145 @@ def _stable_handoff_id(task_id: str, from_step_id: str, to_step_id: str) -> str:
 
 class HandoffSynthesizer:
     """Synthesize a compact handoff document between consecutive steps."""
+
+    def synthesize_structured_for_dispatch(
+        self,
+        prior_step_result: Any,
+        next_step: Any,
+        conn: Any,
+        *,
+        task_id: str | None = None,
+    ) -> str | None:
+        """Build a structured 4KB handoff block for injection into the next agent's prompt.
+
+        This is Tier 2: a richer Markdown block rendered fresh per-dispatch,
+        never persisted.  On any internal failure returns None so the dispatch
+        pipeline can fall back gracefully to the compact Tier 1 text.
+
+        Args:
+            prior_step_result: Completed StepResult-shaped object (or None).
+            next_step: PlanStep about to be dispatched.
+            conn: Open sqlite3 connection on baton.db (may be None).
+            task_id: Task scope for bead queries.
+
+        Returns:
+            Structured Markdown string (capped at HANDOFF_STRUCTURED_MAX_CHARS)
+            or None when there is no prior step / nothing useful to render.
+        """
+        if prior_step_result is None or next_step is None:
+            return None
+        try:
+            return self._synthesize_structured_inner(
+                prior_step_result, next_step, conn, task_id=task_id
+            )
+        except Exception as exc:  # noqa: BLE001
+            _log.debug(
+                "HandoffSynthesizer.synthesize_structured_for_dispatch failed: %s", exc
+            )
+            return None
+
+    def _synthesize_structured_inner(
+        self,
+        prior_step_result: Any,
+        next_step: Any,
+        conn: Any,
+        *,
+        task_id: str | None,
+    ) -> str | None:
+        prior_step_id = _safe_attr(prior_step_result, "step_id", "") or ""
+
+        # Nothing to say without a step identity.
+        if not prior_step_id:
+            return None
+
+        resolved_task_id = task_id or _safe_attr(prior_step_result, "task_id", "") or ""
+
+        files_changed = _normalize_paths(
+            _safe_attr(prior_step_result, "files_changed", []) or []
+        )
+        outcome = _gate_outcome_line(prior_step_result)
+
+        # Key decisions — beads with bead_type='decision' (or tag fallback).
+        decisions = _query_decision_beads_for_step(
+            conn, task_id=resolved_task_id, step_id=prior_step_id
+        )
+
+        # Open questions — open warning beads overlapping the next step.
+        next_tokens = _next_step_domain_tokens(next_step)
+        all_warnings = _query_open_warnings(conn, task_id=resolved_task_id)
+        blockers: list[dict[str, Any]] = []
+        for w in all_warnings:
+            wf = set(w.get("files") or [])
+            wt = set(w.get("tags") or [])
+            if (wf & next_tokens) or (wt & next_tokens):
+                blockers.append(w)
+
+        # Skip entirely when there is nothing useful to render.
+        if (
+            not files_changed
+            and not decisions
+            and not blockers
+            and outcome == "unknown"
+        ):
+            return None
+
+        # Build each section individually so proportional capping is clean.
+        sections: list[str] = ["### Handoff from Prior Step", ""]
+
+        # --- Files section ---
+        if files_changed:
+            top = files_changed[:HANDOFF_STRUCTURED_MAX_FILES]
+            extra = len(files_changed) - len(top)
+            files_str = ", ".join(top)
+            if extra > 0:
+                files_str += f", ... (+{extra} more)"
+            sections.append(f"**Files changed ({len(files_changed)})**: {files_str}")
+            sections.append("")
+
+        # --- Key decisions section ---
+        if decisions:
+            sections.append("**Key decisions**:")
+            for d in decisions:
+                msg = (d.get("content") or "").strip()
+                if not msg:
+                    continue
+                # One-line: collapse newlines and cap per-item length.
+                one_line = msg.replace("\n", " ")
+                if len(one_line) > 120:
+                    one_line = one_line[:117] + "..."
+                sections.append(f"- {one_line}")
+            sections.append("")
+
+        # --- Open questions section ---
+        if blockers:
+            sections.append("**Open questions**:")
+            for w in blockers[:HANDOFF_STRUCTURED_MAX_QUESTIONS]:
+                msg = (w.get("content") or "").strip()
+                if not msg:
+                    continue
+                one_line = msg.replace("\n", " ")
+                if len(one_line) > HANDOFF_STRUCTURED_QUESTION_MAX_CHARS:
+                    one_line = one_line[:HANDOFF_STRUCTURED_QUESTION_MAX_CHARS - 3] + "..."
+                sections.append(f"- {one_line}")
+            sections.append("")
+
+        # --- Outcome section ---
+        sections.append(
+            f"**Outcome of {prior_step_id}**: {outcome}"
+        )
+
+        body = "\n".join(sections)
+
+        # Enforce the 4KB cap.  If we exceed it, truncate at the last complete
+        # newline before the cap so we never chop mid-line.
+        if len(body) > HANDOFF_STRUCTURED_MAX_CHARS:
+            cut = body[: HANDOFF_STRUCTURED_MAX_CHARS - 3].rfind("\n")
+            if cut > 0:
+                body = body[:cut].rstrip() + "\n..."
+            else:
+                body = body[: HANDOFF_STRUCTURED_MAX_CHARS - 3] + "..."
+
+        return body
 
     def synthesize_for_dispatch(
         self,
