@@ -50,6 +50,25 @@ class RosterStage:
     name = "roster"
 
     def run(self, draft: PlanDraft, services: PlannerServices) -> PlanDraft:
+        # Early-return when both agents AND phases were explicitly supplied.
+        # The caller has fully specified the plan shape; we skip the
+        # expensive pattern/retro/subtask/concern expansion and only do
+        # agent routing (step 5e) so stack-flavored variants are resolved.
+        if draft.agents is not None and draft.phases is not None:
+            logger.debug(
+                "RosterStage: explicit agents+phases supplied — skipping "
+                "pattern/retro/decompose/expand, running routing only"
+            )
+            resolved_agents, agent_route_map = self._route_agents(
+                resolved_agents=draft.resolved_agents,
+                project_root=draft.project_root,
+                routing_notes=draft.routing_notes,
+                services=services,
+            )
+            draft.resolved_agents = resolved_agents
+            draft.agent_route_map = agent_route_map
+            return draft
+
         # Step 4+4b — pattern lookup + bead hints.
         pattern, resolved_agents, bead_hints = self._apply_pattern(
             task_summary=draft.task_summary,

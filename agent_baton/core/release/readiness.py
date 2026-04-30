@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_baton.models.release_readiness import ReleaseReadinessReport
+from agent_baton.utils.time import utcnow_zulu as _utcnow
 
 _log = logging.getLogger(__name__)
 
@@ -40,10 +41,6 @@ _WEIGHTS: dict[str, int] = {
     "slo_breaches_7d": 15,
     "escalations": 25,
 }
-
-
-def _utcnow() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _since_iso(days: int) -> str:

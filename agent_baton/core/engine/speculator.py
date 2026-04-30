@@ -35,6 +35,8 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from agent_baton.utils.time import utcnow_seconds as _utcnow
+
 if TYPE_CHECKING:
     from agent_baton.core.engine.worktree_manager import WorktreeHandle, WorktreeManager
 
@@ -614,6 +616,3 @@ def _build_handoff_prompt(
 def _new_spec_id() -> str:
     return str(uuid.uuid4())
 
-
-def _utcnow() -> str:
-    return datetime.now(tz=timezone.utc).isoformat(timespec="seconds")

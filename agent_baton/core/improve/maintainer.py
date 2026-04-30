@@ -32,21 +32,17 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from agent_baton.models.improvement import ImprovementReport
+from agent_baton.utils.time import utcnow_seconds as _utcnow
 
 _log = logging.getLogger(__name__)
 
 _DEFAULT_IMPROVEMENTS_DIR = Path(".claude/team-context/improvements")
 _AGENT_NAME = "system-maintainer"
 _MODEL = "sonnet"
-
-
-def _utcnow() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def _build_prompt(

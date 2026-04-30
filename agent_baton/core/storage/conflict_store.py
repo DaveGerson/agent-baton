@@ -22,14 +22,9 @@ import logging
 from pathlib import Path
 
 from agent_baton.core.improve.conflict_detection import Conflict
+from agent_baton.utils.time import utcnow_zulu as _utcnow_iso
 
 _log = logging.getLogger(__name__)
-
-
-def _utcnow_iso() -> str:
-    from datetime import datetime, timezone
-
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 class ConflictStore:

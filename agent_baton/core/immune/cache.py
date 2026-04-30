@@ -26,8 +26,10 @@ import ast
 import json
 import logging
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
+
+from agent_baton.utils.time import utcnow as _utcnow, utcnow_zulu as _utcnow_str
 
 _log = logging.getLogger(__name__)
 
@@ -39,14 +41,6 @@ _CACHE_REBUILD_INTERVAL_DAYS = 30
 _MAX_SNAPSHOT_BYTES = 50 * 1024
 # Max file tree entries (truncated beyond this to keep token count down).
 _MAX_FILE_TREE_ENTRIES = 500
-
-
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _utcnow_str() -> str:
-    return _utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 class ContextCache:

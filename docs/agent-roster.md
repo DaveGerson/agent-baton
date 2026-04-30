@@ -29,8 +29,8 @@ Each agent file in `agents/` contains a YAML frontmatter block (`name`, `descrip
 | Agent | Model | Use when |
 |-------|-------|----------|
 | `orchestrator` | opus | Complex cross-cutting tasks, multi-domain refactors, batches of related tasks. Drives `baton plan` → `baton execute`. |
-| `team-lead` | opus | Coordinator for parallel sub-teams within a phase. |
-| `task-runner` | sonnet | Procedural execution of pre-scripted shell/HTTP/data-format tasks. No architectural judgment. |
+| `team-lead` | sonnet | Coordinator for parallel sub-teams within a phase. |
+| `task-runner` | haiku | Procedural execution of pre-scripted shell/HTTP/data-format tasks. No architectural judgment. |
 
 ## Implementation specialists
 
@@ -51,7 +51,7 @@ Each agent file in `agents/` contains a YAML frontmatter block (`name`, `descrip
 | Agent | Model | Use when |
 |-------|-------|----------|
 | `code-reviewer` | sonnet | Final pass for readability, performance, error handling, project conventions. |
-| `security-reviewer` | sonnet | Auth flows, input validation, secrets management, OWASP top 10, dependency vulns. |
+| `security-reviewer` | opus | Auth flows, input validation, secrets management, OWASP top 10, dependency vulns. |
 | `auditor` | opus | Independent safety/compliance/governance review. Has veto authority. Required for MEDIUM+ risk plans. |
 | `test-engineer` | sonnet | Unit, integration, and E2E tests. Test infrastructure. |
 
@@ -67,7 +67,7 @@ Each agent file in `agents/` contains a YAML frontmatter block (`name`, `descrip
 
 | Agent | Model | Use when |
 |-------|-------|----------|
-| `subject-matter-expert` | sonnet | Industry-specific business rules, regulatory compliance (SOX, GDPR, HIPAA), business processes. |
+| `subject-matter-expert` | opus | Industry-specific business rules, regulatory compliance (SOX, GDPR, HIPAA), business processes. |
 | `learning-analyst` | sonnet | Reads execution history + scorecards; proposes evidence-backed agent/config improvements. |
 | `system-maintainer` | sonnet | Post-cycle config tuning. Mutates `learned-overrides.json` only — never source code. |
 | `talent-builder` | opus | Researches a domain, creates a new specialist agent + knowledge pack + skills. |

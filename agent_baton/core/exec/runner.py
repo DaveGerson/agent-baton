@@ -29,8 +29,9 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING
+
+from agent_baton.utils.time import utcnow_zulu as _utcnow
 
 if TYPE_CHECKING:
     from agent_baton.core.engine.bead_store import BeadStore
@@ -43,10 +44,6 @@ _log = logging.getLogger(__name__)
 
 _SOULS_ENABLED_ENV = "BATON_SOULS_ENABLED"
 _EXEC_ENABLED_ENV = "BATON_EXEC_BEADS_ENABLED"
-
-
-def _utcnow() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _is_souls_enabled() -> bool:

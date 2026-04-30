@@ -20,9 +20,10 @@ import logging
 import sqlite3
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
+
+from agent_baton.utils.time import utcnow_iso as _utcnow
 
 _log = logging.getLogger(__name__)
 
@@ -167,10 +168,6 @@ class SyncResult:
 # ---------------------------------------------------------------------------
 # SyncEngine
 # ---------------------------------------------------------------------------
-
-
-def _utcnow() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 class SyncEngine:

@@ -27,22 +27,18 @@ matching ``message_ack`` bead.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from agent_baton.models.bead import (
     Bead,
     _generate_bead_id,
 )
+from agent_baton.utils.time import utcnow_zulu as _utcnow
 
 if TYPE_CHECKING:
     from agent_baton.core.engine.bead_store import BeadStore
 
 _log = logging.getLogger(__name__)
-
-
-def _utcnow() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 class TeamBoard:

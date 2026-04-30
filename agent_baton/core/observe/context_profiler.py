@@ -20,11 +20,11 @@ recommend routing or prompt changes):
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 
 from agent_baton.core.observe.trace import TraceRecorder
 from agent_baton.models.context_profile import AgentContextProfile, TaskContextProfile
+from agent_baton.utils.time import utcnow_seconds as _utcnow
 
 # Approximate tokens-per-character multiplier used for rough estimation.
 # 1 token ≈ 4 characters is the common rule of thumb.
@@ -356,10 +356,3 @@ class ContextProfiler:
         return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-def _utcnow() -> str:
-    """Return current UTC time as an ISO 8601 string."""
-    return datetime.now(tz=timezone.utc).isoformat(timespec="seconds")

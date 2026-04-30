@@ -28,9 +28,10 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+from agent_baton.utils.time import utcnow_seconds as _utcnow
 
 if TYPE_CHECKING:
     from agent_baton.core.predict.classifier import IntentClassification
@@ -634,6 +635,3 @@ class PredictiveDispatcher:
 # Utilities
 # ---------------------------------------------------------------------------
 
-
-def _utcnow() -> str:
-    return datetime.now(tz=timezone.utc).isoformat(timespec="seconds")

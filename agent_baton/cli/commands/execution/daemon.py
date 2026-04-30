@@ -19,6 +19,7 @@ import logging
 import os
 from pathlib import Path
 
+from agent_baton.cli.errors import EXIT_VALIDATION, user_error
 from agent_baton.core.runtime.supervisor import WorkerSupervisor
 from agent_baton.core.runtime.launcher import DryRunLauncher, AgentLauncher
 from agent_baton.models.execution import MachinePlan
@@ -297,21 +298,18 @@ def handler(args: argparse.Namespace) -> None:
 
     if args.daemon_action == "start":
         if not args.resume and not args.plan:
-            print("Error: --plan is required (unless --resume is set)")
-            return
+            user_error("--plan is required (unless --resume is set)", exit_code=EXIT_VALIDATION)
 
         plan = None
         if args.plan:
             plan_path = Path(args.plan)
             if not plan_path.exists():
-                print(f"Error: plan file not found: {plan_path}")
-                return
+                user_error(f"plan file not found: {plan_path}", exit_code=EXIT_VALIDATION)
             try:
                 data = json.loads(plan_path.read_text(encoding="utf-8"))
                 plan = MachinePlan.from_dict(data)
             except (json.JSONDecodeError, KeyError) as exc:
-                print(f"Error: invalid plan file: {exc}")
-                return
+                user_error(f"invalid plan file: {exc}", exit_code=EXIT_VALIDATION)
 
         if args.dry_run:
             launcher = DryRunLauncher()
@@ -323,17 +321,14 @@ def handler(args: argparse.Namespace) -> None:
                 registry.load_default_paths()
                 launcher = ClaudeCodeLauncher(registry=registry)
             except RuntimeError as exc:
-                print(f"Error: {exc}")
-                print("Install Claude Code CLI or use --dry-run.")
-                return
+                user_error(str(exc), hint="Install Claude Code CLI or use --dry-run.")
 
         # Change to --project-dir before forking so all relative paths resolve
         # correctly inside the daemon process.
         if args.project_dir is not None:
             project_dir = Path(args.project_dir).resolve()
             if not project_dir.is_dir():
-                print(f"Error: project directory not found: {project_dir}")
-                return
+                user_error(f"project directory not found: {project_dir}", exit_code=EXIT_VALIDATION)
             os.chdir(project_dir)
 
         # --serve is only meaningful in foreground mode or after daemonization.
@@ -390,8 +385,7 @@ def handler(args: argparse.Namespace) -> None:
             try:
                 supervisor._write_pid()
             except RuntimeError as exc:
-                print(f"Error: {exc}")
-                return
+                user_error(str(exc))
             supervisor._setup_logging(log_format=log_format)
 
             logger = logging.getLogger("baton.daemon")
@@ -448,8 +442,7 @@ def handler(args: argparse.Namespace) -> None:
                     log_format=log_format,
                 )
             except RuntimeError as exc:
-                print(f"Error: {exc}")
-                return
+                user_error(str(exc))
 
         # In foreground mode the process is still attached to the terminal and
         # can print the summary.  In daemon mode stdout has been redirected to

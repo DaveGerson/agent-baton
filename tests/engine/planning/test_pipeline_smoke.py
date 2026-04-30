@@ -16,6 +16,7 @@ from agent_baton.core.engine.planning.stages import (
     ClassificationStage,
     DecompositionStage,
     EnrichmentStage,
+    ResearchStage,
     RiskStage,
     RosterStage,
     ValidationStage,
@@ -23,12 +24,13 @@ from agent_baton.core.engine.planning.stages import (
 
 
 class TestPipelineScaffolding:
-    def test_default_pipeline_lists_seven_stages_in_order(self) -> None:
+    def test_default_pipeline_lists_eight_stages_in_order(self) -> None:
         pipeline = _build_default_pipeline()
         assert isinstance(pipeline, Pipeline)
         names = [s.name for s in pipeline.stages]
         assert names == [
             "classification",
+            "research",
             "roster",
             "risk",
             "decomposition",
@@ -47,7 +49,7 @@ class TestPipelineScaffolding:
 
     def test_each_stage_implements_protocol(self) -> None:
         for cls in (
-            ClassificationStage, RosterStage, RiskStage,
+            ClassificationStage, ResearchStage, RosterStage, RiskStage,
             DecompositionStage, EnrichmentStage, ValidationStage,
             AssemblyStage,
         ):

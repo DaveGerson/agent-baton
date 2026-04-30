@@ -20,14 +20,11 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 
+from agent_baton.utils.time import utcnow_zulu as _utcnow_iso
+
 _log = logging.getLogger(__name__)
-
-
-def _utcnow_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 # ---------------------------------------------------------------------------

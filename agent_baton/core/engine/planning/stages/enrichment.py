@@ -31,6 +31,7 @@ from agent_baton.core.engine.planning.utils.gates import (
     default_gate,
 )
 from agent_baton.core.engine.planning.utils.phase_builder import (
+    _normalize_phase_name,
     build_phases_for_names,
     split_implement_phase_by_concerns,
 )
@@ -69,6 +70,7 @@ class EnrichmentStage:
             risk_level_enum=draft.risk_level_enum,
             task_summary=draft.task_summary,
             resolved_agents=draft.resolved_agents,
+            research_concerns=draft.research_concerns,
         )
         draft.split_phase_ids = split_phase_ids
 
@@ -158,6 +160,7 @@ class EnrichmentStage:
         risk_level_enum: Any,
         task_summary: str,
         resolved_agents: list[str],
+        research_concerns: list[tuple[str, str]] | None = None,
     ) -> set[int]:
         """Steps 12b / 12b-bis — approval gates and concern-splitting."""
         from agent_baton.models.enums import RiskLevel
@@ -174,6 +177,12 @@ class EnrichmentStage:
                     )
 
         _concerns = parse_concerns(task_summary)
+        # Fallback: use ResearchStage-provided concerns when the task summary
+        # contains no numbered markers (natural-language tasks like
+        # "audit all components" produce no regex hits).
+        if not _concerns and research_concerns:
+            _concerns = research_concerns
+
         _split_phase_ids: set[int] = set()
         if _concerns:
             logger.debug(
@@ -182,7 +191,9 @@ class EnrichmentStage:
                 [c[0] for c in _concerns],
             )
             for phase in plan_phases:
-                if phase.name.lower() in ("implement", "fix", "draft", "migrate"):
+                if phase.name.lower() in (
+                    "implement", "fix", "draft", "migrate", "audit", "assess",
+                ):
                     split_implement_phase_by_concerns(
                         phase, _concerns, resolved_agents, task_summary,
                     )
@@ -323,7 +334,7 @@ class EnrichmentStage:
         if "auditor" not in draft.resolved_agents:
             return
 
-        if any(p.name.lower() == "audit" for p in draft.plan_phases):
+        if any(_normalize_phase_name(p.name) == "audit" for p in draft.plan_phases):
             return
 
         max_id = max((p.phase_id for p in draft.plan_phases), default=0)
@@ -360,7 +371,7 @@ class EnrichmentStage:
         if draft.risk_level_enum not in (RiskLevel.HIGH, RiskLevel.CRITICAL):
             return
 
-        if any(p.name.lower() == "review" for p in draft.plan_phases):
+        if any(_normalize_phase_name(p.name) == "review" for p in draft.plan_phases):
             return
 
         max_id = max((p.phase_id for p in draft.plan_phases), default=0)

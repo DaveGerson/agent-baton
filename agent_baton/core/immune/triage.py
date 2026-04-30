@@ -24,9 +24,10 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from agent_baton.utils.time import utcnow_zulu as _utcnow_str
 
 if TYPE_CHECKING:
     from agent_baton.core.engine.bead_store import BeadStore
@@ -37,10 +38,6 @@ if TYPE_CHECKING:
 _log = logging.getLogger(__name__)
 
 __all__ = ["FindingTriage"]
-
-
-def _utcnow_str() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 class FindingTriage:

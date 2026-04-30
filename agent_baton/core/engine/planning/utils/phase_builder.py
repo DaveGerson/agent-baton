@@ -53,6 +53,11 @@ _PHASE_FALLBACK_AGENT: dict[str, str] = {
 }
 
 
+def _normalize_phase_name(phase_name: str) -> str:
+    """Strip TalentAgent suffixes like 'Implement: API Layer' → 'implement'."""
+    return phase_name.lower().split(":")[0].strip()
+
+
 def _step_type_for_agent(
     agent_name: str,
     task_description: str = "",
@@ -65,7 +70,7 @@ def _step_type_for_agent(
         lower_desc = task_description.lower()
         if any(kw in lower_desc for kw in TEST_ENGINEER_DEVELOPING_KEYWORDS):
             step_type = "developing"
-    if phase_name and phase_name.lower() in IMPLEMENT_PHASE_NAMES:
+    if phase_name and _normalize_phase_name(phase_name) in IMPLEMENT_PHASE_NAMES:
         if base not in {"code-reviewer", "security-reviewer", "auditor"}:
             step_type = "developing"
     return step_type
@@ -455,23 +460,8 @@ def apply_pattern(
     task_type: str,
     task_summary: str = "",
 ) -> list[PlanPhase]:
-    """Convert a LearnedPattern into PlanPhases (empty steps).
-
-    Uses the pattern's ``recommended_template`` to derive phase names
-    when it contains a parseable sequence (e.g. ``"Design → Implement → Review"``
-    or ``"Design, Implement, Review"``).  Falls back to the task type's
-    default template when the pattern's template is unparseable.
-    """
-    parsed_names: list[str] | None = None
-    template = (pattern.recommended_template or "").strip()
-    if template:
-        for sep in (" → ", " -> ", ", ", "; "):
-            parts = [p.strip() for p in template.split(sep) if p.strip()]
-            if len(parts) >= 2:
-                parsed_names = parts
-                break
-
-    phase_names = parsed_names or PHASE_NAMES.get(task_type, DEFAULT_PHASE_NAMES)
+    """Convert a LearnedPattern into PlanPhases (empty steps)."""
+    phase_names = PHASE_NAMES.get(task_type, DEFAULT_PHASE_NAMES)
     phases: list[PlanPhase] = []
     for idx, name in enumerate(phase_names, start=1):
         phases.append(PlanPhase(phase_id=idx, name=name, steps=[]))
@@ -611,6 +601,7 @@ def split_implement_phase_by_concerns(
                 task_description=desc,
                 step_type=_step_type_for_agent(agent, desc, phase_name=phase.name),
                 knowledge=concern_knowledge,
+                parallel_safe=True,
             )
         )
 

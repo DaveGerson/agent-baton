@@ -33,8 +33,9 @@ import hashlib
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Iterable
+
+from agent_baton.utils.time import utcnow_zulu as _utcnow
 
 _log = logging.getLogger(__name__)
 
@@ -74,10 +75,6 @@ CLUSTER_MIN_WEIGHT = 0.3
 # content-token jaccard is below this threshold are considered to be
 # disagreeing about the same area.
 CONFLICT_TOKEN_OVERLAP_MAX = 0.2
-
-
-def _utcnow() -> str:
-    return datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _decode_json_list(raw: str | None) -> list[str]:

@@ -30,8 +30,9 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING
+
+from agent_baton.utils.time import utcnow_zulu as _utcnow
 
 if TYPE_CHECKING:
     from agent_baton.models.bead import Bead
@@ -85,10 +86,6 @@ _FEEDBACK_DELTAS: dict[str, float] = {
     "misleading": -0.5,
     "outdated": -0.3,
 }
-
-
-def _utcnow() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def parse_bead_feedback(outcome: str) -> list[tuple[str, float]]:

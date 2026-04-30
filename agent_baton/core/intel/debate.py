@@ -29,8 +29,9 @@ import re
 import sqlite3
 import uuid
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Protocol
+
+from agent_baton.utils.time import utcnow_zulu as _utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -38,10 +39,6 @@ logger = logging.getLogger(__name__)
 MAX_VIEWPOINTS = 5
 DEFAULT_ROUNDS = 2
 DEFAULT_MODERATOR = "architect"
-
-
-def _utcnow() -> str:
-    return datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 # ---------------------------------------------------------------------------

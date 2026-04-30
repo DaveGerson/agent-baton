@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from agent_baton.utils.time import utcnow_zulu as _utcnow_str
+
 _log = logging.getLogger(__name__)
 
 __all__ = ["SweepScheduler", "SweepTarget"]
@@ -24,10 +26,6 @@ __all__ = ["SweepScheduler", "SweepTarget"]
 # ---------------------------------------------------------------------------
 _DEFER_NO_ISSUE_DAYS = 30
 _DEFER_ISSUE_DAYS = 7
-
-
-def _utcnow_str() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _future_str(days: int) -> str:

@@ -37,9 +37,10 @@ import socket
 import sqlite3
 import stat
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from agent_baton.utils.time import utcnow_zulu as _utcnow
 
 if TYPE_CHECKING:
     pass
@@ -48,10 +49,6 @@ _log = logging.getLogger(__name__)
 
 _CENTRAL_DB_DEFAULT = Path.home() / ".baton" / "central.db"
 _SOULS_DIR_DEFAULT = Path.home() / ".config" / "baton" / "souls"
-
-
-def _utcnow() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _role_slug(role: str) -> str:

@@ -30,10 +30,11 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Iterable
 
 from agent_baton.models.improvement import Recommendation
+from agent_baton.utils.time import utcnow_zulu as _utcnow_iso
 
 
 # ---------------------------------------------------------------------------
@@ -59,10 +60,6 @@ _DOWN_VERBS = frozenset({"downgrade", "lower", "decrease", "reduce", "shrink", "
 # ---------------------------------------------------------------------------
 # Data model
 # ---------------------------------------------------------------------------
-
-
-def _utcnow_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 @dataclass

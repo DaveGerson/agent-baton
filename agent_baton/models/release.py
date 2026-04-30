@@ -15,17 +15,13 @@ not affect plan execution or gating.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+
+from agent_baton.utils.time import utcnow_seconds as _utcnow
 
 # Allowed lifecycle states for a release.  Stored as a TEXT column rather
 # than a CHECK constraint so future workflow extensions don't require a
 # schema migration.
 RELEASE_STATUSES: tuple[str, ...] = ("planned", "active", "released", "cancelled")
-
-
-def _utcnow() -> str:
-    """Return ISO 8601 UTC timestamp at second precision."""
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 @dataclass

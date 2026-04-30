@@ -68,6 +68,14 @@ cymbal impact <symbol>          # blast radius before edits
 | `BATON_RUN_TOKEN_CEILING` | Hard kill the loop above N tokens | unset |
 | `BATON_EXPERIMENTAL` | Comma list to enable experimental subsystems (e.g., `swarm`) | unset |
 | `ANTHROPIC_API_KEY` | Required for AI risk classification and Haiku classifier | unset |
+| `BATON_WORKTREE_ENABLED` | Enable/disable git worktree isolation for concurrent agents | `1` |
+| `BATON_TAKEOVER_ENABLED` | Enable/disable developer takeover capability | `1` |
+| `BATON_SELFHEAL_ENABLED` | Enable/disable self-heal escalation on failures | `0` |
+| `BATON_SPECULATE_ENABLED` | Enable/disable speculative pipelining | `0` |
+| `BATON_SOULS_ENABLED` | Enable/disable soul registry for agent identity | `0` |
+| `BATON_PLANNER_HARD_GATE` | Enable hard validation gate that blocks bad plans | unset |
+| `BATON_PREDICT_ENABLED` | Enable predictive dispatch system | `0` |
+| `BATON_OTEL_ENABLED` | Enable OpenTelemetry JSONL export | unset |
 
 ## Regulated-domain rules
 

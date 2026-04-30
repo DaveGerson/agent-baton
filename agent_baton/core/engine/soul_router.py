@@ -33,6 +33,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from agent_baton.utils.time import utcnow_zulu as _utcnow
+
 if TYPE_CHECKING:
     from agent_baton.core.engine.soul_registry import AgentSoul, SoulRegistry
 
@@ -44,10 +46,6 @@ _HALF_LIFE_DAYS = 30.0
 _WINDOW_DAYS = 90
 _EXPERTISE_TTL_HOURS = 24.0
 _DOMAIN_FROM_PATH_DEPTH = 2  # number of path components used to derive domain
-
-
-def _utcnow() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _decay_factor(days_ago: float, half_life: float = _HALF_LIFE_DAYS) -> float:

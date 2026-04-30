@@ -72,6 +72,10 @@ class PlanDraft:
     risk_level_enum: "RiskLevel | None" = None
     git_strategy: str = ""
 
+    # --- ResearchStage outputs ---
+    research_concerns: list[tuple[str, str]] | None = None  # (marker, text) tuples from research
+    research_context: str | None = None  # Additional context discovered by research
+
     # --- DecompositionStage outputs ---
     pattern: "LearnedPattern | None" = None
     bead_hints: list = field(default_factory=list)

@@ -27,10 +27,11 @@ from __future__ import annotations
 import logging
 import subprocess
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from agent_baton.utils.time import utcnow_seconds
 
 if TYPE_CHECKING:
     pass
@@ -488,4 +489,4 @@ class SelfHealEscalator:
 
     @staticmethod
     def _utcnow() -> str:
-        return datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
+        return utcnow_seconds()

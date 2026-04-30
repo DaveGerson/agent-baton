@@ -27,16 +27,12 @@ Database tables accessed:
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 
 from agent_baton.core.storage.connection import ConnectionManager
 from agent_baton.core.storage.schema import PMO_SCHEMA_DDL, SCHEMA_VERSION
 from agent_baton.models.pmo import PmoCard, PmoConfig, PmoProject, PmoSignal
-
-
-def _utcnow() -> str:
-    return datetime.now(timezone.utc).isoformat()
+from agent_baton.utils.time import utcnow_iso as _utcnow
 
 
 class PmoSqliteStore:

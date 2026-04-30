@@ -17,16 +17,12 @@ the schema.
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
 from pathlib import Path
 
 from agent_baton.core.storage.connection import ConnectionManager
 from agent_baton.core.storage.schema import PROJECT_SCHEMA_DDL, SCHEMA_VERSION
 from agent_baton.models.release import RELEASE_STATUSES, Release
-
-
-def _utcnow() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+from agent_baton.utils.time import utcnow_seconds as _utcnow
 
 
 class ReleaseStore:

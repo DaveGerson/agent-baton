@@ -85,6 +85,10 @@ class DecompositionStage:
         subtask_data = draft.subtask_data
         agent_route_map = draft.agent_route_map
 
+        # Minimum phase counts by complexity — prevents the classifier
+        # from returning a single phase for a heavy task.
+        _MIN_PHASES = {"heavy": 3, "medium": 2, "light": 1}
+
         # 9. Build phases
         if subtask_data is not None:
             # Compound task — each sub-task becomes its own phase
@@ -92,10 +96,20 @@ class DecompositionStage:
         elif phases is not None:
             plan_phases = phases_from_dicts(phases, resolved_agents, task_summary, registry)
         elif classified_phases is not None:
-            # Use classifier-provided phase names
-            plan_phases = build_phases_for_names(
-                classified_phases, resolved_agents, task_summary, registry
-            )
+            min_required = _MIN_PHASES.get(inferred_complexity, 1)
+            if len(classified_phases) >= min_required:
+                plan_phases = build_phases_for_names(
+                    classified_phases, resolved_agents, task_summary, registry
+                )
+            else:
+                logger.warning(
+                    "Classifier returned %d phase(s) for %s complexity — "
+                    "falling through to default phases",
+                    len(classified_phases), inferred_complexity,
+                )
+                plan_phases = default_phases(
+                    inferred_type, resolved_agents, task_summary, registry
+                )
         elif pattern is not None:
             plan_phases = apply_pattern(pattern, inferred_type, task_summary)
             # Apply routed agent names to pattern-derived phases
@@ -116,6 +130,12 @@ class DecompositionStage:
 
         # 9b. Enrich steps with cross-phase context and default deliverables
         plan_phases = enrich_phases(plan_phases, task_summary, registry)
+
+        # Propagate research concerns so EnrichmentStage can use them for
+        # concern-splitting even when the task summary has no numbered markers.
+        if draft.research_concerns:
+            draft.concerns = list(draft.research_concerns)
+
         return plan_phases
 
     def _resolve_knowledge(

@@ -14,18 +14,14 @@ import json
 import logging
 import sqlite3
 import uuid
-from datetime import datetime, timezone
 from pathlib import Path
 
 from agent_baton.models.learning import LearningEvidence, LearningIssue
+from agent_baton.utils.time import utcnow_iso as _utcnow
 
 _log = logging.getLogger(__name__)
 
 _TERMINAL_STATUSES = ("resolved", "wontfix")
-
-
-def _utcnow() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 class LearningLedger:

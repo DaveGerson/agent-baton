@@ -30,11 +30,11 @@ if TYPE_CHECKING:
     from agent_baton.core.govern.policy import PolicyEngine
     from agent_baton.core.improve.retrospective import RetrospectiveEngine
     from agent_baton.core.knowledge.registry import KnowledgeRegistry
-    from agent_baton.core.optimize.budget_tuner import BudgetTuner
-    from agent_baton.core.optimize.pattern_learner import PatternLearner
-    from agent_baton.core.optimize.scorer import PerformanceScorer
-    from agent_baton.core.routing.agent_registry import AgentRegistry
-    from agent_baton.core.routing.agent_router import AgentRouter
+    from agent_baton.core.learn.budget_tuner import BudgetTuner
+    from agent_baton.core.learn.pattern_learner import PatternLearner
+    from agent_baton.core.improve.scoring import PerformanceScorer
+    from agent_baton.core.orchestration.registry import AgentRegistry
+    from agent_baton.core.orchestration.router import AgentRouter
 
 
 @dataclass(frozen=True)

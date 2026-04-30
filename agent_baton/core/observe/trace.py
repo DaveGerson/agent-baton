@@ -18,10 +18,11 @@ Downstream consumers:
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 from agent_baton.models.trace import TaskTrace, TraceEvent
+from agent_baton.utils.time import utcnow_seconds as _utcnow
 
 
 class TraceRecorder:
@@ -298,11 +299,6 @@ class TraceRenderer:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
-
-def _utcnow() -> str:
-    """Return current UTC time as an ISO 8601 string."""
-    return datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
-
 
 def _hms(iso: str) -> str:
     """Extract HH:MM:SS from an ISO timestamp string, falling back to the raw value."""

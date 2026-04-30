@@ -163,7 +163,7 @@ def default_gate(
     project_root: Path | None = None,
 ) -> PlanGate | None:
     """Return an appropriate QA gate for a phase name."""
-    name_lower = phase_name.lower()
+    name_lower = phase_name.lower().split(":")[0].strip()
     if name_lower in (
         "investigate", "research", "review", "design", "feedback",
         "prepare", "audit", "assess", "synthesize",

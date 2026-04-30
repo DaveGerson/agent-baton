@@ -24,7 +24,6 @@ import logging
 import os
 import signal
 import sys
-from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -41,10 +40,7 @@ from agent_baton.core.runtime.launcher import AgentLauncher
 from agent_baton.core.runtime.signals import SignalHandler
 from agent_baton.core.runtime.worker import TaskWorker
 from agent_baton.models.execution import MachinePlan
-
-
-def _utcnow() -> str:
-    return datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
+from agent_baton.utils.time import utcnow_seconds as _utcnow
 
 
 class WorkerSupervisor:

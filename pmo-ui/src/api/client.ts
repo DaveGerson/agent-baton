@@ -56,88 +56,6 @@ import { beadsApi, type BeadListParams, type BeadListResponse, type Bead } from 
 const BASE = '/api/v1/pmo';
 const BASE_V1 = '/api/v1';
 
-// ---------------------------------------------------------------------------
-// TODO(F0.1): Remove once backend agent 3.1.a ships /api/v1/specs routes.
-// Mocks let the Specs UI render while the backend is being built in parallel.
-// ---------------------------------------------------------------------------
-const _MOCK_SPECS: Spec[] = [
-  {
-    spec_id: 'spec-f01-001',
-    title: 'F0.1 — First-Class Spec Entity',
-    state: 'approved' as SpecState,
-    task_type: 'feature',
-    author_id: 'djiv',
-    template_id: 'feature.yaml',
-    content: [
-      'spec_id: spec-f01-001',
-      'title: F0.1 — First-Class Spec Entity',
-      'task_type: feature',
-      'state: approved',
-      '',
-      'summary: |',
-      '  Add a first-class Spec entity backed by SQLite.',
-      '  New CLI group `baton spec`, PMO API routes, and PMO UI surface.',
-      '',
-      'linked_plans:',
-      '  - plan-2026-04-25-strategic-phase0',
-    ].join('\n'),
-    linked_plan_ids: ['plan-2026-04-25-strategic-phase0'],
-    score: { clarity: 0.9, completeness: 0.85, feasibility: 0.95, testability: 0.8 } as SpecScore,
-    created_at: '2026-04-25T08:00:00Z',
-    updated_at: '2026-04-25T10:00:00Z',
-  },
-  {
-    spec_id: 'spec-f02-001',
-    title: 'F0.2 — Tenancy & Cost Attribution Hierarchy',
-    state: 'draft' as SpecState,
-    task_type: 'feature',
-    author_id: 'djiv',
-    template_id: 'feature.yaml',
-    content: [
-      'spec_id: spec-f02-001',
-      'title: F0.2 — Tenancy & Cost Attribution Hierarchy',
-      'task_type: feature',
-      'state: draft',
-      '',
-      'summary: |',
-      '  Add org/team/user/agent tags to usage_events and task_executions.',
-      '  New TenancyStore + CLI group `baton tenancy`.',
-    ].join('\n'),
-    linked_plan_ids: [],
-    score: { clarity: 0.7, completeness: 0.6, feasibility: 0.9, testability: 0.65 } as SpecScore,
-    created_at: '2026-04-25T08:30:00Z',
-    updated_at: '2026-04-25T08:30:00Z',
-  },
-  {
-    spec_id: 'spec-bug-001',
-    title: 'Fix planner concern splitting for 4+ file phases',
-    state: 'reviewed' as SpecState,
-    task_type: 'bug-fix',
-    author_id: 'djiv',
-    template_id: 'bug-fix.yaml',
-    content: [
-      'spec_id: spec-bug-001',
-      'title: Fix planner concern splitting for 4+ file phases',
-      'task_type: bug-fix',
-      'state: reviewed',
-      '',
-      'summary: |',
-      '  Planner should split 4+ file implementation phases into parallel',
-      '  steps by concern. Tracked in feedback_planner_parallelization.md.',
-    ].join('\n'),
-    linked_plan_ids: [],
-    score: null,
-    created_at: '2026-04-24T15:00:00Z',
-    updated_at: '2026-04-25T09:00:00Z',
-  },
-];
-
-function _mockSpecsList(params?: { state?: string; task_type?: string }): SpecListResponse {
-  let specs = _MOCK_SPECS;
-  if (params?.state)     specs = specs.filter(s => s.state === params.state);
-  if (params?.task_type) specs = specs.filter(s => s.task_type === params.task_type);
-  return { specs, total: specs.length };
-}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const controller = new AbortController();
@@ -369,10 +287,7 @@ export const api = {
         if (!res.ok) throw new Error(`API ${res.status}`);
         return res.json() as Promise<SpecListResponse>;
       })
-      .catch(() => {
-        clearTimeout(timeout);
-        return _mockSpecsList(params);
-      });
+      .catch(err => { clearTimeout(timeout); throw err; });
   },
 
   getSpec(specId: string): Promise<Spec> {
@@ -384,12 +299,7 @@ export const api = {
         if (!res.ok) throw new Error(`API ${res.status}`);
         return res.json() as Promise<Spec>;
       })
-      .catch(() => {
-        clearTimeout(timeout);
-        const found = _MOCK_SPECS.find(s => s.spec_id === specId);
-        if (!found) throw new Error(`Spec ${specId} not found`);
-        return Promise.resolve(found);
-      });
+      .catch(err => { clearTimeout(timeout); throw err; });
   },
 
   approveSpec(specId: string): Promise<SpecApproveResponse> {
@@ -405,10 +315,7 @@ export const api = {
         if (!res.ok) throw new Error(`API ${res.status}`);
         return res.json() as Promise<SpecApproveResponse>;
       })
-      .catch(() => {
-        clearTimeout(timeout);
-        return Promise.resolve({ spec_id: specId, state: 'approved' as SpecState, updated_at: new Date().toISOString() });
-      });
+      .catch(err => { clearTimeout(timeout); throw err; });
   },
 
   markSpecReviewed(specId: string): Promise<SpecMarkReviewedResponse> {
@@ -424,10 +331,7 @@ export const api = {
         if (!res.ok) throw new Error(`API ${res.status}`);
         return res.json() as Promise<SpecMarkReviewedResponse>;
       })
-      .catch(() => {
-        clearTimeout(timeout);
-        return Promise.resolve({ spec_id: specId, state: 'reviewed' as SpecState, updated_at: new Date().toISOString() });
-      });
+      .catch(err => { clearTimeout(timeout); throw err; });
   },
 
   archiveSpec(specId: string): Promise<SpecArchiveResponse> {
@@ -443,10 +347,7 @@ export const api = {
         if (!res.ok) throw new Error(`API ${res.status}`);
         return res.json() as Promise<SpecArchiveResponse>;
       })
-      .catch(() => {
-        clearTimeout(timeout);
-        return Promise.resolve({ spec_id: specId, state: 'archived' as SpecState, updated_at: new Date().toISOString() });
-      });
+      .catch(err => { clearTimeout(timeout); throw err; });
   },
 
   // Webhooks

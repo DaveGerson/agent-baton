@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 from agent_baton.core.orchestration.router import is_reviewer_agent
 
 from agent_baton.core.engine.planning.draft import PlanDraft
+from agent_baton.core.engine.planning.rules.default_agents import DEFAULT_AGENTS as _DEFAULT_AGENTS
 from agent_baton.core.engine.planning.services import PlannerServices
 from agent_baton.core.engine.planning.structured_spec import enrich_phase_titles
 from agent_baton.core.engine.planning.utils.text_parsers import (
@@ -28,21 +29,6 @@ if TYPE_CHECKING:
     from agent_baton.core.orchestration.router import StackProfile
 
 logger = logging.getLogger(__name__)
-
-# Default agents by task type when no pattern is found (mirrors legacy constant).
-_DEFAULT_AGENTS: dict[str, list[str]] = {
-    "new-feature": ["architect", "backend-engineer", "test-engineer", "code-reviewer"],
-    "bug-fix": ["backend-engineer", "test-engineer"],
-    "refactor": ["architect", "backend-engineer", "test-engineer", "code-reviewer"],
-    "data-analysis": ["architect", "data-analyst"],
-    "documentation": ["architect", "talent-builder", "code-reviewer"],
-    "migration": ["architect", "backend-engineer", "test-engineer", "code-reviewer", "auditor"],
-    "test": ["test-engineer"],
-    "audit": ["architect", "code-reviewer"],
-    "assessment": ["architect", "data-analyst", "code-reviewer"],
-    # E3 — fallback for unknown/generic tasks: default four-phase roster
-    "generic": ["architect", "backend-engineer", "test-engineer", "code-reviewer"],
-}
 
 
 class ClassificationStage:

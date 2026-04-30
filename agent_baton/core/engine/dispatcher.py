@@ -713,9 +713,7 @@ class PromptDispatcher:
             "If you still need another round of input, do NOT output INTERACT_COMPLETE",
             "and end your response normally.",
             "",
-            _KNOWLEDGE_GAPS_LINE,
-            "",
-            _BEAD_SIGNALS_LINE,
+            _SIGNALS_BLOCK,
             "",
             "Log non-obvious decisions under a **Decisions** heading. "
             "If you deviate from the plan, explain under a **Deviations** heading.",
@@ -944,11 +942,7 @@ class PromptDispatcher:
             "",
             "Coordinate with your team members on shared resources.",
             "",
-            _KNOWLEDGE_GAPS_LINE,
-            "",
-            _BEAD_SIGNALS_LINE,
-            "",
-            _FLAG_SIGNALS_LINE,
+            _SIGNALS_BLOCK,
             "",
             "Log non-obvious decisions under a **Decisions** heading. "
             "If you deviate from the plan, explain under a **Deviations** heading.",

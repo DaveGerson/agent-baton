@@ -32,8 +32,9 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
-from datetime import datetime, timezone
 from typing import Any
+
+from agent_baton.utils.time import utcnow_zulu as _utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -42,10 +43,6 @@ logger = logging.getLogger(__name__)
 _MAX_SUMMARY_CHARS = 400
 
 _ENV_FLAG = "BATON_HARVEST_CONTEXT"
-
-
-def _utcnow() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def is_enabled() -> bool:

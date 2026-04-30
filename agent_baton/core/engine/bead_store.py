@@ -35,14 +35,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from agent_baton.utils.time import utcnow_zulu as _utcnow
+
 if TYPE_CHECKING:
     from agent_baton.models.bead import Bead, BeadLink
 
 _log = logging.getLogger(__name__)
-
-
-def _utcnow() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 class BeadStore:

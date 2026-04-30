@@ -942,6 +942,7 @@ class StepResult:
 
     @classmethod
     def from_dict(cls, data: dict) -> StepResult:
+        data = dict(data)  # don't mutate caller's dict
         member_results = [
             TeamStepResult.from_dict(m) for m in data.pop("member_results", [])
         ]

@@ -31,6 +31,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterator
 
+from agent_baton.utils.time import utcnow_seconds as _utcnow
+
 if TYPE_CHECKING:
     from agent_baton.core.observe.trace import TraceRecorder
     from agent_baton.models.trace import TaskTrace
@@ -137,10 +139,6 @@ class WorktreeHandle:
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
-
-
-def _utcnow() -> str:
-    return datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
 
 
 def _is_inside_worktree(project_dir: Path) -> bool:

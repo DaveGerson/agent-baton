@@ -34,6 +34,8 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
+from agent_baton.utils.time import utcnow_seconds as _utcnow
+
 logger = logging.getLogger(__name__)
 
 # Regex matching the spillover breadcrumb prefix written by
@@ -94,7 +96,6 @@ from agent_baton.core.engine.persistence import StatePersistence
 from agent_baton.core.events.bus import EventBus
 from agent_baton.core.events import events as evt
 from agent_baton.core.events.persistence import EventPersistence
-from agent_baton.core.events.projections import TaskView, project_task_view
 from agent_baton.core.observe.telemetry import AgentTelemetry, TelemetryEvent
 from agent_baton.core.observe.trace import TraceRecorder
 from agent_baton.models.trace import TaskTrace, TraceEvent
@@ -147,9 +148,14 @@ _log = logging.getLogger(__name__)
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _utcnow() -> str:
-    """Return the current UTC time as a seconds-precision ISO 8601 string."""
-    return datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
+def _env_flag(name: str, default: str = "1") -> bool:
+    """Return True when the named environment variable is not set to a falsy value.
+
+    Falsy values: ``"0"``, ``"false"``, ``"False"``, ``"no"``.  Any other value
+    (including the empty string and ``"1"``) is truthy.  *default* is used when
+    the variable is absent; pass ``"0"`` for features that are off by default.
+    """
+    return os.environ.get(name, default) not in ("0", "false", "False", "no")
 
 
 def _worktree_enabled() -> bool:
@@ -158,7 +164,7 @@ def _worktree_enabled() -> bool:
     Controlled by ``BATON_WORKTREE_ENABLED`` env var.  Default is enabled (1).
     Set to ``0`` to restore pre-Wave-1.3 behavior exactly.
     """
-    return os.environ.get("BATON_WORKTREE_ENABLED", "1") not in ("0", "false", "False", "no")
+    return _env_flag("BATON_WORKTREE_ENABLED", "1")
 
 
 def _takeover_enabled() -> bool:
@@ -167,7 +173,7 @@ def _takeover_enabled() -> bool:
     Default: enabled (zero-cost, opt-in via CLI invocation).
     Override via env: ``BATON_TAKEOVER_ENABLED=0`` or baton.yaml ``takeover.enabled: false``.
     """
-    return os.environ.get("BATON_TAKEOVER_ENABLED", "1") not in ("0", "false", "False", "no")
+    return _env_flag("BATON_TAKEOVER_ENABLED", "1")
 
 
 def _selfheal_enabled() -> bool:
@@ -176,7 +182,7 @@ def _selfheal_enabled() -> bool:
     Default: disabled (cost-incurring, requires explicit opt-in).
     Override via env: ``BATON_SELFHEAL_ENABLED=1`` or baton.yaml ``selfheal.enabled: true``.
     """
-    return os.environ.get("BATON_SELFHEAL_ENABLED", "0") not in ("0", "false", "False", "no")
+    return _env_flag("BATON_SELFHEAL_ENABLED", "0")
 
 
 def _speculate_enabled() -> bool:
@@ -185,7 +191,7 @@ def _speculate_enabled() -> bool:
     Default: disabled (cost-incurring, requires explicit opt-in).
     Override via env: ``BATON_SPECULATE_ENABLED=1`` or baton.yaml ``speculate.enabled: true``.
     """
-    return os.environ.get("BATON_SPECULATE_ENABLED", "0") not in ("0", "false", "False", "no")
+    return _env_flag("BATON_SPECULATE_ENABLED", "0")
 
 
 def _souls_enabled() -> bool:
@@ -194,7 +200,7 @@ def _souls_enabled() -> bool:
     Default: disabled (opt-in).  Set ``BATON_SOULS_ENABLED=1`` to enable.
     When disabled, BeadStore signing is a no-op and SoulRouter is never constructed.
     """
-    return os.environ.get("BATON_SOULS_ENABLED", "0") not in ("0", "false", "False", "no")
+    return _env_flag("BATON_SOULS_ENABLED", "0")
 
 
 def _swarm_enabled() -> bool:
@@ -228,94 +234,7 @@ def _cli_actor() -> str:
 # preserves all existing call sites.
 
 
-# ---------------------------------------------------------------------------
-# TaskViewSubscriber — materialized view maintained as events fire
-# ---------------------------------------------------------------------------
-# NOTE: As of 2026-04-13 the task-view.json file written by this subscriber
-# is not consumed by any production subsystem (CLI commands, API routes, or
-# the PMO UI all read from different sources).  The subscriber is kept because
-# it is exercised by tests (test_executor.py TestTaskViewSubscriber and
-# test_events.py TestTaskViewSubscriber) and the file may be useful for
-# external tooling or future dashboards.
-# ---------------------------------------------------------------------------
-
 _HIGH_RISK_LEVELS: frozenset[str] = frozenset({"HIGH", "CRITICAL"})
-
-
-class TaskViewSubscriber:
-    """EventBus subscriber that maintains a materialized TaskView on disk.
-
-    Each time an event is published, the subscriber re-projects the full
-    task view from the bus history and writes it to *view_path* as JSON.
-    This keeps ``task-view.json`` current without requiring on-demand
-    computation.
-    """
-
-    def __init__(self, task_id: str, bus: "EventBus", view_path: Path) -> None:
-        self._task_id = task_id
-        self._bus = bus
-        self._view_path = view_path
-
-    def __call__(self, event: "Event") -> None:  # noqa: F821
-        """Called synchronously by EventBus for every published event."""
-        if event.task_id != self._task_id:
-            return
-        try:
-            all_events = self._bus.replay(self._task_id)
-            view = project_task_view(all_events, task_id=self._task_id)
-            self._write(view)
-        except Exception as exc:  # pragma: no cover
-            _log.warning("TaskViewSubscriber: failed to update task-view.json: %s", exc)
-
-    def _write(self, view: TaskView) -> None:
-        """Serialise *view* to JSON and write atomically to *view_path*."""
-        self._view_path.parent.mkdir(parents=True, exist_ok=True)
-        data = {
-            "task_id": view.task_id,
-            "status": view.status,
-            "started_at": view.started_at,
-            "completed_at": view.completed_at,
-            "risk_level": view.risk_level,
-            "total_steps": view.total_steps,
-            "steps_completed": view.steps_completed,
-            "steps_failed": view.steps_failed,
-            "steps_dispatched": view.steps_dispatched,
-            "gates_passed": view.gates_passed,
-            "gates_failed": view.gates_failed,
-            "elapsed_seconds": view.elapsed_seconds,
-            "last_event_seq": view.last_event_seq,
-            "pending_decisions": view.pending_decisions,
-            "phases": {
-                str(pid): {
-                    "phase_id": ph.phase_id,
-                    "phase_name": ph.phase_name,
-                    "status": ph.status,
-                    "started_at": ph.started_at,
-                    "completed_at": ph.completed_at,
-                    "gate_status": ph.gate_status,
-                    "gate_output": ph.gate_output,
-                    "steps": {
-                        sid: {
-                            "step_id": sv.step_id,
-                            "agent_name": sv.agent_name,
-                            "status": sv.status,
-                            "dispatched_at": sv.dispatched_at,
-                            "completed_at": sv.completed_at,
-                            "duration_seconds": sv.duration_seconds,
-                            "outcome": sv.outcome,
-                            "error": sv.error,
-                            "files_changed": sv.files_changed,
-                            "commit_hash": sv.commit_hash,
-                        }
-                        for sid, sv in ph.steps.items()
-                    },
-                }
-                for pid, ph in view.phases.items()
-            },
-        }
-        tmp = self._view_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        tmp.replace(self._view_path)
 
 
 # ---------------------------------------------------------------------------
@@ -519,9 +438,6 @@ class ExecutionEngine:
 
         # In-memory trace object, populated during start() / resume().
         self._trace = None
-
-        # TaskViewSubscriber — wired lazily in start() once task_id is known.
-        self._task_view_subscriber: TaskViewSubscriber | None = None
 
         # Resolve compliance log path now that _root is known.
         self._compliance_log_path = self._root / "compliance-audit.jsonl"
@@ -1380,21 +1296,6 @@ class ExecutionEngine:
                 # File-only mode: bare mutation preserves the existing _state_path
                 # so crash-recovery can still locate the flat execution-state.json.
                 self._persistence._task_id = plan.task_id
-
-        # Wire the materialized-view subscriber now that we know the task_id.
-        # One subscriber per engine instance; replace any previous one.
-        if self._bus is not None:
-            if self._task_id:
-                view_dir = self._root / "executions" / self._task_id
-            else:
-                view_dir = self._root
-            view_path = view_dir / "task-view.json"
-            self._task_view_subscriber = TaskViewSubscriber(
-                task_id=plan.task_id,
-                bus=self._bus,
-                view_path=view_path,
-            )
-            self._bus.subscribe("*", self._task_view_subscriber)
 
         # ── Risk-level pre-flight approval ───────────────────────────────────
         # For HIGH/CRITICAL plans, ensure the user explicitly approves before

@@ -31,8 +31,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from datetime import datetime, timezone
 from typing import Any, Iterable
+
+from agent_baton.utils.time import utcnow_zulu as _utcnow
 
 _log = logging.getLogger(__name__)
 
@@ -44,10 +45,6 @@ HANDOFF_MAX_CHARS = 400
 
 # Maximum number of file paths to include in the "Files" line.
 HANDOFF_MAX_FILES = 5
-
-
-def _utcnow() -> str:
-    return datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _safe_attr(obj: Any, name: str, default: Any = None) -> Any:

@@ -204,6 +204,12 @@ class BudgetEnforcer:
         # UTC timestamp at which anomaly suspension ends (None = not suspended)
         self._immune_suspended_until: datetime | None = None
 
+        # ── Predictive speculation state (Wave 6.2 Part C, bd-03b0) ──────────
+        self._predict_daily_cap: float = self.DEFAULT_PREDICT_DAILY_CAP_USD
+        self._predict_daily_spend: dict[str, float] = defaultdict(float)
+        self._predict_outcomes: list[bool] = []
+        self._predict_disabled_until: datetime | None = None
+
         # ── Run-level ceiling (end-user readiness #7) ─────────────────────────
         # Cumulative USD spent across ALL subsystems in this run.
         # Restored from ExecutionState when resuming a crashed run so the
@@ -527,12 +533,7 @@ class BudgetEnforcer:
     PREDICT_AUTO_DISABLE_HOURS: int = 24
 
     def _ensure_predict_state(self) -> None:
-        """Lazily initialise predict-specific state fields."""
-        if not hasattr(self, "_predict_daily_cap"):
-            self._predict_daily_cap: float = self.DEFAULT_PREDICT_DAILY_CAP_USD
-            self._predict_daily_spend: dict[str, float] = defaultdict(float)
-            self._predict_outcomes: list[bool] = []   # True=accepted False=rejected
-            self._predict_disabled_until: datetime | None = None
+        """No-op: predict state is now initialised eagerly in __init__."""
 
     def allow_speculation_predict(self) -> tuple[bool, str]:
         """Return ``(True, "")`` when predict speculation is within budget.

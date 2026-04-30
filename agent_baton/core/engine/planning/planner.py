@@ -30,6 +30,7 @@ from agent_baton.core.engine.planning.stages import (
     ClassificationStage,
     DecompositionStage,
     EnrichmentStage,
+    ResearchStage,
     RiskStage,
     RosterStage,
     ValidationStage,
@@ -40,9 +41,10 @@ if TYPE_CHECKING:
 
 
 def _build_default_pipeline() -> Pipeline:
-    """Construct the canonical seven-stage planning pipeline."""
+    """Construct the canonical eight-stage planning pipeline."""
     return Pipeline([
         ClassificationStage(),
+        ResearchStage(),
         RosterStage(),
         RiskStage(),
         DecompositionStage(),
@@ -104,8 +106,11 @@ class IntelligentPlanner:
         if task_classifier is not None:
             self._task_classifier = task_classifier
         else:
-            from agent_baton.core.engine.classifier import FallbackClassifier
-            self._task_classifier = FallbackClassifier()
+            try:
+                from agent_baton.core.engine.classifier import CLIValidatedClassifier
+                self._task_classifier = CLIValidatedClassifier()
+            except Exception:
+                self._task_classifier = KeywordClassifier()
 
         self._foresight_engine = ForesightEngine()
         self._plan_reviewer = PlanReviewer()
@@ -181,6 +186,9 @@ class IntelligentPlanner:
 
         # Run the pipeline.
         draft = self._pipeline.run(draft, services)
+
+        # Post-pipeline plan review (Option 3).
+        draft = self._review_plan_with_cli(draft)
 
         # Sync _last_* attributes from the draft so tests and explain_plan work.
         self._sync_last_state(draft)
@@ -279,6 +287,204 @@ class IntelligentPlanner:
         self._last_routing_notes = []
         self._last_pattern_used = None
         self._last_team_cost_estimates = {}
+
+    def _review_plan_with_cli(self, draft: PlanDraft) -> PlanDraft:
+        """Post-pipeline plan review via CLI (Option 3).
+
+        Sends the assembled plan to Opus for a holistic quality check.
+        Applies structured corrections.  No-ops gracefully if CLI is
+        unavailable or the review call fails.
+        """
+        import json as _json
+        import logging as _logging
+
+        _log = _logging.getLogger(__name__)
+
+        try:
+            from agent_baton.core.runtime.headless import (
+                HeadlessClaude,
+                HeadlessConfig,
+            )
+        except Exception:
+            return draft
+
+        hc = HeadlessClaude(HeadlessConfig(model="opus", timeout_seconds=120.0))
+        if not hc.is_available:
+            return draft
+
+        phases_summary = []
+        for p in draft.plan_phases:
+            step_details = []
+            for s in p.steps:
+                team_info = ""
+                if getattr(s, "team", None):
+                    members = [f"{m.agent_name}({m.role})" for m in s.team]
+                    team_info = f" [team: {', '.join(members)}]"
+                step_details.append(f"    {s.step_id}: {s.agent_name}{team_info}")
+            gate = f" | gate: {p.gate.gate_type}" if p.gate else " | NO GATE"
+            phases_summary.append(
+                f"  Phase {p.phase_id} '{p.name}'{gate}\n"
+                + "\n".join(step_details)
+            )
+        phases_text = "\n".join(phases_summary) or "  (none)"
+
+        prompt = (
+            "You are the final quality gate for an AI orchestration engine's "
+            "plan generator. A deterministic pipeline produced the plan below. "
+            "Your job: catch mistakes the pipeline makes. Return ONLY JSON.\n\n"
+            f'## Original task\n"{draft.task_summary}"\n\n'
+            f"## Generated plan\n"
+            f"- task_type: {draft.inferred_type}\n"
+            f"- complexity: {draft.inferred_complexity}\n"
+            f"- risk: {draft.risk_level}\n"
+            f"- agents: {', '.join(draft.resolved_agents)}\n"
+            f"- phases:\n{phases_text}\n\n"
+            "## You MUST check each of these — they are the pipeline's "
+            "known failure modes:\n\n"
+            "1. RISK CONTEXT: The keyword risk classifier fires on substrings. "
+            "'deployment docs' contains 'deploy' and triggers HIGH — but "
+            "writing documentation about deployments is NOT deploying to "
+            "production. If the task is ABOUT documentation, risk should "
+            "reflect the documentation activity, not the topic. Similarly, "
+            "'delete tables + GDPR/SOX/HIPAA/PCI' = HIGH, "
+            "'audit trail' with compliance = HIGH.\n\n"
+            "2. TASK TYPE DOMINANCE: The keyword classifier counts keyword "
+            "hits. If a compound task mentions 'test' as ONE subtask among "
+            "3+, the whole task should NOT be type 'test'. The primary "
+            "concern (usually the first listed) determines the type. "
+            "A task starting with 'Add...' or 'Refactor...' or 'Implement...' "
+            "where testing is just one component is 'new-feature' or "
+            "'refactor', not 'test'.\n\n"
+            "3. AGENT COVERAGE: Every domain mentioned in the task needs a "
+            "specialist. 'Refactor the backend service' needs backend-engineer. "
+            "'Update the frontend' needs frontend-engineer. "
+            "'Ensure SOX compliance' needs auditor. "
+            "system-maintainer should NOT do API migrations or feature work. "
+            "Check that each agent's assignment matches their expertise.\n\n"
+            "4. PHASE DECOMPOSITION: Count the distinct deliverables in the "
+            "task. If the task says 'do A, do B, add tests, ensure compliance' "
+            "that's 4 concerns. A plan with 1 Implement phase for 4 concerns "
+            "is wrong. Each concern should have its own phase or be a distinct "
+            "step within a team phase.\n\n"
+            "5. GATE COVERAGE: Every phase that produces or modifies code "
+            "MUST have a test or build gate. Research/Design/Review phases "
+            "do NOT need gates.\n\n"
+            "6. STEP DESCRIPTION QUALITY: Each step's task_description "
+            "should be scoped to that agent's specific work. If 2+ steps "
+            "in the same phase have IDENTICAL task descriptions (copy-paste "
+            "of the full summary), that is a bug — each agent needs a "
+            "description specific to their concern.\n\n"
+            "Return this JSON structure:\n"
+            "{\n"
+            '  "verdict": "PASS" or "NEEDS_CORRECTION",\n'
+            '  "risk_override": null or "LOW" or "MEDIUM" or "HIGH",\n'
+            '  "task_type_override": null or "<corrected type>",\n'
+            '  "agent_swaps": [{"step_id": "1.1", "from": "wrong-agent", '
+            '"to": "correct-agent"}],\n'
+            '  "agents_to_add": ["agent-name"],\n'
+            '  "phases_to_add": ["Phase Name"],\n'
+            '  "notes": "one sentence explaining the most important correction"\n'
+            "}\n\n"
+            "If the plan is correct, return {\"verdict\": \"PASS\", \"notes\": "
+            "\"Plan is well-structured\"}. Do NOT over-correct — only flag "
+            "genuine issues from the 5 checks above."
+        )
+
+        try:
+            result = hc.run_sync(
+                prompt,
+                model="opus",
+                system_prompt="You are a plan quality reviewer. Return JSON only.",
+            )
+        except Exception as exc:
+            _log.debug("Plan review CLI call failed: %s", exc)
+            return draft
+
+        if not result.success:
+            _log.debug("Plan review returned failure: %s", result.error)
+            return draft
+
+        try:
+            text = result.output.strip()
+            if text.startswith("```"):
+                lines = text.splitlines()
+                lines = [l for l in lines if not l.strip().startswith("```")]
+                text = "\n".join(lines)
+            data = _json.loads(text)
+        except (_json.JSONDecodeError, ValueError):
+            start = result.output.find("{")
+            end = result.output.rfind("}")
+            if start >= 0 and end > start:
+                try:
+                    data = _json.loads(result.output[start : end + 1])
+                except _json.JSONDecodeError:
+                    return draft
+            else:
+                return draft
+
+        if data.get("verdict") == "PASS":
+            draft.routing_notes.append("[plan-review] CLI review: PASS")
+            return draft
+
+        from agent_baton.models.enums import RiskLevel
+        from agent_baton.core.engine.planning.rules.risk_signals import RISK_ORDINAL
+        from agent_baton.core.engine.planning.utils.risk_and_policy import select_git_strategy
+
+        # Apply risk override (can escalate OR de-escalate — Opus has
+        # the judgment to know when "deployment docs" isn't really HIGH).
+        risk_override = data.get("risk_override")
+        if risk_override and risk_override in ("LOW", "MEDIUM", "HIGH"):
+            override_enum = RiskLevel(risk_override)
+            current_enum = draft.risk_level_enum or RiskLevel.LOW
+            if override_enum != current_enum:
+                draft.risk_level = risk_override
+                draft.risk_level_enum = override_enum
+                draft.git_strategy = select_git_strategy(override_enum).value
+                draft.routing_notes.append(
+                    f"[plan-review] Risk adjusted {current_enum.value} → {risk_override}"
+                )
+
+        # Apply task_type override.
+        _VALID_TYPES = {
+            "new-feature", "bug-fix", "refactor", "migration",
+            "data-analysis", "documentation", "test", "generic",
+        }
+        type_override = data.get("task_type_override")
+        if type_override and type_override in _VALID_TYPES:
+            if type_override != draft.inferred_type:
+                draft.routing_notes.append(
+                    f"[plan-review] task_type adjusted "
+                    f"{draft.inferred_type} → {type_override}"
+                )
+                draft.inferred_type = type_override
+
+        # Apply agent swaps.
+        for swap in data.get("agent_swaps", []):
+            step_id = swap.get("step_id", "")
+            new_agent = swap.get("to", "")
+            for phase in draft.plan_phases:
+                for step in phase.steps:
+                    if step.step_id == step_id and new_agent:
+                        old = step.agent_name
+                        step.agent_name = new_agent
+                        draft.routing_notes.append(
+                            f"[plan-review] Swapped {old} → {new_agent} "
+                            f"in step {step_id}"
+                        )
+
+        # Add missing agents to roster (for downstream re-planning).
+        for agent in data.get("agents_to_add", []):
+            if agent not in draft.resolved_agents:
+                draft.resolved_agents.append(agent)
+                draft.routing_notes.append(
+                    f"[plan-review] Added {agent} to roster"
+                )
+
+        notes = data.get("notes", "")
+        if notes:
+            draft.routing_notes.append(f"[plan-review] {notes}")
+
+        return draft
 
     def isolation_for_step(self, step_id: str) -> str:
         """Return the configured isolation mode for *step_id*, or ``""``."""

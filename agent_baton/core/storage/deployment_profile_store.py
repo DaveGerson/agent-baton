@@ -78,13 +78,6 @@ class DeploymentProfileStore:
         """Return a profile by ID, or *None* if not found."""
         from agent_baton.models.deployment_profile import DeploymentProfile
 
-        cur = self._conn.execute(
-            "SELECT * FROM deployment_profiles WHERE profile_id = ?",
-            (profile_id,),
-        )
-        cur.row_factory = sqlite3.Row
-        # Re-query with row_factory on cursor level isn't directly possible;
-        # use description to build a dict instead.
         row = self._conn.execute(
             "SELECT profile_id, name, environment, required_gates, "
             "target_slos, allowed_risk_levels, description, created_at "

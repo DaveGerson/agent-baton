@@ -35,9 +35,10 @@ import os
 import signal
 import sys
 import threading
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from agent_baton.utils.time import utcnow_seconds as _utcnow
 
 _log = logging.getLogger(__name__)
 
@@ -674,10 +675,6 @@ def _write_state(state_file: Path, state: dict) -> None:
         state_file.write_text(json.dumps(state, indent=2))
     except Exception as exc:
         _log.debug("predict_cmd._write_state: %s", exc)
-
-
-def _utcnow() -> str:
-    return datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
 
 
 # Import needed for the daemon's _lock attribute access in _persist_state.
