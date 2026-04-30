@@ -16,8 +16,8 @@ CROSS_CONCERN_SIGNALS: dict[str, list[str]] = {
         "fix", "bug", "broken", "error", "remediate", "patch",
     ],
     "test-engineer": [
-        "test suite", "e2e", "playwright", "coverage", "vitest",
-        "jest", "unit test", "integration test",
+        "test", "tests", "testing", "test suite", "e2e", "playwright",
+        "coverage", "vitest", "jest", "unit test", "integration test",
     ],
     "code-reviewer": [
         "review", "code quality", "audit",

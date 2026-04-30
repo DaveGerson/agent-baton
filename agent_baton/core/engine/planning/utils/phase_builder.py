@@ -121,6 +121,65 @@ def _derive_expected_outcome(step: "PlanStep", task_summary: str = "") -> str:
 
 
 # ---------------------------------------------------------------------------
+# Concern scoping — extract agent-relevant clause from task summary
+# ---------------------------------------------------------------------------
+
+_CLAUSE_SPLIT = re.compile(r"[,;]\s+(?:and\s+)?|(?:\s+and\s+)")
+_NUMBERED_SPLIT = re.compile(r"(?:^|\s)\d+[.)]\s+")
+
+
+def _scope_summary_for_agent(task_summary: str, agent_name: str) -> str:
+    """Extract the clause from *task_summary* most relevant to *agent_name*.
+
+    Splits the summary on comma/semicolon/and boundaries OR numbered
+    subtask markers, scores each clause against the agent's
+    CROSS_CONCERN_SIGNALS keywords, and returns the best-matching
+    clause.  Falls back to the full summary when no clause scores
+    above zero or the summary is short.
+
+    bd-f712: fixes the bug where every step got the identical full
+    task description pasted in.
+    """
+    if len(task_summary) < 80:
+        return task_summary
+
+    clauses = [c.strip() for c in _CLAUSE_SPLIT.split(task_summary) if c.strip()]
+    if len(clauses) < 2:
+        parts = _NUMBERED_SPLIT.split(task_summary)
+        clauses = [c.strip() for c in parts if c.strip()]
+    if len(clauses) < 2:
+        return task_summary
+
+    base = agent_name.split("--")[0]
+    keywords = CROSS_CONCERN_SIGNALS.get(base, [])
+    if not keywords:
+        return task_summary
+
+    best_clause = ""
+    best_score = 0
+    summary_lower_words = set(re.findall(r"\b\w+\b", task_summary.lower()))
+
+    for clause in clauses:
+        clause_lower = clause.lower()
+        clause_words = set(re.findall(r"\b\w+\b", clause_lower))
+        score = 0
+        for kw in keywords:
+            if " " in kw:
+                if kw in clause_lower:
+                    score += 2
+            elif kw in clause_words:
+                score += 1
+        if score > best_score:
+            best_score = score
+            best_clause = clause
+
+    if best_score > 0 and best_clause:
+        return best_clause
+
+    return task_summary
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -134,18 +193,19 @@ def step_description(
     if not task_summary:
         return f"{phase_name} phase — {agent_name}"
 
+    scoped = _scope_summary_for_agent(task_summary, agent_name)
     base_agent = agent_name.split("--")[0]
     phase_lower = phase_name.lower()
     expertise = agent_expertise_level(agent_name, registry)
 
     if expertise == "expert":
         verb = PHASE_VERBS.get(phase_lower, phase_name)
-        return f"{verb}: {task_summary}."
+        return f"{verb}: {scoped}."
 
     agent_templates = STEP_TEMPLATES.get(base_agent, {})
     template = agent_templates.get(phase_lower)
     if template:
-        description = template.format(task=task_summary)
+        description = template.format(task=scoped)
         if expertise == "minimal":
             verb = PHASE_VERBS.get(phase_lower, phase_name.lower())
             description += (
@@ -155,7 +215,7 @@ def step_description(
         return description
 
     verb = PHASE_VERBS.get(phase_lower, phase_name)
-    base_desc = f"{verb}: {task_summary} (as {agent_name})"
+    base_desc = f"{verb}: {scoped} (as {agent_name})"
     if expertise == "minimal":
         base_desc += " Document your approach and decisions."
     return base_desc
