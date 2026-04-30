@@ -71,6 +71,7 @@ class PlanDraft:
     risk_level: str = ""
     risk_level_enum: "RiskLevel | None" = None
     git_strategy: str = ""
+    planning_archetype: str = "phased"  # direct | phased | investigative
 
     # --- ResearchStage outputs ---
     research_concerns: list[tuple[str, str]] | None = None  # (marker, text) tuples from research

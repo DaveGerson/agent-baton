@@ -291,3 +291,36 @@ class PhaseManager:
         state.current_step_index = 0
         if set_status_running:
             state.status = "running"
+
+    def retry_phase(self, state: ExecutionState) -> None:
+        """Reset the current phase for re-execution (investigative retry).
+
+        Resets the step index to the beginning of the current phase so all
+        steps will be re-dispatched.  Does NOT advance the phase counter.
+        Tracks retry count in ``state.speculations["_phase_retries"]`` so
+        it persists across CLI calls.
+
+        Args:
+            state: The execution state to mutate.
+        """
+        if state.current_phase >= len(state.plan.phases):
+            return
+        phase = state.plan.phases[state.current_phase]
+
+        # Track retry count in speculations (persisted dict[str, dict])
+        retry_store = getattr(state, "speculations", None)
+        if retry_store is None:
+            state.speculations = {}
+            retry_store = state.speculations
+        if "_phase_retries" not in retry_store:
+            retry_store["_phase_retries"] = {}
+        retry_key = f"phase_{phase.phase_id}"
+        retry_store["_phase_retries"][retry_key] = (
+            int(retry_store["_phase_retries"].get(retry_key, 0)) + 1
+        )
+
+        # Reset step index to the beginning of this phase
+        state.current_step_index = sum(
+            len(p.steps) for p in state.plan.phases[:state.current_phase]
+        )
+        state.status = "running"

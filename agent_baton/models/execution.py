@@ -68,6 +68,7 @@ class ActionType(Enum):
     FEEDBACK = "feedback"               # present multiple-choice questions, dispatch based on answers
     INTERACT = "interact"               # multi-turn interaction: agent responded, awaiting human input
     SWARM_DISPATCH = "swarm.dispatch"   # Wave 6.2 (bd-2b9f): trigger a SwarmDispatcher run
+    CHECKPOINT = "checkpoint"            # save state + suggest fresh session to prevent context rot
 
 
 # ---------------------------------------------------------------------------
@@ -317,6 +318,7 @@ class PlanStep:
     expected_outcome: str = ""      # Wave 3.1: 1-sentence demo statement (behavioral)
     timeout_seconds: int = 0        # 0 = no timeout (backward-compat default)
     parallel_safe: bool = False     # bd-a379: True when sibling steps have disjoint allowed_paths
+    max_estimated_minutes: int = 0  # 0 = no estimate; enrichment enforces ceiling
 
     def to_dict(self) -> dict:
         d = {
@@ -350,6 +352,8 @@ class PlanStep:
             d["timeout_seconds"] = self.timeout_seconds
         if self.parallel_safe:
             d["parallel_safe"] = self.parallel_safe
+        if self.max_estimated_minutes:
+            d["max_estimated_minutes"] = self.max_estimated_minutes
         return d
 
     @classmethod
@@ -376,6 +380,7 @@ class PlanStep:
             expected_outcome=data.get("expected_outcome", ""),
             timeout_seconds=data.get("timeout_seconds", 0),
             parallel_safe=data.get("parallel_safe", False),
+            max_estimated_minutes=data.get("max_estimated_minutes", 0),
         )
 
 
@@ -554,6 +559,8 @@ class MachinePlan:
     # (pre-v10 databases) or when the planner used keyword-fallback only.
     classification_signals: str | None = None    # JSON blob from ClassificationResult.to_dict()
     classification_confidence: float | None = None  # 0.0–1.0 confidence score
+    archetype: str = "phased"       # planning archetype: direct | phased | investigative
+    max_retry_phases: int = 0       # investigative only: max phase retries before failing
 
     def __post_init__(self) -> None:
         if not self.created_at:
@@ -594,6 +601,8 @@ class MachinePlan:
             "depends_on_task": self.depends_on_task,
             "classification_signals": self.classification_signals,
             "classification_confidence": self.classification_confidence,
+            "archetype": self.archetype,
+            "max_retry_phases": self.max_retry_phases,
         }
         if self.resource_limits is not None:
             d["resource_limits"] = self.resource_limits.to_dict()
@@ -628,6 +637,8 @@ class MachinePlan:
             depends_on_task=data.get("depends_on_task"),
             classification_signals=data.get("classification_signals"),
             classification_confidence=data.get("classification_confidence"),
+            archetype=data.get("archetype", "phased"),
+            max_retry_phases=data.get("max_retry_phases", 0),
         )
 
     def to_markdown(self) -> str:
@@ -641,6 +652,7 @@ class MachinePlan:
             f"**Budget Tier**: {self.budget_tier}",
             f"**Execution Mode**: {self.execution_mode}",
             f"**Git Strategy**: {self.git_strategy}",
+            f"**Archetype**: {self.archetype}",
             f"**Created**: {self.created_at}",
         ]
         if self.pattern_source:

@@ -20,6 +20,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from agent_baton.core.engine.planning.archetypes import get_archetype_config
 from agent_baton.core.engine.planning.draft import PlanDraft
 from agent_baton.core.engine.planning.services import PlannerServices
 from agent_baton.core.engine.planning.utils.context import (
@@ -62,6 +63,13 @@ class EnrichmentStage:
             project_root=draft.project_root,
             services=services,
             isolation_overrides=draft.isolation_overrides,
+        )
+
+        # Archetype × risk gate matrix — override/supplement gates based on archetype policy
+        self._apply_archetype_gates(
+            draft.plan_phases,
+            archetype=getattr(draft, 'planning_archetype', 'phased'),
+            risk_level_enum=draft.risk_level_enum,
         )
 
         # Step 12b+12b-bis — approval gates + concern-split.
@@ -391,3 +399,51 @@ class EnrichmentStage:
         )
         logger.info(note)
         draft.routing_notes.append(note)
+
+    def _apply_archetype_gates(
+        self,
+        plan_phases: list["PlanPhase"],
+        *,
+        archetype: str,
+        risk_level_enum: "RiskLevel | None",
+    ) -> None:
+        """Apply archetype × risk gate policies to phases."""
+        config = get_archetype_config(archetype)
+        risk_key = risk_level_enum.value if risk_level_enum else "LOW"
+        policy = config.gate_policies.get(risk_key)
+        if policy is None:
+            return
+
+        from agent_baton.models.execution import PlanGate
+
+        for phase in plan_phases:
+            # Spec compliance: add review gate checking output matches plan intent
+            if policy.spec_compliance and not any(
+                getattr(phase.gate, 'gate_type', '') == 'spec'
+                for _ in [phase.gate] if phase.gate
+            ):
+                # Only add to implementation phases
+                norm_name = phase.name.lower().split(":")[0].strip()
+                if norm_name in ("implement", "fix", "draft"):
+                    if phase.gate is None:
+                        phase.gate = PlanGate(
+                            gate_type="spec",
+                            description="Verify implementation matches plan intent (spec compliance)",
+                        )
+
+            # Auditor requirement: ensure audit phase exists (handled by _ensure_audit_phase)
+            if policy.auditor_required and not phase.approval_required:
+                # Mark final phase for approval when auditor is required
+                if phase == plan_phases[-1]:
+                    phase.approval_required = True
+                    phase.approval_description = (
+                        f"Auditor review required ({risk_key} risk, {archetype} archetype)"
+                    )
+
+        # Step size enforcement: cap step estimates based on archetype ceiling
+        max_minutes = config.max_step_minutes
+        for phase in plan_phases:
+            for step in phase.steps:
+                if hasattr(step, 'max_estimated_minutes'):
+                    if step.max_estimated_minutes == 0 or step.max_estimated_minutes > max_minutes:
+                        step.max_estimated_minutes = max_minutes
