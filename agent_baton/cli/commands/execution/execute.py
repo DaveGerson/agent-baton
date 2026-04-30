@@ -796,6 +796,25 @@ def _print_action(action: dict, *, terse: bool = False) -> None:
         print(f"Respond with: baton execute interact --step-id {step_id} --input \"<your input>\"")
         print(f"Signal done:  baton execute interact --step-id {step_id} --done")
 
+    elif atype == ActionType.CHECKPOINT.value:
+        phase_id = action.get("phase_id", "")
+        reason = action.get("reason", "")
+        tokens_used = action.get("tokens_used", 0)
+        tokens_limit = action.get("tokens_limit", 0)
+        step_count = action.get("step_count_in_phase", 0)
+        print(f"ACTION: CHECKPOINT")
+        print(f"  Phase:        {phase_id}")
+        print(f"  Reason:       {reason}")
+        print(f"  Tokens-Used:  {tokens_used:,}")
+        print(f"  Tokens-Limit: {tokens_limit:,}")
+        print(f"  Step-Count:   {step_count}")
+        print(f"  Message: {msg}")
+        print()
+        print("Context rot warning — save state and start a fresh session:")
+        print("  baton execute pause")
+        print("  # Start a new Claude session, then:")
+        print("  baton execute resume")
+
     else:
         print(f"ACTION: {atype}")
         print(f"  {msg}")

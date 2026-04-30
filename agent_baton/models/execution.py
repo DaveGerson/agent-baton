@@ -1602,6 +1602,11 @@ class ExecutionAction:
     worktree_path: str = ""            # absolute path to isolated worktree; "" = no worktree
     worktree_branch: str = ""          # git branch inside the worktree
 
+    # Generic key-value bag for action-type-specific data not covered by the
+    # fields above (e.g. CHECKPOINT reason / token counts).  Serialised verbatim
+    # into to_dict() output for the named action type only.
+    metadata: dict[str, Any] = field(default_factory=dict)
+
     def to_dict(self) -> dict[str, Any]:
         # action_type is serialised as a plain string so CLI / Claude output
         # is unaffected by the internal enum representation.
@@ -1665,6 +1670,14 @@ class ExecutionAction:
             })
         elif self.action_type in (ActionType.COMPLETE, ActionType.FAILED):
             d["summary"] = self.summary
+        elif self.action_type == ActionType.CHECKPOINT:
+            d.update({
+                "reason": self.metadata.get("reason", ""),
+                "tokens_used": self.metadata.get("tokens_used", 0),
+                "tokens_limit": self.metadata.get("tokens_limit", 0),
+                "phase_id": self.phase_id,
+                "step_count_in_phase": self.metadata.get("step_count_in_phase", 0),
+            })
         if self.parallel_actions:
             d["parallel_actions"] = [a.to_dict() for a in self.parallel_actions]
         return d

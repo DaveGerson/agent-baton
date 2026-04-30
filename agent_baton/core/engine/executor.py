@@ -2066,6 +2066,18 @@ class ExecutionEngine:
             _log.warning("Budget warning: %s", warning)
             result.deviations.append(f"TOKEN_BUDGET_WARNING: {warning}")
 
+        # Track consecutive completions per phase for CHECKPOINT step-count trigger.
+        if status == "complete":
+            _cp_specs = state.speculations if state.speculations is not None else {}
+            if state.speculations is None:
+                state.speculations = _cp_specs
+            _cp_counts: dict[str, int] = _cp_specs.get("_checkpoint_step_count", {})
+            _cp_phase = state.current_phase_obj
+            _cp_phase_id = _cp_phase.phase_id if _cp_phase is not None else 0
+            _cp_key = f"phase_{_cp_phase_id}"
+            _cp_counts[_cp_key] = int(_cp_counts.get(_cp_key, 0)) + 1
+            _cp_specs["_checkpoint_step_count"] = _cp_counts
+
         # ── Wave 1.3 (bd-86bf): worktree fold-back / retain ──────────────────
         # Only runs on terminal statuses (complete / failed); dispatched and
         # interacting are skipped because the worktree is still active.
@@ -4112,6 +4124,107 @@ class ExecutionEngine:
             return warning
         return None
 
+    # Separate method (not extending _check_token_budget) so the 70%-soft-check
+    # never touches state.status — _check_token_budget already owns that path.
+    def _check_checkpoint_triggers(
+        self, state: ExecutionState
+    ) -> ExecutionAction | None:
+        """Return a CHECKPOINT action if either context-rot trigger fires.
+
+        Trigger 1 — token threshold: cumulative tokens >= 70% of the effective
+        budget limit (soft warning before BUDGET_EXCEEDED at 100%).
+
+        Trigger 2 — step count: 10 or more consecutive step completions within
+        the current phase without a phase advance.
+
+        Only fires once per phase (tracked via ``state.speculations``).
+        Returns ``None`` when no trigger is active.
+        """
+        specs = state.speculations
+        if specs is None:
+            state.speculations = {}
+            specs = state.speculations
+
+        phase_obj = state.current_phase_obj
+        phase_id = phase_obj.phase_id if phase_obj is not None else 0
+
+        # One-shot: do not re-emit for the same phase.
+        emitted_phases: set[int] = set(specs.get("_checkpoint_emitted_phases", []))
+        if phase_id in emitted_phases:
+            return None
+
+        # ── Compute token totals using the same limit logic as _check_token_budget ──
+        thresholds: dict[str, int] = {
+            "lean": 50_000,
+            "standard": 500_000,
+            "full": 2_000_000,
+        }
+        total_tokens = sum(r.estimated_tokens for r in state.step_results)
+        if self._token_budget is not None and self._token_budget > 0:
+            token_limit = self._token_budget
+        else:
+            token_limit = thresholds.get(state.plan.budget_tier, 500_000)
+
+        step_counts: dict[str, int] = specs.get("_checkpoint_step_count", {})
+        step_key = f"phase_{phase_id}"
+        step_count_in_phase = int(step_counts.get(step_key, 0))
+
+        reason: str = ""
+        if total_tokens >= int(token_limit * 0.70):
+            reason = "token_threshold"
+        elif step_count_in_phase >= 10:
+            reason = "step_count_threshold"
+
+        if not reason:
+            return None
+
+        # Mark this phase as having fired so we don't re-emit.
+        emitted_phases.add(phase_id)
+        specs["_checkpoint_emitted_phases"] = sorted(emitted_phases)
+
+        _log.warning(
+            "CHECKPOINT triggered (%s): phase_id=%d tokens=%d/%d step_count=%d",
+            reason, phase_id, total_tokens, token_limit, step_count_in_phase,
+        )
+        return ExecutionAction(
+            action_type=ActionType.CHECKPOINT,
+            message=(
+                "Save state with `baton execute pause` and start a fresh "
+                "Claude session with `baton execute resume`."
+            ),
+            phase_id=phase_id,
+            metadata={
+                "reason": reason,
+                "tokens_used": total_tokens,
+                "tokens_limit": token_limit,
+                "step_count_in_phase": step_count_in_phase,
+            },
+        )
+
+    def _reset_checkpoint_state(self, state: ExecutionState, phase_id: int) -> None:
+        """Clear CHECKPOINT tracking for *phase_id* so the next phase starts fresh.
+
+        Removes the per-phase step count key and drops *phase_id* from the
+        emitted-phases set.  Called on PHASE_ADVANCE_OK and RETRY_PHASE so that
+        a retried or newly entered phase re-arms the trip.
+        """
+        specs = state.speculations
+        if specs is None:
+            return
+        step_counts: dict[str, int] = specs.get("_checkpoint_step_count", {})
+        step_key = f"phase_{phase_id}"
+        step_counts.pop(step_key, None)
+        if step_counts:
+            specs["_checkpoint_step_count"] = step_counts
+        else:
+            specs.pop("_checkpoint_step_count", None)
+        emitted: list[int] = specs.get("_checkpoint_emitted_phases", [])
+        updated = [p for p in emitted if p != phase_id]
+        if updated:
+            specs["_checkpoint_emitted_phases"] = updated
+        else:
+            specs.pop("_checkpoint_emitted_phases", None)
+
     def resume_budget(self) -> None:
         """Clear a ``budget_exceeded`` status so execution can continue.
 
@@ -5106,12 +5219,20 @@ class ExecutionEngine:
         # ── DISPATCH / TEAM_DISPATCH / INTERACT_CONTINUE ────────────────────
         if kind == DecisionKind.DISPATCH:
             assert decision.step_id is not None
+            # Check both CHECKPOINT triggers before issuing the next dispatch.
+            checkpoint = self._check_checkpoint_triggers(state)
+            if checkpoint is not None:
+                return checkpoint
             step = _exec_helpers_find_step(state, decision.step_id)
             assert step is not None
             return self._dispatch_action(step, state)
 
         if kind == DecisionKind.TEAM_DISPATCH:
             assert decision.step_id is not None
+            # Check both CHECKPOINT triggers before issuing the next team dispatch.
+            checkpoint = self._check_checkpoint_triggers(state)
+            if checkpoint is not None:
+                return checkpoint
             step = _exec_helpers_find_step(state, decision.step_id)
             assert step is not None
             return self._team_dispatch_action(step, state)
@@ -5250,6 +5371,9 @@ class ExecutionEngine:
         if kind == DecisionKind.PHASE_ADVANCE_OK:
             phase_obj = state.current_phase_obj
             assert phase_obj is not None
+            # Reset CHECKPOINT step-count trip for the completed phase so a
+            # fresh phase starts with a clean counter.
+            self._reset_checkpoint_state(state, phase_obj.phase_id)
             # F0.3 — VETO enforcement (bd-f606).  May raise ExecutionVetoed
             # or write an Override row.  Mirrors legacy line 5294.
             self._enforce_veto_before_advance(state, phase_obj)
@@ -5269,6 +5393,11 @@ class ExecutionEngine:
             # this decision.  phase_manager.retry_phase tracks the retry count
             # in state.speculations["_phase_retries"] so it persists across
             # CLI calls.
+            # Reset CHECKPOINT step-count trip so the retried phase gets a
+            # clean counter and can re-trigger if needed.
+            phase_obj = state.current_phase_obj
+            if phase_obj is not None:
+                self._reset_checkpoint_state(state, phase_obj.phase_id)
             self._phase_manager.retry_phase(state)
             self._persistence.save(state)
             return None  # loop — next determine_next() re-dispatches step 0
