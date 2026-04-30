@@ -6,10 +6,11 @@ type has specific pass/fail semantics:
 - **build** / **test**: pass when exit code is 0.
 - **lint**: pass when exit code is 0 AND no error markers are found in
   output (warnings are tolerated).
-- **spec**: semantic evaluation via ``SpecComplianceEvaluator`` — uses a
-  Claude Haiku call when ``ANTHROPIC_API_KEY`` is set, otherwise falls back
-  to keyword-overlap heuristics.  Replaces the former trivial structural check
-  (exit_code + non-empty output) which conveyed no semantic signal.
+- **spec**: semantic compliance check.  Dispatches the evaluation to a
+  Claude Code subprocess via ``HeadlessClaude`` (``claude --print``) — no
+  Anthropic API calls and no heuristic shortcut.  When the ``claude`` CLI
+  is unavailable the gate fails closed with an actionable rationale rather
+  than fabricating a verdict.
 - **review**: advisory only -- always passes regardless of output.
 - **ci**: triggers a CI provider workflow and polls for completion.
   Currently supports GitHub Actions only.  Requires ``GITHUB_TOKEN`` env var
@@ -23,13 +24,14 @@ without side effects.  Gate evaluation results are recorded by the
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
-import string
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Protocol
+from typing import Callable
 
 from agent_baton.core.govern.spec_validator import SpecValidator
 from agent_baton.models.execution import ActionType, ExecutionAction, GateResult, PlanGate
@@ -72,189 +74,145 @@ def _has_lint_errors(output: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Spec compliance evaluator
+# Spec compliance evaluator (Claude Code subprocess, no API)
 # ---------------------------------------------------------------------------
 
-# Model used for semantic spec compliance checks (fast + cheap).
-_SPEC_HAIKU_MODEL = "claude-haiku-4-5-20251001"
-_SPEC_HAIKU_MAX_TOKENS = 500
-_SPEC_HAIKU_TIMEOUT = 10.0
-
-# Minimum fraction of task-summary content tokens that must appear in output.
-_HEURISTIC_OVERLAP_THRESHOLD = 0.30
-
-# Common English stop words — enough to filter noise without a dependency.
-_STOP_WORDS: frozenset[str] = frozenset({
-    "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for",
-    "of", "with", "by", "from", "as", "is", "it", "its", "be", "was",
-    "are", "were", "been", "has", "have", "had", "do", "does", "did",
-    "will", "would", "could", "should", "may", "might", "shall", "not",
-    "no", "nor", "so", "yet", "both", "either", "neither", "this", "that",
-    "these", "those", "i", "we", "you", "he", "she", "they", "what",
-    "which", "who", "whom", "if", "then", "than", "because", "while",
-    "although", "though", "after", "before", "since", "until", "when",
-    "where", "how", "all", "each", "every", "any", "some", "such", "own",
-    "same", "just", "more", "also", "into", "about", "up", "out", "can",
-    "new", "use", "used", "using", "based", "per", "via",
-})
-
-
-def _content_tokens(text: str) -> list[str]:
-    """Extract lowercase content tokens: length >= 4, non-stop-word, alpha."""
-    translator = str.maketrans("", "", string.punctuation)
-    words = text.lower().translate(translator).split()
-    return [w for w in words if len(w) >= 4 and w not in _STOP_WORDS]
-
-
-class _HaikuCaller(Protocol):
-    """Structural type for the Haiku API call — injectable for tests."""
-
-    def __call__(self, prompt: str) -> str: ...
-
-
-def _default_haiku_caller(prompt: str) -> str:
-    """Call Claude Haiku via the Anthropic SDK (same pattern as classifier.py)."""
-    import anthropic  # noqa: PLC0415 — optional dependency, imported lazily
-
-    client = anthropic.Anthropic()
-    response = client.messages.create(
-        model=_SPEC_HAIKU_MODEL,
-        max_tokens=_SPEC_HAIKU_MAX_TOKENS,
-        timeout=_SPEC_HAIKU_TIMEOUT,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return response.content[0].text
+# Type for the injectable Claude caller.  Returns the raw text response.
+ClaudeCaller = Callable[[str], str]
 
 
 _SPEC_COMPLIANCE_PROMPT = """\
-You are a spec compliance evaluator for a software orchestration engine.
+You are reviewing whether an agent's output fulfils the declared task intent
+for one phase of a multi-phase orchestrated plan.
 
-Task intent (what the plan declared):
+Task summary (the plan's top-level intent):
 {task_summary}
 
 Phase: {phase_name}
 Phase steps:
 {step_descriptions}
 
-Agent output to evaluate:
+Agent output to evaluate (truncated to 4000 chars if longer):
 {agent_output}
 
-Does the agent output fulfill the declared task intent for this phase?
-Return JSON only (no markdown, no commentary):
-{{"compliant": true|false, "rationale": "one sentence", "deviations": ["deviation1", ...]}}
+Evaluate strictly on functional fulfilment.  Be lenient on style.  Be strict
+on missing functionality, wrong scope, or contradictions with the intent.
 
-Rules:
-- "compliant" must be a boolean.
-- "deviations" must be a list (empty when compliant is true).
-- Be lenient on style; strict on functional gaps."""
+Return ONLY a single JSON object on one line, no markdown fences, no commentary:
+{{"compliant": true|false, "rationale": "one sentence", "deviations": ["...", ...]}}
+"""
 
 
+def _default_claude_caller(prompt: str) -> str:
+    """Default caller: dispatch via ``HeadlessClaude`` (``claude --print``).
+
+    Uses the user's authenticated Claude Code session — no API key required.
+    Returns "" when the ``claude`` CLI is not installed; the evaluator
+    interprets empty output as "tool unavailable" and fails the gate
+    closed with an actionable message.
+    """
+    from agent_baton.core.runtime.headless import HeadlessClaude  # noqa: PLC0415
+    hc = HeadlessClaude()
+    if not hc.is_available:
+        return ""
+    result = asyncio.run(hc.run(prompt))
+    if not result.success:
+        logger.warning("SpecComplianceEvaluator: claude --print failed: %s", result.error)
+        return ""
+    return result.output or ""
+
+
+@dataclass
 class SpecComplianceEvaluator:
-    """Evaluate whether agent output fulfills the plan's declared intent.
+    """Evaluate whether agent output fulfils the plan's declared intent.
 
-    Two evaluation paths:
-    1. Semantic (preferred): calls Claude Haiku when ANTHROPIC_API_KEY is set.
-    2. Heuristic fallback: keyword-overlap against task_summary content tokens.
+    Dispatches the evaluation to a Claude Code subprocess via
+    ``HeadlessClaude``.  All agentic evaluation routes through the user's
+    Claude Code session — there are no direct Anthropic API calls and no
+    heuristic shortcut.
 
-    The evaluator is injectable — pass a ``haiku_caller`` to replace the real
-    API call in tests.
+    The ``claude_caller`` seam exists so tests can inject deterministic
+    responses; in production the default uses ``claude --print``.
 
     Args:
         task_summary: The plan's top-level task description.
         phase_name: Name of the phase whose gate is being evaluated.
         step_descriptions: Step task_description strings for context.
-        haiku_caller: Optional override for the Haiku API call (test seam).
+        claude_caller: Optional override for the subprocess call (test seam).
+
+    Behaviour:
+        ``evaluate(output)`` returns ``(passed, rationale)``.  When the
+        caller returns an empty string (CLI unavailable or call failed)
+        the gate fails closed with a message that surfaces the cause.
     """
 
-    def __init__(
-        self,
-        task_summary: str = "",
-        phase_name: str = "",
-        step_descriptions: list[str] | None = None,
-        haiku_caller: _HaikuCaller | None = None,
-    ) -> None:
-        self._task_summary = task_summary
-        self._phase_name = phase_name
-        self._step_descriptions = step_descriptions or []
-        self._haiku_caller: _HaikuCaller = haiku_caller or _default_haiku_caller
+    task_summary: str = ""
+    phase_name: str = ""
+    step_descriptions: list[str] | None = None
+    claude_caller: ClaudeCaller | None = None
 
     def evaluate(self, command_output: str) -> tuple[bool, str]:
-        """Evaluate output against intent; return (passed, rationale).
+        if not self.task_summary.strip():
+            # No plan context attached — gate cannot make a real judgement.
+            return False, (
+                "Spec gate skipped: no task_summary attached to evaluator. "
+                "Wire the plan's task_summary through GateRunner."
+            )
 
-        Never raises — both error paths return (False, reason) so the gate
-        always produces an actionable result.
-        """
-        if not self._task_summary.strip():
-            # Defensive: no plan context available — heuristic would be noise.
-            return False, "No task_summary available; spec gate cannot evaluate compliance."
-
-        api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-        if api_key:
-            try:
-                return self._semantic_evaluate(command_output)
-            except Exception as exc:  # noqa: BLE001
-                # API call failed — fall through to heuristic.
-                logger.warning("SpecComplianceEvaluator: semantic path failed (%s), using heuristic", exc)
-
-        return self._heuristic_evaluate(command_output)
-
-    def _semantic_evaluate(self, command_output: str) -> tuple[bool, str]:
-        steps_text = "\n".join(
-            f"- {desc}" for desc in self._step_descriptions if desc
-        ) or "(no step descriptions)"
-
+        steps = self.step_descriptions or []
+        step_text = "\n".join(f"- {d}" for d in steps if d) or "(no step descriptions)"
         prompt = _SPEC_COMPLIANCE_PROMPT.format(
-            task_summary=self._task_summary,
-            phase_name=self._phase_name or "(unknown)",
-            step_descriptions=steps_text,
-            agent_output=command_output[:4000],  # cap to avoid huge prompts
+            task_summary=self.task_summary,
+            phase_name=self.phase_name or "(unknown)",
+            step_descriptions=step_text,
+            agent_output=(command_output or "")[:4000],
         )
 
-        raw = self._haiku_caller(prompt)
-
-        # Strip markdown fences if the model adds them despite instructions.
-        cleaned = raw.strip()
-        if cleaned.startswith("```"):
-            lines = cleaned.split("\n")
-            cleaned = "\n".join(l for l in lines if not l.strip().startswith("```"))
-
+        caller = self.claude_caller or _default_claude_caller
         try:
-            data = json.loads(cleaned)
+            raw = caller(prompt)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("SpecComplianceEvaluator: claude_caller raised: %s", exc)
+            return False, f"Spec gate error: claude_caller raised ({exc!s})."
+
+        if not raw or not raw.strip():
+            return False, (
+                "Spec gate cannot evaluate: claude CLI unavailable or returned "
+                "empty output.  Install the Claude Code CLI and re-run."
+            )
+
+        return self._parse_verdict(raw)
+
+    @staticmethod
+    def _parse_verdict(raw: str) -> tuple[bool, str]:
+        # Tolerate models that wrap JSON in markdown fences.
+        text = raw.strip()
+        if text.startswith("```"):
+            text = "\n".join(
+                ln for ln in text.splitlines() if not ln.strip().startswith("```")
+            )
+        try:
+            data = json.loads(text)
         except json.JSONDecodeError:
-            # Try to extract JSON substring.
-            start = cleaned.find("{")
-            end = cleaned.rfind("}")
+            start, end = text.find("{"), text.rfind("}")
             if start >= 0 and end > start:
-                data = json.loads(cleaned[start: end + 1])
+                try:
+                    data = json.loads(text[start : end + 1])
+                except json.JSONDecodeError:
+                    return False, f"Spec gate: unparseable verdict ({text[:160]!r})."
             else:
-                raise ValueError(f"Haiku returned unparseable JSON: {cleaned[:200]!r}")
+                return False, f"Spec gate: unparseable verdict ({text[:160]!r})."
 
-        compliant: bool = bool(data.get("compliant", False))
-        rationale: str = str(data.get("rationale", ""))
-        deviations: list[str] = data.get("deviations", [])
-        if deviations:
-            rationale += " Deviations: " + "; ".join(str(d) for d in deviations)
-        return compliant, rationale
-
-    def _heuristic_evaluate(self, command_output: str) -> tuple[bool, str]:
-        if not command_output.strip():
-            return False, "[heuristic-fallback] Output is empty; cannot verify spec compliance."
-
-        summary_tokens = set(_content_tokens(self._task_summary))
-        if not summary_tokens:
-            # Summary has no meaningful tokens — nothing to compare against.
-            return False, "[heuristic-fallback] task_summary yields no content tokens."
-
-        output_tokens = set(_content_tokens(command_output))
-        overlap = summary_tokens & output_tokens
-        ratio = len(overlap) / len(summary_tokens)
-        passed = ratio >= _HEURISTIC_OVERLAP_THRESHOLD
-        rationale = (
-            f"[heuristic-fallback] Keyword overlap {len(overlap)}/{len(summary_tokens)} "
-            f"({ratio:.0%}); threshold {_HEURISTIC_OVERLAP_THRESHOLD:.0%}. "
-            f"{'PASS' if passed else 'FAIL'}."
+        compliant = bool(data.get("compliant", False))
+        rationale = str(data.get("rationale", "")).strip() or (
+            "PASS" if compliant else "FAIL"
         )
-        return passed, rationale
+        deviations = data.get("deviations") or []
+        if deviations:
+            rationale = f"{rationale} Deviations: " + "; ".join(
+                str(d) for d in deviations
+            )
+        return compliant, rationale
 
 
 class GateRunner:
@@ -269,9 +227,6 @@ class GateRunner:
         spec_evaluator: SpecComplianceEvaluator | None = None,
     ) -> None:
         self._spec_validator = SpecValidator()
-        # SpecComplianceEvaluator replaces the old trivial structural check.
-        # Callers can inject one pre-configured with plan context; defaults to
-        # an empty evaluator which will use heuristic-fallback conservatively.
         self._spec_evaluator = spec_evaluator or SpecComplianceEvaluator()
 
     # ------------------------------------------------------------------
@@ -357,8 +312,8 @@ class GateRunner:
         Rules:
         - 'test' and 'build' gates: passed = (exit_code == 0)
         - 'lint' gates: passed = (exit_code == 0 AND no error markers in output)
-        - 'spec' gates: semantic evaluation via SpecComplianceEvaluator — Haiku
-          API when ANTHROPIC_API_KEY is set, heuristic keyword-overlap otherwise
+        - 'spec' gates: delegate to SpecValidator.run_gate with a trivial check
+          on the output text (passes when output is non-empty and exit_code == 0)
         - 'review' gates: always pass (review is advisory)
 
         Args:
@@ -421,25 +376,25 @@ class GateRunner:
             )
 
         if gate_type == "spec":
-            # Semantic evaluation via SpecComplianceEvaluator (replaces the
-            # old trivial exit_code+non-empty check which had no semantic value).
-            # A non-zero exit_code is treated as an automatic failure so that
-            # a broken spec command still blocks progress.
+            # Spec gate: dispatch semantic compliance evaluation to a Claude
+            # Code subprocess.  exit_code != 0 still hard-fails (the agent's
+            # gate command itself broke); on a clean exit we ask the
+            # evaluator whether the output fulfils the declared intent.
             if exit_code != 0:
-                passed = False
-                rationale = f"Spec command exited with code {exit_code}."
-            else:
-                passed, rationale = self._spec_evaluator.evaluate(command_output)
-            logger.info(
-                "Gate 'spec': %s — %s",
-                "PASS" if passed else "FAIL",
-                rationale,
-            )
+                return GateResult(
+                    phase_id=0,
+                    gate_type=gate_type,
+                    passed=False,
+                    output=f"Spec command exited with code {exit_code}.\n{command_output}",
+                    checked_at=checked_at,
+                )
+            passed, rationale = self._spec_evaluator.evaluate(command_output)
+            logger.info("Gate 'spec': %s — %s", "PASS" if passed else "FAIL", rationale)
             return GateResult(
                 phase_id=0,
                 gate_type=gate_type,
                 passed=passed,
-                output=rationale,
+                output=f"{rationale}\n---\n{command_output}",
                 checked_at=checked_at,
             )
 

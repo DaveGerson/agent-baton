@@ -3,11 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from agent_baton.core.engine.gates import (
-    GateRunner,
-    SpecComplianceEvaluator,
-    _has_lint_errors,
-)
+from agent_baton.core.engine.gates import GateRunner, _has_lint_errors
 from agent_baton.models.execution import ActionType, GateResult, PlanGate
 
 
@@ -162,13 +158,10 @@ def test_build_gate_action_to_dict_includes_gate_fields(runner: GateRunner) -> N
     ("lint", "flake8 .", "foo.py:10: error: unexpected indent", 0, False),
     # lint gate — non-zero exit fails
     ("lint", "flake8 .", "All clean.", 2, False),
-    # spec gate — exit_code != 0 always fails regardless of evaluator
-    ("spec", "openapi-spec-validator spec.yaml", "Schema mismatch found.", 1, False),
-    # spec gate — empty output fails (evaluator short-circuits on empty output)
-    ("spec", "openapi-spec-validator spec.yaml", "", 0, False),
-    # spec gate — non-empty output with no task_summary configured also fails
-    # (SpecComplianceEvaluator requires task_summary to evaluate compliance)
-    ("spec", "openapi-spec-validator spec.yaml", "Spec validated OK.", 0, False),
+    # spec gate behaviour moved to tests/engine/test_spec_gate_runner.py —
+    # it is now a semantic check dispatched to a Claude Code subprocess,
+    # not a structural exit_code check, so parametrized integration rows
+    # here would either require a real CLI or a heavy fixture.
     # review gate — always passes regardless of exit code or output
     ("review", "", "Looks good overall.", 0, True),
     ("review", "", "FAIL: missing docstrings.", 1, True),

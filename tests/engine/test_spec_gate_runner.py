@@ -1,27 +1,34 @@
-"""Tests for SpecComplianceEvaluator and the spec gate branch in GateRunner.
+"""Tests for ``SpecComplianceEvaluator`` and the spec branch of ``GateRunner``.
+
+The evaluator dispatches semantic spec checks to a Claude Code subprocess
+(``claude --print`` via ``HeadlessClaude``).  Tests inject a fake
+``claude_caller`` so they never touch the real CLI or any network.
 
 Coverage:
-- Heuristic path: high overlap → pass, low overlap → fail
-- Heuristic path: empty output → fail, empty task_summary → fail (no crash)
-- Stop-word filtering: stop-word-only output does not pass a real task
-- Semantic path: invoked when ANTHROPIC_API_KEY is set (mocked client)
-- Semantic path: falls back to heuristic when API client raises
-- GateRunner spec branch: exit_code != 0 always fails; delegates to evaluator otherwise
-- Existing gate callers (evaluate_output) still work for non-spec gate types
+- Caller returns a compliant verdict       → gate passes
+- Caller returns a non-compliant verdict   → gate fails
+- Caller returns deviations                → rationale includes them
+- Caller wraps JSON in markdown fences     → still parsed
+- Caller returns empty (CLI unavailable)   → fail-closed with actionable msg
+- Caller raises                            → fail-closed with the exception
+- Caller returns unparseable text          → fail-closed with the snippet
+- No task_summary attached                 → skip with explicit "wire it" msg
+- GateRunner spec branch: exit_code != 0   → always fails, no caller invoked
+- GateRunner spec branch: clean exit       → delegates to evaluator
+- Default caller path: no API key required (smoke check that
+  ``_default_claude_caller`` resolves and gracefully reports unavailability
+  when the ``claude`` binary is absent — never raises).
 """
 from __future__ import annotations
-
-import json
-import os
 
 import pytest
 
 from agent_baton.core.engine.gates import (
     GateRunner,
     SpecComplianceEvaluator,
-    _content_tokens,
+    _default_claude_caller,
 )
-from agent_baton.models.execution import GateResult, PlanGate
+from agent_baton.models.execution import PlanGate
 
 
 # ---------------------------------------------------------------------------
@@ -29,430 +36,182 @@ from agent_baton.models.execution import GateResult, PlanGate
 # ---------------------------------------------------------------------------
 
 
-def _spec_gate(command: str = "check-spec") -> PlanGate:
+def _spec_gate(command: str = "echo ok") -> PlanGate:
     return PlanGate(gate_type="spec", command=command, description="", fail_on=[])
 
 
 def _make_evaluator(
-    task_summary: str = "",
+    *,
+    task_summary: str = "Add a login button to the homepage",
     phase_name: str = "Implement",
     step_descriptions: list[str] | None = None,
-    haiku_caller=None,
+    claude_caller=None,
 ) -> SpecComplianceEvaluator:
     return SpecComplianceEvaluator(
         task_summary=task_summary,
         phase_name=phase_name,
-        step_descriptions=step_descriptions,
-        haiku_caller=haiku_caller,
+        step_descriptions=step_descriptions or ["Add LoginButton component"],
+        claude_caller=claude_caller,
     )
 
 
 # ---------------------------------------------------------------------------
-# _content_tokens — unit tests for the tokeniser
+# Evaluator: happy / sad parses
 # ---------------------------------------------------------------------------
 
 
-class TestContentTokens:
-    def test_removes_stop_words(self) -> None:
-        tokens = _content_tokens("add a button to the form")
-        assert "the" not in tokens
-        assert "add" not in tokens  # len < 4
-        assert "button" in tokens
-        assert "form" in tokens
-
-    def test_minimum_length_four(self) -> None:
-        tokens = _content_tokens("fix bug add unit test")
-        # "fix", "bug", "add" are all len < 4; "unit" and "test" are exactly 4
-        assert "fix" not in tokens
-        assert "bug" not in tokens
-        assert "unit" in tokens
-        assert "test" in tokens
-
-    def test_strips_punctuation(self) -> None:
-        tokens = _content_tokens("implement the button, update the form!")
-        assert "button" in tokens
-        assert "form" in tokens
-        assert "button," not in tokens
-
-    def test_lowercases(self) -> None:
-        tokens = _content_tokens("Implement Button Form")
-        assert "implement" in tokens
-        assert "button" in tokens
-
-
-# ---------------------------------------------------------------------------
-# Heuristic path — SpecComplianceEvaluator._heuristic_evaluate
-# ---------------------------------------------------------------------------
-
-
-class TestHeuristicPath:
-    def test_high_overlap_passes(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Output containing most task-summary terms passes."""
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        evaluator = _make_evaluator(
-            task_summary="implement login endpoint with authentication token validation"
+class TestSpecComplianceEvaluator:
+    def test_compliant_verdict_passes(self) -> None:
+        ev = _make_evaluator(
+            claude_caller=lambda _: '{"compliant": true, "rationale": "Button added.", "deviations": []}'
         )
-        output = (
-            "Implemented the login endpoint. Added authentication token validation "
-            "logic in the handler. The endpoint now returns a JWT."
-        )
-        passed, rationale = evaluator.evaluate(output)
+        passed, rationale = ev.evaluate("LoginButton.tsx +12 lines")
         assert passed is True
-        assert "[heuristic-fallback]" in rationale
+        assert "Button added" in rationale
 
-    def test_low_overlap_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Output with little relation to the task summary fails."""
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        evaluator = _make_evaluator(
-            task_summary="implement login endpoint with authentication token validation"
+    def test_noncompliant_verdict_fails(self) -> None:
+        ev = _make_evaluator(
+            claude_caller=lambda _: '{"compliant": false, "rationale": "No button found.", "deviations": ["LoginButton not exported"]}'
         )
-        output = "Updated the README with installation instructions."
-        passed, rationale = evaluator.evaluate(output)
+        passed, rationale = ev.evaluate("Header.tsx unrelated edits")
         assert passed is False
-        assert "[heuristic-fallback]" in rationale
+        assert "No button found" in rationale
+        assert "LoginButton not exported" in rationale
 
-    def test_empty_output_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Empty agent output always fails."""
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        evaluator = _make_evaluator(
-            task_summary="implement login endpoint with authentication"
+    def test_markdown_fenced_json_is_parsed(self) -> None:
+        ev = _make_evaluator(
+            claude_caller=lambda _: '```json\n{"compliant": true, "rationale": "ok", "deviations": []}\n```'
         )
-        passed, rationale = evaluator.evaluate("")
-        assert passed is False
-        assert "empty" in rationale.lower()
-
-    def test_whitespace_only_output_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Whitespace-only output is treated as empty."""
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        evaluator = _make_evaluator(task_summary="implement login endpoint")
-        passed, _ = evaluator.evaluate("   \n\t  ")
-        assert passed is False
-
-    def test_empty_task_summary_fails_without_crash(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """No task_summary → deterministic fail, no exception raised."""
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        evaluator = _make_evaluator(task_summary="")
-        passed, rationale = evaluator.evaluate("Some agent output here.")
-        assert passed is False
-        assert rationale  # must produce a non-empty reason
-
-    def test_stop_word_only_output_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Output consisting only of stop words does not pass a real task summary."""
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        evaluator = _make_evaluator(
-            task_summary="Add a button to the form to submit user data"
-        )
-        # "the the the the" → only stop words, no content tokens overlap
-        output = "the the the the the the the the the the"
-        passed, _ = evaluator.evaluate(output)
-        # task_summary itself has content tokens: "button", "form", "submit",
-        # "user", "data" — none appear in stop-word-only output.
-        assert passed is False
-
-    def test_rationale_contains_overlap_numbers(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Rationale should include overlap counts for debuggability."""
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        evaluator = _make_evaluator(
-            task_summary="implement payment processing with stripe integration"
-        )
-        output = (
-            "Implemented payment processing using the Stripe integration library."
-        )
-        passed, rationale = evaluator.evaluate(output)
-        # Rationale must mention the threshold percentage
-        assert "%" in rationale
-
-
-# ---------------------------------------------------------------------------
-# Semantic path — SpecComplianceEvaluator._semantic_evaluate
-# ---------------------------------------------------------------------------
-
-
-class TestSemanticPath:
-    def _compliant_response(self) -> str:
-        return json.dumps(
-            {"compliant": True, "rationale": "Output matches intent.", "deviations": []}
-        )
-
-    def _noncompliant_response(self) -> str:
-        return json.dumps(
-            {
-                "compliant": False,
-                "rationale": "Missing authentication step.",
-                "deviations": ["authentication not implemented"],
-            }
-        )
-
-    def test_semantic_path_invoked_when_api_key_set(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """When ANTHROPIC_API_KEY is set, the mock caller is used."""
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-abc")
-        calls: list[str] = []
-
-        def mock_caller(prompt: str) -> str:
-            calls.append(prompt)
-            return self._compliant_response()
-
-        evaluator = _make_evaluator(
-            task_summary="implement login endpoint",
-            haiku_caller=mock_caller,
-        )
-        passed, rationale = evaluator.evaluate("Implemented login endpoint with JWT.")
+        passed, rationale = ev.evaluate("any output")
         assert passed is True
-        assert len(calls) == 1
-        assert "login endpoint" in calls[0]
-        assert rationale == "Output matches intent."
+        assert rationale == "ok"
 
-    def test_semantic_path_returns_false_on_noncompliant(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Haiku returning compliant=false → gate fails."""
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-abc")
-
-        evaluator = _make_evaluator(
-            task_summary="implement login endpoint with authentication",
-            haiku_caller=lambda _: self._noncompliant_response(),
+    def test_extracts_json_object_from_chatty_response(self) -> None:
+        # Some models prefix/suffix a verdict with conversational filler;
+        # the evaluator should still find the JSON object.
+        ev = _make_evaluator(
+            claude_caller=lambda _: 'Sure, here is the verdict: {"compliant": false, "rationale": "scope drift"} — hope this helps.'
         )
-        passed, rationale = evaluator.evaluate("Only added a placeholder function.")
+        passed, rationale = ev.evaluate("any output")
         assert passed is False
-        assert "Missing authentication step." in rationale
-        assert "authentication not implemented" in rationale
+        assert "scope drift" in rationale
 
-    def test_semantic_path_includes_deviations_in_rationale(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Deviations are appended to the rationale string."""
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-abc")
-        response = json.dumps(
-            {
-                "compliant": False,
-                "rationale": "Output incomplete.",
-                "deviations": ["missing error handling", "no tests added"],
-            }
-        )
-        evaluator = _make_evaluator(
-            task_summary="implement endpoint with error handling and tests",
-            haiku_caller=lambda _: response,
-        )
-        passed, rationale = evaluator.evaluate("Added stub.")
-        assert "missing error handling" in rationale
-        assert "no tests added" in rationale
+    def test_empty_caller_response_fails_closed(self) -> None:
+        # Empty string signals "claude CLI unavailable" — must NOT default-pass.
+        ev = _make_evaluator(claude_caller=lambda _: "")
+        passed, rationale = ev.evaluate("any output")
+        assert passed is False
+        assert "claude CLI unavailable" in rationale or "claude" in rationale.lower()
 
-    def test_semantic_path_falls_back_to_heuristic_on_api_error(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """When the API call raises, heuristic path is used and tagged."""
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-abc")
+    def test_caller_exception_fails_closed_with_reason(self) -> None:
+        def raising(_: str) -> str:
+            raise RuntimeError("subprocess timeout")
 
-        def failing_caller(prompt: str) -> str:
-            raise ConnectionError("API unreachable")
+        ev = _make_evaluator(claude_caller=raising)
+        passed, rationale = ev.evaluate("any output")
+        assert passed is False
+        assert "subprocess timeout" in rationale
 
-        evaluator = _make_evaluator(
-            task_summary="implement login endpoint with authentication token validation",
-            haiku_caller=failing_caller,
-        )
-        output = (
-            "Implemented the login endpoint. Added authentication token validation "
-            "logic in the handler."
-        )
-        passed, rationale = evaluator.evaluate(output)
-        # Falls back to heuristic — result depends on overlap but must be tagged
-        assert "[heuristic-fallback]" in rationale
+    def test_unparseable_response_fails_closed(self) -> None:
+        ev = _make_evaluator(claude_caller=lambda _: "lol no JSON here")
+        passed, rationale = ev.evaluate("any output")
+        assert passed is False
+        assert "unparseable" in rationale.lower()
 
-    def test_semantic_path_handles_markdown_fenced_json(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Response wrapped in ```json fences is parsed correctly."""
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-abc")
-        fenced = (
-            "```json\n"
-            + json.dumps({"compliant": True, "rationale": "Looks good.", "deviations": []})
-            + "\n```"
-        )
-        evaluator = _make_evaluator(
-            task_summary="implement login endpoint",
-            haiku_caller=lambda _: fenced,
-        )
-        passed, rationale = evaluator.evaluate("Implemented login endpoint.")
-        assert passed is True
+    def test_missing_task_summary_skips_with_actionable_msg(self) -> None:
+        # No plan context attached: don't pretend to evaluate.
+        ev = SpecComplianceEvaluator(claude_caller=lambda _: '{"compliant": true}')
+        passed, rationale = ev.evaluate("any output")
+        assert passed is False
+        assert "task_summary" in rationale.lower()
 
-    def test_semantic_path_not_invoked_without_api_key(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Without ANTHROPIC_API_KEY the mock caller is never invoked."""
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        calls: list[str] = []
-
-        def mock_caller(prompt: str) -> str:
-            calls.append(prompt)
-            return self._compliant_response()
-
-        evaluator = _make_evaluator(
-            task_summary="implement login endpoint",
-            haiku_caller=mock_caller,
-        )
-        evaluator.evaluate("Some output.")
-        assert len(calls) == 0
+    def test_default_caller_resolves_without_api_key(self) -> None:
+        # Smoke: the default caller must not require ANTHROPIC_API_KEY and
+        # must not raise when ``claude`` is absent — it should return ""
+        # so the evaluator fails closed with an actionable message.
+        out = _default_claude_caller("noop prompt")
+        assert isinstance(out, str)
 
 
 # ---------------------------------------------------------------------------
-# GateRunner spec branch integration
+# GateRunner: spec branch routing
 # ---------------------------------------------------------------------------
 
 
 class TestGateRunnerSpecBranch:
-    def test_non_zero_exit_code_always_fails(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """exit_code != 0 short-circuits before the evaluator is consulted."""
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        # Evaluator configured to pass if it were reached.
-        evaluator = _make_evaluator(
-            task_summary="implement login endpoint with authentication token",
-            haiku_caller=lambda _: json.dumps(
-                {"compliant": True, "rationale": "Fine.", "deviations": []}
-            ),
-        )
-        runner = GateRunner(spec_evaluator=evaluator)
-        gate = _spec_gate()
-        result = runner.evaluate_output(gate, "Some valid output.", exit_code=1)
-        assert result.passed is False
-        assert result.gate_type == "spec"
+    def test_nonzero_exit_code_fails_without_invoking_caller(self) -> None:
+        # Caller raises if invoked — proves we short-circuit on exit_code.
+        def must_not_be_called(_: str) -> str:
+            raise AssertionError("evaluator should not be called when exit_code != 0")
 
-    def test_zero_exit_code_delegates_to_evaluator(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """exit_code == 0 calls the evaluator and returns its verdict."""
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        evaluator = _make_evaluator(
-            task_summary="implement login endpoint with authentication token validation"
+        ev = SpecComplianceEvaluator(
+            task_summary="Add a button",
+            claude_caller=must_not_be_called,
         )
-        runner = GateRunner(spec_evaluator=evaluator)
-        gate = _spec_gate()
-        output = (
-            "Implemented the login endpoint. Authentication token validation "
-            "is now enforced on every request."
-        )
-        result = runner.evaluate_output(gate, output, exit_code=0)
-        assert isinstance(result, GateResult)
-        assert result.gate_type == "spec"
-        # High overlap → should pass
-        assert result.passed is True
-
-    def test_result_output_contains_rationale(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """GateResult.output carries the evaluator rationale, not raw output."""
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        evaluator = _make_evaluator(
-            task_summary="implement payment processing with stripe integration"
-        )
-        runner = GateRunner(spec_evaluator=evaluator)
-        gate = _spec_gate()
+        runner = GateRunner(spec_evaluator=ev)
         result = runner.evaluate_output(
-            gate, "Updated README with installation instructions.", exit_code=0
+            _spec_gate(),
+            command_output="...failure trace...",
+            exit_code=2,
         )
-        assert "[heuristic-fallback]" in result.output
+        assert result.passed is False
+        assert "exited with code 2" in result.output
 
-    def test_default_runner_no_task_summary_fails(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Default GateRunner() with no spec_evaluator configured fails non-empty output."""
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    def test_clean_exit_delegates_to_evaluator_pass(self) -> None:
+        ev = _make_evaluator(
+            claude_caller=lambda _: '{"compliant": true, "rationale": "ok"}'
+        )
+        runner = GateRunner(spec_evaluator=ev)
+        result = runner.evaluate_output(
+            _spec_gate(),
+            command_output="LoginButton.tsx +12",
+            exit_code=0,
+        )
+        assert result.passed is True
+        assert "ok" in result.output
+
+    def test_clean_exit_delegates_to_evaluator_fail(self) -> None:
+        ev = _make_evaluator(
+            claude_caller=lambda _: '{"compliant": false, "rationale": "scope drift"}'
+        )
+        runner = GateRunner(spec_evaluator=ev)
+        result = runner.evaluate_output(
+            _spec_gate(),
+            command_output="Header.tsx unrelated edits",
+            exit_code=0,
+        )
+        assert result.passed is False
+        assert "scope drift" in result.output
+
+    def test_default_runner_has_default_evaluator(self) -> None:
+        # GateRunner() must construct a default evaluator without errors.
         runner = GateRunner()
-        gate = _spec_gate()
-        result = runner.evaluate_output(gate, "Some non-empty output.", exit_code=0)
+        # Default evaluator has no task_summary → skip path returns False
+        # with an actionable message.
+        result = runner.evaluate_output(_spec_gate(), command_output="x", exit_code=0)
         assert result.passed is False
-
-    def test_semantic_evaluator_via_gate_runner(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """GateRunner passes the mock Haiku caller through to the evaluator."""
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
-        calls: list[str] = []
-
-        def mock_caller(prompt: str) -> str:
-            calls.append(prompt)
-            return json.dumps(
-                {"compliant": True, "rationale": "Matches intent.", "deviations": []}
-            )
-
-        evaluator = SpecComplianceEvaluator(
-            task_summary="implement login endpoint",
-            phase_name="Implementation",
-            haiku_caller=mock_caller,
-        )
-        runner = GateRunner(spec_evaluator=evaluator)
-        result = runner.evaluate_output(
-            _spec_gate(), "Implemented login endpoint with JWT.", exit_code=0
-        )
-        assert result.passed is True
-        assert len(calls) == 1
-
-    def test_api_failure_fallback_does_not_raise(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """API failure → heuristic fallback, never raises from GateRunner."""
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
-
-        def failing_caller(prompt: str) -> str:
-            raise RuntimeError("network error")
-
-        evaluator = SpecComplianceEvaluator(
-            task_summary="implement authentication token validation endpoint",
-            haiku_caller=failing_caller,
-        )
-        runner = GateRunner(spec_evaluator=evaluator)
-        output = (
-            "Implemented authentication token validation endpoint. "
-            "Tokens are now validated on every request."
-        )
-        result = runner.evaluate_output(_spec_gate(), output, exit_code=0)
-        assert isinstance(result, GateResult)
-        assert "[heuristic-fallback]" in result.output
+        assert "task_summary" in result.output.lower()
 
 
 # ---------------------------------------------------------------------------
-# Existing non-spec gate types still work (regression guard)
+# Other gate types: unaffected by the spec changes
 # ---------------------------------------------------------------------------
 
 
-class TestNonSpecGatesUnchanged:
-    @pytest.fixture
-    def runner(self) -> GateRunner:
-        return GateRunner()
-
-    def test_test_gate_pass(self, runner: GateRunner) -> None:
-        gate = PlanGate(gate_type="test", command="pytest", description="", fail_on=[])
-        result = runner.evaluate_output(gate, "5 passed", exit_code=0)
-        assert result.passed is True
-
-    def test_test_gate_fail(self, runner: GateRunner) -> None:
-        gate = PlanGate(gate_type="test", command="pytest", description="", fail_on=[])
-        result = runner.evaluate_output(gate, "2 failed", exit_code=1)
-        assert result.passed is False
-
-    def test_build_gate_pass(self, runner: GateRunner) -> None:
-        gate = PlanGate(gate_type="build", command="make", description="", fail_on=[])
-        result = runner.evaluate_output(gate, "", exit_code=0)
-        assert result.passed is True
-
-    def test_lint_gate_warnings_pass(self, runner: GateRunner) -> None:
-        gate = PlanGate(gate_type="lint", command="flake8", description="", fail_on=[])
-        result = runner.evaluate_output(gate, "foo.py:3: warning: unused import", exit_code=0)
-        assert result.passed is True
-
-    def test_lint_gate_errors_fail(self, runner: GateRunner) -> None:
-        gate = PlanGate(gate_type="lint", command="flake8", description="", fail_on=[])
-        result = runner.evaluate_output(gate, "foo.py:10: error: bad syntax", exit_code=0)
-        assert result.passed is False
-
-    def test_review_gate_always_passes(self, runner: GateRunner) -> None:
-        gate = PlanGate(gate_type="review", command="", description="", fail_on=[])
-        result = runner.evaluate_output(gate, "FAIL: issues found", exit_code=2)
-        assert result.passed is True
+class TestOtherGatesUnchanged:
+    @pytest.mark.parametrize(
+        "gate_type,exit_code,output,expected",
+        [
+            ("build", 0, "ok", True),
+            ("build", 1, "err", False),
+            ("test", 0, "1 passed", True),
+            ("test", 1, "1 failed", False),
+            ("lint", 0, "no issues", True),
+            ("review", 0, "anything", True),  # advisory; always passes
+        ],
+    )
+    def test_non_spec_gates(self, gate_type, exit_code, output, expected) -> None:
+        runner = GateRunner()
+        gate = PlanGate(gate_type=gate_type, command="x", description="", fail_on=[])
+        result = runner.evaluate_output(gate, command_output=output, exit_code=exit_code)
+        assert result.passed is expected
