@@ -87,9 +87,9 @@ class GitStrategy(Enum):
     commit per agent dispatch or one branch per agent.
     """
 
-    COMMIT_PER_AGENT = "Commit-per-agent"
-    BRANCH_PER_AGENT = "Branch-per-agent"
-    NONE = "None"
+    COMMIT_PER_AGENT = "commit-per-agent"
+    BRANCH_PER_AGENT = "branch-per-agent"
+    NONE = "none"
 
 
 class AgentCategory(Enum):
