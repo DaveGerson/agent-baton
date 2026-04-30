@@ -61,11 +61,15 @@ def ctx(tmp_path: Path) -> Path:
 
 @pytest.fixture()
 def base_planner(ctx: Path, agents_dir: Path) -> IntelligentPlanner:
-    """Planner without governance components — baseline backward-compat fixture."""
+    """Planner without governance components — baseline backward-compat fixture.
+
+    emit_beads=False prevents planning-bead writes to the active per-project
+    baton.db even if a bead_store were injected later.  bd-9de9.
+    """
     from agent_baton.core.orchestration.registry import AgentRegistry
     from agent_baton.core.orchestration.router import AgentRouter
 
-    p = IntelligentPlanner(team_context_root=ctx)
+    p = IntelligentPlanner(team_context_root=ctx, emit_beads=False)
     reg = AgentRegistry()
     reg.load_directory(agents_dir)
     p._registry = reg
@@ -75,7 +79,11 @@ def base_planner(ctx: Path, agents_dir: Path) -> IntelligentPlanner:
 
 @pytest.fixture()
 def governed_planner(ctx: Path, agents_dir: Path) -> IntelligentPlanner:
-    """Planner with real DataClassifier and PolicyEngine wired in."""
+    """Planner with real DataClassifier and PolicyEngine wired in.
+
+    emit_beads=False prevents planning-bead writes to the active per-project
+    baton.db even if a bead_store were injected later.  bd-9de9.
+    """
     from agent_baton.core.orchestration.registry import AgentRegistry
     from agent_baton.core.orchestration.router import AgentRouter
 
@@ -83,6 +91,7 @@ def governed_planner(ctx: Path, agents_dir: Path) -> IntelligentPlanner:
         team_context_root=ctx,
         classifier=DataClassifier(),
         policy_engine=PolicyEngine(),
+        emit_beads=False,
     )
     reg = AgentRegistry()
     reg.load_directory(agents_dir)
@@ -191,7 +200,7 @@ class TestClassifierIntegration:
             explanation="",
         )
 
-        p = IntelligentPlanner(team_context_root=ctx, classifier=mock_classifier)
+        p = IntelligentPlanner(team_context_root=ctx, classifier=mock_classifier, emit_beads=False)
         reg = AgentRegistry()
         reg.load_directory(agents_dir)
         p._registry = reg
@@ -222,7 +231,7 @@ class TestRiskLevelFloor:
             confidence="high",
             explanation="",
         )
-        p = IntelligentPlanner(team_context_root=ctx, classifier=mock_classifier)
+        p = IntelligentPlanner(team_context_root=ctx, classifier=mock_classifier, emit_beads=False)
         reg = AgentRegistry()
         reg.load_directory(agents_dir)
         p._registry = reg
@@ -245,7 +254,7 @@ class TestRiskLevelFloor:
             confidence="high",
             explanation="",
         )
-        p = IntelligentPlanner(team_context_root=ctx, classifier=mock_classifier)
+        p = IntelligentPlanner(team_context_root=ctx, classifier=mock_classifier, emit_beads=False)
         reg = AgentRegistry()
         reg.load_directory(agents_dir)
         p._registry = reg
@@ -265,7 +274,7 @@ class TestRiskLevelFloor:
         mock_classifier = MagicMock(spec=DataClassifier)
         mock_classifier.classify.side_effect = RuntimeError("classifier down")
 
-        p = IntelligentPlanner(team_context_root=ctx, classifier=mock_classifier)
+        p = IntelligentPlanner(team_context_root=ctx, classifier=mock_classifier, emit_beads=False)
         reg = AgentRegistry()
         reg.load_directory(agents_dir)
         p._registry = reg
@@ -303,6 +312,7 @@ class TestPolicyEngineIntegration:
             team_context_root=ctx,
             classifier=mock_classifier,
             policy_engine=PolicyEngine(),
+            emit_beads=False,
         )
         reg = AgentRegistry()
         reg.load_directory(agents_dir)
@@ -350,6 +360,7 @@ class TestPolicyEngineIntegration:
             team_context_root=ctx,
             classifier=mock_classifier,
             policy_engine=PolicyEngine(),
+            emit_beads=False,
         )
         reg = AgentRegistry()
         reg.load_directory(agents_dir)
@@ -379,6 +390,7 @@ class TestPolicyEngineIntegration:
             team_context_root=ctx,
             classifier=mock_classifier,
             policy_engine=PolicyEngine(),
+            emit_beads=False,
         )
         reg = AgentRegistry()
         reg.load_directory(agents_dir)
@@ -402,6 +414,7 @@ class TestPolicyEngineIntegration:
         p = IntelligentPlanner(
             team_context_root=ctx,
             policy_engine=mock_pe,
+            emit_beads=False,
         )
         reg = AgentRegistry()
         reg.load_directory(agents_dir)
@@ -441,6 +454,7 @@ class TestPolicyEngineIntegration:
             team_context_root=ctx,
             classifier=mock_classifier,
             policy_engine=PolicyEngine(),
+            emit_beads=False,
         )
         reg = AgentRegistry()
         reg.load_directory(agents_dir)
@@ -503,6 +517,7 @@ class TestValidateAgentsAgainstPolicy:
         p = IntelligentPlanner(
             team_context_root=ctx,
             policy_engine=PolicyEngine(),
+            emit_beads=False,
         )
         reg = AgentRegistry()
         reg.load_directory(agents_dir)
@@ -665,6 +680,7 @@ class TestPolicyEngineCalledDuringPlan:
             team_context_root=ctx,
             classifier=DataClassifier(),
             policy_engine=mock_policy,
+            emit_beads=False,
         )
         reg = AgentRegistry()
         reg.load_directory(agents_dir)
@@ -700,6 +716,7 @@ class TestPolicyEngineCalledDuringPlan:
             team_context_root=ctx,
             classifier=DataClassifier(),
             policy_engine=mock_policy,
+            emit_beads=False,
         )
         reg = AgentRegistry()
         reg.load_directory(agents_dir)

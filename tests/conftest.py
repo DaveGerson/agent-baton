@@ -163,31 +163,18 @@ def registry_with_agents(tmp_agents_dir: Path) -> AgentRegistry:
 
 @pytest.fixture(autouse=True)
 def isolated_bead_store(request, monkeypatch) -> Generator[None, None, None]:
-    """No-op BeadStore.write for tests in test_planner_governance.
+    """No-op autouse fixture — retained for backward compatibility with
+    tests/test_followup_fixtures.py which exercises the monkeypatch path
+    directly.
 
-    Applied automatically — but *only* when the test module is
-    ``tests.test_planner_governance`` (checked via ``request.node.module``).
-    All other modules are unaffected.
-
-    Monkeypatches ``agent_baton.core.engine.bead_store.BeadStore.write`` at
-    the class level so that any instance (including those constructed inside
-    ``IntelligentPlanner``) silently returns an empty string instead of
-    attempting SQLite I/O.
+    bd-9de9 replaced the underlying mechanism: all IntelligentPlanner
+    constructions in test_planner_governance.py now pass ``emit_beads=False``
+    explicitly, which suppresses planning-bead writes at the constructor level
+    without relying on a class-level monkeypatch.  This autouse fixture is
+    therefore a no-op but is kept so that existing references in
+    TestIsolatedBeadStoreFixture still compile and the conftest API surface
+    does not change.
     """
-    target_module = "tests.test_planner_governance"
-    # Allow the module to be imported as either the dotted name or its
-    # __name__ attribute (pytest sets __name__ to the bare module name).
-    node_module = request.node.module
-    module_name = getattr(node_module, "__name__", "") if node_module else ""
-    module_file = getattr(node_module, "__file__", "") or ""
-
-    if target_module not in module_name and "test_planner_governance" not in module_file:
-        yield
-        return
-
-    from agent_baton.core.engine.bead_store import BeadStore
-
-    monkeypatch.setattr(BeadStore, "write", lambda self, bead: "")
     yield
 
 
