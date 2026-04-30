@@ -43,6 +43,9 @@ _VALID_TASK_TYPES = (
 # TaskClassification dataclass
 # ---------------------------------------------------------------------------
 
+_VALID_ARCHETYPES = ("direct", "phased", "investigative")
+
+
 @dataclass
 class TaskClassification:
     """Result of classifying a task for plan construction."""
@@ -52,6 +55,7 @@ class TaskClassification:
     phases: list[str]
     reasoning: str
     source: str
+    archetype: str = "phased"  # direct | phased | investigative
 
     def __post_init__(self) -> None:
         if self.complexity not in _VALID_COMPLEXITIES:
@@ -63,6 +67,8 @@ class TaskClassification:
             raise ValueError("agents must be non-empty")
         if not self.phases:
             raise ValueError("phases must be non-empty")
+        if self.archetype not in _VALID_ARCHETYPES:
+            self.archetype = "phased"
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +181,25 @@ def _score_task_type(
 
 
 # ---------------------------------------------------------------------------
+# Archetype detection signals
+# ---------------------------------------------------------------------------
+
+_DIRECT_SIGNALS = re.compile(
+    r"\b(?:rename|move|delete|remove|add|update|change|fix typo|swap|toggle|bump|"
+    r"set|enable|disable|configure|adjust|tweak|correct)\b",
+    re.IGNORECASE,
+)
+_INVESTIGATIVE_SIGNALS = re.compile(
+    r"\b(?:debug|investigate|diagnose|root.?cause|triage|"
+    r"why does|why is|why are|regression|flak(?:y|ey)|"
+    r"intermittent|race.?condition|deadlock|memory.?leak|"
+    r"stack.?trace|traceback|exception|crash|segfault|"
+    r"bisect|reproduce|symptom)\b",
+    re.IGNORECASE,
+)
+
+
+# ---------------------------------------------------------------------------
 # KeywordClassifier
 # ---------------------------------------------------------------------------
 
@@ -205,6 +230,7 @@ class KeywordClassifier:
             summary, task_type, complexity, registry, _DEFAULT_AGENTS
         )
         phases = self._select_phases(task_type, complexity, _PHASE_NAMES)
+        archetype = self._detect_archetype(summary, task_type, complexity)
         return TaskClassification(
             task_type=task_type,
             complexity=complexity,
@@ -212,6 +238,7 @@ class KeywordClassifier:
             phases=phases,
             reasoning=f"Keyword classification: {task_type}/{complexity}",
             source="keyword-fallback",
+            archetype=archetype,
         )
 
     @staticmethod
@@ -220,6 +247,22 @@ class KeywordClassifier:
         task_type_keywords: list[tuple[str, list[str]]],
     ) -> str:
         return _score_task_type(summary, task_type_keywords)
+
+    @staticmethod
+    def _detect_archetype(summary: str, task_type: str, complexity: str) -> str:
+        """Infer planning archetype from task signals."""
+        # Investigative: debugging, RCA, triage
+        if task_type == "bug-fix" and _INVESTIGATIVE_SIGNALS.search(summary):
+            return "investigative"
+        if _INVESTIGATIVE_SIGNALS.search(summary) and not _DIRECT_SIGNALS.search(summary):
+            return "investigative"
+        # Direct: simple, low-complexity, single-concern
+        if complexity == "light" and _DIRECT_SIGNALS.search(summary):
+            return "direct"
+        if complexity == "light" and task_type in ("bug-fix", "refactor", "documentation"):
+            return "direct"
+        # Default: phased
+        return "phased"
 
     def _infer_complexity(self, summary: str) -> str:
         heavy_signals = 0
@@ -544,10 +587,16 @@ Return ONLY this JSON (no markdown, no commentary):
   "task_type": "<from the task types list>",
   "complexity": "light|medium|heavy",
   "risk": "LOW|MEDIUM|HIGH",
+  "archetype": "direct|phased|investigative",
   "agents": ["agent-1", "agent-2"],
   "phases": ["Phase1", "Phase2"],
   "reasoning": "one sentence explaining the classification"
-}}"""
+}}
+
+ARCHETYPE — Choose the planning archetype:
+- "direct": simple 1-off tasks, single concern, mechanical action
+- "investigative": debugging, root-cause analysis, triage, reproduction
+- "phased": everything else (multi-step features, refactors, migrations)"""
 
 
 def _talent_agent_available() -> "tuple[bool, object | None]":
@@ -696,6 +745,10 @@ class TalentAgentClassifier:
         if not phases:
             phases = ["Implement"]
 
+        archetype = data.get("archetype", "phased")
+        if archetype not in _VALID_ARCHETYPES:
+            archetype = "phased"
+
         result = TaskClassification(
             task_type=task_type,
             complexity=complexity,
@@ -703,6 +756,7 @@ class TalentAgentClassifier:
             phases=phases,
             reasoning=data.get("reasoning", "TalentAgent classification"),
             source="talent-agent",
+            archetype=archetype,
         )
 
         risk = data.get("risk")
@@ -710,10 +764,11 @@ class TalentAgentClassifier:
             result._cli_risk_hint = risk  # type: ignore[attr-defined]
 
         logger.info(
-            "TalentAgent classified: type=%s complexity=%s risk=%s agents=%s",
+            "TalentAgent classified: type=%s complexity=%s risk=%s archetype=%s agents=%s",
             task_type,
             complexity,
             risk,
+            archetype,
             filtered_agents,
         )
 

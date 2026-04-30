@@ -83,6 +83,7 @@ class DecisionKind(Enum):
     PHASE_NEEDS_FEEDBACK = "phase_needs_feedback"
     PHASE_NEEDS_GATE = "phase_needs_gate"
     PHASE_ADVANCE_OK = "phase_advance_ok"
+    RETRY_PHASE = "retry_phase"  # investigative: loop back to re-run current phase
 
 
 @dataclass(frozen=True)
@@ -433,6 +434,37 @@ class ActionResolver:
                 kind=DecisionKind.PHASE_NEEDS_GATE,
                 phase_id=phase_obj.phase_id,
             )
+
+        # Investigative archetype: check if phase should retry instead of
+        # advancing.  The agent signals retry by including "RETRY_PHASE" in
+        # the last step's outcome text.  Retry counts are tracked in
+        # state.speculations["_phase_retries"] (persists across CLI calls).
+        plan = state.plan
+        max_retries = getattr(plan, "max_retry_phases", 0)
+        archetype = getattr(plan, "archetype", "phased")
+        if archetype == "investigative" and max_retries > 0:
+            retry_store = getattr(state, "speculations", {}) or {}
+            retry_data = retry_store.get("_phase_retries", {})
+            retry_key = f"phase_{phase_obj.phase_id}"
+            retry_count = int(retry_data.get(retry_key, 0))
+
+            # Check if the last completed step's outcome signals retry
+            last_result = state.step_results[-1] if state.step_results else None
+            if (
+                last_result is not None
+                and last_result.status == "complete"
+                and "RETRY_PHASE" in (last_result.outcome or "")
+            ):
+                if retry_count < max_retries:
+                    return ResolverDecision(
+                        kind=DecisionKind.RETRY_PHASE,
+                        phase_id=phase_obj.phase_id,
+                        message=(
+                            f"Phase {phase_obj.phase_id} ({phase_obj.name}) "
+                            f"requesting retry "
+                            f"({retry_count + 1}/{max_retries})"
+                        ),
+                    )
 
         # Engine will mutate state and re-invoke determine_next.
         return ResolverDecision(
