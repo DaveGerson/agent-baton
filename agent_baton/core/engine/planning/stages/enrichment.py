@@ -105,6 +105,12 @@ class EnrichmentStage:
         # code-reviewer from the roster before phase construction.
         self._ensure_review_phase(draft, services)
 
+        # Post-enrichment safety net: when auditor was injected into the roster
+        # by RiskStage._ensure_safety_roster (compliance keywords like GDPR/SOX/
+        # HIPAA/PCI), the phase builder silently drops it because is_reviewer_agent
+        # returns True for "auditor".  Append a dedicated Audit phase here.
+        self._ensure_audit_phase(draft, services)
+
         return draft
 
     # ------------------------------------------------------------------
@@ -299,6 +305,45 @@ class EnrichmentStage:
                     plan_phases, depends_on_task_id, bead_store
                 )
         return depends_on_task_id
+
+    def _ensure_audit_phase(
+        self,
+        draft: PlanDraft,
+        services: PlannerServices,
+    ) -> None:
+        """Inject a terminal Audit phase when auditor is in the resolved roster.
+
+        RiskStage._ensure_safety_roster injects "auditor" for compliance-keyword
+        tasks (GDPR, SOX, HIPAA, PCI, etc.).  The phase builder then silently
+        drops it from Implement team-steps because is_reviewer_agent("auditor")
+        returns True, and no Audit phase was built by DecompositionStage or
+        EnrichmentStage.  This safety net appends one unconditionally whenever
+        auditor is on the roster but no Audit phase exists.
+        """
+        if "auditor" not in draft.resolved_agents:
+            return
+
+        if any(p.name.lower() == "audit" for p in draft.plan_phases):
+            return
+
+        max_id = max((p.phase_id for p in draft.plan_phases), default=0)
+        injected = build_phases_for_names(
+            ["Audit"],
+            ["auditor"],
+            draft.task_summary,
+            services.registry,
+            start_phase_id=max_id + 1,
+        )
+        draft.plan_phases.extend(injected)
+
+        note = (
+            f"[enrichment] Injected Audit phase (phase_id={max_id + 1}) "
+            "for compliance task — auditor was in resolved_agents but had "
+            "no dedicated phase (filtered from Implement team-steps by "
+            "is_reviewer_agent)."
+        )
+        logger.info(note)
+        draft.routing_notes.append(note)
 
     def _ensure_review_phase(
         self,
