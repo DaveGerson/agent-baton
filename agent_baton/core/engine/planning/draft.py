@@ -106,6 +106,8 @@ class PlanDraft:
     assembled_plan: "MachinePlan | None" = None
     classification_signals: str | None = None
     classification_confidence: float | None = None
+    team_cost_estimates: dict[str, int] = field(default_factory=dict)
+    isolation_overrides: dict[str, str] = field(default_factory=dict)
 
     # --- ValidationStage outputs ---
     # Populated by ValidationStage.  See ``planning.stages.validation.PlanDefect``.

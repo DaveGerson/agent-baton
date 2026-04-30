@@ -64,15 +64,3 @@ class PlannerServices:
     knowledge_registry: "KnowledgeRegistry | None" = None
     bead_store: Any = None
     team_context_root: Path | None = None
-
-    # --- Transitional ---
-    # Reference to the IntelligentPlanner instance.  Stages reach
-    # non-``_step_*`` helpers through this — e.g. ``_route_agents``,
-    # ``_assess_risk``, ``_extract_file_paths``,
-    # ``_capture_planning_bead``, ``_enrich_phases``,
-    # ``_assign_agents_to_phases``.  They also write the
-    # ``_last_*`` introspection attributes that ``explain_plan`` reads
-    # back.  Once every helper is extracted out of the legacy class,
-    # this field is dropped along with the inheritance from
-    # _LegacyIntelligentPlanner.
-    planner: Any = None

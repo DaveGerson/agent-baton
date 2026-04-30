@@ -11,13 +11,7 @@ Owns legacy ``create_plan`` steps 20-21 in the original ordering:
 The assembled ``MachinePlan`` is stored on ``draft.assembled_plan`` for
 the pipeline runner to return via ``extract_plan(draft)``.
 
-Non-``_step_*`` helpers used here:
-* ``services.planner._build_shared_context(plan)`` — builds the shared
-  context string from the assembled plan.
-* ``services.planner._capture_planning_bead(...)`` — persists the
-  planning bead when bead_store is set.
-
-Both remain on the legacy class per the porting contract.
+All context-building and bead-capture now use utils.context directly.
 """
 from __future__ import annotations
 
@@ -28,6 +22,10 @@ from typing import TYPE_CHECKING
 
 from agent_baton.core.engine.planning.draft import PlanDraft
 from agent_baton.core.engine.planning.services import PlannerServices
+from agent_baton.core.engine.planning.utils.context import (
+    build_shared_context,
+    capture_planning_bead,
+)
 from agent_baton.models.execution import MachinePlan
 
 if TYPE_CHECKING:
@@ -48,7 +46,7 @@ class AssemblyStage:
         return draft
 
     # ------------------------------------------------------------------
-    # Private: ported from _step_build_shared_context (lines 1939-2023)
+    # Private: build MachinePlan
     # ------------------------------------------------------------------
 
     def _build_shared_context(
@@ -56,15 +54,7 @@ class AssemblyStage:
         draft: PlanDraft,
         services: PlannerServices,
     ) -> MachinePlan:
-        """Assemble the MachinePlan and attach shared_context.
-
-        Ported from ``_LegacyIntelligentPlanner._step_build_shared_context``
-        (lines 1939-2023).  Introspection write
-        ``_last_team_cost_estimates`` is stored on ``services.planner``
-        to preserve the public ``_last_*`` contract.
-        """
-        legacy = services.planner
-
+        """Assemble the MachinePlan and attach shared_context."""
         # A3 — derive classification_signals (JSON) and
         # classification_confidence from the DataClassifier result when
         # available.
@@ -79,16 +69,12 @@ class AssemblyStage:
                     "explanation": draft.classification.explanation,
                 }
             )
-            # ClassificationResult.confidence is "high" | "low" (string).
-            # Map to float so callers can order/threshold numerically.
             _classification_confidence = (
                 1.0 if draft.classification.confidence == "high" else 0.5
             )
 
-        # ``_last_task_classification`` is written by ClassificationStage
-        # onto the legacy planner instance for ``explain_plan`` to read
-        # back later.  We pull it from there.
-        _last_task_cls = legacy._last_task_classification if legacy is not None else None
+        # task_classification was written by ClassificationStage onto the draft.
+        _last_task_cls = draft.task_classification
 
         tmp_plan = MachinePlan(
             task_id=draft.task_id,
@@ -111,19 +97,14 @@ class AssemblyStage:
                 if draft.stack_profile and draft.stack_profile.framework
                 else (draft.stack_profile.language if draft.stack_profile else None)
             ),
-            # ``_last_foresight_insights`` is written by DecompositionStage
-            # onto the legacy planner instance.  Pulled from there for
-            # ``explain_plan`` continuity.
-            foresight_insights=list(
-                legacy._last_foresight_insights if legacy is not None else []
-            ),
+            # foresight_insights was written by DecompositionStage onto the draft.
+            foresight_insights=list(draft.foresight_insights),
             depends_on_task=draft.depends_on_task_id,
             classification_signals=_classification_signals,
             classification_confidence=_classification_confidence,
         )
 
-        # Step 16 — team cost estimation: look up historical cost data for
-        # team steps.
+        # Step 16 — team cost estimation.
         team_cost_estimates: dict[str, int] = {}
         for phase in tmp_plan.phases:
             for step in phase.steps:
@@ -133,23 +114,24 @@ class AssemblyStage:
                     if estimate is not None:
                         team_cost_estimates[step.step_id] = estimate
 
-        # Preserve the introspection attribute on the legacy planner so
-        # existing callers of ``planner._last_team_cost_estimates`` keep
-        # working.
-        if legacy is not None:
-            legacy._last_team_cost_estimates = team_cost_estimates
+        # Store on draft so _sync_last_state can pick it up.
+        draft.team_cost_estimates = team_cost_estimates
 
-        # Attach shared context string (non-_step_* helper stays legacy).
-        shared_context = (
-            legacy._build_shared_context(tmp_plan)
-            if legacy is not None
-            else ""
+        # Build shared context string using utils.context directly.
+        shared_context = build_shared_context(
+            tmp_plan,
+            classification=draft.classification,
+            policy_violations=list(draft.policy_violations) or None,
+            retro_feedback=draft.retro_feedback,
+            team_cost_estimates=team_cost_estimates or None,
+            foresight_insights=list(draft.foresight_insights) or None,
+            task_summary=draft.task_summary,
         )
         tmp_plan.shared_context = shared_context
         return tmp_plan
 
     # ------------------------------------------------------------------
-    # Private: ported from _step_emit_telemetry (lines 2025-2085)
+    # Private: telemetry
     # ------------------------------------------------------------------
 
     def _emit_telemetry(
@@ -160,16 +142,12 @@ class AssemblyStage:
     ) -> None:
         """Emit planning bead + OTel span — pure observability side-effects.
 
-        Ported from ``_LegacyIntelligentPlanner._step_emit_telemetry``
-        (lines 2025-2085).  Failures must not crash plan construction.
+        Failures must not crash plan construction.
         """
-        # F4 — Planning Decision Capture: persist key planner decisions
-        # as beads.  Inspired by Steve Yegge's Beads agent memory system
-        # (beads-ai/beads-cli).  ``_capture_planning_bead`` is a
-        # non-_step_* helper that remains on the legacy class.
-        if services.bead_store is not None and services.planner is not None:
+        # F4 — Planning Decision Capture.
+        if services.bead_store is not None:
             try:
-                services.planner._capture_planning_bead(
+                capture_planning_bead(
                     task_id=draft.task_id,
                     content=(
                         f"Plan created for: {draft.task_summary}. "
@@ -182,6 +160,7 @@ class AssemblyStage:
                         f"git_strategy={draft.git_strategy}."
                     ),
                     tags=["planning", "plan-complete", draft.inferred_type],
+                    bead_store=services.bead_store,
                 )
             except Exception:
                 pass
@@ -204,7 +183,6 @@ class AssemblyStage:
                     ended_at=datetime.now(timezone.utc),
                 )
             except Exception:
-                # Observability must never crash the planner.
                 logger.debug("OTel span emission failed", exc_info=True)
 
     # ------------------------------------------------------------------
