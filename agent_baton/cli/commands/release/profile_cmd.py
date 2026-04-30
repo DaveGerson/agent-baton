@@ -50,38 +50,16 @@ def _open_conn(db_path: Path) -> "sqlite3.Connection":  # type: ignore[name-defi
 # Cooperative parser helpers
 # ---------------------------------------------------------------------------
 
-def _get_or_create_release_parser(
-    subparsers: argparse._SubParsersAction,  # type: ignore[type-arg]
-) -> tuple[argparse.ArgumentParser, argparse._SubParsersAction]:  # type: ignore[type-arg]
-    """Return (release_parser, release_sub) — reuse existing parser if present."""
-    existing = subparsers.choices.get("release") if subparsers.choices else None
-    if existing is not None:
-        sub = getattr(existing, "_baton_release_sub", None)
-        if sub is None:
-            for action in getattr(existing, "_actions", ()):
-                if isinstance(action, argparse._SubParsersAction):  # type: ignore[attr-defined]
-                    sub = action
-                    break
-            if sub is None:
-                sub = existing.add_subparsers(dest="release_subcommand", metavar="SUBCOMMAND")
-            existing._baton_release_sub = sub  # type: ignore[attr-defined]
-        return existing, sub
-
-    p = subparsers.add_parser(
-        "release",
-        help="Release management — profiles, readiness, notes",
-    )
-    sub = p.add_subparsers(dest="release_subcommand", metavar="SUBCOMMAND")
-    p._baton_release_sub = sub  # type: ignore[attr-defined]
-    return p, sub
-
-
 # ---------------------------------------------------------------------------
 # CLI registration
 # ---------------------------------------------------------------------------
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:  # type: ignore[type-arg]
-    release_p, release_sub = _get_or_create_release_parser(subparsers)
+    from agent_baton.cli.commands.release import get_or_create_release_parser
+    release_p, release_sub = get_or_create_release_parser(
+        subparsers,
+        help_text="Release management — profiles, readiness, notes",
+    )
 
     profile_p = release_sub.add_parser(
         "profile",

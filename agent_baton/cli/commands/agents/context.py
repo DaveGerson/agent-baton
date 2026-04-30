@@ -1,14 +1,17 @@
-"""``baton context`` -- inspect harvested agent_context rows.
+"""``baton agent-context`` -- inspect harvested agent_context rows.
 
 Wave 2.2 read-side CLI for :class:`ContextHarvester`.  Lists rows from
 the project ``agent_context`` table, scoped to a single agent.
 
 Usage::
 
-    baton context show backend-engineer
-    baton context show backend-engineer --domain agent_baton
+    baton agent-context show backend-engineer
+    baton agent-context show backend-engineer --domain agent_baton
 
 Plain table output: domain | files | last_task | updated_at | summary.
+
+Renamed from ``baton context`` to avoid argparse subparser collision with
+the newer ``observe/context_cmd.py`` (situational awareness command).
 """
 from __future__ import annotations
 
@@ -24,7 +27,7 @@ _DEFAULT_CONTEXT_ROOT = Path(".claude/team-context")
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     p = subparsers.add_parser(
-        "context",
+        "agent-context",
         help="Inspect harvested agent_context rows (Wave 2.2 ContextHarvester)",
     )
     sub = p.add_subparsers(dest="action", required=True)

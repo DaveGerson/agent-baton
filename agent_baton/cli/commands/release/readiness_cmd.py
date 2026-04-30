@@ -110,11 +110,11 @@ def _render_markdown(report: "ReleaseReadinessReport") -> str:  # type: ignore[n
 # ---------------------------------------------------------------------------
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
-    p = subparsers.add_parser(
-        "release",
-        help="Release management — readiness dashboard and release health",
+    from agent_baton.cli.commands.release import get_or_create_release_parser
+    p, release_sub = get_or_create_release_parser(
+        subparsers,
+        help_text="Release management — readiness dashboard and release health",
     )
-    release_sub = p.add_subparsers(dest="release_subcommand")
 
     rr = release_sub.add_parser(
         "readiness",

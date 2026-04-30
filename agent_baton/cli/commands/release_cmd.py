@@ -50,12 +50,12 @@ def _get_release_store(create_if_missing: bool = False):
 
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:  # type: ignore[type-arg]
-    """Register the ``release`` subcommand."""
-    p = subparsers.add_parser(
-        "release",
-        help="Manage Release entities (delivery targets) and tag plans against them",
+    """Register the ``release`` subcommand (cooperative parser)."""
+    from agent_baton.cli.commands.release import get_or_create_release_parser
+    p, sub = get_or_create_release_parser(
+        subparsers,
+        help_text="Manage Release entities (delivery targets) and tag plans against them",
     )
-    sub = p.add_subparsers(dest="release_cmd", metavar="SUBCOMMAND")
 
     # -- create --------------------------------------------------------------
     create_p = sub.add_parser("create", help="Register a new Release")

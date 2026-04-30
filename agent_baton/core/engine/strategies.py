@@ -70,38 +70,19 @@ _DEFAULT_AGENTS: dict[str, list[str]] = {
     "generic": ["architect", "backend-engineer", "test-engineer", "code-reviewer"],
 }
 
-# Phase templates by task type
-_PHASE_NAMES: dict[str, list[str]] = {
-    "new-feature": ["Design", "Implement", "Test", "Review"],
-    "bug-fix": ["Investigate", "Fix", "Test"],
-    "refactor": ["Design", "Implement", "Test", "Review"],
-    "data-analysis": ["Design", "Implement", "Review"],
-    "documentation": ["Research", "Draft", "Review"],
-    "migration": ["Design", "Implement", "Test", "Review"],
-    "test": ["Implement", "Review"],
-    "audit": ["Prepare", "Audit", "Synthesize", "Review"],
-    "assessment": ["Research", "Assess", "Synthesize", "Review"],
-    # E3 — fallback phases for generic/unknown task types
-    "generic": ["Investigate", "Implement", "Test", "Review"],
-}
-
-_DEFAULT_PHASE_NAMES: list[str] = ["Design", "Implement", "Test", "Review"]
+# Phase templates: re-export the canonical maps from phase_templates so
+# strategies.py and planner.py share a single source of truth.  Drift between
+# the two used to be enforced by test_phase_names_matches_planner, which
+# silently broke whenever phase_templates added a new entry (e.g. the
+# investigative archetype's 'investigation' template).
+from agent_baton.core.engine.planning.rules.phase_templates import (
+    _PHASE_NAMES,
+    _DEFAULT_PHASE_NAMES,
+    _SUBTASK_PHASE_NAMES,
+)
 
 # Minimum confidence required to follow a learned pattern
 _MIN_PATTERN_CONFIDENCE = 0.7
-
-# Compound task decomposition sub-task phase name mapping
-_SUBTASK_PHASE_NAMES: dict[str, str] = {
-    "test": "Test",
-    "bug-fix": "Fix",
-    "new-feature": "Implement",
-    "refactor": "Refactor",
-    "migration": "Migrate",
-    "data-analysis": "Analyze",
-    "documentation": "Document",
-    "audit": "Audit",
-    "assessment": "Assess",
-}
 
 # Regex to split numbered sub-tasks: (1), 1., or 1)
 _SUBTASK_SPLIT = re.compile(
