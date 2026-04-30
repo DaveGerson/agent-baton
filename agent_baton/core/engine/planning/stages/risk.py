@@ -65,6 +65,7 @@ class RiskStage:
                 task_summary=draft.task_summary,
                 resolved_agents=draft.resolved_agents,
                 services=services,
+                task_classification=draft.task_classification,
             )
         )
         draft.classification = classification
@@ -129,6 +130,7 @@ class RiskStage:
         task_summary: str,
         resolved_agents: list[str],
         services: PlannerServices,
+        task_classification: Any = None,
     ) -> tuple["ClassificationResult | None", str, RiskLevel, str]:
         """Steps 7 / 8 / 8b — DataClassifier dispatch, risk merging, and
         git-strategy selection.
@@ -143,17 +145,34 @@ class RiskStage:
             except Exception:
                 pass
 
-        # 8. Risk — combines DataClassifier output with keyword/structural signals.
+        # 8. Risk — combines DataClassifier output with keyword/structural
+        #    signals AND the CLI classifier's risk hint (if available).
         keyword_risk_level = assess_risk(task_summary, resolved_agents)
+        risk_level = keyword_risk_level
+
         if classification is not None:
             classifier_ordinal = RISK_ORDINAL[classification.risk_level]
             keyword_ordinal = RISK_ORDINAL[RiskLevel(keyword_risk_level)]
             if classifier_ordinal > keyword_ordinal:
                 risk_level = classification.risk_level.value
-            else:
-                risk_level = keyword_risk_level
-        else:
-            risk_level = keyword_risk_level
+
+        # CLI-validated classifier attaches a risk hint from its AI review.
+        # Use max(current, hint) so AI judgment can escalate but not lower.
+        cli_risk_hint = getattr(
+            services.task_classifier, "_last_cli_risk_hint", None
+        )
+        if cli_risk_hint is None:
+            cli_risk_hint = getattr(task_classification, "_cli_risk_hint", None)
+        if cli_risk_hint and cli_risk_hint in ("LOW", "MEDIUM", "HIGH"):
+            hint_ordinal = RISK_ORDINAL[RiskLevel(cli_risk_hint)]
+            current_ordinal = RISK_ORDINAL[RiskLevel(risk_level)]
+            if hint_ordinal > current_ordinal:
+                logger.info(
+                    "CLI risk hint escalates %s → %s",
+                    risk_level, cli_risk_hint,
+                )
+                risk_level = cli_risk_hint
+
         risk_level_enum = RiskLevel(risk_level)
 
         logger.info(

@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import shutil
+import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -394,6 +395,120 @@ class HeadlessClaude:
             output=stdout_text,
             duration_seconds=elapsed,
         )
+
+    def run_sync(
+        self,
+        prompt: str,
+        *,
+        model: str | None = None,
+        system_prompt: str | None = None,
+    ) -> HeadlessResult:
+        """Synchronous variant of :meth:`run` using ``subprocess.run``.
+
+        Args:
+            prompt: The full prompt text to send.
+            model: Override the default model for this call.
+            system_prompt: Override the CLI's default system prompt.
+                When set, the CLI skips CLAUDE.md auto-discovery and
+                uses this string as the sole system prompt.  This
+                dramatically reduces token cost for utility calls
+                (classification, plan review) that don't need project
+                context.  Auth (OAuth/keychain) is unaffected.
+        """
+        if self._claude_bin is None:
+            return HeadlessResult(success=False, error="claude CLI not available")
+
+        effective_model = model or self._config.model
+        cmd = [
+            self._claude_bin, "--print",
+            "--model", effective_model,
+            "--output-format", "json",
+        ]
+        if system_prompt is not None:
+            cmd.extend(["--system-prompt", system_prompt])
+        elif _supports_exclude_flag():
+            cmd.append(_EXCLUDE_FLAG)
+
+        use_stdin = len(prompt.encode()) > 131_072
+        if not use_stdin:
+            cmd.extend(["-p", prompt])
+
+        env = self._build_env()
+        cwd = str(self._config.working_directory or Path.cwd())
+
+        attempt = 0
+        while True:
+            attempt += 1
+            start = time.monotonic()
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    input=prompt.encode() if use_stdin else None,
+                    capture_output=True,
+                    timeout=self._config.timeout_seconds,
+                    cwd=cwd,
+                    env=env,
+                )
+            except subprocess.TimeoutExpired:
+                return HeadlessResult(
+                    success=False,
+                    error=f"Timed out after {self._config.timeout_seconds:.0f}s",
+                    duration_seconds=time.monotonic() - start,
+                )
+            except OSError as exc:
+                return HeadlessResult(
+                    success=False,
+                    error=f"Failed to start claude subprocess: {exc}",
+                    duration_seconds=time.monotonic() - start,
+                )
+
+            elapsed = time.monotonic() - start
+            stderr_text = _redact_sensitive(proc.stderr.decode(errors="replace").strip())
+            stdout_text = _redact_sensitive(proc.stdout.decode(errors="replace").strip())
+
+            parsed: dict[str, Any] | None = None
+            if stdout_text:
+                try:
+                    parsed = json.loads(stdout_text)
+                except json.JSONDecodeError:
+                    pass
+
+            if parsed is not None:
+                is_error = bool(parsed.get("is_error", False))
+                result_text = str(parsed.get("result", ""))
+                if proc.returncode != 0 or is_error:
+                    err = stderr_text or result_text or f"exit code {proc.returncode}"
+                    if self._is_rate_limit(err) and attempt <= self._config.max_retries:
+                        delay = self._config.base_retry_delay * (2 ** (attempt - 1))
+                        logger.warning(
+                            "HeadlessClaude rate limit (attempt %d/%d) — retrying in %.1fs",
+                            attempt, self._config.max_retries, delay,
+                        )
+                        time.sleep(delay)
+                        continue
+                    return HeadlessResult(
+                        success=False, output=result_text, error=err,
+                        duration_seconds=elapsed, raw_json=parsed,
+                    )
+                return HeadlessResult(
+                    success=True, output=result_text,
+                    duration_seconds=elapsed, raw_json=parsed,
+                )
+
+            if proc.returncode != 0:
+                err = stderr_text or f"exit code {proc.returncode}"
+                if self._is_rate_limit(err) and attempt <= self._config.max_retries:
+                    delay = self._config.base_retry_delay * (2 ** (attempt - 1))
+                    time.sleep(delay)
+                    continue
+                return HeadlessResult(
+                    success=False, output=stdout_text, error=err,
+                    duration_seconds=elapsed,
+                )
+
+            return HeadlessResult(
+                success=True, output=stdout_text, duration_seconds=elapsed,
+            )
 
     @staticmethod
     def _is_rate_limit(error: str) -> bool:

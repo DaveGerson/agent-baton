@@ -577,3 +577,208 @@ class FallbackClassifier:
                 exc_info=True,
             )
             return self._keyword.classify(summary, registry, project_root)
+
+
+# ---------------------------------------------------------------------------
+# CLIValidatedClassifier — keyword draft + CLI correction (Option 2)
+# ---------------------------------------------------------------------------
+
+_CLI_CORRECTION_PROMPT = """\
+You are a task classifier validator for a software orchestration engine.
+
+A keyword-based classifier produced the draft below. Your job is to \
+verify or correct each field. Return JSON only.
+
+## Original task
+"{summary}"
+
+## Keyword draft
+- task_type: {task_type}
+- complexity: {complexity}
+- agents: {agents}
+- phases: {phases}
+
+## Validation checklist
+1. TASK_TYPE: Does "{task_type}" accurately describe the PRIMARY intent? \
+If the task has multiple parts (e.g. "add feature AND write tests AND update docs"), \
+it is NOT a single-type task — use the type of the dominant/first concern. \
+A task mentioning "test" as ONE of several concerns is NOT type "test".
+2. COMPLEXITY: Count distinct concerns/subtasks. \
+1-2 concerns with single domain = light. \
+3+ concerns OR cross-domain = medium. \
+4+ concerns with multiple domains, compliance, or architecture = heavy. \
+Numbered lists ("1) ... 2) ... 3) ...") are compound tasks — never "light".
+3. RISK: Assess independently (not in the draft). Consider: \
+destructive operations (delete/drop/purge) + data stores = HIGH. \
+Compliance keywords (GDPR/SOX/HIPAA/PCI) = HIGH. \
+Production/deploy/infrastructure (as ACTION, not documentation) = HIGH. \
+"deployment docs" or "deploy documentation" = LOW (it's docs, not deploying). \
+Pure read-only tasks = LOW.
+4. AGENTS: Are the right specialists assigned? Should any be added or removed?
+
+Return this exact JSON structure:
+{{
+  "task_type": "<corrected or same>",
+  "complexity": "<corrected or same>",
+  "risk": "LOW|MEDIUM|HIGH",
+  "agents_add": [],
+  "agents_remove": [],
+  "phases": [<corrected phase list or same>],
+  "reasoning": "<one sentence>"
+}}"""
+
+
+class CLIValidatedClassifier:
+    """Keyword draft + CLI correction via HeadlessClaude.
+
+    Runs the keyword classifier first (free, instant), then sends the
+    draft to a Haiku CLI call for validation and correction.  Falls back
+    to the unvalidated keyword draft if the CLI is unavailable or fails.
+    """
+
+    def __init__(self) -> None:
+        self._keyword = KeywordClassifier()
+        self._headless: Any = None
+        self._headless_checked = False
+
+    def _get_headless(self) -> Any:
+        if not self._headless_checked:
+            self._headless_checked = True
+            try:
+                from agent_baton.core.runtime.headless import (
+                    HeadlessClaude,
+                    HeadlessConfig,
+                )
+                hc = HeadlessClaude(HeadlessConfig(
+                    model="haiku",
+                    timeout_seconds=60.0,
+                ))
+                if hc.is_available:
+                    self._headless = hc
+                else:
+                    logger.info(
+                        "CLIValidatedClassifier: claude CLI not available — "
+                        "using keyword-only classification"
+                    )
+            except Exception:
+                logger.info(
+                    "CLIValidatedClassifier: HeadlessClaude import failed — "
+                    "using keyword-only classification"
+                )
+        return self._headless
+
+    def classify(
+        self,
+        summary: str,
+        registry: AgentRegistry,
+        project_root: Path | None = None,
+    ) -> TaskClassification:
+        draft = self._keyword.classify(summary, registry, project_root)
+
+        hc = self._get_headless()
+        if hc is None:
+            return draft
+
+        prompt = _CLI_CORRECTION_PROMPT.format(
+            summary=summary.replace('"', '\\"'),
+            task_type=draft.task_type,
+            complexity=draft.complexity,
+            agents=", ".join(draft.agents),
+            phases=", ".join(draft.phases),
+        )
+
+        try:
+            result = hc.run_sync(
+                prompt,
+                model="haiku",
+                system_prompt="You are a task classifier. Return JSON only.",
+            )
+        except Exception as exc:
+            logger.warning("CLI classification correction failed: %s", exc)
+            return draft
+
+        if not result.success:
+            logger.debug(
+                "CLI correction call failed (%s) — using keyword draft",
+                result.error,
+            )
+            return draft
+
+        return self._apply_corrections(draft, result.output, registry)
+
+    @staticmethod
+    def _apply_corrections(
+        draft: TaskClassification,
+        raw_output: str,
+        registry: AgentRegistry,
+    ) -> TaskClassification:
+        text = raw_output.strip()
+        if text.startswith("```"):
+            lines = text.splitlines()
+            lines = [l for l in lines if not l.strip().startswith("```")]
+            text = "\n".join(lines)
+
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            start = text.find("{")
+            end = text.rfind("}")
+            if start >= 0 and end > start:
+                try:
+                    data = json.loads(text[start : end + 1])
+                except json.JSONDecodeError:
+                    return draft
+            else:
+                return draft
+
+        valid_names = set(registry.agents.keys())
+
+        task_type = data.get("task_type", draft.task_type)
+        if task_type not in _VALID_TASK_TYPES:
+            task_type = draft.task_type
+
+        complexity = data.get("complexity", draft.complexity)
+        if complexity not in _VALID_COMPLEXITIES:
+            complexity = draft.complexity
+
+        agents = list(draft.agents)
+        for a in data.get("agents_remove", []):
+            agents = [x for x in agents if x != a]
+        for a in data.get("agents_add", []):
+            if a in valid_names and a not in agents:
+                agents.append(a)
+        if not agents:
+            agents = list(draft.agents)
+
+        max_agents = _MAX_AGENTS_BY_COMPLEXITY.get(complexity, 5)
+        agents = agents[:max_agents]
+
+        phases = data.get("phases") or list(draft.phases)
+        if not phases:
+            phases = list(draft.phases)
+
+        reasoning = data.get("reasoning", draft.reasoning)
+
+        corrected = TaskClassification(
+            task_type=task_type,
+            complexity=complexity,
+            agents=agents,
+            phases=phases,
+            reasoning=f"[cli-validated] {reasoning}",
+            source="cli-validated",
+        )
+
+        if (
+            corrected.task_type != draft.task_type
+            or corrected.complexity != draft.complexity
+            or corrected.agents != draft.agents
+        ):
+            logger.info(
+                "CLI correction applied: type=%s→%s complexity=%s→%s agents=%s→%s",
+                draft.task_type, corrected.task_type,
+                draft.complexity, corrected.complexity,
+                draft.agents, corrected.agents,
+            )
+
+        corrected._cli_risk_hint = data.get("risk")  # type: ignore[attr-defined]
+        return corrected
