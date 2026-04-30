@@ -9,18 +9,49 @@ import re
 CROSS_CONCERN_SIGNALS: dict[str, list[str]] = {
     "frontend-engineer": [
         "ux", "ui", "navigate", "browser", "visual", "layout",
-        "css", "component", "react", "frontend",
+        "css", "component", "react", "frontend", "checkout",
+        "dashboard", "chart", "form", "page",
     ],
     "backend-engineer": [
         "api", "endpoint", "server", "database", "migration", "backend",
         "fix", "bug", "broken", "error", "remediate", "patch",
+        "service", "handler", "middleware", "queue", "webhook",
     ],
     "test-engineer": [
         "test", "tests", "testing", "test suite", "e2e", "playwright",
         "coverage", "vitest", "jest", "unit test", "integration test",
+        "regression", "verify", "validate",
     ],
     "code-reviewer": [
-        "review", "code quality", "audit",
+        "review", "code quality",
+    ],
+    "data-engineer": [
+        "etl", "pipeline", "warehouse", "data lake", "spark",
+        "airflow", "ingest", "transform", "batch",
+    ],
+    "data-scientist": [
+        "model", "predict", "classify", "cluster", "train",
+        "feature engineering", "experiment", "hypothesis",
+    ],
+    "architect": [
+        "design", "architecture", "schema", "pattern", "redesign",
+        "system design", "rearchitect", "overhaul",
+    ],
+    "auditor": [
+        "compliance", "gdpr", "sox", "hipaa", "pci", "audit",
+        "regulated", "regulation", "audit trail",
+    ],
+    "security-reviewer": [
+        "security", "auth", "credential", "secret", "vulnerability",
+        "cve", "owasp", "encryption", "token",
+    ],
+    "devops-engineer": [
+        "deploy", "ci", "cd", "docker", "terraform", "kubernetes",
+        "helm", "infrastructure", "pipeline", "staging", "production",
+    ],
+    "documentation-architect": [
+        "documentation", "docs", "readme", "wiki", "guide",
+        "tutorial", "reference",
     ],
 }
 

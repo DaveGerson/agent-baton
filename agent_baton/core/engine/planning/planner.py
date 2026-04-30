@@ -367,6 +367,11 @@ class IntelligentPlanner:
             "5. GATE COVERAGE: Every phase that produces or modifies code "
             "MUST have a test or build gate. Research/Design/Review phases "
             "do NOT need gates.\n\n"
+            "6. STEP DESCRIPTION QUALITY: Each step's task_description "
+            "should be scoped to that agent's specific work. If 2+ steps "
+            "in the same phase have IDENTICAL task descriptions (copy-paste "
+            "of the full summary), that is a bug — each agent needs a "
+            "description specific to their concern.\n\n"
             "Return this JSON structure:\n"
             "{\n"
             '  "verdict": "PASS" or "NEEDS_CORRECTION",\n'
