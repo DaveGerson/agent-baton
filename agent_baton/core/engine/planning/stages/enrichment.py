@@ -39,8 +39,9 @@ from agent_baton.core.engine.planning.utils.text_parsers import (
     parse_concerns,
 )
 
+from agent_baton.models.enums import RiskLevel
+
 if TYPE_CHECKING:
-    from agent_baton.models.enums import RiskLevel
     from agent_baton.models.execution import PlanPhase
 
 logger = logging.getLogger(__name__)
@@ -98,6 +99,12 @@ class EnrichmentStage:
             services=services,
         )
         draft.depends_on_task_id = depends_on_task_id
+
+        # Post-enrichment safety net: HIGH/CRITICAL tasks must always have a
+        # terminal Review phase, regardless of whether complexity cap truncated
+        # code-reviewer from the roster before phase construction.
+        self._ensure_review_phase(draft, services)
+
         return draft
 
     # ------------------------------------------------------------------
@@ -292,3 +299,39 @@ class EnrichmentStage:
                     plan_phases, depends_on_task_id, bead_store
                 )
         return depends_on_task_id
+
+    def _ensure_review_phase(
+        self,
+        draft: PlanDraft,
+        services: PlannerServices,
+    ) -> None:
+        """Inject a terminal Review phase for HIGH/CRITICAL tasks if absent.
+
+        The complexity cap can truncate code-reviewer from the roster before
+        phase construction runs, which silently drops the Review phase.  This
+        post-enrichment check is the safety net: if the risk level warrants a
+        review checkpoint but none exists, one is appended unconditionally.
+        """
+        if draft.risk_level_enum not in (RiskLevel.HIGH, RiskLevel.CRITICAL):
+            return
+
+        if any(p.name.lower() == "review" for p in draft.plan_phases):
+            return
+
+        max_id = max((p.phase_id for p in draft.plan_phases), default=0)
+        injected = build_phases_for_names(
+            ["Review"],
+            ["code-reviewer"],
+            draft.task_summary,
+            services.registry,
+            start_phase_id=max_id + 1,
+        )
+        draft.plan_phases.extend(injected)
+
+        note = (
+            f"[enrichment] Injected Review phase (phase_id={max_id + 1}) "
+            f"for {draft.risk_level_enum.value}-risk task — "
+            "code-reviewer was absent from roster due to complexity cap."
+        )
+        logger.info(note)
+        draft.routing_notes.append(note)

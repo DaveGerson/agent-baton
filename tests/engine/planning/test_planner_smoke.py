@@ -658,6 +658,202 @@ class TestBeadDocumentedBehaviors:
 # INTEGRATION TESTS — full pipeline end-to-end
 # ===================================================================
 
+# ===================================================================
+# 8. REVIEW PHASE SAFETY NET (HIGH/CRITICAL risk)
+# ===================================================================
+
+class TestHighRiskReviewPhaseGuarantee:
+    """EnrichmentStage must inject a Review phase on HIGH/CRITICAL tasks.
+
+    Covers the planning defect where the complexity cap truncates
+    code-reviewer from the roster before phase construction, silently
+    dropping the terminal Review checkpoint.
+    """
+
+    def _make_high_risk_draft(self, plan_phases, risk_level_enum=None):
+        """Return a minimal PlanDraft wired for HIGH risk."""
+        from agent_baton.core.engine.planning.draft import PlanDraft
+        from agent_baton.models.enums import RiskLevel
+
+        draft = PlanDraft.from_inputs("Deploy the authentication service to production")
+        draft.plan_phases = plan_phases
+        draft.risk_level_enum = risk_level_enum or RiskLevel.HIGH
+        draft.risk_level = (risk_level_enum or RiskLevel.HIGH).value
+        return draft
+
+    def _make_services(self):
+        """Return a MagicMock services stub with a real registry attached."""
+        from agent_baton.core.engine.planner import IntelligentPlanner
+        planner = IntelligentPlanner()
+        services = MagicMock()
+        services.registry = planner._registry
+        services.bead_store = None
+        services.project_config = None
+        return services
+
+    def test_high_risk_without_review_phase_gets_one_injected(self):
+        """When no Review phase exists on a HIGH-risk plan, one is appended."""
+        from agent_baton.core.engine.planning.stages.enrichment import EnrichmentStage
+
+        existing_phases = [
+            PlanPhase(
+                phase_id=1, name="Implement",
+                steps=[PlanStep(step_id="1.1", agent_name="backend-engineer",
+                                task_description="Deploy service")],
+            ),
+        ]
+        draft = self._make_high_risk_draft(existing_phases)
+        services = self._make_services()
+
+        EnrichmentStage()._ensure_review_phase(draft, services)
+
+        phase_names = [p.name.lower() for p in draft.plan_phases]
+        assert "review" in phase_names, (
+            "HIGH-risk plan must contain a Review phase after _ensure_review_phase"
+        )
+
+    def test_injected_review_phase_has_code_reviewer(self):
+        """The injected Review phase must use code-reviewer as its agent."""
+        from agent_baton.core.engine.planning.stages.enrichment import EnrichmentStage
+
+        existing_phases = [
+            PlanPhase(
+                phase_id=1, name="Implement",
+                steps=[PlanStep(step_id="1.1", agent_name="backend-engineer",
+                                task_description="Deploy service")],
+            ),
+        ]
+        draft = self._make_high_risk_draft(existing_phases)
+        services = self._make_services()
+
+        EnrichmentStage()._ensure_review_phase(draft, services)
+
+        review_phases = [p for p in draft.plan_phases if p.name.lower() == "review"]
+        assert review_phases, "No Review phase found after injection"
+        review_phase = review_phases[-1]
+        agent_names = [s.agent_name for s in review_phase.steps]
+        assert any("code-reviewer" in a for a in agent_names), (
+            f"Review phase agents are {agent_names!r}, expected code-reviewer"
+        )
+
+    def test_injected_review_phase_id_is_max_plus_one(self):
+        """Injected Review phase_id must be max(existing) + 1."""
+        from agent_baton.core.engine.planning.stages.enrichment import EnrichmentStage
+
+        existing_phases = [
+            PlanPhase(phase_id=1, name="Design",
+                      steps=[PlanStep(step_id="1.1", agent_name="architect",
+                                      task_description="Design")]),
+            PlanPhase(phase_id=2, name="Implement",
+                      steps=[PlanStep(step_id="2.1", agent_name="backend-engineer",
+                                      task_description="Implement")]),
+        ]
+        draft = self._make_high_risk_draft(existing_phases)
+        services = self._make_services()
+
+        EnrichmentStage()._ensure_review_phase(draft, services)
+
+        review_phase = next(p for p in draft.plan_phases if p.name.lower() == "review")
+        assert review_phase.phase_id == 3
+
+    def test_existing_review_phase_is_not_duplicated(self):
+        """When a Review phase already exists, _ensure_review_phase is a no-op."""
+        from agent_baton.core.engine.planning.stages.enrichment import EnrichmentStage
+
+        existing_phases = [
+            PlanPhase(phase_id=1, name="Implement",
+                      steps=[PlanStep(step_id="1.1", agent_name="backend-engineer",
+                                      task_description="Implement")]),
+            PlanPhase(phase_id=2, name="Review",
+                      steps=[PlanStep(step_id="2.1", agent_name="code-reviewer",
+                                      task_description="Review")]),
+        ]
+        draft = self._make_high_risk_draft(existing_phases)
+        services = self._make_services()
+
+        EnrichmentStage()._ensure_review_phase(draft, services)
+
+        review_phases = [p for p in draft.plan_phases if p.name.lower() == "review"]
+        assert len(review_phases) == 1, (
+            "Should not duplicate an already-present Review phase"
+        )
+
+    def test_critical_risk_also_gets_review_phase(self):
+        """CRITICAL risk triggers the same safety-net injection as HIGH."""
+        from agent_baton.core.engine.planning.stages.enrichment import EnrichmentStage
+        from agent_baton.models.enums import RiskLevel
+
+        existing_phases = [
+            PlanPhase(phase_id=1, name="Implement",
+                      steps=[PlanStep(step_id="1.1", agent_name="backend-engineer",
+                                      task_description="Critical deploy")]),
+        ]
+        draft = self._make_high_risk_draft(existing_phases, risk_level_enum=RiskLevel.CRITICAL)
+        services = self._make_services()
+
+        EnrichmentStage()._ensure_review_phase(draft, services)
+
+        phase_names = [p.name.lower() for p in draft.plan_phases]
+        assert "review" in phase_names
+
+    def test_low_risk_does_not_get_review_injected(self):
+        """LOW risk must not trigger injection — only HIGH/CRITICAL are affected."""
+        from agent_baton.core.engine.planning.stages.enrichment import EnrichmentStage
+        from agent_baton.models.enums import RiskLevel
+
+        existing_phases = [
+            PlanPhase(phase_id=1, name="Implement",
+                      steps=[PlanStep(step_id="1.1", agent_name="backend-engineer",
+                                      task_description="Simple change")]),
+        ]
+        draft = self._make_high_risk_draft(existing_phases, risk_level_enum=RiskLevel.LOW)
+        services = self._make_services()
+
+        EnrichmentStage()._ensure_review_phase(draft, services)
+
+        phase_names = [p.name.lower() for p in draft.plan_phases]
+        assert "review" not in phase_names
+
+    def test_injection_appends_routing_note(self):
+        """A routing note must be recorded when the phase is injected."""
+        from agent_baton.core.engine.planning.stages.enrichment import EnrichmentStage
+
+        existing_phases = [
+            PlanPhase(phase_id=1, name="Implement",
+                      steps=[PlanStep(step_id="1.1", agent_name="backend-engineer",
+                                      task_description="Deploy")]),
+        ]
+        draft = self._make_high_risk_draft(existing_phases)
+        services = self._make_services()
+
+        EnrichmentStage()._ensure_review_phase(draft, services)
+
+        assert any("[enrichment]" in note for note in draft.routing_notes), (
+            "Expected an [enrichment] routing note after injection"
+        )
+
+    def test_medium_complexity_production_deploy_has_review_phase(self, plan_for):
+        """Regression: medium-complexity migration to production must retain Review.
+
+        This is the exact scenario described in the defect report — a medium-
+        complexity task triggers HIGH risk, but the 4-agent complexity cap
+        truncates code-reviewer from the 5-agent migration roster.
+        """
+        plan = plan_for(
+            "Migrate the user authentication service to production on the new "
+            "PostgreSQL cluster",
+            complexity="medium",
+        )
+        # Risk must be at least MEDIUM for a migration; may be HIGH.
+        # The key assertion is that if risk is HIGH, Review must be present.
+        if plan.risk_level == "HIGH":
+            phase_names = [p.name.lower() for p in plan.phases]
+            assert "review" in phase_names, (
+                f"HIGH-risk plan (complexity=medium) is missing a Review phase. "
+                f"Phases: {[p.name for p in plan.phases]}"
+            )
+
+
 @pytest.mark.skipif(not _INTEGRATION, reason="integration test")
 class TestPlannerIntegration:
     """End-to-end plan creation and inspection."""
