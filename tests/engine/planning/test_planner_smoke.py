@@ -650,3 +650,239 @@ class TestPlannerIntegration:
         assert plan.shared_context
         assert "Task:" in plan.shared_context
         assert "Risk:" in plan.shared_context
+
+
+# ===================================================================
+# 8. SAFETY ROSTER INJECTION (post-risk, RiskStage step 8c)
+# ===================================================================
+
+class TestSafetyRosterInjection:
+    """Verify that HIGH-risk tasks always carry code-reviewer and that
+    compliance/audit tasks always carry auditor, regardless of the
+    complexity cap applied in RosterStage.
+
+    These tests exercise ``RiskStage._ensure_safety_roster`` directly
+    so they are fast and dependency-free (no full planner, no API keys).
+    """
+
+    def _make_draft(
+        self,
+        task_summary: str,
+        risk_level: "Any",
+        resolved_agents: list[str],
+    ) -> PlanDraft:
+        """Build a minimal PlanDraft with risk already classified."""
+        from agent_baton.models.enums import RiskLevel
+        draft = PlanDraft.from_inputs(task_summary)
+        draft.task_id = "test-task"
+        draft.risk_level = risk_level.value
+        draft.risk_level_enum = risk_level
+        draft.resolved_agents = list(resolved_agents)
+        return draft
+
+    def test_high_risk_injects_code_reviewer_when_missing(self):
+        """code-reviewer must be appended for HIGH-risk tasks that lack it."""
+        from agent_baton.core.engine.planning.stages.risk import RiskStage
+        from agent_baton.models.enums import RiskLevel
+
+        draft = self._make_draft(
+            "Migrate the database schema in production",
+            RiskLevel.HIGH,
+            resolved_agents=["architect", "backend-engineer"],  # cap dropped reviewer
+        )
+        RiskStage()._ensure_safety_roster(draft)
+
+        assert "code-reviewer" in draft.resolved_agents
+        assert any("code-reviewer" in note for note in draft.routing_notes)
+
+    def test_critical_risk_injects_code_reviewer_when_missing(self):
+        """code-reviewer is required for CRITICAL risk as well."""
+        from agent_baton.core.engine.planning.stages.risk import RiskStage
+        from agent_baton.models.enums import RiskLevel
+
+        draft = self._make_draft(
+            "Deploy breaking changes to the payments infrastructure",
+            RiskLevel.CRITICAL,
+            resolved_agents=["backend-engineer", "devops-engineer"],
+        )
+        RiskStage()._ensure_safety_roster(draft)
+
+        assert "code-reviewer" in draft.resolved_agents
+
+    def test_high_risk_does_not_duplicate_existing_code_reviewer(self):
+        """If code-reviewer is already on the roster it must not be added again."""
+        from agent_baton.core.engine.planning.stages.risk import RiskStage
+        from agent_baton.models.enums import RiskLevel
+
+        draft = self._make_draft(
+            "Deploy to production",
+            RiskLevel.HIGH,
+            resolved_agents=["backend-engineer", "code-reviewer"],
+        )
+        RiskStage()._ensure_safety_roster(draft)
+
+        assert draft.resolved_agents.count("code-reviewer") == 1
+
+    def test_high_risk_does_not_duplicate_stack_flavored_code_reviewer(self):
+        """A stack-flavored variant (code-reviewer--python) counts as present."""
+        from agent_baton.core.engine.planning.stages.risk import RiskStage
+        from agent_baton.models.enums import RiskLevel
+
+        draft = self._make_draft(
+            "Deploy to production",
+            RiskLevel.HIGH,
+            resolved_agents=["backend-engineer", "code-reviewer--python"],
+        )
+        RiskStage()._ensure_safety_roster(draft)
+
+        reviewer_entries = [
+            a for a in draft.resolved_agents if a.split("--")[0] == "code-reviewer"
+        ]
+        assert len(reviewer_entries) == 1
+
+    def test_low_risk_does_not_inject_code_reviewer(self):
+        """LOW-risk tasks must not have code-reviewer force-injected."""
+        from agent_baton.core.engine.planning.stages.risk import RiskStage
+        from agent_baton.models.enums import RiskLevel
+
+        draft = self._make_draft(
+            "Add a hello-world endpoint",
+            RiskLevel.LOW,
+            resolved_agents=["backend-engineer"],
+        )
+        RiskStage()._ensure_safety_roster(draft)
+
+        assert "code-reviewer" not in draft.resolved_agents
+
+    def test_medium_risk_does_not_inject_code_reviewer(self):
+        """MEDIUM-risk tasks must not have code-reviewer force-injected."""
+        from agent_baton.core.engine.planning.stages.risk import RiskStage
+        from agent_baton.models.enums import RiskLevel
+
+        draft = self._make_draft(
+            "Migrate the user table to PostgreSQL",
+            RiskLevel.MEDIUM,
+            resolved_agents=["architect", "backend-engineer"],
+        )
+        RiskStage()._ensure_safety_roster(draft)
+
+        assert "code-reviewer" not in draft.resolved_agents
+
+    def test_compliance_keyword_injects_auditor(self):
+        """Tasks mentioning 'compliance' must always carry auditor."""
+        from agent_baton.core.engine.planning.stages.risk import RiskStage
+        from agent_baton.models.enums import RiskLevel
+
+        draft = self._make_draft(
+            "Ensure GDPR compliance for the user data pipeline",
+            RiskLevel.MEDIUM,
+            resolved_agents=["architect", "backend-engineer"],  # auditor cap-dropped
+        )
+        RiskStage()._ensure_safety_roster(draft)
+
+        assert "auditor" in draft.resolved_agents
+        assert any("auditor" in note for note in draft.routing_notes)
+
+    def test_regulated_keyword_injects_auditor(self):
+        """Tasks mentioning 'regulated' must always carry auditor."""
+        from agent_baton.core.engine.planning.stages.risk import RiskStage
+        from agent_baton.models.enums import RiskLevel
+
+        draft = self._make_draft(
+            "Handle regulated financial data in the reporting module",
+            RiskLevel.HIGH,
+            resolved_agents=["architect", "backend-engineer", "code-reviewer"],
+        )
+        RiskStage()._ensure_safety_roster(draft)
+
+        assert "auditor" in draft.resolved_agents
+
+    def test_audit_keyword_injects_auditor(self):
+        """Tasks mentioning 'audit' must always carry auditor."""
+        from agent_baton.core.engine.planning.stages.risk import RiskStage
+        from agent_baton.models.enums import RiskLevel
+
+        draft = self._make_draft(
+            "Add audit logging for all admin actions",
+            RiskLevel.MEDIUM,
+            resolved_agents=["backend-engineer"],
+        )
+        RiskStage()._ensure_safety_roster(draft)
+
+        assert "auditor" in draft.resolved_agents
+
+    def test_compliance_keyword_does_not_duplicate_existing_auditor(self):
+        """auditor already on the roster must not be duplicated."""
+        from agent_baton.core.engine.planning.stages.risk import RiskStage
+        from agent_baton.models.enums import RiskLevel
+
+        draft = self._make_draft(
+            "Ensure compliance with SOX regulations",
+            RiskLevel.HIGH,
+            resolved_agents=["backend-engineer", "code-reviewer", "auditor"],
+        )
+        RiskStage()._ensure_safety_roster(draft)
+
+        assert draft.resolved_agents.count("auditor") == 1
+
+    def test_no_audit_keyword_does_not_inject_auditor(self):
+        """A plain feature task must not receive an injected auditor."""
+        from agent_baton.core.engine.planning.stages.risk import RiskStage
+        from agent_baton.models.enums import RiskLevel
+
+        draft = self._make_draft(
+            "Add a new REST endpoint for user profiles",
+            RiskLevel.LOW,
+            resolved_agents=["backend-engineer"],
+        )
+        RiskStage()._ensure_safety_roster(draft)
+
+        assert "auditor" not in draft.resolved_agents
+
+    def test_risk_none_is_a_safe_no_op(self):
+        """If risk_level_enum is None (unclassified draft) nothing is injected."""
+        from agent_baton.core.engine.planning.stages.risk import RiskStage
+
+        draft = PlanDraft.from_inputs("Deploy to production")
+        draft.task_id = "test-task"
+        draft.risk_level_enum = None
+        draft.resolved_agents = ["backend-engineer"]
+        RiskStage()._ensure_safety_roster(draft)
+
+        assert "code-reviewer" not in draft.resolved_agents
+
+    # --- Full-pipeline integration (uses IntelligentPlanner) ---
+
+    def test_high_risk_plan_has_code_reviewer_in_plan(self, plan_for):
+        """End-to-end: a production deployment plan must include code-reviewer."""
+        plan = plan_for("Deploy the authentication service to production")
+        agent_names_flat = []
+        for phase in plan.phases:
+            for step in phase.steps:
+                if step.agent_name == "team":
+                    agent_names_flat.extend(m.agent_name for m in step.team)
+                else:
+                    agent_names_flat.append(step.agent_name)
+        base_names = {n.split("--")[0] for n in agent_names_flat}
+        # Only assert if the plan itself resolved as HIGH risk
+        if plan.risk_level == "HIGH":
+            assert "code-reviewer" in base_names, (
+                f"HIGH-risk plan is missing code-reviewer. Agents: {base_names}"
+            )
+
+    def test_compliance_plan_has_auditor_in_plan(self, plan_for):
+        """End-to-end: a compliance task must include auditor in the plan."""
+        plan = plan_for(
+            "Implement GDPR compliance controls for the user data pipeline"
+        )
+        agent_names_flat = []
+        for phase in plan.phases:
+            for step in phase.steps:
+                if step.agent_name == "team":
+                    agent_names_flat.extend(m.agent_name for m in step.team)
+                else:
+                    agent_names_flat.append(step.agent_name)
+        base_names = {n.split("--")[0] for n in agent_names_flat}
+        assert "auditor" in base_names, (
+            f"Compliance plan is missing auditor. Agents: {base_names}"
+        )
