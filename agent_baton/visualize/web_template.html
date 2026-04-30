@@ -3,16 +3,16 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Agent Baton &middot; Execution Topology</title>
+<title>Agent Baton · Plan Viewer</title>
 <style>
-/* =====================================================================
-   Design Tokens -- GitHub Dark + neon accents
-   ===================================================================== */
+/* ===================================================================
+   Design tokens — GitHub Dark inspired
+   =================================================================== */
 :root {
   --bg: #0d1117;
   --surface: #161b22;
   --surface-hover: #1c2128;
-  --card: #1c2128;
+  --surface-raised: #1f2530;
   --border: #30363d;
   --border-subtle: #21262d;
   --text: #e6edf3;
@@ -21,13 +21,10 @@
 
   --green: #3fb950;
   --green-dim: #238636;
-  --green-glow: rgba(63,185,80,.35);
   --blue: #58a6ff;
   --blue-dim: #1f6feb;
-  --blue-glow: rgba(88,166,255,.3);
   --red: #f85149;
   --red-dim: #da3633;
-  --red-glow: rgba(248,81,73,.35);
   --yellow: #d29922;
   --yellow-dim: #9e6a03;
   --purple: #bc8cff;
@@ -35,1054 +32,1538 @@
   --orange: #f0883e;
   --orange-dim: #bd561d;
   --gray: #484f58;
-  --cyan: #58a6ff;
+  --cyan: #79c0ff;
+  --cyan-dim: #388bfd;
 
-  --font-mono: 'JetBrains Mono','Fira Code','Cascadia Code','SF Mono',ui-monospace,monospace;
-  --font-sans: -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'SF Mono', ui-monospace, monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
   --radius: 8px;
   --radius-sm: 4px;
   --radius-lg: 12px;
+  --shadow: 0 1px 3px rgba(0,0,0,.12), 0 1px 2px rgba(0,0,0,.24);
+  --shadow-lg: 0 4px 12px rgba(0,0,0,.3);
   --transition: 150ms cubic-bezier(.4,0,.2,1);
 }
 
-/* =====================================================================
+/* ===================================================================
    Reset & base
-   ===================================================================== */
-*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-html{font-size:15px;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
-body{font-family:var(--font-sans);background:var(--bg);color:var(--text);line-height:1.5;min-height:100vh;overflow-x:hidden}
-.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);border:0}
+   =================================================================== */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-/* =====================================================================
-   Layout shell
-   ===================================================================== */
-.shell{display:flex;flex-direction:column;min-height:100vh}
-.header-wrap{flex-shrink:0;background:var(--surface);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:100}
-.header-inner{max-width:1600px;margin:0 auto;padding:16px 28px}
-.view-body{flex:1;position:relative;overflow:hidden}
-.footer-wrap{flex-shrink:0;background:var(--surface);border-top:1px solid var(--border);padding:14px 28px}
-.footer-inner{max-width:1600px;margin:0 auto}
+html {
+  font-size: 15px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
 
-/* =====================================================================
+body {
+  font-family: var(--font-sans);
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.5;
+  min-height: 100vh;
+}
+
+/* ===================================================================
+   Layout
+   =================================================================== */
+.container {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 32px 24px 64px;
+}
+
+/* ===================================================================
    Header
-   ===================================================================== */
-.hdr-top{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:10px}
-.hdr-title{font-size:1.35rem;font-weight:600;line-height:1.3;max-width:700px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.hdr-id{font-family:var(--font-mono);font-size:.78rem;color:var(--text-muted);margin-top:2px}
-.hdr-controls{display:flex;align-items:center;gap:12px;flex-shrink:0}
+   =================================================================== */
+.header {
+  margin-bottom: 24px;
+}
 
-/* View toggle */
-.view-toggle{display:flex;background:var(--bg);border:1px solid var(--border);border-radius:6px;overflow:hidden}
-.view-toggle button{background:none;border:none;color:var(--text-dim);font-family:var(--font-mono);font-size:.75rem;padding:6px 14px;cursor:pointer;transition:background var(--transition),color var(--transition);text-transform:uppercase;letter-spacing:.04em}
-.view-toggle button:hover{background:var(--surface-hover)}
-.view-toggle button.active{background:var(--blue-dim);color:#fff}
+.header__title {
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 6px;
+  line-height: 1.3;
+}
+
+.header__meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.header__meta-sep {
+  color: var(--border);
+}
 
 /* Badges */
-.badge-row{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:10px}
-.badge{display:inline-flex;align-items:center;gap:4px;font-size:.7rem;font-weight:500;font-family:var(--font-mono);padding:2px 9px;border-radius:20px;text-transform:uppercase;letter-spacing:.03em;white-space:nowrap}
-.badge--risk-low{background:rgba(63,185,80,.12);color:var(--green);border:1px solid rgba(63,185,80,.2)}
-.badge--risk-medium{background:rgba(210,153,34,.12);color:var(--yellow);border:1px solid rgba(210,153,34,.2)}
-.badge--risk-high{background:var(--orange-dim);color:#fff}
-.badge--risk-critical{background:var(--red-dim);color:#fff;animation:badge-critical-pulse 2s ease-in-out infinite}
-@keyframes badge-critical-pulse{0%,100%{box-shadow:0 0 0 0 var(--red-glow)}50%{box-shadow:0 0 8px 2px var(--red-glow)}}
-.badge--budget{background:rgba(88,166,255,.08);color:var(--blue);border:1px solid rgba(88,166,255,.15)}
-.badge--complexity{background:rgba(188,140,255,.08);color:var(--purple);border:1px solid rgba(188,140,255,.15)}
-.badge--stack{background:rgba(121,192,255,.08);color:var(--cyan);border:1px solid rgba(121,192,255,.15)}
-.badge--type{background:rgba(139,148,158,.08);color:var(--text-dim);border:1px solid rgba(139,148,158,.12)}
-.badge--source{background:rgba(139,148,158,.06);color:var(--text-muted);border:1px solid rgba(139,148,158,.1)}
-.badge--mode{background:rgba(63,185,80,.06);color:var(--green);border:1px solid rgba(63,185,80,.12)}
-
-/* Progress bar */
-.progress-row{display:flex;align-items:center;gap:14px}
-.progress-pct{font-family:var(--font-mono);font-size:1.1rem;font-weight:700;flex-shrink:0;min-width:52px}
-.progress-track{flex:1;height:6px;background:var(--border-subtle);border-radius:3px;overflow:hidden;position:relative}
-.progress-fill{height:100%;border-radius:3px;transition:width 600ms cubic-bezier(.22,1,.36,1);position:relative}
-.progress-fill--running{background:linear-gradient(90deg,var(--blue-dim),var(--blue));animation:bar-shimmer 2s linear infinite}
-.progress-fill--complete{background:linear-gradient(90deg,var(--green-dim),var(--green))}
-.progress-fill--failed{background:linear-gradient(90deg,var(--red-dim),var(--red))}
-.progress-fill--pending{background:var(--gray)}
-@keyframes bar-shimmer{0%{background-position:-200% 0}100%{background-position:200% 0}}
-.progress-fill--running{background-size:200% 100%;background-image:linear-gradient(90deg,var(--blue-dim),var(--blue),var(--blue-dim))}
-
-.metrics-row{display:flex;gap:18px;font-family:var(--font-mono);font-size:.73rem;color:var(--text-dim);margin-top:6px;flex-wrap:wrap;align-items:center}
-.metrics-row .val{color:var(--text);font-weight:600}
-.metrics-row .lbl{color:var(--text-muted);margin-left:3px}
-.exec-status{display:inline-flex;align-items:center;gap:5px;margin-left:auto}
-
-/* Status dots */
-.dot{display:inline-block;width:7px;height:7px;border-radius:50%;flex-shrink:0}
-.dot--pending{background:var(--gray)}
-.dot--running{background:var(--blue);animation:dot-breathe 1.8s ease-in-out infinite}
-.dot--complete{background:var(--green)}
-.dot--failed{background:var(--red)}
-.dot--skipped{background:var(--text-muted)}
-.dot--interrupted{background:var(--orange)}
-.dot--interacting{background:var(--purple);animation:dot-breathe 1.8s ease-in-out infinite}
-.dot--gate_pending{background:var(--yellow);animation:dot-breathe 1.8s ease-in-out infinite}
-.dot--passed{background:var(--green)}
-.dot--not_started{background:var(--gray)}
-@keyframes dot-breathe{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.45;transform:scale(.8)}}
-
-/* =====================================================================
-   DAG View
-   ===================================================================== */
-.dag-viewport{width:100%;height:100%;overflow:auto;cursor:grab;position:absolute;inset:0}
-.dag-viewport.grabbing{cursor:grabbing}
-.dag-canvas{position:relative;transform-origin:0 0}
-.dag-svg{position:absolute;top:0;left:0;pointer-events:none;overflow:visible}
-.dag-svg .edge-path{fill:none;stroke-width:2;stroke-linecap:round;transition:opacity .2s}
-.dag-svg .edge-path--critical{stroke-width:3.5}
-.dag-svg .edge-particle{r:3;opacity:.9}
-.dag-svg .edge-label{font-family:var(--font-mono);font-size:10px;fill:var(--text-muted);pointer-events:auto;cursor:default}
-.dag-dimmed .edge-path{opacity:.08}
-.dag-dimmed .dag-node{opacity:.15}
-.dag-dimmed .dag-gate{opacity:.15}
-.dag-dimmed .dag-phase-lane{opacity:.3}
-.dag-dimmed .edge-path.hl,.dag-dimmed .dag-node.hl,.dag-dimmed .dag-gate.hl{opacity:1}
-
-/* Phase lanes */
-.dag-phase-lane{position:absolute;border-radius:var(--radius-lg);border:1px solid var(--border-subtle);transition:opacity .2s}
-.dag-phase-label{position:absolute;font-family:var(--font-mono);font-size:.7rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);writing-mode:vertical-rl;transform:rotate(180deg);padding:8px 0}
-
-/* Nodes */
-.dag-node{position:absolute;background:var(--card);border:1px solid var(--border);border-radius:var(--radius);cursor:pointer;transition:box-shadow .2s,opacity .2s,border-color .2s,transform .2s;overflow:hidden;display:flex;flex-direction:column}
-.dag-node:hover{border-color:var(--blue);transform:translateY(-1px)}
-.dag-node--running{box-shadow:0 0 12px var(--blue-glow);animation:node-pulse 2.5s ease-in-out infinite}
-.dag-node--complete{border-color:var(--green-dim)}
-.dag-node--failed{border-color:var(--red-dim);box-shadow:0 0 10px var(--red-glow)}
-@keyframes node-pulse{0%,100%{box-shadow:0 0 12px var(--blue-glow)}50%{box-shadow:0 0 24px var(--blue-glow)}}
-
-.node-top{display:flex;align-items:center;gap:6px;padding:8px 10px 4px;flex-wrap:wrap}
-.node-id{font-family:var(--font-mono);font-size:.68rem;font-weight:600;color:var(--text-muted);background:var(--bg);padding:1px 6px;border-radius:3px}
-.node-agent{font-size:.82rem;font-weight:600;color:var(--cyan);flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.node-model{font-family:var(--font-mono);font-size:.6rem;color:var(--text-muted);background:rgba(139,148,158,.08);padding:1px 5px;border-radius:3px}
-.node-status-row{display:flex;align-items:center;gap:5px;padding:0 10px 4px;font-family:var(--font-mono);font-size:.65rem;text-transform:uppercase;letter-spacing:.03em}
-.node-badges{display:flex;gap:4px;padding:0 10px 6px;flex-wrap:wrap}
-.node-type-badge{font-family:var(--font-mono);font-size:.6rem;padding:1px 6px;border-radius:3px;background:rgba(139,148,158,.08);color:var(--text-muted)}
-.node-parallel-badge{font-family:var(--font-mono);font-size:.6rem;padding:1px 6px;border-radius:3px;background:rgba(188,140,255,.12);color:var(--purple);font-weight:600}
-.node-metrics{display:flex;gap:8px;padding:4px 10px 6px;font-family:var(--font-mono);font-size:.6rem;color:var(--text-muted);border-top:1px solid var(--border-subtle);margin-top:auto}
-.node-metrics .val{color:var(--text-dim)}
-
-/* Team chips inside node */
-.node-team{padding:4px 10px 6px;display:flex;flex-wrap:wrap;gap:3px;border-top:1px solid var(--border-subtle)}
-.team-chip{display:inline-flex;align-items:center;gap:3px;font-size:.6rem;font-family:var(--font-mono);padding:2px 6px;border-radius:3px;background:var(--bg);border:1px solid var(--border-subtle)}
-.team-chip .role{color:var(--text-muted);text-transform:uppercase;font-size:.55rem;letter-spacing:.02em}
-.team-chip .name{color:var(--cyan)}
-
-/* Gate diamonds in DAG */
-.dag-gate{position:absolute;cursor:default;transition:opacity .2s}
-.gate-diamond{width:28px;height:28px;transform:rotate(45deg);border-radius:4px;border:2px solid var(--border);display:flex;align-items:center;justify-content:center;transition:border-color .2s,box-shadow .2s}
-.gate-diamond--passed{background:rgba(63,185,80,.15);border-color:var(--green)}
-.gate-diamond--failed{background:rgba(248,81,73,.15);border-color:var(--red)}
-.gate-diamond--pending{background:rgba(139,148,158,.06);border-style:dashed;border-color:var(--gray)}
-.gate-label{position:absolute;top:34px;left:50%;transform:translateX(-50%);font-family:var(--font-mono);font-size:.58rem;text-transform:uppercase;letter-spacing:.04em;color:var(--text-muted);white-space:nowrap}
-
-/* Node detail panel */
-.node-detail-overlay{display:none;position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.5);backdrop-filter:blur(2px);animation:fade-in .15s ease}
-.node-detail-overlay.open{display:flex;align-items:center;justify-content:center}
-@keyframes fade-in{from{opacity:0}to{opacity:1}}
-.node-detail{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);max-width:560px;width:90%;max-height:80vh;overflow-y:auto;padding:24px;box-shadow:0 8px 32px rgba(0,0,0,.6);animation:slide-up .2s ease}
-@keyframes slide-up{from{transform:translateY(12px);opacity:0}to{transform:translateY(0);opacity:1}}
-.node-detail h3{font-size:1rem;margin-bottom:4px;color:var(--cyan)}
-.node-detail .detail-id{font-family:var(--font-mono);font-size:.75rem;color:var(--text-muted);margin-bottom:12px}
-.detail-section{margin-bottom:14px}
-.detail-section-label{font-family:var(--font-mono);font-size:.68rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px}
-.detail-text{font-size:.85rem;color:var(--text-dim);line-height:1.5}
-.detail-file{font-family:var(--font-mono);font-size:.75rem;color:var(--cyan);padding:2px 0}
-.detail-error{font-family:var(--font-mono);font-size:.78rem;color:var(--red);background:rgba(248,81,73,.06);padding:8px 10px;border-radius:var(--radius-sm);border:1px solid rgba(248,81,73,.15)}
-.detail-close{position:absolute;top:16px;right:16px;background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:1.2rem;line-height:1}
-.detail-metrics-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
-.detail-metric{background:var(--bg);border-radius:var(--radius-sm);padding:8px 10px;text-align:center}
-.detail-metric .val{font-family:var(--font-mono);font-size:1rem;font-weight:700;color:var(--text)}
-.detail-metric .lbl{font-family:var(--font-mono);font-size:.65rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.04em}
-
-/* Edge tooltip */
-.edge-tooltip{display:none;position:fixed;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:4px 10px;font-family:var(--font-mono);font-size:.7rem;color:var(--text-dim);z-index:150;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,.4);white-space:nowrap}
-
-/* =====================================================================
-   Timeline View (improved from original)
-   ===================================================================== */
-.timeline-container{max-width:960px;margin:0 auto;padding:24px 24px 48px}
-.timeline-phases{display:flex;flex-direction:column;gap:12px}
-.tl-phase{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden}
-.tl-phase[open]>.tl-phase-hdr{border-bottom:1px solid var(--border-subtle)}
-.tl-phase-hdr{display:flex;align-items:center;gap:10px;padding:14px 20px;cursor:pointer;user-select:none;list-style:none;transition:background var(--transition)}
-.tl-phase-hdr:hover{background:var(--surface-hover)}
-.tl-phase-hdr::-webkit-details-marker,.tl-phase-hdr::marker{display:none;content:''}
-.tl-chevron{width:16px;height:16px;color:var(--text-muted);transition:transform var(--transition);flex-shrink:0}
-.tl-phase[open]>.tl-phase-hdr .tl-chevron{transform:rotate(90deg)}
-.tl-phase-num{font-size:.73rem;font-family:var(--font-mono);color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em;flex-shrink:0}
-.tl-phase-name{font-size:.93rem;font-weight:600;flex:1;min-width:0}
-.tl-phase-status{font-size:.73rem;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.04em;flex-shrink:0}
-.tl-body{padding:12px 20px 16px}
-.tl-steps{display:flex;flex-direction:column;gap:8px}
-.tl-step{background:var(--bg);border:1px solid var(--border-subtle);border-left:4px solid var(--gray);border-radius:var(--radius-sm);padding:12px 16px;transition:border-color var(--transition),background var(--transition)}
-.tl-step:hover{background:var(--surface-hover)}
-.tl-step--running{border-left-color:var(--blue)}
-.tl-step--complete{border-left-color:var(--green)}
-.tl-step--failed{border-left-color:var(--red)}
-.tl-step--skipped{border-left-color:var(--text-muted)}
-.tl-step--interrupted{border-left-color:var(--orange)}
-.tl-step--interacting{border-left-color:var(--purple)}
-.tl-step-hdr{display:flex;align-items:center;gap:8px;margin-bottom:4px;flex-wrap:wrap}
-.tl-step-id{font-family:var(--font-mono);font-size:.78rem;font-weight:600;color:var(--text-dim);flex-shrink:0}
-.tl-step-agent{font-size:.85rem;font-weight:600;color:var(--cyan)}
-.tl-step-model{font-family:var(--font-mono);font-size:.7rem;color:var(--text-muted);background:rgba(139,148,158,.08);padding:1px 6px;border-radius:3px;flex-shrink:0}
-.tl-step-status{display:inline-flex;align-items:center;gap:4px;font-family:var(--font-mono);font-size:.7rem;text-transform:uppercase;letter-spacing:.04em;margin-left:auto;flex-shrink:0}
-.tl-step-desc{font-size:.82rem;color:var(--text-dim);line-height:1.45;margin-bottom:6px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.tl-step-meta{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
-.tl-tag{font-size:.7rem;font-family:var(--font-mono);color:var(--text-muted);background:rgba(139,148,158,.06);padding:2px 8px;border-radius:3px}
-.tl-tag--parallel{color:var(--purple);background:rgba(188,140,255,.1)}
-.tl-step-metrics{display:flex;gap:14px;margin-top:6px;font-family:var(--font-mono);font-size:.7rem;color:var(--text-muted)}
-.tl-step-metrics .val{color:var(--text-dim)}
-.tl-step-error{margin-top:6px;font-size:.78rem;color:var(--red);font-family:var(--font-mono);background:rgba(248,81,73,.06);padding:6px 10px;border-radius:var(--radius-sm);border:1px solid rgba(248,81,73,.15)}
-.tl-team{margin-top:8px;margin-left:12px;padding-left:14px;border-left:2px solid var(--border)}
-.tl-team-member{display:flex;align-items:center;gap:8px;padding:6px 0;font-size:.8rem;flex-wrap:wrap}
-.tl-team-member+.tl-team-member{border-top:1px solid var(--border-subtle)}
-.tl-team-member-id{font-family:var(--font-mono);font-size:.72rem;color:var(--text-muted);flex-shrink:0}
-.tl-team-member-agent{font-weight:600;color:var(--cyan)}
-.tl-team-member-role{font-family:var(--font-mono);font-size:.68rem;color:var(--text-muted);background:rgba(139,148,158,.08);padding:1px 6px;border-radius:3px;text-transform:uppercase}
-.tl-team-member-desc{font-size:.78rem;color:var(--text-dim);flex-basis:100%;display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden}
-.tl-gate{margin-top:12px;padding:10px 14px;background:rgba(139,148,158,.04);border:1px solid var(--border-subtle);border-radius:var(--radius-sm);display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.tl-gate-icon{width:16px;height:16px;flex-shrink:0}
-.tl-gate-icon--pending{color:var(--text-muted)}
-.tl-gate-icon--passed{color:var(--green)}
-.tl-gate-icon--failed{color:var(--red)}
-.tl-gate-type{font-family:var(--font-mono);font-size:.73rem;font-weight:600;text-transform:uppercase;letter-spacing:.04em;color:var(--text-dim)}
-.tl-gate-desc{font-size:.78rem;color:var(--text-dim);flex:1}
-.tl-gate-status{font-family:var(--font-mono);font-size:.7rem;text-transform:uppercase;letter-spacing:.04em}
-.tl-gate-status--pending{color:var(--text-muted)}
-.tl-gate-status--passed{color:var(--green)}
-.tl-gate-status--failed{color:var(--red)}
-.tl-gate-cmd{flex-basis:100%;font-family:var(--font-mono);font-size:.7rem;color:var(--text-muted);margin-top:2px}
-
-/* =====================================================================
-   Footer
-   ===================================================================== */
-.footer-row{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap}
-.footer-label{font-size:.7rem;color:var(--text-muted);font-weight:500;text-transform:uppercase;letter-spacing:.04em;margin-bottom:5px}
-.footer-agents{display:flex;flex-wrap:wrap;gap:4px}
-.agent-chip{font-family:var(--font-mono);font-size:.68rem;color:var(--cyan);background:rgba(121,192,255,.06);padding:2px 9px;border-radius:20px;border:1px solid rgba(121,192,255,.1)}
-.footer-meta{text-align:right;font-family:var(--font-mono);font-size:.72rem;color:var(--text-muted)}
-.footer-meta a{color:var(--cyan);text-decoration:none}
-.footer-meta a:hover{text-decoration:underline}
-
-/* =====================================================================
-   Responsive
-   ===================================================================== */
-@media(max-width:768px){
-  .dag-viewport{display:none!important}
-  .timeline-container{display:block!important}
-  .view-toggle{display:none!important}
-  .header-inner{padding:12px 14px}
-  .hdr-title{font-size:1.1rem}
-  .metrics-row{gap:10px}
-  .tl-step-status{margin-left:0;flex-basis:100%;margin-top:2px}
-  .footer-row{flex-direction:column}
-  .footer-meta{text-align:left}
+.badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 4px;
 }
-@media(min-width:769px) and (max-width:1200px){
-  .dag-node{min-width:150px!important}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.73rem;
+  font-weight: 500;
+  font-family: var(--font-mono);
+  padding: 3px 10px;
+  border-radius: 20px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+
+.badge--risk-low     { background: rgba(63,185,80,.15); color: var(--green); }
+.badge--risk-medium  { background: rgba(210,153,34,.15); color: var(--yellow); }
+.badge--risk-high    { background: rgba(240,136,62,.15); color: var(--orange); }
+.badge--risk-critical{ background: rgba(248,81,73,.15);  color: var(--red); }
+
+.badge--budget       { background: rgba(88,166,255,.1);  color: var(--blue); }
+.badge--complexity   { background: rgba(188,140,255,.1); color: var(--purple); }
+.badge--stack        { background: rgba(121,192,255,.1); color: var(--cyan); }
+.badge--type         { background: rgba(139,148,158,.12);color: var(--text-dim); }
+.badge--source       { background: rgba(139,148,158,.08);color: var(--text-muted); }
+.badge--mode         { background: rgba(63,185,80,.08);  color: var(--green); border: 1px solid rgba(63,185,80,.15); }
+
+/* ===================================================================
+   Progress bar
+   =================================================================== */
+.progress-section {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 20px;
+  margin-bottom: 24px;
+}
+
+.progress-stats {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.progress-stats__pct {
+  font-size: 1.6rem;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  color: var(--text);
+}
+
+.progress-stats__detail {
+  display: flex;
+  gap: 16px;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  flex-wrap: wrap;
+}
+
+.progress-stats__detail span {
+  white-space: nowrap;
+}
+
+.progress-stats__label {
+  color: var(--text-muted);
+}
+
+.progress-bar {
+  height: 8px;
+  background: var(--border-subtle);
+  border-radius: 4px;
+  overflow: hidden;
+  position: relative;
+}
+
+.progress-bar__fill {
+  height: 100%;
+  border-radius: 4px;
+  background: linear-gradient(90deg, var(--blue-dim), var(--blue));
+  transition: width 600ms cubic-bezier(.22,1,.36,1);
+  position: relative;
+}
+
+.progress-bar__fill--complete {
+  background: linear-gradient(90deg, var(--green-dim), var(--green));
+}
+
+.progress-bar__fill--failed {
+  background: linear-gradient(90deg, var(--red-dim), var(--red));
+}
+
+.progress-bar__fill--running {
+  animation: progress-pulse 2s ease-in-out infinite;
+}
+
+@keyframes progress-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+/* Execution status badge beneath progress */
+.execution-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  font-size: 0.78rem;
+  font-weight: 500;
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* ===================================================================
+   Status indicators (dots)
+   =================================================================== */
+.status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.status-dot--pending    { background: var(--gray); }
+.status-dot--running    { background: var(--blue); animation: dot-pulse 1.5s ease-in-out infinite; }
+.status-dot--complete   { background: var(--green); }
+.status-dot--failed     { background: var(--red); }
+.status-dot--skipped    { background: var(--text-muted); }
+.status-dot--interrupted{ background: var(--orange); }
+.status-dot--interacting{ background: var(--purple); animation: dot-pulse 1.5s ease-in-out infinite; }
+.status-dot--gate_pending { background: var(--yellow); animation: dot-pulse 1.5s ease-in-out infinite; }
+
+@keyframes dot-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.85); }
+}
+
+/* ===================================================================
+   Phases
+   =================================================================== */
+.phases {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.phase {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.phase[open] > .phase__header {
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.phase__header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 20px;
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  transition: background var(--transition);
+}
+
+.phase__header:hover {
+  background: var(--surface-hover);
+}
+
+/* Remove default marker */
+.phase__header::-webkit-details-marker,
+.phase__header::marker {
+  display: none;
+  content: '';
+}
+
+.phase__chevron {
+  width: 16px;
+  height: 16px;
+  color: var(--text-muted);
+  transition: transform var(--transition);
+  flex-shrink: 0;
+}
+
+.phase[open] > .phase__header .phase__chevron {
+  transform: rotate(90deg);
+}
+
+.phase__label {
+  font-size: 0.73rem;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  flex-shrink: 0;
+}
+
+.phase__name {
+  font-size: 0.93rem;
+  font-weight: 600;
+  color: var(--text);
+  flex: 1;
+  min-width: 0;
+}
+
+.phase__status-text {
+  font-size: 0.73rem;
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  flex-shrink: 0;
+}
+
+.phase__status-text--pending     { color: var(--text-muted); }
+.phase__status-text--running     { color: var(--blue); }
+.phase__status-text--complete    { color: var(--green); }
+.phase__status-text--failed      { color: var(--red); }
+.phase__status-text--gate_pending { color: var(--yellow); }
+
+.phase__body {
+  padding: 12px 20px 16px;
+}
+
+/* ===================================================================
+   Step cards
+   =================================================================== */
+.steps {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.step {
+  background: var(--bg);
+  border: 1px solid var(--border-subtle);
+  border-left: 4px solid var(--gray);
+  border-radius: var(--radius-sm);
+  padding: 12px 16px;
+  transition: border-color var(--transition), background var(--transition);
+}
+
+.step:hover {
+  background: var(--surface-hover);
+}
+
+.step--pending     { border-left-color: var(--gray); }
+.step--running     { border-left-color: var(--blue); }
+.step--complete    { border-left-color: var(--green); }
+.step--failed      { border-left-color: var(--red); }
+.step--skipped     { border-left-color: var(--text-muted); }
+.step--interrupted { border-left-color: var(--orange); }
+.step--interacting { border-left-color: var(--purple); }
+
+.step__header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+  flex-wrap: wrap;
+}
+
+.step__id {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+
+.step__agent {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--cyan);
+}
+
+.step__model {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  background: rgba(139,148,158,.08);
+  padding: 1px 6px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.step__status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.step__desc {
+  font-size: 0.82rem;
+  color: var(--text-dim);
+  line-height: 1.45;
+  margin-bottom: 6px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.step__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.step__tag {
+  font-size: 0.7rem;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  background: rgba(139,148,158,.06);
+  padding: 2px 8px;
+  border-radius: 3px;
+}
+
+.step__tag--parallel {
+  color: var(--purple);
+  background: rgba(188,140,255,.1);
+}
+
+.step__tag--depends {
+  color: var(--text-muted);
+}
+
+.step__tag--type {
+  color: var(--text-muted);
+}
+
+/* Step metrics row */
+.step__metrics {
+  display: flex;
+  gap: 14px;
+  margin-top: 6px;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+.step__metric-val {
+  color: var(--text-dim);
+}
+
+/* Error display */
+.step__error {
+  margin-top: 6px;
+  font-size: 0.78rem;
+  color: var(--red);
+  font-family: var(--font-mono);
+  background: rgba(248,81,73,.06);
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(248,81,73,.15);
+}
+
+/* ===================================================================
+   Team members
+   =================================================================== */
+.team {
+  margin-top: 8px;
+  margin-left: 12px;
+  padding-left: 14px;
+  border-left: 2px solid var(--border);
+}
+
+.team__member {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  font-size: 0.8rem;
+  flex-wrap: wrap;
+}
+
+.team__member + .team__member {
+  border-top: 1px solid var(--border-subtle);
+}
+
+.team__member-id {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.team__member-agent {
+  font-weight: 600;
+  color: var(--cyan);
+}
+
+.team__member-role {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  background: rgba(139,148,158,.08);
+  padding: 1px 6px;
+  border-radius: 3px;
+  text-transform: uppercase;
+}
+
+.team__member-desc {
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  flex-basis: 100%;
+  margin-left: 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* ===================================================================
+   Gate bar
+   =================================================================== */
+.gate {
+  margin-top: 12px;
+  padding: 10px 14px;
+  background: rgba(139,148,158,.04);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.gate__icon {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+.gate__icon--pending  { color: var(--text-muted); }
+.gate__icon--passed   { color: var(--green); }
+.gate__icon--failed   { color: var(--red); }
+
+.gate__type {
+  font-family: var(--font-mono);
+  font-size: 0.73rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
+
+.gate__desc {
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  flex: 1;
+}
+
+.gate__status {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.gate__status--pending { color: var(--text-muted); }
+.gate__status--passed  { color: var(--green); }
+.gate__status--failed  { color: var(--red); }
+
+.gate__command {
+  flex-basis: 100%;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+/* ===================================================================
+   Footer
+   =================================================================== */
+.footer {
+  margin-top: 32px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.footer__agents {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.footer__agent-chip {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--cyan);
+  background: rgba(121,192,255,.08);
+  padding: 3px 10px;
+  border-radius: 20px;
+  border: 1px solid rgba(121,192,255,.12);
+}
+
+.footer__label {
+  font-size: 0.73rem;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.footer__amendments {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--text-dim);
+}
+
+/* ===================================================================
+   Responsive
+   =================================================================== */
+@media (max-width: 768px) {
+  .container {
+    padding: 16px 12px 48px;
+  }
+
+  .header__title {
+    font-size: 1.2rem;
+  }
+
+  .progress-stats {
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .progress-stats__detail {
+    gap: 10px;
+  }
+
+  .step__header {
+    gap: 6px;
+  }
+
+  .step__status {
+    margin-left: 0;
+    flex-basis: 100%;
+    margin-top: 2px;
+  }
+
+  .step__desc {
+    -webkit-line-clamp: 3;
+  }
+
+  .footer {
+    flex-direction: column;
+  }
+
+  .gate {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+  }
+}
+
+/* ===================================================================
+   Header toolbar (Export, Copy, Attention toggle)
+   =================================================================== */
+.header__toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.toolbar-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-weight: 500;
+  color: var(--text-dim);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 5px 10px;
+  cursor: pointer;
+  transition: background var(--transition), border-color var(--transition), color var(--transition);
+  white-space: nowrap;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.toolbar-btn:hover {
+  background: var(--surface-hover);
+  border-color: var(--text-muted);
+  color: var(--text);
+}
+
+.toolbar-btn:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 1px;
+}
+
+.toolbar-btn--attention {
+  position: relative;
+}
+
+.toolbar-btn--attention.active {
+  background: rgba(210,153,34,.15);
+  border-color: var(--yellow);
+  color: var(--yellow);
+}
+
+.toolbar-btn__badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  font-size: 0.6rem;
+  font-weight: 700;
+  background: var(--yellow);
+  color: var(--bg);
+  border-radius: 8px;
+  padding: 0 4px;
+}
+
+.toolbar-sep {
+  width: 1px;
+  height: 20px;
+  background: var(--border);
+  flex-shrink: 0;
+}
+
+/* Copied-feedback toast */
+.copy-toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%) translateY(60px);
+  background: var(--green-dim);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  padding: 8px 18px;
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  opacity: 0;
+  transition: opacity 200ms ease, transform 200ms ease;
+  pointer-events: none;
+  z-index: 9999;
+}
+
+.copy-toast.visible {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+/* ===================================================================
+   Attention filter
+   =================================================================== */
+.attention-clear {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 24px;
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  color: var(--green);
+  background: rgba(63,185,80,.06);
+  border: 1px solid rgba(63,185,80,.15);
+  border-radius: var(--radius);
+  margin: 16px 0;
+}
+
+/* Attention-dimmed items */
+.attention-active .phase {
+  opacity: 0.2;
+  transition: opacity var(--transition);
+}
+
+.attention-active .phase.attention-hit {
+  opacity: 1;
+}
+
+.attention-active .step {
+  opacity: 0.2;
+  transition: opacity var(--transition);
+}
+
+.attention-active .step.attention-hit {
+  opacity: 1;
+}
+
+/* Attention glow effects */
+.step.attention-failed {
+  box-shadow: 0 0 8px 2px rgba(248,81,73,.3);
+}
+
+.step.attention-long-running {
+  border-left-color: var(--yellow) !important;
+  box-shadow: 0 0 8px 2px rgba(210,153,34,.25);
+}
+
+.step.attention-error {
+  box-shadow: 0 0 8px 2px rgba(248,81,73,.2);
+}
+
+.gate.attention-gate-failed {
+  box-shadow: 0 0 8px 2px rgba(248,81,73,.3);
+  border-color: var(--red);
+}
+
+/* ===================================================================
+   Per-step cost indicator
+   =================================================================== */
+.step__cost-flag {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  font-weight: 600;
+  color: var(--orange);
+  background: rgba(240,136,62,.1);
+  padding: 1px 6px;
+  border-radius: 3px;
+  margin-left: 4px;
+}
+
+.step--expensive {
+  border-right: 3px solid var(--orange);
+}
+
+/* ===================================================================
+   Print summary card
+   =================================================================== */
+.print-summary {
+  display: none;
+}
+
+@media print {
+  body, html {
+    background: #fff !important;
+    color: #111 !important;
+  }
+  .container > *:not(.print-summary) {
+    display: none !important;
+  }
+  .print-summary {
+    display: block !important;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    color: #111;
+    background: #fff;
+    padding: 32px;
+    max-width: 640px;
+    margin: 0 auto;
+  }
+  .print-summary__title {
+    font-size: 1.3rem;
+    font-weight: 700;
+    margin-bottom: 6px;
+    color: #111;
+    line-height: 1.3;
+  }
+  .print-summary__status {
+    display: inline-block;
+    font-family: ui-monospace, monospace;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 3px 12px;
+    border-radius: 12px;
+    margin-bottom: 16px;
+  }
+  .print-summary__status--running {
+    background: #dbeafe;
+    color: #1d4ed8;
+  }
+  .print-summary__status--complete {
+    background: #dcfce7;
+    color: #166534;
+  }
+  .print-summary__status--failed {
+    background: #fee2e2;
+    color: #991b1b;
+  }
+  .print-summary__grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 12px 20px;
+    margin: 16px 0;
+    padding: 14px 0;
+    border-top: 1px solid #e5e7eb;
+    border-bottom: 1px solid #e5e7eb;
+  }
+  .print-summary__metric {
+    text-align: center;
+  }
+  .print-summary__metric-label {
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #6b7280;
+    margin-bottom: 2px;
+  }
+  .print-summary__metric-value {
+    font-family: ui-monospace, monospace;
+    font-size: 1rem;
+    font-weight: 700;
+    color: #111;
+  }
+  .print-summary__outcome {
+    font-size: 0.82rem;
+    color: #374151;
+    margin: 12px 0;
+    line-height: 1.5;
+  }
+  .print-summary__date {
+    font-size: 0.7rem;
+    color: #9ca3af;
+    margin-top: 12px;
+  }
+  .print-summary__footer {
+    font-size: 0.65rem;
+    color: #9ca3af;
+    margin-top: 20px;
+    padding-top: 12px;
+    border-top: 1px solid #e5e7eb;
+    text-align: center;
+    letter-spacing: 0.03em;
+  }
+}
+
+/* ===================================================================
+   Utilities
+   =================================================================== */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0,0,0,0);
+  border: 0;
 }
 </style>
 </head>
 <body>
 <script>window.__BATON_PLAN__ = __BATON_PLAN_DATA__;</script>
 
-<div class="shell" id="app">
-  <!-- Populated by script -->
-</div>
-
-<!-- Detail overlay (reused) -->
-<div class="node-detail-overlay" id="detailOverlay" role="dialog" aria-modal="true" aria-label="Step details">
-  <div class="node-detail" id="detailPanel"></div>
-</div>
-<div class="edge-tooltip" id="edgeTooltip"></div>
+<main class="container" id="app" role="main" aria-label="Execution Plan Visualization">
+  <!-- Populated by script below -->
+</main>
 
 <script>
-(function(){
-'use strict';
+(function() {
+  'use strict';
 
-var P = window.__BATON_PLAN__;
-if(!P){document.getElementById('app').textContent='No plan data found.';return;}
+  var P = window.__BATON_PLAN__;
+  if (!P) { document.getElementById('app').textContent = 'No plan data found.'; return; }
 
-/* -----------------------------------------------------------------
-   Helpers
-   ----------------------------------------------------------------- */
-function esc(s){if(s==null)return '';var d=document.createElement('div');d.appendChild(document.createTextNode(String(s)));return d.innerHTML;}
-function truncate(s,n){if(!s)return '';return s.length>n?s.slice(0,n)+'...':s;}
-function fmtDur(sec){if(!sec||sec<=0)return '--';if(sec<60)return sec.toFixed(1)+'s';var m=Math.floor(sec/60),s2=Math.round(sec%60);if(m<60)return m+'m '+s2+'s';var h=Math.floor(m/60);m=m%60;return h+'h '+m+'m';}
-function fmtTok(n){if(!n)return '0';if(n>=1e6)return(n/1e6).toFixed(1)+'M';if(n>=1e3)return(n/1e3).toFixed(1)+'K';return String(n);}
-function fmtCost(u){if(!u)return '$0.00';return '$'+u.toFixed(2);}
-function fmtDate(iso){if(!iso)return '--';try{var d=new Date(iso);return d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})+' '+d.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'});}catch(e){return iso;}}
-function statusColor(s){var m={'pending':'var(--gray)','running':'var(--blue)','complete':'var(--green)','failed':'var(--red)','skipped':'var(--text-muted)','interrupted':'var(--orange)','interacting':'var(--purple)','gate_pending':'var(--yellow)','not_started':'var(--gray)','passed':'var(--green)'};return m[s]||'var(--text-dim)';}
-function statusHex(s){var m={'pending':'#484f58','running':'#58a6ff','complete':'#3fb950','failed':'#f85149','skipped':'#656d76','interrupted':'#f0883e','interacting':'#bc8cff','gate_pending':'#d29922','not_started':'#484f58','passed':'#3fb950'};return m[s]||'#8b949e';}
-
-var chevronSvg='<svg class="tl-chevron" viewBox="0 0 16 16" fill="currentColor"><path d="M6.22 3.22a.75.75 0 0 1 1.06 0l4.25 4.25a.75.75 0 0 1 0 1.06l-4.25 4.25a.75.75 0 0 1-1.06-1.06L9.94 8 6.22 4.28a.75.75 0 0 1 0-1.06z"/></svg>';
-function gateIconSvg(status,cls){
-  cls=cls||'tl-gate-icon';
-  if(status==='passed')return '<svg class="'+cls+' '+cls+'--passed" viewBox="0 0 16 16" fill="currentColor"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 0 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0z"/></svg>';
-  if(status==='failed')return '<svg class="'+cls+' '+cls+'--failed" viewBox="0 0 16 16" fill="currentColor"><path d="M3.72 3.72a.75.75 0 0 1 1.06 0L8 6.94l3.22-3.22a.75.75 0 1 1 1.06 1.06L9.06 8l3.22 3.22a.75.75 0 1 1-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 0 1-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 0 1 0-1.06z"/></svg>';
-  return '<svg class="'+cls+' '+cls+'--pending" viewBox="0 0 16 16" fill="currentColor"><path d="M8 4a4 4 0 1 0 0 8 4 4 0 0 0 0-8zM2 8a6 6 0 1 1 12 0A6 6 0 0 1 2 8z"/><path d="M8 6.5a.75.75 0 0 1 .75.75v1.5l1.14.68a.75.75 0 1 1-.78 1.28l-1.5-.9A.75.75 0 0 1 7.25 9V7.25A.75.75 0 0 1 8 6.5z"/></svg>';
-}
-
-/* -----------------------------------------------------------------
-   Build all steps map & adjacency
-   ----------------------------------------------------------------- */
-var phases=P.phases||[];
-var allSteps=[];
-var stepMap={};
-var phaseOfStep={};
-phases.forEach(function(ph){
-  (ph.steps||[]).forEach(function(st){
-    allSteps.push(st);
-    stepMap[st.step_id]=st;
-    phaseOfStep[st.step_id]=ph.phase_id;
-  });
-});
-
-/* Adjacency: child -> parents, parent -> children */
-var parents={};var children={};
-allSteps.forEach(function(st){
-  parents[st.step_id]=st.depends_on||[];
-  if(!children[st.step_id])children[st.step_id]=[];
-  (st.depends_on||[]).forEach(function(dep){
-    if(!children[dep])children[dep]=[];
-    children[dep].push(st.step_id);
-  });
-});
-
-/* -----------------------------------------------------------------
-   Shared header HTML
-   ----------------------------------------------------------------- */
-function buildHeader(){
-  var h='';
-  h+='<div class="header-wrap"><div class="header-inner">';
-  h+='<div class="hdr-top">';
-  h+='<div><div class="hdr-title">'+esc(P.task_summary||'Execution Plan')+'</div>';
-  h+='<div class="hdr-id">'+esc(P.task_id||'')+(P.created_at?' &middot; '+esc(fmtDate(P.created_at)):'')+'</div></div>';
-  h+='<div class="hdr-controls">';
-  h+='<div class="view-toggle" role="tablist" aria-label="View mode">';
-  h+='<button id="btnGraph" role="tab" class="active" aria-selected="true" onclick="switchView(\'dag\')">Graph</button>';
-  h+='<button id="btnTimeline" role="tab" aria-selected="false" onclick="switchView(\'timeline\')">Timeline</button>';
-  h+='</div></div></div>';
-
-  /* Badges */
-  h+='<div class="badge-row" role="list" aria-label="Classification">';
-  var rc='badge--risk-'+(P.risk_level||'low').toLowerCase();
-  h+='<span class="badge '+rc+'" role="listitem">Risk: '+esc(P.risk_level||'LOW')+'</span>';
-  h+='<span class="badge badge--budget" role="listitem">Budget: '+esc(P.budget_tier||'standard')+'</span>';
-  h+='<span class="badge badge--complexity" role="listitem">'+esc(P.complexity||'medium')+'</span>';
-  if(P.detected_stack)h+='<span class="badge badge--stack" role="listitem">'+esc(P.detected_stack)+'</span>';
-  if(P.task_type)h+='<span class="badge badge--type" role="listitem">'+esc(P.task_type)+'</span>';
-  if(P.execution_mode)h+='<span class="badge badge--mode" role="listitem">'+esc(P.execution_mode)+'</span>';
-  if(P.classification_source)h+='<span class="badge badge--source" role="listitem">via '+esc(P.classification_source)+'</span>';
-  h+='</div>';
-
-  /* Progress */
-  var pct=P.progress_pct||0;
-  var fc='progress-fill';
-  if(P.execution_status==='complete')fc+=' progress-fill--complete';
-  else if(P.execution_status==='failed')fc+=' progress-fill--failed';
-  else if(P.execution_status==='running')fc+=' progress-fill--running';
-  else fc+=' progress-fill--pending';
-
-  h+='<div class="progress-row">';
-  h+='<span class="progress-pct">'+pct.toFixed(1)+'%</span>';
-  h+='<div class="progress-track" role="progressbar" aria-valuenow="'+pct+'" aria-valuemin="0" aria-valuemax="100">';
-  h+='<div class="'+fc+'" style="width:'+Math.min(pct,100)+'%"></div></div></div>';
-
-  h+='<div class="metrics-row">';
-  h+='<span><span class="val">'+(P.steps_complete||0)+'</span><span class="lbl"> / '+(P.total_steps||0)+' steps</span></span>';
-  h+='<span><span class="val">'+(P.steps_running||0)+'</span><span class="lbl"> running</span></span>';
-  if(P.steps_failed)h+='<span><span class="val" style="color:var(--red)">'+P.steps_failed+'</span><span class="lbl"> failed</span></span>';
-  h+='<span><span class="val">'+fmtDur(P.elapsed_seconds)+'</span><span class="lbl"> elapsed</span></span>';
-  h+='<span><span class="val">'+fmtTok(P.total_tokens)+'</span><span class="lbl"> tokens</span></span>';
-  h+='<span><span class="val">'+fmtCost(P.total_cost_usd)+'</span><span class="lbl"> cost</span></span>';
-  h+='<span class="exec-status"><span class="dot dot--'+esc(P.execution_status||'not_started')+'"></span> '+esc((P.execution_status||'not_started').replace(/_/g,' '))+'</span>';
-  h+='</div>';
-
-  h+='</div></div>';
-  return h;
-}
-
-/* -----------------------------------------------------------------
-   Footer HTML
-   ----------------------------------------------------------------- */
-function buildFooter(){
-  var agents=P.total_agents||[];
-  var h='<div class="footer-wrap"><div class="footer-inner"><div class="footer-row">';
-  h+='<div><div class="footer-label">Agents ('+agents.length+')</div><div class="footer-agents">';
-  agents.forEach(function(a){h+='<span class="agent-chip">'+esc(a)+'</span>';});
-  h+='</div></div>';
-  h+='<div class="footer-meta">';
-  if(P.amendment_count)h+='<div>Amendments: '+P.amendment_count+'</div>';
-  h+='<div style="margin-top:4px">Generated by <strong>Agent Baton</strong></div>';
-  if(P.created_at)h+='<div>'+esc(fmtDate(P.created_at))+'</div>';
-  h+='<div style="margin-top:4px"><a href="#">baton viz</a></div>';
-  h+='</div>';
-  h+='</div></div></div>';
-  return h;
-}
-
-/* -----------------------------------------------------------------
-   DAG Layout Algorithm
-   ----------------------------------------------------------------- */
-function computeDAGLayout(){
-  /* 1. Topological sort (Kahn's) */
-  var inDeg={};
-  allSteps.forEach(function(st){inDeg[st.step_id]=0;});
-  allSteps.forEach(function(st){
-    (st.depends_on||[]).forEach(function(dep){
-      if(inDeg[st.step_id]!==undefined)inDeg[st.step_id]++;
-    });
-  });
-  var queue=[];
-  allSteps.forEach(function(st){if(inDeg[st.step_id]===0)queue.push(st.step_id);});
-  var topoOrder=[];
-  while(queue.length){
-    queue.sort(); /* deterministic */
-    var n=queue.shift();
-    topoOrder.push(n);
-    (children[n]||[]).forEach(function(c){
-      inDeg[c]--;
-      if(inDeg[c]===0)queue.push(c);
-    });
+  // ---------------------------------------------------------------
+  // Helpers
+  // ---------------------------------------------------------------
+  function esc(s) {
+    if (s == null) return '';
+    var d = document.createElement('div');
+    d.appendChild(document.createTextNode(String(s)));
+    return d.innerHTML;
   }
 
-  /* 2. Assign columns: col = max(col of parents) + 1, or 0 if no parents */
-  var col={};
-  topoOrder.forEach(function(sid){
-    var ps=parents[sid]||[];
-    if(!ps.length){col[sid]=0;}
-    else{
-      var mx=0;
-      ps.forEach(function(p){if(col[p]!==undefined&&col[p]>mx)mx=col[p];});
-      col[sid]=mx+1;
+  function truncate(s, n) {
+    if (!s) return '';
+    return s.length > n ? s.slice(0, n) + '...' : s;
+  }
+
+  function formatDuration(sec) {
+    if (!sec || sec <= 0) return '--';
+    if (sec < 60) return sec.toFixed(1) + 's';
+    var m = Math.floor(sec / 60);
+    var s = Math.round(sec % 60);
+    if (m < 60) return m + 'm ' + s + 's';
+    var h = Math.floor(m / 60);
+    m = m % 60;
+    return h + 'h ' + m + 'm';
+  }
+
+  function formatTokens(n) {
+    if (!n) return '0';
+    if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+    if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+    return String(n);
+  }
+
+  function formatCost(usd) {
+    if (!usd) return '$0.00';
+    return '$' + usd.toFixed(2);
+  }
+
+  function formatDate(iso) {
+    if (!iso) return '--';
+    try {
+      var d = new Date(iso);
+      return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) +
+        ' ' + d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+    } catch(e) { return iso; }
+  }
+
+  function statusColor(s) {
+    var map = {
+      'pending': 'var(--text-muted)', 'running': 'var(--blue)',
+      'complete': 'var(--green)', 'failed': 'var(--red)',
+      'skipped': 'var(--text-muted)', 'interrupted': 'var(--orange)',
+      'interacting': 'var(--purple)', 'gate_pending': 'var(--yellow)',
+      'not_started': 'var(--text-muted)', 'cancelled': 'var(--orange)'
+    };
+    return map[s] || 'var(--text-dim)';
+  }
+
+  // SVG icons as strings
+  var chevronSvg = '<svg class="phase__chevron" viewBox="0 0 16 16" fill="currentColor"><path d="M6.22 3.22a.75.75 0 0 1 1.06 0l4.25 4.25a.75.75 0 0 1 0 1.06l-4.25 4.25a.75.75 0 0 1-1.06-1.06L9.94 8 6.22 4.28a.75.75 0 0 1 0-1.06z"/></svg>';
+
+  function gateIconSvg(status) {
+    if (status === 'passed') {
+      return '<svg class="gate__icon gate__icon--passed" viewBox="0 0 16 16" fill="currentColor"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 0 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0z"/></svg>';
+    }
+    if (status === 'failed') {
+      return '<svg class="gate__icon gate__icon--failed" viewBox="0 0 16 16" fill="currentColor"><path d="M3.72 3.72a.75.75 0 0 1 1.06 0L8 6.94l3.22-3.22a.75.75 0 1 1 1.06 1.06L9.06 8l3.22 3.22a.75.75 0 1 1-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 0 1-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 0 1 0-1.06z"/></svg>';
+    }
+    return '<svg class="gate__icon gate__icon--pending" viewBox="0 0 16 16" fill="currentColor"><path d="M8 4a4 4 0 1 0 0 8 4 4 0 0 0 0-8zM2 8a6 6 0 1 1 12 0A6 6 0 0 1 2 8z"/><path d="M8 6.5a.75.75 0 0 1 .75.75v1.5l1.14.68a.75.75 0 1 1-.78 1.28l-1.5-.9A.75.75 0 0 1 7.25 9V7.25A.75.75 0 0 1 8 6.5z"/></svg>';
+  }
+
+  // ---------------------------------------------------------------
+  // Build HTML
+  // ---------------------------------------------------------------
+  var html = '';
+
+  // -- Header --
+  html += '<header class="header">';
+  html +=   '<h1 class="header__title">' + esc(P.task_summary || 'Execution Plan') + '</h1>';
+  html +=   '<div class="header__meta">';
+  html +=     '<span>' + esc(P.task_id) + '</span>';
+  if (P.created_at) {
+    html +=   '<span class="header__meta-sep" aria-hidden="true">/</span>';
+    html +=   '<span>' + esc(formatDate(P.created_at)) + '</span>';
+  }
+  html +=   '</div>';
+
+  // Badges
+  html +=   '<div class="badges" role="list" aria-label="Classification badges">';
+
+  var riskClass = 'badge--risk-' + (P.risk_level || 'low').toLowerCase();
+  html +=     '<span class="badge ' + riskClass + '" role="listitem">Risk: ' + esc(P.risk_level || 'LOW') + '</span>';
+  html +=     '<span class="badge badge--budget" role="listitem">Budget: ' + esc(P.budget_tier || 'standard') + '</span>';
+  html +=     '<span class="badge badge--complexity" role="listitem">Complexity: ' + esc(P.complexity || 'medium') + '</span>';
+
+  if (P.detected_stack) {
+    html +=   '<span class="badge badge--stack" role="listitem">Stack: ' + esc(P.detected_stack) + '</span>';
+  }
+  if (P.task_type) {
+    html +=   '<span class="badge badge--type" role="listitem">Type: ' + esc(P.task_type) + '</span>';
+  }
+  if (P.execution_mode) {
+    html +=   '<span class="badge badge--mode" role="listitem">Mode: ' + esc(P.execution_mode) + '</span>';
+  }
+  if (P.classification_source) {
+    html +=   '<span class="badge badge--source" role="listitem">Via: ' + esc(P.classification_source) + '</span>';
+  }
+
+  html +=   '</div>';
+
+  // Toolbar: Export, Copy, Attention
+  html +=   '<div class="header__toolbar">';
+  html +=     '<button class="toolbar-btn" id="btn-export" type="button" aria-label="Export summary for print">';
+  html +=       '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0a.75.75 0 0 1 .75.75v8.19l2.72-2.72a.75.75 0 1 1 1.06 1.06l-4 4a.75.75 0 0 1-1.06 0l-4-4a.75.75 0 0 1 1.06-1.06l2.72 2.72V.75A.75.75 0 0 1 8 0z"/><path d="M2.75 12a.75.75 0 0 1 .75.75v1.5h9v-1.5a.75.75 0 0 1 1.5 0v1.5A1.5 1.5 0 0 1 12.5 16h-9A1.5 1.5 0 0 1 2 14.25v-1.5a.75.75 0 0 1 .75-.75z"/></svg>';
+  html +=       ' Export';
+  html +=     '</button>';
+  html +=     '<button class="toolbar-btn" id="btn-copy" type="button" aria-label="Copy summary to clipboard">';
+  html +=       '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25z"/><path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25z"/></svg>';
+  html +=       ' Copy';
+  html +=     '</button>';
+  html +=     '<span class="toolbar-sep" aria-hidden="true"></span>';
+  html +=     '<button class="toolbar-btn toolbar-btn--attention" id="btn-attention" type="button" aria-label="Toggle attention filter" aria-pressed="false">';
+  html +=       '<span id="attention-label">Attention</span>';
+  html +=     '</button>';
+  html +=   '</div>';
+
+  html += '</header>';
+
+  // -- Progress section --
+  var pct = P.progress_pct || 0;
+  var fillClass = 'progress-bar__fill';
+  if (P.execution_status === 'complete') fillClass += ' progress-bar__fill--complete';
+  else if (P.execution_status === 'failed') fillClass += ' progress-bar__fill--failed';
+  else if (P.execution_status === 'running') fillClass += ' progress-bar__fill--running';
+
+  html += '<section class="progress-section" aria-label="Execution progress">';
+  html +=   '<div class="progress-stats">';
+  html +=     '<span class="progress-stats__pct">' + pct.toFixed(1) + '%</span>';
+  html +=     '<div class="progress-stats__detail">';
+  html +=       '<span><span class="step__metric-val">' + (P.steps_complete || 0) + '</span> <span class="progress-stats__label">complete</span></span>';
+  html +=       '<span><span class="step__metric-val">' + (P.steps_running || 0) + '</span> <span class="progress-stats__label">running</span></span>';
+  html +=       '<span><span class="step__metric-val">' + (P.steps_failed || 0) + '</span> <span class="progress-stats__label">failed</span></span>';
+  html +=       '<span><span class="step__metric-val">' + formatDuration(P.elapsed_seconds) + '</span> <span class="progress-stats__label">elapsed</span></span>';
+  html +=       '<span><span class="step__metric-val">' + formatTokens(P.total_tokens) + '</span> <span class="progress-stats__label">tokens</span></span>';
+  html +=       '<span><span class="step__metric-val">' + formatCost(P.total_cost_usd) + '</span> <span class="progress-stats__label">cost</span></span>';
+  html +=     '</div>';
+  html +=   '</div>';
+  html +=   '<div class="progress-bar" role="progressbar" aria-valuenow="' + pct + '" aria-valuemin="0" aria-valuemax="100">';
+  html +=     '<div class="' + fillClass + '" style="width:' + Math.min(pct, 100) + '%"></div>';
+  html +=   '</div>';
+  html +=   '<div class="execution-status" style="color:' + statusColor(P.execution_status) + '">';
+  html +=     '<span class="status-dot status-dot--' + esc(P.execution_status || 'not_started') + '"></span>';
+  html +=     esc((P.execution_status || 'not_started').replace(/_/g, ' '));
+  html +=   '</div>';
+  html += '</section>';
+
+  // -- Phases --
+  html += '<div class="phases" role="list" aria-label="Execution phases">';
+
+  var phases = P.phases || [];
+  for (var pi = 0; pi < phases.length; pi++) {
+    var phase = phases[pi];
+    var phaseStatus = phase.status || 'pending';
+    var isOpen = phaseStatus !== 'complete';
+    html += '<details class="phase" role="listitem"' + (isOpen ? ' open' : '') + '>';
+
+    // Phase header (summary)
+    html += '<summary class="phase__header">';
+    html +=   chevronSvg;
+    html +=   '<span class="status-dot status-dot--' + esc(phaseStatus) + '" aria-hidden="true"></span>';
+    html +=   '<span class="phase__label">Phase ' + esc(phase.phase_id) + '</span>';
+    html +=   '<span class="phase__name">' + esc(phase.name) + '</span>';
+    if (phase.approval_required) {
+      html += '<span class="badge badge--risk-high" style="font-size:.65rem">Approval Required</span>';
+    }
+    html +=   '<span class="phase__status-text phase__status-text--' + esc(phaseStatus) + '">' + esc(phaseStatus.replace(/_/g, ' ')) + '</span>';
+    html += '</summary>';
+
+    // Phase body
+    html += '<div class="phase__body">';
+
+    // Steps
+    var steps = phase.steps || [];
+    if (steps.length > 0) {
+      html += '<div class="steps">';
+      for (var si = 0; si < steps.length; si++) {
+        var step = steps[si];
+        var stepStatus = step.status || 'pending';
+
+        // Determine if this step is expensive (>50% of total plan cost)
+        var thisStepCost = step.tokens_used ? step.tokens_used * 3 / 1000000 : 0;
+        var totalPlanCost = P.total_cost_usd || 0;
+        var isExpensive = totalPlanCost > 0 && thisStepCost > totalPlanCost * 0.5;
+
+        var stepClasses = 'step step--' + esc(stepStatus);
+        if (isExpensive) stepClasses += ' step--expensive';
+
+        // Data attributes for attention filter
+        html += '<div class="' + stepClasses + '"';
+        html += ' data-status="' + esc(stepStatus) + '"';
+        html += ' data-duration="' + (step.duration_seconds || 0) + '"';
+        html += ' data-has-error="' + (step.error ? 'true' : 'false') + '"';
+        html += '>';
+
+        // Step header
+        html += '<div class="step__header">';
+        html +=   '<span class="step__id">' + esc(step.step_id) + '</span>';
+        html +=   '<span class="status-dot status-dot--' + esc(stepStatus) + '" aria-hidden="true"></span>';
+        html +=   '<span class="step__agent">' + esc(step.agent_name) + '</span>';
+        if (step.model) {
+          html += '<span class="step__model">' + esc(step.model) + '</span>';
+        }
+        html +=   '<span class="step__status" style="color:' + statusColor(stepStatus) + '">' + esc(stepStatus) + '</span>';
+        if (isExpensive) {
+          html += '<span class="step__cost-flag" title="This step accounts for over 50% of total plan cost">' + formatCost(thisStepCost) + '</span>';
+        }
+        html += '</div>';
+
+        // Description
+        if (step.task_description) {
+          html += '<div class="step__desc">' + esc(step.task_description) + '</div>';
+        }
+
+        // Meta tags
+        var hasMeta = step.parallel_safe || (step.depends_on && step.depends_on.length) || step.step_type;
+        if (hasMeta) {
+          html += '<div class="step__meta">';
+          if (step.parallel_safe) {
+            html += '<span class="step__tag step__tag--parallel">parallel-safe</span>';
+          }
+          if (step.depends_on && step.depends_on.length) {
+            html += '<span class="step__tag step__tag--depends">depends on: ' + esc(step.depends_on.join(', ')) + '</span>';
+          }
+          if (step.step_type) {
+            html += '<span class="step__tag step__tag--type">' + esc(step.step_type) + '</span>';
+          }
+          html += '</div>';
+        }
+
+        // Metrics (shown if step has results)
+        var stepCostUsd = step.tokens_used ? step.tokens_used * 3 / 1000000 : 0;
+        if (step.tokens_used || step.duration_seconds) {
+          html += '<div class="step__metrics">';
+          if (step.tokens_used) {
+            html += '<span><span class="progress-stats__label">tokens</span> <span class="step__metric-val">' + formatTokens(step.tokens_used) + '</span></span>';
+            html += '<span><span class="progress-stats__label">cost</span> <span class="step__metric-val">' + formatCost(stepCostUsd) + '</span></span>';
+          }
+          if (step.duration_seconds) {
+            html += '<span><span class="progress-stats__label">time</span> <span class="step__metric-val">' + formatDuration(step.duration_seconds) + '</span></span>';
+          }
+          if (step.files_changed && step.files_changed.length) {
+            html += '<span><span class="progress-stats__label">files</span> <span class="step__metric-val">' + step.files_changed.length + '</span></span>';
+          }
+          html += '</div>';
+        }
+
+        // Error
+        if (step.error) {
+          html += '<div class="step__error">' + esc(truncate(step.error, 300)) + '</div>';
+        }
+
+        // Team members
+        if (step.team && step.team.length) {
+          html += '<div class="team" role="list" aria-label="Team members">';
+          for (var ti = 0; ti < step.team.length; ti++) {
+            var member = step.team[ti];
+            var mStatus = member.status || 'pending';
+            html += '<div class="team__member" role="listitem">';
+            html +=   '<span class="status-dot status-dot--' + esc(mStatus) + '" aria-hidden="true"></span>';
+            html +=   '<span class="team__member-id">' + esc(member.member_id) + '</span>';
+            html +=   '<span class="team__member-agent">' + esc(member.agent_name) + '</span>';
+            html +=   '<span class="team__member-role">' + esc(member.role) + '</span>';
+            if (member.task_description) {
+              html += '<span class="team__member-desc">' + esc(member.task_description) + '</span>';
+            }
+            html += '</div>';
+          }
+          html += '</div>';
+        }
+
+        html += '</div>'; // .step
+      }
+      html += '</div>'; // .steps
+    }
+
+    // Gate
+    if (phase.gate) {
+      var gateStatus = phase.gate.status || 'pending';
+      html += '<div class="gate" data-gate-status="' + esc(gateStatus) + '">';
+      html +=   gateIconSvg(gateStatus);
+      html +=   '<span class="gate__type">' + esc(phase.gate.gate_type) + ' gate</span>';
+      if (phase.gate.description) {
+        html += '<span class="gate__desc">' + esc(phase.gate.description) + '</span>';
+      }
+      html +=   '<span class="gate__status gate__status--' + esc(gateStatus) + '">' + esc(gateStatus) + '</span>';
+      if (phase.gate.command) {
+        html += '<span class="gate__command">' + esc(phase.gate.command) + '</span>';
+      }
+      html += '</div>';
+    }
+
+    html += '</div>'; // .phase__body
+    html += '</details>'; // .phase
+  }
+
+  html += '</div>'; // .phases
+
+  // -- Footer --
+  var agents = P.total_agents || [];
+  html += '<footer class="footer">';
+
+  html += '<div>';
+  html +=   '<div class="footer__label">Agents (' + agents.length + ')</div>';
+  html +=   '<div class="footer__agents">';
+  for (var ai = 0; ai < agents.length; ai++) {
+    html += '<span class="footer__agent-chip">' + esc(agents[ai]) + '</span>';
+  }
+  html +=   '</div>';
+  html += '</div>';
+
+  html += '<div>';
+  html +=   '<div class="footer__label">Amendments</div>';
+  html +=   '<div class="footer__amendments">' + (P.amendment_count || 0) + '</div>';
+  html += '</div>';
+
+  html += '</footer>';
+
+  // Inject
+  document.getElementById('app').innerHTML = html;
+
+  // Update document title
+  if (P.task_summary) {
+    document.title = P.task_summary + ' — Baton Plan';
+  }
+
+  // ---------------------------------------------------------------
+  // Print summary card (hidden, shown only via @media print)
+  // ---------------------------------------------------------------
+  (function buildPrintSummary() {
+    var card = document.createElement('div');
+    card.className = 'print-summary';
+
+    var status = P.execution_status || 'not_started';
+    var statusClass = 'print-summary__status--' + (
+      status === 'complete' ? 'complete' :
+      status === 'failed' ? 'failed' : 'running'
+    );
+
+    var totalSteps = 0;
+    var phases = P.phases || [];
+    for (var i = 0; i < phases.length; i++) {
+      totalSteps += (phases[i].steps || []).length;
+    }
+
+    var phasesComplete = 0, phasesRunning = 0, phasesPending = 0;
+    for (var j = 0; j < phases.length; j++) {
+      var ps = phases[j].status || 'pending';
+      if (ps === 'complete') phasesComplete++;
+      else if (ps === 'running') phasesRunning++;
+      else phasesPending++;
+    }
+
+    var elapsedStr = formatDuration(P.elapsed_seconds);
+    var costStr = formatCost(P.total_cost_usd);
+
+    var c = '';
+    c += '<div class="print-summary__title">' + esc(P.task_summary || 'Execution Plan') + '</div>';
+    c += '<div class="print-summary__status ' + statusClass + '">' + esc(status.replace(/_/g, ' ')) + '</div>';
+
+    c += '<div class="print-summary__grid">';
+    c +=   '<div class="print-summary__metric"><div class="print-summary__metric-label">Steps</div><div class="print-summary__metric-value">' + (P.steps_complete || 0) + ' / ' + totalSteps + '</div></div>';
+    c +=   '<div class="print-summary__metric"><div class="print-summary__metric-label">Phases</div><div class="print-summary__metric-value">' + phasesComplete + ' / ' + phases.length + '</div></div>';
+    c +=   '<div class="print-summary__metric"><div class="print-summary__metric-label">Risk Level</div><div class="print-summary__metric-value">' + esc(P.risk_level || 'LOW') + '</div></div>';
+    c +=   '<div class="print-summary__metric"><div class="print-summary__metric-label">Elapsed Time</div><div class="print-summary__metric-value">' + esc(elapsedStr) + '</div></div>';
+    c +=   '<div class="print-summary__metric"><div class="print-summary__metric-label">Total Tokens</div><div class="print-summary__metric-value">' + formatTokens(P.total_tokens) + '</div></div>';
+    c +=   '<div class="print-summary__metric"><div class="print-summary__metric-label">Total Cost</div><div class="print-summary__metric-value">' + esc(costStr) + '</div></div>';
+    c += '</div>';
+
+    c += '<div class="print-summary__outcome">';
+    c += (P.steps_complete || 0) + ' steps complete, ';
+    c += (P.steps_running || 0) + ' running, ';
+    c += (P.steps_failed || 0) + ' failed';
+    c += ' &mdash; ' + esc(costStr) + ' spent in ' + esc(elapsedStr);
+    c += '</div>';
+
+    c += '<div class="print-summary__date">' + esc(formatDate(P.created_at || new Date().toISOString())) + '</div>';
+    c += '<div class="print-summary__footer">Generated by Agent Baton</div>';
+
+    card.innerHTML = c;
+    document.getElementById('app').appendChild(card);
+  })();
+
+  // ---------------------------------------------------------------
+  // Copy-feedback toast
+  // ---------------------------------------------------------------
+  var toastEl = document.createElement('div');
+  toastEl.className = 'copy-toast';
+  toastEl.setAttribute('role', 'status');
+  toastEl.setAttribute('aria-live', 'polite');
+  toastEl.textContent = 'Copied to clipboard';
+  document.body.appendChild(toastEl);
+
+  function showToast(msg) {
+    toastEl.textContent = msg || 'Copied to clipboard';
+    toastEl.classList.add('visible');
+    setTimeout(function() { toastEl.classList.remove('visible'); }, 2000);
+  }
+
+  // ---------------------------------------------------------------
+  // Export button — triggers window.print()
+  // ---------------------------------------------------------------
+  document.getElementById('btn-export').addEventListener('click', function() {
+    window.print();
+  });
+
+  // ---------------------------------------------------------------
+  // Copy button — plain-text summary to clipboard
+  // ---------------------------------------------------------------
+  document.getElementById('btn-copy').addEventListener('click', function() {
+    var status = (P.execution_status || 'not_started').toUpperCase().replace(/_/g, ' ');
+    var totalSteps = 0;
+    var phases = P.phases || [];
+    for (var i = 0; i < phases.length; i++) {
+      totalSteps += (phases[i].steps || []).length;
+    }
+    var pct = P.progress_pct || 0;
+    var phasesComplete = 0, phasesRunning = 0, phasesPending = 0;
+    for (var j = 0; j < phases.length; j++) {
+      var ps = phases[j].status || 'pending';
+      if (ps === 'complete') phasesComplete++;
+      else if (ps === 'running') phasesRunning++;
+      else phasesPending++;
+    }
+
+    var lines = [
+      'Agent Baton — Task Summary',
+      'Task: ' + (P.task_summary || 'Execution Plan'),
+      'Status: ' + status + ' | ' + (P.steps_complete || 0) + '/' + totalSteps + ' steps | ' + pct.toFixed(0) + '% complete',
+      'Risk: ' + (P.risk_level || 'LOW') + ' | Cost: ' + formatCost(P.total_cost_usd) + ' | Elapsed: ' + formatDuration(P.elapsed_seconds),
+      'Phases: ' + phasesComplete + ' ✓ complete, ' + phasesRunning + ' ● running, ' + phasesPending + ' ○ pending'
+    ];
+    var text = lines.join('\n');
+
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function() {
+        showToast('Copied to clipboard');
+      }).catch(function() {
+        fallbackCopy(text);
+      });
+    } else {
+      fallbackCopy(text);
     }
   });
 
-  /* 3. Group by column, then by phase within each column for row assignment */
-  var maxCol=0;
-  topoOrder.forEach(function(sid){if(col[sid]>maxCol)maxCol=col[sid];});
-
-  var colGroups={};
-  for(var c=0;c<=maxCol;c++)colGroups[c]=[];
-  topoOrder.forEach(function(sid){colGroups[col[sid]].push(sid);});
-
-  /* Sort each column group by phase_id then step_id for stable ordering */
-  for(var c2=0;c2<=maxCol;c2++){
-    colGroups[c2].sort(function(a,b){
-      var pa=phaseOfStep[a]||0,pb=phaseOfStep[b]||0;
-      if(pa!==pb)return pa-pb;
-      return a<b?-1:1;
-    });
+  function fallbackCopy(text) {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try {
+      document.execCommand('copy');
+      showToast('Copied to clipboard');
+    } catch(e) {
+      showToast('Copy failed');
+    }
+    document.body.removeChild(ta);
   }
 
-  /* 4. Assign row within column */
-  var row={};
-  for(var c3=0;c3<=maxCol;c3++){
-    colGroups[c3].forEach(function(sid,idx){row[sid]=idx;});
-  }
+  // ---------------------------------------------------------------
+  // Attention filter toggle
+  // ---------------------------------------------------------------
+  (function initAttention() {
+    var btn = document.getElementById('btn-attention');
+    var label = document.getElementById('attention-label');
+    var container = document.getElementById('app');
+    var isActive = false;
 
-  /* 5. Compute phase bounds (min/max row per phase per column, for lane drawing) */
-  var phaseBounds={};
-  phases.forEach(function(ph){phaseBounds[ph.phase_id]={minRow:Infinity,maxRow:-Infinity,minCol:Infinity,maxCol:-Infinity};});
-  allSteps.forEach(function(st){
-    var pid=phaseOfStep[st.step_id];
-    var b=phaseBounds[pid];
-    if(row[st.step_id]<b.minRow)b.minRow=row[st.step_id];
-    if(row[st.step_id]>b.maxRow)b.maxRow=row[st.step_id];
-    if(col[st.step_id]<b.minCol)b.minCol=col[st.step_id];
-    if(col[st.step_id]>b.maxCol)b.maxCol=col[st.step_id];
-  });
+    // Count attention items
+    function getAttentionItems() {
+      var items = [];
+      var allSteps = container.querySelectorAll('.step');
+      for (var i = 0; i < allSteps.length; i++) {
+        var el = allSteps[i];
+        var st = el.getAttribute('data-status');
+        var dur = parseFloat(el.getAttribute('data-duration') || '0');
+        var hasErr = el.getAttribute('data-has-error') === 'true';
 
-  return {topoOrder:topoOrder,col:col,row:row,maxCol:maxCol,colGroups:colGroups,phaseBounds:phaseBounds};
-}
+        var hit = false;
+        var cls = [];
+        if (st === 'failed') { hit = true; cls.push('attention-failed'); }
+        if (st === 'running' && dur > 300) { hit = true; cls.push('attention-long-running'); }
+        if (hasErr) { hit = true; cls.push('attention-error'); }
 
-/* -----------------------------------------------------------------
-   Compute critical path (longest path from any source to any sink)
-   ----------------------------------------------------------------- */
-function computeCriticalPath(){
-  var dist={};var prev={};
-  allSteps.forEach(function(st){dist[st.step_id]=0;prev[st.step_id]=null;});
-  /* Process in topo order */
-  var layout=computeDAGLayout();
-  layout.topoOrder.forEach(function(sid){
-    (children[sid]||[]).forEach(function(cid){
-      var w=1;/* uniform weight */
-      if(dist[sid]+w>dist[cid]){
-        dist[cid]=dist[sid]+w;
-        prev[cid]=sid;
+        if (hit) {
+          items.push({ el: el, classes: cls });
+        }
+      }
+
+      // Gate failures
+      var allGates = container.querySelectorAll('.gate');
+      for (var g = 0; g < allGates.length; g++) {
+        var gEl = allGates[g];
+        if (gEl.getAttribute('data-gate-status') === 'failed') {
+          items.push({ el: gEl, classes: ['attention-gate-failed'] });
+        }
+      }
+
+      return items;
+    }
+
+    // Update badge count
+    function updateBadge() {
+      var count = getAttentionItems().length;
+      if (count > 0) {
+        label.innerHTML = 'Attention <span class="toolbar-btn__badge">' + count + '</span>';
+      } else {
+        label.textContent = 'Attention';
+      }
+    }
+
+    updateBadge();
+
+    btn.addEventListener('click', function() {
+      isActive = !isActive;
+      btn.classList.toggle('active', isActive);
+      btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+
+      // Remove previous attention classes
+      var prev = container.querySelectorAll('.attention-hit, .attention-failed, .attention-long-running, .attention-error, .attention-gate-failed');
+      for (var p = 0; p < prev.length; p++) {
+        prev[p].classList.remove('attention-hit', 'attention-failed', 'attention-long-running', 'attention-error', 'attention-gate-failed');
+      }
+
+      // Remove existing "all clear" message
+      var existingClear = container.querySelector('.attention-clear');
+      if (existingClear) existingClear.remove();
+
+      if (isActive) {
+        container.classList.add('attention-active');
+
+        var items = getAttentionItems();
+
+        if (items.length === 0) {
+          // Show "all clear" message
+          var clearDiv = document.createElement('div');
+          clearDiv.className = 'attention-clear';
+          clearDiv.setAttribute('role', 'status');
+          clearDiv.innerHTML = '<svg width="20" height="20" viewBox="0 0 16 16" fill="currentColor" style="color:var(--green)"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 0 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0z"/></svg> All clear &mdash; no items need attention';
+          var phasesContainer = container.querySelector('.phases');
+          if (phasesContainer) {
+            phasesContainer.parentNode.insertBefore(clearDiv, phasesContainer);
+          }
+        } else {
+          // Mark attention items and their parent phases
+          for (var i = 0; i < items.length; i++) {
+            var item = items[i];
+            item.el.classList.add('attention-hit');
+            for (var c = 0; c < item.classes.length; c++) {
+              item.el.classList.add(item.classes[c]);
+            }
+            // Mark parent phase as attention-hit too
+            var parentPhase = item.el.closest('.phase');
+            if (parentPhase) {
+              parentPhase.classList.add('attention-hit');
+              // Force open
+              parentPhase.setAttribute('open', '');
+            }
+          }
+        }
+      } else {
+        container.classList.remove('attention-active');
       }
     });
-  });
-  /* Find the sink with max dist */
-  var maxDist=0,sink=null;
-  allSteps.forEach(function(st){if(dist[st.step_id]>maxDist){maxDist=dist[st.step_id];sink=st.step_id;}});
-  /* Trace back */
-  var path=new Set();
-  var cur=sink;
-  while(cur){path.add(cur);cur=prev[cur];}
-  return path;
-}
-
-/* -----------------------------------------------------------------
-   Build DAG view
-   ----------------------------------------------------------------- */
-function buildDAG(){
-  var layout=computeDAGLayout();
-  var criticalPath=computeCriticalPath();
-
-  /* Sizing */
-  var nodeW=195,nodeH=90,gapX=80,gapY=24,padX=60,padY=50;
-  var teamNodeH=120; /* taller for team steps */
-  var laneMarginLeft=30;
-
-  /* Determine max rows in any column for total height */
-  var maxRows=0;
-  for(var c=0;c<=layout.maxCol;c++){
-    if(layout.colGroups[c].length>maxRows)maxRows=layout.colGroups[c].length;
-  }
-
-  /* Calculate node height per step (team steps are taller) */
-  function nodeHeight(sid){
-    var st=stepMap[sid];
-    if(st&&st.team&&st.team.length)return teamNodeH;
-    if(st&&st.tokens_used)return nodeH+20;
-    return nodeH;
-  }
-
-  /* Compute Y positions: stack within column, accounting for variable height */
-  var yPos={};
-  for(var c2=0;c2<=layout.maxCol;c2++){
-    var cumY=0;
-    layout.colGroups[c2].forEach(function(sid){
-      yPos[sid]=cumY;
-      cumY+=nodeHeight(sid)+gapY;
-    });
-  }
-
-  /* Compute positions */
-  var positions={};
-  var canvasW=0,canvasH=0;
-  allSteps.forEach(function(st){
-    var x=padX+laneMarginLeft+layout.col[st.step_id]*(nodeW+gapX);
-    var y=padY+yPos[st.step_id];
-    positions[st.step_id]={x:x,y:y,w:nodeW,h:nodeHeight(st.step_id)};
-    if(x+nodeW>canvasW)canvasW=x+nodeW;
-    if(y+nodeHeight(st.step_id)>canvasH)canvasH=y+nodeHeight(st.step_id);
-  });
-  canvasW+=padX+60;
-  canvasH+=padY+80;
-
-  /* Gate positions (between phases along the rightmost column of the phase) */
-  var gatePositions=[];
-  phases.forEach(function(ph,idx){
-    if(!ph.gate)return;
-    var b=layout.phaseBounds[ph.phase_id];
-    if(b.maxCol===-Infinity)return;
-    /* Place gate to the right of the rightmost node in this phase */
-    var gx=padX+laneMarginLeft+(b.maxCol+1)*(nodeW+gapX)-gapX/2-14;
-    /* Vertically centered in the phase */
-    var minY=Infinity,maxY=0;
-    (ph.steps||[]).forEach(function(st){
-      var p=positions[st.step_id];
-      if(p){
-        if(p.y<minY)minY=p.y;
-        if(p.y+p.h>maxY)maxY=p.y+p.h;
-      }
-    });
-    var gy=(minY+maxY)/2-14;
-    gatePositions.push({phase:ph,x:gx,y:gy,status:ph.gate.status||'pending'});
-    if(gx+60>canvasW)canvasW=gx+60;
-  });
-
-  /* Phase lane backgrounds */
-  var laneHTML='';
-  var laneColors=['rgba(88,166,255,.03)','rgba(188,140,255,.03)','rgba(63,185,80,.03)','rgba(240,136,62,.03)','rgba(121,192,255,.03)'];
-  phases.forEach(function(ph,idx){
-    var stepsInPhase=ph.steps||[];
-    if(!stepsInPhase.length)return;
-    var minX=Infinity,maxX=0,minY2=Infinity,maxY2=0;
-    stepsInPhase.forEach(function(st){
-      var p=positions[st.step_id];
-      if(!p)return;
-      if(p.x<minX)minX=p.x;
-      if(p.x+p.w>maxX)maxX=p.x+p.w;
-      if(p.y<minY2)minY2=p.y;
-      if(p.y+p.h>maxY2)maxY2=p.y+p.h;
-    });
-    var pad=14;
-    laneHTML+='<div class="dag-phase-lane" style="left:'+(minX-pad)+'px;top:'+(minY2-pad)+'px;width:'+(maxX-minX+pad*2)+'px;height:'+(maxY2-minY2+pad*2)+'px;background:'+laneColors[idx%laneColors.length]+'"></div>';
-    laneHTML+='<div class="dag-phase-label" style="left:'+(minX-pad-22)+'px;top:'+(minY2-pad)+'px;height:'+(maxY2-minY2+pad*2)+'px">Phase '+esc(ph.phase_id)+' &middot; '+esc(ph.name)+'</div>';
-  });
-
-  /* Build SVG edges */
-  var edgePaths=[];
-  allSteps.forEach(function(st){
-    (st.depends_on||[]).forEach(function(dep){
-      if(!positions[dep]||!positions[st.step_id])return;
-      var src=positions[dep];
-      var tgt=positions[st.step_id];
-      var x1=src.x+src.w;
-      var y1=src.y+src.h/2;
-      var x2=tgt.x;
-      var y2=tgt.y+tgt.h/2;
-      var dx=Math.abs(x2-x1);
-      var cpOff=Math.max(dx*0.4,30);
-      var d='M'+x1+','+y1+' C'+(x1+cpOff)+','+y1+' '+(x2-cpOff)+','+y2+' '+x2+','+y2;
-      var srcStatus=(stepMap[dep]||{}).status||'pending';
-      var isCritical=criticalPath.has(dep)&&criticalPath.has(st.step_id);
-      edgePaths.push({d:d,from:dep,to:st.step_id,status:srcStatus,critical:isCritical,x1:x1,y1:y1,x2:x2,y2:y2});
-    });
-  });
-
-  var svgHTML='<svg class="dag-svg" width="'+canvasW+'" height="'+canvasH+'" xmlns="http://www.w3.org/2000/svg">';
-  /* Gradient definitions */
-  svgHTML+='<defs>';
-  edgePaths.forEach(function(e,i){
-    var c1=statusHex(e.status);
-    var c2=statusHex((stepMap[e.to]||{}).status||'pending');
-    svgHTML+='<linearGradient id="eg'+i+'" x1="0%" y1="0%" x2="100%" y2="0%">';
-    svgHTML+='<stop offset="0%" stop-color="'+c1+'" stop-opacity="0.7"/>';
-    svgHTML+='<stop offset="100%" stop-color="'+c2+'" stop-opacity="0.7"/>';
-    svgHTML+='</linearGradient>';
-  });
-  svgHTML+='</defs>';
-  edgePaths.forEach(function(e,i){
-    var cls='edge-path';
-    if(e.critical)cls+=' edge-path--critical';
-    svgHTML+='<path class="'+cls+'" d="'+e.d+'" stroke="url(#eg'+i+')" data-from="'+esc(e.from)+'" data-to="'+esc(e.to)+'" style="stroke-dasharray:1000;stroke-dashoffset:1000"/>';
-    /* Animated particle for running edges */
-    if(e.status==='running'){
-      svgHTML+='<circle class="edge-particle" fill="'+statusHex('running')+'">';
-      svgHTML+='<animateMotion dur="2s" repeatCount="indefinite" path="'+e.d+'"/>';
-      svgHTML+='</circle>';
-    }
-  });
-  svgHTML+='</svg>';
-
-  /* Build node HTML */
-  var nodesHTML='';
-  layout.topoOrder.forEach(function(sid,topoIdx){
-    var st=stepMap[sid];
-    if(!st)return;
-    var pos=positions[sid];
-    var status=st.status||'pending';
-    var cls='dag-node';
-    if(status==='running')cls+=' dag-node--running';
-    else if(status==='complete')cls+=' dag-node--complete';
-    else if(status==='failed')cls+=' dag-node--failed';
-
-    nodesHTML+='<div class="'+cls+'" data-step="'+esc(sid)+'" style="left:'+pos.x+'px;top:'+pos.y+'px;width:'+pos.w+'px;opacity:0;animation:node-appear .4s ease '+(topoIdx*80)+'ms forwards" tabindex="0" role="button" aria-label="Step '+esc(sid)+': '+esc(st.agent_name)+'">';
-
-    /* Top row */
-    nodesHTML+='<div class="node-top">';
-    nodesHTML+='<span class="node-id">'+esc(sid)+'</span>';
-    nodesHTML+='<span class="node-agent">'+esc(st.agent_name)+'</span>';
-    if(st.model)nodesHTML+='<span class="node-model">'+esc(st.model)+'</span>';
-    nodesHTML+='</div>';
-
-    /* Status row */
-    nodesHTML+='<div class="node-status-row" style="color:'+statusColor(status)+'">';
-    nodesHTML+='<span class="dot dot--'+esc(status)+'"></span> '+esc(status);
-    nodesHTML+='</div>';
-
-    /* Badges */
-    var hasBadges=st.step_type||st.parallel_safe;
-    if(hasBadges){
-      nodesHTML+='<div class="node-badges">';
-      if(st.step_type)nodesHTML+='<span class="node-type-badge">'+esc(st.step_type)+'</span>';
-      if(st.parallel_safe)nodesHTML+='<span class="node-parallel-badge">&parallel;</span>';
-      nodesHTML+='</div>';
-    }
-
-    /* Team chips */
-    if(st.team&&st.team.length){
-      nodesHTML+='<div class="node-team">';
-      st.team.forEach(function(m){
-        nodesHTML+='<span class="team-chip"><span class="dot dot--'+esc(m.status||'pending')+'" style="width:5px;height:5px"></span><span class="role">'+esc(m.role)+'</span><span class="name">'+esc(m.agent_name)+'</span></span>';
-      });
-      nodesHTML+='</div>';
-    }
-
-    /* Metrics */
-    if(st.tokens_used||st.duration_seconds){
-      nodesHTML+='<div class="node-metrics">';
-      if(st.tokens_used)nodesHTML+='<span><span class="val">'+fmtTok(st.tokens_used)+'</span> tok</span>';
-      if(st.duration_seconds)nodesHTML+='<span><span class="val">'+fmtDur(st.duration_seconds)+'</span></span>';
-      if(st.files_changed&&st.files_changed.length)nodesHTML+='<span><span class="val">'+st.files_changed.length+'</span> files</span>';
-      nodesHTML+='</div>';
-    }
-
-    nodesHTML+='</div>';
-  });
-
-  /* Gate diamonds */
-  var gatesHTML='';
-  gatePositions.forEach(function(g){
-    var gs=g.status;
-    gatesHTML+='<div class="dag-gate" style="left:'+g.x+'px;top:'+g.y+'px">';
-    gatesHTML+='<div class="gate-diamond gate-diamond--'+esc(gs)+'"></div>';
-    gatesHTML+='<div class="gate-label">'+esc(g.phase.gate.gate_type)+' gate</div>';
-    gatesHTML+='</div>';
-  });
-
-  return '<div class="dag-viewport" id="dagViewport"><div class="dag-canvas" id="dagCanvas" style="width:'+canvasW+'px;height:'+canvasH+'px;position:relative">'+laneHTML+svgHTML+nodesHTML+gatesHTML+'</div></div>';
-}
-
-/* Node appear animation */
-var styleTag=document.createElement('style');
-styleTag.textContent='@keyframes node-appear{from{opacity:0;transform:translateX(-12px)}to{opacity:1;transform:translateX(0)}}';
-document.head.appendChild(styleTag);
-
-/* -----------------------------------------------------------------
-   Build Timeline view
-   ----------------------------------------------------------------- */
-function buildTimeline(){
-  var h='<div class="timeline-container" id="timelineView" style="display:none">';
-  h+='<div class="timeline-phases" role="list" aria-label="Execution phases">';
-
-  phases.forEach(function(phase){
-    var ps=phase.status||'pending';
-    var isOpen=ps!=='complete';
-    h+='<details class="tl-phase" role="listitem"'+(isOpen?' open':'')+'>';
-    h+='<summary class="tl-phase-hdr">';
-    h+=chevronSvg;
-    h+='<span class="dot dot--'+esc(ps)+'" aria-hidden="true"></span>';
-    h+='<span class="tl-phase-num">Phase '+esc(phase.phase_id)+'</span>';
-    h+='<span class="tl-phase-name">'+esc(phase.name)+'</span>';
-    if(phase.approval_required)h+='<span class="badge badge--risk-high" style="font-size:.63rem">Approval</span>';
-    h+='<span class="tl-phase-status" style="color:'+statusColor(ps)+'">'+esc(ps.replace(/_/g,' '))+'</span>';
-    h+='</summary>';
-    h+='<div class="tl-body">';
-
-    var steps=phase.steps||[];
-    if(steps.length){
-      h+='<div class="tl-steps">';
-      steps.forEach(function(step){
-        var ss=step.status||'pending';
-        h+='<div class="tl-step tl-step--'+esc(ss)+'">';
-        h+='<div class="tl-step-hdr">';
-        h+='<span class="tl-step-id">'+esc(step.step_id)+'</span>';
-        h+='<span class="dot dot--'+esc(ss)+'" aria-hidden="true"></span>';
-        h+='<span class="tl-step-agent">'+esc(step.agent_name)+'</span>';
-        if(step.model)h+='<span class="tl-step-model">'+esc(step.model)+'</span>';
-        h+='<span class="tl-step-status" style="color:'+statusColor(ss)+'">'+esc(ss)+'</span>';
-        h+='</div>';
-        if(step.task_description)h+='<div class="tl-step-desc">'+esc(step.task_description)+'</div>';
-
-        var hasMeta=step.parallel_safe||(step.depends_on&&step.depends_on.length)||step.step_type;
-        if(hasMeta){
-          h+='<div class="tl-step-meta">';
-          if(step.parallel_safe)h+='<span class="tl-tag tl-tag--parallel">&parallel; parallel-safe</span>';
-          if(step.depends_on&&step.depends_on.length)h+='<span class="tl-tag">depends: '+esc(step.depends_on.join(', '))+'</span>';
-          if(step.step_type)h+='<span class="tl-tag">'+esc(step.step_type)+'</span>';
-          h+='</div>';
-        }
-
-        if(step.tokens_used||step.duration_seconds){
-          h+='<div class="tl-step-metrics">';
-          if(step.tokens_used)h+='<span>tokens <span class="val">'+fmtTok(step.tokens_used)+'</span></span>';
-          if(step.duration_seconds)h+='<span>time <span class="val">'+fmtDur(step.duration_seconds)+'</span></span>';
-          if(step.files_changed&&step.files_changed.length)h+='<span>files <span class="val">'+step.files_changed.length+'</span></span>';
-          h+='</div>';
-        }
-
-        if(step.error)h+='<div class="tl-step-error">'+esc(truncate(step.error,300))+'</div>';
-
-        if(step.team&&step.team.length){
-          h+='<div class="tl-team" role="list" aria-label="Team members">';
-          step.team.forEach(function(m){
-            var ms=m.status||'pending';
-            h+='<div class="tl-team-member" role="listitem">';
-            h+='<span class="dot dot--'+esc(ms)+'" aria-hidden="true"></span>';
-            h+='<span class="tl-team-member-id">'+esc(m.member_id)+'</span>';
-            h+='<span class="tl-team-member-agent">'+esc(m.agent_name)+'</span>';
-            h+='<span class="tl-team-member-role">'+esc(m.role)+'</span>';
-            if(m.task_description)h+='<span class="tl-team-member-desc">'+esc(m.task_description)+'</span>';
-            h+='</div>';
-          });
-          h+='</div>';
-        }
-
-        h+='</div>';
-      });
-      h+='</div>';
-    }
-
-    if(phase.gate){
-      var gs=phase.gate.status||'pending';
-      h+='<div class="tl-gate">';
-      h+=gateIconSvg(gs);
-      h+='<span class="tl-gate-type">'+esc(phase.gate.gate_type)+' gate</span>';
-      if(phase.gate.description)h+='<span class="tl-gate-desc">'+esc(phase.gate.description)+'</span>';
-      h+='<span class="tl-gate-status tl-gate-status--'+esc(gs)+'">'+esc(gs)+'</span>';
-      if(phase.gate.command)h+='<span class="tl-gate-cmd">'+esc(phase.gate.command)+'</span>';
-      h+='</div>';
-    }
-
-    h+='</div></details>';
-  });
-
-  h+='</div></div>';
-  return h;
-}
-
-/* -----------------------------------------------------------------
-   Assemble & mount
-   ----------------------------------------------------------------- */
-var appHTML=buildHeader();
-appHTML+='<div class="view-body" id="viewBody">';
-appHTML+=buildDAG();
-appHTML+=buildTimeline();
-appHTML+='</div>';
-appHTML+=buildFooter();
-
-document.getElementById('app').innerHTML=appHTML;
-
-/* Update title */
-if(P.task_summary)document.title=P.task_summary+' — Baton Topology';
-
-/* -----------------------------------------------------------------
-   View toggle
-   ----------------------------------------------------------------- */
-window.switchView=function(view){
-  var dag=document.getElementById('dagViewport');
-  var tl=document.getElementById('timelineView');
-  var btnG=document.getElementById('btnGraph');
-  var btnT=document.getElementById('btnTimeline');
-  if(view==='dag'){
-    if(dag)dag.style.display='';
-    if(tl)tl.style.display='none';
-    btnG.classList.add('active');btnG.setAttribute('aria-selected','true');
-    btnT.classList.remove('active');btnT.setAttribute('aria-selected','false');
-  }else{
-    if(dag)dag.style.display='none';
-    if(tl)tl.style.display='';
-    btnG.classList.remove('active');btnG.setAttribute('aria-selected','false');
-    btnT.classList.add('active');btnT.setAttribute('aria-selected','true');
-  }
-};
-
-/* -----------------------------------------------------------------
-   Edge draw-in animation
-   ----------------------------------------------------------------- */
-(function animateEdges(){
-  var paths=document.querySelectorAll('.edge-path');
-  paths.forEach(function(path,i){
-    var length=path.getTotalLength();
-    path.style.strokeDasharray=length;
-    path.style.strokeDashoffset=length;
-    var delay=i*120;
-    setTimeout(function(){
-      path.style.transition='stroke-dashoffset 0.6s cubic-bezier(.22,1,.36,1)';
-      path.style.strokeDashoffset='0';
-    },300+delay);
-  });
-})();
-
-/* -----------------------------------------------------------------
-   DAG pan/scroll + dependency highlight on hover
-   ----------------------------------------------------------------- */
-(function initDAGInteractions(){
-  var viewport=document.getElementById('dagViewport');
-  if(!viewport)return;
-
-  /* Hover highlight: build upstream/downstream maps */
-  function getAncestors(sid){
-    var set=new Set();
-    var stack=[sid];
-    while(stack.length){
-      var cur=stack.pop();
-      (parents[cur]||[]).forEach(function(p){
-        if(!set.has(p)){set.add(p);stack.push(p);}
-      });
-    }
-    return set;
-  }
-  function getDescendants(sid){
-    var set=new Set();
-    var stack=[sid];
-    while(stack.length){
-      var cur=stack.pop();
-      (children[cur]||[]).forEach(function(c){
-        if(!set.has(c)){set.add(c);stack.push(c);}
-      });
-    }
-    return set;
-  }
-
-  var canvas=document.getElementById('dagCanvas');
-  var nodes=canvas.querySelectorAll('.dag-node');
-  var edgePaths2=canvas.querySelectorAll('.edge-path');
-
-  nodes.forEach(function(node){
-    var sid=node.getAttribute('data-step');
-
-    node.addEventListener('mouseenter',function(){
-      var anc=getAncestors(sid);
-      var desc=getDescendants(sid);
-      var related=new Set(anc);
-      desc.forEach(function(d){related.add(d);});
-      related.add(sid);
-
-      canvas.classList.add('dag-dimmed');
-      /* Highlight related nodes */
-      nodes.forEach(function(n){
-        if(related.has(n.getAttribute('data-step')))n.classList.add('hl');
-      });
-      /* Highlight related edges */
-      edgePaths2.forEach(function(ep){
-        var from=ep.getAttribute('data-from');
-        var to=ep.getAttribute('data-to');
-        if(related.has(from)&&related.has(to))ep.classList.add('hl');
-      });
-    });
-
-    node.addEventListener('mouseleave',function(){
-      canvas.classList.remove('dag-dimmed');
-      nodes.forEach(function(n){n.classList.remove('hl');});
-      edgePaths2.forEach(function(ep){ep.classList.remove('hl');});
-    });
-
-    /* Click -> detail panel */
-    node.addEventListener('click',function(){showDetail(sid);});
-    node.addEventListener('keydown',function(e){if(e.key==='Enter'||e.key===' '){e.preventDefault();showDetail(sid);}});
-  });
-
-  /* Edge hover tooltips */
-  var tooltip=document.getElementById('edgeTooltip');
-  /* Use invisible wider hit areas for edges */
-  edgePaths2.forEach(function(ep){
-    var hit=ep.cloneNode();
-    hit.style.stroke='transparent';
-    hit.style.strokeWidth='14';
-    hit.style.pointerEvents='stroke';
-    hit.style.strokeDasharray='none';
-    hit.style.strokeDashoffset='0';
-    hit.classList.remove('edge-path');
-    ep.parentNode.appendChild(hit);
-
-    hit.addEventListener('mouseenter',function(e){
-      tooltip.style.display='block';
-      tooltip.textContent='Step '+ep.getAttribute('data-from')+' → Step '+ep.getAttribute('data-to');
-    });
-    hit.addEventListener('mousemove',function(e){
-      tooltip.style.left=(e.clientX+12)+'px';
-      tooltip.style.top=(e.clientY-8)+'px';
-    });
-    hit.addEventListener('mouseleave',function(){
-      tooltip.style.display='none';
-    });
-  });
-})();
-
-/* -----------------------------------------------------------------
-   Node detail panel
-   ----------------------------------------------------------------- */
-function showDetail(sid){
-  var st=stepMap[sid];
-  if(!st)return;
-  var overlay=document.getElementById('detailOverlay');
-  var panel=document.getElementById('detailPanel');
-  var status=st.status||'pending';
-
-  var h='<button class="detail-close" aria-label="Close" onclick="closeDetail()">&times;</button>';
-  h+='<h3>'+esc(st.agent_name)+'</h3>';
-  h+='<div class="detail-id">Step '+esc(sid)+' &middot; <span style="color:'+statusColor(status)+'">'+esc(status)+'</span>';
-  if(st.model)h+=' &middot; '+esc(st.model);
-  h+='</div>';
-
-  if(st.task_description){
-    h+='<div class="detail-section"><div class="detail-section-label">Task</div>';
-    h+='<div class="detail-text">'+esc(st.task_description)+'</div></div>';
-  }
-
-  if(st.expected_outcome){
-    h+='<div class="detail-section"><div class="detail-section-label">Expected Outcome</div>';
-    h+='<div class="detail-text">'+esc(st.expected_outcome)+'</div></div>';
-  }
-
-  if(st.outcome){
-    h+='<div class="detail-section"><div class="detail-section-label">Outcome</div>';
-    h+='<div class="detail-text">'+esc(st.outcome)+'</div></div>';
-  }
-
-  /* Metrics grid */
-  h+='<div class="detail-section"><div class="detail-section-label">Metrics</div>';
-  h+='<div class="detail-metrics-grid">';
-  h+='<div class="detail-metric"><div class="val">'+fmtTok(st.tokens_used)+'</div><div class="lbl">Tokens</div></div>';
-  h+='<div class="detail-metric"><div class="val">'+fmtDur(st.duration_seconds)+'</div><div class="lbl">Duration</div></div>';
-  h+='<div class="detail-metric"><div class="val">'+((st.files_changed||[]).length)+'</div><div class="lbl">Files</div></div>';
-  h+='</div></div>';
-
-  /* Files changed */
-  if(st.files_changed&&st.files_changed.length){
-    h+='<div class="detail-section"><div class="detail-section-label">Files Changed</div>';
-    st.files_changed.forEach(function(f){h+='<div class="detail-file">'+esc(f)+'</div>';});
-    h+='</div>';
-  }
-
-  /* Deliverables */
-  if(st.deliverables&&st.deliverables.length){
-    h+='<div class="detail-section"><div class="detail-section-label">Deliverables</div>';
-    st.deliverables.forEach(function(d){h+='<div class="detail-file">'+esc(d)+'</div>';});
-    h+='</div>';
-  }
-
-  /* Dependencies */
-  if(st.depends_on&&st.depends_on.length){
-    h+='<div class="detail-section"><div class="detail-section-label">Dependencies</div>';
-    h+='<div class="detail-text">'+esc(st.depends_on.join(', '))+'</div></div>';
-  }
-
-  /* Team */
-  if(st.team&&st.team.length){
-    h+='<div class="detail-section"><div class="detail-section-label">Team</div>';
-    st.team.forEach(function(m){
-      var ms=m.status||'pending';
-      h+='<div style="display:flex;align-items:center;gap:6px;padding:4px 0;font-size:.82rem">';
-      h+='<span class="dot dot--'+esc(ms)+'"></span>';
-      h+='<span style="color:var(--cyan);font-weight:600">'+esc(m.agent_name)+'</span>';
-      h+='<span style="font-family:var(--font-mono);font-size:.65rem;color:var(--text-muted);text-transform:uppercase">'+esc(m.role)+'</span>';
-      if(m.task_description)h+='<span style="color:var(--text-dim);font-size:.78rem;margin-left:auto">'+esc(truncate(m.task_description,60))+'</span>';
-      h+='</div>';
-    });
-    h+='</div>';
-  }
-
-  /* Error */
-  if(st.error){
-    h+='<div class="detail-section"><div class="detail-section-label">Error</div>';
-    h+='<div class="detail-error">'+esc(st.error)+'</div></div>';
-  }
-
-  panel.innerHTML=h;
-  overlay.classList.add('open');
-  /* Focus trap */
-  panel.querySelector('.detail-close').focus();
-}
-
-window.closeDetail=function(){
-  document.getElementById('detailOverlay').classList.remove('open');
-};
-
-/* Close on overlay click or Escape */
-document.getElementById('detailOverlay').addEventListener('click',function(e){
-  if(e.target===this)window.closeDetail();
-});
-document.addEventListener('keydown',function(e){
-  if(e.key==='Escape')window.closeDetail();
-});
-
-/* -----------------------------------------------------------------
-   Force timeline on mobile
-   ----------------------------------------------------------------- */
-if(window.innerWidth<769){
-  window.switchView('timeline');
-}
+  })();
 
 })();
 </script>
