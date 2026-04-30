@@ -1148,3 +1148,158 @@ class TestSafetyRosterInjection:
                 f"Step agents: {base_names}, "
                 f"shared_context excerpt: {(plan.shared_context or '')[:200]}"
             )
+
+
+# ===================================================================
+# 9. AUDIT PHASE SAFETY NET (bd-1e56)
+# ===================================================================
+
+class TestAuditPhaseInjection:
+    """EnrichmentStage._ensure_audit_phase must inject a dedicated Audit phase
+    when auditor is in resolved_agents but no Audit phase exists.
+
+    Covers the defect where RiskStage._ensure_safety_roster injects auditor
+    for compliance keywords (GDPR/SOX/HIPAA/PCI) but the phase builder then
+    silently drops it because is_reviewer_agent("auditor") returns True.
+    """
+
+    def _make_draft_with_auditor(
+        self,
+        plan_phases: "list[Any]",
+        resolved_agents: "list[str] | None" = None,
+    ) -> "PlanDraft":
+        from agent_baton.core.engine.planning.draft import PlanDraft
+        from agent_baton.models.enums import RiskLevel
+
+        draft = PlanDraft.from_inputs("Ensure GDPR compliance for the user data pipeline")
+        draft.plan_phases = plan_phases
+        draft.risk_level_enum = RiskLevel.HIGH
+        draft.risk_level = RiskLevel.HIGH.value
+        draft.resolved_agents = list(
+            resolved_agents if resolved_agents is not None
+            else ["backend-engineer", "auditor"]
+        )
+        return draft
+
+    def _make_services(self) -> "Any":
+        from agent_baton.core.engine.planner import IntelligentPlanner
+        services = MagicMock()
+        services.registry = IntelligentPlanner()._registry
+        services.bead_store = None
+        services.project_config = None
+        return services
+
+    def test_auditor_in_roster_no_audit_phase_gets_one_injected(self):
+        """When auditor is in resolved_agents and no Audit phase exists, one is appended."""
+        from agent_baton.core.engine.planning.stages.enrichment import EnrichmentStage
+
+        existing_phases = [
+            PlanPhase(
+                phase_id=1, name="Implement",
+                steps=[PlanStep(step_id="1.1", agent_name="backend-engineer",
+                                task_description="Implement GDPR controls")],
+            ),
+        ]
+        draft = self._make_draft_with_auditor(existing_phases)
+        services = self._make_services()
+
+        EnrichmentStage()._ensure_audit_phase(draft, services)
+
+        phase_names = [p.name.lower() for p in draft.plan_phases]
+        assert "audit" in phase_names, (
+            "Expected an Audit phase to be injected when auditor is in resolved_agents"
+        )
+
+    def test_existing_audit_phase_is_not_duplicated(self):
+        """When an Audit phase already exists, _ensure_audit_phase is a no-op."""
+        from agent_baton.core.engine.planning.stages.enrichment import EnrichmentStage
+
+        existing_phases = [
+            PlanPhase(
+                phase_id=1, name="Implement",
+                steps=[PlanStep(step_id="1.1", agent_name="backend-engineer",
+                                task_description="Implement")],
+            ),
+            PlanPhase(
+                phase_id=2, name="Audit",
+                steps=[PlanStep(step_id="2.1", agent_name="auditor",
+                                task_description="Audit the changes")],
+            ),
+        ]
+        draft = self._make_draft_with_auditor(existing_phases)
+        services = self._make_services()
+
+        EnrichmentStage()._ensure_audit_phase(draft, services)
+
+        audit_phases = [p for p in draft.plan_phases if p.name.lower() == "audit"]
+        assert len(audit_phases) == 1, (
+            "Should not duplicate an already-present Audit phase"
+        )
+
+    def test_auditor_not_in_roster_no_audit_phase_injected(self):
+        """When auditor is NOT in resolved_agents, no Audit phase is injected."""
+        from agent_baton.core.engine.planning.stages.enrichment import EnrichmentStage
+
+        existing_phases = [
+            PlanPhase(
+                phase_id=1, name="Implement",
+                steps=[PlanStep(step_id="1.1", agent_name="backend-engineer",
+                                task_description="Add a feature")],
+            ),
+        ]
+        draft = self._make_draft_with_auditor(
+            existing_phases, resolved_agents=["backend-engineer"]
+        )
+        services = self._make_services()
+
+        EnrichmentStage()._ensure_audit_phase(draft, services)
+
+        phase_names = [p.name.lower() for p in draft.plan_phases]
+        assert "audit" not in phase_names, (
+            "Must not inject an Audit phase when auditor is absent from resolved_agents"
+        )
+
+    def test_injected_audit_phase_id_is_max_plus_one(self):
+        """Injected Audit phase_id must be max(existing phase_ids) + 1."""
+        from agent_baton.core.engine.planning.stages.enrichment import EnrichmentStage
+
+        existing_phases = [
+            PlanPhase(phase_id=1, name="Design",
+                      steps=[PlanStep(step_id="1.1", agent_name="architect",
+                                      task_description="Design")]),
+            PlanPhase(phase_id=2, name="Implement",
+                      steps=[PlanStep(step_id="2.1", agent_name="backend-engineer",
+                                      task_description="Implement")]),
+            PlanPhase(phase_id=3, name="Review",
+                      steps=[PlanStep(step_id="3.1", agent_name="code-reviewer",
+                                      task_description="Review")]),
+        ]
+        draft = self._make_draft_with_auditor(existing_phases)
+        services = self._make_services()
+
+        EnrichmentStage()._ensure_audit_phase(draft, services)
+
+        audit_phase = next(p for p in draft.plan_phases if p.name.lower() == "audit")
+        assert audit_phase.phase_id == 4, (
+            f"Expected injected Audit phase_id=4 (max+1), got {audit_phase.phase_id}"
+        )
+
+    def test_injection_appends_enrichment_routing_note(self):
+        """A [enrichment] routing note must be recorded when the Audit phase is injected."""
+        from agent_baton.core.engine.planning.stages.enrichment import EnrichmentStage
+
+        existing_phases = [
+            PlanPhase(
+                phase_id=1, name="Implement",
+                steps=[PlanStep(step_id="1.1", agent_name="backend-engineer",
+                                task_description="Implement compliance controls")],
+            ),
+        ]
+        draft = self._make_draft_with_auditor(existing_phases)
+        services = self._make_services()
+
+        EnrichmentStage()._ensure_audit_phase(draft, services)
+
+        assert any("[enrichment]" in note for note in draft.routing_notes), (
+            "Expected an [enrichment] routing note after Audit phase injection"
+        )
