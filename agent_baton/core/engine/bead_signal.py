@@ -80,6 +80,11 @@ _BEAD_FEEDBACK_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+_SCOPE_EXPANSION_PATTERN = re.compile(
+    r"SCOPE_EXPANSION:\s*(.+?)(?:\n|$)",
+    re.IGNORECASE,
+)
+
 # Score deltas applied per feedback verdict.
 _FEEDBACK_DELTAS: dict[str, float] = {
     "useful": 0.5,
@@ -124,6 +129,20 @@ def parse_bead_feedback(outcome: str) -> list[tuple[str, float]]:
         return results
     except Exception as exc:
         _log.debug("parse_bead_feedback: unexpected error — %s", exc)
+        return []
+
+
+def parse_scope_expansions(outcome: str) -> list[str]:
+    """Extract SCOPE_EXPANSION descriptions from agent outcome text.
+
+    Returns a list of expansion description strings.
+    """
+    if not outcome:
+        return []
+    try:
+        return [m.group(1).strip() for m in _SCOPE_EXPANSION_PATTERN.finditer(outcome) if m.group(1).strip()]
+    except Exception as exc:
+        _log.debug("parse_scope_expansions: unexpected error — %s", exc)
         return []
 
 

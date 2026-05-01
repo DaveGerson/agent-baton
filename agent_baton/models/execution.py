@@ -1399,6 +1399,11 @@ class ExecutionState:
     # Default 0.0 for legacy state files (getattr guard in all accessors).
     run_cumulative_spend_usd: float = 0.0
 
+    # Scope expansion: queued expansion requests detected during execution.
+    # Processed at phase boundaries by _process_pending_expansions().
+    pending_scope_expansions: list[dict] = field(default_factory=list)
+    scope_expansions_applied: int = 0
+
     def __post_init__(self) -> None:
         if not self.started_at:
             self.started_at = datetime.now(timezone.utc).isoformat()
@@ -1475,6 +1480,8 @@ class ExecutionState:
             "working_branch_head": getattr(self, "working_branch_head", ""),
             # end-user readiness #7: run-level cumulative spend for ceiling tracking
             "run_cumulative_spend_usd": float(getattr(self, "run_cumulative_spend_usd", 0.0)),
+            "pending_scope_expansions": list(getattr(self, "pending_scope_expansions", [])),
+            "scope_expansions_applied": int(getattr(self, "scope_expansions_applied", 0)),
         }
 
     @classmethod
@@ -1510,6 +1517,8 @@ class ExecutionState:
             working_branch_head=data.get("working_branch_head", ""),
             # end-user readiness #7: default 0.0 for legacy state files
             run_cumulative_spend_usd=float(data.get("run_cumulative_spend_usd", 0.0)),
+            pending_scope_expansions=list(data.get("pending_scope_expansions", [])),
+            scope_expansions_applied=int(data.get("scope_expansions_applied", 0)),
         )
 
 

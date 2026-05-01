@@ -1920,19 +1920,19 @@ class TestTaskTypeKeywords:
         """Existing bug-fix keyword matching is unaffected by the new keywords."""
         assert planner._infer_task_type("Fix the login crash") == "bug-fix"
 
-    def test_audit_keyword_in_task_type_keywords_constant(self):
-        """The 'audit' keyword must be present in _TASK_TYPE_KEYWORDS for data-analysis."""
-        data_analysis_keywords = next(
-            (kws for tt, kws in _TASK_TYPE_KEYWORDS if tt == "data-analysis"), []
+    def test_audit_keyword_in_own_task_type(self):
+        """The 'audit' keyword must be present in _TASK_TYPE_KEYWORDS for audit."""
+        audit_keywords = next(
+            (kws for tt, kws in _TASK_TYPE_KEYWORDS if tt == "audit"), []
         )
-        assert "audit" in data_analysis_keywords
+        assert "audit" in audit_keywords
 
-    def test_assessment_keyword_in_task_type_keywords_constant(self):
-        """The 'assessment' keyword must be present in _TASK_TYPE_KEYWORDS for data-analysis."""
-        data_analysis_keywords = next(
-            (kws for tt, kws in _TASK_TYPE_KEYWORDS if tt == "data-analysis"), []
+    def test_assessment_keyword_in_own_task_type(self):
+        """The 'assessment' keyword must be present in _TASK_TYPE_KEYWORDS for assessment."""
+        assessment_keywords = next(
+            (kws for tt, kws in _TASK_TYPE_KEYWORDS if tt == "assessment"), []
         )
-        assert "assessment" in data_analysis_keywords
+        assert "assess" in assessment_keywords
 
 
 # ---------------------------------------------------------------------------

@@ -458,8 +458,14 @@ class IntelligentPlanner:
                 )
                 draft.inferred_type = type_override
 
-        # Apply agent swaps.
-        for swap in data.get("agent_swaps", []):
+        # Apply agent swaps — skip when user explicitly specified agents or phases.
+        _has_explicit_roster = draft.agents is not None or draft.phases is not None
+        if _has_explicit_roster:
+            if data.get("agent_swaps"):
+                draft.routing_notes.append(
+                    "[plan-review] Skipped agent_swaps — user specified explicit agents/phases"
+                )
+        for swap in ([] if _has_explicit_roster else data.get("agent_swaps", [])):
             step_id = swap.get("step_id", "")
             new_agent = swap.get("to", "")
             for phase in draft.plan_phases:

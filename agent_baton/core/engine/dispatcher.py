@@ -52,6 +52,7 @@ _SIGNALS_BLOCK = (
     "- `KNOWLEDGE_GAP: <desc>` + `CONFIDENCE: none|low|partial` — STOP if blocked on HIGH/CRITICAL risk.\n"
     "- `BEAD_DISCOVERY: <what>` / `BEAD_DECISION: <what> CHOSE: <x> BECAUSE: <y>` / `BEAD_WARNING: <risk>`\n"
     "- `BEAD_FEEDBACK: <bead-id> useful|misleading|outdated` (rate prior discoveries above)\n"
+    "- `SCOPE_EXPANSION: <what needs doing>` — work outside your step scope that should be added to the plan.\n"
     "- `DESIGN_CHOICE: <desc>` + `OPTION_A/B` + `RECOMMENDATION` — only for decisions that materially change outcome.\n"
     "- `CONFLICT: <what> PARTIES: <steps> RECOMMENDATION: <resolution>` — only for genuine disagreement with prior work."
 )
@@ -384,6 +385,7 @@ class PromptDispatcher:
         prior_step_result: "object | None" = None,
         handoff_conn: "object | None" = None,
         handoff_task_id: str = "",
+        phase_summaries_section: str = "",
     ) -> str:
         """Build a complete delegation prompt for an agent.
 
@@ -480,6 +482,10 @@ class PromptDispatcher:
             f"You are {article} {role} working on {project_line}.",
             "",
         ]
+
+        # Phase-to-phase context chain
+        if phase_summaries_section.strip():
+            parts += [phase_summaries_section.strip(), ""]
 
         # Prior Context (Wave 2.2 — ContextHarvester).
         # When the executor passes a non-empty prior_context_block we prepend

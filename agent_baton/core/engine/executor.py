@@ -790,6 +790,59 @@ class ExecutionEngine:
                 "BeadSynthesizer post-phase skipped (non-fatal): %s", exc
             )
 
+        # Phase-summary bead: distill the completing phase into a single
+        # bead for cross-phase context continuity.
+        try:
+            state = self._load_execution()
+            if state is None:
+                return
+            phase_obj = state.current_phase_obj
+            if phase_obj is None or not phase_obj.steps:
+                return
+
+            from agent_baton.core.intel.phase_summary import synthesize_phase_summary
+
+            phase_step_ids = {s.step_id for s in phase_obj.steps}
+            phase_results = [
+                r for r in state.step_results
+                if r.step_id in phase_step_ids and r.status == "complete"
+            ]
+            if not phase_results:
+                return
+
+            phase_beads = self._bead_store.query(
+                task_id=state.task_id, limit=500,
+            )
+            decision_beads = [
+                b for b in phase_beads
+                if b.bead_type == "decision" and b.step_id in phase_step_ids
+            ]
+            warning_beads = [
+                b for b in phase_beads
+                if b.bead_type == "warning"
+                and b.status == "open"
+                and b.step_id in phase_step_ids
+            ]
+
+            summary_bead = synthesize_phase_summary(
+                phase_id=phase_obj.phase_id,
+                phase_name=phase_obj.name,
+                step_results=phase_results,
+                decision_beads=decision_beads,
+                warning_beads=warning_beads,
+                task_id=state.task_id,
+                bead_count=len(phase_beads),
+            )
+            self._bead_store.write(summary_bead)
+            _log.debug(
+                "Phase-summary bead %s written for phase %d",
+                summary_bead.bead_id, phase_obj.phase_id,
+            )
+        except Exception as _ps_exc:
+            _log.debug(
+                "Phase-summary bead creation skipped (non-fatal): %s", _ps_exc
+            )
+
     # ── Split-brain reconciliation helpers ──────────────────────────────────
     # Step status advancement order: dispatched < interrupted < failed < complete.
     # Used by _reconcile_states to pick the more-advanced result when SQLite and
@@ -2010,6 +2063,49 @@ class ExecutionEngine:
                     )
             except Exception as _fb_exc:
                 _log.debug("Bead feedback processing failed (non-fatal): %s", _fb_exc)
+
+        # ── Scope expansion signal protocol ──────────────────────────────────
+        # Parse SCOPE_EXPANSION signals and queue for processing at the next
+        # phase boundary.  Skipped for automation steps.
+        if (
+            status in ("complete", "interrupted")
+            and outcome
+            and (_plan_step is None or _plan_step.step_type != "automation")
+        ):
+            try:
+                from agent_baton.core.engine.bead_signal import parse_scope_expansions
+                _expansions = parse_scope_expansions(outcome)
+                for _exp_desc in _expansions:
+                    _phase_idx, _ = self._locate_step(state, step_id)
+                    state.pending_scope_expansions.append({
+                        "description": _exp_desc,
+                        "step_id": step_id,
+                        "phase_id": _phase_idx,
+                    })
+                    _log.info(
+                        "SCOPE_EXPANSION queued from step %s: %s",
+                        step_id, _exp_desc[:100],
+                    )
+                    if self._bead_store is not None:
+                        from agent_baton.models.bead import Bead as _BeadCls
+                        from agent_baton.models.bead import _generate_bead_id as _gen_id
+                        from agent_baton.utils.time import utcnow_zulu as _utc
+                        _ts = _utc()
+                        _bc = len(self._bead_store.query(task_id=state.task_id, limit=10000))
+                        self._bead_store.write(_BeadCls(
+                            bead_id=_gen_id(state.task_id, step_id, _exp_desc, _ts, _bc),
+                            task_id=state.task_id,
+                            step_id=step_id,
+                            agent_name=agent_name,
+                            bead_type="planning",
+                            content=f"SCOPE_EXPANSION: {_exp_desc}",
+                            scope="task",
+                            tags=["scope-expansion"],
+                            created_at=_ts,
+                            source="agent-signal",
+                        ))
+            except Exception as _se_exc:
+                _log.debug("Scope expansion parsing failed (non-fatal): %s", _se_exc)
 
         # Determine phase + step index for trace context.
         phase_idx, step_idx = self._locate_step(state, step_id)
@@ -3760,6 +3856,92 @@ class ExecutionEngine:
         self._save_execution(state)
         return amendment
 
+    def _process_pending_expansions(self, state: "ExecutionState") -> None:
+        """Process queued scope expansions at a phase boundary.
+
+        Called from _apply_resolver_decision on PHASE_ADVANCE_OK /
+        EMPTY_PHASE_ADVANCE, BEFORE advance_phase().
+        """
+        pending = list(getattr(state, "pending_scope_expansions", []))
+        if not pending:
+            return
+
+        from agent_baton.core.engine.scope_expansion import (
+            MAX_EXPANSIONS_PER_EXECUTION,
+            check_expansion_guardrails,
+            generate_expansion_phase,
+        )
+
+        _amended_step_count = sum(len(a.steps_added) for a in state.amendments)
+        original_step_count = max(
+            sum(len(p.steps) for p in state.plan.phases) - _amended_step_count, 1
+        )
+
+        processed = 0
+        for expansion in pending:
+            desc = expansion["description"]
+            trigger_phase = expansion.get("phase_id", state.current_phase)
+
+            block_reason = check_expansion_guardrails(state, original_step_count)
+            if block_reason:
+                _log.info(
+                    "Scope expansion blocked: %s (reason: %s)",
+                    desc[:80], block_reason,
+                )
+                if self._bead_store is not None:
+                    try:
+                        from agent_baton.models.bead import Bead as _BeadCls
+                        from agent_baton.models.bead import _generate_bead_id as _gen_id
+                        from agent_baton.utils.time import utcnow_zulu as _utc
+                        _ts = _utc()
+                        _bc = len(self._bead_store.query(task_id=state.task_id, limit=10000))
+                        self._bead_store.write(_BeadCls(
+                            bead_id=_gen_id(state.task_id, "expansion", desc, _ts, _bc),
+                            task_id=state.task_id,
+                            step_id="expansion",
+                            agent_name="engine",
+                            bead_type="warning",
+                            content=f"Scope expansion blocked: {desc}\nReason: {block_reason}",
+                            scope="task",
+                            tags=["scope-expansion", "guardrail-blocked"],
+                            created_at=_ts,
+                            source="agent-signal",
+                        ))
+                    except Exception:
+                        pass
+                continue
+
+            new_phase = generate_expansion_phase(
+                description=desc,
+                plan=state.plan,
+                trigger_phase_id=trigger_phase,
+            )
+
+            self.amend_plan(
+                description=f"Scope expansion: {desc[:200]}",
+                new_phases=[new_phase],
+                insert_after_phase=(
+                    state.current_phase_obj.phase_id
+                    if state.current_phase_obj
+                    else None
+                ),
+                trigger="scope_expansion",
+                trigger_phase_id=trigger_phase,
+            )
+
+            state.scope_expansions_applied = getattr(state, "scope_expansions_applied", 0) + 1
+            processed += 1
+            _log.info(
+                "Scope expansion applied (%d/%d): %s",
+                state.scope_expansions_applied,
+                MAX_EXPANSIONS_PER_EXECUTION,
+                desc[:80],
+            )
+
+        state.pending_scope_expansions = []
+        if processed:
+            self._save_execution(state)
+
     def record_team_member_result(
         self,
         step_id: str,
@@ -5089,6 +5271,7 @@ class ExecutionEngine:
                 phase_name=phase_obj.name,
             ))
             self._synthesize_beads_post_phase()
+            self._process_pending_expansions(state)
             self._phase_manager.advance_phase(state, set_status_running=False)
             self._publish_phase_started(state)
             return None  # loop
@@ -5259,8 +5442,20 @@ class ExecutionEngine:
                 phase_name=phase_obj.name,
             ))
             self._synthesize_beads_post_phase()
+            self._process_pending_expansions(state)
             self._phase_manager.advance_phase(state, set_status_running=True)
             self._publish_phase_started(state)
+            return None  # loop
+
+        # ── RETRY_PHASE: investigative archetype loop-back ─────────────────
+        if kind == DecisionKind.RETRY_PHASE:
+            phase_obj = state.current_phase_obj
+            assert phase_obj is not None
+            self._phase_manager.retry_phase(state)
+            _log.info(
+                "Phase %d (%s) retrying: %s",
+                phase_obj.phase_id, phase_obj.name, decision.message,
+            )
             return None  # loop
 
         # Defensive: should be unreachable — every DecisionKind is handled.
@@ -5391,6 +5586,40 @@ class ExecutionEngine:
                 _log.debug("BeadSelector failed (non-fatal): %s", _sel_exc)
                 prior_beads = []
 
+        # Phase-summary chain injection: when dispatching the first step
+        # of a phase, collect prior phase-summary beads for context continuity.
+        _phase_summaries_section = ""
+        if self._bead_store is not None:
+            _phase_step_ids = set()
+            _phase_obj = state.current_phase_obj
+            if _phase_obj:
+                _phase_step_ids = {s.step_id for s in _phase_obj.steps}
+            _is_first_step = step.step_id not in {
+                r.step_id for r in state.step_results
+                if r.step_id in _phase_step_ids
+            } and not any(
+                r.step_id in _phase_step_ids and r.status == "complete"
+                for r in state.step_results
+            )
+            if _is_first_step:
+                try:
+                    from agent_baton.core.intel.phase_summary import (
+                        collect_phase_summary_chain,
+                        render_phase_summary_section,
+                    )
+                    _current_pid = _phase_obj.phase_id if _phase_obj else 0
+                    _chain = collect_phase_summary_chain(
+                        self._bead_store,
+                        task_id=state.task_id,
+                        current_phase_id=_current_pid,
+                    )
+                    _phase_summaries_section = render_phase_summary_section(_chain)
+                except Exception as _ps_exc:
+                    _log.debug(
+                        "Phase-summary chain lookup failed (non-fatal): %s",
+                        _ps_exc,
+                    )
+
         # ── Route prompt builder by step_type ───────────────────────────────
         # consulting → lightweight consultation prompt (no shared context chain)
         # task       → minimal bespoke-skill prompt (no context overhead)
@@ -5472,6 +5701,7 @@ class ExecutionEngine:
                 prior_step_result=_prior_step_result,
                 handoff_conn=_handoff_conn,
                 handoff_task_id=state.task_id or "",
+                phase_summaries_section=_phase_summaries_section,
             )
             # Persist the updated delivered_knowledge map so subsequent
             # dispatches in this run know which docs are already inlined.

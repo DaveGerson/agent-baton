@@ -12,6 +12,7 @@ DEFAULT_AGENTS: dict[str, list[str]] = {
     "test": ["test-engineer"],
     "audit": ["architect", "code-reviewer"],
     "assessment": ["architect", "data-analyst", "code-reviewer"],
+    "investigation": ["architect", "backend-engineer", "test-engineer"],
     # Fallback for unknown/generic tasks.
     "generic": ["architect", "backend-engineer", "test-engineer", "code-reviewer"],
 }
