@@ -2,6 +2,16 @@
 
 This file is read by every Claude Code agent dispatched inside this repo. It is **not** documentation for humans. Marketing pitch, install steps, comparison tables: not here. Those live in `README.md`. Pages for human readers live in `docs/`.
 
+Can you ## GUIDING PRINCIPLES FOR IMPLEMENTATION
+1) Does this part of the system improve the quality of code within agent-baton                                                                                                                                                                                                                               
+2) Does this part of the system accelerate code generation and maintainability                                                                                                                                                                                                                               
+3) Does this system make appropriate trade-offs when it comes to token usage and output quality                                                                                                                                                                                                              
+4) Does this capability actually solve the problem it is intended too without having any holes or gaps in implementation                                                                                                                                                                                     
+5) Could this functionality be failing silently                                                                                                                                                                                                                                                              
+6) Are there any major code smells                                                                                                                                                                                                                                                                           
+7) Does a user or claude-code deployment on the user side have the information needed to use this capability in the system if they need it?                                                                                                                                                                  
+8) is this capability extensible to multiple challenges.                                                                                                   
+
 ## Repository layout (load-bearing)
 
 ```
@@ -110,6 +120,7 @@ After significant work, update the relevant docs before merging:
 - `docs/agent-roster.md` — when agents are added or removed
 - `README.md` — when public framing changes
 - `CLAUDE.md` (this file) — when developer conventions change
+- `GEMINI.md` — when developer conventions change
 
 The full matrix and writer's contract is in [docs/internal/doc-guiding-principles.md](docs/internal/doc-guiding-principles.md). Audit trail of doc decisions: [docs/internal/doc-audit.md](docs/internal/doc-audit.md). Target tree: [docs/internal/doc-ia.md](docs/internal/doc-ia.md).
 
