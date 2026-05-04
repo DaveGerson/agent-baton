@@ -28,14 +28,14 @@ Apply these to every change before declaring it done:
 | `agent_baton/` | Python orchestration engine (the `baton` CLI's source) | [agent_baton/CLAUDE.md](agent_baton/CLAUDE.md) |
 | `agent_baton/api/` | FastAPI routers, middleware, webhooks (REST + PMO backend) | [agent_baton/api/CLAUDE.md](agent_baton/api/CLAUDE.md) |
 | `agent_baton/cli/` | Click/Typer CLI surface — `baton <command>` entry points | [agent_baton/cli/CLAUDE.md](agent_baton/cli/CLAUDE.md) |
-| `agent_baton/core/` | Engine internals: state machine, planner, dispatcher, governance, storage | [agent_baton/core/CLAUDE.md](agent_baton/core/CLAUDE.md) |
+| `agent_baton/core/` | Engine internals: state machine, planner, dispatcher, governance, storage | [agent_baton/core/CLAUDE.md](agent_baton/core/CLAUDE.md) (deeper: [engine](agent_baton/core/engine/CLAUDE.md), [orchestration](agent_baton/core/orchestration/CLAUDE.md), [govern](agent_baton/core/govern/CLAUDE.md), [storage](agent_baton/core/storage/CLAUDE.md)) |
 | `agent_baton/models/` | Pydantic data models — execution, beads, plans, decisions | [agent_baton/models/CLAUDE.md](agent_baton/models/CLAUDE.md) |
 | `agents/` | 33 distributable agent definitions (Markdown with frontmatter) | [agents/CLAUDE.md](agents/CLAUDE.md) |
 | `references/` | 18 distributable reference procedures | [references/CLAUDE.md](references/CLAUDE.md) |
 | `templates/` | `CLAUDE.md` + `settings.json` + skills installed to user projects | (do not modify `templates/CLAUDE.md` — it's a distributable artifact) |
 | `pmo-ui/` | React/Vite frontend served at `/pmo/` | [pmo-ui/CLAUDE.md](pmo-ui/CLAUDE.md) |
 | `tests/` | pytest suite (unit + integration) | [tests/CLAUDE.md](tests/CLAUDE.md) |
-| `docs/` | Public docs (Diátaxis quadrants); `docs/internal/` is maintainer-only | [docs/CLAUDE.md](docs/CLAUDE.md) |
+| `docs/` | Public docs (Diátaxis quadrants); `docs/internal/` is maintainer-only | [docs/CLAUDE.md](docs/CLAUDE.md) (deeper: [internal](docs/internal/CLAUDE.md)) |
 | `scripts/` | Install scripts and one-shot maintenance utilities | [scripts/CLAUDE.md](scripts/CLAUDE.md) |
 | `.claude/` | Project-specific orchestration setup (not committed) | — |
 
