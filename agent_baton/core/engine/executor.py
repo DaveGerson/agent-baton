@@ -2590,15 +2590,88 @@ class ExecutionEngine:
                                 )
                                 return
                             else:
+                                # Single-step wave: degrade to in-place execution.
+                                # This is an explicit choice but must be visible.
                                 _log.warning(
                                     "Worktree create failed for step %s; running in-place: %s",
                                     step_id, exc,
                                 )
+                                _in_place_reason = f"WorktreeCreateError: {exc}"
+                                try:
+                                    self._worktree_mgr._file_bead_warning(
+                                        task_id=state.task_id,
+                                        step_id=step_id,
+                                        content=(
+                                            f"BEAD_WARNING: worktree-create-failed-degraded-in-place "
+                                            f"step={step_id} reason={exc}"
+                                        ),
+                                    )
+                                except Exception as _bead_exc:
+                                    _log.debug(
+                                        "BEAD_WARNING write failed for step %s (non-fatal): %s",
+                                        step_id, _bead_exc,
+                                    )
+                                # Mark the step in the audit trail so resume
+                                # logic and operators can see the degradation.
+                                _in_place = getattr(state, "steps_ran_in_place", {})
+                                _in_place[step_id] = _in_place_reason
+                                state.steps_ran_in_place = _in_place
+                                self._save_execution(state)
                         except Exception as exc:
+                            _is_parallel = self._is_step_in_parallel_wave(state, step_id)
+                            _exc_label = type(exc).__name__
                             _log.warning(
-                                "Worktree create unexpected error for step %s (non-fatal): %s",
-                                step_id, exc,
+                                "Worktree create unexpected error (%s) for step %s: %s",
+                                _exc_label, step_id, exc,
                             )
+                            if _is_parallel:
+                                # Parallel wave: unexpected errors are as serious
+                                # as WorktreeCreateError — fail the step.
+                                try:
+                                    self._worktree_mgr._file_bead_warning(
+                                        task_id=state.task_id,
+                                        step_id=step_id,
+                                        content=(
+                                            f"BEAD_WARNING: worktree-unexpected-error-parallel "
+                                            f"step={step_id} exc_type={_exc_label} reason={exc}"
+                                        ),
+                                    )
+                                except Exception as _bead_exc:
+                                    _log.debug(
+                                        "BEAD_WARNING write failed for step %s (non-fatal): %s",
+                                        step_id, _bead_exc,
+                                    )
+                                self.record_step_result(
+                                    step_id=step_id,
+                                    agent_name=agent_name,
+                                    status="failed",
+                                    error=f"WorktreeUnexpectedError({_exc_label}): {exc}",
+                                )
+                                return
+                            else:
+                                # Single-step wave: degrade to in-place but record
+                                # that this was an UNEXPECTED error, not a clean
+                                # WorktreeCreateError — the distinction matters for
+                                # triage.
+                                _in_place_reason = f"WorktreeUnexpectedError({_exc_label}): {exc}"
+                                try:
+                                    self._worktree_mgr._file_bead_warning(
+                                        task_id=state.task_id,
+                                        step_id=step_id,
+                                        content=(
+                                            f"BEAD_WARNING: worktree-unexpected-error-degraded-in-place "
+                                            f"step={step_id} exc_type={_exc_label} reason={exc}"
+                                        ),
+                                    )
+                                except Exception as _bead_exc:
+                                    _log.debug(
+                                        "BEAD_WARNING write failed for step %s (non-fatal): %s",
+                                        step_id, _bead_exc,
+                                    )
+                                _in_place = getattr(state, "steps_ran_in_place", {})
+                                _in_place[step_id] = _in_place_reason
+                                state.steps_ran_in_place = _in_place
+                                self._save_execution(state)
 
         self.record_step_result(
             step_id=step_id,
@@ -3995,12 +4068,23 @@ class ExecutionEngine:
             state.status = "running"
         elif result == "approve-with-feedback":
             # Insert a remediation phase after the current phase.
-            # Save state first so amend_plan sees the approval result.
+            # Save state first so _amend_from_feedback → amend_plan can see
+            # the approval result when it loads state.
             self._save_execution(state)
             self._amend_from_feedback(state, phase_id, feedback)
-            # Reload state — amend_plan saved its own copy with the
-            # amendment applied.  We must pick up those changes.
-            state = self._load_execution() or state
+            # amend_plan saves its own copy with the amendment applied.
+            # Reload to pick up those changes — do NOT fall back to the
+            # pre-amendment in-memory state if the load fails, because that
+            # would silently drop the amendment from the running state while
+            # it remains recorded on disk, creating an audit split-brain.
+            from agent_baton.core.engine.errors import ExecutionStateInconsistency
+            _reloaded = self._load_execution()
+            if _reloaded is None:
+                raise ExecutionStateInconsistency(
+                    task_id=state.task_id,
+                    context="record_approval_result:approve-with-feedback",
+                )
+            state = _reloaded
             state.status = "running"
 
         self._save_execution(state)
