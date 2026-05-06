@@ -198,6 +198,7 @@
   "classification_confidence": null,
   "archetype": "phased",
   "max_retry_phases": 2,
+  "compliance_fail_closed": null,
   "resource_limits": {
     "max_concurrent_executions": 2,
     "max_concurrent_agents": 4,

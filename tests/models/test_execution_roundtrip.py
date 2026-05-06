@@ -30,6 +30,7 @@ from agent_baton.models.execution import (
     GateResult,
     InteractionTurn,
     MachinePlan,
+    PendingApprovalRequest,
     PlanAmendment,
     PlanGate,
     PlanPhase,
@@ -317,6 +318,27 @@ class TestApprovalResult:
     def test_legacy_extra_fields_ignored(self) -> None:
         golden = _golden("ApprovalResult")
         ApprovalResult.from_dict({**golden, "_future_field": "ignored"})
+
+
+# ---------------------------------------------------------------------------
+# PendingApprovalRequest
+# ---------------------------------------------------------------------------
+
+class TestPendingApprovalRequest:
+    def test_to_dict_matches_golden(self) -> None:
+        golden = _golden("PendingApprovalRequest")
+        obj = PendingApprovalRequest.from_dict(golden)
+        assert obj.to_dict() == golden
+
+    def test_roundtrip_idempotent(self) -> None:
+        golden = _golden("PendingApprovalRequest")
+        assert PendingApprovalRequest.from_dict(
+            PendingApprovalRequest.from_dict(golden).to_dict()
+        ).to_dict() == golden
+
+    def test_legacy_extra_fields_ignored(self) -> None:
+        golden = _golden("PendingApprovalRequest")
+        PendingApprovalRequest.from_dict({**golden, "_future_field": "ignored"})
 
 
 # ---------------------------------------------------------------------------
