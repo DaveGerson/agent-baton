@@ -509,3 +509,299 @@ class TestGateSseTopics:
         from agent_baton.api.routes.pmo import _PMO_BOARD_TOPICS
 
         assert "gate.rejected" in _PMO_BOARD_TOPICS
+
+
+# ===========================================================================
+# InvalidApprovalState, ComplianceWriteError, ExecutionStateInconsistency
+# ===========================================================================
+
+
+class TestApprovalExceptionMapping:
+    """Engine approval exceptions produce correct HTTP status codes and body shapes."""
+
+    def test_not_approval_pending_approve_returns_409(
+        self, tmp_path: Path, registered_store: PmoStore
+    ) -> None:
+        from agent_baton.core.engine.errors import InvalidApprovalState
+
+        card = _awaiting_card()
+        client = _make_app(tmp_path, registered_store, [card])
+
+        with patch(
+            "agent_baton.core.engine.executor.ExecutionEngine.record_approval_result",
+            side_effect=InvalidApprovalState(
+                reason=InvalidApprovalState.REASON_NOT_PENDING,
+                message="not pending",
+            ),
+        ):
+            r = client.post(
+                f"/api/v1/pmo/gates/{card.card_id}/approve",
+                json={"phase_id": 1},
+            )
+
+        assert r.status_code == 409
+        body = r.json()
+        assert body["error"] == "InvalidApprovalState"
+        assert body["reason"] == "not_approval_pending"
+        assert "message" in body
+        assert "details" in body
+
+    def test_phase_mismatch_approve_returns_409(
+        self, tmp_path: Path, registered_store: PmoStore
+    ) -> None:
+        from agent_baton.core.engine.errors import InvalidApprovalState
+
+        card = _awaiting_card()
+        client = _make_app(tmp_path, registered_store, [card])
+
+        with patch(
+            "agent_baton.core.engine.executor.ExecutionEngine.record_approval_result",
+            side_effect=InvalidApprovalState(
+                reason=InvalidApprovalState.REASON_PHASE_MISMATCH,
+                message="phase mismatch",
+                phase_id=2,
+                current_status="approval_pending",
+            ),
+        ):
+            r = client.post(
+                f"/api/v1/pmo/gates/{card.card_id}/approve",
+                json={"phase_id": 2},
+            )
+
+        assert r.status_code == 409
+        body = r.json()
+        assert body["reason"] == "phase_mismatch"
+        assert body["details"]["phase_id"] == 2
+        assert body["details"]["current_status"] == "approval_pending"
+
+    def test_no_approval_requested_approve_returns_409(
+        self, tmp_path: Path, registered_store: PmoStore
+    ) -> None:
+        from agent_baton.core.engine.errors import InvalidApprovalState
+
+        card = _awaiting_card()
+        client = _make_app(tmp_path, registered_store, [card])
+
+        with patch(
+            "agent_baton.core.engine.executor.ExecutionEngine.record_approval_result",
+            side_effect=InvalidApprovalState(
+                reason=InvalidApprovalState.REASON_NO_APPROVAL_REQUESTED,
+                message="no approval requested",
+            ),
+        ):
+            r = client.post(
+                f"/api/v1/pmo/gates/{card.card_id}/approve",
+                json={"phase_id": 1},
+            )
+
+        assert r.status_code == 409
+        body = r.json()
+        assert body["reason"] == "no_approval_requested"
+
+    def test_self_approval_rejected_approve_returns_403(
+        self, tmp_path: Path, registered_store: PmoStore
+    ) -> None:
+        from agent_baton.core.engine.errors import InvalidApprovalState
+
+        card = _awaiting_card()
+        client = _make_app(tmp_path, registered_store, [card])
+
+        with patch(
+            "agent_baton.core.engine.executor.ExecutionEngine.record_approval_result",
+            side_effect=InvalidApprovalState(
+                reason=InvalidApprovalState.REASON_SELF_APPROVAL,
+                message="self approval rejected",
+                actor="alice@example.com",
+                requester="alice@example.com",
+            ),
+        ):
+            r = client.post(
+                f"/api/v1/pmo/gates/{card.card_id}/approve",
+                json={"phase_id": 1},
+            )
+
+        assert r.status_code == 403
+        body = r.json()
+        assert body["error"] == "InvalidApprovalState"
+        assert body["reason"] == "self_approval_rejected"
+        assert body["details"]["actor"] == "alice@example.com"
+        assert body["details"]["requester"] == "alice@example.com"
+
+    def test_not_approval_pending_reject_returns_409(
+        self, tmp_path: Path, registered_store: PmoStore
+    ) -> None:
+        from agent_baton.core.engine.errors import InvalidApprovalState
+
+        card = _awaiting_card()
+        client = _make_app(tmp_path, registered_store, [card])
+
+        with patch(
+            "agent_baton.core.engine.executor.ExecutionEngine.record_approval_result",
+            side_effect=InvalidApprovalState(
+                reason=InvalidApprovalState.REASON_NOT_PENDING,
+                message="not pending",
+            ),
+        ):
+            r = client.post(
+                f"/api/v1/pmo/gates/{card.card_id}/reject",
+                json={"phase_id": 1, "reason": "Test"},
+            )
+
+        assert r.status_code == 409
+        body = r.json()
+        assert body["reason"] == "not_approval_pending"
+
+    def test_self_approval_rejected_reject_returns_403(
+        self, tmp_path: Path, registered_store: PmoStore
+    ) -> None:
+        from agent_baton.core.engine.errors import InvalidApprovalState
+
+        card = _awaiting_card()
+        client = _make_app(tmp_path, registered_store, [card])
+
+        with patch(
+            "agent_baton.core.engine.executor.ExecutionEngine.record_approval_result",
+            side_effect=InvalidApprovalState(
+                reason=InvalidApprovalState.REASON_SELF_APPROVAL,
+                message="self approval rejected",
+                actor="bob@example.com",
+                requester="bob@example.com",
+            ),
+        ):
+            r = client.post(
+                f"/api/v1/pmo/gates/{card.card_id}/reject",
+                json={"phase_id": 1, "reason": "Policy violation test"},
+            )
+
+        assert r.status_code == 403
+        body = r.json()
+        assert body["reason"] == "self_approval_rejected"
+
+    def test_compliance_write_error_approve_returns_503(
+        self, tmp_path: Path, registered_store: PmoStore
+    ) -> None:
+        from agent_baton.core.engine.errors import ComplianceWriteError
+
+        card = _awaiting_card()
+        client = _make_app(tmp_path, registered_store, [card])
+
+        with patch(
+            "agent_baton.core.engine.executor.ExecutionEngine.record_approval_result",
+            side_effect=ComplianceWriteError(
+                underlying=OSError("disk full"),
+                log_path="/var/audit/log",
+            ),
+        ):
+            r = client.post(
+                f"/api/v1/pmo/gates/{card.card_id}/approve",
+                json={"phase_id": 1},
+            )
+
+        assert r.status_code == 503
+        body = r.json()
+        assert body["error"] == "ComplianceWriteError"
+        assert body["reason"] == "ComplianceWriteError"
+        assert body["details"]["log_path"] == "/var/audit/log"
+
+    def test_compliance_write_error_reject_returns_503(
+        self, tmp_path: Path, registered_store: PmoStore
+    ) -> None:
+        from agent_baton.core.engine.errors import ComplianceWriteError
+
+        card = _awaiting_card()
+        client = _make_app(tmp_path, registered_store, [card])
+
+        with patch(
+            "agent_baton.core.engine.executor.ExecutionEngine.record_approval_result",
+            side_effect=ComplianceWriteError(
+                underlying=OSError("io error"),
+                log_path="",
+            ),
+        ):
+            r = client.post(
+                f"/api/v1/pmo/gates/{card.card_id}/reject",
+                json={"phase_id": 1, "reason": "Bad output"},
+            )
+
+        assert r.status_code == 503
+        body = r.json()
+        assert body["error"] == "ComplianceWriteError"
+
+    def test_execution_state_inconsistency_approve_returns_500(
+        self, tmp_path: Path, registered_store: PmoStore
+    ) -> None:
+        from agent_baton.core.engine.errors import ExecutionStateInconsistency
+
+        card = _awaiting_card()
+        client = _make_app(tmp_path, registered_store, [card])
+
+        with patch(
+            "agent_baton.core.engine.executor.ExecutionEngine.record_approval_result",
+            side_effect=ExecutionStateInconsistency(
+                task_id="gate-task-001",
+                context="approve-with-feedback",
+            ),
+        ):
+            r = client.post(
+                f"/api/v1/pmo/gates/{card.card_id}/approve",
+                json={"phase_id": 1},
+            )
+
+        assert r.status_code == 500
+        body = r.json()
+        assert body["error"] == "ExecutionStateInconsistency"
+        assert body["reason"] == "ExecutionStateInconsistency"
+        assert body["details"]["task_id"] == "gate-task-001"
+        assert body["details"]["context"] == "approve-with-feedback"
+
+    def test_execution_state_inconsistency_reject_returns_500(
+        self, tmp_path: Path, registered_store: PmoStore
+    ) -> None:
+        from agent_baton.core.engine.errors import ExecutionStateInconsistency
+
+        card = _awaiting_card()
+        client = _make_app(tmp_path, registered_store, [card])
+
+        with patch(
+            "agent_baton.core.engine.executor.ExecutionEngine.record_approval_result",
+            side_effect=ExecutionStateInconsistency(
+                task_id="t-002",
+                context="reject",
+            ),
+        ):
+            r = client.post(
+                f"/api/v1/pmo/gates/{card.card_id}/reject",
+                json={"phase_id": 1, "reason": "Bad output"},
+            )
+
+        assert r.status_code == 500
+        body = r.json()
+        assert body["error"] == "ExecutionStateInconsistency"
+
+    def test_error_response_always_has_required_fields(
+        self, tmp_path: Path, registered_store: PmoStore
+    ) -> None:
+        """Every approval error response includes error, reason, message, details."""
+        from agent_baton.core.engine.errors import InvalidApprovalState
+
+        card = _awaiting_card()
+        client = _make_app(tmp_path, registered_store, [card])
+
+        with patch(
+            "agent_baton.core.engine.executor.ExecutionEngine.record_approval_result",
+            side_effect=InvalidApprovalState(
+                reason=InvalidApprovalState.REASON_PHASE_MISMATCH,
+                message="phase mismatch",
+                phase_id=5,
+            ),
+        ):
+            r = client.post(
+                f"/api/v1/pmo/gates/{card.card_id}/approve",
+                json={"phase_id": 5},
+            )
+
+        body = r.json()
+        for field in ("error", "reason", "message", "details"):
+            assert field in body, f"Missing required field: {field}"
+        assert isinstance(body["message"], str) and body["message"]
+        assert isinstance(body["details"], dict)
