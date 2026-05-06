@@ -212,6 +212,24 @@ def _swarm_enabled() -> bool:
     return os.environ.get("BATON_SWARM_ENABLED", "0").strip().lower() in ("1", "true", "yes")
 
 
+def _compliance_fail_closed_enabled() -> bool:
+    """Return True when compliance writes must fail-closed (Hole 2 fix).
+
+    Default: disabled — preserves the historical best-effort behavior where
+    compliance write failures are logged and execution continues.  When set
+    to ``1``/``true``/``yes`` the executor instead raises
+    :class:`agent_baton.core.engine.errors.ComplianceWriteError`, marks the
+    execution failed, and emits a bead warning so the operator is alerted.
+    Required for regulated-domain work where losing an audit entry without
+    halting is a compliance defect.
+
+    Override via env: ``BATON_COMPLIANCE_FAIL_CLOSED=1``.
+    """
+    return os.environ.get("BATON_COMPLIANCE_FAIL_CLOSED", "0").strip().lower() in (
+        "1", "true", "yes"
+    )
+
+
 def _cli_actor() -> str:
     """Return a best-effort identity string for the current CLI user.
 
@@ -991,9 +1009,21 @@ class ExecutionEngine:
         """Append a compliance audit entry to the hash-chained JSONL log.
 
         F0.3 (bd-f606): all entries flow through :class:`ComplianceChainWriter`
-        so the log is tamper-evident.  Best-effort: any I/O failure is logged
-        and silently swallowed so that compliance write failures never block
-        execution.
+        so the log is tamper-evident.
+
+        Two failure modes (Hole 2 fix):
+
+        * **Default (best-effort, ``BATON_COMPLIANCE_FAIL_CLOSED`` unset or
+          ``0``):**  any I/O failure is logged at WARNING level **and** a
+          ``BEAD_WARNING`` is filed so the failure is visible in the audit
+          trail surface — not just buried in logs.  Execution continues.
+        * **Fail-closed (``BATON_COMPLIANCE_FAIL_CLOSED=1``):** the
+          underlying exception is wrapped in
+          :class:`agent_baton.core.engine.errors.ComplianceWriteError`,
+          ``state.status`` is flipped to ``"failed"`` with a clear status
+          reason, and the exception is raised so the caller halts the
+          current step.  Required for regulated-domain work where losing an
+          audit entry without halting is a compliance defect.
 
         ``entry`` should include at minimum: ``timestamp``, ``event_type``,
         ``task_id``, ``plan_id``, ``step_id``, and ``agent_name``.
@@ -1005,7 +1035,116 @@ class ExecutionEngine:
             writer.append(entry)
             return
         except Exception as exc:
+            log_path_str = str(self._compliance_log_path)
+            fail_closed = _compliance_fail_closed_enabled()
+
+            # Best-effort bead warning so the failure surfaces in the audit
+            # trail regardless of mode.  Bead writes themselves are best-effort
+            # — if they fail too we drop down to the log line below.
+            self._file_compliance_bead_warning(
+                exc=exc,
+                log_path=log_path_str,
+                fail_closed=fail_closed,
+                entry=entry,
+            )
+
+            if fail_closed:
+                _log.error(
+                    "Compliance audit write failed in fail-closed mode "
+                    "(BATON_COMPLIANCE_FAIL_CLOSED=1) — halting execution: %s",
+                    exc,
+                )
+                # Mark the execution as failed so resume / inspection sees a
+                # clear status reason for the halt.  Best-effort: if the state
+                # cannot be loaded (e.g. _persistence not yet initialized) we
+                # still raise — the typed exception is the contract.
+                try:
+                    state = self._load_execution()
+                    if state is not None:
+                        state.status = "failed"
+                        state.completed_at = state.completed_at or _utcnow()
+                        # Surface the reason in a status-reason field.  We
+                        # reuse override_justification (the closest existing
+                        # operator-visible field) but only when empty.
+                        if not state.override_justification:
+                            state.override_justification = (
+                                f"compliance_write_failed: "
+                                f"{type(exc).__name__}: {exc}"
+                            )
+                        self._save_execution(state)
+                except Exception as _mark_exc:  # pragma: no cover
+                    _log.debug(
+                        "Could not mark execution failed after compliance "
+                        "write failure (non-fatal): %s",
+                        _mark_exc,
+                    )
+
+                from agent_baton.core.engine.errors import ComplianceWriteError
+                raise ComplianceWriteError(
+                    underlying=exc,
+                    log_path=log_path_str,
+                ) from exc
+
             _log.warning("Compliance audit write failed (non-fatal): %s", exc)
+
+    def _file_compliance_bead_warning(
+        self,
+        *,
+        exc: BaseException,
+        log_path: str,
+        fail_closed: bool,
+        entry: dict,
+    ) -> None:
+        """File a BEAD_WARNING for a compliance audit write failure.
+
+        Hole 2 fix: even in best-effort mode the operator must see compliance
+        write failures somewhere other than a buried log line.  This filer is
+        deliberately tolerant — bead-store I/O failures are logged at DEBUG
+        and never raised, so they don't mask the original compliance failure.
+        """
+        if self._bead_store is None:
+            return
+        try:
+            from agent_baton.models.bead import Bead, _generate_bead_id
+            ts = _utcnow()
+            task_id = entry.get("task_id", "") or "unknown"
+            step_id = entry.get("step_id", "") or "compliance-audit"
+            existing_count = 0
+            try:
+                existing_count = len(
+                    self._bead_store.query(task_id=task_id, limit=10000)
+                )
+            except Exception:
+                pass
+            content = (
+                f"BEAD_WARNING: compliance-audit-write-failed "
+                f"task_id={task_id} "
+                f"step_id={step_id} "
+                f"event_type={entry.get('event_type', 'unknown')} "
+                f"error_type={type(exc).__name__} "
+                f"reason={exc} "
+                f"log_path={log_path} "
+                f"fail_closed={'1' if fail_closed else '0'}"
+            )
+            bead_id = _generate_bead_id(task_id, step_id, content, ts, existing_count)
+            bead = Bead(
+                bead_id=bead_id,
+                task_id=task_id,
+                step_id=step_id,
+                agent_name="compliance-audit",
+                bead_type="warning",
+                content=content,
+                confidence="high",
+                scope="task" if step_id == "compliance-audit" else "step",
+                created_at=ts,
+                source="agent-signal",
+            )
+            self._bead_store.write(bead)
+        except Exception as bead_exc:
+            _log.debug(
+                "Compliance audit bead-warning failed (non-fatal): %s",
+                bead_exc,
+            )
 
     def _compliance_dispatch(
         self,

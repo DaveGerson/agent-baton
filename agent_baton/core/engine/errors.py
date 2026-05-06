@@ -119,3 +119,33 @@ class InvalidApprovalState(RuntimeError):
         self.actor = actor
         self.requester = requester
         super().__init__(message)
+
+
+class ComplianceWriteError(RuntimeError):
+    """Raised by ``_write_compliance_entry`` when fail-closed mode is enabled.
+
+    Hole 2 fix.  Compliance audit writes are best-effort by default —
+    failures are logged plus a bead warning is emitted, and execution
+    continues.  When ``BATON_COMPLIANCE_FAIL_CLOSED=1`` the behavior flips:
+    the underlying I/O error is wrapped in this exception so the executor
+    halts the current step and marks the execution failed.
+
+    Attributes:
+        underlying: The original exception raised by the chain writer.
+        log_path: The compliance log path that the engine attempted to write.
+    """
+
+    def __init__(
+        self,
+        *,
+        underlying: BaseException,
+        log_path: str = "",
+    ) -> None:
+        self.underlying = underlying
+        self.log_path = log_path
+        message = (
+            f"Compliance audit write failed (fail-closed mode): {underlying}"
+        )
+        if log_path:
+            message = f"{message} (log_path={log_path})"
+        super().__init__(message)
