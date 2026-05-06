@@ -8,6 +8,9 @@ auto-loads the closest one based on the working directory. Drill into the
 component file when you're touching that area; come back here for engine
 protocol, isolation, and incident-handling rules.
 
+For the design rationale and the decision rule for adding new `CLAUDE.md`
+files, see [docs/internal/claude-md-architecture.md](docs/internal/claude-md-architecture.md).
+
 ## Guiding principles for implementation
 
 Apply these to every change before declaring it done:

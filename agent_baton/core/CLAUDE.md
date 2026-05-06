@@ -11,13 +11,15 @@ The brain of `baton`. Cross-cutting rules: [../../CLAUDE.md](../../CLAUDE.md). P
 | `govern/` | Risk classifier, guardrails, compliance, regulated-data rules | [govern/CLAUDE.md](govern/CLAUDE.md) |
 | `storage/` | SQLite + file persistence, migrations, sync, external adapters | [storage/CLAUDE.md](storage/CLAUDE.md) |
 | `audit/` | Audit trail recording and replay | — |
+| `exec/` | Sandboxed execution runner, auditor gate, script lint | — |
 | `gates/` | QA gate implementations triggered by the engine | — |
 | `immune/` | Immune-system (anti-rot) detectors and signals | — |
 | `improve/` | Retrospective + improvement-loop logic | — |
 | `intel/` | Intelligence enrichment (context profiles, scoring) | — |
 | `knowledge/` | Knowledge packs and resolution | — |
 | `learn/` | Learning cycle and pattern extraction | — |
-| `observability/`, `observe/` | OpenTelemetry export and observation primitives | — |
+| `observability/` | **Emit side** — OTEL exporter, Prometheus, attribution, chargeback | — |
+| `observe/` | **Consumption side** — dashboard, telemetry, retrospectives, scanners, incidents | — |
 | `pmo/` | PMO data layer powering the UI | — |
 | `predict/` | Predictive dispatch | — |
 | `release/` | Release readiness scoring | — |
