@@ -561,6 +561,10 @@ class MachinePlan:
     classification_confidence: float | None = None  # 0.0–1.0 confidence score
     archetype: str = "phased"       # planning archetype: direct | phased | investigative
     max_retry_phases: int = 0       # investigative only: max phase retries before failing
+    # Override for ``BATON_COMPLIANCE_FAIL_CLOSED``.
+    # ``True`` forces fail-closed; ``False`` forces continue-on-failure;
+    # ``None`` (default) defers to the env var.
+    compliance_fail_closed: bool | None = None
 
     def __post_init__(self) -> None:
         if not self.created_at:
@@ -603,6 +607,7 @@ class MachinePlan:
             "classification_confidence": self.classification_confidence,
             "archetype": self.archetype,
             "max_retry_phases": self.max_retry_phases,
+            "compliance_fail_closed": self.compliance_fail_closed,
         }
         if self.resource_limits is not None:
             d["resource_limits"] = self.resource_limits.to_dict()
@@ -639,6 +644,7 @@ class MachinePlan:
             classification_confidence=data.get("classification_confidence"),
             archetype=data.get("archetype", "phased"),
             max_retry_phases=data.get("max_retry_phases", 0),
+            compliance_fail_closed=data.get("compliance_fail_closed"),
         )
 
     def to_markdown(self) -> str:
@@ -671,6 +677,8 @@ class MachinePlan:
             lines.append(f"**Explicit Knowledge Packs**: {', '.join(self.explicit_knowledge_packs)}")
         if self.explicit_knowledge_docs:
             lines.append(f"**Explicit Knowledge Docs**: {', '.join(self.explicit_knowledge_docs)}")
+        if self.compliance_fail_closed is not None:
+            lines.append(f"**Compliance Fail-Closed**: {self.compliance_fail_closed}")
         lines.append("")
 
         for phase in self.phases:

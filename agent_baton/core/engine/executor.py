@@ -212,12 +212,21 @@ def _swarm_enabled() -> bool:
     return os.environ.get("BATON_SWARM_ENABLED", "0").strip().lower() in ("1", "true", "yes")
 
 
-def _compliance_fail_closed_enabled() -> bool:
+def _compliance_fail_closed_enabled(
+    plan: MachinePlan | None = None,
+) -> bool:
     """Return True when compliance writes must fail-closed (Hole 2 fix).
 
+    Resolution order (first non-``None`` wins):
+
+    1. ``plan.compliance_fail_closed`` — set per-plan by the planning agent
+       for regulated-domain or high-risk tasks.
+    2. ``BATON_COMPLIANCE_FAIL_CLOSED`` env var — operator-level default.
+    3. ``False`` — historical best-effort default.
+
     Default: disabled — preserves the historical best-effort behavior where
-    compliance write failures are logged and execution continues.  When set
-    to ``1``/``true``/``yes`` the executor instead raises
+    compliance write failures are logged and execution continues.  When
+    ``True`` the executor raises
     :class:`agent_baton.core.engine.errors.ComplianceWriteError`, marks the
     execution failed, and emits a bead warning so the operator is alerted.
     Required for regulated-domain work where losing an audit entry without
@@ -225,6 +234,8 @@ def _compliance_fail_closed_enabled() -> bool:
 
     Override via env: ``BATON_COMPLIANCE_FAIL_CLOSED=1``.
     """
+    if plan is not None and plan.compliance_fail_closed is not None:
+        return plan.compliance_fail_closed
     return os.environ.get("BATON_COMPLIANCE_FAIL_CLOSED", "0").strip().lower() in (
         "1", "true", "yes"
     )
@@ -1005,7 +1016,11 @@ class ExecutionEngine:
 
     # ── Compliance audit helpers ─────────────────────────────────────────────
 
-    def _write_compliance_entry(self, entry: dict) -> None:
+    def _write_compliance_entry(
+        self,
+        entry: dict,
+        plan: MachinePlan | None = None,
+    ) -> None:
         """Append a compliance audit entry to the hash-chained JSONL log.
 
         F0.3 (bd-f606): all entries flow through :class:`ComplianceChainWriter`
@@ -1017,8 +1032,9 @@ class ExecutionEngine:
           ``0``):**  any I/O failure is logged at WARNING level **and** a
           ``BEAD_WARNING`` is filed so the failure is visible in the audit
           trail surface — not just buried in logs.  Execution continues.
-        * **Fail-closed (``BATON_COMPLIANCE_FAIL_CLOSED=1``):** the
-          underlying exception is wrapped in
+        * **Fail-closed (``BATON_COMPLIANCE_FAIL_CLOSED=1``, or
+          ``plan.compliance_fail_closed=True``):** the underlying exception
+          is wrapped in
           :class:`agent_baton.core.engine.errors.ComplianceWriteError`,
           ``state.status`` is flipped to ``"failed"`` with a clear status
           reason, and the exception is raised so the caller halts the
@@ -1027,6 +1043,10 @@ class ExecutionEngine:
 
         ``entry`` should include at minimum: ``timestamp``, ``event_type``,
         ``task_id``, ``plan_id``, ``step_id``, and ``agent_name``.
+
+        ``plan`` is optional; when supplied, ``plan.compliance_fail_closed``
+        takes precedence over the env var (see
+        :func:`_compliance_fail_closed_enabled`).
         """
         if self._compliance_log_path is None:
             return
@@ -1036,7 +1056,7 @@ class ExecutionEngine:
             return
         except Exception as exc:
             log_path_str = str(self._compliance_log_path)
-            fail_closed = _compliance_fail_closed_enabled()
+            fail_closed = _compliance_fail_closed_enabled(plan)
 
             # Best-effort bead warning so the failure surfaces in the audit
             # trail regardless of mode.  Bead writes themselves are best-effort
@@ -1154,16 +1174,19 @@ class ExecutionEngine:
         policy_context: str = "",
     ) -> None:
         """Write a compliance entry for an agent dispatch event."""
-        self._write_compliance_entry({
-            "timestamp": _utcnow(),
-            "event_type": "agent_dispatch",
-            "task_id": state.task_id,
-            "plan_id": state.plan.task_id,
-            "step_id": step_id,
-            "agent_name": agent_name,
-            "risk_level": state.plan.risk_level,
-            "policy_context": policy_context,
-        })
+        self._write_compliance_entry(
+            {
+                "timestamp": _utcnow(),
+                "event_type": "agent_dispatch",
+                "task_id": state.task_id,
+                "plan_id": state.plan.task_id,
+                "step_id": step_id,
+                "agent_name": agent_name,
+                "risk_level": state.plan.risk_level,
+                "policy_context": policy_context,
+            },
+            plan=state.plan,
+        )
 
     def _compliance_policy_event(
         self,
@@ -1174,25 +1197,28 @@ class ExecutionEngine:
         action_taken: str,
     ) -> None:
         """Write a compliance entry for a policy violation event."""
-        self._write_compliance_entry({
-            "timestamp": _utcnow(),
-            "event_type": "policy_violation",
-            "task_id": state.task_id,
-            "plan_id": state.plan.task_id,
-            "step_id": step_id,
-            "agent_name": agent_name,
-            "risk_level": state.plan.risk_level,
-            "violations": [
-                {
-                    "rule_name": v.rule.name,
-                    "severity": v.rule.severity,
-                    "rule_type": v.rule.rule_type,
-                    "details": v.details,
-                }
-                for v in violations
-            ],
-            "action_taken": action_taken,
-        })
+        self._write_compliance_entry(
+            {
+                "timestamp": _utcnow(),
+                "event_type": "policy_violation",
+                "task_id": state.task_id,
+                "plan_id": state.plan.task_id,
+                "step_id": step_id,
+                "agent_name": agent_name,
+                "risk_level": state.plan.risk_level,
+                "violations": [
+                    {
+                        "rule_name": v.rule.name,
+                        "severity": v.rule.severity,
+                        "rule_type": v.rule.rule_type,
+                        "details": v.details,
+                    }
+                    for v in violations
+                ],
+                "action_taken": action_taken,
+            },
+            plan=state.plan,
+        )
 
     def _compliance_gate(
         self,
@@ -1203,19 +1229,22 @@ class ExecutionEngine:
         output: str = "",
     ) -> None:
         """Write a compliance entry for a gate evaluation result."""
-        self._write_compliance_entry({
-            "timestamp": _utcnow(),
-            "event_type": "gate_result",
-            "task_id": state.task_id,
-            "plan_id": state.plan.task_id,
-            "step_id": "",
-            "agent_name": "engine",
-            "risk_level": state.plan.risk_level,
-            "phase_id": phase_id,
-            "gate_type": gate_type,
-            "passed": passed,
-            "output_snippet": output[:500] if output else "",
-        })
+        self._write_compliance_entry(
+            {
+                "timestamp": _utcnow(),
+                "event_type": "gate_result",
+                "task_id": state.task_id,
+                "plan_id": state.plan.task_id,
+                "step_id": "",
+                "agent_name": "engine",
+                "risk_level": state.plan.risk_level,
+                "phase_id": phase_id,
+                "gate_type": gate_type,
+                "passed": passed,
+                "output_snippet": output[:500] if output else "",
+            },
+            plan=state.plan,
+        )
 
     # ── CI gate dispatch (Wave 4.1) ──────────────────────────────────────────
 
@@ -2836,18 +2865,21 @@ class ExecutionEngine:
                 # compliance audit entry so regulated environments can prove
                 # the disable was honoured.  Read each time (not cached) so
                 # a runtime toggle is respected immediately.
-                self._write_compliance_entry({
-                    "timestamp": _utcnow(),
-                    "event_type": "selfheal_suppressed",
-                    "task_id": state.task_id,
-                    "plan_id": state.plan.task_id,
-                    "step_id": "",
-                    "agent_name": "engine",
-                    "risk_level": state.plan.risk_level,
-                    "phase_id": phase_id,
-                    "gate_type": gate_type,
-                    "reason": "BATON_SELFHEAL_ENABLED not set; self-heal disabled",
-                })
+                self._write_compliance_entry(
+                    {
+                        "timestamp": _utcnow(),
+                        "event_type": "selfheal_suppressed",
+                        "task_id": state.task_id,
+                        "plan_id": state.plan.task_id,
+                        "step_id": "",
+                        "agent_name": "engine",
+                        "risk_level": state.plan.risk_level,
+                        "phase_id": phase_id,
+                        "gate_type": gate_type,
+                        "reason": "BATON_SELFHEAL_ENABLED not set; self-heal disabled",
+                    },
+                    plan=state.plan,
+                )
             state.status = "gate_failed"
         else:
             self._publish(evt.gate_passed(
