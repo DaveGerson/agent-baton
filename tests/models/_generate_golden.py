@@ -29,6 +29,7 @@ from agent_baton.models.execution import (
     GateResult,
     InteractionTurn,
     MachinePlan,
+    PendingApprovalRequest,
     PlanAmendment,
     PlanGate,
     PlanPhase,
@@ -352,6 +353,15 @@ def gen_approval_result() -> None:
         rationale="Code is functionally correct; documentation gap is minor and can be remediated inline.",
     )
     _write("ApprovalResult", obj.to_dict())
+
+
+def gen_pending_approval_request() -> None:
+    obj = PendingApprovalRequest(
+        phase_id=2,
+        requester="jdoe@workstation.local",
+        requested_at="2026-01-15T10:55:00+00:00",
+    )
+    _write("PendingApprovalRequest", obj.to_dict())
 
 
 def gen_gate_result() -> None:
@@ -861,6 +871,7 @@ if __name__ == "__main__":
     gen_team_step_result()
     gen_step_result()
     gen_approval_result()
+    gen_pending_approval_request()
     gen_gate_result()
     gen_feedback_result()
     gen_file_attribution()
