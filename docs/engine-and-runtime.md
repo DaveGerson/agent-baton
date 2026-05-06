@@ -662,7 +662,7 @@ the row via `ContextHarvester.fetch_one` and passes it through
 `build_delegation_prompt(prior_context_block=...)`, prepending a
 `## Prior Context` block (capped at 400 chars) so the agent skips
 cold-start re-discovery. Best-effort — disabled by
-`BATON_HARVEST_CONTEXT=0`. Inspected via `baton context show <agent>`.
+`BATON_HARVEST_CONTEXT=0`. Inspected via `baton agent-context show <agent>`.
 
 ---
 
