@@ -1374,6 +1374,10 @@ class ExecutionState:
     # step_worktrees maps step_id -> serialised WorktreeHandle dict.
     # Absent from legacy state files; all accessors use getattr(..., {}).
     step_worktrees: dict[str, dict] = field(default_factory=dict)
+    # steps_ran_in_place records steps that degraded to in-place execution
+    # because worktree creation failed.  Maps step_id -> reason string.
+    # Absent from legacy state files; defaults to empty dict.
+    steps_ran_in_place: dict[str, str] = field(default_factory=dict)
     # The git branch that was current when this execution started.
     # Used as base_branch for all worktree create() calls.
     working_branch: str = ""
@@ -1471,6 +1475,8 @@ class ExecutionState:
             "override_justification": self.override_justification,
             # Wave 1.3 (bd-86bf): worktree isolation state
             "step_worktrees": dict(getattr(self, "step_worktrees", {})),
+            # steps that degraded to in-place execution after worktree failure
+            "steps_ran_in_place": dict(getattr(self, "steps_ran_in_place", {})),
             "working_branch": getattr(self, "working_branch", ""),
             # Wave 5 (bd-e208, bd-1483, bd-9839): Human-Agent Loop state
             "takeover_records": list(getattr(self, "takeover_records", [])),
@@ -1508,6 +1514,7 @@ class ExecutionState:
             override_justification=data.get("override_justification", ""),
             # Wave 1.3 (bd-86bf): worktree isolation — default to empty for legacy files
             step_worktrees=dict(data.get("step_worktrees", {})),
+            steps_ran_in_place=dict(data.get("steps_ran_in_place", {})),
             working_branch=data.get("working_branch", ""),
             # Wave 5 (bd-e208, bd-1483, bd-9839): default to empty for legacy files
             takeover_records=list(data.get("takeover_records", [])),
