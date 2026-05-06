@@ -55,6 +55,7 @@ from agent_baton.api.models.requests import (
 from agent_baton.api.models.responses import (
     AdoSearchResponse,
     AdoWorkItemResponse,
+    ApprovalErrorResponse,
     ApprovalLogEntry,
     ApprovalLogResponse,
     ChangelistResponse,
@@ -1583,6 +1584,102 @@ def _locate_awaiting_card(
     return card, project_root
 
 
+def _approval_error_response(exc: object) -> tuple[int, ApprovalErrorResponse]:
+    """Map an approval-related engine exception to ``(http_status, ApprovalErrorResponse)``.
+
+    Handles:
+
+    - :class:`agent_baton.core.engine.errors.InvalidApprovalState` →
+      409 Conflict for most reasons; 403 Forbidden for ``self_approval_rejected``.
+    - :class:`agent_baton.core.engine.errors.ComplianceWriteError` →
+      503 Service Unavailable.
+    - :class:`agent_baton.core.engine.errors.ExecutionStateInconsistency` →
+      500 Internal Server Error.
+
+    Args:
+        exc: The raised exception instance.
+
+    Returns:
+        ``(status_code, ApprovalErrorResponse)``
+    """
+    from agent_baton.core.engine.errors import (
+        ComplianceWriteError,
+        ExecutionStateInconsistency,
+        InvalidApprovalState,
+    )
+
+    if isinstance(exc, InvalidApprovalState):
+        # self_approval_rejected is a policy violation → 403; all others are
+        # resource-state mismatches → 409.
+        status = 403 if exc.reason == "self_approval_rejected" else 409
+        _MESSAGES: dict[str, str] = {
+            "not_approval_pending": (
+                "This execution is not currently waiting for approval. "
+                "Check the task status and try again."
+            ),
+            "phase_mismatch": (
+                "The phase_id you supplied does not match the phase currently "
+                "awaiting approval."
+            ),
+            "no_approval_requested": (
+                "The current phase does not require approval."
+            ),
+            "self_approval_rejected": (
+                "Self-approval is not permitted in team approval mode. "
+                "A different reviewer must approve this gate."
+            ),
+        }
+        return status, ApprovalErrorResponse(
+            error="InvalidApprovalState",
+            reason=exc.reason,
+            message=_MESSAGES.get(exc.reason, str(exc)),
+            details={
+                "phase_id": exc.phase_id,
+                "current_status": exc.current_status or None,
+                "actor": exc.actor or None,
+                "requester": exc.requester or None,
+            },
+        )
+
+    if isinstance(exc, ComplianceWriteError):
+        return 503, ApprovalErrorResponse(
+            error="ComplianceWriteError",
+            reason="ComplianceWriteError",
+            message=(
+                "The compliance audit subsystem failed to record this approval. "
+                "The operation was not applied. Retry in a moment, or contact "
+                "your system administrator if the problem persists."
+            ),
+            details={
+                "audit_path": exc.audit_path or None,
+            },
+        )
+
+    if isinstance(exc, ExecutionStateInconsistency):
+        return 500, ApprovalErrorResponse(
+            error="ExecutionStateInconsistency",
+            reason="ExecutionStateInconsistency",
+            message=(
+                "The execution state could not be reloaded after the approval "
+                "was applied. This is a server-side data integrity problem; "
+                "contact your system administrator."
+            ),
+            details={
+                "task_id": exc.task_id or None,
+                "operation": exc.operation or None,
+            },
+        )
+
+    # Fallback — should not be reached; caller is responsible for only
+    # passing recognised exception types.
+    return 500, ApprovalErrorResponse(
+        error=type(exc).__name__,
+        reason=type(exc).__name__,
+        message=str(exc),
+        details={},
+    )
+
+
 @router.get(
     "/pmo/gates/pending",
     response_model=list[PendingGateResponse],
@@ -1735,16 +1832,26 @@ async def approve_gate(
         ``GateActionResponse`` confirming the approval was recorded.
 
     Raises:
+        HTTPException 403: Self-approval rejected in team approval mode.
         HTTPException 404: If the task cannot be found.
-        HTTPException 409: If the task is not in ``awaiting_human`` state.
-        HTTPException 500: If the engine fails to record the approval.
+        HTTPException 409: If the task is not in ``awaiting_human`` state, or
+            the engine raises ``InvalidApprovalState`` (not_approval_pending,
+            phase_mismatch, no_approval_requested).
+        HTTPException 500: Unexpected engine failure or state inconsistency.
+        HTTPException 503: Compliance audit write failed (fail-closed mode).
     """
     import uuid
     from datetime import datetime, timezone
     from agent_baton.core.storage import detect_backend, get_project_storage
     from agent_baton.core.engine.executor import ExecutionEngine
+    from agent_baton.core.engine.errors import (
+        ComplianceWriteError,
+        ExecutionStateInconsistency,
+        InvalidApprovalState,
+    )
     from agent_baton.core.storage.central import CentralStore
     from agent_baton.models.events import Event
+    from fastapi.responses import JSONResponse
 
     card, project_root = _locate_awaiting_card(task_id, scanner, store)
 
@@ -1763,6 +1870,9 @@ async def approve_gate(
             result="approve",
             feedback=req.notes or "",
         )
+    except (InvalidApprovalState, ComplianceWriteError, ExecutionStateInconsistency) as exc:
+        status, body = _approval_error_response(exc)
+        return JSONResponse(status_code=status, content=body.model_dump())
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -1843,16 +1953,26 @@ async def reject_gate(
         ``GateActionResponse`` confirming the rejection was recorded.
 
     Raises:
+        HTTPException 403: Self-approval rejected in team approval mode.
         HTTPException 404: If the task cannot be found.
-        HTTPException 409: If the task is not in ``awaiting_human`` state.
-        HTTPException 500: If the engine fails to record the rejection.
+        HTTPException 409: If the task is not in ``awaiting_human`` state, or
+            the engine raises ``InvalidApprovalState`` (not_approval_pending,
+            phase_mismatch, no_approval_requested).
+        HTTPException 500: Unexpected engine failure or state inconsistency.
+        HTTPException 503: Compliance audit write failed (fail-closed mode).
     """
     import uuid
     from datetime import datetime, timezone
     from agent_baton.core.storage import detect_backend, get_project_storage
     from agent_baton.core.engine.executor import ExecutionEngine
+    from agent_baton.core.engine.errors import (
+        ComplianceWriteError,
+        ExecutionStateInconsistency,
+        InvalidApprovalState,
+    )
     from agent_baton.core.storage.central import CentralStore
     from agent_baton.models.events import Event
+    from fastapi.responses import JSONResponse
 
     card, project_root = _locate_awaiting_card(task_id, scanner, store)
 
@@ -1871,6 +1991,9 @@ async def reject_gate(
             result="reject",
             feedback=req.reason,
         )
+    except (InvalidApprovalState, ComplianceWriteError, ExecutionStateInconsistency) as exc:
+        status, body = _approval_error_response(exc)
+        return JSONResponse(status_code=status, content=body.model_dump())
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 

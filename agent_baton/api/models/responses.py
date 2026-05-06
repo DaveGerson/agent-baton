@@ -26,6 +26,7 @@ The models are organized into groups:
 - **Forge/ADO**: ``InterviewQuestionResponse``, ``InterviewResponse``,
   ``AdoWorkItemResponse``, ``AdoSearchResponse``
 - **Forge actions**: ``ForgeApproveResponse``, ``ExecuteCardResponse``
+- **Gate errors**: ``ApprovalErrorResponse``
 """
 from __future__ import annotations
 
@@ -954,6 +955,48 @@ class ExternalMappingResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Gate approval responses
 # ---------------------------------------------------------------------------
+
+
+class ApprovalErrorResponse(BaseModel):
+    """Structured error body for approval recording failures.
+
+    Returned by ``POST /pmo/gates/{task_id}/approve`` and
+    ``POST /pmo/gates/{task_id}/reject`` when the engine raises
+    :class:`agent_baton.core.engine.errors.InvalidApprovalState`,
+    :class:`~agent_baton.core.engine.errors.ComplianceWriteError`, or
+    :class:`~agent_baton.core.engine.errors.ExecutionStateInconsistency`.
+
+    The ``reason`` field is the single source of truth for frontend branching.
+    ``details`` carries everything the frontend may want to render; fields are
+    ``None`` when not applicable to the error class.
+    """
+
+    error: str = Field(
+        ...,
+        description=(
+            "Exception class name: 'InvalidApprovalState', "
+            "'ComplianceWriteError', or 'ExecutionStateInconsistency'."
+        ),
+    )
+    reason: str = Field(
+        ...,
+        description=(
+            "Machine-readable reason code. For InvalidApprovalState one of: "
+            "not_approval_pending, phase_mismatch, no_approval_requested, "
+            "self_approval_rejected. For other errors matches the error field."
+        ),
+    )
+    message: str = Field(
+        ...,
+        description="Human-readable explanation suitable for direct display.",
+    )
+    details: dict[str, Optional[Any]] = Field(
+        default_factory=dict,
+        description=(
+            "Structured context for the frontend. May include phase_id, "
+            "current_status, actor, requester."
+        ),
+    )
 
 
 class PendingGateResponse(BaseModel):

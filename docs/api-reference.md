@@ -1810,6 +1810,128 @@ plan to the project's team-context, and updates the signal status to `triaged`.
 
 ---
 
+#### Gate Approvals
+
+##### `GET /api/v1/pmo/gates/pending`
+
+List all executions currently paused and waiting for gate approval.
+
+**Response:** `list[PendingGateResponse]`
+
+Each `PendingGateResponse`:
+
+| Field | Type | Description |
+|---|---|---|
+| `task_id` | string | Task ID of the paused execution |
+| `project_id` | string | Owning project ID |
+| `phase_id` | int | Phase ID awaiting approval |
+| `phase_name` | string | Human-readable phase name |
+| `approval_context` | string | Markdown review summary from the engine |
+| `approval_options` | list[string] | Available choices (approve, reject, approve-with-feedback) |
+| `task_summary` | string | Top-level task description |
+| `current_phase_name` | string | Name of the phase currently awaiting approval |
+
+---
+
+##### `POST /api/v1/pmo/gates/{task_id}/approve`
+
+Record a human approval decision for a paused execution.
+
+**Request Body:** `GateApproveRequest`
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `phase_id` | int | Yes | Phase ID that requires approval |
+| `notes` | string | No | Optional reviewer notes |
+
+**Response Model:** `GateActionResponse`
+
+| Field | Type | Description |
+|---|---|---|
+| `task_id` | string | Task ID |
+| `phase_id` | int | Phase the decision applies to |
+| `result` | string | `"approve"` |
+| `recorded` | bool | Always `true` on success |
+
+**Error Responses:**
+
+| Status | Condition |
+|---|---|
+| `403` | Self-approval rejected (team approval mode) |
+| `404` | Task or project not found |
+| `409` | Task not in `awaiting_human` state; or engine raised `InvalidApprovalState` |
+| `500` | Execution state inconsistency (server-side data integrity error) |
+| `503` | Compliance audit write failed (`BATON_COMPLIANCE_FAIL_CLOSED=1`) |
+
+For `403`, `409`, `500`, and `503` responses the body is an `ApprovalErrorResponse`
+(see below) instead of the standard `{"detail": "..."}` format.
+
+---
+
+##### `POST /api/v1/pmo/gates/{task_id}/reject`
+
+Record a human rejection decision for a paused execution.
+
+**Request Body:** `GateRejectRequest`
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `phase_id` | int | Yes | Phase ID that requires approval |
+| `reason` | string | Yes | Non-empty rejection reason |
+
+**Response Model:** `GateActionResponse`
+
+| Field | Type | Description |
+|---|---|---|
+| `task_id` | string | Task ID |
+| `phase_id` | int | Phase the decision applies to |
+| `result` | string | `"reject"` |
+| `recorded` | bool | Always `true` on success |
+
+**Error Responses:** Same status codes and body shapes as the approve endpoint above.
+
+---
+
+##### `ApprovalErrorResponse` — structured error body
+
+Returned (instead of the standard `detail` string) when approval recording
+fails due to an engine exception. The `reason` field is the single value the
+frontend should branch on for localised UI copy.
+
+```json
+{
+  "error": "InvalidApprovalState",
+  "reason": "self_approval_rejected",
+  "message": "Self-approval is not permitted in team approval mode. A different reviewer must approve this gate.",
+  "details": {
+    "phase_id": 3,
+    "current_status": "approval_pending",
+    "actor": "alice@example.com",
+    "requester": "alice@example.com"
+  }
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `error` | string | Exception class: `InvalidApprovalState`, `ComplianceWriteError`, or `ExecutionStateInconsistency` |
+| `reason` | string | Machine-readable reason code (see table below) |
+| `message` | string | Human-readable default message safe to display directly |
+| `details` | dict | Structured context; keys vary by error class |
+
+**Reason codes and HTTP mappings:**
+
+| `reason` | HTTP status | Meaning |
+|---|---|---|
+| `not_approval_pending` | 409 | Execution is not in `approval_pending` status |
+| `phase_mismatch` | 409 | Supplied `phase_id` does not match the pending phase |
+| `no_approval_requested` | 409 | Current phase does not require approval |
+| `self_approval_rejected` | 403 | Actor is the requester; team-mode policy forbids self-approval |
+| `ComplianceWriteError` | 503 | Compliance audit subsystem write failure (retry later) |
+| `ExecutionStateInconsistency` | 500 | State reload failed after amendment (server bug) |
+
+---
+
 ## 5. Webhook System
 
 The webhook system delivers real-time event notifications to external
@@ -2130,10 +2252,12 @@ For validation errors (422), the response includes field-level details:
 | `204` | No Content | Successful deletion with no response body (e.g. `DELETE /pmo/projects`) |
 | `400` | Bad Request | Invalid request body, validation failure, or business rule violation |
 | `401` | Unauthorized | Missing or invalid Bearer token |
+| `403` | Forbidden | Policy violation (e.g. self-approval rejected in team approval mode) |
 | `404` | Not Found | Resource does not exist |
-| `409` | Conflict | Concurrent modification prevented the operation |
+| `409` | Conflict | Resource state mismatch (e.g. task not awaiting approval, phase_id mismatch) |
 | `422` | Unprocessable Entity | Pydantic validation failure (automatic from FastAPI) |
-| `500` | Internal Server Error | Unexpected server-side failure |
+| `500` | Internal Server Error | Unexpected server-side failure or data integrity error |
+| `503` | Service Unavailable | Dependent subsystem unavailable (e.g. compliance audit write failure) |
 
 ### Standard Error Model
 
