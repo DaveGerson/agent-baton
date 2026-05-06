@@ -239,7 +239,6 @@ def _make_loop(
     tuner=None,
 ) -> "ImprovementLoop":  # noqa: F821
     """Build an ImprovementLoop with mocked collaborators."""
-    from agent_baton.core.improve.experiments import ExperimentManager
     from agent_baton.core.improve.loop import ImprovementLoop
     from agent_baton.core.improve.proposals import ProposalManager
     from agent_baton.core.improve.rollback import RollbackManager
@@ -266,7 +265,6 @@ def _make_loop(
     scorer.score_agent.return_value = scorecard
 
     proposals = ProposalManager(improvements_dir)
-    experiments = ExperimentManager(improvements_dir)
     vcs = AgentVersionControl(tmp_path / "agents")
     rollbacks = RollbackManager(vcs=vcs, improvements_dir=improvements_dir)
 
@@ -274,7 +272,6 @@ def _make_loop(
         trigger_evaluator=triggers,
         recommender=recommender,
         proposal_manager=proposals,
-        experiment_manager=experiments,
         rollback_manager=rollbacks,
         scorer=scorer,
         improvements_dir=improvements_dir,

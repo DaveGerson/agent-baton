@@ -575,3 +575,142 @@ class TestLoadAttachmentContent:
         attachment = _inline_attachment(path=str(doc_file))
         result = PromptDispatcher._load_attachment_content(attachment)
         assert result == content
+
+
+# ---------------------------------------------------------------------------
+# Session-level knowledge dedup — dispatcher._apply_session_dedup
+# ---------------------------------------------------------------------------
+
+
+class TestSessionDedupDispatcher:
+    """Tests for PromptDispatcher._apply_session_dedup and its integration
+    with build_delegation_prompt via the delivered_knowledge parameter."""
+
+    # (a) First dispatch: inline attachment is recorded in delivered_knowledge.
+    def test_first_dispatch_records_inline_doc(
+        self, dispatcher: PromptDispatcher, tmp_path
+    ) -> None:
+        doc_file = tmp_path / "arch.md"
+        doc_file.write_text("Architecture content.")
+        att = _inline_attachment(
+            document_name="architecture.md",
+            pack_name="agent-baton",
+            path=str(doc_file),
+        )
+        delivered: dict[str, str] = {}
+        dispatcher._apply_session_dedup([att], "1.1", delivered)
+        assert str(doc_file) in delivered
+        assert delivered[str(doc_file)] == "1.1"
+
+    # (a) First dispatch: inline doc still renders inline in the prompt.
+    def test_first_dispatch_inline_doc_appears_in_prompt(
+        self, dispatcher: PromptDispatcher, tmp_path
+    ) -> None:
+        doc_file = tmp_path / "arch.md"
+        doc_file.write_text("Load-bearing content.")
+        att = _inline_attachment(path=str(doc_file))
+        step = _make_step(step_id="1.1", knowledge=[att])
+        delivered: dict[str, str] = {}
+        prompt = dispatcher.build_delegation_prompt(
+            step, delivered_knowledge=delivered
+        )
+        assert "Load-bearing content." in prompt
+        assert "## Knowledge Context" in prompt
+
+    # (b) Second dispatch: same doc downgraded to reference with prior-step note.
+    def test_second_dispatch_downgrades_to_reference(
+        self, dispatcher: PromptDispatcher, tmp_path
+    ) -> None:
+        doc_file = tmp_path / "arch.md"
+        doc_file.write_text("Architecture content.")
+        att = _inline_attachment(
+            document_name="architecture.md",
+            pack_name="agent-baton",
+            path=str(doc_file),
+        )
+        # Pre-populate as if step 1.1 already inlined it.
+        delivered: dict[str, str] = {str(doc_file): "1.1"}
+        result = dispatcher._apply_session_dedup([att], "1.2", delivered)
+        assert result[0].delivery == "reference"
+
+    # (b) The downgraded attachment's grounding contains the prior step reference.
+    def test_second_dispatch_grounding_contains_prior_step_note(
+        self, dispatcher: PromptDispatcher, tmp_path
+    ) -> None:
+        doc_file = tmp_path / "arch.md"
+        doc_file.write_text("Architecture content.")
+        att = _inline_attachment(
+            document_name="architecture.md",
+            path=str(doc_file),
+        )
+        delivered: dict[str, str] = {str(doc_file): "1.1"}
+        result = dispatcher._apply_session_dedup([att], "1.2", delivered)
+        assert "step 1.1" in result[0].grounding
+        assert str(doc_file) in result[0].grounding
+
+    # (b) Downgraded doc renders under Knowledge References, not Knowledge Context.
+    def test_second_dispatch_renders_as_reference_section(
+        self, dispatcher: PromptDispatcher, tmp_path
+    ) -> None:
+        doc_file = tmp_path / "arch.md"
+        doc_file.write_text("Architecture content.")
+        att = _inline_attachment(
+            document_name="architecture.md",
+            path=str(doc_file),
+        )
+        delivered: dict[str, str] = {str(doc_file): "1.1"}
+        step = _make_step(step_id="1.2", knowledge=[att])
+        prompt = dispatcher.build_delegation_prompt(
+            step, delivered_knowledge=delivered
+        )
+        assert "## Knowledge References" in prompt
+        assert "## Knowledge Context" not in prompt
+        assert "Architecture content." not in prompt
+
+    # (c) Explicit source layer always inlines regardless of prior delivery.
+    def test_explicit_layer_always_inlines(
+        self, dispatcher: PromptDispatcher, tmp_path
+    ) -> None:
+        doc_file = tmp_path / "arch.md"
+        doc_file.write_text("Explicit content.")
+        att = KnowledgeAttachment(
+            source="explicit",
+            pack_name="agent-baton",
+            document_name="architecture.md",
+            path=str(doc_file),
+            delivery="inline",
+            retrieval="file",
+            grounding="",
+            token_estimate=50,
+        )
+        delivered: dict[str, str] = {str(doc_file): "1.1"}
+        result = dispatcher._apply_session_dedup([att], "1.2", delivered)
+        assert result[0].delivery == "inline"
+        assert result[0].source == "explicit"
+
+    # No delivered_knowledge passed → unchanged behaviour (no dedup).
+    def test_no_delivered_knowledge_leaves_behavior_unchanged(
+        self, dispatcher: PromptDispatcher, tmp_path
+    ) -> None:
+        doc_file = tmp_path / "arch.md"
+        doc_file.write_text("Content.")
+        att = _inline_attachment(path=str(doc_file))
+        step = _make_step(knowledge=[att])
+        prompt = dispatcher.build_delegation_prompt(step)
+        assert "Content." in prompt
+
+    # delivered_knowledge dict is mutated: first inline is recorded.
+    def test_delivered_knowledge_mutated_after_build(
+        self, dispatcher: PromptDispatcher, tmp_path
+    ) -> None:
+        doc_file = tmp_path / "arch.md"
+        doc_file.write_text("Content.")
+        att = _inline_attachment(
+            document_name="architecture.md",
+            path=str(doc_file),
+        )
+        step = _make_step(step_id="2.1", knowledge=[att])
+        delivered: dict[str, str] = {}
+        dispatcher.build_delegation_prompt(step, delivered_knowledge=delivered)
+        assert str(doc_file) in delivered
+        assert delivered[str(doc_file)] == "2.1"

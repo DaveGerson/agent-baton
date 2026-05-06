@@ -156,7 +156,7 @@ class TestClaudeCodeConfig:
             max_outcome_length=1000,
             prompt_file_threshold=65536,
             model_timeouts={"opus": 800.0, "sonnet": 400.0},
-            env_passthrough=["ANTHROPIC_API_KEY", "AWS_PROFILE"],
+            env_passthrough=["CLAUDE_CODE_USE_BEDROCK", "AWS_PROFILE"],
         )
         d = original.to_dict()
         restored = ClaudeCodeConfig.from_dict(d)
@@ -586,14 +586,14 @@ class TestClaudeCodeLauncherSecurity:
         """_build_env must never pass through non-whitelisted environment variables."""
         # Inject a sensitive variable that must NOT appear in the child env
         monkeypatch.setenv("SECRET_DB_PASSWORD", "hunter2")
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        monkeypatch.setenv("AWS_PROFILE", "my-profile")
         monkeypatch.setenv("HOME", "/home/testuser")
 
         launcher = _launcher(monkeypatch)
         env = launcher._build_env()
 
         # Whitelisted key must be present
-        assert env.get("ANTHROPIC_API_KEY") == "sk-test"
+        assert env.get("AWS_PROFILE") == "my-profile"
         # HOME is always forwarded
         assert "HOME" in env
 
@@ -999,3 +999,132 @@ class TestStartNewSession:
         assert captured_kwargs[0].get("start_new_session") is True, (
             "create_subprocess_exec must be called with start_new_session=True"
         )
+
+
+# ===========================================================================
+# bd-37a9: parent state env injection on Wave 1.3 worktree dispatch
+# ===========================================================================
+
+class TestWaveOneThreeStateEnvInjection:
+    """When ``cwd_override`` is set (Wave 1.3 worktree dispatch), the launcher
+    must inject ``BATON_DB_PATH``, ``BATON_TEAM_CONTEXT_ROOT``, and (when
+    given) ``BATON_TASK_ID`` into the subprocess env so the subagent's
+    upward-walk DB discovery does NOT silently latch onto the worktree-local
+    empty baton.db. Pre-bd-37a9 this was a latent corruption hazard for any
+    project that did not gitignore ``.claude/``.
+    """
+
+    def test_no_cwd_override_does_not_inject_state_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Default dispatches MUST NOT inject BATON_DB_PATH — that would
+        force every existing user-flow into a single canonical DB."""
+        captured: list[dict] = []
+
+        async def capturing_exec(*args: Any, **kwargs: Any) -> FakeProcess:
+            captured.append(kwargs)
+            return FakeProcess(stdout=_ok_json(), returncode=0)
+
+        _patch_which(monkeypatch)
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", capturing_exec)
+        launcher = ClaudeCodeLauncher()
+        launcher._git_bin = None
+
+        async def _run():
+            await launcher.launch("backend", "sonnet", "task", "1.1")
+
+        asyncio.run(_run())
+
+        env = captured[0]["env"]
+        assert "BATON_DB_PATH" not in env
+        assert "BATON_TEAM_CONTEXT_ROOT" not in env
+        assert "BATON_TASK_ID" not in env
+
+    def test_cwd_override_injects_baton_db_path_pointing_at_parent(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """The injected BATON_DB_PATH MUST be the parent project's
+        ``.claude/team-context/baton.db`` — not the worktree's local copy."""
+        parent_root = tmp_path / "parent"
+        parent_root.mkdir()
+        worktree_path = tmp_path / "wt"
+        worktree_path.mkdir()
+
+        config = ClaudeCodeConfig(working_directory=parent_root)
+        _patch_which(monkeypatch)
+        captured: list[dict] = []
+
+        async def capturing_exec(*args: Any, **kwargs: Any) -> FakeProcess:
+            captured.append(kwargs)
+            return FakeProcess(stdout=_ok_json(), returncode=0)
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", capturing_exec)
+        launcher = ClaudeCodeLauncher(config)
+        launcher._git_bin = None
+
+        async def _run():
+            await launcher.launch(
+                "backend", "sonnet", "task", "1.1",
+                cwd_override=str(worktree_path),
+                task_id="task-abc-123",
+            )
+
+        asyncio.run(_run())
+
+        env = captured[0]["env"]
+        expected_db = str((parent_root / ".claude" / "team-context" / "baton.db").resolve())
+        expected_root = str((parent_root / ".claude" / "team-context").resolve())
+        assert env["BATON_DB_PATH"] == expected_db
+        assert env["BATON_TEAM_CONTEXT_ROOT"] == expected_root
+        assert env["BATON_TASK_ID"] == "task-abc-123"
+
+    def test_cwd_override_without_task_id_omits_baton_task_id(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """Empty task_id must NOT set BATON_TASK_ID (don't shadow existing
+        operator-provided env values with empty strings)."""
+        parent_root = tmp_path / "parent"
+        parent_root.mkdir()
+        config = ClaudeCodeConfig(working_directory=parent_root)
+        _patch_which(monkeypatch)
+        captured: list[dict] = []
+
+        async def capturing_exec(*args: Any, **kwargs: Any) -> FakeProcess:
+            captured.append(kwargs)
+            return FakeProcess(stdout=_ok_json(), returncode=0)
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", capturing_exec)
+        launcher = ClaudeCodeLauncher(config)
+        launcher._git_bin = None
+
+        async def _run():
+            await launcher.launch(
+                "backend", "sonnet", "task", "1.1",
+                cwd_override=str(tmp_path / "wt"),
+            )
+
+        asyncio.run(_run())
+
+        env = captured[0]["env"]
+        assert "BATON_DB_PATH" in env
+        assert "BATON_TASK_ID" not in env
+
+    def test_inject_helper_is_a_noop_for_already_set_keys(
+        self, tmp_path
+    ) -> None:
+        """If a caller has already populated BATON_DB_PATH (e.g. for a
+        test fixture), the injection MUST NOT overwrite it."""
+        parent_root = tmp_path / "parent"
+        parent_root.mkdir()
+        config = ClaudeCodeConfig(working_directory=parent_root)
+        # We instantiate without going through the binary check — the helper
+        # is pure: it only reads self._config and a passed-in dict.
+        launcher = object.__new__(ClaudeCodeLauncher)
+        launcher._config = config
+
+        env = {"BATON_DB_PATH": "/explicit/test/baton.db"}
+        launcher._inject_parent_state_env(env, task_id="t")
+
+        assert env["BATON_DB_PATH"] == "/explicit/test/baton.db"  # preserved
+        assert "BATON_TEAM_CONTEXT_ROOT" in env  # newly added
+        assert env["BATON_TASK_ID"] == "t"

@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,100..1000&family=JetBrains+Mono:wght@400;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,700;9..144,800;9..144,900&family=DM+Sans:opsz,wght@9..40,100..1000&family=Caveat:wght@500;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap');
 
 *, *::before, *::after {
   box-sizing: border-box;
@@ -13,22 +13,25 @@ html, body, #root {
 
 body {
   font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
-  background: #060a11;
-  color: #f1f5f9;
+  background: #fff4de;
+  color: #2a1a10;
   -webkit-font-smoothing: antialiased;
 }
 
-/* Thin scrollbars throughout */
+/* Warm scrollbars */
 ::-webkit-scrollbar {
-  width: 3px;
-  height: 3px;
+  width: 5px;
+  height: 5px;
 }
 ::-webkit-scrollbar-track {
-  background: transparent;
+  background: #f3e4c2;
 }
 ::-webkit-scrollbar-thumb {
-  background: #1a2236;
+  background: #c9a97a;
   border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #a4691a;
 }
 
 /* Pulse animation for status indicators */
@@ -43,9 +46,23 @@ body {
   to { transform: rotate(360deg); }
 }
 
+/* Forge loading bar */
+@keyframes forge-bar {
+  0% { width: 15%; }
+  50% { width: 75%; }
+  100% { width: 95%; }
+}
+
+/* Ticker slide */
+@keyframes ticker-slide {
+  0% { transform: translateX(100%); }
+  100% { transform: translateX(-100%); }
+}
+
 input::placeholder,
 textarea::placeholder {
-  color: #475569;
+  color: #a4805f;
+  font-style: italic;
 }
 
 select {
@@ -62,4 +79,29 @@ textarea {
 
 pre, code {
   font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+/* Polka-dot texture helper */
+.surface--dots {
+  background-color: #fff4de;
+  background-image: radial-gradient(#d4a15a 1.2px, transparent 1.4px);
+  background-size: 14px 14px;
+}
+
+/* Gingham helper */
+.surface--gingham {
+  background-color: #fff4de;
+  background-image:
+    linear-gradient(to right, rgba(226,58,58,.07) 50%, transparent 50%),
+    linear-gradient(to bottom, rgba(226,58,58,.07) 50%, transparent 50%);
+  background-size: 16px 16px;
+}
+
+/* Ruled-paper lines helper (recipe card feel) */
+.surface--ruled {
+  background-image: repeating-linear-gradient(
+    0deg,
+    transparent 0 30px,
+    #c9a97a44 30px 31px
+  );
 }

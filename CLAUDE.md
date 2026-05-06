@@ -1,277 +1,143 @@
-# Agent Baton — Development Guide
+# CLAUDE.md — agent runtime config
 
-This repo contains the source for Agent Baton, a multi-agent orchestration
-system for Claude Code.
+This file is read by every Claude Code agent dispatched inside this repo. It is **not** documentation for humans. Marketing pitch, install steps, comparison tables: not here. Those live in `README.md`. Pages for human readers live in `docs/`.
 
-## Repository Structure
+This root file holds **cross-cutting rules** that apply everywhere. Each major
+directory has its own `CLAUDE.md` with component-specific guidance — Claude Code
+auto-loads the closest one based on the working directory. Drill into the
+component file when you're touching that area; come back here for engine
+protocol, isolation, and incident-handling rules.
 
-```
-agent_baton/       ← Python package (orchestration engine)
-  models/          ← Data models (23 modules, incl. pmo.py, knowledge.py, bead.py,
-  |                  learning.py, decision.py, events.py, session.py, parallel.py)
-  core/            ← Business logic (11 sub-packages, no shim files)
-    engine/        ← Execution core: planner, executor, dispatcher, gates,
-    │                persistence, protocols (ExecutionDriver), classifier,
-    │                knowledge_resolver, knowledge_gap,
-    │                bead_store, bead_signal, bead_decay, bead_selector
-    orchestration/ ← Agent discovery: registry, router, context manager,
-    │                knowledge_registry
-    pmo/           ← PMO subsystem: store, scanner, forge
-    storage/       ← Central DB: sync.py (SyncEngine), central.py (CentralStore),
-    │                connection, schema, migrate, queries, protocol,
-    │                sqlite_backend, file_backend, pmo_sqlite,
-    │                adapters/ (ExternalSourceAdapter protocol, AdoAdapter)
-    govern/        ← Policy enforcement, compliance, escalation,
-    │                spec_validator, validator
-    observe/       ← Tracing, usage, dashboard, retrospective, telemetry,
-    │                context_profiler, archiver
-    improve/       ← Scoring, evolution, VCS, experiments, loop, proposals,
-    │                rollback, triggers
-    learn/         ← Pattern learner, budget tuner, bead_analyzer, engine,
-    │                interviewer, ledger, overrides, recommender, resolvers
-    distribute/    ← Packaging, sharing, registry client
-    │  experimental/ ← Incident, async dispatch, transfer (not production)
-    events/        ← Event bus, domain events, persistence, projections
-    runtime/       ← Worker, supervisor, launcher, claude_launcher, headless,
-    │                daemon, scheduler, signals, decisions, context (factory)
-  cli/             ← CLI interface (49 commands via `baton`)
-    commands/
-      execution/   ← execute, plan, status, daemon, async, decide
-      observe/     ← dashboard, trace, usage, telemetry, context_profile, retro,
-      |              context, query, cleanup, migrate_storage
-      govern/      ← classify, compliance, policy, escalations, validate,
-      |              spec_check, detect
-      improve/     ← scores, evolve, patterns, budget, changelog, learn,
-      |              anomalies, experiment, improve
-      distribute/  ← package, publish, pull, verify_package, install, transfer
-      agents/      ← agents, route, events, incident
-      pmo_cmd      ← pmo serve, pmo status, pmo add, pmo health
-      sync_cmd     ← baton sync, baton sync --all, baton sync status
-      query_cmd    ← baton cquery (cross-project SQL against central.db)
-      source_cmd   ← baton source add/list/sync/remove/map (external adapters)
-      bead_cmd     ← baton beads list/show/ready/close/link (structured memory)
-      serve        ← baton serve (API server)
-      uninstall    ← baton uninstall (remove from target project)
-docs/              ← Architecture documentation (13 .md files incl. architecture.md,
-|                    design-decisions.md, invariants.md, cli-reference.md,
-|                    api-reference.md, engine-and-runtime.md, storage-sync-and-pmo.md,
-|                    governance-knowledge-and-events.md, observe-learn-and-improve.md,
-|                    terminology.md, troubleshooting.md)
-agents/            ← Distributable agent definitions (19 .md files)
-references/        ← Distributable reference docs (15 .md files)
-templates/         ← CLAUDE.md + settings.json installed to target projects
-scripts/           ← Install scripts (Linux + Windows)
-tests/             ← Test suite (~5035 tests, pytest)
-pmo-ui/            ← React/Vite PMO frontend (served at /pmo/)
-.claude/           ← Project-specific orchestration setup:
-  agents/          ← 19 packaged agents (mirrored from agents/) +
-  |                  6 meta agents for baton development +
-  |                  18 GSD framework agents
-  references/      ← Symlink → ../references/ (canonical source)
-  knowledge/       ← Knowledge packs (3 packs, 10 docs)
-  settings.json    ← Hooks for this project
-```
+For the design rationale and the decision rule for adding new `CLAUDE.md`
+files, see [docs/internal/claude-md-architecture.md](docs/internal/claude-md-architecture.md).
 
-## Key Rules
+## Guiding principles for implementation
 
-- `agents/` and `references/` are the **distributable** source of truth.
-  Changes here affect all users who install agent-baton.
-- `.claude/agents/` contains three tiers: (1) **packaged agents** mirrored
-  from `agents/` so this project can dogfood them, (2) **meta agents** for
-  developing agent-baton itself (these are NOT distributed), and (3) **GSD
-  framework agents** for project management workflows.
-- `.claude/references/` is a symlink to `references/` — edits to canonical
-  references are immediately available to the project's orchestrator.
-- The `agent_baton` Python package reads agent definitions at runtime.
-- `core/engine/` is the execution engine — changes here affect the runtime
-  behavior of all orchestrated tasks.
-- All imports use canonical sub-package paths (e.g.,
-  `from agent_baton.core.govern.classifier import DataClassifier`).
-  There are no backward-compatibility shims.
-- `cli/commands/execution/execute.py` contains `_print_action()` — the
-  output format Claude reads to drive orchestration. Treat it as a public
-  API. See `docs/invariants.md` for the full contract.
-- Before changing CLI command names, `_print_action()` output format, or
-  execution state schema, read `docs/invariants.md` — these are the protocol
-  contract between Claude and the engine.
+Apply these to every change before declaring it done:
 
-## Agent Roster (for this project)
+1. Does this improve the quality of code within agent-baton?
+2. Does this accelerate code generation and maintainability?
+3. Does this make appropriate trade-offs between token usage and output quality?
+4. Does this actually solve the problem with no holes or gaps?
+5. Could this functionality be failing silently?
+6. Are there any major code smells?
+7. Does a user or a Claude Code deployment have the information needed to use this capability?
+8. Is this capability extensible to multiple challenges?
 
-**Packaged agents** (19 — mirrored from `agents/`, also shipped to users):
+## Reference architecture (where to look)
 
-| Agent | Role |
-|-------|------|
-| `orchestrator` | Coordinate multi-step development tasks |
-| `backend-engineer` / `--python` / `--node` | Server-side implementation |
-| `frontend-engineer` / `--react` / `--dotnet` | Client-side UI |
-| `architect` | Design decisions, module boundaries |
-| `test-engineer` | Write and organize pytest tests |
-| `code-reviewer` | Quality review before commits |
-| `auditor` | Safety review for guardrail/hook changes |
-| `talent-builder` | Create new distributable agent definitions |
-| `security-reviewer` | Security audit (OWASP, auth, secrets) |
-| `devops-engineer` | Infrastructure, CI/CD, Docker |
-| `data-engineer` / `data-analyst` / `data-scientist` | Data stack |
-| `visualization-expert` | Charts, dashboards |
-| `subject-matter-expert` | Domain-specific business operations |
+| Path | What lives there | Per-directory CLAUDE.md |
+|------|------------------|-------------------------|
+| `agent_baton/` | Python orchestration engine (the `baton` CLI's source) | [agent_baton/CLAUDE.md](agent_baton/CLAUDE.md) |
+| `agent_baton/api/` | FastAPI routers, middleware, webhooks (REST + PMO backend) | [agent_baton/api/CLAUDE.md](agent_baton/api/CLAUDE.md) |
+| `agent_baton/cli/` | Click/Typer CLI surface — `baton <command>` entry points | [agent_baton/cli/CLAUDE.md](agent_baton/cli/CLAUDE.md) |
+| `agent_baton/core/` | Engine internals: state machine, planner, dispatcher, governance, storage | [agent_baton/core/CLAUDE.md](agent_baton/core/CLAUDE.md) (deeper: [engine](agent_baton/core/engine/CLAUDE.md), [orchestration](agent_baton/core/orchestration/CLAUDE.md), [govern](agent_baton/core/govern/CLAUDE.md), [storage](agent_baton/core/storage/CLAUDE.md)) |
+| `agent_baton/models/` | Pydantic data models — execution, beads, plans, decisions | [agent_baton/models/CLAUDE.md](agent_baton/models/CLAUDE.md) |
+| `agents/` | 33 distributable agent definitions (Markdown with frontmatter) | [agents/CLAUDE.md](agents/CLAUDE.md) |
+| `references/` | 18 distributable reference procedures | [references/CLAUDE.md](references/CLAUDE.md) |
+| `templates/` | `CLAUDE.md` + `settings.json` + skills installed to user projects | (do not modify `templates/CLAUDE.md` — it's a distributable artifact) |
+| `pmo-ui/` | React/Vite frontend served at `/pmo/` | [pmo-ui/CLAUDE.md](pmo-ui/CLAUDE.md) |
+| `tests/` | pytest suite (unit + integration) | [tests/CLAUDE.md](tests/CLAUDE.md) |
+| `docs/` | Public docs (Diátaxis quadrants); `docs/internal/` is maintainer-only | [docs/CLAUDE.md](docs/CLAUDE.md) (deeper: [internal](docs/internal/CLAUDE.md)) |
+| `scripts/` | Install scripts and one-shot maintenance utilities | [scripts/CLAUDE.md](scripts/CLAUDE.md) |
+| `.claude/` | Project-specific orchestration setup (not committed) | — |
 
-**Meta agents** (6 — project-specific, for developing agent-baton):
+All Python imports use canonical paths: `from agent_baton.core.govern.classifier import DataClassifier`. Never reach across submodules through `__init__.py` shortcuts.
 
-| Agent | Role |
-|-------|------|
-| `ai-systems-architect` | Multi-agent orchestration design |
-| `agent-definition-engineer` | Edit agent .md files, references, knowledge packs |
-| `prompt-engineer` | Agent prompt optimization |
-| `ai-product-strategist` | Product decisions, value/cost analysis |
-| `spec-document-reviewer` | Review and validate specification documents |
-| `documentation-architect` | Deep-dive codebase documentation |
+## Key files (treat as public APIs)
 
-## Development
+- `agent_baton/cli/commands/execution/execute.py` — `_print_action()` is the protocol surface between the engine and the orchestrator agent. Don't break its output shape.
+- `agent_baton/core/engine/states.py` — execution state machine.
+- `agent_baton/core/engine/protocols.py` — `ExecutionDriver` 15-method interface.
+- `agent_baton/models/execution.py` — `ActionType` enum (9 values: DISPATCH, GATE, APPROVAL, COMPLETE, FAILED, WAIT, FEEDBACK, INTERACT, SWARM_DISPATCH) and `ExecutionState`.
+- `agent_baton/api/` — FastAPI routers for the REST API + PMO UI backend.
+
+## Orchestrator behavior (mandatory)
+
+When the `orchestrator` agent is invoked:
+
+1. Plan with `baton plan "<task>" --save --explain`. The engine handles routing, risk, budget, sequencing. Writes `plan.json` + `plan.md` to `.claude/team-context/`.
+2. Start with `baton execute start`. The engine initializes tracing and returns the first action.
+3. Drive the action loop. The engine returns DISPATCH (spawn the named agent with the provided prompt), GATE (run the named check), APPROVAL (wait for sign-off), or INTERACT (multi-turn dialogue). Record results with `baton execute record` and `baton execute gate`.
+4. Finalize with `baton execute complete`. The engine writes the trace, usage log, and retrospective.
+5. Use a feature branch; commit each agent's work individually.
+6. If the session crashes, `baton execute resume` picks up from saved state.
+
+Recipes for common tasks: [docs/orchestrator-usage.md](docs/orchestrator-usage.md). Protocol contract from the agent side: [references/baton-engine.md](references/baton-engine.md).
+
+## Concurrent agent isolation (mandatory)
+
+When dispatching parallel `Agent` calls that touch tracked files, use `isolation: "worktree"`. Branch checkout alone does not isolate uncommitted changes — the parent HEAD silently drifts during multi-agent dispatch.
+
+## Autonomous incident handling (mandatory)
+
+Handle bugs/failures without pausing the main flow:
+
+1. **Bead it** — `baton beads create --type warning --message "<incident>"`.
+2. **Fix in parallel** — launch a subagent on a separate branch (use `isolation: "worktree"` for concurrent agents).
+3. **Require a regression test.**
+4. **Continue the main flow.**
+
+Only pause for true human decisions (security, compliance, scope changes).
+
+## Regulated-domain rules
+
+Any work touching regulated data, compliance systems, audit-controlled records, or industry-specific business rules MUST:
+
+- Involve the `subject-matter-expert` agent for domain context.
+- Involve the `auditor` agent for pre-execution and post-execution review.
+- Follow the Regulated Data guardrail preset.
+
+## Testing discipline
+
+Agents do **not** run the full test suite. Tests run only at GATE steps the engine emits. The full suite is gated to maintainers + CI. Unit tests for the file you're editing are fine. See [tests/CLAUDE.md](tests/CLAUDE.md) for layout.
+
+## Code navigation
+
+Use `cymbal` instead of grep for symbol lookup:
 
 ```bash
-pip install -e ".[dev]"    # Install in editable mode
-pytest                     # Run tests (~5035 tests)
-scripts/install.sh         # Re-install globally after editing agents/references
+cymbal investigate <symbol>     # source, callers, callees
+cymbal impact <symbol>          # blast radius before edits
 ```
 
-## Orchestrator Usage
+## Token efficiency (mandatory)
 
-This project dogfoods the agent-baton execution engine for its own
-orchestration. For complex tasks involving 3+ files across different
-layers, use the engine path:
+- Prefer file-reference summaries over inline tool output.
+- Trust engine records; don't re-verify what `plan.md` already states.
+- Default to `baton execute run` for non-INTERACT phases.
+- Don't re-read files already summarized in `plan.md` or beads.
 
-```
-baton plan "task description" --save --explain \
-    [--knowledge path/to/doc.md] \       # attach explicit knowledge document(s)
-    [--knowledge-pack pack-name] \       # attach explicit knowledge pack(s)
-    [--intervention low|medium|high]     # escalation threshold (default: low)
-# Review plan.md — present summary to user, adjust if needed
-baton execute start
+## Environment variables
 
-loop:
-  baton execute next
-  if DISPATCH:
-    baton execute dispatched --step ID --agent NAME
-    → spawn Agent tool with the delegation_prompt ←
-    baton execute record --step ID --agent NAME --status complete \
-      --outcome "summary" --files "changed.py"
-  if GATE:
-    run gate command
-    baton execute gate --phase-id N --result pass
-  if APPROVAL:
-    → present context to user, get decision ←
-    baton execute approve --phase-id N --result approve
-  if COMPLETE:
-    baton execute complete
-    break
-```
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `BATON_TASK_ID` | Target a specific execution in multi-task scenarios | auto-detected |
+| `BATON_APPROVAL_MODE` | `local` (self-approve) or `team` (different reviewer required) | `local` |
+| `BATON_DB_PATH` | Override per-project `baton.db` location | discovered |
+| `BATON_RUN_TOKEN_CEILING` | Hard kill the loop above N tokens | unset |
+| `BATON_EXPERIMENTAL` | Comma list to enable experimental subsystems (e.g., `swarm`) | unset |
+| `ANTHROPIC_API_KEY` | Required for AI risk classification and Haiku classifier | unset |
+| `BATON_WORKTREE_ENABLED` | Enable/disable git worktree isolation for concurrent agents | `1` |
+| `BATON_TAKEOVER_ENABLED` | Enable/disable developer takeover capability | `1` |
+| `BATON_SELFHEAL_ENABLED` | Enable/disable self-heal escalation on failures | `0` |
+| `BATON_SPECULATE_ENABLED` | Enable/disable speculative pipelining | `0` |
+| `BATON_SOULS_ENABLED` | Enable/disable soul registry for agent identity | `0` |
+| `BATON_PLANNER_HARD_GATE` | Enable hard validation gate that blocks bad plans | unset |
+| `BATON_PREDICT_ENABLED` | Enable predictive dispatch system | `0` |
+| `BATON_OTEL_ENABLED` | Enable OpenTelemetry JSONL export | unset |
 
-**Headless execution:** For autonomous execution without a Claude Code
-session, use `baton execute run`. This drives the full loop (start → dispatch
-→ gate → complete) by spawning `claude --print` subprocesses. The PMO UI
-can also launch execution directly from the board.
+## Documentation maintenance (mandatory)
 
-**Depth limit:** The orchestrator MUST run at the top level of a conversation,
-never as a dispatched subagent. It needs to spawn its own agents, and Claude
-Code limits agent nesting to depth 1.
+After significant work, update the relevant docs before merging:
 
-**For DISPATCH actions — you MUST use the Agent tool** to spawn the
-specified subagent with the delegation prompt. Do NOT do the work inline.
-Valid `--status` values: `complete` or `failed`.
+- `docs/architecture.md` + `docs/architecture/{high-level-design,technical-design,package-layout,state-machine}.md` — design and structure
+- `docs/cli-reference.md` — when CLI surface changes
+- `docs/api-reference.md` — when REST routes change
+- `docs/agent-roster.md` — when agents are added or removed
+- `README.md` — when public framing changes
+- `CLAUDE.md` (this file) — when cross-cutting developer conventions change
+- The component-level `CLAUDE.md` — when conventions change inside a single directory
+- `GEMINI.md` — when developer conventions change
 
-**For APPROVAL actions** — present the approval context to the user and
-record their decision with `baton execute approve`. Options: `approve`,
-`reject`, `approve-with-feedback` (inserts remediation phase).
-
-**Plan amendments** — use `baton execute amend` to add phases or steps
-during execution. **Team steps** — use `baton execute team-record` to
-record individual team member completions.
-
-See `references/baton-engine.md` for the full CLI reference and
-troubleshooting guide.
-
-For simple single-file changes, work directly without the engine.
-
-Changes to distributable files (`agents/`, `references/`) are MEDIUM risk
-and should involve the auditor when substantial.
-
-Changes to `core/engine/` affect the execution runtime and should have
-corresponding test coverage.
-
-## Cross-Layer Linkage Rules
-
-Schema and model changes touch multiple layers that must stay in sync.
-These linkage rules prevent the category of bugs where a change in one
-layer silently breaks another.
-
-### Schema Linkage (storage/)
-
-When adding or removing a column in `schema.py`:
-
-1. **Project-level schema** (`PROJECT_SCHEMA_DDL`) — the CREATE TABLE
-   for `baton.db`.
-2. **Central schema** (`CENTRAL_SCHEMA_DDL`) — the CREATE TABLE for
-   `central.db`.  The central table mirrors the project table with an
-   additional `project_id` prefix column.
-3. **Migration script** (`MIGRATIONS` dict) — ALTER TABLE for existing
-   project databases.  Central does not have its own migration dict;
-   it uses `CREATE TABLE IF NOT EXISTS` on first access.  **Important:**
-   migrations are applied to both project and central databases, so
-   FK constraints referencing single-column PKs must be omitted from
-   `MIGRATIONS` (central tables use composite PKs).  Fresh project DBs
-   get FKs from `PROJECT_SCHEMA_DDL` directly.
-4. **SQLite backend** (`sqlite_backend.py`) — INSERT and SELECT
-   statements that reference the column.
-5. **Sync engine** (`sync.py`) — uses `SELECT *` so column presence is
-   sufficient, but verify the central DDL includes the column.
-
-**Rule:** Every column in `PROJECT_SCHEMA_DDL` must also exist in
-`CENTRAL_SCHEMA_DDL` (with the `project_id` prefix added to the key).
-The sync engine copies all columns via `SELECT *`; a missing column in
-the central schema causes a silent sync failure.
-
-### Model ↔ Test Linkage
-
-When the planner produces new step types (e.g. team steps with
-member IDs like `"2.1.a"`):
-
-1. **Integration tests** that drive the engine through
-   `record_step_result` must use the `_record_dispatch` helper (in
-   `test_engine_integration.py`) which routes team member IDs to
-   `record_team_member_result`.  Direct calls to
-   `engine.record_step_result` will fail for team member IDs.
-2. **CLI handler tests** (e.g. `test_planner_governance.py`) that
-   construct `argparse.Namespace` fixtures must include all attributes
-   that `plan_cmd.handler` reads.  When a new CLI flag is added to the
-   plan command, update the test namespace.
-
-### Planner ↔ Gate Linkage
-
-When adding new phase names to `_PHASE_NAMES` or `_STEP_TEMPLATES`
-in `planner.py`, check `_default_gate()` to ensure non-code-producing
-phases (design, investigate, research, review) are excluded from
-automated test gates.
-
-## Documentation Maintenance
-
-When completing work that changes the architecture, public API, CLI
-commands, or data models, update the relevant documentation:
-
-- **`docs/architecture.md`** — Package layout, dependency graph, key
-  contracts. Update when adding/removing/moving modules or changing
-  the interaction chain.
-- **`docs/design-decisions.md`** — ADR log. Add an entry when making a
-  non-obvious architectural decision.
-- **`docs/invariants.md`** — Critical interface boundaries. Update when
-  changing CLI command names, `_print_action()` output format, or
-  `execution-state.json` schema.
-- **`docs/cli-reference.md`** — Full CLI command reference. Update when
-  adding, removing, or changing CLI commands or flags.
-- **`docs/engine-and-runtime.md`** — Engine internals and runtime
-  subsystem. Update when changing executor, planner, or runtime behavior.
-- **`docs/storage-sync-and-pmo.md`** — Storage layer, sync engine, and
-  PMO subsystem. Update when changing schema, sync, or PMO behavior.
-- **`README.md`** — User-facing overview. Update when adding agents,
-  references, or CLI commands.
-- **This file (`CLAUDE.md`)** — Developer guide. Update when the repo
-  structure, test count, or development workflow changes.
+The full matrix and writer's contract is in [docs/internal/doc-guiding-principles.md](docs/internal/doc-guiding-principles.md). Audit trail of doc decisions: [docs/internal/doc-audit.md](docs/internal/doc-audit.md). Target tree: [docs/internal/doc-ia.md](docs/internal/doc-ia.md).

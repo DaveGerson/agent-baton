@@ -1,0 +1,39 @@
+# Refactor Spec Template
+spec_id: ""
+task_type: refactor
+template_id: refactor
+title: "<Refactor: short description>"
+
+## Motivation
+# Why is this refactor needed? What technical debt does it address?
+motivation: |
+  <Describe the motivation>
+
+## Current State
+current_state: |
+  <Describe the current code structure / pain points>
+
+## Target State
+target_state: |
+  <Describe the desired code structure after refactor>
+
+## Invariants (must not break)
+invariants:
+  - "<Behavioral invariant 1>"
+  - "<Behavioral invariant 2>"
+
+## Rollout Strategy
+rollout: incremental    # incremental | big-bang | feature-flagged
+
+## Affected Components
+affected_modules: []
+affected_tests: []
+
+## Effort Estimate
+effort: M
+
+## Score
+score:
+  clarity: 0.0
+  testability: 0.0
+  risk_coverage: 0.0

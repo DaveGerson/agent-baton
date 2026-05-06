@@ -45,14 +45,26 @@ class DecisionManager:
         self,
         decisions_dir: Path | None = None,
         bus: EventBus | None = None,
+        safe_read_root: Path | None = None,
     ) -> None:
         self._dir = (decisions_dir or self._DEFAULT_DIR).resolve()
         self._bus = bus
+        self._safe_read_root = safe_read_root.resolve() if safe_read_root else None
 
     @property
     def decisions_dir(self) -> Path:
         """Absolute (or relative) path to the decisions directory."""
         return self._dir
+
+    @property
+    def safe_read_root(self) -> Path | None:
+        """Absolute root directory inside which context_files reads are permitted.
+
+        ``None`` means the manager is in defensive mode and *no* file reads
+        through the API are allowed (secure-by-default for callers that did
+        not opt into a constrained root).
+        """
+        return self._safe_read_root
 
     # ── Public API ───────────────────────────────────────────────────────────
 

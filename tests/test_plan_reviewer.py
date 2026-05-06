@@ -55,7 +55,7 @@ def _make_step(
 def _make_broad_plan() -> MachinePlan:
     """Create a plan with a single broad implementation step spanning many concerns."""
     step = _make_step(
-        desc="Implement engine routing, dispatcher changes, worker automation, and CLI output",
+        desc="Wire engine routing, dispatcher changes, worker automation, and CLI output end-to-end",
         context_files=[
             "agent_baton/core/engine/executor.py",
             "agent_baton/core/engine/dispatcher.py",
@@ -76,7 +76,7 @@ def _make_broad_plan() -> MachinePlan:
             ]),
         ],
         task_summary=(
-            "Add new step type to executor.py, dispatcher.py, worker.py, "
+            "Wire new step type through executor.py, dispatcher.py, worker.py, "
             "execute.py, planner.py, and execution.py"
         ),
     )
@@ -175,23 +175,18 @@ class TestHeuristicReview:
         impl_phase = plan.phases[1]
         assert len(impl_phase.steps) == 1, "Precondition: single step"
 
-        # Haiku unavailable — will use heuristic fallback
-        with patch(
-            "agent_baton.core.engine.plan_reviewer.PlanReviewer._try_haiku_review",
-            return_value=None,
-        ):
-            result = reviewer.review(
-                plan, plan.task_summary,
-                file_paths=[
-                    "agent_baton/core/engine/executor.py",
-                    "agent_baton/core/engine/dispatcher.py",
-                    "agent_baton/core/runtime/worker.py",
-                    "agent_baton/cli/commands/execution/execute.py",
-                    "agent_baton/core/engine/planner.py",
-                    "agent_baton/models/execution.py",
-                ],
-                complexity="medium",
-            )
+        result = reviewer.review(
+            plan, plan.task_summary,
+            file_paths=[
+                "agent_baton/core/engine/executor.py",
+                "agent_baton/core/engine/dispatcher.py",
+                "agent_baton/core/runtime/worker.py",
+                "agent_baton/cli/commands/execution/execute.py",
+                "agent_baton/core/engine/planner.py",
+                "agent_baton/models/execution.py",
+            ],
+            complexity="medium",
+        )
 
         assert result.source == "heuristic"
         # Coupled concerns (engine+runtime+models+execution) → team
@@ -224,11 +219,7 @@ class TestHeuristicReview:
             PlanPhase(phase_id=1, name="Implement", steps=[step]),
         ])
         reviewer = PlanReviewer()
-        with patch(
-            "agent_baton.core.engine.plan_reviewer.PlanReviewer._try_haiku_review",
-            return_value=None,
-        ):
-            result = reviewer.review(
+        result = reviewer.review(
                 plan,
                 "Update docs, tests, distribution, and PMO UI",
                 file_paths=[
@@ -262,11 +253,7 @@ class TestHeuristicReview:
             PlanPhase(phase_id=1, name="Implement", steps=[step]),
         ])
         reviewer = PlanReviewer()
-        with patch(
-            "agent_baton.core.engine.plan_reviewer.PlanReviewer._try_haiku_review",
-            return_value=None,
-        ):
-            result = reviewer.review(plan, "Fix two engine files", complexity="medium")
+        result = reviewer.review(plan, "Fix two engine files", complexity="medium")
         assert result.splits_applied == 0
         assert len(plan.phases[0].steps) == 1
 
@@ -287,11 +274,7 @@ class TestHeuristicReview:
             PlanPhase(phase_id=1, name="Design", steps=[step]),
         ])
         reviewer = PlanReviewer()
-        with patch(
-            "agent_baton.core.engine.plan_reviewer.PlanReviewer._try_haiku_review",
-            return_value=None,
-        ):
-            result = reviewer.review(plan, "Design the approach", complexity="medium")
+        result = reviewer.review(plan, "Design the approach", complexity="medium")
         assert result.splits_applied == 0
 
     def test_does_not_split_team_steps(self):
@@ -314,11 +297,7 @@ class TestHeuristicReview:
             PlanPhase(phase_id=2, name="Implement", steps=[step]),
         ])
         reviewer = PlanReviewer()
-        with patch(
-            "agent_baton.core.engine.plan_reviewer.PlanReviewer._try_haiku_review",
-            return_value=None,
-        ):
-            result = reviewer.review(
+        result = reviewer.review(
                 plan, "Implement across engine and CLI",
                 file_paths=[
                     "agent_baton/core/engine/executor.py",
@@ -339,11 +318,7 @@ class TestHeuristicReview:
             ]),
         ])
         reviewer = PlanReviewer()
-        with patch(
-            "agent_baton.core.engine.plan_reviewer.PlanReviewer._try_haiku_review",
-            return_value=None,
-        ):
-            result = reviewer.review(
+        result = reviewer.review(
                 plan, "Implement across engine and CLI",
                 file_paths=[
                     "agent_baton/core/engine/executor.py",
@@ -354,156 +329,6 @@ class TestHeuristicReview:
                 complexity="medium",
             )
         assert result.splits_applied == 0
-
-
-# ---------------------------------------------------------------------------
-# Haiku review path tests
-# ---------------------------------------------------------------------------
-
-class TestHaikuReview:
-    def test_parses_valid_response(self):
-        reviewer = PlanReviewer()
-        raw = json.dumps({
-            "splits": [{
-                "phase_id": 2,
-                "step_id": "2.1",
-                "reason": "Step covers engine, CLI, and models",
-                "groups": [
-                    {"label": "engine core", "files": ["executor.py"],
-                     "description_hint": "Implement engine routing"},
-                    {"label": "CLI layer", "files": ["execute.py"],
-                     "description_hint": "Implement CLI output changes"},
-                    {"label": "data models", "files": ["execution.py"],
-                     "description_hint": "Update data models"},
-                ],
-            }],
-            "dependencies": [{
-                "step_id": "2.3",
-                "depends_on": "2.1",
-                "reason": "CLI reads engine output",
-            }],
-            "warnings": ["Phase 2 has imbalanced scope"],
-        })
-        data = reviewer._parse_review_response(raw)
-        assert len(data["splits"]) == 1
-        assert len(data["splits"][0]["groups"]) == 3
-        assert len(data["dependencies"]) == 1
-        assert len(data["warnings"]) == 1
-
-    def test_parses_markdown_wrapped_json(self):
-        reviewer = PlanReviewer()
-        raw = '```json\n{"splits": [], "dependencies": [], "warnings": []}\n```'
-        data = reviewer._parse_review_response(raw)
-        assert data["splits"] == []
-
-    def test_rejects_invalid_json(self):
-        reviewer = PlanReviewer()
-        with pytest.raises(ValueError, match="invalid JSON"):
-            reviewer._parse_review_response("not json at all")
-
-    def test_applies_split_recommendations(self):
-        """Haiku split recommendations should produce parallel steps."""
-        reviewer = PlanReviewer()
-        plan = _make_broad_plan()
-
-        recommendations = {
-            "splits": [{
-                "phase_id": 2,
-                "step_id": "2.1",
-                "reason": "Too broad",
-                "groups": [
-                    {"label": "engine", "files": ["executor.py", "planner.py"],
-                     "description_hint": "Implement engine changes"},
-                    {"label": "runtime", "files": ["worker.py"],
-                     "description_hint": "Implement runtime changes"},
-                    {"label": "CLI", "files": ["execute.py"],
-                     "description_hint": "Implement CLI changes"},
-                ],
-            }],
-            "dependencies": [],
-            "warnings": [],
-        }
-
-        result = reviewer._apply_recommendations(plan, recommendations)
-        assert result.splits_applied == 1
-        impl_phase = plan.phases[1]
-        assert len(impl_phase.steps) == 3
-        assert all(s.agent_name == "backend-engineer--python" for s in impl_phase.steps)
-
-    def test_applies_dependency_recommendations(self):
-        """Haiku dependency recommendations should add depends_on edges."""
-        reviewer = PlanReviewer()
-        plan = _make_plan(phases=[
-            PlanPhase(phase_id=2, name="Implement", steps=[
-                _make_step("2.1", desc="Engine changes"),
-                _make_step("2.2", desc="CLI changes"),
-            ]),
-        ])
-
-        recommendations = {
-            "splits": [],
-            "dependencies": [{
-                "step_id": "2.2",
-                "depends_on": "2.1",
-                "reason": "CLI depends on engine",
-            }],
-            "warnings": [],
-        }
-
-        result = reviewer._apply_recommendations(plan, recommendations)
-        assert result.dependencies_added == 1
-        assert "2.1" in plan.phases[0].steps[1].depends_on
-
-    def test_skips_invalid_step_ids(self):
-        """Recommendations referencing non-existent steps should be ignored."""
-        reviewer = PlanReviewer()
-        plan = _make_broad_plan()
-
-        recommendations = {
-            "splits": [{
-                "phase_id": 99,
-                "step_id": "99.1",
-                "reason": "Nonexistent",
-                "groups": [
-                    {"label": "a", "files": ["a.py"], "description_hint": "a"},
-                    {"label": "b", "files": ["b.py"], "description_hint": "b"},
-                ],
-            }],
-            "dependencies": [{
-                "step_id": "99.1",
-                "depends_on": "2.1",
-                "reason": "Nonexistent",
-            }],
-            "warnings": [],
-        }
-
-        result = reviewer._apply_recommendations(plan, recommendations)
-        assert result.splits_applied == 0
-        assert result.dependencies_added == 0
-
-    def test_haiku_fallback_to_heuristic(self):
-        """When Haiku is unavailable, reviewer should fall back to heuristic."""
-        reviewer = PlanReviewer()
-        plan = _make_broad_plan()
-
-        with patch(
-            "agent_baton.core.engine.classifier._haiku_available",
-            return_value=(False, "No API key"),
-        ):
-            result = reviewer.review(
-                plan, plan.task_summary,
-                file_paths=[
-                    "agent_baton/core/engine/executor.py",
-                    "agent_baton/core/engine/dispatcher.py",
-                    "agent_baton/core/runtime/worker.py",
-                    "agent_baton/cli/commands/execution/execute.py",
-                    "agent_baton/core/engine/planner.py",
-                    "agent_baton/models/execution.py",
-                ],
-                complexity="medium",
-            )
-
-        assert result.source == "heuristic"
 
 
 # ---------------------------------------------------------------------------
@@ -540,8 +365,8 @@ class TestPlannerIntegration:
         assert planner._last_review_result is not None
         assert planner._last_review_result.source == "skipped-light"
 
-    def test_explain_plan_includes_review(self):
-        """explain_plan() should include the Plan Review section."""
+    def test_explain_plan_renders(self):
+        """explain_plan() should produce a non-empty explanation."""
         planner = IntelligentPlanner()
         plan = planner.create_plan(
             "Fix a bug in executor.py",
@@ -549,7 +374,7 @@ class TestPlannerIntegration:
             complexity="medium",
         )
         explanation = planner.explain_plan(plan)
-        assert "## Plan Review" in explanation
+        assert "## Plan Explanation" in explanation
 
 
 # ---------------------------------------------------------------------------
@@ -569,13 +394,14 @@ class TestCouplingDetection:
         assert _detect_coupling(groups, "Wire new step type through engine and runtime")
 
     def test_coupled_engine_and_cli(self):
-        """Engine + execution (CLI commands) are coupled."""
+        """Engine + execution (CLI commands) are coupled when integration language present."""
         groups = {
             "engine": ["agent_baton/core/engine/executor.py"],
             "execution": ["agent_baton/cli/commands/execution/execute.py"],
             "models": ["agent_baton/models/execution.py"],
         }
-        assert _detect_coupling(groups, "Add new action type")
+        # Integration keyword "wire" signals genuine cross-layer coupling
+        assert _detect_coupling(groups, "Wire new action type through engine and CLI")
 
     def test_uncoupled_docs_and_tests(self):
         """Docs + tests + unrelated dirs are independent."""
@@ -608,111 +434,3 @@ class TestCouplingDetection:
             "scripts": ["scripts/install.sh"],
         }
         assert not _detect_coupling(groups, "Update packaging and PMO board")
-
-
-# ---------------------------------------------------------------------------
-# Haiku team coordination tests
-# ---------------------------------------------------------------------------
-
-class TestHaikuTeamCoordination:
-    """Tests for Haiku recommendations with coordination=team."""
-
-    def test_applies_team_recommendation(self):
-        """Haiku team recommendation should produce a team step."""
-        reviewer = PlanReviewer()
-        plan = _make_broad_plan()
-
-        recommendations = {
-            "splits": [{
-                "phase_id": 2,
-                "step_id": "2.1",
-                "reason": "Coupled concerns need coordination",
-                "coordination": "team",
-                "groups": [
-                    {"label": "engine", "files": ["executor.py"],
-                     "description_hint": "Implement engine routing",
-                     "depends_on_groups": []},
-                    {"label": "runtime", "files": ["worker.py"],
-                     "description_hint": "Implement runtime changes",
-                     "depends_on_groups": ["engine"]},
-                    {"label": "CLI", "files": ["execute.py"],
-                     "description_hint": "Implement CLI output",
-                     "depends_on_groups": ["engine"]},
-                ],
-            }],
-            "dependencies": [],
-            "warnings": [],
-        }
-
-        result = reviewer._apply_recommendations(plan, recommendations)
-        assert result.teams_created == 1
-        assert result.splits_applied == 0
-
-        team_step = plan.phases[1].steps[0]
-        assert team_step.agent_name == "team"
-        assert len(team_step.team) == 3
-        # All members should be the original agent type
-        assert all(m.agent_name == "backend-engineer--python" for m in team_step.team)
-        # First member is lead
-        assert team_step.team[0].role == "lead"
-        # Runtime and CLI members depend on engine
-        engine_id = team_step.team[0].member_id
-        assert engine_id in team_step.team[1].depends_on
-        assert engine_id in team_step.team[2].depends_on
-        # Team has synthesis
-        assert team_step.synthesis is not None
-        assert team_step.synthesis.strategy == "merge_files"
-
-    def test_parallel_recommendation_still_works(self):
-        """Haiku parallel recommendation should produce independent steps."""
-        reviewer = PlanReviewer()
-        plan = _make_broad_plan()
-
-        recommendations = {
-            "splits": [{
-                "phase_id": 2,
-                "step_id": "2.1",
-                "reason": "Independent concerns",
-                "coordination": "parallel",
-                "groups": [
-                    {"label": "docs", "files": ["docs/arch.md"],
-                     "description_hint": "Update docs"},
-                    {"label": "tests", "files": ["tests/test_x.py"],
-                     "description_hint": "Add tests"},
-                ],
-            }],
-            "dependencies": [],
-            "warnings": [],
-        }
-
-        result = reviewer._apply_recommendations(plan, recommendations)
-        assert result.splits_applied == 1
-        assert result.teams_created == 0
-        assert len(plan.phases[1].steps) == 2
-        assert all(s.agent_name == "backend-engineer--python"
-                    for s in plan.phases[1].steps)
-
-    def test_defaults_to_parallel_when_coordination_missing(self):
-        """When coordination field is absent, default to parallel."""
-        reviewer = PlanReviewer()
-        plan = _make_broad_plan()
-
-        recommendations = {
-            "splits": [{
-                "phase_id": 2,
-                "step_id": "2.1",
-                "reason": "Broad step",
-                "groups": [
-                    {"label": "a", "files": ["a.py"],
-                     "description_hint": "Do A"},
-                    {"label": "b", "files": ["b.py"],
-                     "description_hint": "Do B"},
-                ],
-            }],
-            "dependencies": [],
-            "warnings": [],
-        }
-
-        result = reviewer._apply_recommendations(plan, recommendations)
-        assert result.splits_applied == 1
-        assert result.teams_created == 0

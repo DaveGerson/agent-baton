@@ -96,3 +96,52 @@
 1. **BUG-001/002**: Manually edited `execution-state.json` via Python script to set step status to "complete" and `active_phase_index` to 0. This didn't fully work because the engine reads from SQLite.
 2. **BUG-004**: Bypassed engine routing by dispatching agents directly with explicit `subagent_type` parameter.
 3. **BUG-001/002**: Ultimately bypassed the engine entirely and dispatched backend/frontend agents in parallel without the execution loop.
+
+---
+
+## Prompt caching on subagent dispatch path (issue #29966)
+
+**Context**: Anthropic issue #29966 reports that the in-process Agent tool
+(where the top-level Claude Code session spawns packaged subagents) does not
+set `enablePromptCaching` on the API requests it makes, reducing cache hit
+rates for repeated system prompts.
+
+**Does this affect Baton's headless path?** No.  `baton execute run` and
+`ForgeSession` / `HeadlessClaude` both dispatch agents by shelling out to
+`claude --print` as a top-level CLI invocation via
+`asyncio.create_subprocess_exec`.  Each subprocess is its own independent
+Claude Code process — not a nested in-process Agent tool call.  Issue #29966
+only affects the in-process Agent tool path used by an orchestrator running
+inside a Claude Code session.
+
+**What about the session-based orchestrator path?** When the orchestrator
+agent runs inside a Claude Code session and uses the Agent tool to dispatch
+packaged subagents, issue #29966 does apply.  We have no direct control over
+`enablePromptCaching` from within a Claude Code session; that is an internal
+Claude Code concern to be fixed upstream.
+
+**Caching behavior on the subprocess path**: Each `claude --print`
+subprocess independently builds its API request.  We have no direct handle
+on `enablePromptCaching` from a subprocess caller.  However, we can reduce
+the dynamic content in the system prompt — which is the main obstacle to
+cache reuse — by passing `--exclude-dynamic-system-prompt-sections`.  This
+flag moves per-machine sections (cwd, env info, memory paths, git status)
+from the system prompt into the first user message, making the system prompt
+stable across dispatches from different machines or directories.
+
+**Mitigation implemented** (2026-04-17): Both
+`ClaudeCodeLauncher._build_command` and `HeadlessClaude.run` now append
+`--exclude-dynamic-system-prompt-sections` when the installed Claude Code CLI
+supports the flag.  Support is probed once at process startup via
+`_supports_exclude_flag()` in `agent_baton/core/runtime/claude_launcher.py`
+and cached for the process lifetime.  The flag is skipped when a custom
+`--system-prompt` is injected (it is documented as a no-op in that case).
+
+**Flag availability**: Confirmed present in the installed Claude Code version:
+
+```
+--exclude-dynamic-system-prompt-sections   Move per-machine sections (cwd,
+  env info, memory paths, git status) from the system prompt into the first
+  user message. Improves cross-user prompt-cache reuse. Only applies with
+  the default system prompt (ignored with --system-prompt). (default: false)
+```

@@ -16,6 +16,11 @@ Integration:
   record the watermark.
 * Anomaly detection is always run during a cycle, even when triggered by
   ``force=True``, to ensure urgent issues are surfaced.
+* :meth:`learning_cycle_due` provides a separate counter-based check for
+  whether a full learning cycle (COLLECT→ANALYZE→PROPOSE→REVIEW→APPLY→DOCUMENT)
+  is recommended.  This flag is informational only — it never auto-triggers
+  the cycle.  The threshold is controlled by ``LEARNING_TRIGGER_COUNT`` env
+  var (default 10).
 
 Anomaly types detected by :meth:`detect_anomalies`:
 
@@ -29,25 +34,32 @@ Configuration priority (highest to lowest):
 
 1. Explicit ``config`` argument passed to the constructor.
 2. ``trigger_config`` block inside ``learned-overrides.json``.
-3. Environment variables: ``BATON_MIN_TASKS``, ``BATON_ANALYSIS_INTERVAL``.
+3. Environment variables: ``BATON_MIN_TASKS``, ``BATON_ANALYSIS_INTERVAL``,
+   ``LEARNING_TRIGGER_COUNT``.
 4. Compiled-in defaults (``min_tasks_before_analysis=3``,
-   ``analysis_interval_tasks=3``).
+   ``analysis_interval_tasks=3``, ``learning_cycle_count_threshold=10``).
 """
 from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 
 from agent_baton.core.observe.usage import UsageLogger
 from agent_baton.models.improvement import Anomaly, TriggerConfig
 from agent_baton.models.usage import TaskUsageRecord
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from agent_baton.core.storage.protocol import StorageBackend
 
 _log = logging.getLogger(__name__)
 
 _DEFAULT_TEAM_CONTEXT = Path(".claude/team-context")
 _TRIGGER_STATE_FILE = "improvement-trigger-state.json"
 _OVERRIDES_FILE = "learned-overrides.json"
+_LEARNING_CYCLE_STATE_FILE = "learning-cycle-state.json"
 
 
 class TriggerEvaluator:
@@ -69,16 +81,32 @@ class TriggerEvaluator:
         config: Trigger thresholds.  When ``None``, the evaluator resolves
             configuration from ``learned-overrides.json`` and env vars.
         team_context_root: Root directory for team context files.
+        storage: Optional :class:`StorageBackend`.  When provided,
+            ``_read_records`` reads from ``storage.read_usage()`` instead
+            of the JSONL flat file.  Falls back to JSONL on any exception.
+        bead_store: Optional bead store.  When provided, ``should_analyze``
+            checks for new beads created since the last analysis timestamp
+            as a supplementary trigger signal (threshold: >= 3 beads).
+        ledger: Optional learning-issue ledger.  When provided,
+            ``should_analyze`` checks for open issues updated since the
+            last analysis timestamp as a supplementary trigger signal
+            (threshold: >= 1 issue).
     """
 
     def __init__(
         self,
         config: TriggerConfig | None = None,
         team_context_root: Path | None = None,
+        storage: "StorageBackend | None" = None,
+        bead_store=None,
+        ledger=None,
     ) -> None:
         self._root = (team_context_root or _DEFAULT_TEAM_CONTEXT).resolve()
         self._state_path = self._root / _TRIGGER_STATE_FILE
         self._log_path = self._root / "usage-log.jsonl"
+        self._storage = storage
+        self._bead_store = bead_store
+        self._ledger = ledger
 
         if config is not None:
             self._config = config
@@ -96,26 +124,85 @@ class TriggerEvaluator:
     def should_analyze(self) -> bool:
         """Return ``True`` if enough new data exists for a new improvement cycle.
 
-        Two conditions must both be met:
+        Uses a composite signal from up to three data sources:
 
-        1. At least ``min_tasks_before_analysis`` total tasks must exist
-           in the usage log (avoids analysis on tiny datasets).
-        2. At least ``analysis_interval_tasks`` new tasks must have been
-           recorded since the last analysis (avoids redundant re-analysis).
+        1. **Usage records** (primary): at least ``min_tasks_before_analysis``
+           total tasks must exist AND ``analysis_interval_tasks`` new tasks
+           since the last analysis.
+        2. **Learning issues** (supplementary): any open issue updated since
+           the last analysis timestamp.
+        3. **Beads** (supplementary): at least 3 beads created since the last
+           analysis timestamp.
+
+        Any single signal crossing its threshold triggers analysis, provided
+        the minimum baseline data requirement (signal 1's total check) is met.
 
         Returns:
-            ``True`` if both conditions are met and a new improvement
-            cycle should be triggered.
+            ``True`` if any signal indicates new data worth analysing.
         """
         records = self._read_records()
         total = len(records)
 
+        last_count = self._read_last_analyzed_count()
+
+        # Auto-reset stale watermark (transition from JSONL to SQLite may
+        # have left the watermark higher than the new source's count).
+        if last_count > total:
+            _log.info(
+                "TriggerEvaluator: watermark (%d) > total records (%d), "
+                "resetting to 0 (data source migration detected)",
+                last_count, total,
+            )
+            self._write_state(0)
+            last_count = 0
+
+        # Baseline gate: need minimum data before any analysis.
         if total < self._config.min_tasks_before_analysis:
             return False
 
-        last_count = self._read_last_analyzed_count()
+        # Signal 1: usage record count delta (primary).
         new_tasks = total - last_count
-        return new_tasks >= self._config.analysis_interval_tasks
+        if new_tasks >= self._config.analysis_interval_tasks:
+            return True
+
+        # Supplementary signals require a prior analysis timestamp.
+        watermark_ts = self._read_last_analyzed_at()
+        if watermark_ts is None:
+            return False
+
+        # Signal 2: learning issues updated since last analysis.
+        if self._ledger is not None:
+            try:
+                open_issues = self._ledger.get_open_issues()
+                new_issues = sum(
+                    1 for i in open_issues if i.last_seen > watermark_ts
+                )
+                if new_issues >= 1:
+                    _log.debug(
+                        "Trigger: %d learning issue(s) updated since %s",
+                        new_issues, watermark_ts,
+                    )
+                    return True
+            except Exception as exc:
+                _log.debug("Trigger: ledger query failed: %s", exc)
+
+        # Signal 3: beads created since last analysis.
+        if self._bead_store is not None:
+            try:
+                recent_beads = self._bead_store.query(limit=50)
+                new_beads = sum(
+                    1 for b in recent_beads if b.created_at > watermark_ts
+                )
+                if new_beads >= 3:
+                    _log.debug(
+                        "Trigger: %d bead(s) created since %s",
+                        new_beads, watermark_ts,
+                    )
+                    return True
+            except Exception as exc:
+                _log.debug("Trigger: bead_store query failed: %s", exc)
+
+        return False
 
     def mark_analyzed(self) -> None:
         """Record the current task count as the last-analyzed watermark."""
@@ -261,6 +348,75 @@ class TriggerEvaluator:
     # Private helpers
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Counter-based learning cycle flag (D4)
+    # ------------------------------------------------------------------
+
+    def learning_cycle_due(self) -> bool:
+        """Return ``True`` if enough executions have completed since the last
+        learning cycle to recommend running one.
+
+        This is a **flag only** — it never auto-triggers the cycle.  Callers
+        are expected to surface it (e.g. via ``baton execute status``) and let
+        the operator or daemon decide when to run ``baton learn run-cycle``.
+
+        The counter threshold is ``config.learning_cycle_count_threshold``
+        (default 10, overridable via ``LEARNING_TRIGGER_COUNT`` env var).
+        A threshold of 0 disables the flag entirely.
+
+        State is persisted to ``learning-cycle-state.json`` in the
+        team-context directory (separate from the improvement-trigger-state
+        so the two counters advance independently).
+
+        Returns:
+            ``True`` when the number of completed executions since the last
+            learning cycle meets or exceeds the threshold.
+        """
+        threshold = self._config.learning_cycle_count_threshold
+        if threshold <= 0:
+            return False
+
+        since_last = self._executions_since_last_learning_cycle()
+        return since_last >= threshold
+
+    def executions_since_last_learning_cycle(self) -> int:
+        """Return the number of completed executions since the last learning cycle."""
+        return self._executions_since_last_learning_cycle()
+
+    def mark_learning_cycle_complete(self) -> None:
+        """Record that a learning cycle just ran, resetting the counter."""
+        path = self._root / _LEARNING_CYCLE_STATE_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        records = self._read_records()
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        path.write_text(
+            json.dumps({
+                "last_cycle_count": len(records),
+                "last_cycle_at": now,
+            }, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        _log.debug(
+            "TriggerEvaluator: learning cycle counter reset at count=%d", len(records)
+        )
+
+    def _executions_since_last_learning_cycle(self) -> int:
+        """Internal: executions completed since last learning cycle."""
+        records = self._read_records()
+        total = len(records)
+        path = self._root / _LEARNING_CYCLE_STATE_FILE
+        if not path.exists():
+            return total
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            last_count = int(data.get("last_cycle_count", 0))
+            # Guard against stale state from a different data source.
+            if last_count > total:
+                return total
+            return total - last_count
+        except (json.JSONDecodeError, OSError, ValueError):
+            return total
+
     def _load_config_from_overrides(self, base: TriggerConfig) -> TriggerConfig:
         """Overlay ``trigger_config`` from ``learned-overrides.json`` onto *base*.
 
@@ -291,6 +447,7 @@ class TriggerEvaluator:
                 "gate_failure_threshold",
                 "budget_deviation_threshold",
                 "confidence_threshold",
+                "learning_cycle_count_threshold",
             ):
                 if key in tc_data:
                     merged[key] = tc_data[key]
@@ -307,8 +464,12 @@ class TriggerEvaluator:
             return base
 
     def _read_records(self) -> list[TaskUsageRecord]:
-        logger = UsageLogger(self._log_path)
-        return logger.read_all()
+        if self._storage is not None:
+            try:
+                return self._storage.read_usage()
+            except Exception:
+                _log.debug("storage.read_usage() failed, falling back to JSONL")
+        return UsageLogger(self._log_path).read_all()
 
     def _read_last_analyzed_count(self) -> int:
         if not self._state_path.exists():
@@ -319,9 +480,23 @@ class TriggerEvaluator:
         except (json.JSONDecodeError, OSError):
             return 0
 
+    def _read_last_analyzed_at(self) -> str | None:
+        """Return the ISO timestamp of the last analysis, or ``None``."""
+        if not self._state_path.exists():
+            return None
+        try:
+            data = json.loads(self._state_path.read_text(encoding="utf-8"))
+            return data.get("last_analyzed_at")
+        except (json.JSONDecodeError, OSError):
+            return None
+
     def _write_state(self, count: int) -> None:
         self._state_path.parent.mkdir(parents=True, exist_ok=True)
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         self._state_path.write_text(
-            json.dumps({"last_analyzed_count": count}, indent=2) + "\n",
+            json.dumps({
+                "last_analyzed_count": count,
+                "last_analyzed_at": now,
+            }, indent=2) + "\n",
             encoding="utf-8",
         )

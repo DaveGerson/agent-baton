@@ -162,9 +162,12 @@ def init_dependencies(
     _registry.load_default_paths()
 
     # Decision manager — uses the shared bus to publish decision events.
+    # safe_read_root constrains context_files reads to the team-context
+    # directory tree, mitigating CVE-style path traversal (bd-90c4).
     _decision_manager = DecisionManager(
         decisions_dir=team_context_root / "decisions",
         bus=_bus,
+        safe_read_root=team_context_root,
     )
 
     # Dashboard — wraps the usage logger we already created.
@@ -197,6 +200,19 @@ def init_dependencies(
 # ---------------------------------------------------------------------------
 # FastAPI dependency providers
 # ---------------------------------------------------------------------------
+
+def get_team_context_root() -> Path:
+    """Return the team-context root :class:`~pathlib.Path` configured at startup.
+
+    Raises:
+        RuntimeError: If :func:`init_dependencies` has not been called.
+    """
+    if _team_context_root is None:
+        raise RuntimeError(
+            "team_context_root not initialised. Call init_dependencies() before serving requests."
+        )
+    return _team_context_root
+
 
 def get_bus() -> EventBus:
     """Return the shared :class:`~agent_baton.core.events.bus.EventBus` instance.

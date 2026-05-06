@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Git merge driver wrapper for refs/notes/baton-beads.
+# Installed via:
+#   git config merge.baton-notes.driver "scripts/baton-notes-merge %O %A %B"
+#
+# Delegates to the Python implementation in the same directory.
+# $1 = ancestor (%O), $2 = ours (%A, result goes here), $3 = theirs (%B)
+
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec python3 "$SCRIPT_DIR/baton-notes-merge.py" "$@"

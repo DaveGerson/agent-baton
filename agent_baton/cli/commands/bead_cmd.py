@@ -4,6 +4,7 @@ Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
 
 Subcommands
 -----------
+create   Create a bead manually (task-independent or task-scoped).
 list     List beads with optional filters (--type, --status, --task, --tag).
 show     Show a single bead as JSON.
 ready    List open beads whose blocked_by dependencies are all satisfied.
@@ -11,7 +12,9 @@ close    Close a bead with a summary.
 link     Add a typed link between two beads.
 cleanup  Archive old closed beads (memory decay).
 promote  Promote a bead to a persistent knowledge document.
-graph    Show the dependency graph for a task's beads.
+graph        Show the dependency graph for a task's beads.
+synthesize   Run the BeadSynthesizer manually (refresh bead_edges/clusters).
+clusters     List bead clusters discovered by the synthesizer.
 
 All subcommands degrade gracefully when the bead store is unavailable
 (older schema, no baton.db in the current project).
@@ -19,7 +22,9 @@ All subcommands degrade gracefully when the bead store is unavailable
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -29,25 +34,92 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 _DEFAULT_DB_PATH = Path(".claude/team-context/baton.db")
+_DB_REL = Path(".claude/team-context/baton.db")
+
+
+def _resolve_db_path() -> Path:
+    """Resolve the baton.db path with worktree-friendly discovery (bd-ce64).
+
+    Resolution order:
+
+    1. ``BATON_DB_PATH`` env var (absolute or relative to cwd) — explicit
+       operator override; bypasses discovery entirely.
+    2. Module-level ``_DEFAULT_DB_PATH`` if it has been monkey-patched
+       to an absolute path that differs from the default relative one
+       (preserves the legacy test ergonomics from ``tests/test_bead_cli``).
+    3. ``.claude/team-context/baton.db`` directly under the cwd
+       (legacy behaviour — preserved for backwards compatibility).
+    4. Walk parent directories upward, returning the first
+       ``<parent>/.claude/team-context/baton.db`` that exists.  This lets
+       a subagent invoked from a worktree (or any nested cwd) reach the
+       project-root baton.db instead of seeing an empty per-worktree DB.
+    5. Fallback: the legacy cwd-relative path (so ``_get_or_create_*``
+       can still create one in the conventional spot).
+    """
+    override = os.environ.get("BATON_DB_PATH", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+
+    # Honour test-time monkey-patches of _DEFAULT_DB_PATH.  When a caller
+    # has swapped it for an absolute path (the pattern in
+    # tests/test_bead_cli.py and others), use that path directly so we
+    # never accidentally walk upward and pick up the developer's real
+    # project DB.
+    patched = _DEFAULT_DB_PATH
+    if patched.is_absolute() and patched != Path("/").joinpath(_DB_REL):
+        return patched.resolve()
+
+    cwd_default = (Path.cwd() / _DB_REL).resolve()
+    if cwd_default.exists():
+        return cwd_default
+
+    # Walk upward — stop at filesystem root or first match.
+    current = Path.cwd().resolve()
+    for parent in current.parents:
+        candidate = parent / _DB_REL
+        if candidate.exists():
+            return candidate
+
+    return cwd_default
 
 
 def _get_bead_store():
     """Resolve the BeadStore for the current project.
 
     Returns a :class:`~agent_baton.core.engine.bead_store.BeadStore` instance
-    or ``None`` when the database is not found.
+    or ``None`` when the database is not found.  See :func:`_resolve_db_path`
+    for the discovery order (bd-ce64: walks upward so worktree subagents
+    find the project-root baton.db).
     """
     from agent_baton.core.engine.bead_store import BeadStore
 
-    db = _DEFAULT_DB_PATH.resolve()
+    db = _resolve_db_path()
     if not db.exists():
         return None
     return BeadStore(db)
 
 
+def _get_or_create_bead_store():
+    """Resolve the BeadStore, creating the parent directory and DB if needed.
+
+    Unlike :func:`_get_bead_store`, this helper is used by the ``create``
+    subcommand which must work even when no ``baton execute start`` has been
+    run yet.  It ensures the ``.claude/team-context/`` directory exists before
+    constructing the store so that a fresh project does not fail with
+    ``FileNotFoundError``.
+
+    Returns a :class:`~agent_baton.core.engine.bead_store.BeadStore` instance.
+    """
+    from agent_baton.core.engine.bead_store import BeadStore
+
+    db = _resolve_db_path()
+    db.parent.mkdir(parents=True, exist_ok=True)
+    return BeadStore(db)
+
+
 def _get_active_task_id() -> str | None:
     """Return the active task ID from the baton.db active_task table, or None."""
-    db = _DEFAULT_DB_PATH.resolve()
+    db = _resolve_db_path()
     if not db.exists():
         return None
     try:
@@ -73,6 +145,70 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         help="Inspect and manage Bead memory (agent discoveries, decisions, warnings)",
     )
     sub = p.add_subparsers(dest="beads_cmd", metavar="SUBCOMMAND")
+
+    # -- create --------------------------------------------------------------
+    create_p = sub.add_parser("create", help="Create a bead manually")
+    create_p.add_argument(
+        "--type",
+        dest="bead_type",
+        metavar="TYPE",
+        required=True,
+        choices=["discovery", "decision", "warning", "outcome", "planning"],
+        help="Bead type: discovery, decision, warning, outcome, planning",
+    )
+    create_p.add_argument(
+        "--content", "--body",
+        dest="content",
+        metavar="TEXT",
+        required=True,
+        help="The bead text (insight, decision, or warning) (--body is accepted as an alias)",
+    )
+    create_p.add_argument(
+        "--task-id",
+        dest="task_id",
+        metavar="TASK_ID",
+        default=None,
+        help="Task ID to scope this bead (defaults to $BATON_TASK_ID env var; "
+             "omit for a project-scoped bead)",
+    )
+    create_p.add_argument(
+        "--step-id",
+        dest="step_id",
+        metavar="STEP_ID",
+        default="",
+        help="Step ID within the execution (optional)",
+    )
+    create_p.add_argument(
+        "--agent",
+        dest="agent_name",
+        metavar="AGENT",
+        default="orchestrator",
+        help="Agent name to record as the bead author (default: orchestrator)",
+    )
+    create_p.add_argument(
+        "--tag",
+        dest="tags",
+        metavar="TAG",
+        action="append",
+        default=None,
+        help="Semantic tag (repeatable)",
+    )
+    create_p.add_argument(
+        "--file",
+        dest="files",
+        metavar="FILE",
+        action="append",
+        default=None,
+        help="Affected file path (repeatable)",
+    )
+    create_p.add_argument(
+        "--confidence",
+        dest="confidence",
+        metavar="LEVEL",
+        choices=["none", "low", "partial", "medium", "high"],
+        default="medium",
+        help="Confidence level (default: medium)",
+    )
 
     # -- list ----------------------------------------------------------------
     list_p = sub.add_parser("list", help="List beads with optional filters")
@@ -135,11 +271,33 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     close_p = sub.add_parser("close", help="Close a bead with a summary")
     close_p.add_argument("bead_id", metavar="BEAD_ID", help="Bead ID to close")
     close_p.add_argument(
-        "--summary",
+        "--summary", "--note", "--content",
         dest="summary",
         metavar="TEXT",
         default="",
-        help="Compacted summary of the bead's outcome",
+        help="Compacted summary of the bead's outcome (aliases: --note, --content)",
+    )
+
+    # -- annotate ------------------------------------------------------------
+    annotate_p = sub.add_parser(
+        "annotate", help="Append a note to an existing bead"
+    )
+    annotate_p.add_argument(
+        "bead_id", metavar="BEAD_ID", help="Bead ID to annotate"
+    )
+    annotate_p.add_argument(
+        "--note", "--content",
+        dest="note",
+        metavar="TEXT",
+        required=True,
+        help="Note to append (aliases: --content)",
+    )
+    annotate_p.add_argument(
+        "--agent",
+        dest="agent",
+        metavar="NAME",
+        default=None,
+        help="Agent authoring the annotation",
     )
 
     # -- link ----------------------------------------------------------------
@@ -238,6 +396,136 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         help="Task ID whose bead graph to display (defaults to active task)",
     )
 
+    # -- synthesize ----------------------------------------------------------
+    synth_p = sub.add_parser(
+        "synthesize",
+        help="Refresh inferred bead edges and clusters (Wave 2.1).",
+    )
+    synth_p.add_argument(
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help="Emit machine-readable JSON instead of human text.",
+    )
+
+    # -- clusters ------------------------------------------------------------
+    clusters_p = sub.add_parser(
+        "clusters",
+        help="List bead clusters discovered by the synthesizer.",
+    )
+    clusters_p.add_argument(
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help="Emit machine-readable JSON instead of human text.",
+    )
+
+    # -- handoffs (Wave 3.2) -------------------------------------------------
+    handoffs_p = sub.add_parser(
+        "handoffs",
+        help="List automated handoff documents synthesized for a task (Wave 3.2).",
+    )
+    handoffs_p.add_argument(
+        "--task-id",
+        dest="task_id",
+        metavar="TASK_ID",
+        default=None,
+        help="Task ID whose handoff_beads to list (defaults to active task).",
+    )
+    handoffs_p.add_argument(
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help="Emit machine-readable JSON instead of human text.",
+    )
+
+    # -- exec (Wave 6.1 Part C — Executable Beads, bd-81b9) ------------------
+    exec_p = sub.add_parser(
+        "exec",
+        help="Run an executable bead in a sandbox (requires BATON_EXEC_BEADS_ENABLED=1).",
+    )
+    exec_p.add_argument(
+        "bead_id",
+        metavar="BEAD_ID",
+        help="Bead ID of an approved executable bead (e.g. bd-a1b2)",
+    )
+    exec_p.add_argument(
+        "--no-confirm",
+        dest="no_confirm",
+        action="store_true",
+        default=False,
+        help="Skip the interactive confirmation prompt before running.",
+    )
+
+    # -- create-exec (Wave 6.1 Part C) ----------------------------------------
+    create_exec_p = sub.add_parser(
+        "create-exec",
+        help="Create an executable bead from a script file (requires BATON_EXEC_BEADS_ENABLED=1).",
+    )
+    create_exec_p.add_argument(
+        "bead_id",
+        metavar="BEAD_ID",
+        help="Desired bead ID for the new executable bead (e.g. bd-a1b2).",
+    )
+    create_exec_p.add_argument(
+        "--interpreter",
+        dest="interpreter",
+        required=True,
+        choices=["bash", "python", "ast-grep", "pytest"],
+        help="Script interpreter: bash, python, ast-grep, or pytest.",
+    )
+    create_exec_p.add_argument(
+        "--script-file",
+        dest="script_file",
+        metavar="PATH",
+        required=True,
+        help="Path to the script file to store as an executable bead.",
+    )
+    create_exec_p.add_argument(
+        "--content",
+        dest="content",
+        metavar="TEXT",
+        default="",
+        help="Human-readable description of what this script does.",
+    )
+    create_exec_p.add_argument(
+        "--task-id",
+        dest="task_id",
+        metavar="TASK_ID",
+        default=None,
+        help="Task ID to scope this bead (defaults to $BATON_TASK_ID).",
+    )
+    create_exec_p.add_argument(
+        "--agent",
+        dest="agent_name",
+        metavar="AGENT",
+        default="orchestrator",
+        help="Agent name to record as the bead author (default: orchestrator).",
+    )
+    create_exec_p.add_argument(
+        "--timeout",
+        dest="timeout_s",
+        metavar="SECONDS",
+        type=int,
+        default=30,
+        help="Sandbox timeout in seconds (default: 30).",
+    )
+    create_exec_p.add_argument(
+        "--mem-mb",
+        dest="mem_mb",
+        metavar="MB",
+        type=int,
+        default=256,
+        help="Sandbox memory limit in MB (default: 256).",
+    )
+    create_exec_p.add_argument(
+        "--net",
+        dest="net",
+        action="store_true",
+        default=False,
+        help="Allow network access in sandbox (default: blocked).",
+    )
+
     return p
 
 
@@ -250,19 +538,30 @@ def handler(args: argparse.Namespace) -> None:
     """Dispatch to the appropriate beads subcommand handler."""
     cmd = getattr(args, "beads_cmd", None)
     if cmd is None:
-        print("Usage: baton beads <subcommand>  [list|show|ready|close|link]")
+        print(
+            "Usage: baton beads <subcommand>  "
+            "[create|list|show|ready|close|annotate|link|cleanup|promote|"
+            "graph|synthesize|clusters|handoffs|exec|create-exec]"
+        )
         print("Run `baton beads --help` for details.")
         return
 
     dispatch = {
+        "create": _handle_create,
         "list": _handle_list,
         "show": _handle_show,
         "ready": _handle_ready,
         "close": _handle_close,
+        "annotate": _handle_annotate,
         "link": _handle_link,
         "cleanup": _handle_cleanup,
         "promote": _handle_promote,
         "graph": _handle_graph,
+        "synthesize": _handle_synthesize,
+        "clusters": _handle_clusters,
+        "handoffs": _handle_handoffs,
+        "exec": _handle_exec,
+        "create-exec": _handle_create_exec,
     }
     fn = dispatch.get(cmd)
     if fn is None:
@@ -274,6 +573,59 @@ def handler(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 # Subcommand handlers
 # ---------------------------------------------------------------------------
+
+
+def _handle_create(args: argparse.Namespace) -> None:
+    """Create a bead manually via the CLI.
+
+    Project-scoped beads (no ``--task-id`` and no ``$BATON_TASK_ID``) are
+    written with ``task_id=""`` which the store converts to NULL in the
+    database, bypassing the executions FK constraint.  Task-scoped beads
+    require a matching executions row only when foreign-key enforcement is
+    active (it is OFF by default in SQLite unless explicitly enabled).
+    """
+    from datetime import datetime, timezone
+
+    from agent_baton.models.bead import Bead
+
+    # Resolve task_id: CLI flag > env var > project-scoped (empty string).
+    task_id: str = args.task_id or os.environ.get("BATON_TASK_ID", "") or ""
+
+    content: str = args.content
+    bead_id: str = f"bd-{hashlib.sha256(content.encode()).hexdigest()[:4]}"
+
+    # Determine scope based on whether we have a task_id.
+    scope = "task" if task_id else "project"
+
+    created_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    bead = Bead(
+        bead_id=bead_id,
+        task_id=task_id,
+        step_id=args.step_id,
+        agent_name=args.agent_name,
+        bead_type=args.bead_type,
+        content=content,
+        confidence=args.confidence,
+        scope=scope,
+        tags=args.tags or [],
+        affected_files=args.files or [],
+        status="open",
+        created_at=created_at,
+        source="manual",
+    )
+
+    store = _get_or_create_bead_store()
+    result = store.write(bead)
+    if not result:
+        print(
+            f"error: failed to write bead — check that baton.db schema is up to date.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    scope_label = f"task={task_id}" if task_id else "project-scoped"
+    print(f"Created bead {bead_id} [{args.bead_type}] ({scope_label}).")
 
 
 def _handle_list(args: argparse.Namespace) -> None:
@@ -365,6 +717,21 @@ def _handle_close(args: argparse.Namespace) -> None:
 
     store.close(args.bead_id, args.summary)
     print(f"Closed bead {args.bead_id}.")
+
+
+def _handle_annotate(args: argparse.Namespace) -> None:
+    store = _get_bead_store()
+    if store is None:
+        print("No baton.db found in .claude/team-context/.")
+        return
+
+    bead = store.read(args.bead_id)
+    if bead is None:
+        print(f"Bead not found: {args.bead_id}", file=sys.stderr)
+        sys.exit(1)
+
+    store.annotate(args.bead_id, args.note, agent_name=args.agent)
+    print(f"Annotated bead {args.bead_id}.")
 
 
 def _handle_link(args: argparse.Namespace) -> None:
@@ -556,3 +923,483 @@ def _handle_graph(args: argparse.Namespace) -> None:
         print("Run `baton beads list --tag conflict:unresolved` to inspect.")
     else:
         print("No unresolved conflicts.")
+
+    # Synthesizer-derived edges (Wave 2.1) — pulled directly from
+    # bead_edges so we don't need to widen the BeadStore API surface.
+    bead_id_set = {b.bead_id for b in beads}
+    synth_rows = _query_bead_edges_for(bead_id_set)
+    if synth_rows:
+        print()
+        print(f"Synthesized edges ({len(synth_rows)}):")
+        for src, dst, etype, weight in synth_rows:
+            print(f"  {src} --[{etype} w={weight:.2f}]--> {dst}")
+
+
+def _query_bead_edges_for(bead_ids: set[str]) -> list[tuple[str, str, str, float]]:
+    """Fetch bead_edges where both endpoints are in *bead_ids*.
+
+    Defensive: returns ``[]`` when the table is missing or the query fails.
+    """
+    if not bead_ids:
+        return []
+    db = _DEFAULT_DB_PATH.resolve()
+    if not db.exists():
+        return []
+    try:
+        import sqlite3
+        conn = sqlite3.connect(str(db))
+        # Detect table presence to stay graceful on older schemas.
+        has_table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='bead_edges'"
+        ).fetchone()
+        if not has_table:
+            conn.close()
+            return []
+        placeholders = ",".join("?" * len(bead_ids))
+        ids_list = list(bead_ids)
+        rows = conn.execute(
+            f"SELECT src_bead_id, dst_bead_id, edge_type, weight "
+            f"FROM bead_edges "
+            f"WHERE src_bead_id IN ({placeholders}) "
+            f"AND dst_bead_id IN ({placeholders}) "
+            f"ORDER BY edge_type, weight DESC, src_bead_id",
+            ids_list + ids_list,
+        ).fetchall()
+        conn.close()
+        return [(r[0], r[1], r[2], float(r[3])) for r in rows]
+    except Exception:
+        return []
+
+
+def _handle_synthesize(args: argparse.Namespace) -> None:
+    """Run the BeadSynthesizer manually and print counts."""
+    store = _get_bead_store()
+    if store is None:
+        print("No baton.db found in .claude/team-context/.", file=sys.stderr)
+        sys.exit(1)
+
+    from agent_baton.core.intel.bead_synthesizer import BeadSynthesizer
+
+    conn = store._conn()
+    result = BeadSynthesizer().synthesize(conn)
+
+    if getattr(args, "as_json", False):
+        print(json.dumps(result.to_dict(), indent=2))
+        return
+
+    print("BeadSynthesizer completed.")
+    print(f"  pairs_examined:    {result.pairs_examined}")
+    print(f"  edges_added:       {result.edges_added}")
+    print(f"  clusters_created:  {result.clusters_created}")
+    print(f"  conflicts_flagged: {result.conflicts_flagged}")
+    if result.errors:
+        print(f"  errors:            {len(result.errors)}")
+        for err in result.errors:
+            print(f"    - {err}")
+
+
+def _handle_clusters(args: argparse.Namespace) -> None:
+    """List bead clusters discovered by the synthesizer."""
+    db = _DEFAULT_DB_PATH.resolve()
+    if not db.exists():
+        print("No baton.db found in .claude/team-context/.", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        import sqlite3
+        conn = sqlite3.connect(str(db))
+        has_table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='bead_clusters'"
+        ).fetchone()
+        if not has_table:
+            print("bead_clusters table not present (older schema).")
+            conn.close()
+            return
+        rows = conn.execute(
+            "SELECT cluster_id, label, bead_ids, created_at "
+            "FROM bead_clusters ORDER BY created_at DESC, cluster_id"
+        ).fetchall()
+        conn.close()
+    except Exception as exc:
+        print(f"Failed to read bead_clusters: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if not rows:
+        if getattr(args, "as_json", False):
+            print("[]")
+        else:
+            print("No bead clusters found. Run `baton beads synthesize` first.")
+        return
+
+    if getattr(args, "as_json", False):
+        out = []
+        for cluster_id, label, bead_ids_json, created_at in rows:
+            try:
+                members = json.loads(bead_ids_json)
+            except Exception:
+                members = []
+            out.append({
+                "cluster_id": cluster_id,
+                "label": label,
+                "bead_ids": members,
+                "created_at": created_at,
+            })
+        print(json.dumps(out, indent=2))
+        return
+
+    print(f"Bead clusters ({len(rows)}):")
+    for cluster_id, label, bead_ids_json, _created_at in rows:
+        try:
+            members = json.loads(bead_ids_json)
+        except Exception:
+            members = []
+        print(f"  {cluster_id}  [{label}]  ({len(members)} bead(s))")
+        for bid in members:
+            print(f"    - {bid}")
+
+
+def _handle_handoffs(args: argparse.Namespace) -> None:
+    """List automated handoff documents synthesized for a task (Wave 3.2).
+
+    Reads ``handoff_beads`` rows directly via sqlite3 — the table is
+    populated by :class:`agent_baton.core.intel.handoff_synthesizer.
+    HandoffSynthesizer` whenever the dispatcher hands off from one step
+    to the next.  No-op when the table doesn't exist (older schema).
+    """
+    task_id: str | None = (
+        getattr(args, "task_id", None)
+        or os.environ.get("BATON_TASK_ID")
+        or _get_active_task_id()
+    )
+    if not task_id:
+        print(
+            "No task ID provided and no active task found. "
+            "Pass --task-id or set $BATON_TASK_ID.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    db = _resolve_db_path()
+    if not db.exists():
+        print(f"No baton.db found at {db}.", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        import sqlite3
+        conn = sqlite3.connect(str(db))
+        has_table = conn.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type='table' AND name='handoff_beads'"
+        ).fetchone()
+        if not has_table:
+            print("handoff_beads table not present (older schema).")
+            conn.close()
+            return
+        rows = conn.execute(
+            "SELECT handoff_id, from_step_id, to_step_id, created_at, content "
+            "FROM handoff_beads WHERE task_id = ? "
+            "ORDER BY created_at ASC, handoff_id ASC",
+            (task_id,),
+        ).fetchall()
+        conn.close()
+    except Exception as exc:  # noqa: BLE001
+        print(f"Failed to read handoff_beads: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if getattr(args, "as_json", False):
+        out = [
+            {
+                "handoff_id": h_id,
+                "from_step_id": frm,
+                "to_step_id": to,
+                "created_at": ts,
+                "content": content,
+            }
+            for (h_id, frm, to, ts, content) in rows
+        ]
+        print(json.dumps(out, indent=2))
+        return
+
+    if not rows:
+        print(f"No handoff beads found for task {task_id}.")
+        return
+
+    print(f"Handoff beads for task {task_id} ({len(rows)}):")
+    print(f"  {'HANDOFF_ID':<16} {'FROM → TO':<14} {'CREATED_AT':<22} CONTENT")
+    for h_id, frm, to, ts, content in rows:
+        snippet = (content or "").splitlines()[0][:60] if content else ""
+        arrow = f"{frm or '-'} → {to or '-'}"
+        print(f"  {h_id:<16} {arrow:<14} {ts:<22} {snippet}")
+
+
+# ---------------------------------------------------------------------------
+# Wave 6.1 Part C — Executable Bead handlers (bd-81b9)
+# ---------------------------------------------------------------------------
+
+_EXEC_ENABLED_ENV = "BATON_EXEC_BEADS_ENABLED"
+
+# Bead `source` values that indicate the bead was produced locally (in the
+# operator's own project, by the operator's own agents/tooling).  Anything
+# outside this set is treated as an "external origin" by
+# ``_emit_trust_boundary_warning_if_external`` and triggers a one-line
+# trust-boundary warning before sandbox execution.
+#
+# See: references/baton-patterns.md, "Pattern: Executable Beads —
+# Trust Boundary" (end-user readiness #10, bd-18f6).
+_LOCAL_BEAD_SOURCES: frozenset[str] = frozenset(
+    {"agent-signal", "planning-capture", "retrospective", "manual"}
+)
+
+
+def _exec_beads_enabled() -> bool:
+    """Return True when BATON_EXEC_BEADS_ENABLED=1."""
+    return os.environ.get(_EXEC_ENABLED_ENV, "0").strip() not in ("0", "false", "False", "")
+
+
+def _emit_trust_boundary_warning_if_external(bead: object) -> None:
+    """Print a one-line `[security]` warning for non-local executable beads.
+
+    The sandbox in :mod:`agent_baton.core.exec` is process-level only — no
+    filesystem namespacing, no syscall filter.  That is fine for beads the
+    local team authored, version-controlled, and reviewed; it is NOT fine
+    for beads from federation, downloaded packs, or fork PRs.
+
+    This function is a *tripwire*, not a security feature: it surfaces the
+    gap to the operator so they can read the script body and decide
+    whether to run it under the current trust assumptions.  See
+    ``references/baton-patterns.md`` for the full pattern.
+
+    Args:
+        bead: A :class:`agent_baton.models.bead.Bead` (or subclass) whose
+            ``source`` attribute is checked against
+            :data:`_LOCAL_BEAD_SOURCES`.  For locally-produced beads this
+            function is silent.
+    """
+    source = getattr(bead, "source", "") or ""
+    if source in _LOCAL_BEAD_SOURCES:
+        return
+    print(
+        f"[security] executable bead from external origin: {source!r}. "
+        "Sandbox is process-level only — see "
+        "references/baton-patterns.md#executable-beads-trust-boundary.",
+        file=sys.stderr,
+    )
+
+
+def _handle_exec(args: argparse.Namespace) -> None:
+    """Run an executable bead in the sandbox.
+
+    Steps:
+    1. Check BATON_EXEC_BEADS_ENABLED.
+    2. Load the bead and verify it is approved (not quarantined).
+    3. Confirm with the operator (skipped with --no-confirm).
+    4. Execute via ExecutableBeadRunner.run.
+    5. Print exit code + stdout tail + stderr tail.
+    """
+    if not _exec_beads_enabled():
+        print(
+            "error: executable beads disabled. "
+            "Set BATON_EXEC_BEADS_ENABLED=1 to enable.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    store = _get_bead_store()
+    if store is None:
+        print("No baton.db found in .claude/team-context/ — no beads available.", file=sys.stderr)
+        sys.exit(1)
+
+    bead_id: str = args.bead_id
+
+    # Load and validate.
+    raw = store.read(bead_id)
+    if raw is None:
+        print(f"error: bead not found: {bead_id}", file=sys.stderr)
+        sys.exit(1)
+    if raw.bead_type != "executable":
+        print(
+            f"error: bead {bead_id} has type={raw.bead_type!r}, expected 'executable'.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    from agent_baton.core.exec.auditor_gate import AuditorGate
+
+    gate = AuditorGate(store)
+    if not gate.is_approved(bead_id):
+        print(
+            f"error: bead {bead_id} is still in quarantine. "
+            "Obtain auditor approval before running.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # Trust-boundary tripwire (end-user readiness #10, bd-18f6).
+    # The sandbox is process-level only — see references/baton-patterns.md.
+    # Beads whose `source` field falls outside the locally-produced set
+    # (agent-signal | planning-capture | retrospective | manual) are
+    # treated as having an external origin and surface a one-line warning.
+    _emit_trust_boundary_warning_if_external(raw)
+
+    # Operator confirmation.
+    if not args.no_confirm:
+        from agent_baton.models.bead import ExecutableBead
+        exec_bead = ExecutableBead.from_dict(raw.to_dict())
+        print(f"Executable bead: {bead_id}")
+        print(f"  interpreter : {exec_bead.interpreter}")
+        print(f"  script_sha  : {exec_bead.script_sha[:16]}...")
+        print(f"  runtime     : {exec_bead.runtime_limits}")
+        print(f"  content     : {raw.content[:120]}")
+        try:
+            answer = input("Run this bead? [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\nAborted.", file=sys.stderr)
+            sys.exit(1)
+        if answer not in ("y", "yes"):
+            print("Aborted.", file=sys.stderr)
+            sys.exit(1)
+
+    # Execute.
+    from agent_baton.core.exec.sandbox import Sandbox, SandboxConfig
+    from agent_baton.core.exec.runner import ExecutableBeadRunner
+
+    sandbox = Sandbox(
+        config=SandboxConfig(),
+        spill_dir=Path(".claude/team-context/exec-results"),
+    )
+    runner = ExecutableBeadRunner(bead_store=store, sandbox=sandbox)
+
+    try:
+        result = runner.run(bead_id)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as exc:
+        print(f"error: unexpected failure during exec: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"exit_code : {result.exit_code}")
+    print(f"duration  : {result.duration_ms}ms")
+    if result.stdout.strip():
+        print("--- stdout ---")
+        print(result.stdout[-1000:])
+    if result.stderr.strip():
+        print("--- stderr ---")
+        print(result.stderr[-500:])
+    if result.full_output_path:
+        print(f"full output: {result.full_output_path}")
+
+    sys.exit(result.exit_code)
+
+
+def _handle_create_exec(args: argparse.Namespace) -> None:
+    """Create an executable bead from a script file.
+
+    Steps:
+    1. Check BATON_EXEC_BEADS_ENABLED.
+    2. Read the script file.
+    3. Lint via ScriptLinter (errors if lint fails).
+    4. Store via ExecutableBeadRunner.store (signs if souls enabled).
+    5. Quarantine via AuditorGate.
+    6. Print script_sha + bead_id.
+    """
+    if not _exec_beads_enabled():
+        print(
+            "error: executable beads disabled. "
+            "Set BATON_EXEC_BEADS_ENABLED=1 to enable.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # Read script file.
+    script_path = Path(args.script_file)
+    if not script_path.exists():
+        print(f"error: script file not found: {script_path}", file=sys.stderr)
+        sys.exit(1)
+    try:
+        script_body = script_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"error: cannot read script file: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    # Lint first so we fail fast before touching the store.
+    from agent_baton.core.exec.script_lint import ScriptLinter
+
+    lint_result = ScriptLinter().lint(script_body, args.interpreter)
+    if not lint_result.safe:
+        print(
+            f"error: script lint failed — {len(lint_result.findings)} finding(s):",
+            file=sys.stderr,
+        )
+        for pid, msg, lineno in lint_result.findings:
+            print(f"  line {lineno}: [{pid}] {msg}", file=sys.stderr)
+        sys.exit(1)
+
+    # Build ExecutableBead.
+    from datetime import datetime, timezone
+
+    from agent_baton.core.engine.notes_adapter import NotesAdapter
+    from agent_baton.models.bead import ExecutableBead
+
+    task_id: str = args.task_id or os.environ.get("BATON_TASK_ID", "") or ""
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    content_sha = NotesAdapter.compute_script_sha(script_body)
+    script_ref = NotesAdapter.script_ref_for(content_sha)
+
+    description = args.content or f"Executable {args.interpreter} script from {script_path.name}"
+    bead = ExecutableBead(
+        bead_id=args.bead_id,
+        task_id=task_id,
+        step_id="",
+        agent_name=args.agent_name,
+        bead_type="executable",
+        content=description,
+        confidence="high",
+        scope="task" if task_id else "project",
+        tags=["executable", args.interpreter],
+        affected_files=[],
+        status="quarantine",
+        created_at=now,
+        source="manual",
+        exec_ref=script_ref,
+        interpreter=args.interpreter,
+        script_sha=content_sha,
+        script_ref=script_ref,
+        runtime_limits={
+            "timeout_s": args.timeout_s,
+            "mem_mb": args.mem_mb,
+            "net": args.net,
+        },
+    )
+
+    store = _get_or_create_bead_store()
+
+    from agent_baton.core.exec.runner import ExecutableBeadRunner
+    from agent_baton.core.exec.sandbox import Sandbox, SandboxConfig
+    from agent_baton.core.exec.auditor_gate import AuditorGate
+
+    sandbox = Sandbox(
+        config=SandboxConfig(),
+        spill_dir=Path(".claude/team-context/exec-results"),
+    )
+    runner = ExecutableBeadRunner(bead_store=store, sandbox=sandbox)
+
+    try:
+        returned_ref = runner.store(bead, script_body)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    # Quarantine.
+    gate = AuditorGate(store)
+    gate.quarantine(bead)
+
+    print(f"Created executable bead {bead.bead_id} [quarantine].")
+    print(f"  script_sha : {content_sha}")
+    print(f"  script_ref : {returned_ref}")
+    print(f"  interpreter: {args.interpreter}")
+    print()
+    print(
+        f"Next: dispatch the auditor agent to review this bead, then run "
+        f"`baton beads exec {bead.bead_id}` once approved."
+    )

@@ -182,6 +182,31 @@ team. Record each member separately with `baton execute team-record`.
 For the full command reference, error list, and file layout, read
 `.claude/references/baton-engine.md`.
 
+## Concurrent Dispatch (MANDATORY)
+
+When you dispatch two or more `Agent` subagents in a single message that
+modify code in this repo, **every** Agent call MUST include
+`isolation:"worktree"`. Single-agent or strictly sequential dispatch may
+omit it. Without isolation, parallel agents share the project root,
+contaminate each other's branches, and stage each other's files into the
+wrong commits.
+
+The engine signals this for you. Each DISPATCH action returned by
+`baton execute next` (or emitted in a `parallel_actions` batch) carries
+an `isolation` field. When it is `"worktree"`, forward the value
+verbatim onto the matching `Agent(...)` call. When the field is empty
+or absent, do not pass `isolation`.
+
+When the action also carries a `worktree_path` field, pass that path
+as the `cwd` parameter on the `Agent(...)` invocation. The engine has
+already created the worktree at that path; the agent runs inside it
+without any additional setup. Without this, the agent boots in the
+parent project root and the worktree isolation is silently bypassed.
+
+Inside the agent: never `cd` out of your worktree, and never act on an
+absolute path from the prompt that points back at the project root —
+use the worktree-relative paths the engine provides.
+
 ## Regulated Domain Rules
 
 Any work touching regulated data, compliance systems, audit-controlled
@@ -189,6 +214,18 @@ records, or industry-specific business rules MUST:
 - Involve the `subject-matter-expert` agent for domain context
 - Involve the `auditor` agent for pre-execution and post-execution review
 - Follow the Regulated Data guardrail preset
+
+## Code Navigation
+
+If `cymbal` is installed, prefer it over grep for symbol lookup:
+
+```bash
+cymbal investigate <symbol>     # source, callers, callees
+cymbal impact <symbol>          # blast radius before edits
+cymbal refs <symbol>            # find references
+```
+
+Falls back to lsp or grep if cymbal is not available.
 
 ## Agent Invocation
 

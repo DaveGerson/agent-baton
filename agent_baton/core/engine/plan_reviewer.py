@@ -5,23 +5,9 @@ step splitting for overly broad single-agent steps, missing dependency
 edges, scope imbalance warnings, and same-agent team recommendations
 for coupled concerns.
 
-Two review strategies:
-1. **Haiku review** — cheap LLM call (~2000 tokens) that analyzes the
-   plan structure and returns JSON recommendations.  Used for medium+
-   complexity plans when the Anthropic SDK and API key are available.
-2. **Heuristic review** — deterministic fallback using file-path clustering
-   and task-description analysis.  Always available, catches the most
-   common case (single-step work phases spanning 4+ files across 3+
-   directories).
-
-The reviewer thinks holistically about each step's scope and chooses
-the right coordination strategy:
-- **Parallel independent steps** — when concerns are truly independent
-  (different files, different directories, no shared state).
-- **Same-agent team** — when concerns are coupled (shared imports,
-  one layer depends on another, changes need coordinated integration).
-  Team members work in parallel with scoped concerns but share
-  synthesis and lateral context.
+Uses deterministic heuristic review via file-path clustering and
+task-description analysis.  Catches the most common case: single-step
+work phases spanning 4+ files across 3+ directories.
 
 Wired into ``IntelligentPlanner.create_plan()`` at step 12c.5, after
 team consolidation but before bead hints.
@@ -51,13 +37,6 @@ _SPLITTABLE_PHASES = {"implement", "fix", "draft", "migrate", "refactor"}
 # Minimum file count and directory spread to trigger heuristic splitting
 _MIN_FILES_FOR_SPLIT = 4
 _MIN_DIRS_FOR_SPLIT = 3
-
-# Max output tokens for the Haiku review call
-_REVIEW_MAX_TOKENS = 512
-
-# Haiku model and timeout (mirrors classifier.py)
-_REVIEW_MODEL = "claude-haiku-4-5-20251001"
-_REVIEW_TIMEOUT = 8.0  # slightly longer than classifier — plan summaries are bigger
 
 # Common code file extensions for path extraction
 _CODE_EXTENSIONS = {
@@ -102,86 +81,7 @@ class PlanReviewResult:
     teams_created: int = 0
     dependencies_added: int = 0
     warnings: list[str] = field(default_factory=list)
-    source: str = "none"  # "haiku", "heuristic", "none"
-
-
-# ---------------------------------------------------------------------------
-# Haiku review prompt
-# ---------------------------------------------------------------------------
-
-_REVIEW_PROMPT_TEMPLATE = """\
-You are a plan quality reviewer for a software orchestration engine.
-
-Think holistically about each step's scope: is it appropriately sized \
-for a single agent dispatch? If a step is too broad, decide the right \
-coordination strategy based on how the concerns relate to each other.
-
-Plan summary:
-- Task: "{task_summary}"
-- Complexity: {complexity}
-- Phases: {phase_summary}
-
-Phase details:
-{phase_details}
-
-File paths mentioned in task: {file_paths}
-
-Return JSON only (no markdown, no commentary):
-{{
-  "splits": [
-    {{
-      "phase_id": <int>,
-      "step_id": "<str>",
-      "reason": "<why this step is too broad>",
-      "coordination": "<parallel or team>",
-      "groups": [
-        {{
-          "label": "<concern name, e.g. 'engine routing'>",
-          "files": ["<file1.py>", "<file2.py>"],
-          "description_hint": "<what this sub-step should do>",
-          "depends_on_groups": ["<label of group this depends on>"]
-        }}
-      ]
-    }}
-  ],
-  "dependencies": [
-    {{
-      "step_id": "<step that should depend on another>",
-      "depends_on": "<step it depends on>",
-      "reason": "<why>"
-    }}
-  ],
-  "warnings": ["<any other plan quality concern>"]
-}}
-
-Rules:
-- Only recommend splitting steps in work phases (Implement, Fix, Draft, \
-Migrate, Refactor).
-- Split when a single step touches 4+ files across 3+ different \
-directories/concerns.
-- Do NOT split steps that are already scoped to one concern.
-- Do NOT split steps in Design, Test, or Review phases.
-- For existing team steps (steps with team members), do NOT split.
-
-Choosing coordination strategy (the "coordination" field):
-- "parallel": Use when concern groups are INDEPENDENT — different files, \
-different directories, no shared state, each group can be implemented \
-without knowing what the others did. Example: adding a CLI flag \
-(cli/) and updating docs (docs/) are independent.
-- "team": Use when concern groups are COUPLED — one group's changes \
-affect another, they share imports or data models, or integration \
-between layers matters. Example: changing an engine API (core/engine/) \
-and updating the CLI that calls it (cli/commands/) are coupled — the \
-CLI author needs to know the new API signature. Teams of the same \
-agent type are valid and preferred when the work needs coordination \
-across layers (e.g. 3 backend engineers at engine, runtime, and CLI \
-layers communicating via team synthesis).
-
-- For "team" coordination, use depends_on_groups to express ordering \
-between groups (e.g. engine group before CLI group).
-- Keep groups to 2-5 per split.
-- If the plan looks fine, return empty arrays.
-- For light complexity plans, return empty arrays (nothing to split)."""
+    source: str = "none"  # "heuristic", "none"
 
 
 # ---------------------------------------------------------------------------
@@ -205,138 +105,18 @@ class PlanReviewer:
         file_paths: list[str] | None = None,
         complexity: str = "medium",
     ) -> PlanReviewResult:
-        """Review plan and apply improvements.
+        """Review plan and apply heuristic improvements.
 
-        For light complexity, skips review entirely. For medium+, attempts
-        Haiku review with heuristic fallback.
-
-        Args:
-            plan: The MachinePlan to review (mutated in place).
-            task_summary: Original task description.
-            file_paths: File paths extracted from the task summary.
-            complexity: Complexity tier from classification.
-
-        Returns:
-            PlanReviewResult describing what was changed.
+        For light complexity, skips review entirely.
         """
         if complexity == "light":
             logger.debug("Skipping plan review for light complexity plan")
             return PlanReviewResult(source="skipped-light")
 
-        file_paths = file_paths or []
-
-        # Try Haiku review first, fall back to heuristic
-        result = self._try_haiku_review(plan, task_summary, file_paths, complexity)
-        if result is not None:
-            return result
-
-        return self._heuristic_review(plan, task_summary, file_paths)
+        return self._heuristic_review(plan, task_summary, file_paths or [])
 
     # ------------------------------------------------------------------
-    # Haiku review path
-    # ------------------------------------------------------------------
-
-    def _try_haiku_review(
-        self,
-        plan: MachinePlan,
-        task_summary: str,
-        file_paths: list[str],
-        complexity: str,
-    ) -> PlanReviewResult | None:
-        """Attempt Haiku-powered plan review. Returns None if unavailable."""
-        from agent_baton.core.engine.classifier import _haiku_available
-
-        available, reason = _haiku_available()
-        if not available:
-            logger.debug("Haiku unavailable for plan review: %s", reason)
-            return None
-
-        try:
-            prompt = self._build_review_prompt(plan, task_summary, file_paths, complexity)
-            raw = self._call_haiku(prompt)
-            recommendations = self._parse_review_response(raw)
-            result = self._apply_recommendations(plan, recommendations)
-            result.source = "haiku"
-            return result
-        except Exception as exc:
-            logger.warning(
-                "Haiku plan review failed — falling back to heuristic. Reason: %s",
-                exc,
-            )
-            return None
-
-    @staticmethod
-    def _call_haiku(prompt: str) -> str:
-        """Call Haiku for plan review. Separated for easy test mocking."""
-        import anthropic  # type: ignore[import-untyped]
-
-        client = anthropic.Anthropic()
-        response = client.messages.create(
-            model=_REVIEW_MODEL,
-            max_tokens=_REVIEW_MAX_TOKENS,
-            timeout=_REVIEW_TIMEOUT,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return response.content[0].text
-
-    def _build_review_prompt(
-        self,
-        plan: MachinePlan,
-        task_summary: str,
-        file_paths: list[str],
-        complexity: str,
-    ) -> str:
-        """Build a compact plan summary for Haiku review."""
-        phase_summary = ", ".join(
-            f"{p.name} ({len(p.steps)} step{'s' if len(p.steps) != 1 else ''})"
-            for p in plan.phases
-        )
-
-        detail_lines: list[str] = []
-        for phase in plan.phases:
-            detail_lines.append(f"Phase {phase.phase_id}: {phase.name}")
-            for step in phase.steps:
-                team_note = f" [TEAM: {len(step.team)} members]" if step.team else ""
-                files_note = ""
-                if step.context_files:
-                    files_note = f" files=[{', '.join(step.context_files[:10])}]"
-                detail_lines.append(
-                    f"  Step {step.step_id}: {step.agent_name}{team_note}"
-                    f" — {step.task_description[:200]}{files_note}"
-                )
-        phase_details = "\n".join(detail_lines)
-
-        safe_summary = task_summary.replace("{", "{{").replace("}", "}}")
-        safe_details = phase_details.replace("{", "{{").replace("}", "}}")
-        file_list = ", ".join(file_paths[:20]) if file_paths else "none extracted"
-        safe_files = file_list.replace("{", "{{").replace("}", "}}")
-
-        return _REVIEW_PROMPT_TEMPLATE.format(
-            task_summary=safe_summary,
-            complexity=complexity,
-            phase_summary=phase_summary,
-            phase_details=safe_details,
-            file_paths=safe_files,
-        )
-
-    @staticmethod
-    def _parse_review_response(raw: str) -> dict:
-        """Parse Haiku's JSON review response."""
-        cleaned = raw.strip()
-        if cleaned.startswith("```"):
-            lines = cleaned.split("\n")
-            lines = [line for line in lines if not line.strip().startswith("```")]
-            cleaned = "\n".join(lines)
-
-        try:
-            data = json.loads(cleaned)
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Haiku plan review returned invalid JSON: {e}") from e
-
-        return data
-
-    # ------------------------------------------------------------------
-    # Heuristic review path (fallback)
+    # Heuristic review path
     # ------------------------------------------------------------------
 
     def _heuristic_review(
@@ -400,7 +180,9 @@ class PlanReviewer:
 
             if len(relevant_groups) >= _MIN_DIRS_FOR_SPLIT:
                 # Decide: parallel independent steps or same-agent team?
-                coupled = _detect_coupling(relevant_groups, task_summary)
+                # Use step description (not full task_summary) to avoid
+                # coupling keywords from unrelated items tainting the score.
+                coupled = _detect_coupling(relevant_groups, step.task_description)
 
                 if coupled:
                     # Coupled concerns → same-agent team with synthesis
@@ -590,7 +372,7 @@ _COUPLED_PAIRS: set[frozenset[str]] = {
 # Keywords in task descriptions that signal coupled work across layers
 _COUPLING_KEYWORDS = [
     "wire", "integrate", "connect", "plumb", "thread through",
-    "end-to-end", "e2e", "across", "propagate", "flow",
+    "end-to-end", "e2e", "propagate", "flow",
     "api change", "interface change", "contract", "protocol",
     "schema change", "model change",
 ]
@@ -635,10 +417,21 @@ def _detect_coupling(
                 break  # one file per group is enough
     shared_parent = any(count >= 2 for count in grandparents.values())
 
-    # Decision: coupled if 2+ signals fire, or if 1 strong signal
-    # (coupled pair) fires with 3+ groups
-    score = coupled_pair_count * 2 + keyword_hits + (1 if shared_parent else 0)
-    return score >= 2
+    # Decision: directory pairs alone don't indicate coupling — many bug-fix
+    # plans touch engine+runtime without the items being related.  Pairs only
+    # count when reinforced by integration keywords in the description.
+    # This prevents multi-bug-fix plans from being falsely coupled while
+    # still detecting genuine cross-layer integration work.
+    if keyword_hits == 0:
+        # No integration language → directories are just co-present, not coupled
+        return False
+    score = coupled_pair_count + keyword_hits + (1 if shared_parent else 0)
+    # When many concern groups are present (4+), a single keyword in a long
+    # multi-item description is likely incidental (applies to one item, not
+    # the whole step).  Require keyword density proportional to group count.
+    if len(group_names) >= 4 and keyword_hits < 2:
+        return False
+    return score >= 3
 
 
 # ---------------------------------------------------------------------------

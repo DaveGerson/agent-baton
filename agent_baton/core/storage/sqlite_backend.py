@@ -152,19 +152,27 @@ class SqliteStorage:
             # -- plan ----------------------------------------------------------
             _upsert_plan(conn, state.plan)
 
-            # -- step_results (DELETE + INSERT for clean replacement) ----------
+            # -- step_results (DELETE + INSERT OR REPLACE for idempotent writes)
+            # INSERT OR REPLACE is used alongside the DELETE as belt-and-suspenders:
+            # if a prior partial transaction left a stale row that the DELETE missed,
+            # the upsert overwrites it safely instead of raising UNIQUE constraint
+            # failure.  This is the idempotent-write pattern for event-sourced state
+            # machines: writing the same (task_id, step_id) twice must be safe.
             conn.execute(
                 "DELETE FROM step_results WHERE task_id = ?", (state.task_id,)
             )
             for sr in state.step_results:
                 conn.execute(
                     """
-                    INSERT INTO step_results
+                    INSERT OR REPLACE INTO step_results
                         (task_id, step_id, agent_name, status, outcome,
                          files_changed, commit_hash, estimated_tokens,
                          duration_seconds, retries, error, completed_at,
-                         deviations)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         deviations, step_type, updated_at,
+                         input_tokens, cache_read_tokens, cache_creation_tokens,
+                         output_tokens, model_id, session_id, step_started_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         state.task_id,
@@ -180,6 +188,15 @@ class SqliteStorage:
                         sr.error,
                         sr.completed_at,
                         json.dumps(sr.deviations),
+                        sr.step_type,
+                        sr.updated_at,
+                        sr.input_tokens,
+                        sr.cache_read_tokens,
+                        sr.cache_creation_tokens,
+                        sr.output_tokens,
+                        sr.model_id,
+                        sr.session_id,
+                        sr.step_started_at,
                     ),
                 )
                 # team step results cascade from step_results, delete via FK
@@ -210,8 +227,9 @@ class SqliteStorage:
                 conn.execute(
                     """
                     INSERT INTO gate_results
-                        (task_id, phase_id, gate_type, passed, output, checked_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                        (task_id, phase_id, gate_type, passed, output, checked_at,
+                         command, exit_code, decision_source, actor)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         state.task_id,
@@ -220,6 +238,10 @@ class SqliteStorage:
                         int(gr.passed),
                         gr.output,
                         gr.checked_at,
+                        gr.command,
+                        gr.exit_code,
+                        gr.decision_source,
+                        gr.actor,
                     ),
                 )
 
@@ -231,8 +253,9 @@ class SqliteStorage:
                 conn.execute(
                     """
                     INSERT INTO approval_results
-                        (task_id, phase_id, result, feedback, decided_at)
-                    VALUES (?, ?, ?, ?, ?)
+                        (task_id, phase_id, result, feedback, decided_at,
+                         decision_source, actor, rationale)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         state.task_id,
@@ -240,6 +263,9 @@ class SqliteStorage:
                         ar.result,
                         ar.feedback,
                         ar.decided_at,
+                        ar.decision_source,
+                        ar.actor,
+                        ar.rationale,
                     ),
                 )
 
@@ -269,6 +295,55 @@ class SqliteStorage:
                     ),
                 )
 
+            # -- interaction_turns (A4: incremental — DELETE + INSERT) ---------
+            # Rebuild from in-memory state on every save so that turns added
+            # during the current execution cycle are persisted.
+            conn.execute(
+                "DELETE FROM interaction_turns WHERE task_id = ?", (state.task_id,)
+            )
+            for sr in state.step_results:
+                for turn in sr.interaction_history:
+                    conn.execute(
+                        """
+                        INSERT INTO interaction_turns
+                            (task_id, step_id, turn_number, role,
+                             content, timestamp, source)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            state.task_id,
+                            sr.step_id,
+                            turn.turn_number,
+                            turn.role,
+                            turn.content,
+                            turn.timestamp,
+                            turn.source,
+                        ),
+                    )
+
+            # -- feedback_responses (A4: incremental — DELETE + INSERT) --------
+            conn.execute(
+                "DELETE FROM feedback_responses WHERE task_id = ?", (state.task_id,)
+            )
+            for fr in state.feedback_results:
+                conn.execute(
+                    """
+                    INSERT INTO feedback_responses
+                        (task_id, phase_id, question_id, chosen_index,
+                         chosen_option, dispatched_step_id, decided_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        state.task_id,
+                        fr.phase_id,
+                        fr.question_id,
+                        fr.chosen_index,
+                        fr.chosen_option,
+                        fr.dispatched_step_id,
+                        fr.decided_at,
+                    ),
+                )
+
     def load_execution(self, task_id: str) -> "ExecutionState | None":
         """Reconstruct a full ``ExecutionState`` from normalised tables.
 
@@ -288,7 +363,9 @@ class SqliteStorage:
         from agent_baton.models.execution import (
             ApprovalResult,
             ExecutionState,
+            FeedbackResult,
             GateResult,
+            InteractionTurn,
             PlanAmendment,
             StepResult,
             TeamStepResult,
@@ -320,6 +397,15 @@ class SqliteStorage:
         for tr in team_rows:
             team_by_step.setdefault(tr["step_id"], []).append(tr)
 
+        # A4: load interaction turns grouped by step_id
+        turn_rows = conn.execute(
+            "SELECT * FROM interaction_turns WHERE task_id = ? ORDER BY step_id, turn_number",
+            (task_id,),
+        ).fetchall() if _table_exists(conn, "interaction_turns") else []
+        turns_by_step: dict[str, list] = {}
+        for tr in turn_rows:
+            turns_by_step.setdefault(tr["step_id"], []).append(tr)
+
         step_results = []
         for sr in step_rows:
             member_results = [
@@ -332,6 +418,17 @@ class SqliteStorage:
                 )
                 for mr in team_by_step.get(sr["step_id"], [])
             ]
+            interaction_history = [
+                InteractionTurn(
+                    role=tr["role"],
+                    content=tr["content"],
+                    timestamp=tr["timestamp"],
+                    turn_number=tr["turn_number"],
+                    source=tr["source"],
+                )
+                for tr in turns_by_step.get(sr["step_id"], [])
+            ]
+            sr_keys = sr.keys() if hasattr(sr, "keys") else []
             step_results.append(
                 StepResult(
                     step_id=sr["step_id"],
@@ -347,39 +444,82 @@ class SqliteStorage:
                     completed_at=sr["completed_at"],
                     member_results=member_results,
                     deviations=json.loads(
-                        sr["deviations"] if "deviations" in sr.keys() else "[]"
+                        sr["deviations"] if "deviations" in sr_keys else "[]"
                     ),
+                    step_type=sr["step_type"] if "step_type" in sr_keys else "developing",
+                    interaction_history=interaction_history,
+                    updated_at=sr["updated_at"] if "updated_at" in sr_keys else "",
+                    input_tokens=sr["input_tokens"] if "input_tokens" in sr_keys else 0,
+                    cache_read_tokens=sr["cache_read_tokens"] if "cache_read_tokens" in sr_keys else 0,
+                    cache_creation_tokens=sr["cache_creation_tokens"] if "cache_creation_tokens" in sr_keys else 0,
+                    output_tokens=sr["output_tokens"] if "output_tokens" in sr_keys else 0,
+                    model_id=sr["model_id"] if "model_id" in sr_keys else "",
+                    session_id=sr["session_id"] if "session_id" in sr_keys else "",
+                    step_started_at=sr["step_started_at"] if "step_started_at" in sr_keys else "",
                 )
             )
 
         # gate_results
-        gate_results = [
-            GateResult(
+        gr_keys_checked = False
+        gr_has_command = False
+        gate_results = []
+        for gr in conn.execute(
+            "SELECT * FROM gate_results WHERE task_id = ? ORDER BY id",
+            (task_id,),
+        ).fetchall():
+            if not gr_keys_checked:
+                gr_cols = gr.keys() if hasattr(gr, "keys") else []
+                gr_has_command = "command" in gr_cols
+                gr_keys_checked = True
+            gate_results.append(GateResult(
                 phase_id=gr["phase_id"],
                 gate_type=gr["gate_type"],
                 passed=bool(gr["passed"]),
                 output=gr["output"],
                 checked_at=gr["checked_at"],
-            )
-            for gr in conn.execute(
-                "SELECT * FROM gate_results WHERE task_id = ? ORDER BY id",
-                (task_id,),
-            ).fetchall()
-        ]
+                command=gr["command"] if gr_has_command else "",
+                exit_code=gr["exit_code"] if gr_has_command else None,
+                decision_source=gr["decision_source"] if gr_has_command else "",
+                actor=gr["actor"] if gr_has_command else "",
+            ))
 
         # approval_results
-        approval_results = [
-            ApprovalResult(
+        ar_keys_checked = False
+        ar_has_source = False
+        approval_results = []
+        for ar in conn.execute(
+            "SELECT * FROM approval_results WHERE task_id = ? ORDER BY id",
+            (task_id,),
+        ).fetchall():
+            if not ar_keys_checked:
+                ar_cols = ar.keys() if hasattr(ar, "keys") else []
+                ar_has_source = "decision_source" in ar_cols
+                ar_keys_checked = True
+            approval_results.append(ApprovalResult(
                 phase_id=ar["phase_id"],
                 result=ar["result"],
                 feedback=ar["feedback"],
                 decided_at=ar["decided_at"],
-            )
-            for ar in conn.execute(
-                "SELECT * FROM approval_results WHERE task_id = ? ORDER BY id",
+                decision_source=ar["decision_source"] if ar_has_source else "",
+                actor=ar["actor"] if ar_has_source else "",
+                rationale=ar["rationale"] if ar_has_source else "",
+            ))
+
+        # A4: feedback_results
+        feedback_results = []
+        if _table_exists(conn, "feedback_responses"):
+            for fr in conn.execute(
+                "SELECT * FROM feedback_responses WHERE task_id = ? ORDER BY id",
                 (task_id,),
-            ).fetchall()
-        ]
+            ).fetchall():
+                feedback_results.append(FeedbackResult(
+                    phase_id=fr["phase_id"],
+                    question_id=fr["question_id"],
+                    chosen_index=fr["chosen_index"],
+                    chosen_option=fr["chosen_option"],
+                    dispatched_step_id=fr["dispatched_step_id"],
+                    decided_at=fr["decided_at"],
+                ))
 
         # amendments
         amendments = [
@@ -412,6 +552,7 @@ class SqliteStorage:
             step_results=step_results,
             gate_results=gate_results,
             approval_results=approval_results,
+            feedback_results=feedback_results,
             amendments=amendments,
             started_at=row["started_at"],
             completed_at=row["completed_at"] or "",
@@ -426,10 +567,17 @@ class SqliteStorage:
         )
 
     def list_executions(self) -> list[str]:
-        """Return all task_ids in the executions table."""
+        """Return task_ids for plan-level executions (those with a plans row).
+
+        Sub-task dispatch records from the engine's internal step execution
+        exist in the executions table but have no corresponding plans row.
+        Excluding them here avoids silent skips in the PMO scanner.
+        """
         conn = self._conn()
         rows = conn.execute(
-            "SELECT task_id FROM executions ORDER BY started_at"
+            "SELECT task_id FROM executions"
+            " WHERE task_id IN (SELECT task_id FROM plans)"
+            " ORDER BY started_at"
         ).fetchall()
         return [r["task_id"] for r in rows]
 
@@ -532,8 +680,11 @@ class SqliteStorage:
                     (task_id, step_id, agent_name, status, outcome,
                      files_changed, commit_hash, estimated_tokens,
                      duration_seconds, retries, error, completed_at,
-                     deviations)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     deviations, step_type, updated_at,
+                     input_tokens, cache_read_tokens, cache_creation_tokens,
+                     output_tokens, model_id, session_id, step_started_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task_id,
@@ -549,6 +700,15 @@ class SqliteStorage:
                     result.error,
                     result.completed_at,
                     json.dumps(result.deviations),
+                    result.step_type,
+                    result.updated_at,
+                    result.input_tokens,
+                    result.cache_read_tokens,
+                    result.cache_creation_tokens,
+                    result.output_tokens,
+                    result.model_id,
+                    result.session_id,
+                    result.step_started_at,
                 ),
             )
             # Replace team member results for this step
@@ -590,8 +750,9 @@ class SqliteStorage:
             conn.execute(
                 """
                 INSERT INTO gate_results
-                    (task_id, phase_id, gate_type, passed, output, checked_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                    (task_id, phase_id, gate_type, passed, output, checked_at,
+                     command, exit_code, decision_source, actor)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task_id,
@@ -600,6 +761,10 @@ class SqliteStorage:
                     int(result.passed),
                     result.output,
                     result.checked_at,
+                    result.command,
+                    result.exit_code,
+                    result.decision_source,
+                    result.actor,
                 ),
             )
 
@@ -615,8 +780,9 @@ class SqliteStorage:
             conn.execute(
                 """
                 INSERT INTO approval_results
-                    (task_id, phase_id, result, feedback, decided_at)
-                VALUES (?, ?, ?, ?, ?)
+                    (task_id, phase_id, result, feedback, decided_at,
+                     decision_source, actor, rationale)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task_id,
@@ -624,6 +790,9 @@ class SqliteStorage:
                     result.result,
                     result.feedback,
                     result.decided_at,
+                    result.decision_source,
+                    result.actor,
+                    result.rationale,
                 ),
             )
 
@@ -747,6 +916,18 @@ class SqliteStorage:
         Args:
             record: The usage record to persist.
         """
+        # Resolve tenancy from the centralised context when the record
+        # itself does not carry an explicit value.  This keeps callers
+        # that build records with default fields automatically tagged.
+        from agent_baton.core.runtime.tenancy_context import get_current_tenancy
+
+        ctx = get_current_tenancy()
+        org_id = record.org_id or ctx.org_id
+        team_id = record.team_id or ctx.team_id
+        user_id = record.user_id or ctx.user_id
+        spec_author_id = record.spec_author_id or ctx.spec_author_id
+        cost_center = record.cost_center or ctx.cost_center
+
         conn = self._conn()
         with conn:
             conn.execute(
@@ -754,8 +935,9 @@ class SqliteStorage:
                 INSERT OR REPLACE INTO usage_records
                     (task_id, timestamp, total_agents, risk_level,
                      sequencing_mode, gates_passed, gates_failed,
-                     outcome, notes)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     outcome, notes,
+                     org_id, team_id, user_id, spec_author_id, cost_center)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.task_id,
@@ -767,6 +949,11 @@ class SqliteStorage:
                     record.gates_failed,
                     record.outcome,
                     record.notes,
+                    org_id,
+                    team_id,
+                    user_id,
+                    spec_author_id,
+                    cost_center,
                 ),
             )
             # agent_usage has no natural PK — delete and re-insert
@@ -778,8 +965,10 @@ class SqliteStorage:
                     """
                     INSERT INTO agent_usage
                         (task_id, agent_name, model, steps, retries,
-                         gate_results, estimated_tokens, duration_seconds)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                         gate_results, estimated_tokens, duration_seconds,
+                         agent_type, org_id, team_id, user_id,
+                         spec_author_id, cost_center)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         record.task_id,
@@ -790,6 +979,12 @@ class SqliteStorage:
                         json.dumps(au.gate_results),
                         au.estimated_tokens,
                         au.duration_seconds,
+                        au.agent_type,
+                        org_id,
+                        team_id,
+                        user_id,
+                        spec_author_id,
+                        cost_center,
                     ),
                 )
 
@@ -1600,6 +1795,20 @@ class SqliteStorage:
 # ==========================================================================
 
 
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    """Return True if *table_name* exists in the database.
+
+    Used for graceful fallback when loading from databases created before
+    schema v10 that do not yet have ``interaction_turns`` or
+    ``feedback_responses`` tables.
+    """
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
 def _upsert_plan(conn: sqlite3.Connection, plan: "MachinePlan") -> None:  # noqa: F821
     """Insert or replace a ``MachinePlan`` and its child rows.
 
@@ -1620,8 +1829,9 @@ def _upsert_plan(conn: sqlite3.Connection, plan: "MachinePlan") -> None:  # noqa
              execution_mode, git_strategy, shared_context,
              pattern_source, plan_markdown, created_at,
              explicit_knowledge_packs, explicit_knowledge_docs,
-             intervention_level, task_type)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             intervention_level, task_type,
+             classification_signals, classification_confidence)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             plan.task_id,
@@ -1638,6 +1848,8 @@ def _upsert_plan(conn: sqlite3.Connection, plan: "MachinePlan") -> None:  # noqa
             json.dumps(plan.explicit_knowledge_docs),
             plan.intervention_level,
             plan.task_type,
+            plan.classification_signals,
+            plan.classification_confidence,
         ),
     )
 
@@ -1675,8 +1887,9 @@ def _upsert_plan(conn: sqlite3.Connection, plan: "MachinePlan") -> None:  # noqa
                     (task_id, step_id, phase_id, agent_name,
                      task_description, model, depends_on,
                      deliverables, allowed_paths, blocked_paths,
-                     context_files, knowledge_attachments)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     context_files, knowledge_attachments,
+                     step_type, command)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     plan.task_id,
@@ -1691,17 +1904,28 @@ def _upsert_plan(conn: sqlite3.Connection, plan: "MachinePlan") -> None:  # noqa
                     json.dumps(step.blocked_paths),
                     json.dumps(step.context_files),
                     json.dumps([a.to_dict() for a in step.knowledge]),
+                    step.step_type,
+                    step.command,
                 ),
             )
 
             for member in step.team:
+                # Persist sub_team and synthesis as JSON blobs so nested
+                # teams and the per-lead synthesis spec survive a round-trip.
+                sub_team_json = json.dumps(
+                    [m.to_dict() for m in member.sub_team]
+                )
+                synthesis_json = (
+                    json.dumps(member.synthesis.to_dict())
+                    if member.synthesis is not None else ""
+                )
                 conn.execute(
                     """
                     INSERT INTO team_members
                         (task_id, step_id, member_id, agent_name,
                          role, task_description, model,
-                         depends_on, deliverables)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         depends_on, deliverables, sub_team, synthesis)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         plan.task_id,
@@ -1713,6 +1937,8 @@ def _upsert_plan(conn: sqlite3.Connection, plan: "MachinePlan") -> None:  # noqa
                         member.model,
                         json.dumps(member.depends_on),
                         json.dumps(member.deliverables),
+                        sub_team_json,
+                        synthesis_json,
                     ),
                 )
 
@@ -1791,8 +2017,27 @@ def _load_plan_struct(
 
         steps: list[PlanStep] = []
         for sr in steps_by_phase.get(pr["phase_id"], []):
-            team = [
-                TeamMember(
+            team = []
+            for mr in members_by_step.get(sr["step_id"], []):
+                # sub_team / synthesis are schema v15 additions — read
+                # defensively so older DBs without these columns still work.
+                try:
+                    sub_team_raw = mr["sub_team"] or "[]"
+                except (IndexError, KeyError):
+                    sub_team_raw = "[]"
+                try:
+                    synth_raw = mr["synthesis"] or ""
+                except (IndexError, KeyError):
+                    synth_raw = ""
+                sub_team_list = [
+                    TeamMember.from_dict(d)
+                    for d in json.loads(sub_team_raw or "[]")
+                ]
+                synthesis_obj = None
+                if synth_raw:
+                    from agent_baton.models.execution import SynthesisSpec
+                    synthesis_obj = SynthesisSpec.from_dict(json.loads(synth_raw))
+                team.append(TeamMember(
                     member_id=mr["member_id"],
                     agent_name=mr["agent_name"],
                     role=mr["role"],
@@ -1800,9 +2045,9 @@ def _load_plan_struct(
                     model=mr["model"],
                     depends_on=json.loads(mr["depends_on"]),
                     deliverables=json.loads(mr["deliverables"]),
-                )
-                for mr in members_by_step.get(sr["step_id"], [])
-            ]
+                    sub_team=sub_team_list,
+                    synthesis=synthesis_obj,
+                ))
             raw_ka = sr["knowledge_attachments"] if "knowledge_attachments" in sr.keys() else "[]"
             steps.append(
                 PlanStep(
@@ -1820,6 +2065,8 @@ def _load_plan_struct(
                         KnowledgeAttachment.from_dict(a)
                         for a in json.loads(raw_ka or "[]")
                     ],
+                    step_type=sr["step_type"] if "step_type" in sr.keys() else "developing",
+                    command=sr["command"] if "command" in sr.keys() else "",
                 )
             )
 
@@ -1840,6 +2087,9 @@ def _load_plan_struct(
     ekd = plan_row["explicit_knowledge_docs"] if "explicit_knowledge_docs" in plan_keys else "[]"
     il = plan_row["intervention_level"] if "intervention_level" in plan_keys else "low"
     tt = plan_row["task_type"] if "task_type" in plan_keys else None
+    # A3: classification signals (v10+, graceful fallback for older databases)
+    cs = plan_row["classification_signals"] if "classification_signals" in plan_keys else None
+    cc = plan_row["classification_confidence"] if "classification_confidence" in plan_keys else None
 
     return MachinePlan(
         task_id=plan_row["task_id"],
@@ -1856,4 +2106,6 @@ def _load_plan_struct(
         explicit_knowledge_docs=json.loads(ekd or "[]"),
         intervention_level=il or "low",
         task_type=tt,
+        classification_signals=cs,
+        classification_confidence=float(cc) if cc is not None else None,
     )

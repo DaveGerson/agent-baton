@@ -10,12 +10,12 @@ Key responsibilities:
   :class:`AgentScorecard` objects that combine quantitative metrics (first-pass
   rate, retry rate, gate pass rate, token usage) with qualitative signals
   (retrospective mentions, knowledge gaps cited).  Scores are the primary
-  input to prompt evolution and routing recommendations.
+  input to routing recommendations.
 
-* **Prompt evolution** -- :class:`PromptEvolutionEngine` identifies
-  underperforming agents and generates :class:`EvolutionProposal` objects
-  containing specific suggested prompt changes.  Prompt changes are NEVER
-  auto-applied; they always require human review.
+* **Prompt evolution** -- moved out of code (L2.1, bd-362f).  The
+  template-based ``PromptEvolutionEngine`` was retired in favour of the
+  ``learning-analyst`` agent dispatched via ``baton learn run-cycle``,
+  which reads actual retrospective content and execution traces.
 
 * **Version control** -- :class:`AgentVersionControl` maintains timestamped
   backups and a changelog for agent definition files, enabling safe
@@ -25,8 +25,6 @@ Additional modules in this package:
 
 * ``triggers.py`` -- :class:`TriggerEvaluator` decides when enough new data
   has accumulated to warrant a new improvement cycle.
-* ``experiments.py`` -- :class:`ExperimentManager` tracks A/B-style
-  experiments for applied recommendations.
 * ``proposals.py`` -- :class:`ProposalManager` persists recommendation
   lifecycle (proposed -> applied -> rolled_back).
 * ``rollback.py`` -- :class:`RollbackManager` restores agents on
@@ -34,7 +32,13 @@ Additional modules in this package:
   auto-apply).
 * ``loop.py`` -- :class:`ImprovementLoop` orchestrates the full cycle:
   triggers -> recommendations -> classification -> apply/escalate ->
-  experiments -> rollback.
+  rollback.
+
+Note: L2.1 (bd-362f) retired the experiment-tracking subsystem along
+with prompt evolution; the retired ``ExperimentManager`` provided per-cycle
+before/after metric comparison.  Impact validation now flows through the
+learning-cycle pipeline (``baton learn run-cycle``) which compares
+scorecards across full cycles.
 
 Data flow::
 
@@ -50,23 +54,18 @@ Data flow::
     improve.ImprovementLoop
         |
         +--> PerformanceScorer   (agent scorecards)
-        +--> PromptEvolutionEngine (prompt change proposals)
         +--> ProposalManager     (recommendation persistence)
-        +--> ExperimentManager   (impact tracking)
         +--> RollbackManager     (safe rollback + circuit breaker)
         +--> AgentVersionControl (backups + changelog)
 """
 from __future__ import annotations
 
 from agent_baton.core.improve.scoring import PerformanceScorer, AgentScorecard
-from agent_baton.core.improve.evolution import PromptEvolutionEngine, EvolutionProposal
 from agent_baton.core.improve.vcs import AgentVersionControl, ChangelogEntry
 
 __all__ = [
     "PerformanceScorer",
     "AgentScorecard",
-    "PromptEvolutionEngine",
-    "EvolutionProposal",
     "AgentVersionControl",
     "ChangelogEntry",
 ]

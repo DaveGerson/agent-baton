@@ -440,7 +440,7 @@ class TestTeamRecordGuard:
              patch("os.environ.get", return_value=None), \
              patch.object(execute_mod.StatePersistence, "get_active_task_id", return_value=None), \
              patch.object(execute_mod, "user_error", side_effect=fake_user_error), \
-             pytest.raises(RuntimeError, match="no active execution state"):
+             pytest.raises(RuntimeError, match="no execution state found"):
             execute_mod.handler(args)
 
         # The guard must NOT have fired (no state → guard skipped entirely).

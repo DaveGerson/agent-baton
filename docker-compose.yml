@@ -1,0 +1,53 @@
+version: "3.9"
+
+# Agent Baton — Docker Compose configuration
+#
+# Quick start:
+#   docker compose up
+#
+# Override env vars in a .env file or via the environment block.
+# Required: ANTHROPIC_API_KEY
+# Optional: BATON_API_TOKEN (shared secret for API bearer-auth)
+
+services:
+  baton:
+    build:
+      context: .
+      target: runtime
+    image: agent-baton:latest
+    environment:
+      # Required — Anthropic API key for Claude Code subprocesses
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
+      # Optional bearer token for API authentication
+      BATON_API_TOKEN: "${BATON_API_TOKEN:-}"
+      # Log level: DEBUG, INFO, WARNING, ERROR (default: INFO)
+      BATON_LOG_LEVEL: "${BATON_LOG_LEVEL:-INFO}"
+      # Log format: text or json (default: text)
+      BATON_LOG_FORMAT: "${BATON_LOG_FORMAT:-text}"
+      # Mode: api (daemon + REST server) or daemon (worker only)
+      BATON_MODE: "${BATON_MODE:-api}"
+      BATON_HOST: "0.0.0.0"
+      BATON_PORT: "8741"
+    ports:
+      - "8741:8741"
+    volumes:
+      # Mount project root so baton can read CLAUDE.md, .claude/, etc.
+      - "${PROJECT_ROOT:-.}:/workspace"
+      # Persist execution state across container restarts.
+      # The team-context directory holds plan.json, baton.db, traces, etc.
+      - baton-state:/workspace/.claude/team-context
+    healthcheck:
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8741/api/v1/health')"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+volumes:
+  baton-state:
+    driver: local

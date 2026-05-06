@@ -18,21 +18,77 @@ import asyncio
 import json
 import logging
 import os
-import re
 import shutil
+import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from agent_baton.core.runtime._redaction import redact_sensitive as _redact_sensitive
 from agent_baton.models.execution import MachinePlan
+from agent_baton.core.runtime.claude_launcher import (
+    _EXCLUDE_FLAG,
+    _supports_exclude_flag,
+)
 
 logger = logging.getLogger(__name__)
 
-_API_KEY_RE = re.compile(r"sk-ant-[A-Za-z0-9_-]+")
+# ---------------------------------------------------------------------------
+# Macros validation
+# ---------------------------------------------------------------------------
+
+#: Keys every macro entry dict must contain.
+_MACRO_REQUIRED_KEYS: frozenset[str] = frozenset({"command"})
+
+
+def _validate_macros(macros: dict) -> None:  # type: ignore[type-arg]
+    """Validate a macros configuration block.
+
+    A valid macros block is a ``dict`` whose values are dicts, each with:
+
+    - ``command`` (str, non-empty) — the shell command the macro expands to.
+    - Any additional string keys (e.g. ``description``) are tolerated.
+
+    Raises:
+        ValueError: On the first structural or value violation found, with a
+            descriptive message indicating which macro and what is wrong.
+
+    Args:
+        macros: The macros configuration block to validate.
+
+    Examples::
+
+        _validate_macros({})                          # OK — empty is allowed
+        _validate_macros({"lint": {"command": "ruff check ."}})  # OK
+        _validate_macros(None)                        # ValueError — not a dict
+        _validate_macros({"bad": {}})                 # ValueError — missing 'command'
+        _validate_macros({"bad": {"command": ""}})    # ValueError — empty command
+    """
+    if not isinstance(macros, dict):
+        raise ValueError(
+            f"macros must be a dict, got {type(macros).__name__!r}"
+        )
+
+    for name, entry in macros.items():
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"macros[{name!r}]: entry must be a dict, got {type(entry).__name__!r}"
+            )
+        for key in _MACRO_REQUIRED_KEYS:
+            if key not in entry:
+                raise ValueError(
+                    f"macros[{name!r}]: missing required key {key!r}"
+                )
+        command = entry["command"]
+        if not isinstance(command, str) or not command.strip():
+            raise ValueError(
+                f"macros[{name!r}]: 'command' must be a non-empty string, "
+                f"got {command!r}"
+            )
+
 
 _DEFAULT_ENV_PASSTHROUGH: list[str] = [
-    "ANTHROPIC_API_KEY",
     "CLAUDE_CODE_USE_BEDROCK",
     "CLAUDE_CODE_USE_VERTEX",
     "AWS_PROFILE",
@@ -64,6 +120,13 @@ class HeadlessConfig:
     env_passthrough: list[str] = field(
         default_factory=lambda: list(_DEFAULT_ENV_PASSTHROUGH)
     )
+    macros: dict[str, dict[str, Any]] = field(default_factory=dict)
+    """Named macros forwarded to the headless session.
+
+    Each entry maps a macro name to a dict with at minimum a ``command``
+    key (non-empty str).  An optional ``description`` key is also
+    recognised.  Pass ``{}`` (the default) to disable macros entirely.
+    """
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -74,6 +137,7 @@ class HeadlessConfig:
             "base_retry_delay": self.base_retry_delay,
             "working_directory": self.working_directory.as_posix() if self.working_directory else None,
             "env_passthrough": list(self.env_passthrough),
+            "macros": dict(self.macros),
         }
 
     @classmethod
@@ -87,6 +151,7 @@ class HeadlessConfig:
             base_retry_delay=float(data.get("base_retry_delay", 5.0)),
             working_directory=Path(wd) if wd else None,
             env_passthrough=list(data.get("env_passthrough", _DEFAULT_ENV_PASSTHROUGH)),
+            macros=dict(data.get("macros", {})),
         )
 
 
@@ -107,6 +172,7 @@ class HeadlessClaude:
 
     def __init__(self, config: HeadlessConfig | None = None) -> None:
         self._config = config or HeadlessConfig()
+        _validate_macros(self._config.macros)
         resolved = shutil.which(self._config.claude_path)
         self._claude_bin: str | None = resolved
         if resolved is None:
@@ -144,6 +210,11 @@ class HeadlessClaude:
             "--model", effective_model,
             "--output-format", "json",
         ]
+        # Improve prompt-cache reuse by moving per-machine dynamic sections
+        # out of the system prompt.  HeadlessClaude never injects a custom
+        # --system-prompt, so the flag is always applicable when supported.
+        if _supports_exclude_flag():
+            cmd.append(_EXCLUDE_FLAG)
 
         use_stdin = len(prompt.encode()) > 131_072
         if not use_stdin:
@@ -276,8 +347,10 @@ class HeadlessClaude:
             )
 
         elapsed = time.monotonic() - start
-        stderr_text = _API_KEY_RE.sub("sk-ant-***REDACTED***", stderr.decode(errors="replace").strip())
-        stdout_text = stdout.decode(errors="replace").strip()
+        # A5: apply full redaction suite to both stderr and stdout before
+        # any persistence path (result.output, result.error).
+        stderr_text = _redact_sensitive(stderr.decode(errors="replace").strip())
+        stdout_text = _redact_sensitive(stdout.decode(errors="replace").strip())
         exit_code = process.returncode if process.returncode is not None else -1
 
         # Try JSON parse (claude --output-format json)
@@ -322,6 +395,120 @@ class HeadlessClaude:
             output=stdout_text,
             duration_seconds=elapsed,
         )
+
+    def run_sync(
+        self,
+        prompt: str,
+        *,
+        model: str | None = None,
+        system_prompt: str | None = None,
+    ) -> HeadlessResult:
+        """Synchronous variant of :meth:`run` using ``subprocess.run``.
+
+        Args:
+            prompt: The full prompt text to send.
+            model: Override the default model for this call.
+            system_prompt: Override the CLI's default system prompt.
+                When set, the CLI skips CLAUDE.md auto-discovery and
+                uses this string as the sole system prompt.  This
+                dramatically reduces token cost for utility calls
+                (classification, plan review) that don't need project
+                context.  Auth (OAuth/keychain) is unaffected.
+        """
+        if self._claude_bin is None:
+            return HeadlessResult(success=False, error="claude CLI not available")
+
+        effective_model = model or self._config.model
+        cmd = [
+            self._claude_bin, "--print",
+            "--model", effective_model,
+            "--output-format", "json",
+        ]
+        if system_prompt is not None:
+            cmd.extend(["--system-prompt", system_prompt])
+        elif _supports_exclude_flag():
+            cmd.append(_EXCLUDE_FLAG)
+
+        use_stdin = len(prompt.encode()) > 131_072
+        if not use_stdin:
+            cmd.extend(["-p", prompt])
+
+        env = self._build_env()
+        cwd = str(self._config.working_directory or Path.cwd())
+
+        attempt = 0
+        while True:
+            attempt += 1
+            start = time.monotonic()
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    input=prompt.encode() if use_stdin else None,
+                    capture_output=True,
+                    timeout=self._config.timeout_seconds,
+                    cwd=cwd,
+                    env=env,
+                )
+            except subprocess.TimeoutExpired:
+                return HeadlessResult(
+                    success=False,
+                    error=f"Timed out after {self._config.timeout_seconds:.0f}s",
+                    duration_seconds=time.monotonic() - start,
+                )
+            except OSError as exc:
+                return HeadlessResult(
+                    success=False,
+                    error=f"Failed to start claude subprocess: {exc}",
+                    duration_seconds=time.monotonic() - start,
+                )
+
+            elapsed = time.monotonic() - start
+            stderr_text = _redact_sensitive(proc.stderr.decode(errors="replace").strip())
+            stdout_text = _redact_sensitive(proc.stdout.decode(errors="replace").strip())
+
+            parsed: dict[str, Any] | None = None
+            if stdout_text:
+                try:
+                    parsed = json.loads(stdout_text)
+                except json.JSONDecodeError:
+                    pass
+
+            if parsed is not None:
+                is_error = bool(parsed.get("is_error", False))
+                result_text = str(parsed.get("result", ""))
+                if proc.returncode != 0 or is_error:
+                    err = stderr_text or result_text or f"exit code {proc.returncode}"
+                    if self._is_rate_limit(err) and attempt <= self._config.max_retries:
+                        delay = self._config.base_retry_delay * (2 ** (attempt - 1))
+                        logger.warning(
+                            "HeadlessClaude rate limit (attempt %d/%d) — retrying in %.1fs",
+                            attempt, self._config.max_retries, delay,
+                        )
+                        time.sleep(delay)
+                        continue
+                    return HeadlessResult(
+                        success=False, output=result_text, error=err,
+                        duration_seconds=elapsed, raw_json=parsed,
+                    )
+                return HeadlessResult(
+                    success=True, output=result_text,
+                    duration_seconds=elapsed, raw_json=parsed,
+                )
+
+            if proc.returncode != 0:
+                err = stderr_text or f"exit code {proc.returncode}"
+                if self._is_rate_limit(err) and attempt <= self._config.max_retries:
+                    delay = self._config.base_retry_delay * (2 ** (attempt - 1))
+                    time.sleep(delay)
+                    continue
+                return HeadlessResult(
+                    success=False, output=stdout_text, error=err,
+                    duration_seconds=elapsed,
+                )
+
+            return HeadlessResult(
+                success=True, output=stdout_text, duration_seconds=elapsed,
+            )
 
     @staticmethod
     def _is_rate_limit(error: str) -> bool:

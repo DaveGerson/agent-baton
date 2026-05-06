@@ -8,19 +8,22 @@ complete improvement cycle:
    data has accumulated since the last analysis.
 2. **Anomaly detection** -- scans for high failure rates, retry spikes,
    gate failures, and budget overruns.
-3. **Recommendation generation** -- :class:`Recommender` runs all analysis
-   engines (budget tuner, pattern learner, scorer, evolution engine).
+3. **Recommendation generation** -- :class:`Recommender` runs the analysis
+   engines (budget tuner, pattern learner, scorer).
 4. **Classification** -- each recommendation is classified as auto-apply
    or escalate based on guardrails (see :meth:`_should_auto_apply`).
 5. **Application** -- safe recommendations are applied and tracked via
    :class:`ProposalManager`.
-6. **Experiment creation** -- each applied recommendation spawns an
-   :class:`~agent_baton.models.improvement.Experiment` to track impact.
-7. **Experiment evaluation** -- running experiments with enough samples are
-   evaluated; degraded experiments trigger automatic rollback.
-8. **Report persistence** -- the cycle produces an
+6. **Report persistence** -- the cycle produces an
    :class:`~agent_baton.models.improvement.ImprovementReport` saved to
    ``improvements/reports/<id>.json``.
+
+Note: L2.1 (bd-362f) retired per-cycle experiment tracking (``ExperimentManager``).
+Impact validation now flows through the learning-cycle pipeline
+(``baton learn run-cycle``) which compares scorecards across full cycles.
+Auto-rollback on degradation is no longer driven from this loop -- the
+``RollbackManager`` is still wired here for circuit-breaker checks and
+external callers.
 
 Safety mechanisms:
 
@@ -41,14 +44,12 @@ from pathlib import Path
 
 _log = logging.getLogger(__name__)
 
-from agent_baton.core.improve.experiments import ExperimentManager
 from agent_baton.core.improve.proposals import ProposalManager
 from agent_baton.core.improve.rollback import RollbackManager
 from agent_baton.core.improve.scoring import PerformanceScorer
 from agent_baton.core.improve.triggers import TriggerEvaluator
 from agent_baton.core.learn.recommender import Recommender
 from agent_baton.models.improvement import (
-    Experiment,
     ImprovementConfig,
     ImprovementReport,
     Recommendation,
@@ -66,13 +67,17 @@ class ImprovementLoop:
     * :class:`TriggerEvaluator` -- decides when to run.
     * :class:`Recommender` -- produces recommendations from all engines.
     * :class:`ProposalManager` -- persists recommendation lifecycle.
-    * :class:`ExperimentManager` -- tracks applied recommendation impact.
     * :class:`RollbackManager` -- handles rollbacks and circuit breaker.
     * :class:`PerformanceScorer` -- provides current metric values for
-      experiment baselines.
+      reporting and rollback decisions.
 
     The loop is typically invoked by the ``baton`` CLI or at the end of an
     orchestrated task to continuously improve agent performance.
+
+    .. note::
+       The ``experiment_manager`` constructor parameter is accepted but
+       ignored: per-cycle experiment tracking was retired in L2.1
+       (bd-362f).  See the module docstring for the replacement.
     """
 
     def __init__(
@@ -80,26 +85,35 @@ class ImprovementLoop:
         trigger_evaluator: TriggerEvaluator | None = None,
         recommender: Recommender | None = None,
         proposal_manager: ProposalManager | None = None,
-        experiment_manager: ExperimentManager | None = None,
+        experiment_manager=None,  # Retired in L2.1 (bd-362f); accepted for caller compat.
         rollback_manager: RollbackManager | None = None,
         scorer: PerformanceScorer | None = None,
         config: ImprovementConfig | None = None,
         improvements_dir: Path | None = None,
         bead_store=None,
         maintainer_spawner=None,
+        storage=None,
+        ledger=None,
     ) -> None:
         self._dir = (improvements_dir or _DEFAULT_DIR).resolve()
         self._reports_dir = self._dir / "reports"
 
-        self._triggers = trigger_evaluator or TriggerEvaluator()
-        self._recommender = recommender or Recommender()
+        self._triggers = trigger_evaluator or TriggerEvaluator(
+            storage=storage,
+            bead_store=bead_store,
+            ledger=ledger,
+        )
+        self._recommender = recommender or Recommender(storage=storage)
         self._proposals = proposal_manager or ProposalManager(self._dir)
-        self._experiments = experiment_manager or ExperimentManager(self._dir)
+        # experiment_manager parameter retired in L2.1 (bd-362f); accept and ignore
+        # so existing call-sites do not break while they migrate.
+        del experiment_manager
         self._rollbacks = rollback_manager or RollbackManager(improvements_dir=self._dir)
-        self._scorer = scorer or PerformanceScorer()
+        self._scorer = scorer or PerformanceScorer(storage=storage)
         self._config = config or ImprovementConfig()
         self._bead_store = bead_store  # F12: passed to scorer for bead quality metrics
         self._maintainer_spawner = maintainer_spawner  # Injected for tests; None = default
+        self._storage = storage  # L2.4: used by _persist_conflicts for db_path lookup
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -145,6 +159,22 @@ class ImprovementLoop:
         # Detect anomalies
         anomalies = self._triggers.detect_anomalies()
 
+        # O1.3 (bd-91c7): statistical cost-anomaly detection.
+        # Velocity-zero: pure detection, never blocks.  Failures here must
+        # not abort the improvement cycle, so the call is wrapped.
+        try:
+            cost_anomalies = self.detect_cost_anomalies()
+            if cost_anomalies:
+                from agent_baton.models.improvement import Anomaly
+                for ca in cost_anomalies:
+                    anomalies.append(Anomaly.from_dict(ca.to_anomaly_dict()))
+                _log.info(
+                    "ImprovementLoop: surfaced %d statistical cost anomalies",
+                    len(cost_anomalies),
+                )
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("Cost-anomaly detection skipped: %s", exc)
+
         # Run learning engine analysis (best-effort, non-blocking).
         # Reads open LearningIssues, marks proposed candidates, feeds into
         # the recommendation pipeline via confidence scoring.
@@ -187,28 +217,45 @@ class ImprovementLoop:
         # Persist all recommendations
         self._proposals.record_many(recommendations)
 
+        # L2.4 (bd-362f): detect contradictions across the freshly-generated
+        # recommendation batch BEFORE the auto-apply pass so we never auto-
+        # apply two recs that disagree on the same target.  Detection is
+        # strictly best-effort: any failure in this block must not block
+        # the rest of the cycle.  Velocity-zero behaviour: conflicting recs
+        # are escalated rather than auto-rejected.
+        conflicting_rec_ids: set[str] = set()
+        try:
+            from agent_baton.core.improve.conflict_detection import ConflictDetector
+
+            conflicts = ConflictDetector().detect(recommendations)
+            if conflicts:
+                for c in conflicts:
+                    for rid in c.rec_ids:
+                        conflicting_rec_ids.add(rid)
+                self._persist_conflicts(conflicts)
+        except Exception as exc:  # noqa: BLE001 - defensive
+            _log.warning(
+                "ConflictDetector failed (non-fatal, continuing cycle): %s", exc
+            )
+
         # Classify and apply
         auto_applied: list[str] = []
         escalated: list[str] = []
 
         for rec in recommendations:
+            if rec.rec_id in conflicting_rec_ids:
+                # Velocity-zero: suppress auto-apply for conflicting recs;
+                # operator reviews via ``baton improve conflicts``.
+                escalated.append(rec.rec_id)
+                continue
             if self._should_auto_apply(rec):
                 self._apply_recommendation(rec)
                 auto_applied.append(rec.rec_id)
             else:
                 escalated.append(rec.rec_id)
 
-        # Create experiments for auto-applied recommendations
-        active_experiments: list[str] = []
-        for rec_id in auto_applied:
-            rec = self._proposals.get(rec_id)
-            if rec is not None:
-                exp = self._create_experiment_for(rec)
-                if exp is not None:
-                    active_experiments.append(exp.experiment_id)
-
-        # Evaluate any running experiments that have enough data
-        self._evaluate_running_experiments()
+        # Per-cycle experiment creation/evaluation retired in L2.1 (bd-362f);
+        # use learning-analyst agent dispatched via 'baton learn run-cycle'.
 
         # Mark analysis as done
         self._triggers.mark_analyzed()
@@ -220,7 +267,7 @@ class ImprovementLoop:
             recommendations=[r.to_dict() for r in recommendations],
             auto_applied=auto_applied,
             escalated=escalated,
-            active_experiments=active_experiments,
+            active_experiments=[],  # Field retained for schema back-compat; always empty post-L2.1.
         )
         report_path = self._save_report(report)
 
@@ -232,23 +279,9 @@ class ImprovementLoop:
         return report
 
     # ------------------------------------------------------------------
-    # Experiment evaluation
+    # Experiment evaluation retired in L2.1 (bd-362f); use the
+    # learning-analyst agent for impact validation.
     # ------------------------------------------------------------------
-
-    def evaluate_experiments(self) -> list[tuple[str, str]]:
-        """Evaluate all running experiments and auto-rollback degraded ones.
-
-        For each running experiment with sufficient samples (>= 5), the
-        experiment is evaluated against its baseline.  Degraded experiments
-        (> 5% metric drop) are automatically rolled back via
-        :class:`RollbackManager` without human approval.
-
-        Returns:
-            List of ``(experiment_id, result)`` tuples where result is one
-            of ``"improved"``, ``"degraded"``, ``"inconclusive"``, or
-            ``"insufficient_data"``.
-        """
-        return self._evaluate_running_experiments()
 
     # ------------------------------------------------------------------
     # Classification logic
@@ -297,41 +330,8 @@ class ImprovementLoop:
         rec.status = "applied"
         self._proposals.update_status(rec.rec_id, "applied")
 
-    def _create_experiment_for(self, rec: Recommendation) -> Experiment | None:
-        """Create an experiment to track the impact of an applied recommendation."""
-        # Determine baseline metric based on category
-        metric = self._metric_for_category(rec.category)
-        baseline = self._current_metric_value(rec.target, metric)
-        target = baseline * 1.05 if baseline > 0 else 0.05  # 5% improvement target
-
-        return self._experiments.create_experiment(
-            recommendation=rec,
-            metric=metric,
-            baseline_value=baseline,
-            target_value=target,
-            agent_name=rec.target,
-        )
-
-    def _evaluate_running_experiments(self) -> list[tuple[str, str]]:
-        """Evaluate experiments and auto-rollback degraded ones."""
-        results: list[tuple[str, str]] = []
-
-        for exp in self._experiments.active():
-            if len(exp.samples) < exp.min_samples:
-                continue
-
-            result = self._experiments.evaluate(exp.experiment_id)
-            results.append((exp.experiment_id, result))
-
-            # Auto-rollback on degradation (no human approval needed)
-            if result == "degraded":
-                rec = self._proposals.get(exp.recommendation_id)
-                if rec is not None:
-                    self._rollbacks.rollback(rec, f"Experiment {exp.experiment_id} degraded")
-                    self._proposals.update_status(rec.rec_id, "rolled_back")
-                    self._experiments.mark_rolled_back(exp.experiment_id)
-
-        return results
+    # Experiment creation/evaluation retired in L2.1 (bd-362f); replaced by
+    # the learning-cycle pipeline ('baton learn run-cycle').
 
     # ------------------------------------------------------------------
     # Metric helpers
@@ -368,6 +368,34 @@ class ImprovementLoop:
             encoding="utf-8",
         )
         return path
+
+    def _persist_conflicts(self, conflicts: list) -> None:  # type: ignore[type-arg]
+        """Persist detected conflicts to the project ``baton.db``.
+
+        L2.4 (bd-362f).  Best-effort: any failure (no storage backend, table
+        missing, etc.) is swallowed so the rest of the cycle continues.
+        """
+        if not conflicts:
+            return
+        db_path = None
+        storage = getattr(self, "_storage", None) or getattr(
+            self._recommender, "_storage", None
+        )
+        if storage is not None:
+            db_path = getattr(storage, "db_path", None)
+        if db_path is None:
+            _log.debug(
+                "ConflictStore: no storage.db_path available -- "
+                "skipping persistence of %d conflict(s)",
+                len(conflicts),
+            )
+            return
+        try:
+            from agent_baton.core.storage.conflict_store import ConflictStore
+
+            ConflictStore(db_path).record_many(conflicts)
+        except Exception as exc:  # noqa: BLE001 - defensive
+            _log.warning("ConflictStore persistence failed: %s", exc)
 
     # ------------------------------------------------------------------
     # Maintainer spawn (best-effort)
@@ -408,6 +436,38 @@ class ImprovementLoop:
             _log.warning(
                 "ImprovementLoop._spawn_maintainer failed (non-fatal): %s", exc
             )
+
+    # ------------------------------------------------------------------
+    # Statistical cost-anomaly detection (O1.3, bd-91c7)
+    # ------------------------------------------------------------------
+
+    def detect_cost_anomalies(self, window_days: int = 30) -> list:
+        """Run the statistical cost-anomaly detector.
+
+        Velocity-zero: this never blocks execution.  The result is
+        attached to the improvement report for visibility only.
+
+        Args:
+            window_days: Look-back window in days for the per-pair
+                baseline.
+
+        Returns:
+            A list of :class:`agent_baton.core.improve.cost_anomaly.CostAnomaly`.
+            Returns ``[]`` if the detector cannot read the database (e.g.
+            no SQLite backend, no completed steps, import error).
+        """
+        from agent_baton.core.improve.cost_anomaly import CostAnomalyDetector
+
+        db_path = None
+        storage = getattr(self._triggers, "_storage", None)
+        if storage is not None and hasattr(storage, "db_path"):
+            db_path = storage.db_path
+
+        if db_path is None:
+            return []
+
+        detector = CostAnomalyDetector(db_path=db_path)
+        return detector.detect(window_days=window_days)
 
     # ------------------------------------------------------------------
     # Central Store enrichment (best-effort)

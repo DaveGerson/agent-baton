@@ -47,23 +47,73 @@ from pathlib import Path
 from typing import Any
 
 from agent_baton.core.orchestration.registry import AgentRegistry
+from agent_baton.core.runtime._redaction import (
+    _REDACT_PATTERNS,
+    redact_sensitive as _redact_sensitive,
+)
 from agent_baton.core.runtime.launcher import LaunchResult
 from agent_baton.models.agent import AgentDefinition
 
 logger = logging.getLogger(__name__)
 
-_API_KEY_RE = re.compile(r"sk-ant-[A-Za-z0-9_-]+")
+# Keep the old name as an alias so any external callers do not break.
+_API_KEY_RE = _REDACT_PATTERNS[0][0]
+
+# ---------------------------------------------------------------------------
+# Prompt-cache optimisation flag detection
+# ---------------------------------------------------------------------------
+
+_EXCLUDE_FLAG = "--exclude-dynamic-system-prompt-sections"
+_exclude_flag_supported: bool | None = None  # None = not yet probed
+
+
+def _supports_exclude_flag() -> bool:
+    """Return True if the installed ``claude`` CLI supports
+    ``--exclude-dynamic-system-prompt-sections``.
+
+    The result is cached after the first call so we only probe once per
+    process lifetime.  The probe runs ``claude --print --help`` and checks
+    whether the flag name appears in the output; failure modes (binary not
+    found, timeout, non-zero exit) are treated as "not supported" so they
+    never block a dispatch.
+    """
+    global _exclude_flag_supported
+    if _exclude_flag_supported is not None:
+        return _exclude_flag_supported
+
+    claude_bin = shutil.which("claude")
+    if claude_bin is None:
+        _exclude_flag_supported = False
+        return False
+
+    try:
+        import subprocess  # noqa: PLC0415 — stdlib, intentional lazy import
+        result = subprocess.run(
+            [claude_bin, "--print", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        combined = result.stdout + result.stderr
+        _exclude_flag_supported = _EXCLUDE_FLAG in combined
+    except Exception:  # noqa: BLE001
+        _exclude_flag_supported = False
+
+    logger.debug(
+        "ClaudeCodeLauncher: %s is %s",
+        _EXCLUDE_FLAG,
+        "supported" if _exclude_flag_supported else "NOT supported",
+    )
+    return _exclude_flag_supported
 
 
 def _redact_stderr(text: str) -> str:
-    """Strip Anthropic API key patterns from error text.
+    """Backward-compatible alias for :func:`_redact_sensitive`.
 
-    Matches the ``sk-ant-`` prefix followed by alphanumeric characters,
-    hyphens, and underscores.  Applied to all error output before it is
-    stored in ``LaunchResult.error`` to prevent accidental key exposure
-    in logs, traces, and retrospectives.
+    Retained so that call sites outside this module that reference
+    ``_redact_stderr`` by name continue to work without modification.
     """
-    return _API_KEY_RE.sub("sk-ant-***REDACTED***", text)
+    return _redact_sensitive(text)
 
 
 # ---------------------------------------------------------------------------
@@ -77,11 +127,15 @@ _DEFAULT_MODEL_TIMEOUTS: dict[str, float] = {
 }
 
 _DEFAULT_ENV_PASSTHROUGH: list[str] = [
-    "ANTHROPIC_API_KEY",
     "CLAUDE_CODE_USE_BEDROCK",
     "CLAUDE_CODE_USE_VERTEX",
     "AWS_PROFILE",
     "AWS_REGION",
+    # bd-37a9: baton coordination env vars — always propagated so subagents in
+    # worktrees always point at the parent baton.db and task.
+    "BATON_DB_PATH",
+    "BATON_TASK_ID",
+    "BATON_TEAM_CONTEXT_ROOT",
 ]
 
 
@@ -118,7 +172,23 @@ class ClaudeCodeConfig:
     """Base delay (seconds) for exponential-backoff retries."""
 
     max_outcome_length: int = 4000
-    """Maximum characters kept from the agent outcome string."""
+    """Maximum characters kept from the agent outcome *inline* string.
+
+    Outputs longer than ``max_outcome_length - 200`` are truncated; the
+    full text is preserved on disk under ``outcome_spillover_dir_relative``
+    and referenced via :attr:`LaunchResult.outcome_spillover_path`.
+    """
+
+    outcome_spillover_dir_relative: str = "outcome-spillover"
+    """Subdirectory (relative to the per-task execution dir) where full
+    outcome text is written when truncation occurs.  Created lazily."""
+
+    execution_dir: Path | None = None
+    """Per-task execution directory used as the parent for the spillover
+    subdirectory.  When ``None`` the launcher falls back to
+    ``$BATON_TEAM_CONTEXT_ROOT/executions/$BATON_TASK_ID`` (or the
+    canonical ``.claude/team-context/executions/<task_id>`` path) at the
+    time of writing."""
 
     prompt_file_threshold: int = 131_072
     """Byte threshold above which the prompt is delivered via stdin rather
@@ -131,6 +201,12 @@ class ClaudeCodeConfig:
     variables (plus ``PATH`` and ``HOME``) are included in the child
     environment."""
 
+    bead_db_path: Path | None = None
+    """Optional path to the project ``baton.db``.  When set and an agent
+    outcome is silently truncated by ``max_outcome_length``, a ``warning``
+    bead tagged ``outcome-truncated`` is filed so the operator can see the
+    data loss.  When ``None`` the bead is skipped (warning is still logged)."""
+
     def to_dict(self) -> dict[str, Any]:
         """Serialise to a plain dict (JSON-safe)."""
         return {
@@ -141,14 +217,19 @@ class ClaudeCodeConfig:
             "max_retries": self.max_retries,
             "base_retry_delay": self.base_retry_delay,
             "max_outcome_length": self.max_outcome_length,
+            "outcome_spillover_dir_relative": self.outcome_spillover_dir_relative,
+            "execution_dir": self.execution_dir.as_posix() if self.execution_dir else None,
             "prompt_file_threshold": self.prompt_file_threshold,
             "env_passthrough": list(self.env_passthrough),
+            "bead_db_path": self.bead_db_path.as_posix() if self.bead_db_path else None,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ClaudeCodeConfig:
         """Deserialise from a plain dict."""
         wd = data.get("working_directory")
+        ed = data.get("execution_dir")
+        bdp = data.get("bead_db_path")
         return cls(
             claude_path=data.get("claude_path", "claude"),
             working_directory=Path(wd) if wd else None,
@@ -157,14 +238,190 @@ class ClaudeCodeConfig:
             max_retries=int(data.get("max_retries", 3)),
             base_retry_delay=float(data.get("base_retry_delay", 5.0)),
             max_outcome_length=int(data.get("max_outcome_length", 4000)),
+            outcome_spillover_dir_relative=str(
+                data.get("outcome_spillover_dir_relative", "outcome-spillover")
+            ),
+            execution_dir=Path(ed) if ed else None,
             prompt_file_threshold=int(data.get("prompt_file_threshold", 131_072)),
             env_passthrough=list(data.get("env_passthrough", _DEFAULT_ENV_PASSTHROUGH)),
+            bead_db_path=Path(bdp) if bdp else None,
         )
+
+
+# ---------------------------------------------------------------------------
+# Outcome spillover
+# ---------------------------------------------------------------------------
+
+# Headroom reserved at the end of the inline outcome for the spillover
+# breadcrumb.  When raw outcome length exceeds (max_outcome_length -
+# _SPILLOVER_BREADCRUMB_HEADROOM), spillover-on-truncate is triggered.
+_SPILLOVER_BREADCRUMB_HEADROOM: int = 200
+
+
+def _resolve_execution_dir(config: ClaudeCodeConfig) -> Path | None:
+    """Return the per-task execution directory used as the spillover root.
+
+    Resolution order:
+    1. ``config.execution_dir`` if explicitly set.
+    2. ``$BATON_TASK_ID`` + ``$BATON_TEAM_CONTEXT_ROOT`` (or working_directory
+       / ``.claude/team-context``) — canonical layout
+       ``<root>/executions/<task_id>``.
+    3. ``None`` if no task id is available (caller should skip spillover).
+    """
+    if config.execution_dir is not None:
+        return config.execution_dir
+    task_id = os.environ.get("BATON_TASK_ID", "").strip()
+    if not task_id:
+        return None
+    root_env = os.environ.get("BATON_TEAM_CONTEXT_ROOT", "").strip()
+    if root_env:
+        root = Path(root_env)
+    else:
+        base = config.working_directory or Path.cwd()
+        root = base / ".claude" / "team-context"
+    return root / "executions" / task_id
+
+
+def _write_outcome_spillover(
+    *,
+    full_text: str,
+    step_id: str,
+    config: ClaudeCodeConfig,
+) -> tuple[str, str] | None:
+    """Persist the FULL untruncated outcome to disk.
+
+    Returns a ``(relative_path, breadcrumb_outcome)`` tuple on success, where
+    ``relative_path`` is the spillover file path relative to the execution
+    dir and ``breadcrumb_outcome`` is the inline string that should replace
+    ``outcome`` in the LaunchResult.  Returns ``None`` when the execution
+    directory cannot be resolved or the write fails (caller falls back to
+    legacy truncation).
+    """
+    exec_dir = _resolve_execution_dir(config)
+    if exec_dir is None:
+        return None
+
+    spillover_dir = exec_dir / config.outcome_spillover_dir_relative
+    try:
+        spillover_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:  # noqa: BLE001
+        logger.warning(
+            "Could not create spillover dir %s: %s — falling back to truncation.",
+            spillover_dir,
+            exc,
+        )
+        return None
+
+    safe_step_id = re.sub(r"[^A-Za-z0-9._-]", "_", step_id) or "unknown"
+    timestamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
+    fname = f"step-{safe_step_id}-{timestamp}.md"
+    target = spillover_dir / fname
+
+    try:
+        target.write_text(full_text, encoding="utf-8")
+    except OSError as exc:  # noqa: BLE001
+        logger.warning(
+            "Could not write spillover file %s: %s — falling back to truncation.",
+            target,
+            exc,
+        )
+        return None
+
+    rel_path = f"{config.outcome_spillover_dir_relative}/{fname}"
+    head_chars = max(0, config.max_outcome_length - _SPILLOVER_BREADCRUMB_HEADROOM)
+    head = full_text[:head_chars]
+    breadcrumb = (
+        f"[TRUNCATED — full output: {rel_path} "
+        f"({len(full_text.encode('utf-8'))} bytes total)]\n\n"
+        f"--- First {head_chars} chars ---\n"
+        f"{head}"
+    )
+    return rel_path, breadcrumb
+
+
+def _truncate_or_spillover(
+    *,
+    raw_text: str,
+    step_id: str,
+    config: ClaudeCodeConfig,
+) -> tuple[str, str]:
+    """Apply the inline cap; if exceeded, write spillover and return the
+    breadcrumb outcome.
+
+    Returns ``(outcome_string, spillover_relative_path)``.  ``spillover_relative_path``
+    is empty when no spillover was needed (or could not be written).
+    """
+    inline_cap = config.max_outcome_length
+    threshold = inline_cap - _SPILLOVER_BREADCRUMB_HEADROOM
+    if len(raw_text) <= threshold:
+        # Below the headroom-adjusted threshold: legacy behavior, no spillover.
+        return raw_text[:inline_cap], ""
+
+    spilled = _write_outcome_spillover(
+        full_text=raw_text, step_id=step_id, config=config
+    )
+    if spilled is None:
+        # Best-effort fallback: legacy hard truncation.
+        return raw_text[:inline_cap], ""
+    rel_path, breadcrumb = spilled
+    return breadcrumb, rel_path
 
 
 # ---------------------------------------------------------------------------
 # Launcher
 # ---------------------------------------------------------------------------
+
+
+
+def _resolve_baton_env_for_worktree(
+    config: "ClaudeCodeConfig",
+    cwd_override: str,
+) -> dict[str, str]:
+    """Derive the three BATON_* env vars that must be set when an agent runs in
+    an isolated worktree (bd-37a9).
+
+    Resolution:
+    - BATON_TEAM_CONTEXT_ROOT: from env, or walk from config.working_directory
+      upward to find the ``.claude/team-context`` directory.
+    - BATON_DB_PATH: <BATON_TEAM_CONTEXT_ROOT>/baton.db
+    - BATON_TASK_ID: from env (already set by the orchestrator session).
+
+    Returns a dict of {key: value} for vars that could be resolved.  Missing
+    values are omitted so callers can decide to skip them.
+    """
+    result: dict[str, str] = {}
+
+    # BATON_TEAM_CONTEXT_ROOT
+    root_env = os.environ.get("BATON_TEAM_CONTEXT_ROOT", "").strip()
+    if root_env:
+        team_ctx_root = Path(root_env)
+    else:
+        # Walk upward from config.working_directory looking for .claude/team-context
+        base = config.working_directory or Path(cwd_override)
+        team_ctx_root = base / ".claude" / "team-context"
+        # Try ancestors if the computed path doesn't exist
+        if not team_ctx_root.is_dir():
+            for ancestor in base.parents:
+                candidate = ancestor / ".claude" / "team-context"
+                if candidate.is_dir():
+                    team_ctx_root = candidate
+                    break
+
+    result["BATON_TEAM_CONTEXT_ROOT"] = str(team_ctx_root)
+
+    # BATON_DB_PATH
+    db_path_env = os.environ.get("BATON_DB_PATH", "").strip()
+    if db_path_env:
+        result["BATON_DB_PATH"] = db_path_env
+    else:
+        result["BATON_DB_PATH"] = str(team_ctx_root / "baton.db")
+
+    # BATON_TASK_ID
+    task_id = os.environ.get("BATON_TASK_ID", "").strip()
+    if task_id:
+        result["BATON_TASK_ID"] = task_id
+
+    return result
 
 
 class ClaudeCodeLauncher:
@@ -218,6 +475,10 @@ class ClaudeCodeLauncher:
                 "commit_hash will be empty in LaunchResult."
             )
 
+        # Registry of active subprocesses for cleanup on shutdown.
+        # Set operations are safe without locks because asyncio is single-threaded.
+        self._active_processes: set[asyncio.subprocess.Process] = set()
+
     # ── Public API ───────────────────────────────────────────────────────────
 
     async def launch(
@@ -227,10 +488,21 @@ class ClaudeCodeLauncher:
         prompt: str,
         step_id: str = "",
         mcp_servers: list[str] | None = None,
+        cwd_override: str | None = None,   # Wave 1.3 (bd-86bf): worktree path
+        task_id: str = "",                  # bd-37a9: for BATON_TASK_ID inject
     ) -> LaunchResult:
         """Launch a Claude Code agent and return its result.
 
         Implements the :class:`AgentLauncher` protocol.
+
+        Args:
+            cwd_override: When set, the agent subprocess is launched with this
+                directory as its working directory instead of the default
+                ``config.working_directory``.  Used by Wave 1.3 worktree
+                isolation to run each agent inside its isolated worktree.
+            task_id: Optional task identifier propagated to the subprocess as
+                ``BATON_TASK_ID`` when ``cwd_override`` is set, so the
+                subagent's bead/state writes target the correct task.
         """
         start = time.monotonic()
         pre_commit = await self._git_rev_parse()
@@ -240,9 +512,15 @@ class ClaudeCodeLauncher:
             agent = self._registry.get(agent_name)
         cmd = self._build_command(model, agent, mcp_servers=mcp_servers)
         env = self._build_env()
+        # bd-37a9: when running in a Wave 1.3 worktree, inject pointers to
+        # the parent project's state so the subagent's upward-walk db
+        # discovery doesn't latch onto the worktree-local empty baton.db.
+        if cwd_override:
+            self._inject_parent_state_env(env, task_id=task_id)
         timeout = self._resolve_timeout(model)
         use_stdin = len(prompt.encode()) > self._config.prompt_file_threshold
-        cwd = str(self._config.working_directory or Path.cwd())
+        # Wave 1.3: cwd_override takes precedence over the configured directory.
+        cwd = cwd_override or str(self._config.working_directory or Path.cwd())
 
         if use_stdin:
             # Large prompt — deliver via stdin; drop the -p flag from the command.
@@ -312,12 +590,22 @@ class ClaudeCodeLauncher:
         When *mcp_servers* is non-empty, ``--mcp-config`` is appended with
         the server names joined by commas.
         """
+        has_system_prompt = (
+            agent is not None
+            and bool(agent.instructions and agent.instructions.strip())
+        )
         cmd: list[str] = [
             self._claude_bin,
             "--print",
             "--model", model,
             "--output-format", "json",
         ]
+        # Improve cross-dispatch prompt-cache reuse by moving per-machine
+        # sections (cwd, env info, git status) out of the system prompt.
+        # The flag is documented as a no-op when --system-prompt is supplied,
+        # so we only add it when no custom system prompt will be injected.
+        if not has_system_prompt and _supports_exclude_flag():
+            cmd.append(_EXCLUDE_FLAG)
         if agent is not None:
             if agent.instructions and agent.instructions.strip():
                 cmd.extend(["--system-prompt", agent.instructions])
@@ -353,6 +641,32 @@ class ClaudeCodeLauncher:
 
         return env
 
+    def _inject_parent_state_env(self, env: dict[str, str], task_id: str = "") -> None:
+        """Add parent project state pointers to *env* in-place (bd-37a9).
+
+        Called when the subprocess will run inside a Wave 1.3 worktree so
+        it does NOT silently target the worktree-local empty baton.db via
+        upward-walk discovery. Sets:
+
+        - ``BATON_DB_PATH`` to the parent project's absolute baton.db path,
+        - ``BATON_TEAM_CONTEXT_ROOT`` to the parent's team-context dir, and
+        - ``BATON_TASK_ID`` (only when *task_id* is non-empty).
+
+        The parent root is taken from ``self._config.working_directory``,
+        which the engine sets to the project root at construction time.
+        Existing values in *env* are preserved (caller-set wins) so tests
+        and explicit overrides keep working.
+        """
+        parent_root = self._config.working_directory or Path.cwd()
+        parent_root = Path(parent_root).resolve()
+        team_context_root = parent_root / ".claude" / "team-context"
+        baton_db = team_context_root / "baton.db"
+
+        env.setdefault("BATON_DB_PATH", str(baton_db))
+        env.setdefault("BATON_TEAM_CONTEXT_ROOT", str(team_context_root))
+        if task_id:
+            env.setdefault("BATON_TASK_ID", task_id)
+
     def _resolve_timeout(self, model: str) -> float:
         """Return the timeout for *model*, falling back to the default."""
         # Try exact match first, then case-insensitive substring.
@@ -363,6 +677,81 @@ class ClaudeCodeLauncher:
             if key in model_lower:
                 return value
         return self._config.default_timeout_seconds
+
+    def _warn_truncation(
+        self,
+        agent_name: str,
+        step_id: str,
+        bytes_attempted: int,
+        bytes_written: int,
+    ) -> None:
+        """Log a WARNING and file a ``warning`` bead when outcome is truncated.
+
+        Called whenever the raw outcome text exceeds ``max_outcome_length``.
+        The truncated outcome is still returned by the caller — this method
+        only makes the data loss *visible*.
+
+        Best-effort: any exception during bead filing is caught and logged at
+        DEBUG level so a BeadStore failure never cascades into a launcher
+        failure.
+
+        Args:
+            agent_name: Name of the agent whose outcome was truncated.
+            step_id: Step identifier within the execution.
+            bytes_attempted: Length of the full (pre-truncation) outcome text.
+            bytes_written: Length of the truncated outcome text that was kept.
+        """
+        logger.warning(
+            "Outcome truncated for agent=%r step=%r: attempted=%d chars, kept=%d chars "
+            "(max_outcome_length=%d). Data loss is silent without this warning.",
+            agent_name,
+            step_id,
+            bytes_attempted,
+            bytes_written,
+            self._config.max_outcome_length,
+        )
+
+        if self._config.bead_db_path is None:
+            return
+
+        try:
+            from datetime import datetime, timezone
+
+            from agent_baton.core.engine.bead_store import BeadStore
+            from agent_baton.models.bead import Bead, _generate_bead_id  # type: ignore[attr-defined]
+
+            content = (
+                f"Outcome truncated for agent={agent_name!r} step={step_id!r}. "
+                f"Attempted {bytes_attempted} chars, kept {bytes_written} chars "
+                f"(limit={self._config.max_outcome_length})."
+            )
+            ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            bead_id = _generate_bead_id(
+                task_id="",
+                step_id=step_id,
+                content=content,
+                timestamp=ts,
+                bead_count=0,
+            )
+            bead = Bead(
+                bead_id=bead_id,
+                task_id="",
+                step_id=step_id,
+                agent_name=agent_name,
+                bead_type="warning",
+                content=content,
+                confidence="high",
+                scope="step",
+                tags=["outcome-truncated"],
+                source="agent-signal",
+                created_at=ts,
+            )
+            store = BeadStore(self._config.bead_db_path)
+            store.write(bead)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "ClaudeCodeLauncher._warn_truncation: bead write failed (non-fatal): %s", exc
+            )
 
     def _parse_output(
         self,
@@ -392,7 +781,20 @@ class ClaudeCodeLauncher:
         if parsed is not None:
             is_error: bool = bool(parsed.get("is_error", False))
             result_text: str = str(parsed.get("result", ""))
-            outcome = result_text[: self._config.max_outcome_length]
+            # A5: redact sensitive patterns from outcome before storage.
+            redacted = _redact_sensitive(result_text)
+            outcome, spillover_path = _truncate_or_spillover(
+                raw_text=redacted, step_id=step_id, config=self._config
+            )
+            # bd-e78c: if truncation happened without spillover (write failed
+            # or spillover disabled), file a warning bead so the loss is visible.
+            if len(redacted) > self._config.max_outcome_length and not spillover_path:
+                self._warn_truncation(
+                    agent_name=agent_name,
+                    step_id=step_id,
+                    bytes_attempted=len(redacted),
+                    bytes_written=len(outcome),
+                )
 
             # Token usage
             usage = parsed.get("usage", {}) or {}
@@ -411,11 +813,11 @@ class ClaudeCodeLauncher:
                 # Include both stderr and result_text so rate-limit
                 # detection works regardless of where the 429 appears.
                 if is_error and stderr_text:
-                    error = _redact_stderr(f"{stderr_text}\n{result_text}")
+                    error = _redact_sensitive(f"{stderr_text}\n{result_text}")
                 elif is_error:
-                    error = _redact_stderr(result_text)
+                    error = _redact_sensitive(result_text)
                 else:
-                    error = _redact_stderr(stderr_text) or f"exit code {exit_code}"
+                    error = _redact_sensitive(stderr_text) or f"exit code {exit_code}"
                 return LaunchResult(
                     step_id=step_id,
                     agent_name=agent_name,
@@ -424,6 +826,7 @@ class ClaudeCodeLauncher:
                     duration_seconds=duration_seconds,
                     estimated_tokens=estimated_tokens,
                     error=error,
+                    outcome_spillover_path=spillover_path,
                 )
 
             return LaunchResult(
@@ -433,10 +836,23 @@ class ClaudeCodeLauncher:
                 outcome=outcome,
                 duration_seconds=duration_seconds,
                 estimated_tokens=estimated_tokens,
+                outcome_spillover_path=spillover_path,
             )
 
         # --- Raw text fallback -----------------------------------------------
-        outcome = stdout_text[: self._config.max_outcome_length]
+        # A5: redact sensitive patterns from raw stdout before storage.
+        redacted_raw = _redact_sensitive(stdout_text)
+        outcome, spillover_path = _truncate_or_spillover(
+            raw_text=redacted_raw, step_id=step_id, config=self._config
+        )
+        # bd-e78c: visible warning when truncation happened without spillover.
+        if len(redacted_raw) > self._config.max_outcome_length and not spillover_path:
+            self._warn_truncation(
+                agent_name=agent_name,
+                step_id=step_id,
+                bytes_attempted=len(redacted_raw),
+                bytes_written=len(outcome),
+            )
 
         # Estimate tokens from raw output length (1 token ≈ 4 chars).
         # stdout_text is used (not truncated outcome) to keep the estimate
@@ -452,7 +868,8 @@ class ClaudeCodeLauncher:
                 outcome=outcome,
                 duration_seconds=elapsed,
                 estimated_tokens=raw_estimated_tokens,
-                error=_redact_stderr(stderr_text) or f"exit code {exit_code}",
+                error=_redact_sensitive(stderr_text) or f"exit code {exit_code}",
+                outcome_spillover_path=spillover_path,
             )
 
         return LaunchResult(
@@ -462,6 +879,7 @@ class ClaudeCodeLauncher:
             outcome=outcome,
             duration_seconds=elapsed,
             estimated_tokens=raw_estimated_tokens,
+            outcome_spillover_path=spillover_path,
         )
 
     def _is_rate_limit(self, stderr: str) -> bool:
@@ -567,6 +985,7 @@ class ClaudeCodeLauncher:
                 error=f"Failed to start claude subprocess: {exc}",
             )
 
+        self._active_processes.add(process)
         try:
             if prompt_stdin is not None:
                 stdout, stderr = await asyncio.wait_for(
@@ -592,6 +1011,8 @@ class ClaudeCodeLauncher:
                 duration_seconds=elapsed,
                 error=f"Agent timed out after {timeout:.0f}s",
             )
+        finally:
+            self._active_processes.discard(process)
 
         elapsed = time.monotonic() - start
         exit_code = process.returncode if process.returncode is not None else -1
@@ -603,3 +1024,47 @@ class ClaudeCodeLauncher:
             agent_name=agent_name,
             elapsed=elapsed,
         )
+
+    async def cleanup(self) -> None:
+        """Terminate all active subprocesses registered in ``_active_processes``.
+
+        Called during graceful shutdown (e.g. SIGTERM) to ensure that child
+        ``claude`` processes started with ``start_new_session=True`` are not
+        orphaned.  For each process:
+
+        1. Send ``SIGTERM`` via ``process.terminate()``.
+        2. Wait up to 5 seconds for the process to exit.
+        3. If still running, escalate to ``SIGKILL`` via ``process.kill()``.
+
+        Safe to call multiple times or when the set is empty.
+        """
+        if not self._active_processes:
+            return
+
+        processes = list(self._active_processes)
+        logger.info(
+            "ClaudeCodeLauncher.cleanup(): terminating %d active subprocess(es)",
+            len(processes),
+        )
+        for process in processes:
+            try:
+                process.terminate()
+            except ProcessLookupError:
+                # Process already exited between the snapshot and terminate().
+                self._active_processes.discard(process)
+                continue
+
+            try:
+                await asyncio.wait_for(process.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "ClaudeCodeLauncher.cleanup(): PID %s did not exit after SIGTERM, sending SIGKILL",
+                    process.pid,
+                )
+                try:
+                    process.kill()
+                    await process.wait()
+                except ProcessLookupError:
+                    pass
+            finally:
+                self._active_processes.discard(process)

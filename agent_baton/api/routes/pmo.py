@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
@@ -36,25 +38,37 @@ from agent_baton.api.models.requests import (
     ApproveForgeRequest,
     BatchResolveRequest,
     CreateForgeRequest,
+    CreatePrRequest,
     CreateSignalRequest,
     ExecuteCardRequest,
     ForgeSignalRequest,
     GateApproveRequest,
     GateRejectRequest,
     InterviewRequest,
+    MergeCardRequest,
     RegenerateRequest,
     RegisterProjectRequest,
+    RequestReviewRequest,
+    RetryStepRequest,
+    SkipStepRequest,
 )
 from agent_baton.api.models.responses import (
     AdoSearchResponse,
     AdoWorkItemResponse,
+    ApprovalLogEntry,
+    ApprovalLogResponse,
+    ChangelistResponse,
+    CreatePrResponse,
     ExecuteCardResponse,
+    ExecutionControlResponse,
     ExternalItemResponse,
     ExternalMappingResponse,
     ForgeApproveResponse,
+    ForgePlanResponse,
     GateActionResponse,
     InterviewQuestionResponse,
     InterviewResponse,
+    MergeResponse,
     PendingGateResponse,
     PmoBoardResponse,
     PmoCardDetailResponse,
@@ -69,6 +83,24 @@ from agent_baton.core.pmo.store import PmoStore
 from agent_baton.models.pmo import PmoProject, PmoSignal
 
 router = APIRouter()
+
+# ---------------------------------------------------------------------------
+# Forge progress SSE registry
+# ---------------------------------------------------------------------------
+
+# Maps session_id -> asyncio.Queue of forge progress event dicts.
+# Entries are created by forge_plan and consumed by stream_forge_progress.
+# Queues are sentinel-terminated (None) when generation completes.
+_forge_progress_queues: dict[str, asyncio.Queue[dict[str, Any] | None]] = {}
+
+_FORGE_STAGES = [
+    ("analyzing",   0,   "Analyzing codebase..."),
+    ("routing",     25,  "Selecting agents..."),
+    ("sizing",      50,  "Sizing budget..."),
+    ("generating",  75,  "Generating plan..."),
+    ("validating",  90,  "Validating plan..."),
+    ("complete",    100, "Plan ready"),
+]
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +253,7 @@ class _ExecutionDetailResponse(BaseModel):
 async def get_card_execution(
     card_id: str,
     scanner: PmoScanner = Depends(get_pmo_scanner),
+    store: PmoStore = Depends(get_pmo_store),
 ) -> _ExecutionDetailResponse:
     """Return execution progress events for a card.
 
@@ -229,7 +262,6 @@ async def get_card_execution(
     Reads the event log for the card's task_id and returns step-level
     events for the execution progress monitor in the PMO UI.
     """
-    from pathlib import Path
     from datetime import datetime, timezone
 
     try:
@@ -237,7 +269,7 @@ async def get_card_execution(
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Card '{card_id}' not found.")
 
-    project_path = Path(card.project_id) if Path(card.project_id).is_dir() else None
+    project_path = _resolve_project_path(card, store)
     events: list[_StepEvent] = []
     started_at = card.created_at
     status = card.column
@@ -520,17 +552,115 @@ async def stream_pmo_events(
     return EventSourceResponse(event_generator())
 
 
+@router.get(
+    "/pmo/forge/progress/{session_id}",
+    summary="Stream forge plan-generation progress over SSE",
+    response_description="Server-Sent Event stream of forge progress payloads.",
+    response_class=EventSourceResponse,
+    tags=["pmo"],
+)
+async def stream_forge_progress(
+    session_id: str,
+    request: Request,
+) -> EventSourceResponse:
+    """Open a Server-Sent Events stream for forge plan-generation progress.
+
+    GET /api/v1/pmo/forge/progress/{session_id}
+    Accept: text/event-stream
+
+    Streams best-effort cosmetic progress events emitted by the
+    corresponding ``POST /pmo/forge/plan`` request.  The frontend
+    obtains the ``session_id`` from the forge plan response and
+    connects to this endpoint before or immediately after calling
+    ``POST /pmo/forge/plan``.
+
+    Each SSE frame carries a ``forge_progress`` event with data:
+
+    .. code-block:: json
+
+        {"stage": "analyzing", "progress_pct": 0, "message": "Analyzing codebase..."}
+
+    The stream closes automatically after the ``complete`` event
+    (``progress_pct: 100``) or when the client disconnects.  If the
+    ``session_id`` is unknown the stream sends a single ``error``
+    event and closes.
+
+    Args:
+        session_id: UUID returned by ``POST /pmo/forge/plan``.
+        request: Injected by FastAPI; used to detect client disconnection.
+
+    Returns:
+        A streaming ``EventSourceResponse`` yielding SSE frames with
+        ``event`` set to ``"forge_progress"`` and ``data`` as a JSON
+        object.
+    """
+
+    async def event_generator():
+        # Wait briefly for the producer to register its queue (race-safe).
+        deadline = asyncio.get_running_loop().time() + 5.0
+        while session_id not in _forge_progress_queues:
+            if asyncio.get_running_loop().time() >= deadline:
+                yield {
+                    "event": "forge_progress",
+                    "data": json.dumps(
+                        {"stage": "error", "progress_pct": 0, "message": "Unknown session_id"}
+                    ),
+                }
+                return
+            await asyncio.sleep(0.1)
+
+        queue = _forge_progress_queues[session_id]
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=30.0)
+                except asyncio.TimeoutError:
+                    yield {"comment": "keepalive"}
+                    continue
+
+                if item is None:
+                    # Sentinel — generation complete, close the stream.
+                    break
+
+                yield {
+                    "event": "forge_progress",
+                    "data": json.dumps(item),
+                }
+
+                if item.get("progress_pct") == 100:
+                    break
+        finally:
+            _forge_progress_queues.pop(session_id, None)
+
+    return EventSourceResponse(event_generator())
+
+
 # ---------------------------------------------------------------------------
 # Forge (plan creation + approval)
 # ---------------------------------------------------------------------------
 
 
-@router.post("/pmo/forge/plan", response_model=dict, status_code=201)
+def _publish_forge_progress(
+    queue: asyncio.Queue[dict[str, Any] | None],
+    stage: str,
+    progress_pct: int,
+    message: str,
+) -> None:
+    """Push a forge progress event onto *queue* (non-blocking, best-effort)."""
+    try:
+        queue.put_nowait({"stage": stage, "progress_pct": progress_pct, "message": message})
+    except asyncio.QueueFull:
+        pass  # cosmetic feedback — drop silently if queue is full
+
+
+@router.post("/pmo/forge/plan", response_model=ForgePlanResponse, status_code=201)
 async def forge_plan(
     req: CreateForgeRequest,
     forge: ForgeSession = Depends(get_forge_session),
     store: PmoStore = Depends(get_pmo_store),
-) -> dict:
+) -> ForgePlanResponse:
     """Create a plan via IntelligentPlanner for the given project.
 
     POST /api/v1/pmo/forge/plan
@@ -539,6 +669,10 @@ async def forge_plan(
     before approval.  It is NOT saved to disk at this stage -- call
     ``POST /pmo/forge/approve`` to persist it.
 
+    A ``session_id`` is also returned so the frontend can subscribe to
+    ``GET /pmo/forge/progress/{session_id}`` for real-time progress
+    events during the (potentially slow) plan generation step.
+
     Args:
         req: Validated request body with description, program,
             project_id, and optional task_type/priority.
@@ -546,7 +680,8 @@ async def forge_plan(
         store: Injected PMO store singleton (to verify project exists).
 
     Returns:
-        The generated plan as a raw dict (201 Created).
+        A ``ForgePlanResponse`` with ``session_id`` and the generated
+        ``plan`` dict (201 Created).
 
     Raises:
         HTTPException 400: If the description or parameters are
@@ -561,23 +696,49 @@ async def forge_plan(
             detail=f"Project '{req.project_id}' not found.",
         )
 
-    try:
-        plan = forge.create_plan(
-            description=req.description,
-            program=req.program,
-            project_id=req.project_id,
-            task_type=req.task_type,
-            priority=req.priority,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Plan creation failed: {exc}",
-        ) from exc
+    session_id = uuid.uuid4().hex
+    # maxsize=32 is generous for 6 events — prevents unbounded growth if the
+    # SSE client never connects.
+    queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=32)
+    _forge_progress_queues[session_id] = queue
 
-    return plan.to_dict()
+    try:
+        _publish_forge_progress(queue, "analyzing", 0, "Analyzing codebase...")
+        _publish_forge_progress(queue, "routing", 25, "Selecting agents...")
+        _publish_forge_progress(queue, "sizing", 50, "Sizing budget...")
+        _publish_forge_progress(queue, "generating", 75, "Generating plan...")
+
+        loop = asyncio.get_running_loop()
+        try:
+            plan = await loop.run_in_executor(
+                None,
+                lambda: forge.create_plan(
+                    description=req.description,
+                    program=req.program,
+                    project_id=req.project_id,
+                    task_type=req.task_type,
+                    priority=req.priority,
+                ),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Plan creation failed: {exc}",
+            ) from exc
+
+        _publish_forge_progress(queue, "validating", 90, "Validating plan...")
+        _publish_forge_progress(queue, "complete", 100, "Plan ready")
+
+    finally:
+        # Sentinel: tells the SSE stream to close after draining remaining events.
+        try:
+            queue.put_nowait(None)
+        except asyncio.QueueFull:
+            pass
+
+    return ForgePlanResponse(session_id=session_id, plan=plan.to_dict())
 
 
 @router.post("/pmo/forge/approve", response_model=ForgeApproveResponse, status_code=200)
@@ -849,6 +1010,438 @@ async def execute_card(
     )
 
 
+# ---------------------------------------------------------------------------
+# Execution interrupt controls
+# ---------------------------------------------------------------------------
+
+
+def _resolve_worker_context(
+    card_id: str,
+    scanner: PmoScanner,
+    store: PmoStore,
+) -> tuple:
+    """Shared helper: resolve a card to its project root and context root.
+
+    Returns ``(card, project_root, context_root)``.
+
+    Raises:
+        HTTPException 404: Card or project not found.
+    """
+    from pathlib import Path
+
+    try:
+        card, _ = scanner.find_card(card_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Card '{card_id}' not found.")
+
+    project_root = _resolve_project_path(card, store)
+    if project_root is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Project path for card '{card_id}' could not be resolved.",
+        )
+
+    context_root = project_root / ".claude" / "team-context"
+    return card, project_root, context_root
+
+
+@router.post(
+    "/pmo/execute/{card_id}/pause",
+    response_model=ExecutionControlResponse,
+    summary="Pause a running execution by sending SIGSTOP to its worker",
+    tags=["pmo"],
+)
+async def pause_execution(
+    card_id: str,
+    scanner: PmoScanner = Depends(get_pmo_scanner),
+    store: PmoStore = Depends(get_pmo_store),
+    bus: EventBus = Depends(get_bus),
+) -> ExecutionControlResponse:
+    """Pause a running execution worker with SIGSTOP.
+
+    POST /api/v1/pmo/execute/{card_id}/pause
+
+    Locates the ``worker.pid`` file for the card's execution directory,
+    sends ``SIGSTOP`` to suspend the worker process without terminating it,
+    and publishes a ``task.paused`` event so the PMO board updates via SSE.
+
+    The worker can be resumed at any point with the ``/resume`` endpoint.
+
+    Args:
+        card_id: The task ID of the card whose worker should be paused.
+        scanner: Injected ``PmoScanner`` singleton.
+        store: Injected PMO store singleton.
+        bus: The shared ``EventBus`` (for SSE event emission).
+
+    Returns:
+        ``{"status": "paused", "task_id": "<id>"}``
+
+    Raises:
+        HTTPException 404: If the card, project, or PID file cannot be found.
+        HTTPException 409: If the process is not running or cannot be signalled.
+    """
+    from agent_baton.core.runtime.supervisor import WorkerSupervisor
+    from agent_baton.models.events import Event
+
+    card, project_root, context_root = _resolve_worker_context(card_id, scanner, store)
+
+    supervisor = WorkerSupervisor(team_context_root=context_root, task_id=card_id)
+    try:
+        pid = supervisor.pause_worker(card_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (ProcessLookupError, PermissionError, OSError) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Could not pause worker for card '{card_id}': {exc}",
+        ) from exc
+
+    try:
+        bus.publish(Event.create(
+            topic="task.paused",
+            task_id=card_id,
+            payload={"pid": pid},
+        ))
+    except Exception:
+        pass  # SSE emission is best-effort.
+
+    return ExecutionControlResponse(
+        status="paused",
+        task_id=card_id,
+        message=f"Sent SIGSTOP to worker process {pid}.",
+    )
+
+
+@router.post(
+    "/pmo/execute/{card_id}/resume",
+    response_model=ExecutionControlResponse,
+    summary="Resume a paused execution by sending SIGCONT to its worker",
+    tags=["pmo"],
+)
+async def resume_execution(
+    card_id: str,
+    scanner: PmoScanner = Depends(get_pmo_scanner),
+    store: PmoStore = Depends(get_pmo_store),
+    bus: EventBus = Depends(get_bus),
+) -> ExecutionControlResponse:
+    """Resume a previously paused execution worker with SIGCONT.
+
+    POST /api/v1/pmo/execute/{card_id}/resume
+
+    Sends ``SIGCONT`` to the suspended worker process and publishes a
+    ``task.resumed`` event so the PMO board updates via SSE.
+
+    Args:
+        card_id: The task ID of the card whose worker should be resumed.
+        scanner: Injected ``PmoScanner`` singleton.
+        store: Injected PMO store singleton.
+        bus: The shared ``EventBus`` (for SSE event emission).
+
+    Returns:
+        ``{"status": "running", "task_id": "<id>"}``
+
+    Raises:
+        HTTPException 404: If the card, project, or PID file cannot be found.
+        HTTPException 409: If the process cannot be signalled.
+    """
+    from agent_baton.core.runtime.supervisor import WorkerSupervisor
+    from agent_baton.models.events import Event
+
+    card, project_root, context_root = _resolve_worker_context(card_id, scanner, store)
+
+    supervisor = WorkerSupervisor(team_context_root=context_root, task_id=card_id)
+    try:
+        pid = supervisor.resume_worker(card_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (ProcessLookupError, PermissionError, OSError) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Could not resume worker for card '{card_id}': {exc}",
+        ) from exc
+
+    try:
+        bus.publish(Event.create(
+            topic="task.resumed",
+            task_id=card_id,
+            payload={"pid": pid},
+        ))
+    except Exception:
+        pass
+
+    return ExecutionControlResponse(
+        status="running",
+        task_id=card_id,
+        message=f"Sent SIGCONT to worker process {pid}.",
+    )
+
+
+@router.post(
+    "/pmo/execute/{card_id}/cancel",
+    response_model=ExecutionControlResponse,
+    summary="Cancel a running execution by sending SIGTERM to its worker",
+    tags=["pmo"],
+)
+async def cancel_execution(
+    card_id: str,
+    scanner: PmoScanner = Depends(get_pmo_scanner),
+    store: PmoStore = Depends(get_pmo_store),
+    bus: EventBus = Depends(get_bus),
+) -> ExecutionControlResponse:
+    """Cancel a running execution worker with SIGTERM.
+
+    POST /api/v1/pmo/execute/{card_id}/cancel
+
+    Sends ``SIGTERM`` to the worker process (which triggers the worker's
+    graceful shutdown path) and publishes a ``task.cancelled`` event so
+    the PMO board updates via SSE.
+
+    Args:
+        card_id: The task ID of the card whose worker should be cancelled.
+        scanner: Injected ``PmoScanner`` singleton.
+        store: Injected PMO store singleton.
+        bus: The shared ``EventBus`` (for SSE event emission).
+
+    Returns:
+        ``{"status": "cancelled", "task_id": "<id>"}``
+
+    Raises:
+        HTTPException 404: If the card, project, or PID file cannot be found.
+        HTTPException 409: If the process cannot be signalled.
+    """
+    from agent_baton.core.runtime.supervisor import WorkerSupervisor
+    from agent_baton.models.events import Event
+
+    card, project_root, context_root = _resolve_worker_context(card_id, scanner, store)
+
+    supervisor = WorkerSupervisor(team_context_root=context_root, task_id=card_id)
+    try:
+        pid = supervisor.cancel_worker(card_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (ProcessLookupError, PermissionError, OSError) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Could not cancel worker for card '{card_id}': {exc}",
+        ) from exc
+
+    try:
+        bus.publish(Event.create(
+            topic="task.cancelled",
+            task_id=card_id,
+            payload={"pid": pid},
+        ))
+    except Exception:
+        pass
+
+    return ExecutionControlResponse(
+        status="cancelled",
+        task_id=card_id,
+        message=f"Sent SIGTERM to worker process {pid}.",
+    )
+
+
+@router.post(
+    "/pmo/execute/{card_id}/retry-step",
+    response_model=ExecutionControlResponse,
+    summary="Reset a failed step to pending so it will be re-dispatched",
+    tags=["pmo"],
+)
+async def retry_step(
+    card_id: str,
+    req: RetryStepRequest,
+    scanner: PmoScanner = Depends(get_pmo_scanner),
+    store: PmoStore = Depends(get_pmo_store),
+) -> ExecutionControlResponse:
+    """Reset a failed step back to pending for re-dispatch.
+
+    POST /api/v1/pmo/execute/{card_id}/retry-step
+
+    Removes the failed ``StepResult`` for the specified step from the
+    execution state and saves the updated state.  On the next loop
+    iteration the execution engine will see the step as un-recorded and
+    re-dispatch it.
+
+    This endpoint is intended for use when execution has stopped due to
+    a failed step and the operator wants to give the step another
+    attempt without restarting the entire task.
+
+    Args:
+        card_id: The task ID of the card (URL path parameter).
+        req: Request body containing ``step_id``.
+        scanner: Injected ``PmoScanner`` singleton.
+        store: Injected PMO store singleton.
+
+    Returns:
+        ``{"status": "retried", "task_id": "<id>", "step_id": "<step_id>"}``
+
+    Raises:
+        HTTPException 404: If the card, project, execution state, or step
+            cannot be found.
+        HTTPException 409: If the step is not currently in ``"failed"``
+            status.
+        HTTPException 500: If the storage layer fails to save the updated
+            state.
+    """
+    from agent_baton.core.storage import detect_backend, get_project_storage
+
+    card, project_root, context_root = _resolve_worker_context(card_id, scanner, store)
+
+    try:
+        backend = detect_backend(context_root)
+        storage = get_project_storage(context_root, backend=backend)
+        state = storage.load_execution(card_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to load execution state: {exc}",
+        ) from exc
+
+    if state is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No execution state found for card '{card_id}'.",
+        )
+
+    # Locate the step result to be retried.
+    target = next(
+        (r for r in state.step_results if r.step_id == req.step_id),
+        None,
+    )
+    if target is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Step '{req.step_id}' not found in execution state for card '{card_id}'.",
+        )
+    if target.status != "failed":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Step '{req.step_id}' has status '{target.status}' and cannot be retried. "
+                "Only steps in 'failed' status may be reset."
+            ),
+        )
+
+    # Remove the failed result so the engine treats the step as pending.
+    state.step_results = [r for r in state.step_results if r.step_id != req.step_id]
+
+    try:
+        storage.save_execution(state)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to save updated execution state: {exc}",
+        ) from exc
+
+    return ExecutionControlResponse(
+        status="retried",
+        task_id=card_id,
+        step_id=req.step_id,
+        message=f"Step '{req.step_id}' reset to pending; it will be re-dispatched on next loop.",
+    )
+
+
+@router.post(
+    "/pmo/execute/{card_id}/skip-step",
+    response_model=ExecutionControlResponse,
+    summary="Mark a failed step as skipped so execution can continue past it",
+    tags=["pmo"],
+)
+async def skip_step(
+    card_id: str,
+    req: SkipStepRequest,
+    scanner: PmoScanner = Depends(get_pmo_scanner),
+    store: PmoStore = Depends(get_pmo_store),
+) -> ExecutionControlResponse:
+    """Mark a step as skipped so execution advances past it.
+
+    POST /api/v1/pmo/execute/{card_id}/skip-step
+
+    Upserts a ``StepResult`` with ``status="skipped"`` for the specified
+    step and saves the updated execution state.  The execution engine
+    treats a skipped step as complete for dependency-resolution purposes,
+    allowing the phase to advance.
+
+    Args:
+        card_id: The task ID of the card (URL path parameter).
+        req: Request body containing ``step_id`` and optional ``reason``.
+        scanner: Injected ``PmoScanner`` singleton.
+        store: Injected PMO store singleton.
+
+    Returns:
+        ``{"status": "skipped", "task_id": "<id>", "step_id": "<step_id>"}``
+
+    Raises:
+        HTTPException 404: If the card, project, or execution state cannot
+            be found.
+        HTTPException 409: If the step is already in ``"complete"`` status
+            (skipping a completed step would silently discard its output).
+        HTTPException 500: If the storage layer fails to save the updated
+            state.
+    """
+    from datetime import datetime, timezone
+    from agent_baton.core.storage import detect_backend, get_project_storage
+    from agent_baton.models.execution import StepResult
+
+    card, project_root, context_root = _resolve_worker_context(card_id, scanner, store)
+
+    try:
+        backend = detect_backend(context_root)
+        storage = get_project_storage(context_root, backend=backend)
+        state = storage.load_execution(card_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to load execution state: {exc}",
+        ) from exc
+
+    if state is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No execution state found for card '{card_id}'.",
+        )
+
+    # Guard: refuse to skip a step that has already completed successfully.
+    existing = next(
+        (r for r in state.step_results if r.step_id == req.step_id),
+        None,
+    )
+    if existing is not None and existing.status == "complete":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Step '{req.step_id}' is already in 'complete' status and cannot be skipped."
+            ),
+        )
+
+    # Remove any existing result for this step (failed/dispatched) and insert
+    # a new skipped result so the engine sees it as resolved.
+    state.step_results = [r for r in state.step_results if r.step_id != req.step_id]
+    skipped_result = StepResult(
+        step_id=req.step_id,
+        agent_name="operator",
+        status="skipped",
+        outcome=req.reason or "Skipped by operator via PMO UI.",
+        completed_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+    state.step_results.append(skipped_result)
+
+    try:
+        storage.save_execution(state)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to save updated execution state: {exc}",
+        ) from exc
+
+    return ExecutionControlResponse(
+        status="skipped",
+        task_id=card_id,
+        step_id=req.step_id,
+        message=req.reason or "Skipped by operator via PMO UI.",
+    )
+
+
 @router.get("/pmo/ado/search", response_model=AdoSearchResponse)
 async def ado_search(q: str = "") -> AdoSearchResponse:
     """Search Azure DevOps work items via the ADO adapter.
@@ -1113,9 +1706,11 @@ async def list_pending_gates(
 async def approve_gate(
     task_id: str,
     req: GateApproveRequest,
+    request: Request,
     scanner: PmoScanner = Depends(get_pmo_scanner),
     store: PmoStore = Depends(get_pmo_store),
     bus: EventBus = Depends(get_bus),
+    central: object = Depends(get_central_store),
 ) -> GateActionResponse:
     """Record a human approval decision for a paused execution.
 
@@ -1124,14 +1719,17 @@ async def approve_gate(
     Equivalent to running ``baton execute approve --phase-id N --result approve``
     from the CLI.  After recording the decision the execution engine advances
     to the next phase and an SSE ``gate.approved`` event is published so the
-    PMO board updates in real time.
+    PMO board updates in real time.  The decision is also written to the
+    ``approval_log`` table in central.db for cross-project audit visibility.
 
     Args:
         task_id: The task ID of the paused execution (URL path parameter).
         req: Validated request body with ``phase_id`` and optional ``notes``.
+        request: Injected FastAPI request (provides request.state.user_id).
         scanner: Injected ``PmoScanner`` singleton.
         store: Injected PMO store singleton (used to resolve the project path).
         bus: The shared ``EventBus`` (for SSE event emission).
+        central: Injected ``CentralStore`` for writing to approval_log.
 
     Returns:
         ``GateActionResponse`` confirming the approval was recorded.
@@ -1141,8 +1739,11 @@ async def approve_gate(
         HTTPException 409: If the task is not in ``awaiting_human`` state.
         HTTPException 500: If the engine fails to record the approval.
     """
+    import uuid
+    from datetime import datetime, timezone
     from agent_baton.core.storage import detect_backend, get_project_storage
     from agent_baton.core.engine.executor import ExecutionEngine
+    from agent_baton.core.storage.central import CentralStore
     from agent_baton.models.events import Event
 
     card, project_root = _locate_awaiting_card(task_id, scanner, store)
@@ -1164,6 +1765,28 @@ async def approve_gate(
         )
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    # Write approval_log entry (best-effort — never block the response).
+    user_id: str = getattr(request.state, "user_id", "local-user")
+    try:
+        central_store: CentralStore = central  # type: ignore[assignment]
+        central_store.execute(
+            """
+            INSERT INTO approval_log (log_id, task_id, phase_id, user_id, action, notes, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(uuid.uuid4()),
+                task_id,
+                str(req.phase_id),
+                user_id,
+                "approve",
+                req.notes or "",
+                datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            ),
+        )
+    except Exception:
+        pass
 
     # Emit SSE event so the PMO board refreshes without polling.
     try:
@@ -1192,9 +1815,11 @@ async def approve_gate(
 async def reject_gate(
     task_id: str,
     req: GateRejectRequest,
+    request: Request,
     scanner: PmoScanner = Depends(get_pmo_scanner),
     store: PmoStore = Depends(get_pmo_store),
     bus: EventBus = Depends(get_bus),
+    central: object = Depends(get_central_store),
 ) -> GateActionResponse:
     """Record a human rejection decision for a paused execution.
 
@@ -1202,14 +1827,17 @@ async def reject_gate(
 
     Equivalent to running ``baton execute approve --phase-id N --result reject``
     from the CLI.  The execution is marked as failed and an SSE
-    ``gate.rejected`` event is published.
+    ``gate.rejected`` event is published.  The decision is also written to the
+    ``approval_log`` table in central.db for cross-project audit visibility.
 
     Args:
         task_id: The task ID of the paused execution (URL path parameter).
         req: Validated request body with ``phase_id`` and required ``reason``.
+        request: Injected FastAPI request (provides request.state.user_id).
         scanner: Injected ``PmoScanner`` singleton.
         store: Injected PMO store singleton (used to resolve the project path).
         bus: The shared ``EventBus`` (for SSE event emission).
+        central: Injected ``CentralStore`` for writing to approval_log.
 
     Returns:
         ``GateActionResponse`` confirming the rejection was recorded.
@@ -1219,8 +1847,11 @@ async def reject_gate(
         HTTPException 409: If the task is not in ``awaiting_human`` state.
         HTTPException 500: If the engine fails to record the rejection.
     """
+    import uuid
+    from datetime import datetime, timezone
     from agent_baton.core.storage import detect_backend, get_project_storage
     from agent_baton.core.engine.executor import ExecutionEngine
+    from agent_baton.core.storage.central import CentralStore
     from agent_baton.models.events import Event
 
     card, project_root = _locate_awaiting_card(task_id, scanner, store)
@@ -1242,6 +1873,28 @@ async def reject_gate(
         )
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    # Write approval_log entry (best-effort — never block the response).
+    user_id: str = getattr(request.state, "user_id", "local-user")
+    try:
+        central_store: CentralStore = central  # type: ignore[assignment]
+        central_store.execute(
+            """
+            INSERT INTO approval_log (log_id, task_id, phase_id, user_id, action, notes, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(uuid.uuid4()),
+                task_id,
+                str(req.phase_id),
+                user_id,
+                "reject",
+                req.reason,
+                datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            ),
+        )
+    except Exception:
+        pass
 
     # Emit SSE event so the PMO board refreshes.
     try:
@@ -1699,6 +2352,509 @@ async def get_external_item_mappings(
         )
         for m in mapping_rows
     ]
+
+
+# ---------------------------------------------------------------------------
+# Changelist / merge / PR endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/pmo/cards/{card_id}/changelist",
+    response_model=ChangelistResponse,
+    summary="Return the consolidation changelist for a card",
+    tags=["pmo"],
+)
+async def get_card_changelist(
+    card_id: str,
+    scanner: PmoScanner = Depends(get_pmo_scanner),
+    store: PmoStore = Depends(get_pmo_store),
+) -> ChangelistResponse:
+    """Return the consolidation result (changelist) for a completed card.
+
+    GET /api/v1/pmo/cards/{card_id}/changelist
+
+    Loads the execution state for the card's task_id and returns the
+    ``consolidation_result`` recorded by ``CommitConsolidator`` when the
+    task completed.
+
+    Args:
+        card_id: The task ID of the card (URL path parameter).
+        scanner: Injected ``PmoScanner`` singleton.
+        store: Injected PMO store singleton.
+
+    Returns:
+        A ``ChangelistResponse`` mirroring the ``ConsolidationResult`` fields.
+
+    Raises:
+        HTTPException 404: If the card, project, or consolidation result is
+            not found.
+    """
+    from pathlib import Path
+    from agent_baton.core.storage import detect_backend, get_project_storage
+
+    try:
+        card, _ = scanner.find_card(card_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Card '{card_id}' not found.")
+
+    project_root = _resolve_project_path(card, store)
+    if project_root is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Project path for card '{card_id}' could not be resolved.",
+        )
+
+    context_root = project_root / ".claude" / "team-context"
+    try:
+        backend = detect_backend(context_root)
+        storage = get_project_storage(context_root, backend=backend)
+        state = storage.load_execution(card_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to load execution state: {exc}",
+        ) from exc
+
+    if state is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No execution state found for card '{card_id}'.",
+        )
+
+    cr = state.consolidation_result
+    if cr is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"No consolidation result for card '{card_id}'. "
+                "The task may not have completed yet or git_strategy is 'none'."
+            ),
+        )
+
+    return ChangelistResponse(
+        status=cr.status,
+        final_head=cr.final_head,
+        base_commit=cr.base_commit,
+        files_changed=cr.files_changed,
+        total_insertions=cr.total_insertions,
+        total_deletions=cr.total_deletions,
+        rebased_commits=list(cr.rebased_commits),
+        attributions=[a.to_dict() for a in cr.attributions],
+        conflict_files=cr.conflict_files,
+        conflict_step_id=cr.conflict_step_id,
+        skipped_steps=cr.skipped_steps,
+        started_at=cr.started_at,
+        completed_at=cr.completed_at,
+        error=cr.error,
+    )
+
+
+@router.post(
+    "/pmo/cards/{card_id}/merge",
+    response_model=MergeResponse,
+    summary="Fast-forward merge a consolidated card onto the base branch",
+    tags=["pmo"],
+)
+async def merge_card(
+    card_id: str,
+    req: MergeCardRequest,
+    scanner: PmoScanner = Depends(get_pmo_scanner),
+    store: PmoStore = Depends(get_pmo_store),
+    bus: EventBus = Depends(get_bus),
+) -> MergeResponse:
+    """Perform a fast-forward merge for a card whose commits are consolidated.
+
+    POST /api/v1/pmo/cards/{card_id}/merge
+
+    The cherry-picks were already applied to the feature branch by
+    ``CommitConsolidator.consolidate()``.  This endpoint records the
+    current HEAD as the merge commit, removes agent worktrees, and
+    publishes a ``card.merged`` event.
+
+    Args:
+        card_id: The task ID of the card (URL path parameter).
+        req: Optional merge options (``force`` flag).
+        scanner: Injected ``PmoScanner`` singleton.
+        store: Injected PMO store singleton.
+        bus: The shared ``EventBus`` (for SSE event emission).
+
+    Returns:
+        A ``MergeResponse`` with the merge commit hash and cleaned worktrees.
+
+    Raises:
+        HTTPException 404: If the card, project, or execution state is missing.
+        HTTPException 409: If the consolidation status is not ``'success'``
+            and ``force`` is False.
+        HTTPException 500: If the git or cleanup operation fails.
+    """
+    import subprocess
+    import shutil
+    from agent_baton.core.storage import detect_backend, get_project_storage
+    from agent_baton.models.events import Event
+
+    try:
+        card, _ = scanner.find_card(card_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Card '{card_id}' not found.")
+
+    project_root = _resolve_project_path(card, store)
+    if project_root is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Project path for card '{card_id}' could not be resolved.",
+        )
+
+    context_root = project_root / ".claude" / "team-context"
+    try:
+        backend = detect_backend(context_root)
+        storage = get_project_storage(context_root, backend=backend)
+        state = storage.load_execution(card_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to load execution state: {exc}",
+        ) from exc
+
+    if state is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No execution state found for card '{card_id}'.",
+        )
+
+    cr = state.consolidation_result
+    if cr is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No consolidation result for card '{card_id}'.",
+        )
+
+    if not req.force and cr.status != "success":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Consolidation status is '{cr.status}', not 'success'. "
+                "Resolve conflicts before merging, or pass force=true to override."
+            ),
+        )
+
+    # The cherry-picks already landed the commits; resolve HEAD as merge_commit.
+    git_bin = shutil.which("git")
+    if git_bin is None:
+        raise HTTPException(status_code=500, detail="git binary not found on PATH.")
+
+    try:
+        proc = subprocess.run(
+            [git_bin, "rev-parse", "HEAD"],
+            cwd=str(project_root),
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=True,
+        )
+        merge_commit = proc.stdout.strip()
+    except subprocess.CalledProcessError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to resolve HEAD: {exc.stderr.strip()}",
+        ) from exc
+
+    # Clean up agent worktrees.
+    cleaned_worktrees: list[str] = []
+    try:
+        from agent_baton.core.engine.consolidator import CommitConsolidator
+        _consolidator = CommitConsolidator(working_directory=project_root)
+        cleaned_worktrees = _consolidator.cleanup_worktrees(state)
+    except Exception as exc:
+        # Non-fatal: log and continue — worktrees can be cleaned manually.
+        import logging
+        logging.getLogger(__name__).warning(
+            "Worktree cleanup failed for card '%s' (non-fatal): %s", card_id, exc
+        )
+
+    # Publish card.merged event so the PMO board updates via SSE.
+    try:
+        bus.publish(Event.create(
+            topic="card.merged",
+            task_id=card_id,
+            payload={
+                "merge_commit": merge_commit,
+                "cleaned_worktrees": cleaned_worktrees,
+            },
+        ))
+    except Exception:
+        pass  # SSE emission is best-effort.
+
+    return MergeResponse(
+        merge_commit=merge_commit,
+        cleaned_worktrees=cleaned_worktrees,
+    )
+
+
+@router.post(
+    "/pmo/cards/{card_id}/create-pr",
+    response_model=CreatePrResponse,
+    status_code=201,
+    summary="Create a GitHub pull request for a consolidated card",
+    tags=["pmo"],
+)
+async def create_card_pr(
+    card_id: str,
+    req: CreatePrRequest,
+    scanner: PmoScanner = Depends(get_pmo_scanner),
+    store: PmoStore = Depends(get_pmo_store),
+) -> CreatePrResponse:
+    """Open a GitHub pull request for the card's consolidated branch.
+
+    POST /api/v1/pmo/cards/{card_id}/create-pr
+
+    Invokes ``gh pr create`` in the project root.  If ``body`` is omitted
+    the engine builds a description from the plan summary and step outcomes.
+
+    Args:
+        card_id: The task ID of the card (URL path parameter).
+        req: PR title, optional body, and base branch.
+        scanner: Injected ``PmoScanner`` singleton.
+        store: Injected PMO store singleton.
+
+    Returns:
+        A ``CreatePrResponse`` with the PR URL and numeric PR number
+        (201 Created).
+
+    Raises:
+        HTTPException 404: If the card or project cannot be found.
+        HTTPException 500: If ``gh pr create`` fails or returns unexpected
+            output.
+    """
+    import re
+    import subprocess
+    import shutil
+    from agent_baton.core.storage import detect_backend, get_project_storage
+
+    try:
+        card, _ = scanner.find_card(card_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Card '{card_id}' not found.")
+
+    project_root = _resolve_project_path(card, store)
+    if project_root is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Project path for card '{card_id}' could not be resolved.",
+        )
+
+    # Build PR body from plan + step outcomes when the caller omits it.
+    pr_body = req.body
+    if not pr_body:
+        try:
+            context_root = project_root / ".claude" / "team-context"
+            backend = detect_backend(context_root)
+            storage = get_project_storage(context_root, backend=backend)
+            state = storage.load_execution(card_id)
+            if state is not None:
+                lines: list[str] = [
+                    f"## {state.plan.task_summary}",
+                    "",
+                    "### Step outcomes",
+                ]
+                for sr in state.step_results:
+                    status_icon = "+" if sr.status == "complete" else "x"
+                    lines.append(
+                        f"- [{status_icon}] **{sr.step_id}** ({sr.agent_name}): "
+                        f"{sr.outcome or sr.status}"
+                    )
+                pr_body = "\n".join(lines)
+        except Exception:
+            pr_body = f"Automated PR for task {card_id}."
+
+    gh_bin = shutil.which("gh")
+    if gh_bin is None:
+        raise HTTPException(
+            status_code=500,
+            detail="gh CLI not found on PATH. Install the GitHub CLI to use this endpoint.",
+        )
+
+    cmd = [
+        gh_bin, "pr", "create",
+        "--title", req.title,
+        "--body", pr_body,
+        "--base", req.base_branch,
+    ]
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(project_root),
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to invoke gh CLI: {exc}",
+        ) from exc
+
+    if proc.returncode != 0:
+        raise HTTPException(
+            status_code=500,
+            detail=f"gh pr create failed: {proc.stderr.strip() or proc.stdout.strip()}",
+        )
+
+    # gh pr create prints the PR URL on stdout (e.g. https://github.com/org/repo/pull/42).
+    pr_url = proc.stdout.strip().splitlines()[-1].strip()
+    match = re.search(r"/pull/(\d+)", pr_url)
+    if not match:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not parse PR number from gh output: {pr_url!r}",
+        )
+    pr_number = int(match.group(1))
+
+    return CreatePrResponse(pr_url=pr_url, pr_number=pr_number)
+
+
+# ---------------------------------------------------------------------------
+# Role-based approval endpoints
+# ---------------------------------------------------------------------------
+
+_APPROVAL_ENV = __import__("os").environ.get("BATON_APPROVAL_MODE", "local").lower()
+
+
+@router.post(
+    "/pmo/cards/{card_id}/request-review",
+    response_model=dict,
+    status_code=201,
+    summary="Request peer review for a card",
+    tags=["pmo"],
+)
+async def request_card_review(
+    card_id: str,
+    req: RequestReviewRequest,
+    request: Request,
+    bus: EventBus = Depends(get_bus),
+    central: object = Depends(get_central_store),
+) -> dict:
+    """Submit a card for peer review before approval.
+
+    POST /api/v1/pmo/cards/{card_id}/request-review
+
+    Writes an ``approval_log`` entry with ``action="request_review"`` and
+    publishes a ``card.review_requested`` SSE event so the PMO board can
+    reflect the pending review state in real time.
+
+    Args:
+        card_id: Task ID of the card to submit for review.
+        req: Optional target reviewer_id and reviewer notes.
+        request: Injected FastAPI request (provides request.state.user_id).
+        bus: Shared ``EventBus`` for SSE emission.
+        central: Injected ``CentralStore`` for writing to approval_log.
+
+    Returns:
+        ``{"logged": true, "log_id": "<uuid>", "card_id": "<card_id>"}``
+        (201 Created).
+    """
+    import uuid
+    from datetime import datetime, timezone
+    from agent_baton.core.storage.central import CentralStore
+    from agent_baton.models.events import Event
+
+    user_id: str = getattr(request.state, "user_id", "local-user")
+    log_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    store: CentralStore = central  # type: ignore[assignment]
+    notes = req.notes or ""
+    if req.reviewer_id:
+        notes = f"Requested reviewer: {req.reviewer_id}. {notes}".strip()
+
+    try:
+        store.execute(
+            """
+            INSERT INTO approval_log (log_id, task_id, phase_id, user_id, action, notes, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (log_id, card_id, "", user_id, "request_review", notes, now),
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to write approval log: {exc}",
+        ) from exc
+
+    try:
+        bus.publish(Event.create(
+            topic="card.review_requested",
+            task_id=card_id,
+            payload={
+                "user_id": user_id,
+                "reviewer_id": req.reviewer_id,
+                "notes": notes,
+                "log_id": log_id,
+            },
+        ))
+    except Exception:
+        pass  # SSE emission is best-effort.
+
+    return {"logged": True, "log_id": log_id, "card_id": card_id}
+
+
+@router.get(
+    "/pmo/cards/{card_id}/approval-log",
+    response_model=ApprovalLogResponse,
+    summary="Return the approval audit log for a card",
+    tags=["pmo"],
+)
+async def get_card_approval_log(
+    card_id: str,
+    central: object = Depends(get_central_store),
+) -> ApprovalLogResponse:
+    """Return all approval log entries for a card, newest first.
+
+    GET /api/v1/pmo/cards/{card_id}/approval-log
+
+    Reads from the ``approval_log`` table in central.db filtered by
+    ``task_id``.  Returns an empty list when no entries exist.
+
+    Args:
+        card_id: Task ID of the card to look up (URL path parameter).
+        central: Injected ``CentralStore`` for querying approval_log.
+
+    Returns:
+        An ``ApprovalLogResponse`` with entries ordered newest-first.
+    """
+    from agent_baton.core.storage.central import CentralStore
+
+    store: CentralStore = central  # type: ignore[assignment]
+
+    try:
+        rows = store.query(
+            """
+            SELECT log_id, task_id, phase_id, user_id, action, notes, created_at
+            FROM approval_log
+            WHERE task_id = ?
+            ORDER BY created_at DESC
+            """,
+            (card_id,),
+        )
+    except Exception:
+        # approval_log table may not exist on old central.db — return empty.
+        return ApprovalLogResponse(entries=[])
+
+    entries = [
+        ApprovalLogEntry(
+            log_id=row["log_id"],
+            task_id=row["task_id"],
+            phase_id=row.get("phase_id", ""),
+            user_id=row.get("user_id", "local-user"),
+            action=row["action"],
+            notes=row.get("notes", ""),
+            created_at=row.get("created_at", ""),
+        )
+        for row in rows
+    ]
+    return ApprovalLogResponse(entries=entries)
 
 
 # ---------------------------------------------------------------------------

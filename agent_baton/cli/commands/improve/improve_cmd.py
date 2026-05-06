@@ -1,9 +1,14 @@
-"""``baton improve`` -- run or view improvement cycle reports.
+"""``baton improve`` -- DEPRECATED shim.
 
-The improvement loop is the top-level entry point for the closed-loop
-learning pipeline. A single cycle: detects anomalies, generates
-recommendations, auto-applies safe changes, escalates risky ones,
-and starts experiments.
+Use ``baton learn improve`` instead.
+
+This module keeps the old top-level ``baton improve`` command working so that
+existing scripts and CI pipelines are not broken.  A deprecation warning is
+printed to stderr on every invocation.
+
+The real implementation lives here (``handler`` / ``_improve_handler_impl``)
+and is imported directly by ``learn_cmd.py`` for the ``baton learn improve``
+subcommand path.
 
 Delegates to:
     agent_baton.core.improve.loop.ImprovementLoop
@@ -11,6 +16,7 @@ Delegates to:
 from __future__ import annotations
 
 import argparse
+import sys
 
 from agent_baton.core.improve.loop import ImprovementLoop
 
@@ -18,7 +24,8 @@ from agent_baton.core.improve.loop import ImprovementLoop
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     p = subparsers.add_parser(
         "improve",
-        help="Run the improvement loop or view reports",
+        help="[DEPRECATED] Use 'baton learn improve' instead",
+        description="DEPRECATED: Use 'baton learn improve' instead.",
     )
     group = p.add_mutually_exclusive_group()
     group.add_argument(
@@ -71,8 +78,45 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
 
 
 def handler(args: argparse.Namespace) -> None:
+    """Deprecated top-level entry point — prints warning then delegates."""
+    print(
+        "warning: `baton improve` is deprecated; use `baton learn improve` instead."
+        " This alias will be removed in a future release.",
+        file=sys.stderr,
+    )
+    _improve_handler_impl(args)
+
+
+def _improve_handler_impl(args: argparse.Namespace) -> None:
+    """Real implementation shared by top-level shim and 'baton learn improve'."""
+    from pathlib import Path
     from agent_baton.core.improve.triggers import TriggerEvaluator
+    from agent_baton.core.storage import get_project_storage
     from agent_baton.models.improvement import TriggerConfig
+
+    # Resolve storage backend for the current project so the improvement
+    # pipeline reads from SQLite instead of stale JSONL.
+    context_root = Path(".claude/team-context").resolve()
+    try:
+        storage = get_project_storage(context_root)
+    except Exception:
+        storage = None
+
+    # Construct bead_store and ledger from storage.db_path when available
+    # (SqliteStorage only; FileStorage has no db_path and fails gracefully).
+    bead_store = None
+    ledger = None
+    if storage is not None:
+        try:
+            from agent_baton.core.engine.bead_store import BeadStore
+            bead_store = BeadStore(storage.db_path)
+        except Exception:
+            pass
+        try:
+            from agent_baton.core.learn.ledger import LearningLedger
+            ledger = LearningLedger(storage.db_path)
+        except Exception:
+            pass
 
     # Build a custom TriggerConfig when CLI overrides are supplied.
     trigger_evaluator = None
@@ -82,9 +126,19 @@ def handler(args: argparse.Namespace) -> None:
             base_config.min_tasks_before_analysis = args.min_tasks
         if args.interval is not None:
             base_config.analysis_interval_tasks = args.interval
-        trigger_evaluator = TriggerEvaluator(config=base_config)
+        trigger_evaluator = TriggerEvaluator(
+            config=base_config,
+            storage=storage,
+            bead_store=bead_store,
+            ledger=ledger,
+        )
 
-    loop = ImprovementLoop(trigger_evaluator=trigger_evaluator)
+    loop = ImprovementLoop(
+        trigger_evaluator=trigger_evaluator,
+        storage=storage,
+        bead_store=bead_store,
+        ledger=ledger,
+    )
 
     if args.run or args.force:
         report = loop.run_cycle(force=args.force)
@@ -110,24 +164,16 @@ def handler(args: argparse.Namespace) -> None:
         return
 
     if args.experiments:
-        from agent_baton.core.improve.experiments import ExperimentManager
-        mgr = ExperimentManager()
-        active = mgr.active()
-        if not active:
-            print("No active experiments.")
-            return
-        print(f"Active Experiments ({len(active)}):")
-        print()
-        for exp in active:
-            print(f"  {exp.experiment_id}")
-            print(f"    Recommendation: {exp.recommendation_id}")
-            print(f"    Agent:    {exp.agent_name}")
-            print(f"    Metric:   {exp.metric}")
-            print(f"    Baseline: {exp.baseline_value:.4f}")
-            print(f"    Target:   {exp.target_value:.4f}")
-            print(f"    Samples:  {len(exp.samples)}/{exp.min_samples}")
-            print(f"    Started:  {exp.started_at}")
-            print()
+        # ExperimentManager was retired by L2.1 (bd-362f).  Per-cycle experiment
+        # tracking now flows through the learning-analyst agent dispatched via
+        # `baton learn run-cycle`.  This flag is kept so existing scripts do not
+        # break on unrecognised arguments; it prints a removal notice instead.
+        print(
+            "warning: --experiments is no longer supported. "
+            "ExperimentManager was retired (L2.1, bd-362f). "
+            "Use 'baton learn run-cycle' for impact validation.",
+            file=sys.stderr,
+        )
         return
 
     if args.history:

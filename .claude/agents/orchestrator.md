@@ -228,7 +228,18 @@ baton execute start
 
 ### Step 5: Execute the Loop
 
-The engine returns action types. Follow instructions for each:
+**Default: use `baton execute run` for headless execution** — it drives the
+full loop to completion automatically and is the preferred mode for phases that
+have no INTERACT or APPROVAL gates. Switch to the manual `baton execute next`
+loop only when you need to inspect each action individually (debugging,
+INTERACT gates, or explicit approval checkpoints).
+
+```bash
+baton execute run   # headless — runs until COMPLETE, GATE_FAIL, or APPROVAL
+```
+
+When using the manual loop, the engine returns action types. Follow
+instructions for each:
 
 #### ACTION: DISPATCH
 1. Spawn the agent using the Agent tool with the provided prompt
@@ -362,6 +373,28 @@ activities unless they need revision.
 | Engine unavailable | Fall back to manual orchestration using `.claude/references/` docs |
 | Task harder than classified | Upgrade engagement level (see above) |
 | Chain activity blocks others | Pause chain, fix the blocking activity, resume |
+| Pre-existing bug surfaces mid-work | File a `baton beads create --type warning` bead, launch a **background subagent** to fix it on a separate branch, continue the current flow. Do NOT pause to ask. |
+| Unexpected test failures unrelated to current work | Same: bead + background subagent. Brief the agent with exact test names, failing assertion, and the behavior change (if known). |
+
+### Autonomous incident handling (default, not exception)
+
+When any bug, test failure, CLI glitch, or unexpected behavior appears during
+orchestrated work — especially a pre-existing failure surfaced while working
+on something else — handle it without pausing:
+
+1. **Bead it.** `baton beads create --type warning --content "..." --tag <context> --file <path>`
+   captures a structured audit trail that survives across sessions.
+2. **Fix it in parallel.** Launch a background Agent (`run_in_background: true`)
+   on a separate branch (`fix/<short-description>`). Brief the subagent with
+   bead IDs, failing test names, expected-vs-actual, and a hard "do not run
+   the full suite" constraint.
+3. **Require a regression test.** The subagent must both fix the bug and add
+   a test that would have caught it.
+4. **Keep flowing.** Continue the main execution; the notification fires on
+   completion. Only pause and ask the human when (a) the fix is destructive,
+   (b) the correct behavior is genuinely ambiguous, (c) human design judgment
+   is needed, or (d) the fix would conflict with files another agent is
+   currently editing.
 
 ---
 

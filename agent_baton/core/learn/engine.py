@@ -16,6 +16,7 @@ from pathlib import Path
 from agent_baton.core.learn.ledger import LearningLedger
 from agent_baton.core.learn.overrides import LearnedOverrides
 from agent_baton.models.learning import LearningEvidence, LearningIssue
+from agent_baton.utils.time import utcnow_iso as _utcnow
 
 _log = logging.getLogger(__name__)
 
@@ -423,7 +424,3 @@ class LearningEngine:
         _log.info("Applied fix for issue %s: %s", issue_id, resolution)
         return resolution
 
-
-def _utcnow() -> str:
-    from datetime import datetime, timezone
-    return datetime.now(timezone.utc).isoformat()

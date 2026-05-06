@@ -1,25 +1,25 @@
-"""``baton verify-package`` -- validate a .tar.gz package before distribution.
+"""``baton verify-package`` -- DEPRECATED alias.
 
-Runs structural and content checks on a package archive: verifies the
-manifest, checks agent frontmatter, validates references, and optionally
-displays per-file SHA-256 checksums.
+Use ``baton install verify ARCHIVE`` instead.
 
-Delegates to:
-    agent_baton.core.distribute.packager.PackageVerifier
+This module keeps the old top-level ``baton verify-package`` command working
+so that existing scripts and CI pipelines are not broken.  A deprecation
+warning is printed to stderr on every invocation.
 """
 from __future__ import annotations
 
 import argparse
 import sys
-from pathlib import Path
-
-from agent_baton.core.distribute.packager import PackageVerifier
 
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     p = subparsers.add_parser(
         "verify-package",
-        help="Validate a .tar.gz agent-baton package before distribution",
+        help="[DEPRECATED] Use 'baton install verify ARCHIVE' instead",
+        description=(
+            "DEPRECATED: Use 'baton install verify ARCHIVE' instead.\n\n"
+            "Validates a .tar.gz agent-baton package before distribution."
+        ),
     )
     p.add_argument(
         "archive",
@@ -36,40 +36,10 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
 
 
 def handler(args: argparse.Namespace) -> None:
-    archive_path = Path(args.archive)
-    verifier = PackageVerifier()
-
-    result = verifier.validate_package(archive_path)
-
-    # Header
-    status_label = "PASS" if result.valid else "FAIL"
-    print(f"Package: {archive_path.name}  [{status_label}]")
     print(
-        f"Contents: {result.agent_count} agent(s), "
-        f"{result.reference_count} reference(s), "
-        f"{result.knowledge_count} knowledge pack(s)"
+        "warning: `baton verify-package` is deprecated; use `baton install verify ARCHIVE`"
+        " instead. This alias will be removed in a future release.",
+        file=sys.stderr,
     )
-
-    # Errors
-    if result.errors:
-        print(f"\nErrors ({len(result.errors)}):")
-        for err in result.errors:
-            print(f"  [ERROR] {err}")
-
-    # Warnings
-    if result.warnings:
-        print(f"\nWarnings ({len(result.warnings)}):")
-        for warn in result.warnings:
-            print(f"  [WARN]  {warn}")
-
-    # Checksums (optional)
-    if args.checksums and result.checksums:
-        print(f"\nChecksums ({len(result.checksums)} files):")
-        for member_name, digest in sorted(result.checksums.items()):
-            print(f"  {digest}  {member_name}")
-
-    if not result.errors and not result.warnings:
-        print("\nAll checks passed.")
-
-    if not result.valid:
-        sys.exit(1)
+    from agent_baton.cli.commands.distribute.install import _cmd_verify
+    _cmd_verify(args)

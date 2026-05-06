@@ -364,7 +364,6 @@ class TestImprovementLoopApplyCentralSignals:
     """Unit tests for _apply_central_signals — exercises the method in isolation."""
 
     def _make_loop(self, tmp_path: Path, learner=None, tuner=None):
-        from agent_baton.core.improve.experiments import ExperimentManager
         from agent_baton.core.improve.loop import ImprovementLoop
         from agent_baton.core.improve.proposals import ProposalManager
         from agent_baton.core.improve.rollback import RollbackManager
@@ -387,7 +386,6 @@ class TestImprovementLoopApplyCentralSignals:
             }),
             recommender=recommender,
             proposal_manager=ProposalManager(improvements_dir),
-            experiment_manager=ExperimentManager(improvements_dir),
             rollback_manager=RollbackManager(improvements_dir=improvements_dir),
             scorer=MagicMock(spec=PerformanceScorer),
             config=ImprovementConfig(),

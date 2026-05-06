@@ -96,15 +96,88 @@ class AgentRegistry:
     def load_default_paths(self) -> int:
         """Load agents from standard locations (global then project override).
 
+        Search order (later entries override earlier ones with the same name):
+
+        1. Bundled package agents (``importlib.resources`` — always available
+           after ``pip install agent-baton``).  Used as a base fallback so the
+           tool works out-of-the-box without any local agent files.
+        2. Global user agents: ``~/.claude/agents/``
+        3. Project-level agents: ``.claude/agents/`` (highest priority)
+
         Returns:
             Total number of agents loaded.
         """
+        count = self._load_bundled_agents()
+
         global_dir = Path.home() / ".claude" / "agents"
         project_dir = (Path(".claude") / "agents").resolve()
 
-        count = self.load_directory(global_dir)
+        count += self.load_directory(global_dir, override=True)
         count += self.load_directory(project_dir, override=True)
         return count
+
+    def _load_bundled_agents(self) -> int:
+        """Load agent definitions bundled inside the installed package.
+
+        Uses ``importlib.resources`` to locate the ``agents/`` directory
+        shipped with the ``agent_baton`` package.  This enables ``pip install
+        agent-baton && baton plan`` to work without cloning the repo.
+
+        Bundled agents have the lowest priority — project-level definitions
+        override them via subsequent :meth:`load_directory` calls.
+
+        Returns:
+            Number of bundled agents loaded (0 if resources unavailable).
+        """
+        try:
+            import importlib.resources as pkg_resources
+            # Try the modern (3.9+) traversal API first.
+            try:
+                pkg = pkg_resources.files("agent_baton").joinpath("_bundled_agents")
+                if pkg.is_dir():  # type: ignore[union-attr]
+                    count = 0
+                    for entry in pkg.iterdir():  # type: ignore[union-attr]
+                        name = getattr(entry, "name", "")
+                        if not name.endswith(".md"):
+                            continue
+                        try:
+                            content = entry.read_text(encoding="utf-8")  # type: ignore[union-attr]
+                        except Exception:
+                            continue
+                        agent = self._parse_agent_content(content, name)
+                        if agent is not None and agent.name not in self._agents:
+                            self._agents[agent.name] = agent
+                            count += 1
+                    return count
+            except (AttributeError, TypeError):
+                pass
+
+            # Fallback: resolve via __file__ from the installed package.
+            import agent_baton as _pkg
+            pkg_dir = Path(_pkg.__file__).parent
+            bundled_dir = pkg_dir / "_bundled_agents"
+            if bundled_dir.is_dir():
+                return self.load_directory(bundled_dir)
+        except Exception as exc:
+            logger.debug("Bundled agent loading skipped (non-fatal): %s", exc)
+        return 0
+
+    @staticmethod
+    def project_agents_dir() -> Path:
+        """Return the canonical project-level agents directory path."""
+        return (Path(".claude") / "agents").resolve()
+
+    def has_project_agents(self) -> bool:
+        """Return True if the project has any local agent definition files.
+
+        Used by ``baton plan`` to decide whether to run talent-builder
+        auto-initiation (B6).  Returns False when ``.claude/agents/`` is
+        absent or contains no ``.md`` files.
+        """
+        agents_dir = self.project_agents_dir()
+        if not agents_dir.is_dir():
+            return False
+        return any(agents_dir.glob("*.md"))
 
     def get(self, name: str) -> AgentDefinition | None:
         """Look up an agent by exact name."""
@@ -214,5 +287,51 @@ class AgentRegistry:
             tools=tools,
             instructions=body,
             source_path=path,
+            knowledge_packs=knowledge_packs,
+        )
+
+    def _parse_agent_content(
+        self, content: str, filename: str
+    ) -> "AgentDefinition | None":
+        """Parse an agent definition from a string (used for bundled resources).
+
+        Mirrors :meth:`_parse_agent_file` but accepts the file content and
+        filename directly, without requiring a filesystem path.
+        """
+        try:
+            metadata, body = parse_frontmatter(content)
+        except Exception:
+            return None
+
+        name = metadata.get("name") or Path(filename).stem
+        description = metadata.get("description", "")
+        if isinstance(description, str):
+            description = description.strip()
+
+        tools_raw = metadata.get("tools", "")
+        if isinstance(tools_raw, str):
+            tools = [t.strip() for t in tools_raw.split(",") if t.strip()]
+        elif isinstance(tools_raw, list):
+            tools = tools_raw
+        else:
+            tools = []
+
+        kp_raw = metadata.get("knowledge_packs", [])
+        if isinstance(kp_raw, str):
+            knowledge_packs = [k.strip() for k in kp_raw.split(",") if k.strip()]
+        elif isinstance(kp_raw, list):
+            knowledge_packs = [str(k).strip() for k in kp_raw if k]
+        else:
+            knowledge_packs = []
+
+        return AgentDefinition(
+            name=name,
+            description=description,
+            model=metadata.get("model", ""),
+            permission_mode=metadata.get("permissionMode", "default"),
+            color=metadata.get("color"),
+            tools=tools,
+            instructions=body,
+            source_path=Path(filename),
             knowledge_packs=knowledge_packs,
         )

@@ -74,3 +74,8 @@ The engine returns these action types from `baton execute start` and
 | Wrong gate field name | Engine accepts both `gate_type` and `type` |
 | Plan uses wrong agents | Re-run with `--agents` or `--task-type` override |
 | Session crashed | `baton execute resume` picks up where it left off |
+
+## See Also
+
+- `/baton-beads` — Bead memory workflows (create, link, promote discoveries)
+- `/baton-learn` — Learning pipeline (analyze patterns, apply fixes, review scores)

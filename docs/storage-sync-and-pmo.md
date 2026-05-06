@@ -576,11 +576,11 @@ SELECT project_id, task_id, status, started_at
 | Column | Description | Mapped From (ExecutionState.status) |
 |--------|-------------|-------------------------------------|
 | `queued` | Plan ready, awaiting execution | None / default |
-| `planning` | Claude decomposing scope | (future) |
 | `executing` | Baton steps running | `running`, `failed` |
 | `awaiting_human` | Paused for human input | `approval_pending` |
 | `validating` | Test suites running | `gate_pending` |
-| `deployed` | Complete | `complete` |
+| `review` | Post-execution changelist review | `complete` (with consolidation pending) |
+| `deployed` | Complete and merged | `complete` |
 
 **PmoSignal:** A signal (bug, escalation, blocker).
 
@@ -837,19 +837,47 @@ done, blocked, failed). Color-coded by program name hash.
 **`ForgePanel.tsx`** -- AI-driven plan creation workflow with phases:
 - **Intake**: Project selector, task type, priority, description textarea,
   ADO import combobox, "Generate Plan" button.
-- **Generating**: Loading state while plan is created.
+- **Generating**: 5-stage SSE progress indicator (Analyzing, Routing,
+  Sizing, Generating, Validating) via
+  `GET /pmo/forge/progress/{session_id}`.
 - **Preview**: `PlanEditor` with "Approve & Queue" and "Regenerate" buttons.
 - **Regenerating**: `InterviewPanel` with refinement questions.
 - **Saved**: Success confirmation with saved path, "New Plan" and "Back to
   Board" buttons.
 
-**`PlanEditor.tsx`** -- Interactive plan editor:
+**`ExecutionProgress.tsx`** -- Live execution progress display:
+- Step-by-step progress with status indicators.
+- Interrupt controls: pause, resume, cancel buttons.
+- Retry-step and skip-step for failed steps.
+- Bead alert flags for warning/incident signals.
+
+**`ChangelistPanel.tsx`** -- Post-execution code review:
+- File tree grouped by contributing agent.
+- Diff stats (files changed, insertions, deletions).
+- Merge and Create PR action buttons.
+- Presented in the "Plating Review" Kanban column.
+
+**`GateApprovalPanel.tsx`** -- Gate approval/rejection UI:
+- Displays pending gate details and output.
+- Approve/reject buttons with optional notes.
+- Wired into KanbanCard when `card.column === 'awaiting_human'`.
+
+**`ReviewPanel.tsx`** -- Role-based review and approval:
+- Request-review workflow with user identity.
+- Approval log display.
+- Respects `BATON_APPROVAL_MODE` (local vs team).
+
+**`PlanEditor.tsx`** -- Advanced interactive plan editor:
 - Stats bar (phases, steps, gates, risk level).
 - Collapsible phase sections with step lists.
 - Inline step editing (click to edit task description).
 - Step reordering (up/down buttons).
 - Add/remove steps and phases.
 - Agent name chips per step.
+- Model selection per step (sonnet/opus/haiku).
+- Dependency multi-select across steps.
+- Tag inputs for deliverables, allowed_paths, and context_files.
+- Gate editing (type, command, approval_required).
 
 **`InterviewPanel.tsx`** -- Refinement questions panel:
 - Numbered question cards with context.
@@ -876,25 +904,55 @@ typeahead (300ms). Currently uses mock data (placeholder endpoint).
 ### 7.6 PMO API Endpoints
 
 All endpoints are prefixed with `/api/v1` and defined in
-`agent_baton/api/routes/pmo.py`.
+`agent_baton/api/routes/pmo.py`. **36 endpoints total.**
 
 | Method | Path | Description |
 |--------|------|-------------|
+| **Board** | | |
 | GET | `/pmo/board` | Full Kanban board (cards + health) |
 | GET | `/pmo/board/{program}` | Board filtered by program |
+| GET | `/pmo/cards/{card_id}` | Card detail |
+| GET | `/pmo/cards/{card_id}/execution` | Card execution state |
+| GET | `/pmo/events` | SSE stream of board-relevant events |
+| **Projects** | | |
 | GET | `/pmo/projects` | List registered projects |
 | POST | `/pmo/projects` | Register a project |
 | DELETE | `/pmo/projects/{project_id}` | Unregister a project |
 | GET | `/pmo/health` | Program health metrics |
+| **Forge** | | |
 | POST | `/pmo/forge/plan` | Create a plan via IntelligentPlanner |
+| GET | `/pmo/forge/progress/{session_id}` | SSE stream of plan-generation progress (5 stages) |
 | POST | `/pmo/forge/approve` | Save approved plan to project |
 | POST | `/pmo/forge/interview` | Generate refinement questions |
 | POST | `/pmo/forge/regenerate` | Re-generate plan with answers |
+| **Execution Controls** | | |
+| POST | `/pmo/execute/{card_id}` | Launch execution for a card |
+| POST | `/pmo/execute/{card_id}/pause` | Pause worker (SIGSTOP) |
+| POST | `/pmo/execute/{card_id}/resume` | Resume worker (SIGCONT) |
+| POST | `/pmo/execute/{card_id}/cancel` | Cancel worker (SIGTERM) |
+| POST | `/pmo/execute/{card_id}/retry-step` | Reset failed step for re-dispatch |
+| POST | `/pmo/execute/{card_id}/skip-step` | Skip failed step |
+| **Gates** | | |
+| GET | `/pmo/gates/pending` | List executions awaiting gate approval |
+| POST | `/pmo/gates/{task_id}/approve` | Approve a pending gate |
+| POST | `/pmo/gates/{task_id}/reject` | Reject a pending gate |
+| **Changelist and Merge** | | |
+| GET | `/pmo/cards/{card_id}/changelist` | Consolidation changelist (files by agent) |
+| POST | `/pmo/cards/{card_id}/merge` | Fast-forward merge onto base branch |
+| POST | `/pmo/cards/{card_id}/create-pr` | Create GitHub PR via `gh` |
+| **Review and Approval** | | |
+| POST | `/pmo/cards/{card_id}/request-review` | Request review (writes approval_log) |
+| GET | `/pmo/cards/{card_id}/approval-log` | Approval audit trail |
+| **External Items** | | |
+| GET | `/pmo/ado/search` | Search ADO items |
+| GET | `/pmo/external-items` | List external items |
+| GET | `/pmo/external-items/{item_id}/mappings` | Item-to-plan mappings |
+| **Signals** | | |
 | GET | `/pmo/signals` | List open signals |
 | POST | `/pmo/signals` | Create a signal |
+| POST | `/pmo/signals/batch/resolve` | Batch-resolve signals |
 | POST | `/pmo/signals/{id}/resolve` | Resolve a signal |
 | POST | `/pmo/signals/{id}/forge` | Triage signal into a plan |
-| GET | `/pmo/ado/search` | Search ADO items (placeholder) |
 
 **Dependency injection:** The API server uses FastAPI's `Depends()` system
 with singletons initialized in `api/deps.py`:
@@ -1366,6 +1424,31 @@ Indexes: `idx_events_task`, `idx_events_topic`, `idx_events_task_seq`
 | metric_value | REAL | |
 | details | TEXT | JSON |
 
+**`users`** -- PMO user identity and role tracking.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| user_id | TEXT | PK |
+| display_name | TEXT | |
+| role | TEXT | creator, reviewer, approver, admin |
+| created_at | TEXT | ISO 8601 |
+
+Index: `idx_users_role`
+
+**`approval_log`** -- Immutable audit trail of approve/reject/request_review actions.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| log_id | TEXT | PK |
+| task_id | TEXT | Card/task being reviewed |
+| phase_id | TEXT | Phase within the task |
+| user_id | TEXT | Who performed the action |
+| action | TEXT | approve, reject, request_review |
+| notes | TEXT | Optional reviewer notes |
+| created_at | TEXT | ISO 8601 |
+
+Indexes: `idx_approval_log_task`, `idx_approval_log_user`
+
 ### 8.3 Central Database Sync Infrastructure
 
 **`sync_watermarks`** -- Per-table watermarks tracking the highest synced
@@ -1691,6 +1774,12 @@ organization and project names match exactly.
 | `pmo-ui/src/components/HealthBar.tsx` | Program health bars |
 | `pmo-ui/src/components/AdoCombobox.tsx` | ADO search combobox |
 | `pmo-ui/src/components/PlanPreview.tsx` | Read-only plan display |
+| `pmo-ui/src/components/ChangelistPanel.tsx` | Post-execution code review |
+| `pmo-ui/src/components/ExecutionProgress.tsx` | Live execution with interrupt controls |
+| `pmo-ui/src/components/GateApprovalPanel.tsx` | Gate approval/rejection UI |
+| `pmo-ui/src/components/ReviewPanel.tsx` | Role-based review and approval |
+| `pmo-ui/src/components/AnalyticsDashboard.tsx` | Program analytics |
 | `pmo-ui/src/styles/tokens.ts` | Design tokens and column definitions |
+| `agent_baton/api/middleware/user_identity.py` | UserIdentityMiddleware |
 | `pmo-ui/vite.config.ts` | Vite build configuration |
 | `pmo-ui/package.json` | Frontend dependencies |

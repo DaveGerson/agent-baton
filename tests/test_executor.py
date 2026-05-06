@@ -139,10 +139,14 @@ class TestStart:
         action = _engine(tmp_path).start(plan)
         assert "src/main.py" in action.delegation_prompt
 
-    def test_delegation_prompt_mentions_claude_md(self, tmp_path: Path) -> None:
+    def test_delegation_prompt_does_not_re_inject_claude_md(self, tmp_path: Path) -> None:
+        # CLAUDE.md is loaded by Claude Code into every agent's system prompt
+        # at SessionStart. Re-injecting it in the per-DISPATCH delegation prompt
+        # measurably bloats the orchestrator's cached context on every turn
+        # (see docs/token-burn-audit). The line was removed from the dispatcher.
         plan = _plan(phases=[_phase(steps=[_step()])])
         action = _engine(tmp_path).start(plan)
-        assert "CLAUDE.md" in action.delegation_prompt
+        assert "Read `CLAUDE.md`" not in action.delegation_prompt
 
 
 # ---------------------------------------------------------------------------
@@ -292,9 +296,17 @@ class TestNextAction:
 class TestRecordGateResult:
     # DECISION: shared helper _gate_engine builds a two-phase plan with gate on phase 0
     #   to eliminate repeated plan construction boilerplate.
+    # DECISION: gate failures are retryable up to max_gate_retries (default 3).
+    #   A single failure sets status="gate_failed" and next_action() returns GATE
+    #   with a retry message.  Only after max_gate_retries failures does
+    #   next_action() auto-terminate with FAILED.
 
     @staticmethod
-    def _gate_engine(tmp_path: Path, two_phase: bool = False) -> ExecutionEngine:
+    def _gate_engine(
+        tmp_path: Path,
+        two_phase: bool = False,
+        max_gate_retries: int = 3,
+    ) -> ExecutionEngine:
         """Return an engine that has started and completed step 1.1 in a gated phase."""
         if two_phase:
             plan = _plan(phases=[
@@ -303,7 +315,10 @@ class TestRecordGateResult:
             ])
         else:
             plan = _plan(phases=[_phase(phase_id=0, steps=[_step("1.1")], gate=_gate())])
-        engine = _engine(tmp_path)
+        engine = ExecutionEngine(
+            team_context_root=tmp_path,
+            max_gate_retries=max_gate_retries,
+        )
         engine.start(plan)
         engine.record_step_result("1.1", "backend-engineer")
         return engine
@@ -316,11 +331,13 @@ class TestRecordGateResult:
         assert state.current_phase == 1
         assert state.status == "running"
 
-    def test_failed_gate_sets_status_failed(self, tmp_path: Path) -> None:
+    def test_gate_failure_first_attempt_sets_status_gate_failed(self, tmp_path: Path) -> None:
+        """A single gate failure sets status to gate_failed (not failed) — the
+        engine keeps the execution alive so the operator can retry."""
         engine = self._gate_engine(tmp_path)
         engine.next_action()  # returns GATE
         engine.record_gate_result(phase_id=0, passed=False, output="tests failed")
-        assert engine._load_state().status == "failed"
+        assert engine._load_state().status == "gate_failed"
 
     def test_gate_result_stored(self, tmp_path: Path) -> None:
         engine = self._gate_engine(tmp_path)
@@ -330,8 +347,18 @@ class TestRecordGateResult:
         assert state.gate_results[0].passed is True
         assert state.gate_results[0].output == "all green"
 
-    def test_failed_gate_followed_by_failed_action(self, tmp_path: Path) -> None:
-        engine = self._gate_engine(tmp_path)
+    def test_gate_failure_first_attempt_returns_retry_gate(self, tmp_path: Path) -> None:
+        """After the first gate failure, next_action() returns GATE (not FAILED)
+        so the operator can retry without manually intervening."""
+        engine = self._gate_engine(tmp_path, max_gate_retries=3)
+        engine.record_gate_result(phase_id=0, passed=False)
+        action = engine.next_action()
+        assert action.action_type == ActionType.GATE
+
+    def test_gate_failure_exhausts_retries_returns_failed(self, tmp_path: Path) -> None:
+        """Once max_gate_retries failures are recorded, next_action() flips to
+        FAILED automatically to prevent infinite retry loops."""
+        engine = self._gate_engine(tmp_path, max_gate_retries=1)
         engine.record_gate_result(phase_id=0, passed=False)
         action = engine.next_action()
         assert action.action_type == ActionType.FAILED
@@ -449,7 +476,7 @@ class TestComplete:
         engine = _engine(tmp_path)
         result = engine.complete()
         assert isinstance(result, str)
-        assert "No active" in result
+        assert "No execution state found" in result
 
     def test_complete_writes_context_profile_json(self, tmp_path: Path) -> None:
         """complete() auto-invokes ContextProfiler and writes context-profile.json."""
@@ -1016,14 +1043,19 @@ class TestMultiPhaseEndToEnd:
         action = engine.next_action()
         assert action.action_type == ActionType.COMPLETE
 
-    def test_gate_failure_halts_execution(self, tmp_path: Path) -> None:
+    def test_gate_failure_exhausts_retries_halts_execution(self, tmp_path: Path) -> None:
+        """Gate failure with max_gate_retries=1 terminates the execution on the
+        first failure — verifies that the retry cap gates forward progress."""
         plan = _plan(
             phases=[
                 _phase(phase_id=0, steps=[_step("1.1")], gate=_gate()),
                 _phase(phase_id=1, steps=[_step("2.1")]),
             ]
         )
-        engine = _engine(tmp_path)
+        engine = ExecutionEngine(
+            team_context_root=tmp_path,
+            max_gate_retries=1,
+        )
         engine.start(plan)
         engine.record_step_result("1.1", "backend-engineer")
         engine.next_action()  # GATE
@@ -2239,87 +2271,3 @@ class TestRiskBasedApproval:
         assert "Custom reviewer note" in post_action.approval_context
 
 
-# ---------------------------------------------------------------------------
-# Fix 2: TaskViewSubscriber — materialized task-view.json
-# ---------------------------------------------------------------------------
-
-def _engine_with_bus(tmp_path: Path, task_id: str = "task-view-001") -> ExecutionEngine:
-    """Return an engine wired with a live EventBus."""
-    bus = EventBus()
-    return ExecutionEngine(team_context_root=tmp_path, bus=bus, task_id=task_id)
-
-
-class TestTaskViewSubscriber:
-    """EventBus subscriber writes task-view.json to the execution directory."""
-
-    def test_task_view_created_on_start(self, tmp_path: Path) -> None:
-        tid = "tview-001"
-        engine = _engine_with_bus(tmp_path, task_id=tid)
-        engine.start(_plan(task_id=tid))
-        view_path = tmp_path / "executions" / tid / "task-view.json"
-        assert view_path.exists(), "task-view.json should be created after start()"
-
-    def test_task_view_is_valid_json(self, tmp_path: Path) -> None:
-        tid = "tview-002"
-        engine = _engine_with_bus(tmp_path, task_id=tid)
-        engine.start(_plan(task_id=tid))
-        view_path = tmp_path / "executions" / tid / "task-view.json"
-        data = json.loads(view_path.read_text())
-        assert data["task_id"] == tid
-
-    def test_task_view_status_running_after_start(self, tmp_path: Path) -> None:
-        tid = "tview-003"
-        engine = _engine_with_bus(tmp_path, task_id=tid)
-        engine.start(_plan(task_id=tid))
-        view_path = tmp_path / "executions" / tid / "task-view.json"
-        data = json.loads(view_path.read_text())
-        assert data["status"] == "running"
-
-    def test_task_view_reflects_risk_level(self, tmp_path: Path) -> None:
-        tid = "tview-004"
-        engine = _engine_with_bus(tmp_path, task_id=tid)
-        plan = _plan(task_id=tid, risk_level="HIGH")
-        engine.start(plan)
-        # Approve the pre-flight so the view proceeds past approval_pending.
-        state = engine._load_state()
-        phase_id = state.plan.phases[0].phase_id
-        engine.record_approval_result(phase_id=phase_id, result="approve")
-        view_path = tmp_path / "executions" / tid / "task-view.json"
-        data = json.loads(view_path.read_text())
-        assert data["risk_level"] == "HIGH"
-
-    def test_task_view_total_steps_correct(self, tmp_path: Path) -> None:
-        tid = "tview-005"
-        engine = _engine_with_bus(tmp_path, task_id=tid)
-        plan = _plan(
-            task_id=tid,
-            phases=[_phase(steps=[_step("1.1"), _step("1.2")])],
-        )
-        engine.start(plan)
-        view_path = tmp_path / "executions" / tid / "task-view.json"
-        data = json.loads(view_path.read_text())
-        assert data["total_steps"] == 2
-
-    def test_task_view_updates_on_step_complete(self, tmp_path: Path) -> None:
-        """After a step.completed event, task-view.json should show steps_completed > 0."""
-        from agent_baton.core.events import events as evt
-
-        tid = "tview-006"
-        bus = EventBus()
-        engine = ExecutionEngine(team_context_root=tmp_path, bus=bus, task_id=tid)
-        engine.start(_plan(task_id=tid))
-        # Manually publish a step.completed event so the subscriber fires.
-        bus.publish(evt.step_completed(tid, "1.1", "backend-engineer", outcome="done"))
-        view_path = tmp_path / "executions" / tid / "task-view.json"
-        data = json.loads(view_path.read_text())
-        assert data["steps_completed"] == 1
-
-    def test_task_view_not_created_without_bus(self, tmp_path: Path) -> None:
-        """Without a bus, no task-view.json should be written."""
-        tid = "tview-007"
-        engine = _engine(tmp_path)  # no bus
-        engine.start(_plan(task_id=tid))
-        view_path = tmp_path / "executions" / tid / "task-view.json"
-        assert not view_path.exists(), (
-            "task-view.json must not be created when no EventBus is wired"
-        )

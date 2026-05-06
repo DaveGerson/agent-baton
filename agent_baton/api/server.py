@@ -35,6 +35,7 @@ from fastapi import FastAPI
 from agent_baton.api.deps import init_dependencies, get_bus, get_webhook_registry
 from agent_baton.api.middleware.auth import TokenAuthMiddleware
 from agent_baton.api.middleware.cors import configure_cors
+from agent_baton.api.middleware.user_identity import UserIdentityMiddleware
 from agent_baton.core.events.bus import EventBus
 
 try:
@@ -51,6 +52,9 @@ except ImportError:
 # raise ImportError only if the route is actually registered.
 _ROUTE_MODULES: list[tuple[str, str, str, list[str]]] = [
     ("agent_baton.api.routes.health", "router", "/api/v1", ["health"]),
+    # Prometheus scrape endpoint mounts at root (/metrics), not /api/v1,
+    # to match the standard Prometheus convention.
+    ("agent_baton.api.routes.metrics", "router", "", ["metrics"]),
     ("agent_baton.api.routes.plans", "router", "/api/v1", ["plans"]),
     ("agent_baton.api.routes.executions", "router", "/api/v1", ["executions"]),
     ("agent_baton.api.routes.agents", "router", "/api/v1", ["agents"]),
@@ -59,7 +63,11 @@ _ROUTE_MODULES: list[tuple[str, str, str, list[str]]] = [
     ("agent_baton.api.routes.events", "router", "/api/v1", ["events"]),
     ("agent_baton.api.routes.webhooks", "router", "/api/v1", ["webhooks"]),
     ("agent_baton.api.routes.pmo", "router", "/api/v1", ["pmo"]),
+    ("agent_baton.api.routes.pmo_h3", "router", "/api/v1", ["pmo"]),
     ("agent_baton.api.routes.learn", "router", "/api/v1", ["learn"]),
+    ("agent_baton.api.routes.specs", "router", "/api/v1", ["specs"]),
+    ("agent_baton.api.routes.noc", "router", "/api/v1", ["noc"]),
+    ("agent_baton.api.routes.viz", "router", "/api/v1", ["viz"]),
 ]
 
 
@@ -139,6 +147,11 @@ def create_app(
 
     # Auth middleware — no-op when token is None.
     app.add_middleware(TokenAuthMiddleware, token=token)
+
+    # User identity middleware — resolves X-Baton-User header or Bearer token
+    # into request.state.user_id.  In local approval mode (BATON_APPROVAL_MODE
+    # unset or "local") falls back to "local-user" with admin role.
+    app.add_middleware(UserIdentityMiddleware)
 
     # --- Routes --------------------------------------------------------------
 

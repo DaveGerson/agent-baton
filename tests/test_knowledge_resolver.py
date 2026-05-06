@@ -1184,3 +1184,156 @@ class TestEdgeCases:
             explicit_docs=[str(stub)],
         )
         assert attachments[0].path == str(stub)
+
+
+# ---------------------------------------------------------------------------
+# TestSessionDedup
+# ---------------------------------------------------------------------------
+
+class TestSessionDedup:
+    """Tests for session-level knowledge deduplication via already_delivered."""
+
+    def _small_registry(self, tmp_path: Path) -> tuple[KnowledgeRegistry, Path]:
+        """Return a registry with one small inline-eligible doc."""
+        root = tmp_path / "knowledge"
+        pd = root / "mypack"
+        pd.mkdir(parents=True)
+        _make_manifest(pd, name="mypack", tags=["dedup-test"])
+        _make_doc(pd, "doc.md", name="doc", tags=["dedup-test"], body="x" * 200)
+        reg = KnowledgeRegistry()
+        reg.load_directory(root)
+        return reg, root / "mypack" / "doc.md"
+
+    # (a) First dispatch inlines the doc and records the step_id.
+    def test_first_dispatch_inlines_doc(self, tmp_path: Path) -> None:
+        reg, _ = self._small_registry(tmp_path)
+        r = KnowledgeResolver(reg)
+        delivered: dict[str, str] = {}
+        attachments = r.resolve(
+            agent_name="any-agent",
+            task_description="dedup-test",
+            already_delivered=delivered,
+        )
+        assert len(attachments) == 1
+        assert attachments[0].delivery == "inline"
+
+    # (a) After first dispatch the doc key is NOT in already_delivered
+    #     (that's the dispatcher's job to record; the resolver only reads it).
+    def test_first_dispatch_does_not_mutate_already_delivered(
+        self, tmp_path: Path
+    ) -> None:
+        reg, _ = self._small_registry(tmp_path)
+        r = KnowledgeResolver(reg)
+        delivered: dict[str, str] = {}
+        r.resolve(
+            agent_name="any-agent",
+            task_description="dedup-test",
+            already_delivered=delivered,
+        )
+        # The resolver itself never mutates already_delivered — that's the
+        # dispatcher's responsibility.  Dict must stay empty.
+        assert delivered == {}
+
+    # (b) Second dispatch with doc already in already_delivered → reference.
+    def test_second_dispatch_downgrades_to_reference(
+        self, tmp_path: Path
+    ) -> None:
+        reg, doc_path = self._small_registry(tmp_path)
+        r = KnowledgeResolver(reg)
+        # Simulate that step "1.1" already inlined the doc.
+        delivered: dict[str, str] = {str(doc_path): "1.1"}
+        attachments = r.resolve(
+            agent_name="any-agent",
+            task_description="dedup-test",
+            already_delivered=delivered,
+        )
+        assert len(attachments) == 1
+        assert attachments[0].delivery == "reference"
+
+    # (b) The grounding note on the downgraded attachment references the prior step.
+    def test_downgraded_attachment_grounding_contains_prior_step(
+        self, tmp_path: Path
+    ) -> None:
+        reg, doc_path = self._small_registry(tmp_path)
+        r = KnowledgeResolver(reg)
+        delivered: dict[str, str] = {str(doc_path): "1.1"}
+        attachments = r.resolve(
+            agent_name="any-agent",
+            task_description="dedup-test",
+            already_delivered=delivered,
+        )
+        assert "step 1.1" in attachments[0].grounding
+        assert str(doc_path) in attachments[0].grounding
+
+    # (c) Explicit layer-1 attachment re-inlines even after prior delivery.
+    def test_explicit_layer1_always_inlines_despite_prior_delivery(
+        self, tmp_path: Path
+    ) -> None:
+        reg, doc_path = self._small_registry(tmp_path)
+        r = KnowledgeResolver(reg)
+        # Pretend the doc was already delivered inline in step 1.1.
+        delivered: dict[str, str] = {str(doc_path): "1.1"}
+        attachments = r.resolve(
+            agent_name="any-agent",
+            task_description="dedup-test",
+            explicit_docs=[str(doc_path)],
+            already_delivered=delivered,
+        )
+        explicit_attachments = [a for a in attachments if a.source == "explicit"]
+        assert len(explicit_attachments) == 1
+        assert explicit_attachments[0].delivery == "inline"
+
+    # (d) State serializes / deserializes correctly round-trip.
+    def test_delivered_knowledge_roundtrip_in_execution_state(self) -> None:
+        from agent_baton.models.execution import ExecutionState, MachinePlan
+
+        plan = MachinePlan(
+            task_id="t1",
+            task_summary="test",
+            risk_level="LOW",
+            phases=[],
+        )
+        state = ExecutionState(task_id="t1", plan=plan)
+        state.delivered_knowledge["docs/arch.md"] = "1.1"
+        state.delivered_knowledge["mypack::conventions"] = "1.2"
+
+        data = state.to_dict()
+        assert data["delivered_knowledge"] == {
+            "docs/arch.md": "1.1",
+            "mypack::conventions": "1.2",
+        }
+
+        restored = ExecutionState.from_dict(data)
+        assert restored.delivered_knowledge["docs/arch.md"] == "1.1"
+        assert restored.delivered_knowledge["mypack::conventions"] == "1.2"
+
+    # (d) Older state file without delivered_knowledge field loads without error.
+    def test_missing_delivered_knowledge_field_defaults_to_empty(self) -> None:
+        from agent_baton.models.execution import ExecutionState, MachinePlan
+
+        plan = MachinePlan(
+            task_id="t2",
+            task_summary="test",
+            risk_level="LOW",
+            phases=[],
+        )
+        state = ExecutionState(task_id="t2", plan=plan)
+        raw = state.to_dict()
+        # Simulate old state file that has no delivered_knowledge key.
+        del raw["delivered_knowledge"]
+
+        restored = ExecutionState.from_dict(raw)
+        assert restored.delivered_knowledge == {}
+
+    # No already_delivered passed → behaviour identical to before the feature.
+    def test_none_already_delivered_leaves_behavior_unchanged(
+        self, tmp_path: Path
+    ) -> None:
+        reg, _ = self._small_registry(tmp_path)
+        r = KnowledgeResolver(reg)
+        attachments = r.resolve(
+            agent_name="any-agent",
+            task_description="dedup-test",
+            already_delivered=None,
+        )
+        assert attachments[0].delivery == "inline"

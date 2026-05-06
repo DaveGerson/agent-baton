@@ -7,6 +7,13 @@ tables defined in ``core/storage/schema.py`` (added in schema v4).  It uses
 the same ``ConnectionManager`` pattern as ``SqliteStorage`` — one connection
 per thread, WAL mode, schema applied on first access.
 
+Gastown Part A (bd-2870): when ``gastown_dual_write=True`` the store also
+writes each bead as a JSON note in ``refs/notes/baton-beads`` via
+``NotesAdapter``, and maintains a ``bead_anchors`` SQLite index for O(1)
+git-notes lookups.  The flag defaults to ``False`` (Phase M0 — no behaviour
+change for existing callers).  Phase M1+ flag flips happen in follow-up
+commits.
+
 Design invariants:
 - All SQL uses parameterised queries (no f-string interpolation of values).
 - ``write()`` writes ``beads`` and ``bead_tags`` in a single transaction.
@@ -14,6 +21,8 @@ Design invariants:
   method returns a safe empty/None value and logs a warning rather than
   raising.  This supports graceful degradation when running against an
   older schema.
+- Notes writes are always warn-only on failure — SQLite success is the
+  contract.  A notes failure NEVER rolls back the SQLite transaction.
 
 See ``docs/superpowers/specs/2026-04-12-bead-memory-design.md`` for the
 full design rationale and ``models/bead.py`` for the data model.
@@ -26,14 +35,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from agent_baton.utils.time import utcnow_zulu as _utcnow
+
 if TYPE_CHECKING:
     from agent_baton.models.bead import Bead, BeadLink
 
 _log = logging.getLogger(__name__)
-
-
-def _utcnow() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 class BeadStore:
@@ -45,14 +52,112 @@ class BeadStore:
 
     Args:
         db_path: Absolute path to the project's ``baton.db``.
+        soul_router: Optional :class:`~agent_baton.core.engine.soul_router.SoulRouter`
+            for signing writes and verifying reads.  When ``None``, signing is
+            completely skipped (backward-compatible behaviour, default when
+            ``BATON_SOULS_ENABLED`` is not set).
+        repo_root: Optional path to the git repository root.  Required when
+            ``gastown_dual_write`` is True.  When ``None``, the store attempts
+            to derive the repo root from ``db_path.parent`` (walking upward
+            for a ``.git`` directory).
+        gastown_dual_write: Phase M0 flag (default ``False``).  When ``True``,
+            every ``write()`` call also writes the bead as a git note in
+            ``refs/notes/baton-beads`` (warn-only on failure) and updates the
+            ``bead_anchors`` SQLite index.  Has no effect on reads — the read
+            path always uses SQLite (Phase M0/M1 behaviour).
     """
 
-    def __init__(self, db_path: Path) -> None:
+    def __init__(
+        self,
+        db_path: Path,
+        soul_router=None,  # SoulRouter | None — Wave 6.1 Part B (bd-d975)
+        repo_root: Path | None = None,  # Wave 6.1 Part A (bd-2870)
+        *,
+        gastown_dual_write: bool = False,  # Wave 6.1 Part A (bd-2870)
+    ) -> None:
         from agent_baton.core.storage.connection import ConnectionManager
         from agent_baton.core.storage.schema import PROJECT_SCHEMA_DDL, SCHEMA_VERSION
 
         self._conn_mgr = ConnectionManager(db_path)
         self._conn_mgr.configure_schema(PROJECT_SCHEMA_DDL, SCHEMA_VERSION)
+        # Wave 6.1 Part B (bd-d975): optional SoulRouter for signing.
+        # None → signing disabled (BATON_SOULS_ENABLED=0, the default).
+        self._soul_router = soul_router
+
+        self._gastown_dual_write = gastown_dual_write
+
+        # Resolve repo root for git-notes operations.
+        if repo_root is not None:
+            self._repo_root: Path | None = repo_root
+        elif gastown_dual_write:
+            self._repo_root = self._find_repo_root(db_path)
+        else:
+            self._repo_root = None
+
+        # Lazy-init: NotesAdapter and BeadAnchorIndex are constructed only
+        # when gastown_dual_write is True and a repo root is available.
+        self._notes_adapter = None
+        self._anchor_index = None
+        if self._gastown_dual_write and self._repo_root is not None:
+            self._init_gastown()
+
+    # ------------------------------------------------------------------
+    # Gastown initialisation helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _find_repo_root(db_path: Path) -> Path | None:
+        """Walk upward from *db_path* to find a directory containing ``.git``."""
+        candidate = db_path.parent
+        for _ in range(10):  # max 10 levels up
+            if (candidate / ".git").exists():
+                return candidate
+            parent = candidate.parent
+            if parent == candidate:
+                break
+            candidate = parent
+        return None
+
+    def _init_gastown(self) -> None:
+        """Initialise NotesAdapter and BeadAnchorIndex."""
+        try:
+            from agent_baton.core.engine.notes_adapter import NotesAdapter
+            from agent_baton.core.engine.bead_anchors import BeadAnchorIndex
+
+            self._notes_adapter = NotesAdapter(self._repo_root)  # type: ignore[arg-type]
+            self._anchor_index = BeadAnchorIndex(self._conn())
+            _log.debug(
+                "BeadStore: Gastown dual-write enabled (repo=%s)", self._repo_root
+            )
+        except Exception as exc:
+            _log.warning(
+                "BeadStore: Gastown init failed — dual-write disabled: %s", exc
+            )
+            self._gastown_dual_write = False
+
+    def _compute_anchor(self, bead: "Bead") -> tuple[str, str]:
+        """Return ``(anchor_commit, branch_at_create)`` for *bead*.
+
+        Task-scoped beads anchor to ``HEAD``; project-scoped beads anchor to
+        ``git merge-base origin/main HEAD`` (falling back to the root commit).
+
+        Returns empty strings on any failure so the caller can decide whether
+        to skip the notes write.
+        """
+        if self._notes_adapter is None:
+            return "", ""
+        try:
+            adapter = self._notes_adapter
+            branch = adapter.resolve_branch()
+            is_project_scoped = not bead.task_id  # empty task_id → project scope
+            if is_project_scoped:
+                anchor = adapter.resolve_merge_base()
+            else:
+                anchor = adapter.resolve_head()
+            return anchor, branch
+        except Exception as exc:
+            _log.debug("BeadStore._compute_anchor failed: %s", exc)
+            return "", ""
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -75,11 +180,49 @@ class BeadStore:
     # Public API
     # ------------------------------------------------------------------
 
+    def _sign_bead(self, bead: "Bead") -> "Bead":  # noqa: F821
+        """Resolve the current soul and sign *bead* in-place if souls are enabled.
+
+        Mutates ``bead.signed_by`` and ``bead.signature`` when a soul is
+        available.  Returns the (possibly mutated) bead for fluent use.
+
+        This is a no-op when ``_soul_router`` is ``None`` (BATON_SOULS_ENABLED=0).
+        """
+        if self._soul_router is None:
+            return bead
+        try:
+            from pathlib import Path as _Path
+            affected = [_Path(f) for f in (bead.affected_files or [])]
+            soul = self._soul_router.current_soul(bead.agent_name, affected)
+            if soul is None:
+                return bead
+            bead.signed_by = soul.soul_id
+            # Canonical body = to_dict() without the signature field itself.
+            body = bead.to_dict()
+            body.pop("signature", None)
+            canonical = json.dumps(body, sort_keys=True, ensure_ascii=False).encode()
+            try:
+                bead.signature = soul.sign(canonical)
+            except RuntimeError:
+                # Private key unavailable on this machine — record soul identity
+                # but omit the signature.
+                bead.signature = ""
+                _log.debug(
+                    "BEAD_WARNING: soul-delegated bead_id=%s soul_id=%s — privkey unavailable",
+                    bead.bead_id, soul.soul_id,
+                )
+        except Exception as exc:
+            _log.debug("BeadStore._sign_bead failed (non-fatal): %s", exc)
+        return bead
+
     def write(self, bead: "Bead") -> str:  # noqa: F821
         """Persist *bead* and its normalised ``bead_tags`` rows.
 
         Both writes occur in a single transaction.  If the bead already
         exists (same ``bead_id``) the row is replaced.
+
+        When a :class:`~agent_baton.core.engine.soul_router.SoulRouter` is
+        wired (``BATON_SOULS_ENABLED=1``), the bead is signed before writing.
 
         Args:
             bead: The :class:`~agent_baton.models.bead.Bead` to persist.
@@ -91,12 +234,16 @@ class BeadStore:
         if not self._table_exists():
             _log.debug("BeadStore.write: beads table not found — skipping")
             return ""
+        # Wave 6.1 Part B: sign the bead when souls are enabled.
+        bead = self._sign_bead(bead)
         try:
             conn = self._conn()
             # Use a column list that gracefully degrades on schema v4 databases
             # (which lack quality_score/retrieval_count).  We attempt the full
-            # v5 INSERT first; if it fails due to missing columns we fall back
-            # to the v4 insert.
+            # v31 INSERT first; if it fails due to missing columns (older schema)
+            # we fall back through v5, then v4.
+            signed_by = getattr(bead, "signed_by", "")
+            signature = getattr(bead, "signature", "")
             try:
                 conn.execute(
                     """
@@ -104,17 +251,18 @@ class BeadStore:
                         bead_id, task_id, step_id, agent_name, bead_type,
                         content, confidence, scope, tags, affected_files,
                         status, created_at, closed_at, summary, links,
-                        source, token_estimate, quality_score, retrieval_count
+                        source, token_estimate, quality_score, retrieval_count,
+                        signed_by, signature
                     ) VALUES (
                         ?, ?, ?, ?, ?,
                         ?, ?, ?, ?, ?,
                         ?, ?, ?, ?, ?,
-                        ?, ?, ?, ?
+                        ?, ?, ?, ?, ?, ?
                     )
                     """,
                     (
                         bead.bead_id,
-                        bead.task_id,
+                        bead.task_id or None,  # empty string → NULL (project-scoped bead)
                         bead.step_id,
                         bead.agent_name,
                         bead.bead_type,
@@ -132,44 +280,85 @@ class BeadStore:
                         bead.token_estimate,
                         getattr(bead, "quality_score", 0.0),
                         getattr(bead, "retrieval_count", 0),
+                        signed_by,
+                        signature,
                     ),
                 )
             except Exception:
-                # Fall back to v4-compatible insert (no quality/retrieval cols).
-                conn.execute(
-                    """
-                    INSERT OR REPLACE INTO beads (
-                        bead_id, task_id, step_id, agent_name, bead_type,
-                        content, confidence, scope, tags, affected_files,
-                        status, created_at, closed_at, summary, links,
-                        source, token_estimate
-                    ) VALUES (
-                        ?, ?, ?, ?, ?,
-                        ?, ?, ?, ?, ?,
-                        ?, ?, ?, ?, ?,
-                        ?, ?
+                try:
+                    # Fall back to v5-compatible insert (no signed_by/signature cols).
+                    conn.execute(
+                        """
+                        INSERT OR REPLACE INTO beads (
+                            bead_id, task_id, step_id, agent_name, bead_type,
+                            content, confidence, scope, tags, affected_files,
+                            status, created_at, closed_at, summary, links,
+                            source, token_estimate, quality_score, retrieval_count
+                        ) VALUES (
+                            ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?
+                        )
+                        """,
+                        (
+                            bead.bead_id,
+                            bead.task_id or None,
+                            bead.step_id,
+                            bead.agent_name,
+                            bead.bead_type,
+                            bead.content,
+                            bead.confidence,
+                            bead.scope,
+                            json.dumps(bead.tags),
+                            json.dumps(bead.affected_files),
+                            bead.status,
+                            bead.created_at or _utcnow(),
+                            bead.closed_at,
+                            bead.summary,
+                            json.dumps([lnk.to_dict() for lnk in bead.links]),
+                            bead.source,
+                            bead.token_estimate,
+                            getattr(bead, "quality_score", 0.0),
+                            getattr(bead, "retrieval_count", 0),
+                        ),
                     )
-                    """,
-                    (
-                        bead.bead_id,
-                        bead.task_id,
-                        bead.step_id,
-                        bead.agent_name,
-                        bead.bead_type,
-                        bead.content,
-                        bead.confidence,
-                        bead.scope,
-                        json.dumps(bead.tags),
-                        json.dumps(bead.affected_files),
-                        bead.status,
-                        bead.created_at or _utcnow(),
-                        bead.closed_at,
-                        bead.summary,
-                        json.dumps([lnk.to_dict() for lnk in bead.links]),
-                        bead.source,
-                        bead.token_estimate,
-                    ),
-                )
+                except Exception:
+                    # Final fallback: v4-compatible insert (no quality/retrieval cols).
+                    conn.execute(
+                        """
+                        INSERT OR REPLACE INTO beads (
+                            bead_id, task_id, step_id, agent_name, bead_type,
+                            content, confidence, scope, tags, affected_files,
+                            status, created_at, closed_at, summary, links,
+                            source, token_estimate
+                        ) VALUES (
+                            ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?, ?,
+                            ?, ?
+                        )
+                        """,
+                        (
+                            bead.bead_id,
+                            bead.task_id or None,
+                            bead.step_id,
+                            bead.agent_name,
+                            bead.bead_type,
+                            bead.content,
+                            bead.confidence,
+                            bead.scope,
+                            json.dumps(bead.tags),
+                            json.dumps(bead.affected_files),
+                            bead.status,
+                            bead.created_at or _utcnow(),
+                            bead.closed_at,
+                            bead.summary,
+                            json.dumps([lnk.to_dict() for lnk in bead.links]),
+                            bead.source,
+                            bead.token_estimate,
+                        ),
+                    )
             # Normalised tag rows — delete existing tags for this bead first
             # so that a replace operation does not leave stale tags.
             conn.execute("DELETE FROM bead_tags WHERE bead_id = ?", (bead.bead_id,))
@@ -179,13 +368,45 @@ class BeadStore:
                     (bead.bead_id, tag),
                 )
             conn.commit()
+
             return bead.bead_id
         except Exception as exc:
             _log.warning("BeadStore.write failed for %s: %s", bead.bead_id, exc)
             return ""
+        finally:
+            # ------------------------------------------------------------------
+            # Gastown Phase M0: dual-write to git notes (warn-only on failure).
+            # Runs in `finally` so notes failures NEVER prevent SQLite success
+            # from being returned.  `bead.bead_id` is the return value only when
+            # the try block above completed without exception; in the except path
+            # the finally body still runs but the caller already gets "".
+            # Notes writes are fully isolated — any exception here is swallowed.
+            # ------------------------------------------------------------------
+            if self._gastown_dual_write and self._notes_adapter is not None:
+                try:
+                    anchor_commit, branch = self._compute_anchor(bead)
+                    if anchor_commit:
+                        blob = bead.to_dict()
+                        blob["schema_version"] = "gastown-1"
+                        blob["anchor_commit"] = anchor_commit
+                        blob["branch_at_create"] = branch
+                        self._notes_adapter.write(bead.bead_id, anchor_commit, blob)
+                        if self._anchor_index is not None:
+                            self._anchor_index.put(bead.bead_id, anchor_commit)
+                except Exception as notes_exc:
+                    _log.warning(
+                        "BEAD_WARNING: notes-write-failed bead=%s exc=%s",
+                        bead.bead_id,
+                        notes_exc,
+                    )
 
     def read(self, bead_id: str) -> "Bead | None":  # noqa: F821
         """Fetch a single bead by ID.
+
+        When a :class:`~agent_baton.core.engine.soul_router.SoulRouter` is
+        wired, the bead's signature is verified on load.  A mismatch emits
+        ``BEAD_WARNING: signature-invalid`` but the bead is still returned
+        (degrade, don't fail).
 
         Args:
             bead_id: The ``bead_id`` to look up.
@@ -201,11 +422,88 @@ class BeadStore:
                 "SELECT * FROM beads WHERE bead_id = ?", (bead_id,)
             ).fetchone()
             if row is None:
+                # Gastown Part A fallback: consult git-notes when SQLite misses
+                # and dual-write is enabled (bd-971d).
+                if self._gastown_dual_write and self._notes_adapter is not None:
+                    return self._read_from_notes(bead_id)
                 return None
-            return self._row_to_bead(row)
+            bead = self._row_to_bead(row)
+            # Wave 6.1 Part B: verify signature when souls are wired.
+            self._verify_bead_signature(bead)
+            return bead
         except Exception as exc:
             _log.warning("BeadStore.read failed for %s: %s", bead_id, exc)
             return None
+
+    def _read_from_notes(self, bead_id: str) -> "Bead | None":  # noqa: F821
+        """Attempt to reconstruct a bead from git-notes when the SQLite row is absent.
+
+        Requires ``gastown_dual_write=True`` and a wired ``_notes_adapter``.
+        Uses ``_anchor_index`` to look up the anchor commit, then calls
+        ``_notes_adapter.read()`` to fetch the JSON blob.
+
+        Returns the reconstructed :class:`~agent_baton.models.bead.Bead` or
+        ``None`` on any failure (missing anchor, no note, parse error).
+        """
+        try:
+            anchor_commit = None
+            if self._anchor_index is not None:
+                anchor_commit = self._anchor_index.get(bead_id)
+            if not anchor_commit:
+                _log.debug(
+                    "BeadStore._read_from_notes: no anchor commit for %s — cannot consult notes",
+                    bead_id,
+                )
+                return None
+            blob = self._notes_adapter.read(bead_id, anchor_commit)
+            if blob is None:
+                return None
+            from agent_baton.models.bead import Bead  # noqa: PLC0415
+            bead = Bead.from_dict(blob)
+            _log.debug(
+                "BeadStore._read_from_notes: reconstructed %s from git-notes anchor=%s",
+                bead_id,
+                anchor_commit[:8],
+            )
+            return bead
+        except Exception as exc:
+            _log.warning(
+                "BeadStore._read_from_notes: failed for %s: %s", bead_id, exc
+            )
+            return None
+
+    def _verify_bead_signature(self, bead: "Bead") -> None:  # noqa: F821
+        """Verify the ed25519 signature on *bead* if present.
+
+        Emits ``BEAD_WARNING: signature-invalid`` on mismatch.  Bead is NOT
+        modified — the caller receives the original record regardless.
+
+        No-op when:
+        - ``_soul_router`` is ``None`` (souls disabled).
+        - ``bead.signed_by == ""`` (unsigned bead — legacy or pre-souls).
+        - ``bead.signature == ""`` (soul identity recorded but key was
+          unavailable at write time).
+        """
+        if self._soul_router is None:
+            return
+        if not bead.signed_by or not bead.signature:
+            return
+        try:
+            # Reconstruct canonical body (same logic as _sign_bead).
+            body = bead.to_dict()
+            body.pop("signature", None)
+            canonical = json.dumps(body, sort_keys=True, ensure_ascii=False).encode()
+            # Route through SoulRouter.verify_signature so that the revocation
+            # guard is enforced unconditionally (bd-1ca2).  The router handles
+            # soul-not-found, is_revoked, and the cryptographic check, emitting
+            # its own structured BEAD_WARNING log lines for each failure mode.
+            if not self._soul_router.verify_signature(bead.signed_by, canonical, bead.signature):
+                _log.warning(
+                    "BEAD_WARNING: signature-invalid bead_id=%s signed_by=%s",
+                    bead.bead_id, bead.signed_by,
+                )
+        except Exception as exc:
+            _log.debug("BeadStore._verify_bead_signature error: %s", exc)
 
     def query(
         self,
@@ -341,6 +639,30 @@ class BeadStore:
             conn.commit()
         except Exception as exc:
             _log.warning("BeadStore.close failed for %s: %s", bead_id, exc)
+
+    def annotate(self, bead_id: str, note: str, agent_name: str | None = None) -> None:
+        """Append a timestamped annotation to a bead's content.
+
+        Works on beads in any status (open, closed, archived).
+        """
+        if not self._table_exists():
+            return
+        try:
+            now = _utcnow()
+            author = f" ({agent_name})" if agent_name else ""
+            separator = f"\n\n--- annotated {now}{author} ---\n"
+            conn = self._conn()
+            conn.execute(
+                """
+                UPDATE beads
+                SET content = content || ?
+                WHERE bead_id = ?
+                """,
+                (separator + note, bead_id),
+            )
+            conn.commit()
+        except Exception as exc:
+            _log.warning("BeadStore.annotate failed for %s: %s", bead_id, exc)
 
     def link(self, source_id: str, target_id: str, link_type: str) -> None:
         """Add a typed link from *source_id* to *target_id*.
@@ -562,6 +884,58 @@ class BeadStore:
             return 0
 
     # ------------------------------------------------------------------
+    # Wave 6.2 Part A (bd-707d) — Swarm approval helpers
+    # ------------------------------------------------------------------
+
+    def find_recent_approvals(
+        self,
+        tag: str,
+        max_age_minutes: int = 5,
+    ) -> "list[Bead]":  # noqa: F821
+        """Return open approval beads that carry *tag* and were created within
+        the last *max_age_minutes* minutes.
+
+        Used by the ``baton swarm refactor`` sign-off gate when
+        ``--require-approval-bead`` is set without an explicit bead ID.
+
+        Args:
+            tag: The tag that must be present on the bead (e.g.
+                ``"swarm-refactor"``).
+            max_age_minutes: How far back to look, in minutes (default 5).
+
+        Returns:
+            List of matching :class:`~agent_baton.models.bead.Bead` objects,
+            newest first.  Empty list when none are found or on any error.
+        """
+        if not self._table_exists():
+            return []
+        try:
+            from datetime import timedelta
+
+            cutoff = (
+                datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
+            ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+            rows = self._conn().execute(
+                """
+                SELECT * FROM beads
+                WHERE bead_type = 'approval'
+                  AND status = 'open'
+                  AND created_at >= ?
+                  AND bead_id IN (
+                      SELECT bead_id FROM bead_tags WHERE tag = ?
+                  )
+                ORDER BY created_at DESC
+                LIMIT 50
+                """,
+                (cutoff, tag),
+            ).fetchall()
+            return [self._row_to_bead(r) for r in rows]
+        except Exception as exc:
+            _log.warning("BeadStore.find_recent_approvals failed: %s", exc)
+            return []
+
+    # ------------------------------------------------------------------
     # Internal conversion helpers
     # ------------------------------------------------------------------
 
@@ -599,9 +973,20 @@ class BeadStore:
         except (IndexError, KeyError, TypeError):
             retrieval_count = 0
 
+        # signed_by and signature were added in schema v31 — use dict-style
+        # access with a fallback so older databases degrade gracefully.
+        try:
+            signed_by = row["signed_by"] or ""
+        except (IndexError, KeyError, TypeError):
+            signed_by = ""
+        try:
+            signature = row["signature"] or ""
+        except (IndexError, KeyError, TypeError):
+            signature = ""
+
         return Bead(
             bead_id=row["bead_id"],
-            task_id=row["task_id"],
+            task_id=row["task_id"] or "",  # NULL in DB → empty string in model (project-scoped)
             step_id=row["step_id"],
             agent_name=row["agent_name"],
             bead_type=row["bead_type"],
@@ -619,4 +1004,6 @@ class BeadStore:
             token_estimate=int(row["token_estimate"] or 0),
             quality_score=quality_score,
             retrieval_count=retrieval_count,
+            signed_by=signed_by,
+            signature=signature,
         )

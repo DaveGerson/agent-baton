@@ -1,0 +1,73 @@
+{
+  "_template_meta": {
+    "name": "learning-cycle",
+    "version": "2",
+    "description": "Two-phase learning cycle: learning-analyst inspects recent execution data and writes evidence-backed Recommendation rows; a review step confirms the analysis. Does NOT apply changes — proposals are routed through the existing escalation / system-maintainer flow.",
+    "instantiate_with": "baton learn run-cycle",
+    "parameters": {
+      "lookback_executions": {
+        "description": "Number of recent executions the analyst should inspect",
+        "default": 20
+      }
+    }
+  },
+  "task_id": "learning-cycle-template",
+  "task_summary": "Run learning cycle: analyst inspects recent executions and proposes improvements as Recommendation rows",
+  "risk_level": "LOW",
+  "budget_tier": "standard",
+  "execution_mode": "phased",
+  "git_strategy": "no-commit",
+  "task_type": "analysis",
+  "intervention_level": "low",
+  "complexity": "light",
+  "phases": [
+    {
+      "phase_id": 1,
+      "name": "Analyze",
+      "steps": [
+        {
+          "step_id": "1.1",
+          "agent_name": "learning-analyst",
+          "model": "sonnet",
+          "step_type": "consulting",
+          "task_description": "Read the last 20 step_results, gate_results, retrospectives, scorecards, and improvement_reports from .claude/team-context/. Identify evidence-backed patterns (>=3 data points each) and write proposed improvements as Recommendation rows via the ImprovementLoop ingestion path. Persist your structured output to .claude/team-context/learning-cycle-analysis.json with keys agent_issues, gate_issues, budget_issues, retrospective_themes, unresolved_escalations. Do NOT modify code; do NOT apply changes — your output is escalated for human review or system-maintainer action.",
+          "deliverables": [
+            ".claude/team-context/learning-cycle-analysis.json"
+          ],
+          "allowed_paths": [
+            ".claude/team-context/learning-cycle-analysis.json",
+            ".claude/team-context/improvements/reports/"
+          ],
+          "context_files": [
+            ".claude/team-context/baton.db",
+            ".claude/team-context/learned-patterns.json",
+            ".claude/team-context/budget-recommendations.json"
+          ]
+        }
+      ]
+    },
+    {
+      "phase_id": 2,
+      "name": "Review",
+      "steps": [
+        {
+          "step_id": "2.1",
+          "agent_name": "plan-reviewer",
+          "model": "sonnet",
+          "step_type": "reviewing",
+          "task_description": "Read .claude/team-context/learning-cycle-analysis.json. Verify each finding cites at least 3 evidence data points (task IDs, agent names, counts). Mark findings that fail the evidence bar as 'insufficient'. Print a concise summary grouped by severity. This is a soft review — proposals proceed to the existing escalation / system-maintainer flow regardless; this step exists to flag low-quality proposals before they reach a human.",
+          "depends_on": ["1.1"],
+          "deliverables": [
+            ".claude/team-context/learning-cycle-review.json"
+          ],
+          "allowed_paths": [
+            ".claude/team-context/learning-cycle-review.json"
+          ],
+          "context_files": [
+            ".claude/team-context/learning-cycle-analysis.json"
+          ]
+        }
+      ]
+    }
+  ]
+}

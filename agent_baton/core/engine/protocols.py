@@ -257,3 +257,36 @@ class ExecutionDriver(Protocol):
             The next action to perform.
         """
         ...
+
+    def provide_interact_input(
+        self,
+        step_id: str,
+        input_text: str,
+        source: str = "human",
+    ) -> None:
+        """Record human input for an interactive step awaiting a response.
+
+        Appends a human turn to the step's interaction history and sets the
+        step status to ``interact_dispatched`` so the next
+        ``_determine_action()`` call returns a DISPATCH continuation.
+
+        Args:
+            step_id: The step ID currently in ``interacting`` status.
+            input_text: Human-provided text for the next agent turn.
+            source: Origin of this input turn — ``"human"`` (default),
+                ``"auto-agent"`` (Tier 2 agent-to-agent dialogue), or
+                ``"webhook"`` (external webhook response).
+        """
+        ...
+
+    def complete_interaction(self, step_id: str) -> None:
+        """Promote an interacting step to ``complete`` using its last agent output.
+
+        Called when the human decides the multi-turn exchange is finished
+        (``baton execute interact --step-id X --done``) without the agent
+        emitting the ``INTERACT_COMPLETE`` signal.
+
+        Args:
+            step_id: The step ID currently in ``interacting`` status.
+        """
+        ...

@@ -499,8 +499,6 @@ class TestExtractFilePaths:
         ("Update agent_baton/core/engine/planner.py", ["agent_baton/core/engine/planner.py"]),
         ("See docs/spec.md for details", ["docs/spec.md"]),
         ("Edit tests/test_foo.py and src/bar.py", ["tests/test_foo.py", "src/bar.py"]),
-        # Paths with trailing slash (directory-like)
-        ("Work in agent_baton/models/", ["agent_baton/models/"]),
         # Known extensions without slash
         ("Change config.yaml and schema.json", ["config.yaml", "schema.json"]),
         # CLAUDE.md — single-component with known extension
@@ -522,6 +520,10 @@ class TestExtractFilePaths:
         ("Fix the issue in auth", "auth"),
         # Numbers only
         ("Step 1.1 is complete", "1.1"),
+        # bd-0960: trailing-slash directory references are indistinguishable
+        # from parse artifacts of slash-separated prose phrases — reject both.
+        ("Work in agent_baton/models/", "agent_baton/models/"),
+        ("Add fields required_role/timeout_minutes/", "required_role/timeout_minutes/"),
     ])
     def test_rejects_non_paths(
         self, planner: IntelligentPlanner, text: str, rejected: str

@@ -1,0 +1,869 @@
+# Technical Design
+
+> **Audience.** Engineers modifying or extending the engine. This page
+> documents the load-bearing internal patterns: the planner pipeline,
+> the executor's inner state-determination loop, dispatcher prompt
+> assembly, gate enforcement, the persistence dual-write strategy, and
+> the runtime's async dispatch model. For high-level orientation see
+> [high-level-design.md](high-level-design.md). For the action enum and
+> transition table see [state-machine.md](state-machine.md).
+>
+> **005b decomposition.** The resolver/PhaseManager/state-pattern split
+> introduced in proposal 005b is documented here in §3.2–3.2.4. Detailed
+> extraction maps are in
+> [docs/internal/005b-phase1-design.md](../internal/005b-phase1-design.md),
+> [docs/internal/005b-phase2-design.md](../internal/005b-phase2-design.md),
+> and [docs/internal/005b-phase3-design.md](../internal/005b-phase3-design.md).
+
+---
+
+## 1. Layering and the seven contracts
+
+The engine is built on seven explicit contracts. Every internal pattern
+respects one or more of them.
+
+| # | Contract | Type | Where |
+|---|----------|------|-------|
+| 1 | `ExecutionDriver` | `typing.Protocol` (runtime-checkable) | [`core/engine/protocols.py:22`](../../agent_baton/core/engine/protocols.py) |
+| 2 | `StorageBackend` | `typing.Protocol` (runtime-checkable) | [`core/storage/protocol.py`](../../agent_baton/core/storage/protocol.py) |
+| 3 | `AgentLauncher` | `typing.Protocol` | [`core/runtime/launcher.py`](../../agent_baton/core/runtime/launcher.py) |
+| 4 | `TaskClassifier` | `typing.Protocol` | [`core/engine/classifier.py`](../../agent_baton/core/engine/classifier.py) |
+| 5 | `RetroEngine` | `typing.Protocol` | [`core/engine/planner.py:743`](../../agent_baton/core/engine/planner.py) |
+| 6 | `ExternalSourceAdapter` | `typing.Protocol` | [`core/storage/adapters/__init__.py`](../../agent_baton/core/storage/adapters/__init__.py) |
+| 7 | `_print_action()` | Function (wire format) | [`cli/commands/execution/execute.py:568`](../../agent_baton/cli/commands/execution/execute.py) |
+
+Contracts 1-6 are Python protocols — they let tests inject lightweight
+substitutes without subclassing concrete implementations (ADR-03).
+Contract 7 is the wire format Claude depends on (Invariant 2).
+
+---
+
+## 2. Planner internals (`IntelligentPlanner`)
+
+### 2.1 Class shape
+
+`IntelligentPlanner` ([`planner.py:760`](../../agent_baton/core/engine/planner.py))
+accepts six optional collaborators. All degrade gracefully when absent:
+
+```python
+IntelligentPlanner(
+    team_context_root: Path | None = None,
+    classifier: DataClassifier | None = None,           # govern
+    policy_engine: PolicyEngine | None = None,          # govern
+    retro_engine: RetroEngine | None = None,            # observe
+    knowledge_registry: KnowledgeRegistry | None = None, # orchestration
+    task_classifier: TaskClassifier | None = None,      # engine.classifier
+    bead_store=None,                                    # engine.bead_store
+    project_config: ProjectConfig | None = None,        # config
+)
+```
+
+### 2.2 `create_plan()` pipeline
+
+`create_plan()` ([`planner.py:1001`](../../agent_baton/core/engine/planner.py))
+is the entry point. The 13-step pipeline is deliberately ordered so each
+step's output feeds the next:
+
+```
+1.  Parse task description
+2.  AgentRouter.detect_stack() ─ scan repo root + 2 levels for
+                                   package signals (package.json,
+                                   pyproject.toml, etc.)
+3.  FallbackClassifier.classify() ─ Haiku → keyword fallback;
+                                     yields task_type, complexity,
+                                     agent_names, max_agents
+4.  PatternLearner.find_pattern() ─ historical patterns matching
+                                     (task_type, stack)
+5.  BudgetTuner.recommend() ─ tier recommendation (lean / standard / full)
+6.  PerformanceScorer.scorecard() ─ per-agent health rating
+7.  DataClassifier.classify() ─ risk level + guardrail preset
+8.  PolicyEngine.evaluate() ─ block-severity violations surface as
+                               APPROVAL pre-dispatch
+9.  AgentRouter.resolve_agents() ─ apply LearnedOverrides.flavor_map +
+                                    stack flavor (e.g. backend-engineer
+                                    → backend-engineer--python)
+10. KnowledgeResolver.resolve() ─ 4-layer match: explicit →
+                                   agent-declared → tag-strict → TF-IDF
+11. KnowledgeRanker.rank() ─ effectiveness × recency × usage (bd-0184);
+                              capped by BATON_MAX_KNOWLEDGE_PER_STEP
+12. BeadAnalyzer.analyze() ─ historical-bead structure hints (review
+                              phases, context files, approval gates)
+13. _apply_project_config() ─ overlay baton.yaml defaults
+```
+
+The output is a `MachinePlan` with phases, steps, gates, and approvals.
+A companion `plan.md` is generated by `MachinePlan.to_markdown()`.
+
+### 2.3 Graceful degradation rules
+
+Every collaborator is optional. The planner contract:
+
+- **Missing pattern data** → fall back to default agent roster from the
+  classifier output.
+- **Missing budget data** → use the tier the classifier recommended.
+- **Missing scorecards** → no agent-health warnings; selection unchanged.
+- **Missing knowledge registry** → skip the resolution step entirely; no
+  knowledge attachments.
+- **Missing policy engine** → no pre-dispatch blocks.
+- **`Haiku` classifier unavailable** → `KeywordClassifier` fallback;
+  `classification_source: "keyword-fallback"` recorded in the plan.
+
+`_classify()` and `_pattern_for()` log warnings but never raise.
+
+### 2.4 Adaptive sizing
+
+The classifier returns a `complexity` field (`light`/`medium`/`heavy`).
+The planner uses it to choose the phase template:
+
+| Complexity | Default phases |
+|-----------|----------------|
+| `light` | 1 phase: implementation + review |
+| `medium` | 2 phases: implementation; test + review |
+| `heavy` | 3+ phases: spec; implementation; test + review; (optional) approval |
+
+`max_agents` from the classifier caps the team-step size.
+
+---
+
+## 3. Executor inner loop (`ExecutionEngine`)
+
+### 3.1 Entry methods
+
+The state machine has three external entry methods on
+[`executor.py:1301`](../../agent_baton/core/engine/executor.py),
+[`:1503`](../../agent_baton/core/engine/executor.py),
+[`:1539`](../../agent_baton/core/engine/executor.py):
+
+| Method | Purpose |
+|--------|---------|
+| `start(plan)` | Bind plan, persist initial state, return first action. |
+| `next_action()` | Single-action poll. Used by the CLI. |
+| `next_actions()` | Multi-action poll for parallel dispatch. Used by `TaskWorker`. |
+
+All three converge on the private `_drive_resolver_loop(state)`.
+The former `_determine_action` god-method was deleted in proposal 005b
+(step 2.3d) and replaced by the three-stage pipeline described in §3.2.
+
+### 3.2 Decision pipeline (post-005b)
+
+After proposal 005b, the next-action computation is a three-stage pipeline:
+
+1. **Resolve intent** — [`ActionResolver`](../../agent_baton/core/engine/resolver.py)
+   reads the immutable state and returns a `ResolverDecision`
+   (`DecisionKind` + payload). No mutation.
+2. **Dispatch on `DecisionKind`** — `_apply_resolver_decision()` on the
+   engine looks up a heavy builder in a dispatch table keyed by
+   `DecisionKind` and calls it.  Builders are responsible for the
+   final `ExecutionAction` construction and for invoking the small
+   mutation epilogue.
+3. **State-class epilogue** — `_state_handler_for(state.status).handle(state, decision)`
+   applies the small mutation epilogue (status flips like
+   ``"gate_pending"`` / ``"approval_pending"`` / ``"failed"``).
+   See §3.2.2.
+
+`DecisionKind` is a 22-value enum in
+[`resolver.py`](../../agent_baton/core/engine/resolver.py):
+`TERMINAL_COMPLETE`, `TERMINAL_FAILED`, `APPROVAL_PENDING`,
+`FEEDBACK_PENDING`, `GATE_PENDING`, `GATE_FAILED`, `PAUSED_TAKEOVER`,
+`BUDGET_EXCEEDED`, `NO_PHASES_LEFT`, `EMPTY_PHASE_GATE`,
+`EMPTY_PHASE_ADVANCE`, `STEP_FAILED_IN_PHASE`, `DISPATCH`,
+`TEAM_DISPATCH`, `INTERACT`, `INTERACT_CONTINUE`, `TIMEOUT`, `WAIT`,
+`PHASE_NEEDS_APPROVAL`, `PHASE_NEEDS_FEEDBACK`, `PHASE_NEEDS_GATE`,
+`PHASE_ADVANCE_OK`.
+
+The resolver walks this decision tree:
+
+```
+                ┌─ state.status == "complete"      → TERMINAL_COMPLETE
+                ├─ state.status == "failed"        → TERMINAL_FAILED
+                ├─ state.status == "cancelled"     → TERMINAL_FAILED
+state.status -->┼─ state.status == "budget_exceeded" → BUDGET_EXCEEDED
+                ├─ state.status == "paused-takeover" → PAUSED_TAKEOVER
+                └─ otherwise:
+                          │
+                          v
+            ┌─ pending feedback? → FEEDBACK_PENDING / PHASE_NEEDS_FEEDBACK
+            ├─ pending approval? → APPROVAL_PENDING / PHASE_NEEDS_APPROVAL
+            ├─ pending interact? → INTERACT / INTERACT_CONTINUE
+            ├─ phase has unfinished steps?
+            │     │
+            │     ├─ ready dispatchable step? → DISPATCH (or TEAM_DISPATCH)
+            │     ├─ dispatched in flight?    → WAIT
+            │     └─ failed?                  → STEP_FAILED_IN_PHASE
+            ├─ phase complete, gate not run? → PHASE_NEEDS_GATE / EMPTY_PHASE_GATE
+            ├─ gate failed, retries < cap?   → GATE_FAILED
+            ├─ gate failed, retries == cap?  → TERMINAL_FAILED
+            └─ all phases done?              → NO_PHASES_LEFT / TERMINAL_COMPLETE
+```
+
+`_drive_resolver_loop()` runs the resolver → dispatch loop until it
+emits a terminal `ExecutionAction`.  The two transitive
+`DecisionKind` values (`EMPTY_PHASE_ADVANCE`, `PHASE_ADVANCE_OK`) call
+`PhaseManager.advance_phase()` and re-enter the loop instead of
+returning an action.
+
+#### 3.2.1 `PhaseManager` — phase-boundary evaluator + advance mutator
+
+[`PhaseManager`](../../agent_baton/core/engine/phase_manager.py) is a
+zero-arg, stateless helper that owns:
+
+- **Pure read methods**: `is_phase_complete`, `evaluate_phase_gate`,
+  `evaluate_phase_approval_gate`, `evaluate_phase_feedback_gate`.
+  These delegate to module helpers in
+  [`_executor_helpers.py`](../../agent_baton/core/engine/_executor_helpers.py)
+  and return frozen `GateOutcome` / `ApprovalGateOutcome` /
+  `FeedbackGateOutcome` records.
+- **One mutator**: `advance_phase(state, *, set_status_running: bool)`
+  bumps `state.current_phase`, resets `state.current_step_index`, and
+  optionally flips `state.status` to ``"running"``.
+
+By architectural invariant (enforced by
+`tests/test_architecture.py::test_only_phase_manager_bumps_current_phase`),
+`PhaseManager.advance_phase` is the **only** site in `agent_baton/`
+allowed to bump `state.current_phase` or reset `state.current_step_index`.
+All callers (resolver-loop arms, `record_gate_result`) must route
+through it and pair the call with `_publish_phase_started(state)` to
+emit the `phase_pre_start` + `phase_started` events.
+
+Design rationale: [docs/internal/005b-phase3-design.md §1](../internal/005b-phase3-design.md).
+
+#### 3.2.2 State pattern — small mutation epilogue
+
+[`states.py`](../../agent_baton/core/engine/states.py) defines four
+state-handler singletons matched to `state.status` clusters:
+
+| Status cluster | Handler | Role |
+|----------------|---------|------|
+| `"pending"` | `PlanningState` | No-op (engine's `start()` flips to `"running"`). |
+| `"running"` | `ExecutingPhaseState` | Owns the bulk of mid-flight status flips (gate_pending, approval_pending, failed, …). |
+| `"approval_pending"`, `"feedback_pending"`, `"gate_pending"`, `"gate_failed"`, `"paused"`, `"paused-takeover"` | `AwaitingApprovalState` | Pass-through for blocked-state decisions; raises on DISPATCH-class arrivals (resolver bug surface). |
+| `"complete"`, `"failed"`, `"budget_exceeded"` | `TerminalState` | No-ops on terminal-pass-through; raises on any non-terminal `DecisionKind`. |
+
+Engine maintains a `_state_handlers: dict[str, ExecutionPhaseStateProtocol]`
+map and resolves it via `_state_handler_for(status)`.  Unknown
+statuses fall back to `ExecutingPhaseState` with a `_log.warning` —
+deliberate forward-compat for daemon/swarm/future status keys
+(see `_state_handler_for` docstring, bd-7eac).
+
+State classes import only from `agent_baton.models.*` and
+`agent_baton.core.engine.resolver`; they MUST NOT reach back into
+the engine.
+
+#### 3.2.3 Engine helpers
+
+[`_executor_helpers.py`](../../agent_baton/core/engine/_executor_helpers.py)
+holds the leaf predicates shared by `PhaseManager` and the resolver:
+`is_phase_complete`, `gate_passed_for_phase`,
+`approval_passed_for_phase`, `feedback_resolved_for_phase`.  These
+are pure reads over `ExecutionState`, kept module-level so neither
+PhaseManager nor ActionResolver imports the engine.
+
+#### 3.2.4 Heavy builders (still on `ExecutionEngine`)
+
+The engine retains the heavy action-construction methods that the
+resolver dispatch table calls into:
+
+- `_dispatch_action()` builds the `DISPATCH` action: calls
+  `PromptDispatcher`, attaches knowledge, selects beads via
+  `BeadSelector`, populates worktree fields, applies path-enforcement.
+- `_approval_action()` builds approval actions, including
+  policy-violation approvals.
+- `_feedback_action()`, `_build_gate_action()`, `_build_complete_action()`,
+  `_build_swarm_dispatch_action()` cover the remaining builders.
+
+These are single-responsibility-coherent slices that remain on the
+engine because they own real essential complexity (governance,
+prompt composition, knowledge resolution, swarm fan-out).  Further
+extraction (`DispatchBuilder`, `StepResultRecorder`, `KnowledgeResolver`)
+is tracked as 005b-phase5-future discoveries — the post-005b engine
+size of ~6,900 LOC is the realistic shape, not the proposal's
+aspirational ~300 LOC.
+
+### 3.3 Persistence dual-write
+
+The engine accepts an optional `storage: StorageBackend` constructor
+argument. When set:
+
+- Primary writes go through the storage backend (SQLite).
+- A `StatePersistence` instance is **also** maintained for file-based
+  fallback so legacy readers (PMO scanner, `baton execute list/switch`)
+  stay current during the SQLite transition.
+- On SQLite write failure, the engine logs a warning and continues with
+  file-only persistence.
+
+When `storage` is None, only the legacy file-based persistence is used.
+
+The dual-write covers `executions`, `step_results`, `gate_results`,
+`approval_results`, `feedback_results`, `amendments`. The bead store
+([`BeadStore`](../../agent_baton/core/engine/bead_store.py)) and event
+persistence write directly to SQLite without a JSON mirror.
+
+### 3.4 Step recording side-effects
+
+`record_step_result()` ([`executor.py:1730`](../../agent_baton/core/engine/executor.py))
+parses agent output for several signal types in this order:
+
+1. `parse_knowledge_gap()` — `KNOWLEDGE_GAP/CONFIDENCE/TYPE` → adds to
+   `state.pending_gaps`; `determine_escalation()` produces an action of
+   `auto-resolve` / `best-effort` / `queue-for-gate`.
+2. `parse_bead_signals()` — `BEAD_DISCOVERY/DECISION/WARNING` → creates
+   beads in `BeadStore`; publishes `bead.created` events.
+3. `parse_bead_feedback()` — `BEAD_USEFUL/STALE` → updates
+   `Bead.quality_score`.
+4. **OTel span emission** (env-gated): `step.dispatch` span with
+   `step_id`, `agent_name`, `task_id`, `step_type`, `model`, `status`,
+   `tokens_used`, 1 KiB-truncated outcome.
+5. **Trace event** appended to in-memory `TaskTrace` (written at
+   `complete()`).
+
+All signal-parsing failures are caught and logged; they never raise to
+the caller. The `step_result` itself is recorded regardless.
+
+### 3.5 `complete()` finalization
+
+`complete()` ([`executor.py:3121`](../../agent_baton/core/engine/executor.py))
+runs in this order:
+
+```
+1. Set state.status = "complete"; state.completed_at = utcnow()
+2. Persist final state
+3. Run commit consolidation if a git strategy is declared (lazy import via `agent_baton.core.engine.consolidator`; see note below)
+4. Write trace via TraceRecorder
+5. Append usage record via UsageLogger
+6. Generate retrospective via RetrospectiveEngine
+7. Run ImprovementLoop.run() (best-effort)
+8. auto_sync_current_project() (best-effort)
+9. Return summary string
+```
+
+Steps 4-8 are wrapped in `try/except` so a failure in retrospective
+generation never blocks the completion summary.
+
+---
+
+## 4. Dispatcher (`PromptDispatcher`)
+
+`PromptDispatcher` ([`dispatcher.py:161`](../../agent_baton/core/engine/dispatcher.py))
+is **stateless**: every public method takes its inputs and returns a
+prompt string. No instance state crosses calls.
+
+### 4.1 Public methods
+
+| Method | Builds | Cited |
+|--------|--------|-------|
+| `build_delegation_prompt(step, plan, context, beads, ...)` | The full prompt for an agent dispatch | [dispatcher.py:370](../../agent_baton/core/engine/dispatcher.py) |
+| `build_team_delegation_prompt(member, parent_step, plan, ...)` | Per-member prompt for a team step | [dispatcher.py:867](../../agent_baton/core/engine/dispatcher.py) |
+| `build_gate_prompt(gate, phase_id, files_changed)` | The natural-language reviewer prompt for `review`-type gates | [dispatcher.py:958](../../agent_baton/core/engine/dispatcher.py) |
+| `build_path_enforcement(step)` | A bash guard that aborts if the agent writes outside `allowed_paths` | [dispatcher.py:1025](../../agent_baton/core/engine/dispatcher.py) |
+
+### 4.2 Prompt composition order
+
+`build_delegation_prompt()` assembles the final prompt in this order:
+
+```
+1.  ## Expected Outcome      (Wave 3.1, blank if not derived)
+2.  ## Task                  (one-line summary)
+3.  ## Description           (full task description)
+4.  ## Deliverables          (bullet list from PlanStep.deliverables)
+5.  ## Allowed Paths         (with bash enforcement guard)
+6.  ## Blocked Paths
+7.  ## Context Files         (paths only — agent reads them)
+8.  ## Knowledge             (inline blocks per KnowledgeResolver budget)
+9.  ## Resolved Decisions    (gap auto-resolutions)
+10. ## Beads                 (selected via BeadSelector, 3-tier priority)
+11. ## Handoff from Prior Step  (Wave 3.2; ≤400 chars)
+12. ## Synthesis Spec        (when step.synthesis is set)
+13. ## Tools                 (whitelisted from agent definition)
+14. ## Reporting Protocol    (BEAD_*, KNOWLEDGE_GAP, INTERACT signals)
+```
+
+Each section is omitted when empty. The order is load-bearing: the
+agent reads top-down and the most-prescriptive context (allowed paths,
+expected outcome) appears first.
+
+### 4.3 Knowledge inline-vs-reference decision
+
+`KnowledgeResolver` decides per-document whether to embed the body or
+emit a reference path. Default budgets:
+
+| Limit | Default | Source |
+|-------|---------|--------|
+| Per-step token budget | 32 000 | `KnowledgeResolver` constructor |
+| Per-document token cap | 8 000 | `KnowledgeResolver` constructor |
+| Max docs per step | 8 | `BATON_MAX_KNOWLEDGE_PER_STEP` |
+
+A document fits inline iff `tokens(doc) ≤ per_doc_cap` AND
+`tokens(doc) + already_inlined ≤ per_step_budget`. Otherwise the prompt
+emits `Reference: <path>` only.
+
+Session-level deduplication: `ExecutionState.delivered_knowledge` maps
+doc-key → first-step-where-delivered-inline. Subsequent steps that
+attach the same doc emit a reference, not the inline body.
+
+---
+
+## 5. Gate enforcement (`GateRunner`)
+
+`GateRunner` ([`gates.py:67`](../../agent_baton/core/engine/gates.py))
+is also stateless. Two public methods:
+
+| Method | Purpose |
+|--------|---------|
+| `build_gate_action(gate, phase_id, files_changed)` | Returns an `ExecutionAction(GATE)` with the command to run | [gates.py:108](../../agent_baton/core/engine/gates.py) |
+| `evaluate_output(gate, output, exit_code)` | Returns `bool` pass/fail given the command's stdout + exit code | [gates.py:149](../../agent_baton/core/engine/gates.py) |
+
+### 5.1 Gate types
+
+| Type | Pass condition |
+|------|----------------|
+| `build` | exit code 0 |
+| `test` | exit code 0 |
+| `lint` | exit code 0 AND no `error:` lines |
+| `spec` | `SpecValidator.validate()` returns all checks passed |
+| `review` | reviewer agent's output passes a heuristic ("LGTM" or no `BLOCK:` markers) |
+| `approval` | not run by `GateRunner`; built directly by the engine as an `APPROVAL` action |
+| `ci` | delegated to `core/gates/ci_gate.CIGateRunner` (poll `gh run view`) |
+
+### 5.2 Retry budget
+
+`ExecutionEngine._max_gate_retries` (default `3`) bounds gate retries.
+On the (cap+1)th failure, the engine sets `state.status = "failed"` and
+returns `FAILED`. Operators can also call `fail_gate()` programmatically
+to short-circuit retries.
+
+### 5.3 CI gate (opt-in)
+
+A plan may declare `gate_type="ci"` whose `command` is either a workflow
+filename (e.g. `"ci.yml"`) or a JSON config
+(`{"provider": "github", "workflow": "ci.yml", "timeout_s": 600}`).
+[`CIGateRunner`](../../agent_baton/core/gates/ci_gate.py) polls
+`gh run list/view` every 15s for the current branch's HEAD commit and
+returns a `CIGateResult` (passed, run_id, conclusion, url, log_excerpt).
+
+Missing `gh`, GitLab, and timeout are reported as `passed=False` with
+sentinel conclusions (`gh_unavailable`, `not_implemented`, `timeout`).
+
+---
+
+## 6. Persistence layer
+
+### 6.1 Two backends behind one protocol
+
+```
+                StorageBackend (Protocol, 34 methods)
+                ([core/storage/protocol.py])
+                       /         \
+                      v           v
+           SqliteStorage      FileStorage
+           (sqlite_backend.py) (file_backend.py)
+                  |                  |
+                  v                  v
+              baton.db        execution-state.json
+              (WAL mode,      + usage-log.jsonl
+              31 tables)      + traces/
+                              + retrospectives/
+                              + telemetry.jsonl
+                              + events/<task>.jsonl
+```
+
+`get_project_storage()` ([`core/storage/__init__.py`](../../agent_baton/core/storage/__init__.py))
+auto-detects the backend: if `baton.db` exists OR a `BATON_DB_PATH`
+override is set, return SQLite; otherwise return file-based.
+
+### 6.2 Atomic-write contract
+
+| Write surface | Atomicity mechanism |
+|---------------|---------------------|
+| `execution-state.json` | tmp+rename in `StatePersistence.save()` ([persistence.py:83](../../agent_baton/core/engine/persistence.py)) |
+| Other JSON files (decisions, learned-overrides) | tmp+rename via `Path.replace()` |
+| JSONL files (usage, telemetry, events, OTel) | append-only with `os.O_APPEND` semantics |
+| SQLite | WAL mode + busy timeout ([connection.py](../../agent_baton/core/storage/connection.py)) |
+| Cross-project sync | row-level watermarks; idempotent UPSERT |
+
+The Windows retry loop in `StatePersistence.save()` ([persistence.py:97](../../agent_baton/core/engine/persistence.py))
+tolerates antivirus / search-indexer holds.
+
+### 6.3 Federated sync (`SyncEngine`)
+
+```
+project baton.db                                 ~/.baton/central.db
+─────────────────                                 ─────────────────
+(28 syncable tables)        SyncEngine
+                            ─────────             (28 mirror tables
+─ executions                 watermark              prefixed with
+─ plans                      per-table              project_id)
+─ plan_steps                 last_synced_at        + 6 cross-project
+─ step_results              ──────────────►         views
+─ gate_results
+─ ...                        idempotent
+                             one-way
+                             best-effort
+```
+
+[`SyncEngine`](../../agent_baton/core/storage/sync.py) is the **only**
+writer of `central.db`. Auto-sync triggers at the end of `complete()`
+inside a `try/except` — sync failure never blocks completion.
+
+Watermarks are **row-level**, keyed on `(project_id, table, primary_key)`
+and `last_synced_at` timestamps. Re-running sync after a partial failure
+resumes from the last successful row, not the start of the table.
+
+---
+
+## 7. Runtime async dispatch (`TaskWorker`)
+
+### 7.1 Component map
+
+```
+WorkerSupervisor (daemon lifecycle, signals, log rotation)
+   │
+   └── TaskWorker (run loop, async event loop)
+         │
+         ├── ExecutionContext (factory)
+         │     wires EventBus, ExecutionEngine, EventPersistence
+         │
+         ├── StepScheduler (asyncio.Semaphore(max_concurrent=3))
+         │     dispatches LaunchResult per step
+         │
+         ├── AgentLauncher protocol
+         │     ├── ClaudeCodeLauncher (real `claude` subprocess)
+         │     ├── DryRunLauncher (test stub)
+         │     └── HeadlessClaude (used by Forge / `execute run`)
+         │
+         └── DecisionManager (human-decision JSON files + .md summaries)
+```
+
+### 7.2 The async loop
+
+`TaskWorker.run()` ([`worker.py:116`](../../agent_baton/core/runtime/worker.py))
+delegates to `_execution_loop()` ([`worker.py:126`](../../agent_baton/core/runtime/worker.py)).
+The loop:
+
+```python
+while True:
+    actions = engine.next_actions()
+    if not actions:
+        action = engine.next_action()
+        match action.action_type:
+            case COMPLETE | FAILED: break
+            case GATE: await self._handle_gate(action); continue
+            case APPROVAL: await self._handle_approval(action); continue
+            case WAIT: await asyncio.sleep(poll_interval); continue
+        continue
+
+    # parallel dispatch wave
+    results = await self._scheduler.dispatch_batch(actions, self._launcher)
+    for r in results:
+        engine.record_step_result(r.step_id, r.agent_name, ...)
+        bus.publish(step_completed/step_failed event)
+```
+
+Concurrency is bounded by `SchedulerConfig.max_concurrent` (default 3).
+The `asyncio.Semaphore` lives inside `StepScheduler.dispatch_batch()`
+([`scheduler.py:85`](../../agent_baton/core/runtime/scheduler.py)).
+
+### 7.3 EventBus topic ownership (ADR-04)
+
+| Owner | Topics |
+|-------|--------|
+| `ExecutionEngine` | `task.started`, `task.completed`, `task.failed`, `phase.started`, `phase.completed`, `gate.passed`, `gate.failed`, `bead.created`, `bead.conflict`, `human.decision_needed`, `human.decision_resolved`, `approval.required`, `approval.resolved`, `plan.amended`, `team_member.completed` |
+| `TaskWorker` | `step.dispatched`, `step.completed`, `step.failed` |
+
+Each step transition produces exactly one event. `EventPersistence`
+writes all events to a JSONL file via a bus subscription wired by
+`ExecutionContext.build()`.
+
+### 7.4 Subprocess safety
+
+`ClaudeCodeLauncher` ([`claude_launcher.py`](../../agent_baton/core/runtime/claude_launcher.py))
+launches `claude` with three explicit safety constraints:
+
+1. **Whitelist environment.** Only `PATH`, `HOME`, `ANTHROPIC_API_KEY`,
+   and a small allow-list of `BATON_*` vars are forwarded. Other env vars
+   are stripped to prevent leakage of secrets into the subagent.
+2. **Exec-only.** `subprocess.create_subprocess_exec()` (no shell). The
+   command is a tokenised argv, never a shell string.
+3. **API-key redaction.** Stderr passes through `_redaction.py` which
+   matches `sk-ant-*` patterns and replaces them with `<redacted>` before
+   logging.
+
+Per-model timeouts are configurable via `ClaudeCodeConfig`.
+
+---
+
+## 8. Worktree isolation (Wave 1.3)
+
+[`WorktreeManager`](../../agent_baton/core/engine/worktree_manager.py)
+materialises a separate git worktree per dispatched step at
+`.claude/worktrees/<task_id>/<step_id>/`. The lifecycle:
+
+```
+mark_dispatched()
+   └─> WorktreeManager.create(task_id, step_id, base_branch)
+       └─> git worktree add <path> -b <task_id>--<step_id>--<base_branch>
+
+(agent works inside worktree)
+
+record_step_result(status="complete")
+   └─> WorktreeManager.fold_back(handle, commit_hash, strategy)
+   │     └─> git cherry-pick or rebase onto base_branch
+   └─> WorktreeManager.cleanup(handle, on_failure=False)
+         └─> git worktree remove <path>
+
+record_step_result(status="failed")
+   └─> WorktreeManager.cleanup(handle, on_failure=True)  ← NO-OP
+       (worktree retained for forensics / takeover)
+```
+
+State fields in `ExecutionState` ([`models/execution.py:1349`](../../agent_baton/models/execution.py)):
+
+- `step_worktrees: dict[str, dict]` — serialised handles, keyed by step_id
+- `working_branch: str` — branch captured at `start()` time
+- `working_branch_head: str` — SHA of rebased tip after most recent fold
+
+`baton execute worktree-gc [--max-age-hours N] [--dry-run]` reclaims
+stale failed worktrees.
+
+Disabled by `BATON_WORKTREE_ENABLED=0`; all lifecycle methods become
+no-ops.
+
+---
+
+## 9. Wave 5 — human/agent loop primitives
+
+Three opt-in primitives, each gated by an env var so they ship as
+opt-in until production data justifies enablement:
+
+| Wave | Module | Env flag | Default |
+|------|--------|----------|---------|
+| 5.1 Takeover | [`engine/takeover.py`](../../agent_baton/core/engine/takeover.py) | `BATON_TAKEOVER_ENABLED` | `1` (on) |
+| 5.2 Self-heal | [`engine/selfheal.py`](../../agent_baton/core/engine/selfheal.py) | `BATON_SELFHEAL_ENABLED` | `0` (off) |
+| 5.3 Speculate | [`engine/speculator.py`](../../agent_baton/core/engine/speculator.py) | `BATON_SPECULATE_ENABLED` | `0` (off) |
+
+All three reuse the worktree contract from §8. Each emits its own
+trace events (`takeover.started`, `selfheal_attempt`,
+`speculate.accepted/rejected`) so the closed-loop learning pipeline can
+score effectiveness.
+
+CLI surfaces:
+
+- `baton execute takeover STEP_ID [--editor ...] [--shell] [--reason ...] [--no-rerun-gate]`
+- `baton execute resume [--abort]` (post-takeover)
+- `baton execute self-heal STEP_ID [--max-tier opus]` (manual escalation)
+- `baton execute speculate status|accept|reject|show [SPEC_ID]`
+
+---
+
+## 10. Bead memory pipeline
+
+### 10.1 Lifecycle
+
+```
+agent emits BEAD_DISCOVERY/DECISION/WARNING in stdout
+        │
+        v
+parse_bead_signals() → BeadStore.create()  (bead_signal.py, bead_store.py)
+        │                          │
+        │                          ├─> SQLite beads + bead_tags
+        │                          └─> EventBus.publish("bead.created")
+        v
+on next dispatch:
+  BeadSelector.select(step, plan, scope_chain, budget)
+      tier 1: dependency-chain beads (highest priority)
+      tier 2: same-phase beads
+      tier 3: cross-phase beads
+      within tier: type rank (warning > discovery > decision > outcome > planning)
+                   then quality_score
+                   total cap: token budget (default 4096), max count 5
+        │
+        v
+prompt section "## Beads" assembled by PromptDispatcher
+        │
+        v
+agent sees inherited context; may emit BEAD_USEFUL bd-X 0.9
+                                       BEAD_STALE  bd-Y 0.2
+        │
+        v
+parse_bead_feedback() updates Bead.quality_score
+        │
+        v
+periodically: decay_beads() archives old open beads
+              BeadSynthesizer (intel/) rebuilds bead_edges + bead_clusters
+              BeadAnalyzer (learn/) mines historical beads → PlanStructureHint
+```
+
+### 10.2 ID scheme
+
+`Bead.bead_id` is `bd-<n hex>` where length scales:
+
+| Bead count | ID length | Namespace |
+|-----------|-----------|-----------|
+| < 500 | 4 hex chars | ~65K |
+| 500-1499 | 5 hex chars | ~1M |
+| ≥ 1500 | 6 hex chars | ~16M |
+
+ID generation: `SHA-256(task_id:step_id:content:timestamp)`, truncated.
+
+---
+
+## 11. Closed-loop learning (`LearningEngine`)
+
+[`LearningEngine`](../../agent_baton/core/learn/engine.py) implements
+the three-phase closed loop:
+
+```
+detect(state)
+    │
+    │  scan ExecutionState for:
+    │    - routing mismatches (declared agent ≠ effective agent)
+    │    - agent degradation (consecutive failures of same agent)
+    │    - knowledge gaps (queue-for-gate signals)
+    │    - gate mismatches (gate command failed with stack mismatch)
+    │    - roster bloat (too-many-agents on simple tasks)
+    │
+    └─> LearningLedger.record() (SQLite, dedup by issue_type+target)
+
+analyze()
+    │
+    │  compute confidence from occurrence_count
+    │  propose auto-applicable fixes (degraded by guardrails)
+    │
+    └─> recommendations queued for review
+
+apply(issue_id)
+    │
+    │  dispatch to type-specific resolver:
+    │    resolve_routing_mismatch     → flavor_map override
+    │    resolve_agent_degradation    → agent drop
+    │    resolve_knowledge_gap        → knowledge pack stub
+    │    resolve_gate_mismatch        → gate command override
+    │    resolve_roster_bloat         → classifier setting adjustment
+    │
+    └─> LearnedOverrides.write() → learned-overrides.json
+        (consumed by AgentRouter.route() and IntelligentPlanner)
+```
+
+Guardrails enforced by `Recommender`
+([`learn/recommender.py`](../../agent_baton/core/learn/recommender.py)):
+
+- Prompt changes **never** auto-apply (human review required).
+- Budget changes auto-apply **only downward** (never increase).
+- Routing changes require **high confidence** (≥0.8).
+
+`baton learn interview` runs `LearningInterviewer` for human-directed
+decisions on lower-confidence issues.
+
+---
+
+## 12. API factory and DI
+
+### 12.1 `create_app()` order
+
+[`api/server.py`](../../agent_baton/api/server.py) `create_app()`:
+
+```
+1. init_dependencies(team_context_root, bus)
+     - constructs module-level singletons in api/deps.py
+2. WebhookDispatcher subscribes to the shared EventBus
+3. configure_cors(allowed_origins)            ← outermost middleware
+4. TokenAuthMiddleware (no-op when token=None) ← inner middleware
+5. UserIdentityMiddleware                      ← innermost (sets request.state)
+6. for each route module in (health, plans, executions, agents,
+       observe, decisions, events, webhooks, pmo, pmo_h3, learn):
+       try: include_router(module.router)
+       except ImportError: log and skip   ← optional deps degrade
+7. if pmo-ui/dist/ exists: mount StaticFiles at /pmo/
+8. return FastAPI app
+```
+
+### 12.2 Middleware stack
+
+```
+Request --> CORS --> TokenAuth --> UserIdentity --> Route --> Response
+```
+
+- **CORS**: localhost permissive by default; configurable via
+  `allowed_origins`.
+- **TokenAuth**: Bearer-token validation; auth-exempt paths
+  `/api/v1/health`, `/api/v1/ready`, `/openapi.json`, `/docs`, `/redoc`.
+- **UserIdentity**: resolves caller from `X-Baton-User`, the Bearer
+  claim, or `"local-user"`. Sets `request.state.user_id` and
+  `request.state.user_role`. Controlled by `BATON_APPROVAL_MODE`.
+
+### 12.3 Singleton DI
+
+`api/deps.py` defines module-level singletons with `get_*()` accessors
+used as FastAPI `Depends()`. All singletons share **one** `EventBus`
+instance — events flow through one bus regardless of source.
+
+---
+
+## 13. Webhook delivery
+
+```
+EventBus.publish(event)
+   │
+   v
+WebhookDispatcher._on_event(event)         (bus subscriber)
+   │
+   ├─ WebhookRegistry.match(event.topic)   (fnmatch glob over subscriptions)
+   │
+   └─ for each matching subscription:
+        ├─ HMAC-SHA256 sign payload (when secret is set)
+        ├─ asyncio.create_task(deliver)
+        ├─ retry: [5s, 30s, 300s] backoff
+        ├─ auto-disable after 10 consecutive failures
+        └─ log failures to webhook-failures.jsonl
+```
+
+The dispatcher uses a single `aiohttp.ClientSession` per app and never
+blocks the publishing thread — delivery is fully async.
+
+---
+
+## 14. Plan amendment semantics
+
+`amend_plan()` ([`protocols.py:170`](../../agent_baton/core/engine/protocols.py))
+mutates the running plan in place and records a `PlanAmendment`.
+
+Triggers:
+
+| Trigger | Source |
+|---------|--------|
+| `manual` | `baton execute amend --description "..."` |
+| `approval_feedback` | `record_approval_result(result="approve-with-feedback")` |
+| `knowledge_gap` | `determine_escalation()` produces `auto-resolve` for a queued gap |
+| `feedback_question` | `record_feedback_result()` chooses an option that maps to a new step |
+
+After amendment, **phase IDs are renumbered** to maintain sequential
+ordering. The `PlanAmendment` audit row preserves the pre-amendment
+snapshot for diffing.
+
+`amendments` are stored in SQLite (`amendments` table) and serialised
+to `state.amendments` so `resume()` reconstructs the amended plan.
+
+---
+
+## 15. Where each pattern is tested
+
+| Pattern | Test root |
+|---------|-----------|
+| Action determination (`ActionResolver`) | `tests/engine/test_action_resolver.py` |
+| Phase-boundary logic (`PhaseManager`) | `tests/test_phase_manager.py` |
+| State-class epilogues (`states.py`) | `tests/test_execution_states.py` |
+| Executor helpers | `tests/engine/test_executor_helpers.py` |
+| Engine API contract (canary) | `tests/test_engine_api_contract.py` |
+| Plan creation pipeline | `tests/engine/test_planner_*.py` |
+| Gate evaluation | `tests/engine/test_gate_runner.py` |
+| Persistence dual-write | `tests/storage/test_sqlite_backend.py`, `tests/storage/test_file_backend.py` |
+| Federated sync | `tests/storage/test_sync_engine.py` |
+| TaskWorker dispatch | `tests/runtime/test_worker_*.py` |
+| Bead lifecycle | `tests/engine/test_bead_*.py` |
+| Closed-loop learning | `tests/learn/test_engine.py`, `tests/learn/test_resolvers.py` |
+| API factory | `tests/api/test_server.py`, `tests/api/test_*_routes.py` |
+| Worktree isolation | `tests/engine/test_worktree_manager.py` |
+| Phase advance invariant | `tests/test_architecture.py` |
+| `_print_action()` contract | `tests/cli/test_execute_*.py` |
+
+`tests/cli/test_execute_*.py` covers the wire format Claude depends on;
+breaking it is a contract violation and CI fails loudly.

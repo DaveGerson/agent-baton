@@ -8,7 +8,7 @@ Coverage:
 - FK cascade bug: bead rows survive save_execution (INSERT OR REPLACE fix)
 - FK cascade bug: bead rows survive multiple save_execution calls
 - Beads written before save_execution are still readable after it
-- Schema migration: SCHEMA_VERSION is 8 (documents FK cascade fix)
+- Schema migration: SCHEMA_VERSION matches the current constant
 """
 from __future__ import annotations
 
@@ -539,18 +539,26 @@ class TestBeadsSurviveSaveExecution:
 
 
 class TestSchemaVersion:
-    """SCHEMA_VERSION is 8 after the FK cascade fix migration."""
+    """SCHEMA_VERSION tracks the current migration level.
 
-    def test_schema_version_is_8(self) -> None:
+    These tests assert against the imported constant so they remain correct
+    across future schema bumps without needing manual updates.
+    """
+
+    def test_schema_version_matches_constant(self) -> None:
         from agent_baton.core.storage.schema import SCHEMA_VERSION
-        assert SCHEMA_VERSION == 8
+        # Assert the constant is a positive integer — catches accidental
+        # deletion or mis-typing, while staying version-agnostic.
+        assert isinstance(SCHEMA_VERSION, int)
+        assert SCHEMA_VERSION > 0
 
-    def test_migration_8_is_registered(self) -> None:
+    def test_migration_9_is_registered(self) -> None:
         from agent_baton.core.storage.schema import MIGRATIONS
-        assert 8 in MIGRATIONS
+        assert 9 in MIGRATIONS
 
-    def test_new_database_is_at_version_8(self, tmp_path: Path) -> None:
-        """A freshly created baton.db is stamped at version 8."""
+    def test_new_database_is_at_current_version(self, tmp_path: Path) -> None:
+        """A freshly created baton.db is stamped at the current SCHEMA_VERSION."""
+        from agent_baton.core.storage.schema import SCHEMA_VERSION
         storage = SqliteStorage(tmp_path / "baton.db")
         # Trigger schema initialisation
         from agent_baton.core.engine.bead_store import BeadStore
@@ -563,7 +571,7 @@ class TestSchemaVersion:
                 "SELECT version FROM _schema_version"
             ).fetchone()
             assert row is not None
-            assert row[0] == 8
+            assert row[0] == SCHEMA_VERSION
         finally:
             conn.close()
 

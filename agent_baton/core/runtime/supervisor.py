@@ -24,7 +24,6 @@ import logging
 import os
 import signal
 import sys
-from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -41,10 +40,7 @@ from agent_baton.core.runtime.launcher import AgentLauncher
 from agent_baton.core.runtime.signals import SignalHandler
 from agent_baton.core.runtime.worker import TaskWorker
 from agent_baton.models.execution import MachinePlan
-
-
-def _utcnow() -> str:
-    return datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
+from agent_baton.utils.time import utcnow_seconds as _utcnow
 
 
 class WorkerSupervisor:
@@ -113,6 +109,9 @@ class WorkerSupervisor:
         bus: EventBus | None = None,
         max_parallel: int = 3,
         resume: bool = False,
+        max_steps: int = 0,
+        token_budget: int = 0,
+        log_format: str = "text",
     ) -> str:
         """Start the worker synchronously (blocking).
 
@@ -126,10 +125,13 @@ class WorkerSupervisor:
             max_parallel: Maximum concurrently dispatched agents.
             resume: When True, call ``engine.resume()`` instead of
                 ``engine.start(plan)`` to continue from persisted state.
+            max_steps: Stop after N steps (0 = unlimited).
+            token_budget: Soft token cap in tokens (0 = use tier default).
+            log_format: ``"text"`` (default) or ``"json"`` for structured logs.
         """
         self._root.mkdir(parents=True, exist_ok=True)
         self._write_pid()
-        self._setup_logging()
+        self._setup_logging(log_format=log_format)
 
         logger = logging.getLogger("baton.daemon")
 
@@ -144,6 +146,7 @@ class WorkerSupervisor:
         if resume:
             logger.info("Daemon resuming: task=%s", plan.task_id)
             engine.resume()
+            engine.recover_dispatched_steps()
         else:
             logger.info("Daemon starting: task=%s", plan.task_id)
             engine.start(plan)
@@ -154,16 +157,21 @@ class WorkerSupervisor:
         if plan.resource_limits is not None:
             effective_parallel = plan.resource_limits.max_concurrent_agents
 
+        # Apply token budget cap on the engine when an explicit cap was given.
+        if token_budget > 0:
+            engine._token_budget = token_budget
+
         worker = TaskWorker(
             engine=engine,
             launcher=launcher,
             bus=ctx.bus,
             max_parallel=effective_parallel,
+            max_steps=max_steps or None,
         )
 
         summary = ""
         try:
-            summary = asyncio.run(self._run_with_signals(worker))
+            summary = asyncio.run(self._run_with_signals(worker, launcher))
         except KeyboardInterrupt:
             summary = "Daemon interrupted by user."
             logger.info("Daemon interrupted.")
@@ -177,12 +185,17 @@ class WorkerSupervisor:
 
         return summary
 
-    async def _run_with_signals(self, worker: TaskWorker) -> str:
+    async def _run_with_signals(
+        self, worker: TaskWorker, launcher: AgentLauncher
+    ) -> str:
         """Run the worker with signal handling for graceful shutdown.
 
         Installs SIGTERM and SIGINT handlers via :class:`SignalHandler`.
         When a signal arrives the worker task is cancelled and we wait up to
-        30 seconds for an orderly drain of in-flight agents.
+        30 seconds for an orderly drain of in-flight agents.  The ``finally``
+        block always calls ``launcher.cleanup()`` (if available) so that child
+        ``claude`` subprocesses started with ``start_new_session=True`` are not
+        orphaned when the daemon exits.
         """
         handler = SignalHandler()
         handler.install()
@@ -207,6 +220,9 @@ class WorkerSupervisor:
                 return worker_task.result()
         finally:
             handler.uninstall()
+            cleanup = getattr(launcher, "cleanup", None)
+            if cleanup is not None:
+                await cleanup()
 
     # ── Status ──────────────────────────────────────────────────────────────
 
@@ -342,6 +358,98 @@ class WorkerSupervisor:
 
         return results
 
+    # ── Worker signal management ─────────────────────────────────────────────
+
+    @staticmethod
+    def _read_pid(pid_path: Path) -> int | None:
+        """Read and return the PID from *pid_path*, or None on failure."""
+        try:
+            return int(pid_path.read_text().strip())
+        except (ValueError, OSError):
+            return None
+
+    @staticmethod
+    def _send_signal(pid: int, sig: int) -> None:
+        """Send *sig* to *pid*.
+
+        Raises:
+            ProcessLookupError: Process does not exist.
+            PermissionError: Caller lacks permission to signal the process.
+        """
+        os.kill(pid, sig)
+
+    def pause_worker(self, task_id: str) -> int:
+        """Send SIGSTOP to the worker process for *task_id*.
+
+        Locates the PID from the execution directory's ``worker.pid`` file
+        and sends SIGSTOP to suspend the process.
+
+        Args:
+            task_id: The execution task ID whose worker should be paused.
+
+        Returns:
+            The PID that was signalled.
+
+        Raises:
+            FileNotFoundError: No PID file found for this task.
+            ProcessLookupError: Process does not exist (already dead).
+            PermissionError: Caller lacks permission to signal the process.
+        """
+        pid_path = self._root / "executions" / task_id / "worker.pid"
+        pid = self._read_pid(pid_path)
+        if pid is None:
+            raise FileNotFoundError(
+                f"No worker PID file found for task '{task_id}' at {pid_path}."
+            )
+        self._send_signal(pid, signal.SIGSTOP)
+        return pid
+
+    def resume_worker(self, task_id: str) -> int:
+        """Send SIGCONT to the worker process for *task_id*.
+
+        Args:
+            task_id: The execution task ID whose worker should be resumed.
+
+        Returns:
+            The PID that was signalled.
+
+        Raises:
+            FileNotFoundError: No PID file found for this task.
+            ProcessLookupError: Process does not exist.
+            PermissionError: Caller lacks permission to signal the process.
+        """
+        pid_path = self._root / "executions" / task_id / "worker.pid"
+        pid = self._read_pid(pid_path)
+        if pid is None:
+            raise FileNotFoundError(
+                f"No worker PID file found for task '{task_id}' at {pid_path}."
+            )
+        self._send_signal(pid, signal.SIGCONT)
+        return pid
+
+    def cancel_worker(self, task_id: str) -> int:
+        """Send SIGTERM to the worker process for *task_id*.
+
+        Args:
+            task_id: The execution task ID whose worker should be cancelled.
+
+        Returns:
+            The PID that was signalled.
+
+        Raises:
+            FileNotFoundError: No PID file found for this task.
+            ProcessLookupError: Process does not exist.
+            PermissionError: Caller lacks permission to signal the process.
+        """
+        pid_path = self._root / "executions" / task_id / "worker.pid"
+        pid = self._read_pid(pid_path)
+        if pid is None:
+            raise FileNotFoundError(
+                f"No worker PID file found for task '{task_id}' at {pid_path}."
+            )
+        self._send_signal(pid, signal.SIGTERM)
+        return pid
+
     # ── Internal helpers ────────────────────────────────────────────────────
 
     def _write_pid(self) -> None:
@@ -350,7 +458,7 @@ class WorkerSupervisor:
         # The OS releases the lock automatically when the process exits or the
         # FD is closed, which eliminates the stale-PID-file race condition.
         # Note: flock() on network filesystems may not enforce mutual exclusion.
-        self._pid_fd = open(self.pid_path, "w+")  # noqa: SIM115
+        self._pid_fd = open(self.pid_path, "w+")  # noqa: SIM115  # "w+" allows seek+read
         if fcntl is not None:
             try:
                 fcntl.flock(self._pid_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -377,25 +485,58 @@ class WorkerSupervisor:
             except OSError:
                 pass
 
-    def _setup_logging(self) -> None:
-        """Configure file-based logging for the daemon with rotation."""
+    def _setup_logging(self, log_format: str = "text") -> None:
+        """Configure file-based logging for the daemon with rotation.
+
+        Respects the ``BATON_LOG_LEVEL`` environment variable (default: INFO).
+        Accepts DEBUG, INFO, WARNING, ERROR (case-insensitive).
+
+        Args:
+            log_format: ``"text"`` emits plain ``%(asctime)s %(levelname)s
+                %(message)s`` lines (default).  ``"json"`` emits structured
+                JSON records using ``pythonjsonlogger`` when available,
+                falling back to text if the package is absent.
+        """
         self._exec_dir.mkdir(parents=True, exist_ok=True)
         logger = logging.getLogger("baton.daemon")
         # Remove any existing handlers so we always log to the current path.
         for h in logger.handlers[:]:
             logger.removeHandler(h)
             h.close()
-        handler = RotatingFileHandler(
+
+        file_handler = RotatingFileHandler(
             str(self.log_path),
             maxBytes=10 * 1024 * 1024,  # 10 MB
             backupCount=3,
             encoding="utf-8",
         )
-        handler.setFormatter(
-            logging.Formatter("%(asctime)s %(levelname)s %(message)s")
-        )
-        logger.addHandler(handler)
-        logger.setLevel(logging.INFO)
+
+        if log_format == "json":
+            try:
+                from pythonjsonlogger import jsonlogger  # type: ignore[import]
+                json_formatter = jsonlogger.JsonFormatter(
+                    "%(asctime)s %(levelname)s %(message)s %(name)s",
+                    rename_fields={"asctime": "timestamp", "levelname": "level"},
+                )
+                file_handler.setFormatter(json_formatter)
+            except ImportError:
+                # python-json-logger not installed — fall back to text silently.
+                file_handler.setFormatter(
+                    logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+                )
+        else:
+            file_handler.setFormatter(
+                logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+            )
+
+        logger.addHandler(file_handler)
+
+        # Honour BATON_LOG_LEVEL env var; default to INFO.
+        raw_level = os.environ.get("BATON_LOG_LEVEL", "INFO").upper()
+        level = getattr(logging, raw_level, logging.INFO)
+        if not isinstance(level, int):
+            level = logging.INFO
+        logger.setLevel(level)
 
     def _write_status(self, engine: ExecutionDriver, summary: str = "") -> None:
         """Write a status snapshot to disk atomically.

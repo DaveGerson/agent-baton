@@ -28,8 +28,9 @@ import json
 import logging
 import os
 import tempfile
-from datetime import datetime, timezone
 from pathlib import Path
+
+from agent_baton.utils.time import utcnow_iso as _utcnow
 
 _log = logging.getLogger(__name__)
 
@@ -43,10 +44,6 @@ _EMPTY_OVERRIDES: dict = {
     "version": 1,
     "last_updated": "",
 }
-
-
-def _utcnow() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 class LearnedOverrides:

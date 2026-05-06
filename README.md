@@ -1,5 +1,7 @@
 # Agent Baton
 
+📖 **Docs:** <https://davegerson.github.io/agent-baton/>
+
 **Turn one prompt into a coordinated team of AI specialists.**
 
 Agent Baton is a multi-agent orchestration system for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Describe a complex task in plain language -- Baton plans it, routes it to the right specialist agents, enforces QA gates between phases, and delivers tested, reviewed code. No external services. No API keys beyond Claude. Everything runs locally.
@@ -57,22 +59,48 @@ definitions, reference procedures, a template `CLAUDE.md`, and
 
 ### 2. Install the Python engine
 
+**From PyPI (recommended):**
+
 ```bash
-pip install -e ".[dev]"     # Core engine + CLI
+pip install agent-baton          # Core engine + CLI
+pip install agent-baton[pmo]     # + REST API and PMO server
+pip install agent-baton[classify] # + AI risk classification
+```
+
+**From source (for development):**
+
+```bash
+git clone https://github.com/DaveGerson/agent-baton.git
+cd agent-baton
+pip install -e ".[dev]"          # Core engine + CLI + test deps
 ```
 
 ### 3. Verify
 
 ```bash
 # In Claude Code
-/agents                     # Should list ~19 agents
+/agents                     # Should list ~22 agents
 
 # In terminal
 baton agents                # List agents from Python registry
 baton detect                # Detect your project's stack
 ```
 
-### 4. Run your first task
+### 4. Optional: install cymbal (recommended)
+
+[cymbal](https://github.com/1broseidon/cymbal) is a tree-sitter
+code indexer that agents use for symbol lookup and impact analysis.
+Without it, agents fall back to LSP or grep.
+
+```bash
+# Check if cymbal is installed
+cymbal --help
+
+# If not, install the binary to ~/.local/bin/
+# (see cymbal docs for platform-specific instructions)
+```
+
+### 5. Run your first task
 
 In a Claude Code session:
 
@@ -209,7 +237,9 @@ baton beads cleanup --ttl 168 --dry-run         # Memory decay preview
 
 AI-driven task planning via headless Claude Code subprocess. Generates
 real LLM-quality plans (not rule-based templates). Includes interactive
-interview-based refinement and integrates with the PMO UI.
+interview-based refinement, SSE progress streaming through 5 stages
+(Analyzing, Routing, Sizing, Generating, Validating), and integrates
+with the PMO UI.
 
 ### Headless Execution
 
@@ -236,6 +266,99 @@ baton daemon stop
 Supports `--foreground`, `--resume`, `--dry-run`, and `--serve` (co-hosts
 the HTTP API in the same process). Human decision requests raised during
 daemon execution are managed via `baton decide`.
+
+### Worktree Isolation (Wave 1.3)
+
+When the planner classifies a task as parallelizable, the engine
+provisions a linked git worktree per agent so concurrent edits never
+clobber each other. Worktrees live under `.claude/worktrees/<short-id>/`
+and are reclaimed automatically:
+
+- **Aggressive GC.** `baton execute complete` runs `WorktreeManager.gc_stale()`
+  on a daemon thread (errors emit `BEAD_WARNING` and never block completion).
+- **Stale threshold.** Default is 4 hours (was 72h pre-2026-04-28). Override
+  with `BATON_WORKTREE_STALE_HOURS=<hours>`. The legacy
+  `BATON_WORKTREE_GC_HOURS` env var is still honoured.
+- **In-flight guard.** The GC skips worktrees referenced by any
+  `status='running'` execution in `baton.db` and logs `skipping in-flight
+  worktree X (active execution Y)`.
+- **Parent-repo detection.** When `baton` is invoked from inside a linked
+  worktree, `WorktreeManager` resolves the canonical repo root via
+  `git worktree list --porcelain` so all repo-level operations
+  (worktree add/remove/prune, branch ops, rebase, merge) target the main
+  repository — fixing the dogfood failure where running baton inside an
+  agent worktree silently disabled isolation. (PR #69, bd-c071.)
+
+### Run-Level Spend Ceiling (PR #67)
+
+Set `BATON_RUN_TOKEN_CEILING=<USD>` to cap total cumulative spend per
+execution. `BudgetEnforcer` reads the env var fresh on every check
+(never cached), tracks a run-level counter that survives crash recovery,
+and raises `RunTokenCeilingExceeded` before any record_* call would push
+the total over the limit. The selfheal, speculator, and immune-system
+daemons all check the ceiling before kicking off an escalation cycle and
+abort with `'ceiling-abort'` rather than overspending.
+
+> **Known gap (bd-3f80).** Selfheal/speculator/immune respect the ceiling,
+> but the main `Executor.dispatch()` path does not yet block individual
+> agent dispatches when the projected spend would breach the cap; it only
+> emits a warning at HIGH/CRITICAL run start. Full executor wiring is
+> tracked in bd-3f80.
+
+### Persistent Agent Souls (EXPERIMENTAL — Wave 6.1 Part B)
+
+Cross-project cryptographic identities for agents stored in
+`~/.baton/central.db`. Each soul has an Ed25519 keypair (private key in
+`~/.config/baton/souls/<soul_id>.ed25519`, mode 0600) and accumulates an
+expertise vector across runs.
+
+```bash
+baton souls mint <role> <domain>     # Mint a new operator-issued soul
+baton souls list [--role ROLE]       # List active souls
+baton souls show <soul_id>           # Show metadata + expertise
+baton souls retire <soul_id> [--successor SUCC]
+baton souls revoke <soul_id> --confirm
+```
+
+Schema v33 added the `soul_revocations` table (PR #68). The Python API
+exposes `SoulRegistry.revoke()`, `is_revoked()`, `list_revocations()`,
+and `rotate()` (mints a successor keypair atomically). The
+revocation-aware verification path is `SoulRouter.verify_signature()`.
+
+> **Known gap (bd-1ca2).** The CLI `revoke` subcommand only accepts
+> `--confirm`; the `--reason`, `list-revocations`, and `rotate`
+> subcommands are available via the Python `SoulRegistry` API but not yet
+> wired into the CLI. Existing callers of the legacy `soul.verify` are
+> not migrated to the revocation-aware `SoulRouter.verify_signature()`
+> path either; tracked in bd-1ca2.
+
+### Executable Beads (EXPERIMENTAL — Wave 6.1 Part C)
+
+`bead_type="executable"` beads carry a script body anchored in
+`refs/notes/baton-bead-scripts`. Pipeline: `ScriptLinter` (denylist of
+dangerous patterns) -> optional soul signature -> `BeadStore.write()`
+with `status="quarantine"` -> `AuditorGate.approve(bead_id)` flips
+status to `open` -> `ExecutableBeadRunner.run()` executes the script
+through `Sandbox` (wall-clock timeout + memory limit + captured I/O) and
+writes a child `discovery` bead linked via `validates`/`contradicts`.
+Gated behind `BATON_EXEC_BEADS_ENABLED=1`.
+
+> **Trust boundary.** The sandbox is **process-level only** — no
+> filesystem namespacing, network namespacing, or syscall filter. Trust
+> model assumes locally-authored, version-controlled, team-reviewed
+> scripts. Beads from external origins (federation, downloaded packs,
+> fork PRs) emit a `[security]` warning to stderr from `baton beads
+> exec`. Single source of truth: [`references/baton-patterns.md`](references/baton-patterns.md)
+> -> *"Pattern: Executable Beads — Trust Boundary"*.
+
+### Git-Native Bead Persistence (Wave 6.1 Part A)
+
+Beads are anchored to git via `refs/notes/baton-beads` (and
+`refs/notes/baton-bead-scripts` for executable bead bodies). The
+installer (`scripts/install.sh` Step 5) auto-configures the wildcard
+notes refspec so beads round-trip across clones; the runtime warns once
+per session if the refspec is missing. Opt out with
+`BATON_SKIP_GIT_NOTES_SETUP=1`. (PR #66.)
 
 ### Cross-Project Intelligence
 
@@ -285,9 +408,9 @@ and surfaces anomalies. The learning pipeline includes:
   in agent behavior
 - **Experiments** -- `baton experiment` manages controlled trials to
   validate improvement recommendations
-- **Full-cycle improvement** -- `baton improve --run` executes the complete
-  loop: detect anomalies, generate recommendations, auto-apply safe
-  changes, escalate risky ones, start experiments
+- **Full-cycle improvement** -- `baton learn improve --run` executes the
+  complete loop: detect anomalies, generate recommendations, auto-apply
+  safe changes, escalate risky ones, start experiments
 
 ### Learning Automation
 
@@ -312,7 +435,7 @@ with confidence thresholds:
 
 ### REST API and PMO UI
 
-A FastAPI server exposes the full engine over HTTP with 9 route modules:
+A FastAPI server exposes the full engine over HTTP with 10 route modules:
 
 | Route | Purpose |
 |-------|---------|
@@ -324,13 +447,27 @@ A FastAPI server exposes the full engine over HTTP with 9 route modules:
 | `/api/v1/decisions` | Human-in-the-loop decision management |
 | `/api/v1/events` | SSE event streaming |
 | `/api/v1/webhooks` | Outbound webhook subscription CRUD |
-| `/api/v1/pmo` | Portfolio management (board, projects, forge, signals) |
+| `/api/v1/pmo` | Portfolio management (board, projects, forge, execute, gates, changelist, review, signals) |
+| `/api/v1/learn` | Learning issues and auto-correction |
 
-The API supports Bearer token authentication, CORS configuration, and
-outbound webhooks with HMAC-SHA256 signing and Slack Block Kit payloads.
+The API supports Bearer token authentication, CORS configuration,
+user identity middleware (`BATON_APPROVAL_MODE`), and outbound webhooks
+with HMAC-SHA256 signing and Slack Block Kit payloads.
 
-A React/Vite **PMO frontend** provides Kanban boards, the Forge plan
-builder, one-click execution launch, and program health dashboards.
+A React/Vite **PMO frontend** provides a complete plan-to-merge
+lifecycle:
+
+- **Kanban board** with 6 columns (queued, executing, awaiting_human,
+  validating, review, deployed) and program health dashboards
+- **Smart Forge** with SSE progress streaming (5-stage indicator)
+- **Advanced plan editor** with model selection, dependency multi-select,
+  tag inputs, and gate editing
+- **Execution controls** -- pause/resume/cancel (SIGSTOP/SIGCONT/SIGTERM),
+  retry-step and skip-step for failed steps, bead alert flags
+- **Changelist review** -- post-execution file tree grouped by agent with
+  diff stats, merge and PR buttons
+- **Role-based approval** -- request-review workflow with audit trail
+  (`approval_log` table)
 
 ```bash
 baton serve --port 8741              # API only
@@ -367,7 +504,7 @@ contract between Claude and the engine.
 ```
                     +----------------------------------------------------+
                     |                    ORCHESTRATOR                     |
-                    |  Reads 15 reference procedures inline               |
+                    |  Reads 16 reference procedures inline               |
                     +------------------------+---------------------------+
                                              |
                           baton plan --------+-------- baton execute
@@ -447,6 +584,7 @@ The `baton` CLI provides 50+ commands organized into ten groups:
 | Command | Description |
 |---------|-------------|
 | `baton plan` | Create a data-driven execution plan |
+| `baton plan --dry-run` | Preview plan + token/cost forecast without saving |
 | `baton execute start` | Start execution from a saved plan |
 | `baton execute next [--all]` | Get next action(s) to perform |
 | `baton execute record` | Record a step completion |
@@ -490,7 +628,7 @@ The `baton` CLI provides 50+ commands organized into ten groups:
 | `baton context current/briefing/gaps` | Situational awareness for agents |
 | `baton query <subcommand>` | SQL queries against this project's baton.db |
 | `baton cleanup` | Archive old execution artifacts |
-| `baton migrate-storage` | Migrate JSON flat files to SQLite |
+| `baton sync --migrate-storage` | Migrate JSON flat files to SQLite |
 
 </details>
 
@@ -521,7 +659,7 @@ The `baton` CLI provides 50+ commands organized into ten groups:
 | `baton changelog` | Agent changelog and backup management |
 | `baton anomalies [--watch]` | Detect system anomalies |
 | `baton experiment list/show/conclude/rollback` | Manage improvement experiments |
-| `baton improve --run/--force/--report` | Run the full improvement loop |
+| `baton learn improve --run/--force/--report` | Run the full improvement loop |
 | `baton learn status` | Dashboard of open learning issues |
 | `baton learn issues` | List issues with filters (`--type`, `--severity`, `--status`) |
 | `baton learn analyze` | Detect patterns across issues, propose fixes |
@@ -542,7 +680,7 @@ The `baton` CLI provides 50+ commands organized into ten groups:
 | `baton package` | Create or install package archives |
 | `baton publish` | Publish to a local registry |
 | `baton pull` | Pull from a registry |
-| `baton verify-package` | Verify a package archive |
+| `baton sync --verify ARCHIVE` | Verify a package archive |
 | `baton transfer` | Transfer between projects |
 
 </details>
@@ -600,13 +738,32 @@ The `baton` CLI provides 50+ commands organized into ten groups:
 
 </details>
 
+<details>
+<summary><strong>Deprecated aliases (still work, removal in a future release)</strong></summary>
+
+These top-level commands still execute but print a deprecation warning to
+stderr on every invocation. Update scripts to use the new paths.
+
+| Old command | New canonical path | Bead |
+|-------------|-------------------|------|
+| `baton migrate-storage` | `baton sync --migrate-storage` | bd-8eef |
+| `baton verify-package ARCHIVE` | `baton sync --verify ARCHIVE` | bd-7eec |
+| `baton improve` | `baton learn improve` | bd-5049 |
+
+PR #70 (end-user-readiness #12) consolidated the three top-level
+commands into the canonical `sync` and `learn` groups. Old aliases keep
+working for the v0.1 series but emit a deprecation warning to stderr on
+every invocation.
+
+</details>
+
 ---
 
 ## Project Structure
 
 ```
-agents/            <- 19 agent definitions (markdown + YAML frontmatter)
-references/        <- 15 reference procedures (shared knowledge)
+agents/            <- 22 agent definitions (markdown + YAML frontmatter)
+references/        <- 16 reference procedures (shared knowledge)
 templates/         <- CLAUDE.md + settings.json + skills for target projects
 scripts/           <- Install scripts (Linux + Windows)
 docs/              <- Architecture docs, ADRs, invariants, troubleshooting
@@ -626,9 +783,9 @@ agent_baton/       <- Python package
     distribute/    <- Packaging, sharing, registry (+ experimental)
     events/        <- Event bus, domain events, projections
     runtime/       <- Async worker, supervisor, headless Claude, decisions
-  api/             <- FastAPI REST API (9 route modules, webhooks, middleware)
+  api/             <- FastAPI REST API (10 route modules, webhooks, middleware)
   cli/             <- CLI interface (50+ commands)
-tests/             <- Test suite (~5010 tests, pytest)
+tests/             <- Test suite (~6202 tests, pytest)
 pmo-ui/            <- React/Vite PMO frontend
 ```
 
@@ -638,11 +795,27 @@ pmo-ui/            <- React/Vite PMO frontend
 
 ### Environment Variables
 
-| Variable | Purpose |
-|----------|---------|
-| `BATON_TASK_ID` | Target a specific execution in multi-task scenarios |
-| `BATON_API_TOKEN` | Bearer token for API authentication |
-| `ANTHROPIC_API_KEY` | Required for AI classification (`pip install agent-baton[classify]`) |
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `BATON_TASK_ID` | Target a specific execution in multi-task scenarios | auto-detected |
+| `BATON_DB_PATH` | Override the project `baton.db` location (subagents in worktrees can rely on the upward-walk discovery) | discovered |
+| `BATON_API_TOKEN` | Bearer token for API authentication | none |
+| `BATON_APPROVAL_MODE` | Approval policy: `local` (self-approve) or `team` (different reviewer required). In `team` mode, `baton swarm` defaults `--require-approval-bead` ON. | `local` |
+| `BATON_SELFHEAL_ENABLED` | Enable speculator/selfheal escalation on gate failure. Falsy values (`0`, `false`, `no`) are honoured and write a `selfheal_suppressed` event to `compliance-audit.jsonl`. | `0` |
+| `BATON_RUN_TOKEN_CEILING` | Per-run cumulative spend cap (USD float). When set, `BudgetEnforcer.check_run_ceiling()` raises `RunTokenCeilingExceeded` before exceeding the cap and selfheal/speculator/immune all abort. Counter is restored on `baton execute resume`. (See PR #67/#73, bd-3f80.) | unset |
+| `BATON_WORKTREE_STALE_HOURS` | Max age (hours) for the worktree GC to reclaim a stale linked worktree. New canonical name; `BATON_WORKTREE_GC_HOURS` is kept as a legacy alias. | `4` |
+| `BATON_EXPERIMENTAL` | CSV opt-in flag for experimental features. Required for `baton swarm` (`BATON_EXPERIMENTAL=swarm`). | unset |
+| `BATON_SWARM_ENABLED` | Required (in addition to `BATON_EXPERIMENTAL=swarm`) to actually dispatch a swarm refactor. | unset |
+| `BATON_SOULS_ENABLED` / `BATON_EXEC_BEADS_ENABLED` | Feature flags for persistent agent souls (Wave 6.1B) and executable beads (Wave 6.1C). | unset |
+| `BATON_SKIP_GIT_NOTES_SETUP` | Set to `1` to silence the install-time git-notes replication setup and the runtime warning emitted by `NotesAdapter.write()` when the wildcard refspec is missing. | unset |
+| `ANTHROPIC_API_KEY` | Required for AI classification (`pip install agent-baton[classify]`) and the Haiku planner classifier | none |
+
+> **Note on experimental features.** `baton swarm`, the Wave 6.2 immune-system
+> daemon, and the predictive watcher (Wave 6.2 Part C) are explicitly marked
+> EXPERIMENTAL and gated behind feature flags. They emit stub warnings to
+> stderr on every invocation and must not be relied on for production work.
+> See [Known Integration Gaps](docs/architecture.md#13-known-integration-gaps-as-of-2026-04-28)
+> for the current paper-functionality matrix.
 
 ### Plan Command Flags
 
@@ -677,7 +850,7 @@ git clone https://github.com/DaveGerson/agent-baton.git
 cd agent-baton
 pip install -e ".[dev]"        # Core + test deps
 pip install -e ".[dev,api]"    # Everything including REST API
-pytest                         # ~5010 tests
+pytest                         # ~6202 tests
 ```
 
 Requires Python 3.10+. The only runtime dependency is PyYAML.
@@ -687,8 +860,11 @@ Requires Python 3.10+. The only runtime dependency is PyYAML.
 | Extra | Packages | Purpose |
 |-------|----------|---------|
 | `dev` | pytest, pytest-cov | Test suite |
-| `api` | FastAPI, uvicorn, httpx, sse-starlette, pydantic | REST API and PMO server |
+| `pmo` | FastAPI, uvicorn, httpx, sse-starlette, pydantic | REST API and PMO server |
+| `api` | same as `pmo` | Backward-compatible alias |
+| `daemon` | uvicorn | Background daemon runner |
 | `classify` | anthropic | AI-powered risk classification |
+| `all` | pmo + classify | Everything except dev tools |
 
 ### Key Documentation
 
@@ -708,17 +884,47 @@ Requires Python 3.10+. The only runtime dependency is PyYAML.
 ## Project Status
 
 Agent Baton is in active development (v0.1.0). The orchestration engine,
-all 19 agents, 15 references, knowledge delivery, bead memory system,
-PMO subsystem, REST API with webhooks, federated sync, event system,
-learning automation, and the improvement pipeline are implemented and
-tested.
+all 22 agents, 16 references, knowledge delivery, bead memory system,
+PMO subsystem with end-to-end workflow (plan, edit, execute, review,
+merge), REST API with webhooks, federated sync, event system, learning
+automation, and the improvement pipeline are implemented and tested.
 
 - **Python**: 3.10+
 - **Runtime dependency**: PyYAML only
 - **Optional**: FastAPI + uvicorn (REST API), Anthropic SDK (AI classification)
-- **Test suite**: ~5010 tests (pytest)
+- **Test suite**: ~6202 tests (pytest)
 - **External adapters**: Azure DevOps implemented; Jira, GitHub, Linear
   protocols defined
+
+### End-User Readiness Sweep — 2026-04-28
+
+The v0.1 series shipped a 12-concern end-user-readiness sweep
+(PRs #59 + #61–#73) that closed paper-functionality gaps, hardened
+worktree isolation, added the run-level token ceiling, gated stub
+features behind `BATON_EXPERIMENTAL`, and consolidated the CLI surface.
+Three integration gaps remain:
+
+| Gap | Bead | Surface |
+|-----|------|---------|
+| Executor wiring of `BATON_RUN_TOKEN_CEILING` | bd-3f80 | Selfheal/speculator/immune respect the cap; main `Executor.dispatch()` only warns |
+| Soul callers not migrated | bd-1ca2 | Existing `soul.verify` callers not yet routed through revocation-aware `SoulRouter.verify_signature()` |
+| Wave 6.1 Part A integration | bd-971d | Git-notes bead persistence + executor BeadStore handoff |
+
+See [Known Integration Gaps](docs/architecture.md#13-known-integration-gaps-as-of-2026-04-28) for the full matrix.
+
+### Experimental Features
+
+The following surfaces are explicitly EXPERIMENTAL and gated behind
+feature flags. Stub implementations emit warnings to stderr; do not rely
+on them for production work.
+
+| Feature | Flag | Status |
+|---------|------|--------|
+| `baton swarm` (massive refactor dispatcher) | `BATON_EXPERIMENTAL=swarm` + `BATON_SWARM_ENABLED=1` | v1 stub — partition plans real, agent dispatch not wired (bd-18f6) |
+| Immune-system daemon | feature flag in `core/intel/immune.py` | Wave 6.2 Part B stub (bd-dd52) |
+| Predictive watcher | feature flag in `core/intel/predictive.py` | Wave 6.2 Part C stub (bd-708a) |
+| Executable beads | `BATON_EXEC_BEADS_ENABLED=1` | Process-level sandbox only; not safe for external-origin beads (bd-fe40) |
+| Persistent agent souls | `BATON_SOULS_ENABLED=1` | CLI partial: rotate/list-revocations API-only (bd-b05e) |
 
 ---
 

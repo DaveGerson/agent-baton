@@ -158,11 +158,10 @@ def test_build_gate_action_to_dict_includes_gate_fields(runner: GateRunner) -> N
     ("lint", "flake8 .", "foo.py:10: error: unexpected indent", 0, False),
     # lint gate — non-zero exit fails
     ("lint", "flake8 .", "All clean.", 2, False),
-    # spec gate
-    ("spec", "openapi-spec-validator spec.yaml", "Spec validated OK.", 0, True),
-    ("spec", "openapi-spec-validator spec.yaml", "Schema mismatch found.", 1, False),
-    # spec gate — empty output fails (no validation output = not validated)
-    ("spec", "openapi-spec-validator spec.yaml", "", 0, False),
+    # spec gate behaviour moved to tests/engine/test_spec_gate_runner.py —
+    # it is now a semantic check dispatched to a Claude Code subprocess,
+    # not a structural exit_code check, so parametrized integration rows
+    # here would either require a real CLI or a heavy fixture.
     # review gate — always passes regardless of exit code or output
     ("review", "", "Looks good overall.", 0, True),
     ("review", "", "FAIL: missing docstrings.", 1, True),

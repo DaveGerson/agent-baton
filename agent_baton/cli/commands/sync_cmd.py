@@ -7,9 +7,11 @@ status      Show sync watermarks for all projects.
 
 Flags
 -----
---all           Sync all registered projects.
---project ID    Sync a specific project by ID.
---rebuild       Full rebuild (delete + re-sync).
+--all                   Sync all registered projects.
+--project ID            Sync a specific project by ID.
+--rebuild               Full rebuild (delete + re-sync).
+--migrate-storage       Migrate JSON/JSONL flat files to SQLite (baton.db).
+--verify ARCHIVE        Validate a .tar.gz agent-baton package.
 """
 from __future__ import annotations
 
@@ -52,6 +54,73 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         action="store_true",
         help="Full rebuild (delete all central rows then re-sync)",
     )
+
+    # ---- migrate-storage (formerly 'baton migrate-storage') ----------------
+    p.add_argument(
+        "--migrate-storage",
+        action="store_true",
+        dest="migrate_storage",
+        help=(
+            "Migrate JSON/JSONL flat files to SQLite (baton.db). "
+            "Formerly 'baton migrate-storage'."
+        ),
+    )
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        dest="dry_run",
+        help="(with --migrate-storage) Show what would be migrated without writing",
+    )
+    _file_group = p.add_mutually_exclusive_group()
+    _file_group.add_argument(
+        "--keep-files",
+        action="store_true",
+        default=True,
+        help="(with --migrate-storage) Keep original files after migration (default)",
+    )
+    _file_group.add_argument(
+        "--remove-files",
+        action="store_true",
+        default=False,
+        help=(
+            "(with --migrate-storage) Archive original files to pre-sqlite-backup/ "
+            "after successful import"
+        ),
+    )
+    p.add_argument(
+        "--team-context",
+        default=".claude/team-context",
+        metavar="PATH",
+        help="(with --migrate-storage) Path to team-context directory",
+    )
+    p.add_argument(
+        "--migrate-verify",
+        action="store_true",
+        dest="migrate_verify",
+        help="(with --migrate-storage) Verify row counts after migration",
+    )
+
+    # ---- verify-package (formerly 'baton verify-package') ------------------
+    p.add_argument(
+        "--verify",
+        dest="verify_package",
+        metavar="ARCHIVE",
+        nargs="?",
+        const=True,
+        default=False,
+        help=(
+            "Validate a .tar.gz agent-baton package before distribution. "
+            "Pass the archive path as the flag value: --verify path/to/pkg.tar.gz. "
+            "Formerly 'baton verify-package'."
+        ),
+    )
+    p.add_argument(
+        "--checksums",
+        action="store_true",
+        default=False,
+        help="(with --verify) Display per-file SHA-256 checksums",
+    )
+
     return p
 
 
@@ -61,7 +130,11 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
 
 
 def handler(args: argparse.Namespace) -> None:
-    if args.subcommand == "status":
+    if getattr(args, "migrate_storage", False):
+        _sync_migrate_storage(args)
+    elif getattr(args, "verify_package", False):
+        _sync_verify_package(args)
+    elif args.subcommand == "status":
         _status(args)
     elif args.sync_all:
         _sync_all(args)
@@ -69,6 +142,62 @@ def handler(args: argparse.Namespace) -> None:
         _sync_project(args)
     else:
         _sync_current(args)
+
+
+# ---------------------------------------------------------------------------
+# migrate-storage implementation (new path: baton sync --migrate-storage)
+# ---------------------------------------------------------------------------
+
+
+def _sync_migrate_storage(args: argparse.Namespace) -> None:
+    """Implementation for ``baton sync --migrate-storage``.
+
+    Delegates to the shared ``_cmd_migrate`` implementation in storage_cmd,
+    translating the sync-namespace attribute names to the expected names.
+    """
+    import argparse as _ap
+    from agent_baton.cli.commands.observe.storage_cmd import _cmd_migrate
+
+    inner = _ap.Namespace(
+        team_context=getattr(args, "team_context", ".claude/team-context"),
+        dry_run=getattr(args, "dry_run", False),
+        remove_files=getattr(args, "remove_files", False),
+        verify=getattr(args, "migrate_verify", False),
+    )
+    _cmd_migrate(inner)
+
+
+# ---------------------------------------------------------------------------
+# verify-package implementation (new path: baton sync --verify ARCHIVE)
+# ---------------------------------------------------------------------------
+
+
+def _sync_verify_package(args: argparse.Namespace) -> None:
+    """Implementation for ``baton sync --verify ARCHIVE``.
+
+    Delegates to the shared ``_cmd_verify`` implementation in install,
+    translating the sync-namespace attribute names to the expected names.
+    """
+    import argparse as _ap
+    from agent_baton.cli.commands.distribute.install import _cmd_verify
+
+    # verify_package holds the archive path string when supplied as
+    # `--verify path/to/pkg.tar.gz`, True when the flag is bare (const),
+    # or False when the flag is absent.
+    verify_package = getattr(args, "verify_package", None)
+    if not verify_package or verify_package is True:
+        print(
+            "error: --verify requires an ARCHIVE path.\n"
+            "Usage: baton sync --verify path/to/package.tar.gz",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    inner = _ap.Namespace(
+        archive=verify_package,
+        checksums=getattr(args, "checksums", False),
+    )
+    _cmd_verify(inner)
 
 
 # ---------------------------------------------------------------------------

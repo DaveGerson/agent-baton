@@ -677,6 +677,43 @@ Reopen a resolved or applied issue.  If an override was auto-applied,
 the user should also remove the corresponding entry from
 `learned-overrides.json`.
 
+#### `baton learn run-cycle`
+
+```
+baton learn run-cycle [--run] [--dry-run] [--template PATH]
+```
+
+Instantiate the bundled learning-cycle plan template and optionally
+execute it via `baton execute run`.  The cycle collects execution data,
+analyzes patterns, proposes improvements, requires human approval,
+applies changes, and documents outcomes.
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--run` | No | Execute the cycle immediately after instantiating the plan |
+| `--dry-run` | No | Print the `baton execute run` command that would run, without executing |
+| `--template PATH` | No | Custom path to a learning-cycle plan template JSON file |
+
+#### `baton learn improve`
+
+```
+baton learn improve [--run | --force | --report | --experiments | --history] [--min-tasks N] [--interval N]
+```
+
+Run a full improvement cycle (formerly `baton improve`).  Detects
+anomalies, generates recommendations, auto-applies safe changes,
+escalates risky ones, and starts experiments.
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--run` | No | Run a full improvement cycle |
+| `--force` | No | Force-run bypassing the data-threshold check |
+| `--report` | No | Show the latest improvement report |
+| `--experiments` | No | Show active experiments |
+| `--history` | No | Show all improvement reports |
+| `--min-tasks N` | No | Override `BATON_MIN_TASKS` for this run |
+| `--interval N` | No | Override `BATON_ANALYSIS_INTERVAL` for this run |
+
 ---
 
 ### `baton context`
@@ -745,6 +782,30 @@ by creating knowledge packs or improving agent definitions.
 Inspect and manage Bead memory -- structured agent discoveries, decisions,
 and warnings that persist across steps within and across tasks.
 
+#### `baton beads create`
+
+Create a bead manually.
+
+```
+baton beads create --type TYPE --content TEXT [--task-id TASK_ID] [--step-id STEP_ID]
+    [--agent AGENT] [--tag TAG] [--file FILE] [--confidence LEVEL]
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--type TYPE` | Yes | Bead type: `discovery`, `decision`, `warning`, `outcome`, `planning` |
+| `--content TEXT` | Yes | The bead text (alias: `--body`) |
+| `--task-id TASK_ID` | No | Task ID to scope this bead (defaults to `$BATON_TASK_ID`; omit for project-scoped) |
+| `--step-id STEP_ID` | No | Step ID within the execution |
+| `--agent AGENT` | No | Agent name to record as the bead author (default: `orchestrator`) |
+| `--tag TAG` | No | Semantic tag (repeatable) |
+| `--file FILE` | No | Affected file path (repeatable) |
+| `--confidence LEVEL` | No | Confidence level: `high`, `medium`, `low` (default: `medium`) |
+
+**When to use:** To capture discoveries, decisions, warnings, or
+incidents that future agents should know about.  Inside an execution
+loop, `--task-id` and `--step-id` are inherited automatically.
+
 #### `baton beads list`
 
 List beads with optional filters.
@@ -799,6 +860,26 @@ baton beads close BEAD_ID [--summary TEXT]
 |----------|----------|-------------|
 | `BEAD_ID` | Yes | Bead ID to close |
 | `--summary TEXT` | No | Compacted summary of the bead's outcome |
+
+#### `baton beads annotate`
+
+Append a timestamped note to an existing bead's content without
+changing its status.  Works on beads in any status (open, closed,
+archived).
+
+```
+baton beads annotate BEAD_ID --note TEXT [--agent NAME]
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `BEAD_ID` | Yes | Bead ID to annotate |
+| `--note TEXT` | Yes | Note to append (alias: `--content`) |
+| `--agent NAME` | No | Agent authoring the annotation |
+
+**When to use:** After an agent interacts with a bead — acts on it,
+discovers it's wrong, or finds new context.  Keeps beads current
+without creating a separate extension bead for every observation.
 
 #### `baton beads link`
 
@@ -1171,27 +1252,9 @@ to review what will be removed.
 
 ---
 
-### `baton migrate-storage`
+### `baton migrate-storage` (deprecated)
 
-Migrate JSON/JSONL flat files to the SQLite database (`baton.db`).
-
-```
-baton migrate-storage [--dry-run] [--keep-files | --remove-files] [--team-context PATH] [--verify]
-```
-
-| Argument | Required | Description |
-|----------|----------|-------------|
-| `--dry-run` | No | Show what would be migrated without writing to the database |
-| `--keep-files` | No | Keep original files after migration (default) |
-| `--remove-files` | No | Move original files to `pre-sqlite-backup/` after successful import |
-| `--team-context PATH` | No | Path to team-context directory (default: `.claude/team-context`) |
-| `--verify` | No | After migrating, compare source file counts against DB row counts |
-
-Safe to run multiple times -- all inserts use `INSERT OR IGNORE` so
-duplicate records are skipped.
-
-**When to use:** When upgrading from a pre-SQLite version of agent-baton.
-Run once to import historical data, then use `--verify` to confirm parity.
+> **Deprecated.** Use `baton sync --migrate-storage` instead. The shim still works and prints a `DEPRECATED:` warning to stderr. All migration flags (`--dry-run`, `--keep-files`, `--remove-files`, `--team-context`, `--migrate-verify`) are now hosted under `baton sync`.
 
 ---
 
@@ -1298,19 +1361,9 @@ baton scores [--agent NAME] [--write] [--trends] [--teams]
 
 ---
 
-### `baton evolve`
+### `baton evolve` (deprecated)
 
-Propose prompt improvements for underperforming agents.
-
-```
-baton evolve [--agent NAME] [--save] [--write]
-```
-
-| Argument | Required | Description |
-|----------|----------|-------------|
-| `--agent NAME` | No | Show proposal for a specific agent |
-| `--save` | No | Write proposals to `.claude/team-context/evolution-proposals/` |
-| `--write` | No | Write summary report to disk |
+> **Deprecated.** Prompt-evolution proposals are produced by the unified learning loop. Use `baton learn run-cycle` instead. The shim still works and prints a `DEPRECATED:` warning to stderr.
 
 ---
 
@@ -1361,59 +1414,47 @@ baton anomalies [--watch]
 
 ---
 
-### `baton experiment`
+### `baton experiment` (deprecated)
 
-Manage improvement experiments.
-
-#### `baton experiment list`
-
-List all experiments.
-
-```
-baton experiment list
-```
-
-#### `baton experiment show`
-
-Show details of an experiment.
-
-```
-baton experiment show
-```
-
-#### `baton experiment conclude`
-
-Manually conclude an experiment.
-
-```
-baton experiment conclude
-```
-
-#### `baton experiment rollback`
-
-Roll back an experiment.
-
-```
-baton experiment rollback
-```
+> **Deprecated.** Experiment tracking is folded into the unified learning loop. Use `baton learn run-cycle` (auto-apply, escalate, and rollback are handled automatically) or inspect active experiments with `baton learn improve --experiments`. The shim still works and prints a `DEPRECATED:` warning to stderr.
 
 ---
 
-### `baton improve`
+### `baton improve` (deprecated)
 
-Run the improvement loop or view reports.
+> **Deprecated.** Use `baton learn improve` instead (same flags). The shim still works and prints a `DEPRECATED:` warning to stderr. Note: the `baton learn` group also adds `run-cycle` (templated learning plan) and the issue-tracking subcommands (`status`, `issues`, `analyze`, `apply`, `interview`, `history`, `reset`) which the legacy `baton improve` did not expose.
+
+---
+
+### `baton swarm`
+
+Experimental Wave 6.2 Part A swarm dispatcher. Partition a codebase into
+AST-independent chunks and (eventually) dispatch one Haiku agent per
+chunk to apply a refactor directive.
 
 ```
-baton improve [--run] [--force] [--report] [--experiments] [--history]
+baton swarm refactor DIRECTIVE_JSON [options]
 ```
 
-| Argument | Required | Description |
-|----------|----------|-------------|
-| `--run` | No | Run a full improvement cycle |
-| `--force` | No | Force-run a cycle even if triggers have not fired |
-| `--report` | No | Show the latest improvement report |
-| `--experiments` | No | Show active experiments |
-| `--history` | No | Show all improvement reports |
+**Gates** (both required, otherwise the command exits with code 2):
+
+- `BATON_EXPERIMENTAL=swarm`
+- `BATON_SWARM_ENABLED=1`
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `DIRECTIVE_JSON` | (required) | JSON directive: `kind` + directive fields (e.g. `replace-import`, `rename-symbol`) |
+| `--max-agents N` | 100 | Max parallel chunk agents (cap: 100) |
+| `--language` | `python` | AST language (v1: python only) |
+| `--model` | `claude-haiku` | LLM tier for chunk agents |
+| `--codebase-root PATH` | cwd | Root of the project to refactor |
+| `--dry-run` | false | Print preview and exit, no dispatch |
+| `-y / --yes` | false | Skip interactive confirmation prompt |
+| `--require-approval-bead [BEAD_ID]` | -- | Require a pre-filed approval bead. Defaults ON when `BATON_APPROVAL_MODE=team`. |
+
+**Exit codes:** `2` = experimental flag not set; `1` = swarm disabled or
+gate failure. See [docs/cli-reference.md#swarm-commands](../docs/cli-reference.md#swarm-commands)
+for examples.
 
 ---
 
@@ -1605,13 +1646,9 @@ Transfer agents/knowledge/references between projects.
 baton transfer
 ```
 
-#### `baton verify-package`
+#### `baton verify-package` (deprecated)
 
-Validate a `.tar.gz` agent-baton package before distribution.
-
-```
-baton verify-package
-```
+> **Deprecated.** Use `baton sync --verify ARCHIVE` instead. The shim still works and prints a `DEPRECATED:` warning to stderr.
 
 ---
 
@@ -2225,3 +2262,27 @@ advance past the team step until all members are in a terminal state
 **Failure handling:** If any member records `--status failed`, the team
 step is marked failed and the engine sets `status = failed` on the next
 call to `baton execute next`.
+
+---
+
+## Environment Variables
+
+The full list of Baton environment variables. Mirrored in
+[docs/cli-reference.md#environment-variables](../docs/cli-reference.md#environment-variables).
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `BATON_TASK_ID` | Bind a shell session to a specific execution. Set after `baton execute start` to scope all subsequent commands. | auto-detected |
+| `BATON_DB_PATH` | Override the project `baton.db` location. CLI walks upward from cwd if unset. | discovered |
+| `BATON_APPROVAL_MODE` | PMO approval policy: `local` (self-approve) or `team` (different reviewer required). In `team` mode, `baton swarm` defaults `--require-approval-bead` ON. | `local` |
+| `BATON_RUN_TOKEN_CEILING` | Per-run cumulative spend cap (USD float). Read fresh on every check; restored on `baton execute resume`. Selfheal/speculator/immune respect it; main `Executor.dispatch()` only warns at HIGH/CRITICAL run start (bd-3f80). | unset |
+| `BATON_EXPERIMENTAL` | CSV opt-in for experimental subsystems. Required for `baton swarm` (`BATON_EXPERIMENTAL=swarm`). Exits with code 2 if unset. | unset |
+| `BATON_SWARM_ENABLED` | Required in addition to `BATON_EXPERIMENTAL=swarm` to dispatch a swarm refactor. | unset |
+| `BATON_SOULS_ENABLED` | Wave 6.1 Part B persistent agent souls (signing + revocation). | `0` |
+| `BATON_PREDICT_ENABLED` | Wave 6.2 Part C predictive computation watcher / classifier / dispatcher. | `0` |
+| `BATON_IMMUNE_ENABLED` | Immune-system monitoring loop. | `0` |
+| `BATON_EXEC_BEADS_ENABLED` | Wave 6.1 Part C executable beads. Sandbox is process-level only — see `references/baton-patterns.md` trust-boundary section before extending to external-origin input. | `0` |
+| `BATON_SKIP_GIT_NOTES_SETUP` | Silence install-time git-notes refspec setup and the runtime warning emitted by `NotesAdapter.write()` when the wildcard refspec is missing. | unset |
+| `BATON_SELFHEAL_ENABLED` | Enable speculator/selfheal escalation on gate failure. Falsy values (`0`, `false`, `no`) are honoured and emit a `selfheal_suppressed` row to `compliance-audit.jsonl`. | `0` |
+| `BATON_API_TOKEN` | Bearer token for the FastAPI server (`baton serve`). CLI `--token` flag takes precedence. | unset |
+| `ANTHROPIC_API_KEY` | Required for AI risk classification and the Haiku planner classifier. | unset |

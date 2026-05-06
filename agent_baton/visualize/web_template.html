@@ -1,0 +1,2681 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Pie Eating Contest · Plan Viewer</title>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,700;9..144,800;9..144,900&family=DM+Sans:wght@400;500;600;700;800&family=Caveat:wght@500;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+<style>
+/* ===================================================================
+   Design tokens — The Pie Eating Contest
+   =================================================================== */
+:root {
+  --cream: #fff4de;
+  --cream-soft: #fff9ec;
+  --cream-deep: #f3e4c2;
+  --crust: #d4a15a;
+  --crust-dark: #a4691a;
+  --ink: #2a1a10;
+  --ink-soft: #5b3a23;
+  --ink-faint: #8a6a4f;
+
+  --cherry: #e23a3a;
+  --cherry-dark: #a8151a;
+  --cherry-soft: #ffd3ce;
+  --blueberry: #4b3bb3;
+  --blueberry-soft: #d6cfff;
+  --mint: #4db892;
+  --mint-dark: #2f7a5e;
+  --mint-soft: #c3e8d2;
+  --butter: #ffc94a;
+  --butter-soft: #fff0b8;
+  --tangerine: #ff8a3d;
+  --tangerine-soft: #ffd7b0;
+  --sky: #6db9ff;
+  --peach: #ffb0a1;
+  --lime: #c9d94a;
+
+  --status-complete: var(--mint);
+  --status-running: var(--butter);
+  --status-pending: var(--crust);
+  --status-failed: var(--cherry);
+  --status-gate: var(--blueberry);
+  --status-approval: var(--tangerine);
+
+  --font-display: 'Fraunces', Georgia, serif;
+  --font-body: 'DM Sans', -apple-system, sans-serif;
+  --font-hand: 'Caveat', cursive;
+  --font-mono: 'JetBrains Mono', monospace;
+
+  --radius-sm: 8px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+  --radius-pill: 999px;
+
+  --shadow-sticker: 3px 3px 0 0 var(--ink);
+  --shadow-sticker-sm: 1.5px 1.5px 0 0 var(--ink);
+  --shadow-sticker-hover: 5px 5px 0 0 var(--ink);
+  --transition: 200ms cubic-bezier(.34, 1.56, .64, 1);
+}
+
+/* ===================================================================
+   Reset & base
+   =================================================================== */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html {
+  font-size: 15px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  font-family: var(--font-body);
+  background: var(--cream);
+  background-image: radial-gradient(var(--crust) 1px, transparent 1.5px);
+  background-size: 18px 18px;
+  color: var(--ink);
+  line-height: 1.5;
+  min-height: 100vh;
+}
+
+/* ===================================================================
+   Layout
+   =================================================================== */
+.container {
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 32px 24px 64px;
+}
+
+/* ===================================================================
+   Header
+   =================================================================== */
+.header {
+  margin-bottom: 24px;
+}
+
+.header__title {
+  font-family: var(--font-display);
+  font-size: 1.8rem;
+  font-weight: 800;
+  color: var(--ink);
+  margin-bottom: 4px;
+  line-height: 1.2;
+}
+
+.header__scribble {
+  font-family: var(--font-hand);
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--cherry);
+  transform: rotate(-2deg);
+  display: inline-block;
+  margin-bottom: 6px;
+}
+
+.header__meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.8rem;
+  color: var(--ink-faint);
+  font-family: var(--font-mono);
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.header__meta-sep {
+  color: var(--crust);
+}
+
+/* Badges */
+.badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.68rem;
+  font-weight: 800;
+  font-family: var(--font-body);
+  padding: 4px 12px;
+  border-radius: var(--radius-pill);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+  border: 1.5px solid var(--ink);
+  box-shadow: var(--shadow-sticker-sm);
+}
+
+.badge--risk-low     { background: var(--mint-soft); color: var(--mint-dark); }
+.badge--risk-medium  { background: var(--tangerine-soft); color: var(--crust-dark); }
+.badge--risk-high    { background: var(--cherry-soft); color: var(--cherry-dark); }
+.badge--risk-critical{ background: var(--cherry); color: var(--cream); }
+
+.badge--budget       { background: var(--butter-soft); color: var(--crust-dark); }
+.badge--complexity   { background: var(--blueberry-soft); color: var(--blueberry); }
+.badge--stack        { background: #dbeeff; color: #2a5a8a; }
+.badge--type         { background: var(--cream-deep); color: var(--ink-soft); }
+.badge--source       { background: var(--cream-deep); color: var(--ink-faint); }
+.badge--mode         { background: var(--mint-soft); color: var(--mint-dark); }
+
+/* ===================================================================
+   Progress bar
+   =================================================================== */
+.progress-section {
+  background: var(--cream-soft);
+  border: 2px solid var(--ink);
+  border-radius: var(--radius-lg);
+  padding: 16px 20px;
+  margin-bottom: 24px;
+  box-shadow: var(--shadow-sticker);
+}
+
+.progress-stats {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.progress-stats__pct {
+  font-size: 1.6rem;
+  font-weight: 800;
+  font-family: var(--font-display);
+  color: var(--ink);
+}
+
+.progress-stats__detail {
+  display: flex;
+  gap: 16px;
+  font-size: 0.8rem;
+  color: var(--ink-soft);
+  font-family: var(--font-mono);
+  flex-wrap: wrap;
+}
+
+.progress-stats__detail span {
+  white-space: nowrap;
+}
+
+.progress-stats__label {
+  color: var(--ink-faint);
+}
+
+.progress-bar {
+  height: 12px;
+  background: var(--cream-deep);
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+  position: relative;
+  border: 2px solid var(--ink);
+}
+
+.progress-bar__fill {
+  height: 100%;
+  border-radius: var(--radius-pill);
+  background: var(--butter);
+  transition: width 600ms cubic-bezier(.22,1,.36,1);
+  position: relative;
+}
+
+.progress-bar__fill--complete {
+  background: var(--mint);
+}
+
+.progress-bar__fill--failed {
+  background: var(--cherry);
+}
+
+.progress-bar__fill--running {
+  animation: progress-pulse 2s ease-in-out infinite;
+}
+
+@keyframes progress-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+/* Execution status badge beneath progress */
+.execution-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  font-family: var(--font-body);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* ===================================================================
+   Status indicators (dots)
+   =================================================================== */
+.status-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  border: 1.5px solid var(--ink);
+}
+
+.status-dot--pending    { background: var(--crust); }
+.status-dot--running    { background: var(--butter); animation: dot-pulse 1.5s ease-in-out infinite; }
+.status-dot--complete   { background: var(--mint); }
+.status-dot--failed     { background: var(--cherry); }
+.status-dot--skipped    { background: var(--ink-faint); }
+.status-dot--interrupted{ background: var(--tangerine); }
+.status-dot--interacting{ background: var(--blueberry); animation: dot-pulse 1.5s ease-in-out infinite; }
+.status-dot--gate_pending { background: var(--butter); animation: dot-pulse 1.5s ease-in-out infinite; }
+
+@keyframes dot-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.85); }
+}
+
+/* ===================================================================
+   View toggle (Graph / Timeline / Attention)
+   =================================================================== */
+.view-toggle {
+  display: flex;
+  gap: 0;
+  margin-bottom: 20px;
+  border: 2px solid var(--ink);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  width: fit-content;
+  box-shadow: var(--shadow-sticker);
+}
+
+.view-toggle__btn {
+  font-family: var(--font-body);
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 8px 18px;
+  border: none;
+  background: var(--cream-soft);
+  color: var(--ink-soft);
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition);
+  border-right: 2px solid var(--ink);
+}
+
+.view-toggle__btn:last-child {
+  border-right: none;
+}
+
+.view-toggle__btn:hover {
+  background: var(--cream-deep);
+  color: var(--ink);
+}
+
+.view-toggle__btn:focus-visible {
+  outline: 2px solid var(--blueberry);
+  outline-offset: -2px;
+}
+
+.view-toggle__btn--active {
+  background: var(--butter);
+  color: var(--ink);
+}
+
+.view-toggle__btn--attention-active {
+  background: var(--cherry);
+  color: var(--cream);
+}
+
+.view-toggle__btn-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  font-size: 0.6rem;
+  font-weight: 800;
+  background: var(--cherry);
+  color: var(--cream);
+  border-radius: var(--radius-pill);
+  padding: 0 5px;
+  margin-left: 4px;
+  border: 1px solid var(--ink);
+}
+
+/* ===================================================================
+   Phases (timeline view)
+   =================================================================== */
+.phases {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.phase {
+  background: var(--cream-soft);
+  border: 2px solid var(--ink);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  box-shadow: var(--shadow-sticker);
+}
+
+.phase[open] > .phase__header {
+  border-bottom: 2px solid var(--ink);
+}
+
+.phase__header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 20px;
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  transition: background var(--transition);
+}
+
+.phase__header:hover {
+  background: var(--cream-deep);
+}
+
+/* Remove default marker */
+.phase__header::-webkit-details-marker,
+.phase__header::marker {
+  display: none;
+  content: '';
+}
+
+.phase__chevron {
+  width: 16px;
+  height: 16px;
+  color: var(--ink-faint);
+  transition: transform var(--transition);
+  flex-shrink: 0;
+}
+
+.phase[open] > .phase__header .phase__chevron {
+  transform: rotate(90deg);
+}
+
+.phase__label {
+  font-size: 0.73rem;
+  font-family: var(--font-mono);
+  color: var(--ink-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  flex-shrink: 0;
+}
+
+.phase__name {
+  font-family: var(--font-display);
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--ink);
+  flex: 1;
+  min-width: 0;
+}
+
+.phase__status-text {
+  font-size: 0.73rem;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  flex-shrink: 0;
+}
+
+.phase__status-text--pending     { color: var(--crust-dark); }
+.phase__status-text--running     { color: var(--butter); }
+.phase__status-text--complete    { color: var(--mint); }
+.phase__status-text--failed      { color: var(--cherry); }
+.phase__status-text--gate_pending { color: var(--blueberry); }
+
+.phase__body {
+  padding: 12px 20px 16px;
+}
+
+/* ===================================================================
+   Step cards
+   =================================================================== */
+.steps {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.step {
+  background: var(--cream-soft);
+  border: 2px solid var(--ink);
+  border-radius: var(--radius-lg);
+  padding: 14px 18px;
+  box-shadow: var(--shadow-sticker);
+  transition: transform var(--transition), box-shadow var(--transition);
+  cursor: pointer;
+}
+
+.step:hover {
+  transform: rotate(-0.5deg) translate(-1px, -1px);
+  box-shadow: var(--shadow-sticker-hover);
+}
+
+.step:active {
+  transform: translate(2px, 2px);
+  box-shadow: none;
+}
+
+.step--pending     { border-left: 5px solid var(--crust); }
+.step--running     { border-left: 5px solid var(--butter); }
+.step--complete    { border-left: 5px solid var(--mint); }
+.step--failed      { border-left: 5px solid var(--cherry); }
+.step--skipped     { border-left: 5px solid var(--ink-faint); }
+.step--interrupted { border-left: 5px solid var(--tangerine); }
+.step--interacting { border-left: 5px solid var(--blueberry); }
+
+.step__header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+  flex-wrap: wrap;
+}
+
+.step__id {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--ink-soft);
+  flex-shrink: 0;
+}
+
+.step__agent {
+  font-size: 0.88rem;
+  font-weight: 700;
+  color: var(--crust-dark);
+}
+
+.step__model {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--ink-faint);
+  background: var(--cream-deep);
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--crust);
+  flex-shrink: 0;
+}
+
+.step__status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.step__desc {
+  font-size: 0.82rem;
+  color: var(--ink-soft);
+  line-height: 1.45;
+  margin-bottom: 6px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.step__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.step__tag {
+  font-size: 0.68rem;
+  font-weight: 800;
+  font-family: var(--font-body);
+  color: var(--ink-soft);
+  background: var(--cream-deep);
+  padding: 3px 10px;
+  border-radius: var(--radius-pill);
+  border: 1.5px solid var(--ink);
+  box-shadow: var(--shadow-sticker-sm);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.step__tag--parallel {
+  color: var(--blueberry);
+  background: var(--blueberry-soft);
+}
+
+.step__tag--depends {
+  color: var(--ink-faint);
+  background: var(--cream-deep);
+}
+
+.step__tag--type {
+  color: var(--ink-faint);
+}
+
+/* Step metrics row */
+.step__metrics {
+  display: flex;
+  gap: 14px;
+  margin-top: 6px;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--ink-faint);
+}
+
+.step__metric-val {
+  color: var(--ink-soft);
+  font-weight: 700;
+}
+
+/* Error display */
+.step__error {
+  margin-top: 6px;
+  font-size: 0.78rem;
+  color: var(--cherry-dark);
+  font-family: var(--font-mono);
+  background: var(--cherry-soft);
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  border: 2px solid var(--cherry);
+}
+
+/* ===================================================================
+   Team members
+   =================================================================== */
+.team {
+  margin-top: 8px;
+  margin-left: 12px;
+  padding-left: 14px;
+  border-left: 2px solid var(--crust);
+}
+
+.team__member {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  font-size: 0.8rem;
+  flex-wrap: wrap;
+}
+
+.team__member + .team__member {
+  border-top: 1px dashed var(--crust);
+}
+
+.team__member-id {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--ink-faint);
+  flex-shrink: 0;
+}
+
+.team__member-agent {
+  font-weight: 700;
+  color: var(--crust-dark);
+}
+
+.team__member-role {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: var(--ink-faint);
+  background: var(--cream-deep);
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--crust);
+  text-transform: uppercase;
+}
+
+.team__member-desc {
+  font-size: 0.78rem;
+  color: var(--ink-soft);
+  flex-basis: 100%;
+  margin-left: 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* ===================================================================
+   Gate bar
+   =================================================================== */
+.gate {
+  margin-top: 12px;
+  padding: 10px 14px;
+  background: var(--cream-deep);
+  border: 2px solid var(--ink);
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  box-shadow: var(--shadow-sticker-sm);
+}
+
+.gate__icon {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+.gate__icon--pending  { color: var(--ink-faint); }
+.gate__icon--passed   { color: var(--mint); }
+.gate__icon--failed   { color: var(--cherry); }
+
+.gate__type {
+  font-family: var(--font-mono);
+  font-size: 0.73rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ink-soft);
+}
+
+.gate__desc {
+  font-size: 0.78rem;
+  color: var(--ink-soft);
+  flex: 1;
+}
+
+.gate__status {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.gate__status--pending { color: var(--ink-faint); }
+.gate__status--passed  { color: var(--mint-dark); }
+.gate__status--failed  { color: var(--cherry); }
+
+.gate__command {
+  flex-basis: 100%;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--ink-faint);
+  margin-top: 2px;
+}
+
+/* ===================================================================
+   Footer
+   =================================================================== */
+.footer {
+  margin-top: 32px;
+  padding-top: 20px;
+  border-top: 2px dashed var(--crust);
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.footer__agents {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.footer__agent-chip {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: var(--crust-dark);
+  background: var(--butter-soft);
+  padding: 4px 12px;
+  border-radius: var(--radius-pill);
+  border: 1.5px solid var(--ink);
+  box-shadow: var(--shadow-sticker-sm);
+}
+
+.footer__label {
+  font-size: 0.73rem;
+  color: var(--ink-faint);
+  margin-bottom: 6px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.footer__amendments {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--ink-soft);
+}
+
+.footer__scribble {
+  font-family: var(--font-hand);
+  font-size: 1.2rem;
+  font-weight: 600;
+  color: var(--ink-soft);
+  text-align: right;
+}
+
+.footer__timestamp {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--ink-faint);
+  margin-top: 4px;
+}
+
+/* ===================================================================
+   Header toolbar (Export, Copy)
+   =================================================================== */
+.header__toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.toolbar-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-body);
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--ink);
+  background: var(--cream-soft);
+  border: 2px solid var(--ink);
+  border-radius: var(--radius-md);
+  padding: 6px 14px;
+  cursor: pointer;
+  transition: transform var(--transition), box-shadow var(--transition), background var(--transition);
+  white-space: nowrap;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  box-shadow: var(--shadow-sticker-sm);
+}
+
+.toolbar-btn:hover {
+  background: var(--butter-soft);
+  transform: translate(-1px, -1px);
+  box-shadow: var(--shadow-sticker);
+}
+
+.toolbar-btn:active {
+  transform: translate(2px, 2px);
+  box-shadow: none;
+}
+
+.toolbar-btn:focus-visible {
+  outline: 2px solid var(--blueberry);
+  outline-offset: 2px;
+}
+
+.toolbar-btn--primary {
+  background: var(--cherry);
+  color: var(--cream);
+}
+
+.toolbar-btn--primary:hover {
+  background: var(--cherry-dark);
+  color: var(--cream);
+}
+
+.toolbar-btn--success {
+  background: var(--mint);
+  color: var(--ink);
+}
+
+.toolbar-btn--success:hover {
+  background: var(--mint-dark);
+  color: var(--cream);
+}
+
+.toolbar-sep {
+  width: 2px;
+  height: 20px;
+  background: var(--crust);
+  flex-shrink: 0;
+}
+
+/* Copied-feedback toast */
+.copy-toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%) translateY(60px);
+  background: var(--mint-dark);
+  color: var(--cream);
+  font-family: var(--font-body);
+  font-size: 0.82rem;
+  font-weight: 700;
+  padding: 10px 22px;
+  border-radius: var(--radius-md);
+  border: 2px solid var(--ink);
+  box-shadow: var(--shadow-sticker);
+  opacity: 0;
+  transition: opacity 200ms ease, transform 200ms ease;
+  pointer-events: none;
+  z-index: 9999;
+}
+
+.copy-toast.visible {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+/* ===================================================================
+   Attention filter
+   =================================================================== */
+.attention-clear {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 24px;
+  font-family: var(--font-hand);
+  font-size: 1.2rem;
+  font-weight: 600;
+  color: var(--mint-dark);
+  background: var(--mint-soft);
+  border: 2px solid var(--ink);
+  border-radius: var(--radius-lg);
+  margin: 16px 0;
+  box-shadow: var(--shadow-sticker);
+}
+
+/* Attention-dimmed items */
+.attention-active .phase {
+  opacity: 0.3;
+  transition: opacity var(--transition);
+}
+
+.attention-active .phase.attention-hit {
+  opacity: 1;
+}
+
+.attention-active .step {
+  opacity: 0.3;
+  transition: opacity var(--transition);
+}
+
+.attention-active .step.attention-hit {
+  opacity: 1;
+}
+
+/* Attention glow effects */
+.step.attention-failed {
+  background: var(--cherry-soft);
+  border-color: var(--cherry);
+}
+
+.step.attention-long-running {
+  border-left-color: var(--butter) !important;
+  background: var(--butter-soft);
+}
+
+.step.attention-error {
+  background: var(--cherry-soft);
+}
+
+.gate.attention-gate-failed {
+  background: var(--cherry-soft);
+  border-color: var(--cherry);
+}
+
+/* ===================================================================
+   Per-step cost indicator
+   =================================================================== */
+.step__cost-flag {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  font-weight: 700;
+  color: var(--cherry-dark);
+  background: var(--cherry-soft);
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  border: 1.5px solid var(--cherry);
+  margin-left: 4px;
+}
+
+.step--expensive {
+  border-right: 4px solid var(--cherry);
+}
+
+/* ===================================================================
+   DAG (Graph) view
+   =================================================================== */
+.dag-container {
+  display: none;
+  position: relative;
+  overflow-x: auto;
+  overflow-y: auto;
+  background: var(--cream-soft);
+  border: 2px solid var(--ink);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sticker);
+  min-height: 300px;
+  padding: 20px;
+}
+
+.dag-container.active {
+  display: block;
+}
+
+.dag-svg {
+  display: block;
+}
+
+.dag-phase-lane {
+  fill: var(--cream-deep);
+  stroke: none;
+  rx: 10;
+  opacity: 0.5;
+}
+
+.dag-phase-label {
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-weight: 700;
+  fill: var(--ink);
+}
+
+.dag-edge {
+  fill: none;
+  stroke-width: 2.5;
+  stroke-linecap: round;
+}
+
+.dag-edge--pending   { stroke: var(--crust); }
+.dag-edge--running   { stroke: var(--butter); stroke-width: 3; }
+.dag-edge--complete  { stroke: var(--mint); }
+.dag-edge--failed    { stroke: var(--cherry); }
+.dag-edge--critical  { stroke: var(--ink); stroke-width: 3; }
+
+.dag-edge--animated {
+  stroke-dasharray: 8 6;
+  animation: dag-flow 0.8s linear infinite;
+}
+
+@keyframes dag-flow {
+  to { stroke-dashoffset: -14; }
+}
+
+/* DAG nodes */
+.dag-node {
+  cursor: pointer;
+  transition: transform var(--transition);
+}
+
+.dag-node:hover {
+  transform: translate(-1px, -1px);
+}
+
+.dag-node-rect {
+  rx: 14;
+  ry: 14;
+  stroke: var(--ink);
+  stroke-width: 2;
+}
+
+.dag-node-rect--pending    { fill: var(--cream-soft); }
+.dag-node-rect--running    { fill: var(--butter-soft); }
+.dag-node-rect--complete   { fill: var(--mint-soft); }
+.dag-node-rect--failed     { fill: var(--cherry-soft); }
+.dag-node-rect--skipped    { fill: var(--cream-deep); }
+.dag-node-rect--interrupted{ fill: var(--tangerine-soft); }
+.dag-node-rect--interacting{ fill: var(--blueberry-soft); }
+
+.dag-node-shadow {
+  rx: 14;
+  ry: 14;
+  fill: var(--ink);
+}
+
+.dag-node-id {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  fill: var(--ink-faint);
+}
+
+.dag-node-agent {
+  font-family: var(--font-body);
+  font-size: 12px;
+  font-weight: 700;
+  fill: var(--ink);
+}
+
+.dag-node-status {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.dag-node-status--pending    { fill: var(--crust-dark); }
+.dag-node-status--running    { fill: var(--crust-dark); }
+.dag-node-status--complete   { fill: var(--mint-dark); }
+.dag-node-status--failed     { fill: var(--cherry-dark); }
+
+.dag-node-cost {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  fill: var(--cherry-dark);
+}
+
+/* DAG node running pulse */
+.dag-node--running .dag-node-rect {
+  animation: node-pulse-butter 2s ease-in-out infinite;
+}
+
+@keyframes node-pulse-butter {
+  0%, 100% { stroke: var(--butter); stroke-width: 2; }
+  50% { stroke: var(--butter); stroke-width: 4; }
+}
+
+/* DAG gate diamonds */
+.dag-gate {
+  cursor: pointer;
+  transition: transform var(--transition);
+}
+
+.dag-gate:hover {
+  transform: translate(-1px, -1px);
+}
+
+.dag-gate-diamond {
+  stroke: var(--ink);
+  stroke-width: 2;
+}
+
+.dag-gate-diamond--pending  { fill: var(--cream-soft); stroke-dasharray: 4 3; }
+.dag-gate-diamond--passed   { fill: var(--mint-soft); }
+.dag-gate-diamond--failed   { fill: var(--cherry-soft); }
+
+.dag-gate-label {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  fill: var(--ink);
+}
+
+/* DAG team members inside nodes */
+.dag-team-dot {
+  stroke: var(--ink);
+  stroke-width: 1;
+}
+
+/* DAG dependency highlight */
+.dag-node.dep-dimmed { opacity: 0.2; }
+.dag-edge.dep-dimmed { opacity: 0.1; }
+.dag-gate.dep-dimmed { opacity: 0.2; }
+.dag-node.dep-highlight { opacity: 1; }
+.dag-edge.dep-highlight { opacity: 1; }
+.dag-gate.dep-highlight { opacity: 1; }
+
+/* ===================================================================
+   Detail modal
+   =================================================================== */
+.modal-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(42, 26, 16, 0.5);
+  z-index: 1000;
+  justify-content: center;
+  align-items: center;
+  padding: 24px;
+}
+
+.modal-overlay.active {
+  display: flex;
+}
+
+.modal {
+  background: var(--cream-soft);
+  border: 2px solid var(--ink);
+  border-radius: var(--radius-xl);
+  box-shadow: 6px 6px 0 0 var(--ink);
+  max-width: 560px;
+  width: 100%;
+  max-height: 80vh;
+  overflow-y: auto;
+  padding: 28px;
+  position: relative;
+}
+
+.modal__close {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  width: 32px;
+  height: 32px;
+  border: 2px solid var(--ink);
+  border-radius: var(--radius-pill);
+  background: var(--cream-deep);
+  color: var(--ink);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1rem;
+  font-weight: 800;
+  transition: transform var(--transition), box-shadow var(--transition);
+  box-shadow: var(--shadow-sticker-sm);
+}
+
+.modal__close:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: var(--shadow-sticker);
+}
+
+.modal__close:active {
+  transform: translate(1px, 1px);
+  box-shadow: none;
+}
+
+.modal__title {
+  font-family: var(--font-display);
+  font-size: 1.2rem;
+  font-weight: 800;
+  color: var(--ink);
+  margin-bottom: 4px;
+  padding-right: 40px;
+}
+
+.modal__subtitle {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--ink-faint);
+  margin-bottom: 16px;
+}
+
+.modal__section {
+  margin-bottom: 14px;
+}
+
+.modal__section-label {
+  font-family: var(--font-body);
+  font-size: 0.7rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-faint);
+  margin-bottom: 4px;
+}
+
+.modal__section-value {
+  font-size: 0.85rem;
+  color: var(--ink-soft);
+  line-height: 1.5;
+}
+
+.modal__section-value--mono {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+}
+
+.modal__metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+
+.modal__metric {
+  text-align: center;
+  padding: 10px;
+  background: var(--cream-deep);
+  border: 1.5px solid var(--ink);
+  border-radius: var(--radius-sm);
+}
+
+.modal__metric-label {
+  font-size: 0.6rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-faint);
+  margin-bottom: 2px;
+}
+
+.modal__metric-value {
+  font-family: var(--font-mono);
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.modal__error {
+  background: var(--cherry-soft);
+  border: 2px solid var(--cherry);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--cherry-dark);
+}
+
+.modal__team-list {
+  list-style: none;
+}
+
+.modal__team-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px dashed var(--crust);
+  font-size: 0.82rem;
+}
+
+.modal__team-item:last-child {
+  border-bottom: none;
+}
+
+/* ===================================================================
+   Print summary card
+   =================================================================== */
+.print-summary {
+  display: none;
+}
+
+@media print {
+  body, html {
+    background: #fff !important;
+    background-image: none !important;
+    color: #111 !important;
+  }
+  .container > *:not(.print-summary) {
+    display: none !important;
+  }
+  .print-summary {
+    display: block !important;
+    font-family: 'DM Sans', -apple-system, sans-serif;
+    color: #111;
+    background: #fff;
+    padding: 32px;
+    max-width: 640px;
+    margin: 0 auto;
+  }
+  .print-summary__title {
+    font-family: 'Fraunces', Georgia, serif;
+    font-size: 1.3rem;
+    font-weight: 800;
+    margin-bottom: 6px;
+    color: #111;
+    line-height: 1.3;
+  }
+  .print-summary__status {
+    display: inline-block;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 0.72rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    padding: 4px 14px;
+    border-radius: 999px;
+    margin-bottom: 16px;
+    border: 1.5px solid #111;
+  }
+  .print-summary__status--running {
+    background: #fff0b8;
+    color: #6b4a10;
+  }
+  .print-summary__status--complete {
+    background: #c3e8d2;
+    color: #2f7a5e;
+  }
+  .print-summary__status--failed {
+    background: #ffd3ce;
+    color: #a8151a;
+  }
+  .print-summary__grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 12px 20px;
+    margin: 16px 0;
+    padding: 14px 0;
+    border-top: 2px solid #2a1a10;
+    border-bottom: 2px solid #2a1a10;
+  }
+  .print-summary__metric {
+    text-align: center;
+  }
+  .print-summary__metric-label {
+    font-size: 0.6rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #8a6a4f;
+    margin-bottom: 2px;
+  }
+  .print-summary__metric-value {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 1rem;
+    font-weight: 700;
+    color: #111;
+  }
+  .print-summary__outcome {
+    font-size: 0.82rem;
+    color: #5b3a23;
+    margin: 12px 0;
+    line-height: 1.5;
+  }
+  .print-summary__date {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.7rem;
+    color: #8a6a4f;
+    margin-top: 12px;
+  }
+  .print-summary__footer {
+    font-family: 'Caveat', cursive;
+    font-size: 1rem;
+    color: #8a6a4f;
+    margin-top: 20px;
+    padding-top: 12px;
+    border-top: 2px dashed #d4a15a;
+    text-align: center;
+  }
+}
+
+/* ===================================================================
+   Responsive
+   =================================================================== */
+@media (max-width: 768px) {
+  .container {
+    padding: 16px 12px 48px;
+  }
+
+  .header__title {
+    font-size: 1.4rem;
+  }
+
+  .progress-stats {
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .progress-stats__detail {
+    gap: 10px;
+  }
+
+  .step__header {
+    gap: 6px;
+  }
+
+  .step__status {
+    margin-left: 0;
+    flex-basis: 100%;
+    margin-top: 2px;
+  }
+
+  .step__desc {
+    -webkit-line-clamp: 3;
+  }
+
+  .footer {
+    flex-direction: column;
+  }
+
+  .gate {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+  }
+
+  .view-toggle {
+    flex-wrap: wrap;
+  }
+
+  .modal {
+    margin: 12px;
+    padding: 20px;
+    max-height: 90vh;
+  }
+
+  .modal__metrics-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+/* ===================================================================
+   Utilities
+   =================================================================== */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0,0,0,0);
+  border: 0;
+}
+
+/* Hidden view containers */
+.timeline-container { display: none; }
+.timeline-container.active { display: block; }
+</style>
+</head>
+<body>
+<script>window.__BATON_PLAN__ = __BATON_PLAN_DATA__;</script>
+
+<main class="container" id="app" role="main" aria-label="Execution Plan Visualization">
+  <!-- Populated by script below -->
+</main>
+
+<!-- Detail modal -->
+<div class="modal-overlay" id="modal-overlay" role="dialog" aria-modal="true" aria-label="Step details">
+  <div class="modal" id="modal">
+    <button class="modal__close" id="modal-close" aria-label="Close detail panel">&times;</button>
+    <div id="modal-content"></div>
+  </div>
+</div>
+
+<script>
+(function() {
+  'use strict';
+
+  var P = window.__BATON_PLAN__;
+  if (!P) { document.getElementById('app').textContent = 'No plan data found.'; return; }
+
+  // ---------------------------------------------------------------
+  // Helpers
+  // ---------------------------------------------------------------
+  function esc(s) {
+    if (s == null) return '';
+    var d = document.createElement('div');
+    d.appendChild(document.createTextNode(String(s)));
+    return d.innerHTML;
+  }
+
+  function truncate(s, n) {
+    if (!s) return '';
+    return s.length > n ? s.slice(0, n) + '...' : s;
+  }
+
+  function formatDuration(sec) {
+    if (!sec || sec <= 0) return '--';
+    if (sec < 60) return sec.toFixed(1) + 's';
+    var m = Math.floor(sec / 60);
+    var s = Math.round(sec % 60);
+    if (m < 60) return m + 'm ' + s + 's';
+    var h = Math.floor(m / 60);
+    m = m % 60;
+    return h + 'h ' + m + 'm';
+  }
+
+  function formatTokens(n) {
+    if (!n) return '0';
+    if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+    if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+    return String(n);
+  }
+
+  function formatCost(usd) {
+    if (!usd) return '$0.00';
+    return '$' + usd.toFixed(2);
+  }
+
+  function formatDate(iso) {
+    if (!iso) return '--';
+    try {
+      var d = new Date(iso);
+      return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) +
+        ' ' + d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+    } catch(e) { return iso; }
+  }
+
+  function statusColor(s) {
+    var map = {
+      'pending': 'var(--crust-dark)', 'running': 'var(--butter)',
+      'complete': 'var(--mint)', 'failed': 'var(--cherry)',
+      'skipped': 'var(--ink-faint)', 'interrupted': 'var(--tangerine)',
+      'interacting': 'var(--blueberry)', 'gate_pending': 'var(--butter)',
+      'not_started': 'var(--ink-faint)', 'cancelled': 'var(--tangerine)'
+    };
+    return map[s] || 'var(--ink-soft)';
+  }
+
+  // Kitchen metaphor mappings
+  var kitchenStatus = {
+    'pending': '&#x1F95F; On Deck',
+    'running': '&#x1F525; In the Oven',
+    'gate_pending': '&#x1F445; Taste Test',
+    'approval': '&#x1F6CE; Ding! Pick Up',
+    'complete': '&#x1F37D; Served!',
+    'failed': '&#x1F4A5; Burnt!',
+    'skipped': 'Skipped',
+    'interrupted': 'Interrupted',
+    'interacting': '&#x1F445; Taste Test',
+    'not_started': '&#x1F95F; On Deck',
+    'cancelled': 'Cancelled'
+  };
+
+  var kitchenRisk = {
+    'LOW': '&#x1FAD1; Mild',
+    'MEDIUM': '&#x1F336; Spicy',
+    'HIGH': '&#x1F525; Extra Hot',
+    'CRITICAL': '&#x1F9EF; Kitchen on Fire'
+  };
+
+  function getKitchenStatus(s) {
+    return kitchenStatus[s] || esc(s);
+  }
+
+  function getKitchenRisk(r) {
+    return kitchenRisk[(r || '').toUpperCase()] || esc(r);
+  }
+
+  // SVG icons as strings
+  var chevronSvg = '<svg class="phase__chevron" viewBox="0 0 16 16" fill="currentColor"><path d="M6.22 3.22a.75.75 0 0 1 1.06 0l4.25 4.25a.75.75 0 0 1 0 1.06l-4.25 4.25a.75.75 0 0 1-1.06-1.06L9.94 8 6.22 4.28a.75.75 0 0 1 0-1.06z"/></svg>';
+
+  function gateIconSvg(status) {
+    if (status === 'passed') {
+      return '<svg class="gate__icon gate__icon--passed" viewBox="0 0 16 16" fill="currentColor"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 0 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0z"/></svg>';
+    }
+    if (status === 'failed') {
+      return '<svg class="gate__icon gate__icon--failed" viewBox="0 0 16 16" fill="currentColor"><path d="M3.72 3.72a.75.75 0 0 1 1.06 0L8 6.94l3.22-3.22a.75.75 0 1 1 1.06 1.06L9.06 8l3.22 3.22a.75.75 0 1 1-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 0 1-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 0 1 0-1.06z"/></svg>';
+    }
+    return '<svg class="gate__icon gate__icon--pending" viewBox="0 0 16 16" fill="currentColor"><path d="M8 4a4 4 0 1 0 0 8 4 4 0 0 0 0-8zM2 8a6 6 0 1 1 12 0A6 6 0 0 1 2 8z"/><path d="M8 6.5a.75.75 0 0 1 .75.75v1.5l1.14.68a.75.75 0 1 1-.78 1.28l-1.5-.9A.75.75 0 0 1 7.25 9V7.25A.75.75 0 0 1 8 6.5z"/></svg>';
+  }
+
+  // ---------------------------------------------------------------
+  // Flatten all steps for DAG and modal lookup
+  // ---------------------------------------------------------------
+  var allStepsFlat = [];
+  var stepPhaseMap = {};
+  var phases = P.phases || [];
+  for (var fi = 0; fi < phases.length; fi++) {
+    var ph = phases[fi];
+    var steps = ph.steps || [];
+    for (var si = 0; si < steps.length; si++) {
+      allStepsFlat.push(steps[si]);
+      stepPhaseMap[steps[si].step_id] = ph;
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // Build HTML
+  // ---------------------------------------------------------------
+  var html = '';
+
+  // -- Header --
+  html += '<header class="header">';
+  html +=   '<h1 class="header__title">' + esc(P.task_summary || 'Execution Plan') + '</h1>';
+
+  // Scribble note with task_id
+  if (P.task_id) {
+    html += '<div class="header__scribble">recipe card #' + esc(P.task_id).slice(0, 8) + '</div>';
+  }
+
+  html +=   '<div class="header__meta">';
+  html +=     '<span>' + esc(P.task_id) + '</span>';
+  if (P.created_at) {
+    html +=   '<span class="header__meta-sep" aria-hidden="true">/</span>';
+    html +=   '<span>' + esc(formatDate(P.created_at)) + '</span>';
+  }
+  html +=   '</div>';
+
+  // Badges with kitchen risk
+  html +=   '<div class="badges" role="list" aria-label="Classification badges">';
+
+  var riskClass = 'badge--risk-' + (P.risk_level || 'low').toLowerCase();
+  html +=     '<span class="badge ' + riskClass + '" role="listitem">' + getKitchenRisk(P.risk_level || 'LOW') + '</span>';
+  html +=     '<span class="badge badge--budget" role="listitem">Budget: ' + esc(P.budget_tier || 'standard') + '</span>';
+  html +=     '<span class="badge badge--complexity" role="listitem">Complexity: ' + esc(P.complexity || 'medium') + '</span>';
+
+  if (P.detected_stack) {
+    html +=   '<span class="badge badge--stack" role="listitem">Stack: ' + esc(P.detected_stack) + '</span>';
+  }
+  if (P.task_type) {
+    html +=   '<span class="badge badge--type" role="listitem">Type: ' + esc(P.task_type) + '</span>';
+  }
+  if (P.execution_mode) {
+    html +=   '<span class="badge badge--mode" role="listitem">Mode: ' + esc(P.execution_mode) + '</span>';
+  }
+  if (P.classification_source) {
+    html +=   '<span class="badge badge--source" role="listitem">Via: ' + esc(P.classification_source) + '</span>';
+  }
+
+  html +=   '</div>';
+
+  // Toolbar: Export + Copy
+  html +=   '<div class="header__toolbar">';
+  html +=     '<button class="toolbar-btn" id="btn-export" type="button" aria-label="Export summary for print">';
+  html +=       '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0a.75.75 0 0 1 .75.75v8.19l2.72-2.72a.75.75 0 1 1 1.06 1.06l-4 4a.75.75 0 0 1-1.06 0l-4-4a.75.75 0 0 1 1.06-1.06l2.72 2.72V.75A.75.75 0 0 1 8 0z"/><path d="M2.75 12a.75.75 0 0 1 .75.75v1.5h9v-1.5a.75.75 0 0 1 1.5 0v1.5A1.5 1.5 0 0 1 12.5 16h-9A1.5 1.5 0 0 1 2 14.25v-1.5a.75.75 0 0 1 .75-.75z"/></svg>';
+  html +=       ' Export';
+  html +=     '</button>';
+  html +=     '<button class="toolbar-btn" id="btn-copy" type="button" aria-label="Copy summary to clipboard">';
+  html +=       '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25z"/><path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25z"/></svg>';
+  html +=       ' Copy';
+  html +=     '</button>';
+  html +=   '</div>';
+
+  html += '</header>';
+
+  // -- Progress section --
+  var pct = P.progress_pct || 0;
+  var fillClass = 'progress-bar__fill';
+  if (P.execution_status === 'complete') fillClass += ' progress-bar__fill--complete';
+  else if (P.execution_status === 'failed') fillClass += ' progress-bar__fill--failed';
+  else if (P.execution_status === 'running') fillClass += ' progress-bar__fill--running';
+
+  html += '<section class="progress-section" aria-label="Execution progress">';
+  html +=   '<div class="progress-stats">';
+  html +=     '<span class="progress-stats__pct">' + pct.toFixed(1) + '%</span>';
+  html +=     '<div class="progress-stats__detail">';
+  html +=       '<span><span class="step__metric-val">' + (P.steps_complete || 0) + '</span> <span class="progress-stats__label">served</span></span>';
+  html +=       '<span><span class="step__metric-val">' + (P.steps_running || 0) + '</span> <span class="progress-stats__label">cooking</span></span>';
+  html +=       '<span><span class="step__metric-val">' + (P.steps_failed || 0) + '</span> <span class="progress-stats__label">burnt</span></span>';
+  html +=       '<span><span class="step__metric-val">' + formatDuration(P.elapsed_seconds) + '</span> <span class="progress-stats__label">elapsed</span></span>';
+  html +=       '<span><span class="step__metric-val">' + formatTokens(P.total_tokens) + '</span> <span class="progress-stats__label">tokens</span></span>';
+  html +=       '<span><span class="step__metric-val">' + formatCost(P.total_cost_usd) + '</span> <span class="progress-stats__label">cost</span></span>';
+  html +=     '</div>';
+  html +=   '</div>';
+  html +=   '<div class="progress-bar" role="progressbar" aria-valuenow="' + pct + '" aria-valuemin="0" aria-valuemax="100">';
+  html +=     '<div class="' + fillClass + '" style="width:' + Math.min(pct, 100) + '%"></div>';
+  html +=   '</div>';
+  html +=   '<div class="execution-status" style="color:' + statusColor(P.execution_status) + '">';
+  html +=     '<span class="status-dot status-dot--' + esc(P.execution_status || 'not_started') + '"></span>';
+  html +=     getKitchenStatus(P.execution_status || 'not_started');
+  html +=   '</div>';
+  html += '</section>';
+
+  // -- View toggle --
+  html += '<div class="view-toggle" role="tablist" aria-label="View mode">';
+  html +=   '<button class="view-toggle__btn view-toggle__btn--active" id="btn-view-graph" role="tab" aria-selected="true" aria-controls="dag-view" type="button">Graph</button>';
+  html +=   '<button class="view-toggle__btn" id="btn-view-timeline" role="tab" aria-selected="false" aria-controls="timeline-view" type="button">Timeline</button>';
+  html +=   '<button class="view-toggle__btn" id="btn-view-attention" role="tab" aria-selected="false" type="button"><span id="attention-label">Attention</span></button>';
+  html += '</div>';
+
+  // -- DAG container --
+  html += '<div class="dag-container active" id="dag-view" role="tabpanel" aria-label="Dependency graph view"></div>';
+
+  // -- Timeline (phases) container --
+  html += '<div class="timeline-container" id="timeline-view" role="tabpanel" aria-label="Timeline view">';
+
+  html += '<div class="phases" role="list" aria-label="Execution phases">';
+
+  for (var pi = 0; pi < phases.length; pi++) {
+    var phase = phases[pi];
+    var phaseStatus = phase.status || 'pending';
+    var isOpen = phaseStatus !== 'complete';
+
+    // Phase emoji
+    var phaseEmoji = '';
+    if (phaseStatus === 'pending') phaseEmoji = '&#x1F95F; ';
+    else if (phaseStatus === 'running') phaseEmoji = '&#x1F525; ';
+    else if (phaseStatus === 'gate_pending') phaseEmoji = '&#x1F445; ';
+    else if (phaseStatus === 'complete') phaseEmoji = '&#x1F37D; ';
+    else if (phaseStatus === 'failed') phaseEmoji = '&#x1F4A5; ';
+
+    html += '<details class="phase" role="listitem"' + (isOpen ? ' open' : '') + '>';
+
+    // Phase header (summary)
+    html += '<summary class="phase__header">';
+    html +=   chevronSvg;
+    html +=   '<span class="status-dot status-dot--' + esc(phaseStatus) + '" aria-hidden="true"></span>';
+    html +=   '<span class="phase__label">Station ' + esc(phase.phase_id) + '</span>';
+    html +=   '<span class="phase__name">' + phaseEmoji + esc(phase.name) + '</span>';
+    if (phase.approval_required) {
+      html += '<span class="badge badge--risk-high" style="font-size:.62rem">&#x1F6CE; Approval</span>';
+    }
+    html +=   '<span class="phase__status-text phase__status-text--' + esc(phaseStatus) + '">' + getKitchenStatus(phaseStatus) + '</span>';
+    html += '</summary>';
+
+    // Phase body
+    html += '<div class="phase__body">';
+
+    // Steps
+    var pSteps = phase.steps || [];
+    if (pSteps.length > 0) {
+      html += '<div class="steps">';
+      for (var psi = 0; psi < pSteps.length; psi++) {
+        var step = pSteps[psi];
+        var stepStatus = step.status || 'pending';
+
+        // Determine if this step is expensive (>50% of total plan cost)
+        var thisStepCost = step.tokens_used ? step.tokens_used * 3 / 1000000 : 0;
+        var totalPlanCost = P.total_cost_usd || 0;
+        var isExpensive = totalPlanCost > 0 && thisStepCost > totalPlanCost * 0.5;
+
+        var stepClasses = 'step step--' + esc(stepStatus);
+        if (isExpensive) stepClasses += ' step--expensive';
+
+        // Data attributes for attention filter
+        html += '<div class="' + stepClasses + '"';
+        html += ' data-status="' + esc(stepStatus) + '"';
+        html += ' data-duration="' + (step.duration_seconds || 0) + '"';
+        html += ' data-has-error="' + (step.error ? 'true' : 'false') + '"';
+        html += ' data-step-id="' + esc(step.step_id) + '"';
+        html += '>';
+
+        // Step header
+        html += '<div class="step__header">';
+        html +=   '<span class="step__id">' + esc(step.step_id) + '</span>';
+        html +=   '<span class="status-dot status-dot--' + esc(stepStatus) + '" aria-hidden="true"></span>';
+        html +=   '<span class="step__agent">&#x1F468;&#x200D;&#x1F373; ' + esc(step.agent_name) + '</span>';
+        if (step.model) {
+          html += '<span class="step__model">' + esc(step.model) + '</span>';
+        }
+        html +=   '<span class="step__status" style="color:' + statusColor(stepStatus) + '">' + getKitchenStatus(stepStatus) + '</span>';
+        if (isExpensive) {
+          html += '<span class="step__cost-flag" title="This step accounts for over 50% of total plan cost">' + formatCost(thisStepCost) + '</span>';
+        }
+        html += '</div>';
+
+        // Description
+        if (step.task_description) {
+          html += '<div class="step__desc">' + esc(step.task_description) + '</div>';
+        }
+
+        // Meta tags
+        var hasMeta = step.parallel_safe || (step.depends_on && step.depends_on.length) || step.step_type;
+        if (hasMeta) {
+          html += '<div class="step__meta">';
+          if (step.parallel_safe) {
+            html += '<span class="step__tag step__tag--parallel">parallel-safe</span>';
+          }
+          if (step.depends_on && step.depends_on.length) {
+            html += '<span class="step__tag step__tag--depends">depends on: ' + esc(step.depends_on.join(', ')) + '</span>';
+          }
+          if (step.step_type) {
+            html += '<span class="step__tag step__tag--type">' + esc(step.step_type) + '</span>';
+          }
+          html += '</div>';
+        }
+
+        // Metrics (shown if step has results)
+        var stepCostUsd = step.tokens_used ? step.tokens_used * 3 / 1000000 : 0;
+        if (step.tokens_used || step.duration_seconds) {
+          html += '<div class="step__metrics">';
+          if (step.tokens_used) {
+            html += '<span><span class="progress-stats__label">tokens</span> <span class="step__metric-val">' + formatTokens(step.tokens_used) + '</span></span>';
+            html += '<span><span class="progress-stats__label">cost</span> <span class="step__metric-val">' + formatCost(stepCostUsd) + '</span></span>';
+          }
+          if (step.duration_seconds) {
+            html += '<span><span class="progress-stats__label">time</span> <span class="step__metric-val">' + formatDuration(step.duration_seconds) + '</span></span>';
+          }
+          if (step.files_changed && step.files_changed.length) {
+            html += '<span><span class="progress-stats__label">files</span> <span class="step__metric-val">' + step.files_changed.length + '</span></span>';
+          }
+          html += '</div>';
+        }
+
+        // Error
+        if (step.error) {
+          html += '<div class="step__error">' + esc(truncate(step.error, 300)) + '</div>';
+        }
+
+        // Team members
+        if (step.team && step.team.length) {
+          html += '<div class="team" role="list" aria-label="Team members">';
+          for (var ti = 0; ti < step.team.length; ti++) {
+            var member = step.team[ti];
+            var mStatus = member.status || 'pending';
+            html += '<div class="team__member" role="listitem">';
+            html +=   '<span class="status-dot status-dot--' + esc(mStatus) + '" aria-hidden="true"></span>';
+            html +=   '<span class="team__member-id">' + esc(member.member_id) + '</span>';
+            html +=   '<span class="team__member-agent">&#x1F468;&#x200D;&#x1F373; ' + esc(member.agent_name) + '</span>';
+            html +=   '<span class="team__member-role">' + esc(member.role) + '</span>';
+            if (member.task_description) {
+              html += '<span class="team__member-desc">' + esc(member.task_description) + '</span>';
+            }
+            html += '</div>';
+          }
+          html += '</div>';
+        }
+
+        html += '</div>'; // .step
+      }
+      html += '</div>'; // .steps
+    }
+
+    // Gate
+    if (phase.gate) {
+      var gateStatus = phase.gate.status || 'pending';
+      html += '<div class="gate" data-gate-status="' + esc(gateStatus) + '">';
+      html +=   gateIconSvg(gateStatus);
+      html +=   '<span class="gate__type">&#x1F445; ' + esc(phase.gate.gate_type) + ' taste test</span>';
+      if (phase.gate.description) {
+        html += '<span class="gate__desc">' + esc(phase.gate.description) + '</span>';
+      }
+      html +=   '<span class="gate__status gate__status--' + esc(gateStatus) + '">' + esc(gateStatus) + '</span>';
+      if (phase.gate.command) {
+        html += '<span class="gate__command">' + esc(phase.gate.command) + '</span>';
+      }
+      html += '</div>';
+    }
+
+    html += '</div>'; // .phase__body
+    html += '</details>'; // .phase
+  }
+
+  html += '</div>'; // .phases
+  html += '</div>'; // .timeline-container
+
+  // -- Footer --
+  var agents = P.total_agents || [];
+  html += '<footer class="footer">';
+
+  html += '<div>';
+  html +=   '<div class="footer__label">Chefs (' + agents.length + ')</div>';
+  html +=   '<div class="footer__agents">';
+  for (var ai = 0; ai < agents.length; ai++) {
+    html += '<span class="footer__agent-chip">&#x1F468;&#x200D;&#x1F373; ' + esc(agents[ai]) + '</span>';
+  }
+  html +=   '</div>';
+  html += '</div>';
+
+  html += '<div>';
+  html +=   '<div class="footer__label">Amendments</div>';
+  html +=   '<div class="footer__amendments">' + (P.amendment_count || 0) + '</div>';
+  html += '</div>';
+
+  html += '<div style="text-align:right">';
+  html +=   '<div class="footer__scribble">order up, Chef! &#x1F468;&#x200D;&#x1F373;</div>';
+  if (P.created_at) {
+    html += '<div class="footer__timestamp">' + esc(formatDate(P.created_at)) + '</div>';
+  }
+  html += '</div>';
+
+  html += '</footer>';
+
+  // Inject
+  document.getElementById('app').innerHTML = html;
+
+  // Update document title
+  if (P.task_summary) {
+    document.title = P.task_summary + ' — The Pie Eating Contest';
+  }
+
+  // ---------------------------------------------------------------
+  // Print summary card (hidden, shown only via @media print)
+  // ---------------------------------------------------------------
+  (function buildPrintSummary() {
+    var card = document.createElement('div');
+    card.className = 'print-summary';
+
+    var status = P.execution_status || 'not_started';
+    var statusClass = 'print-summary__status--' + (
+      status === 'complete' ? 'complete' :
+      status === 'failed' ? 'failed' : 'running'
+    );
+
+    var totalSteps = 0;
+    var phs = P.phases || [];
+    for (var i = 0; i < phs.length; i++) {
+      totalSteps += (phs[i].steps || []).length;
+    }
+
+    var phasesComplete = 0, phasesRunning = 0, phasesPending = 0;
+    for (var j = 0; j < phs.length; j++) {
+      var ps = phs[j].status || 'pending';
+      if (ps === 'complete') phasesComplete++;
+      else if (ps === 'running') phasesRunning++;
+      else phasesPending++;
+    }
+
+    var elapsedStr = formatDuration(P.elapsed_seconds);
+    var costStr = formatCost(P.total_cost_usd);
+
+    var c = '';
+    c += '<div class="print-summary__title">' + esc(P.task_summary || 'Execution Plan') + '</div>';
+    c += '<div class="print-summary__status ' + statusClass + '">' + esc(status.replace(/_/g, ' ')) + '</div>';
+
+    c += '<div class="print-summary__grid">';
+    c +=   '<div class="print-summary__metric"><div class="print-summary__metric-label">Steps</div><div class="print-summary__metric-value">' + (P.steps_complete || 0) + ' / ' + totalSteps + '</div></div>';
+    c +=   '<div class="print-summary__metric"><div class="print-summary__metric-label">Phases</div><div class="print-summary__metric-value">' + phasesComplete + ' / ' + phs.length + '</div></div>';
+    c +=   '<div class="print-summary__metric"><div class="print-summary__metric-label">Risk Level</div><div class="print-summary__metric-value">' + esc(P.risk_level || 'LOW') + '</div></div>';
+    c +=   '<div class="print-summary__metric"><div class="print-summary__metric-label">Elapsed Time</div><div class="print-summary__metric-value">' + esc(elapsedStr) + '</div></div>';
+    c +=   '<div class="print-summary__metric"><div class="print-summary__metric-label">Total Tokens</div><div class="print-summary__metric-value">' + formatTokens(P.total_tokens) + '</div></div>';
+    c +=   '<div class="print-summary__metric"><div class="print-summary__metric-label">Total Cost</div><div class="print-summary__metric-value">' + esc(costStr) + '</div></div>';
+    c += '</div>';
+
+    c += '<div class="print-summary__outcome">';
+    c += (P.steps_complete || 0) + ' steps served, ';
+    c += (P.steps_running || 0) + ' cooking, ';
+    c += (P.steps_failed || 0) + ' burnt';
+    c += ' &mdash; ' + esc(costStr) + ' spent in ' + esc(elapsedStr);
+    c += '</div>';
+
+    c += '<div class="print-summary__date">' + esc(formatDate(P.created_at || new Date().toISOString())) + '</div>';
+    c += '<div class="print-summary__footer">order up, Chef! &#x1F468;&#x200D;&#x1F373; &middot; Agent Baton</div>';
+
+    card.innerHTML = c;
+    document.getElementById('app').appendChild(card);
+  })();
+
+  // ---------------------------------------------------------------
+  // Copy-feedback toast
+  // ---------------------------------------------------------------
+  var toastEl = document.createElement('div');
+  toastEl.className = 'copy-toast';
+  toastEl.setAttribute('role', 'status');
+  toastEl.setAttribute('aria-live', 'polite');
+  toastEl.textContent = 'Copied to clipboard';
+  document.body.appendChild(toastEl);
+
+  function showToast(msg) {
+    toastEl.textContent = msg || 'Copied to clipboard';
+    toastEl.classList.add('visible');
+    setTimeout(function() { toastEl.classList.remove('visible'); }, 2000);
+  }
+
+  // ---------------------------------------------------------------
+  // Export button -- triggers window.print()
+  // ---------------------------------------------------------------
+  document.getElementById('btn-export').addEventListener('click', function() {
+    window.print();
+  });
+
+  // ---------------------------------------------------------------
+  // Copy button -- plain-text summary to clipboard
+  // ---------------------------------------------------------------
+  document.getElementById('btn-copy').addEventListener('click', function() {
+    var status = (P.execution_status || 'not_started').toUpperCase().replace(/_/g, ' ');
+    var totalSteps = 0;
+    var phs = P.phases || [];
+    for (var i = 0; i < phs.length; i++) {
+      totalSteps += (phs[i].steps || []).length;
+    }
+    var cpct = P.progress_pct || 0;
+    var phasesComplete = 0, phasesRunning = 0, phasesPending = 0;
+    for (var j = 0; j < phs.length; j++) {
+      var ps = phs[j].status || 'pending';
+      if (ps === 'complete') phasesComplete++;
+      else if (ps === 'running') phasesRunning++;
+      else phasesPending++;
+    }
+
+    var lines = [
+      'Agent Baton — The Pie Eating Contest',
+      'Recipe: ' + (P.task_summary || 'Execution Plan'),
+      'Status: ' + status + ' | ' + (P.steps_complete || 0) + '/' + totalSteps + ' steps | ' + cpct.toFixed(0) + '% complete',
+      'Risk: ' + (P.risk_level || 'LOW') + ' | Cost: ' + formatCost(P.total_cost_usd) + ' | Elapsed: ' + formatDuration(P.elapsed_seconds),
+      'Stations: ' + phasesComplete + ' served, ' + phasesRunning + ' cooking, ' + phasesPending + ' on deck'
+    ];
+    var text = lines.join('\n');
+
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function() {
+        showToast('Copied to clipboard');
+      }).catch(function() {
+        fallbackCopy(text);
+      });
+    } else {
+      fallbackCopy(text);
+    }
+  });
+
+  function fallbackCopy(text) {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try {
+      document.execCommand('copy');
+      showToast('Copied to clipboard');
+    } catch(e) {
+      showToast('Copy failed');
+    }
+    document.body.removeChild(ta);
+  }
+
+  // ---------------------------------------------------------------
+  // Detail modal
+  // ---------------------------------------------------------------
+  var modalOverlay = document.getElementById('modal-overlay');
+  var modalContent = document.getElementById('modal-content');
+  var modalClose = document.getElementById('modal-close');
+
+  function openStepModal(stepId) {
+    var step = null;
+    for (var i = 0; i < allStepsFlat.length; i++) {
+      if (allStepsFlat[i].step_id === stepId) { step = allStepsFlat[i]; break; }
+    }
+    if (!step) return;
+
+    var st = step.status || 'pending';
+    var phas = stepPhaseMap[stepId];
+    var stepCost = step.tokens_used ? step.tokens_used * 3 / 1000000 : 0;
+
+    var m = '';
+    m += '<div class="modal__title">' + esc(step.agent_name) + '</div>';
+    m += '<div class="modal__subtitle">' + esc(step.step_id) + (phas ? ' &middot; Station ' + esc(phas.phase_id) + ' &middot; ' + esc(phas.name) : '') + '</div>';
+
+    // Status badge
+    m += '<div class="modal__section">';
+    m +=   '<span class="badge" style="background:' + statusColor(st) + ';color:var(--cream);border-color:var(--ink)">' + getKitchenStatus(st) + '</span>';
+    if (step.model) {
+      m += ' <span class="badge badge--type">' + esc(step.model) + '</span>';
+    }
+    m += '</div>';
+
+    // Description
+    if (step.task_description) {
+      m += '<div class="modal__section">';
+      m +=   '<div class="modal__section-label">Task</div>';
+      m +=   '<div class="modal__section-value">' + esc(step.task_description) + '</div>';
+      m += '</div>';
+    }
+
+    // Metrics
+    m += '<div class="modal__section">';
+    m +=   '<div class="modal__section-label">Metrics</div>';
+    m +=   '<div class="modal__metrics-grid">';
+    m +=     '<div class="modal__metric"><div class="modal__metric-label">Tokens</div><div class="modal__metric-value">' + formatTokens(step.tokens_used) + '</div></div>';
+    m +=     '<div class="modal__metric"><div class="modal__metric-label">Cost</div><div class="modal__metric-value">' + formatCost(stepCost) + '</div></div>';
+    m +=     '<div class="modal__metric"><div class="modal__metric-label">Time</div><div class="modal__metric-value">' + formatDuration(step.duration_seconds) + '</div></div>';
+    m +=   '</div>';
+    m += '</div>';
+
+    // Dependencies
+    if (step.depends_on && step.depends_on.length) {
+      m += '<div class="modal__section">';
+      m +=   '<div class="modal__section-label">Depends On</div>';
+      m +=   '<div class="modal__section-value modal__section-value--mono">' + esc(step.depends_on.join(', ')) + '</div>';
+      m += '</div>';
+    }
+
+    // Tags
+    var tags = [];
+    if (step.parallel_safe) tags.push('parallel-safe');
+    if (step.step_type) tags.push(step.step_type);
+    if (tags.length) {
+      m += '<div class="modal__section">';
+      m +=   '<div class="modal__section-label">Tags</div>';
+      m +=   '<div style="display:flex;gap:6px;flex-wrap:wrap">';
+      for (var t = 0; t < tags.length; t++) {
+        m += '<span class="step__tag">' + esc(tags[t]) + '</span>';
+      }
+      m +=   '</div>';
+      m += '</div>';
+    }
+
+    // Files changed
+    if (step.files_changed && step.files_changed.length) {
+      m += '<div class="modal__section">';
+      m +=   '<div class="modal__section-label">Files Changed (' + step.files_changed.length + ')</div>';
+      m +=   '<div class="modal__section-value modal__section-value--mono">' + esc(step.files_changed.join(', ')) + '</div>';
+      m += '</div>';
+    }
+
+    // Error
+    if (step.error) {
+      m += '<div class="modal__section">';
+      m +=   '<div class="modal__section-label">Error</div>';
+      m +=   '<div class="modal__error">' + esc(step.error) + '</div>';
+      m += '</div>';
+    }
+
+    // Team
+    if (step.team && step.team.length) {
+      m += '<div class="modal__section">';
+      m +=   '<div class="modal__section-label">Team</div>';
+      m +=   '<ul class="modal__team-list">';
+      for (var tm = 0; tm < step.team.length; tm++) {
+        var mbr = step.team[tm];
+        m += '<li class="modal__team-item">';
+        m +=   '<span class="status-dot status-dot--' + esc(mbr.status || 'pending') + '"></span>';
+        m +=   '<strong>' + esc(mbr.agent_name) + '</strong>';
+        m +=   '<span class="step__tag">' + esc(mbr.role) + '</span>';
+        m += '</li>';
+      }
+      m +=   '</ul>';
+      m += '</div>';
+    }
+
+    modalContent.innerHTML = m;
+    modalOverlay.classList.add('active');
+    document.body.style.overflow = 'hidden';
+    modalClose.focus();
+  }
+
+  function closeModal() {
+    modalOverlay.classList.remove('active');
+    document.body.style.overflow = '';
+  }
+
+  modalClose.addEventListener('click', closeModal);
+  modalOverlay.addEventListener('click', function(e) {
+    if (e.target === modalOverlay) closeModal();
+  });
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape' && modalOverlay.classList.contains('active')) closeModal();
+  });
+
+  // Bind click on timeline step cards to open modal
+  var timelineSteps = document.querySelectorAll('.step[data-step-id]');
+  for (var tsi = 0; tsi < timelineSteps.length; tsi++) {
+    (function(el) {
+      el.addEventListener('click', function() {
+        openStepModal(el.getAttribute('data-step-id'));
+      });
+      el.setAttribute('role', 'button');
+      el.setAttribute('tabindex', '0');
+      el.setAttribute('aria-label', 'View step details');
+      el.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          openStepModal(el.getAttribute('data-step-id'));
+        }
+      });
+    })(timelineSteps[tsi]);
+  }
+
+  // ---------------------------------------------------------------
+  // DAG view — topology layout with bezier edges
+  // ---------------------------------------------------------------
+  (function buildDag() {
+    var dagContainer = document.getElementById('dag-view');
+    if (!dagContainer) return;
+
+    var nodeW = 180, nodeH = 60, gateW = 50, gateH = 50;
+    var padX = 40, padY = 30;
+    var laneGap = 20;
+
+    // Build step index and dependency graph
+    var stepIndex = {};
+    var phaseSteps = {};
+    var allIds = [];
+
+    for (var p = 0; p < phases.length; p++) {
+      var ph = phases[p];
+      var pid = ph.phase_id;
+      phaseSteps[pid] = [];
+      var sts = ph.steps || [];
+      for (var s = 0; s < sts.length; s++) {
+        var st = sts[s];
+        stepIndex[st.step_id] = { step: st, phase: ph, phaseIdx: p };
+        phaseSteps[pid].push(st.step_id);
+        allIds.push(st.step_id);
+      }
+    }
+
+    // Topological sort within each phase (columns)
+    // Simple: arrange by dependency depth
+    function depthOf(sid, visited) {
+      if (!visited) visited = {};
+      if (visited[sid]) return 0;
+      visited[sid] = true;
+      var info = stepIndex[sid];
+      if (!info) return 0;
+      var deps = info.step.depends_on || [];
+      var maxD = 0;
+      for (var d = 0; d < deps.length; d++) {
+        maxD = Math.max(maxD, depthOf(deps[d], visited) + 1);
+      }
+      return maxD;
+    }
+
+    // Compute positions
+    var positions = {};
+    var currentY = padY;
+    var maxX = 0;
+
+    for (var pi2 = 0; pi2 < phases.length; pi2++) {
+      var phase2 = phases[pi2];
+      var sIds = phaseSteps[phase2.phase_id] || [];
+      if (sIds.length === 0) continue;
+
+      // Group by depth
+      var depthGroups = {};
+      var maxDepth = 0;
+      for (var s2 = 0; s2 < sIds.length; s2++) {
+        var dd = depthOf(sIds[s2]);
+        if (!depthGroups[dd]) depthGroups[dd] = [];
+        depthGroups[dd].push(sIds[s2]);
+        maxDepth = Math.max(maxDepth, dd);
+      }
+
+      var laneStartY = currentY;
+      var laneLabel = { x: padX, y: currentY + 16, text: phase2.name, phaseId: phase2.phase_id, status: phase2.status || 'pending' };
+
+      // Add phase label height
+      currentY += 30;
+
+      // Place nodes column by column
+      var colX = padX + 120; // after label area
+      for (var depth = 0; depth <= maxDepth; depth++) {
+        var group = depthGroups[depth] || [];
+        var colY = currentY;
+        for (var g = 0; g < group.length; g++) {
+          positions[group[g]] = {
+            x: colX,
+            y: colY,
+            cx: colX + nodeW / 2,
+            cy: colY + nodeH / 2
+          };
+          colY += nodeH + 14;
+        }
+        colX += nodeW + 50;
+      }
+
+      // Update maxX
+      maxX = Math.max(maxX, colX + 40);
+
+      // Find max Y in this phase
+      var phaseMaxY = currentY;
+      for (var sid in positions) {
+        var inf = stepIndex[sid];
+        if (inf && inf.phaseIdx === pi2) {
+          phaseMaxY = Math.max(phaseMaxY, positions[sid].y + nodeH + 10);
+        }
+      }
+
+      // Gate diamond after phase
+      if (phase2.gate) {
+        positions['gate_' + phase2.phase_id] = {
+          x: padX + 120 + (maxDepth + 1) * (nodeW + 50) - 30,
+          y: laneStartY + (phaseMaxY - laneStartY) / 2 - gateH / 2,
+          cx: padX + 120 + (maxDepth + 1) * (nodeW + 50) - 30 + gateW / 2,
+          cy: laneStartY + (phaseMaxY - laneStartY) / 2,
+          isGate: true,
+          gate: phase2.gate,
+          phaseId: phase2.phase_id
+        };
+        maxX = Math.max(maxX, positions['gate_' + phase2.phase_id].x + gateW + padX);
+      }
+
+      // Store lane bounds
+      laneLabel.laneY = laneStartY - 10;
+      laneLabel.laneH = phaseMaxY - laneStartY + 20;
+      laneLabel.laneW = maxX;
+      positions['_lane_' + pi2] = laneLabel;
+
+      currentY = phaseMaxY + laneGap;
+    }
+
+    var svgW = Math.max(maxX + padX, 600);
+    var svgH = currentY + padY;
+
+    // Build SVG
+    var svg = '<svg class="dag-svg" width="' + svgW + '" height="' + svgH + '" viewBox="0 0 ' + svgW + ' ' + svgH + '" xmlns="http://www.w3.org/2000/svg">';
+
+    // Phase lanes
+    for (var li = 0; li < phases.length; li++) {
+      var lane = positions['_lane_' + li];
+      if (lane) {
+        svg += '<rect class="dag-phase-lane" x="' + (padX - 10) + '" y="' + lane.laneY + '" width="' + (svgW - padX * 2 + 20) + '" height="' + lane.laneH + '" />';
+        // Phase emoji
+        var lEmoji = '';
+        if (lane.status === 'pending') lEmoji = '🥟 ';
+        else if (lane.status === 'running') lEmoji = '🔥 ';
+        else if (lane.status === 'complete') lEmoji = '🍽 ';
+        else if (lane.status === 'failed') lEmoji = '💥 ';
+        svg += '<text class="dag-phase-label" x="' + lane.x + '" y="' + (lane.y + 4) + '">' + lEmoji + esc(lane.text) + '</text>';
+      }
+    }
+
+    // Edges (bezier curves)
+    var edgesSvg = '';
+    for (var ei = 0; ei < allIds.length; ei++) {
+      var eId = allIds[ei];
+      var eInfo = stepIndex[eId];
+      if (!eInfo) continue;
+      var deps = eInfo.step.depends_on || [];
+      var toPos = positions[eId];
+      if (!toPos) continue;
+
+      for (var di = 0; di < deps.length; di++) {
+        var fromPos = positions[deps[di]];
+        if (!fromPos) continue;
+
+        var fromStatus = stepIndex[deps[di]] ? (stepIndex[deps[di]].step.status || 'pending') : 'pending';
+        var edgeClass = 'dag-edge dag-edge--' + fromStatus;
+        if (fromStatus === 'running') edgeClass += ' dag-edge--animated';
+
+        // Bezier from right of source to left of target
+        var sx = fromPos.x + nodeW;
+        var sy = fromPos.cy;
+        var ex = toPos.x;
+        var ey = toPos.cy;
+        var cpOffset = Math.min(Math.abs(ex - sx) * 0.4, 60);
+
+        edgesSvg += '<path class="' + edgeClass + '" data-from="' + esc(deps[di]) + '" data-to="' + esc(eId) + '" d="M' + sx + ',' + sy + ' C' + (sx + cpOffset) + ',' + sy + ' ' + (ex - cpOffset) + ',' + ey + ' ' + ex + ',' + ey + '" />';
+      }
+    }
+    svg += edgesSvg;
+
+    // Nodes
+    for (var ni = 0; ni < allIds.length; ni++) {
+      var nId = allIds[ni];
+      var nInfo = stepIndex[nId];
+      if (!nInfo) continue;
+      var nPos = positions[nId];
+      if (!nPos) continue;
+      var nStep = nInfo.step;
+      var nSt = nStep.status || 'pending';
+      var nCost = nStep.tokens_used ? nStep.tokens_used * 3 / 1000000 : 0;
+      var totalC = P.total_cost_usd || 0;
+      var nExpensive = totalC > 0 && nCost > totalC * 0.5;
+
+      var nodeClass = 'dag-node';
+      if (nSt === 'running') nodeClass += ' dag-node--running';
+
+      svg += '<g class="' + nodeClass + '" data-step-id="' + esc(nId) + '" tabindex="0" role="button" aria-label="Step ' + esc(nId) + ' ' + esc(nStep.agent_name) + '">';
+      // Shadow rect
+      svg +=   '<rect class="dag-node-shadow" x="' + (nPos.x + 3) + '" y="' + (nPos.y + 3) + '" width="' + nodeW + '" height="' + nodeH + '" />';
+      // Main rect
+      svg +=   '<rect class="dag-node-rect dag-node-rect--' + esc(nSt) + '" x="' + nPos.x + '" y="' + nPos.y + '" width="' + nodeW + '" height="' + nodeH + '" />';
+      // Step ID
+      svg +=   '<text class="dag-node-id" x="' + (nPos.x + 8) + '" y="' + (nPos.y + 14) + '">' + esc(nId) + '</text>';
+      // Agent name
+      var agentDisplay = (nStep.agent_name || '').length > 18 ? nStep.agent_name.slice(0, 16) + '..' : nStep.agent_name;
+      svg +=   '<text class="dag-node-agent" x="' + (nPos.x + 8) + '" y="' + (nPos.y + 32) + '">👨‍🍳 ' + esc(agentDisplay) + '</text>';
+      // Status
+      svg +=   '<text class="dag-node-status dag-node-status--' + esc(nSt) + '" x="' + (nPos.x + 8) + '" y="' + (nPos.y + 48) + '">' + esc(nSt.toUpperCase()) + '</text>';
+
+      // Cost flag for expensive steps
+      if (nExpensive) {
+        svg += '<text class="dag-node-cost" x="' + (nPos.x + nodeW - 8) + '" y="' + (nPos.y + 48) + '" text-anchor="end">' + formatCost(nCost) + '</text>';
+      }
+
+      // Team member dots
+      if (nStep.team && nStep.team.length) {
+        for (var tmi = 0; tmi < Math.min(nStep.team.length, 4); tmi++) {
+          var tmSt = nStep.team[tmi].status || 'pending';
+          var tmColor = tmSt === 'complete' ? '#4db892' : tmSt === 'running' ? '#ffc94a' : tmSt === 'failed' ? '#e23a3a' : '#d4a15a';
+          svg += '<circle class="dag-team-dot" cx="' + (nPos.x + nodeW - 12 - tmi * 14) + '" cy="' + (nPos.y + 14) + '" r="5" fill="' + tmColor + '" />';
+        }
+      }
+
+      svg += '</g>';
+    }
+
+    // Gate diamonds
+    for (var gi = 0; gi < phases.length; gi++) {
+      var gPhase = phases[gi];
+      if (!gPhase.gate) continue;
+      var gKey = 'gate_' + gPhase.phase_id;
+      var gPos = positions[gKey];
+      if (!gPos) continue;
+      var gSt = gPhase.gate.status || 'pending';
+
+      var gcx = gPos.cx;
+      var gcy = gPos.cy;
+      var gr = 22;
+
+      svg += '<g class="dag-gate" data-gate-phase="' + esc(gPhase.phase_id) + '" tabindex="0" role="button" aria-label="Gate for station ' + esc(gPhase.phase_id) + '">';
+      // Diamond shape
+      var diamondPath = 'M' + gcx + ',' + (gcy - gr) + ' L' + (gcx + gr) + ',' + gcy + ' L' + gcx + ',' + (gcy + gr) + ' L' + (gcx - gr) + ',' + gcy + ' Z';
+      svg += '<path class="dag-gate-diamond dag-gate-diamond--' + esc(gSt) + '" d="' + diamondPath + '" />';
+      // Label
+      svg += '<text class="dag-gate-label" x="' + gcx + '" y="' + (gcy + 4) + '" text-anchor="middle">👅</text>';
+      svg += '</g>';
+    }
+
+    svg += '</svg>';
+    dagContainer.innerHTML = svg;
+
+    // --- DAG interactivity ---
+
+    // Click nodes to open modal
+    var dagNodes = dagContainer.querySelectorAll('.dag-node');
+    for (var dn = 0; dn < dagNodes.length; dn++) {
+      (function(node) {
+        var sid = node.getAttribute('data-step-id');
+        node.addEventListener('click', function() { openStepModal(sid); });
+        node.addEventListener('keydown', function(e) {
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openStepModal(sid); }
+        });
+      })(dagNodes[dn]);
+    }
+
+    // Hover dependency chain highlight
+    function getAncestors(sid, set) {
+      if (!set) set = {};
+      if (set[sid]) return set;
+      set[sid] = true;
+      var info = stepIndex[sid];
+      if (!info) return set;
+      var deps = info.step.depends_on || [];
+      for (var d = 0; d < deps.length; d++) {
+        getAncestors(deps[d], set);
+      }
+      return set;
+    }
+
+    function getDescendants(sid, set) {
+      if (!set) set = {};
+      if (set[sid]) return set;
+      set[sid] = true;
+      for (var i = 0; i < allIds.length; i++) {
+        var inf = stepIndex[allIds[i]];
+        if (!inf) continue;
+        var deps = inf.step.depends_on || [];
+        for (var d = 0; d < deps.length; d++) {
+          if (deps[d] === sid) {
+            getDescendants(allIds[i], set);
+          }
+        }
+      }
+      return set;
+    }
+
+    for (var hn = 0; hn < dagNodes.length; hn++) {
+      (function(node) {
+        var sid = node.getAttribute('data-step-id');
+
+        node.addEventListener('mouseenter', function() {
+          var chain = {};
+          getAncestors(sid, chain);
+          getDescendants(sid, chain);
+
+          // Dim all, highlight chain
+          var allN = dagContainer.querySelectorAll('.dag-node');
+          for (var i = 0; i < allN.length; i++) {
+            var nSid = allN[i].getAttribute('data-step-id');
+            if (chain[nSid]) {
+              allN[i].classList.add('dep-highlight');
+              allN[i].classList.remove('dep-dimmed');
+            } else {
+              allN[i].classList.add('dep-dimmed');
+              allN[i].classList.remove('dep-highlight');
+            }
+          }
+
+          var allE = dagContainer.querySelectorAll('.dag-edge');
+          for (var j = 0; j < allE.length; j++) {
+            var ef = allE[j].getAttribute('data-from');
+            var et = allE[j].getAttribute('data-to');
+            if (chain[ef] && chain[et]) {
+              allE[j].classList.add('dep-highlight');
+              allE[j].classList.remove('dep-dimmed');
+            } else {
+              allE[j].classList.add('dep-dimmed');
+              allE[j].classList.remove('dep-highlight');
+            }
+          }
+
+          var allG = dagContainer.querySelectorAll('.dag-gate');
+          for (var k = 0; k < allG.length; k++) {
+            allG[k].classList.add('dep-dimmed');
+          }
+        });
+
+        node.addEventListener('mouseleave', function() {
+          var allEls = dagContainer.querySelectorAll('.dep-dimmed, .dep-highlight');
+          for (var i = 0; i < allEls.length; i++) {
+            allEls[i].classList.remove('dep-dimmed', 'dep-highlight');
+          }
+        });
+      })(dagNodes[hn]);
+    }
+  })();
+
+  // ---------------------------------------------------------------
+  // View toggle + Attention filter
+  // ---------------------------------------------------------------
+  (function initViewToggle() {
+    var btnGraph = document.getElementById('btn-view-graph');
+    var btnTimeline = document.getElementById('btn-view-timeline');
+    var btnAttention = document.getElementById('btn-view-attention');
+    var dagView = document.getElementById('dag-view');
+    var timelineView = document.getElementById('timeline-view');
+    var container = document.getElementById('app');
+    var attLabel = document.getElementById('attention-label');
+
+    var currentView = 'graph'; // 'graph', 'timeline', 'attention'
+    var attentionActive = false;
+
+    function setView(view) {
+      currentView = view;
+
+      // Reset all
+      btnGraph.classList.remove('view-toggle__btn--active');
+      btnTimeline.classList.remove('view-toggle__btn--active');
+      btnAttention.classList.remove('view-toggle__btn--active', 'view-toggle__btn--attention-active');
+      btnGraph.setAttribute('aria-selected', 'false');
+      btnTimeline.setAttribute('aria-selected', 'false');
+      btnAttention.setAttribute('aria-selected', 'false');
+      dagView.classList.remove('active');
+      timelineView.classList.remove('active');
+      container.classList.remove('attention-active');
+      attentionActive = false;
+      btnAttention.setAttribute('aria-pressed', 'false');
+
+      // Clear attention classes
+      var prev = container.querySelectorAll('.attention-hit, .attention-failed, .attention-long-running, .attention-error, .attention-gate-failed');
+      for (var p = 0; p < prev.length; p++) {
+        prev[p].classList.remove('attention-hit', 'attention-failed', 'attention-long-running', 'attention-error', 'attention-gate-failed');
+      }
+      var existingClear = container.querySelector('.attention-clear');
+      if (existingClear) existingClear.remove();
+
+      if (view === 'graph') {
+        dagView.classList.add('active');
+        btnGraph.classList.add('view-toggle__btn--active');
+        btnGraph.setAttribute('aria-selected', 'true');
+      } else if (view === 'timeline') {
+        timelineView.classList.add('active');
+        btnTimeline.classList.add('view-toggle__btn--active');
+        btnTimeline.setAttribute('aria-selected', 'true');
+      } else if (view === 'attention') {
+        timelineView.classList.add('active');
+        btnAttention.classList.add('view-toggle__btn--attention-active');
+        btnAttention.setAttribute('aria-selected', 'true');
+        btnAttention.setAttribute('aria-pressed', 'true');
+        attentionActive = true;
+        activateAttention();
+      }
+    }
+
+    // Attention items detection
+    function getAttentionItems() {
+      var items = [];
+      var allStepEls = container.querySelectorAll('.step');
+      for (var i = 0; i < allStepEls.length; i++) {
+        var el = allStepEls[i];
+        var st = el.getAttribute('data-status');
+        var dur = parseFloat(el.getAttribute('data-duration') || '0');
+        var hasErr = el.getAttribute('data-has-error') === 'true';
+
+        var hit = false;
+        var cls = [];
+        if (st === 'failed') { hit = true; cls.push('attention-failed'); }
+        if (st === 'running' && dur > 300) { hit = true; cls.push('attention-long-running'); }
+        if (hasErr) { hit = true; cls.push('attention-error'); }
+
+        if (hit) {
+          items.push({ el: el, classes: cls });
+        }
+      }
+
+      // Gate failures
+      var allGates = container.querySelectorAll('.gate');
+      for (var g = 0; g < allGates.length; g++) {
+        var gEl = allGates[g];
+        if (gEl.getAttribute('data-gate-status') === 'failed') {
+          items.push({ el: gEl, classes: ['attention-gate-failed'] });
+        }
+      }
+
+      return items;
+    }
+
+    // Update attention badge count
+    function updateBadge() {
+      var count = getAttentionItems().length;
+      if (count > 0) {
+        attLabel.innerHTML = 'Attention <span class="view-toggle__btn-badge">' + count + '</span>';
+      } else {
+        attLabel.textContent = 'Attention';
+      }
+    }
+
+    function activateAttention() {
+      container.classList.add('attention-active');
+
+      var items = getAttentionItems();
+
+      if (items.length === 0) {
+        var clearDiv = document.createElement('div');
+        clearDiv.className = 'attention-clear';
+        clearDiv.setAttribute('role', 'status');
+        clearDiv.innerHTML = 'nothin\' burnin\' 😴';
+        var phasesContainer = container.querySelector('.phases');
+        if (phasesContainer) {
+          phasesContainer.parentNode.insertBefore(clearDiv, phasesContainer);
+        }
+      } else {
+        for (var i = 0; i < items.length; i++) {
+          var item = items[i];
+          item.el.classList.add('attention-hit');
+          for (var c = 0; c < item.classes.length; c++) {
+            item.el.classList.add(item.classes[c]);
+          }
+          var parentPhase = item.el.closest('.phase');
+          if (parentPhase) {
+            parentPhase.classList.add('attention-hit');
+            parentPhase.setAttribute('open', '');
+          }
+        }
+      }
+    }
+
+    updateBadge();
+
+    btnGraph.addEventListener('click', function() { setView('graph'); });
+    btnTimeline.addEventListener('click', function() { setView('timeline'); });
+    btnAttention.addEventListener('click', function() {
+      if (currentView === 'attention') {
+        setView('timeline');
+      } else {
+        setView('attention');
+      }
+    });
+  })();
+
+})();
+</script>
+</body>
+</html>

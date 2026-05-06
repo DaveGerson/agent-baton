@@ -1,0 +1,39 @@
+# Bug Fix Spec Template
+spec_id: ""
+task_type: bug-fix
+template_id: bug-fix
+title: "<Bug: short description>"
+
+## Bug Report
+reproduction_steps: |
+  1. <Step 1>
+  2. <Step 2>
+expected_behavior: "<What should happen>"
+actual_behavior: "<What actually happens>"
+severity: medium     # critical | high | medium | low
+environment: "<OS / runtime / version>"
+
+## Root Cause Hypothesis
+root_cause: |
+  <Describe the suspected root cause>
+
+## Fix Approach
+fix: |
+  <Describe the planned fix>
+
+## Regression Test Plan
+regression_tests:
+  - "<Test case 1>"
+  - "<Test case 2>"
+
+## Affected Components
+affected_files: []
+
+## Effort Estimate
+effort: S
+
+## Score
+score:
+  clarity: 0.0
+  testability: 0.0
+  risk_coverage: 0.0

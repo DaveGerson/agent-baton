@@ -16,7 +16,6 @@ from agent_baton.core.events.projections import (
     project_task_view,
 )
 from agent_baton.core.events import events as evt
-from agent_baton.core.engine.executor import TaskViewSubscriber
 
 
 # ---------------------------------------------------------------------------
@@ -618,82 +617,100 @@ class TestBusPersistenceIntegration:
 
 
 # ===========================================================================
-# TaskViewSubscriber — materialized view maintained by EventBus
+# Pre-lifecycle hook event factories
 # ===========================================================================
 
-class TestTaskViewSubscriber:
-    """Unit tests for TaskViewSubscriber in isolation from ExecutionEngine."""
+class TestPreLifecycleHookEvents:
+    # ── step.pre_dispatch ───────────────────────────────────────────────────
 
-    def _make_subscriber(
-        self, tmp_path: Path, task_id: str = "t-sub"
-    ) -> tuple[TaskViewSubscriber, EventBus, Path]:
-        bus = EventBus()
-        view_path = tmp_path / "task-view.json"
-        sub = TaskViewSubscriber(task_id=task_id, bus=bus, view_path=view_path)
-        bus.subscribe("*", sub)
-        return sub, bus, view_path
+    def test_step_pre_dispatch_topic(self) -> None:
+        e = evt.step_pre_dispatch("t1", "1.1", "backend-engineer")
+        assert e.topic == "step.pre_dispatch"
 
-    def test_view_file_created_on_first_event(self, tmp_path: Path) -> None:
-        _, bus, view_path = self._make_subscriber(tmp_path)
-        bus.publish(evt.task_started("t-sub", task_summary="Build X", total_steps=2))
-        assert view_path.exists()
+    def test_step_pre_dispatch_task_id(self) -> None:
+        e = evt.step_pre_dispatch("task-abc", "2.3", "test-engineer")
+        assert e.task_id == "task-abc"
 
-    def test_view_contains_task_id(self, tmp_path: Path) -> None:
-        _, bus, view_path = self._make_subscriber(tmp_path, task_id="my-task")
-        bus.publish(evt.task_started("my-task"))
-        data = json.loads(view_path.read_text())
-        assert data["task_id"] == "my-task"
+    def test_step_pre_dispatch_payload_keys(self) -> None:
+        e = evt.step_pre_dispatch(
+            "t1", "1.1", "backend-engineer--python",
+            model="opus", delegation_prompt="Do the thing.", sequence=5,
+        )
+        assert e.payload["step_id"] == "1.1"
+        assert e.payload["agent_name"] == "backend-engineer--python"
+        assert e.payload["model"] == "opus"
+        assert e.payload["delegation_prompt"] == "Do the thing."
 
-    def test_view_ignores_other_task_ids(self, tmp_path: Path) -> None:
-        _, bus, view_path = self._make_subscriber(tmp_path, task_id="t-sub")
-        bus.publish(evt.task_started("other-task"))
-        assert not view_path.exists(), "Subscriber should ignore events for other tasks"
+    def test_step_pre_dispatch_defaults(self) -> None:
+        e = evt.step_pre_dispatch("t1", "1.2", "frontend-engineer")
+        assert e.payload["model"] == "sonnet"
+        assert e.payload["delegation_prompt"] == ""
+        assert e.sequence == 0
 
-    def test_view_status_running_after_task_started(self, tmp_path: Path) -> None:
-        _, bus, view_path = self._make_subscriber(tmp_path)
-        bus.publish(evt.task_started("t-sub", total_steps=3))
-        data = json.loads(view_path.read_text())
-        assert data["status"] == "running"
-        assert data["total_steps"] == 3
+    # ── phase.pre_start ─────────────────────────────────────────────────────
 
-    def test_view_steps_completed_increments(self, tmp_path: Path) -> None:
-        _, bus, view_path = self._make_subscriber(tmp_path)
-        bus.publish(evt.task_started("t-sub", total_steps=2))
-        bus.publish(evt.phase_started("t-sub", phase_id=1))
-        bus.publish(evt.step_completed("t-sub", "1.1", "backend", outcome="done"))
-        data = json.loads(view_path.read_text())
-        assert data["steps_completed"] == 1
+    def test_phase_pre_start_topic(self) -> None:
+        e = evt.phase_pre_start("t1", phase_id=1)
+        assert e.topic == "phase.pre_start"
 
-    def test_view_status_completed_after_task_completed(self, tmp_path: Path) -> None:
-        _, bus, view_path = self._make_subscriber(tmp_path)
-        bus.publish(evt.task_started("t-sub", total_steps=1))
-        bus.publish(evt.step_completed("t-sub", "1.1", "backend"))
-        bus.publish(evt.task_completed("t-sub", steps_completed=1, elapsed_seconds=10.0))
-        data = json.loads(view_path.read_text())
-        assert data["status"] == "completed"
-        assert data["elapsed_seconds"] == 10.0
+    def test_phase_pre_start_task_id(self) -> None:
+        e = evt.phase_pre_start("task-xyz", phase_id=2)
+        assert e.task_id == "task-xyz"
 
-    def test_view_gate_status_reflected(self, tmp_path: Path) -> None:
-        _, bus, view_path = self._make_subscriber(tmp_path)
-        bus.publish(evt.task_started("t-sub"))
-        bus.publish(evt.phase_started("t-sub", phase_id=1))
-        bus.publish(evt.gate_passed("t-sub", phase_id=1, gate_type="test", output="ok"))
-        data = json.loads(view_path.read_text())
-        assert data["gates_passed"] == 1
-        assert data["phases"]["1"]["gate_status"] == "passed"
+    def test_phase_pre_start_payload_keys(self) -> None:
+        e = evt.phase_pre_start(
+            "t1", phase_id=3, phase_name="Implementation", step_count=4, sequence=7,
+        )
+        assert e.payload["phase_id"] == 3
+        assert e.payload["phase_name"] == "Implementation"
+        assert e.payload["step_count"] == 4
 
-    def test_view_file_written_atomically(self, tmp_path: Path) -> None:
-        """Write must not leave a .tmp file behind."""
-        _, bus, view_path = self._make_subscriber(tmp_path)
-        bus.publish(evt.task_started("t-sub"))
-        tmp_file = view_path.with_suffix(".tmp")
-        assert not tmp_file.exists(), ".tmp file should be cleaned up after atomic write"
+    def test_phase_pre_start_defaults(self) -> None:
+        e = evt.phase_pre_start("t1", phase_id=1)
+        assert e.payload["phase_name"] == ""
+        assert e.payload["step_count"] == 0
+        assert e.sequence == 0
 
-    def test_last_event_seq_tracked(self, tmp_path: Path) -> None:
-        _, bus, view_path = self._make_subscriber(tmp_path)
-        bus.publish(evt.task_started("t-sub", sequence=0))
-        bus.publish(evt.phase_started("t-sub", phase_id=1, sequence=0))
-        bus.publish(evt.step_completed("t-sub", "1.1", "backend", sequence=0))
-        data = json.loads(view_path.read_text())
-        # After 3 events the highest seq assigned is 3.
-        assert data["last_event_seq"] == 3
+    # ── task.completing ─────────────────────────────────────────────────────
+
+    def test_task_completing_topic(self) -> None:
+        e = evt.task_completing("t1")
+        assert e.topic == "task.completing"
+
+    def test_task_completing_task_id(self) -> None:
+        e = evt.task_completing("task-99")
+        assert e.task_id == "task-99"
+
+    def test_task_completing_payload_keys(self) -> None:
+        e = evt.task_completing("t1", steps_completed=5, steps_failed=1, sequence=10)
+        assert e.payload["steps_completed"] == 5
+        assert e.payload["steps_failed"] == 1
+
+    def test_task_completing_defaults(self) -> None:
+        e = evt.task_completing("t1")
+        assert e.payload["steps_completed"] == 0
+        assert e.payload["steps_failed"] == 0
+        assert e.sequence == 0
+
+    # ── gate.pre_check ──────────────────────────────────────────────────────
+
+    def test_gate_pre_check_topic(self) -> None:
+        e = evt.gate_pre_check("t1", phase_id=1, gate_type="test")
+        assert e.topic == "gate.pre_check"
+
+    def test_gate_pre_check_task_id(self) -> None:
+        e = evt.gate_pre_check("task-42", phase_id=2, gate_type="lint")
+        assert e.task_id == "task-42"
+
+    def test_gate_pre_check_payload_keys(self) -> None:
+        e = evt.gate_pre_check(
+            "t1", phase_id=2, gate_type="lint", command="ruff check .", sequence=3,
+        )
+        assert e.payload["phase_id"] == 2
+        assert e.payload["gate_type"] == "lint"
+        assert e.payload["command"] == "ruff check ."
+
+    def test_gate_pre_check_defaults(self) -> None:
+        e = evt.gate_pre_check("t1", phase_id=1, gate_type="review")
+        assert e.payload["command"] == ""
+        assert e.sequence == 0

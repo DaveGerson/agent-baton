@@ -1,0 +1,37 @@
+# Agent Baton
+
+> Multi-agent orchestration for Claude Code. Plans tasks, routes phases to specialist agents, runs gates between phases, persists traces locally, and recovers from crashes.
+
+## Docs
+
+- [README](https://github.com/DaveGerson/agent-baton/blob/master/README.md): adopter pitch, install, first-run pointer.
+- [Docs landing](https://davegerson.github.io/agent-baton/): four-card index across tutorial, how-to, reference, explanation.
+- [First-run tutorial](https://github.com/DaveGerson/agent-baton/blob/master/docs/examples/first-run.md): one-task end-to-end walkthrough with real command output.
+- [Orchestrator usage](https://github.com/DaveGerson/agent-baton/blob/master/docs/orchestrator-usage.md): how-to for driving tasks through the orchestrator agent.
+- [Architecture](https://github.com/DaveGerson/agent-baton/blob/master/docs/architecture.md): engine, storage, governance, learning subsystems.
+- [CLI reference](https://github.com/DaveGerson/agent-baton/blob/master/docs/cli-reference.md): every `baton` subcommand and flag.
+- [Agent roster](https://github.com/DaveGerson/agent-baton/blob/master/docs/agent-roster.md): the specialist agents the engine can dispatch.
+- [Terminology](https://github.com/DaveGerson/agent-baton/blob/master/docs/terminology.md): canonical names for plans, phases, steps, gates, beads, packs.
+- [Invariants](https://github.com/DaveGerson/agent-baton/blob/master/docs/invariants.md): CLI output contract and interface boundaries.
+- [Design decisions](https://github.com/DaveGerson/agent-baton/blob/master/docs/design-decisions.md): ADR log.
+- [Troubleshooting](https://github.com/DaveGerson/agent-baton/blob/master/docs/troubleshooting.md): common failures and recovery.
+
+## Reference procedures (agent-facing)
+
+- [baton-engine](https://github.com/DaveGerson/agent-baton/blob/master/references/baton-engine.md): full CLI surface and engine protocol used by the orchestrator.
+- [task-sequencing](https://github.com/DaveGerson/agent-baton/blob/master/references/task-sequencing.md): phase ordering and dependency rules.
+- [agent-routing](https://github.com/DaveGerson/agent-baton/blob/master/references/agent-routing.md): how the router selects flavors.
+- [guardrail-presets](https://github.com/DaveGerson/agent-baton/blob/master/references/guardrail-presets.md): risk-tier policies.
+- [cost-budget](https://github.com/DaveGerson/agent-baton/blob/master/references/cost-budget.md): token tiers and cost models.
+- [comms-protocols](https://github.com/DaveGerson/agent-baton/blob/master/references/comms-protocols.md): inter-agent contracts.
+- [failure-handling](https://github.com/DaveGerson/agent-baton/blob/master/references/failure-handling.md): retry, escalation, recovery.
+- [git-strategy](https://github.com/DaveGerson/agent-baton/blob/master/references/git-strategy.md): branch and commit conventions.
+- [decision-framework](https://github.com/DaveGerson/agent-baton/blob/master/references/decision-framework.md): human-in-the-loop protocol.
+- [baton-patterns](https://github.com/DaveGerson/agent-baton/blob/master/references/baton-patterns.md): reusable orchestration patterns.
+- [knowledge-architecture](https://github.com/DaveGerson/agent-baton/blob/master/references/knowledge-architecture.md): knowledge pack design.
+
+## Optional
+
+- [Source repository](https://github.com/DaveGerson/agent-baton): code, issues, pull requests.
+- [CLAUDE.md](https://github.com/DaveGerson/agent-baton/blob/master/CLAUDE.md): developer conventions and token-efficiency rules.
+- [Examples directory](https://github.com/DaveGerson/agent-baton/tree/master/docs/examples): first-run walkthrough and knowledge-pack samples.

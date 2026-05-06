@@ -1,51 +1,129 @@
 import type { CSSProperties } from 'react';
 
+// ===================================================================
+// THE PIE EATING CONTEST — Design Tokens
+// A warm, kitchen-themed orchestration board.
+// Butcher-paper cream backdrops · jam-jar reds · butter yellows ·
+// blueberry purples · pistachio mint · chunky ink borders.
+// ===================================================================
+
 export const T = {
-  bg0: '#060a11',
-  bg1: '#0b1120',
-  bg2: '#111827',
-  bg3: '#1a2236',
-  bg4: '#222d42',
-  border: '#1e2d4a',
-  borderHover: '#2d4a6a',
-  borderActive: '#3b82f6',
-  text0: '#f1f5f9',
-  text1: '#cbd5e1',
-  text2: '#94a3b8',
-  text3: '#8b9bb5',
-  text4: '#8b9bb5',
-  accent: '#3b82f6',
-  green: '#10b981',
-  yellow: '#f59e0b',
-  red: '#ef4444',
-  purple: '#8b5cf6',
-  cyan: '#06b6d4',
-  orange: '#f97316',
+  // Backgrounds — butcher-paper cream spectrum
+  bg0: '#fff4de',    // cream — main body background
+  bg1: '#fff9ec',    // cream-soft — panels, nav, sidebars
+  bg2: '#fff4de',    // cream — cards, wells
+  bg3: '#f3e4c2',    // cream-deep — sunken areas, pie-crust edge
+  bg4: '#e8d4a8',    // darker crust — interactive inactive
+
+  // Borders
+  border: '#2a1a10',      // ink — all primary borders (hand-drawn feel)
+  borderHover: '#5b3a23', // ink-soft — hover state borders
+  borderActive: '#e23a3a', // cherry — active/selected state
+  borderSoft: '#c9a97a',  // warm tan — secondary hairlines
+
+  // Text
+  text0: '#2a1a10',  // ink — primary text
+  text1: '#5b3a23',  // ink-soft — secondary text
+  text2: '#8a6a4f',  // ink-faint — tertiary/muted
+  text3: '#a4805f',  // lighter muted
+  text4: '#c9a97a',  // faintest — timestamps, subtleties
+
+  // Brand / Accent palette
+  accent: '#e23a3a',    // cherry — primary action color
+  cherry: '#e23a3a',    // cherry pie red
+  cherryDark: '#a8151a',
+  cherrySoft: '#ffd3ce',
+
+  green: '#4db892',     // mint / pistachio — success, served
+  mint: '#4db892',
+  mintDark: '#2f7a5e',
+  mintSoft: '#c3e8d2',
+
+  yellow: '#ffc94a',    // butter / golden — in-progress
+  butter: '#ffc94a',
+  butterSoft: '#fff0b8',
+
+  red: '#e23a3a',       // same as cherry
+  purple: '#4b3bb3',    // blueberry — validating/taste-test
+  blueberry: '#4b3bb3',
+  blueberrySoft: '#d6cfff',
+
+  orange: '#ff8a3d',    // tangerine — awaiting human
+  tangerine: '#ff8a3d',
+  tangerineSoft: '#ffd7b0',
+
+  cyan: '#4db892',      // maps to mint (no cool blue in kitchen palette)
+  crust: '#d4a15a',     // golden crust — queued/resting
+  crustDark: '#a4691a',
+  ink: '#2a1a10',       // darkest — always ink brown
+  inkSoft: '#5b3a23',
+  inkFaint: '#8a6a4f',
+  cream: '#fff4de',
+  creamSoft: '#fff9ec',
+  creamDeep: '#f3e4c2',
 } as const;
 
 export type TokenKey = keyof typeof T;
 
+// Column definitions — kitchen station metaphors
 export const COLUMNS = [
-  { id: 'queued' as const, label: 'Queued', color: T.text2, desc: 'Plan ready, awaiting execution slot' },
-  { id: 'executing' as const, label: 'Executing', color: T.yellow, desc: 'Baton steps actively running' },
-  { id: 'awaiting_human' as const, label: 'Awaiting Human', color: T.orange, desc: 'Interactive step paused for input' },
-  { id: 'validating' as const, label: 'Validating', color: T.purple, desc: 'Test suites, baseline comparison' },
-  { id: 'deployed' as const, label: 'Deployed', color: T.green, desc: 'Complete — ADO synced' },
+  {
+    id: 'intake' as const,
+    label: 'Tickets Up',
+    color: T.crust,
+    desc: 'Fresh orders — signals & items needing a plan',
+  },
+  {
+    id: 'queued' as const,
+    label: 'On Deck',
+    color: T.bg4,
+    desc: 'Plan forged — prepped and waiting for the pass',
+  },
+  {
+    id: 'awaiting_human' as const,
+    label: 'Pick Up',
+    color: T.tangerine,
+    desc: "Manager's window — review & approve for firing",
+  },
+  {
+    id: 'executing' as const,
+    label: 'In the Oven',
+    color: T.butter,
+    desc: 'Actively baking — Baton steps running',
+  },
+  {
+    id: 'validating' as const,
+    label: 'Taste Test',
+    color: T.blueberry,
+    desc: 'Flagged — needs attention, blocked, or gate check',
+  },
+  {
+    id: 'review' as const,
+    label: 'Plating Review',
+    color: T.crust,
+    desc: 'Expediter checks — commits ready for merge',
+  },
+  {
+    id: 'deployed' as const,
+    label: 'Served!',
+    color: T.mint,
+    desc: 'Out the window — merged and delivered',
+  },
 ];
 
 export type ColumnId = typeof COLUMNS[number]['id'];
 
 export const SEVERITY_COLOR: Record<string, string> = {
-  critical: T.red,
-  high: T.red,
-  medium: T.yellow,
+  critical: T.cherry,
+  high: T.cherry,
+  medium: T.butter,
   low: T.text2,
 };
 
 export const PRIORITY_COLOR: Record<number, string> = {
-  2: T.red,      // P0 — critical
-  1: T.orange,   // P1 — high
-  0: T.text2,    // P2 — normal (no chip needed)
+  2: T.cherry,      // P0 — kitchen is on fire
+  1: T.tangerine,   // P1 — hungry VIP
+  0: T.text2,       // P2 — on the menu (no chip needed)
 };
 
 export const SR_ONLY: CSSProperties = {
@@ -60,8 +138,15 @@ export const SR_ONLY: CSSProperties = {
   border: 0,
 };
 
+// Font families
+export const FONTS = {
+  display: "'Fraunces', 'Playfair Display', Georgia, serif",
+  body: "'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif",
+  hand: "'Caveat', 'Comic Sans MS', cursive",
+  mono: "'JetBrains Mono', 'Courier New', monospace",
+} as const;
+
 // Numeric values are React inline-style compatible (px assumed).
-// Adopt gradually — prefer these tokens over bare fontSize literals.
 export const FONT_SIZES = {
   xs: 9,    // minimum — only for tertiary metadata
   sm: 11,   // scannable content floor
@@ -70,9 +155,24 @@ export const FONT_SIZES = {
   xl: 16,   // page titles
 } as const;
 
+// Hard-edged sticker shadows — no blur, offset ink
+export const SHADOWS = {
+  sm: '2px 2px 0 0 #2a1a10',
+  md: '3px 3px 0 0 #2a1a10',
+  lg: '5px 5px 0 0 #2a1a10',
+  xl: '8px 8px 0 0 #2a1a10',
+} as const;
+
+// Kitchen program palette — warm, saturated
 const PROGRAM_PALETTE = [
-  '#3b82f6', '#a78bfa', '#34d399', '#f87171',
-  '#38bdf8', '#fb923c', '#2dd4bf', '#c084fc',
+  '#e23a3a', // cherry
+  '#4b3bb3', // blueberry
+  '#4db892', // mint
+  '#d4a15a', // crust
+  '#ffc94a', // butter
+  '#ff8a3d', // tangerine
+  '#d6336c', // raspberry
+  '#6db9ff', // sky
 ];
 
 export function programColor(program: string): string {

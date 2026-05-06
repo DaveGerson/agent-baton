@@ -1,0 +1,559 @@
+"""EnrichmentStage — gates, approvals, team consolidation, bead hints, context.
+
+Owns legacy ``create_plan`` steps 13-19 in the original ordering:
+
+* Step 12+12.a:    ``_step_apply_gates`` — insert QA gates (pytest,
+  lint, build) and apply project-config defaults.
+* Step 12b+12b-bis: ``_step_apply_approval_gates`` — add approval
+  gates on Design/Research at HIGH+ risk; concern-split implement
+  phases when the summary names multiple concerns.
+* Step 12d:        ``_apply_bead_hints`` — apply BeadAnalyzer
+  recommendations (only when bead_hints non-empty).
+* Step 13+13b+13c: ``_step_inject_context_files`` — inject context
+  files, propagate model preferences, enrich with extracted paths.
+* Step 13d:        ``_step_attach_prior_beads`` — scan summary for
+  prior task references and attach their outcome beads.
+"""
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+from agent_baton.core.engine.planning.archetypes import get_archetype_config
+from agent_baton.core.engine.planning.draft import PlanDraft
+from agent_baton.core.engine.planning.services import PlannerServices
+from agent_baton.core.engine.planning.utils.context import (
+    attach_prior_task_beads,
+    detect_task_dependency,
+)
+from agent_baton.core.engine.planning.utils.gates import (
+    apply_project_config,
+    default_gate,
+)
+from agent_baton.core.engine.planning.utils.phase_builder import (
+    _normalize_phase_name,
+    build_phases_for_names,
+    split_implement_phase_by_concerns,
+)
+from agent_baton.core.engine.planning.utils.text_parsers import (
+    extract_file_paths,
+    parse_concerns,
+)
+
+from agent_baton.models.enums import RiskLevel
+
+if TYPE_CHECKING:
+    from agent_baton.models.execution import PlanPhase
+
+logger = logging.getLogger(__name__)
+
+
+class EnrichmentStage:
+    """Stage 5: attach gates, approvals, bead hints, context, prior-task beads."""
+
+    name = "enrichment"
+
+    def run(self, draft: PlanDraft, services: PlannerServices) -> PlanDraft:
+        # Step 12+12.a — QA gates + project-config defaults.
+        self._apply_gates(
+            draft.plan_phases,
+            stack_profile=draft.stack_profile,
+            gate_scope=draft.gate_scope,
+            project_root=draft.project_root,
+            services=services,
+            isolation_overrides=draft.isolation_overrides,
+        )
+
+        # Archetype × risk gate matrix — override/supplement gates based on archetype policy
+        self._apply_archetype_gates(
+            draft.plan_phases,
+            archetype=getattr(draft, 'planning_archetype', 'phased'),
+            risk_level_enum=draft.risk_level_enum,
+        )
+
+        # Decision-capture INTERACT injection for PHASED HIGH/CRITICAL plans
+        self._apply_decision_capture(
+            draft.plan_phases,
+            archetype=getattr(draft, 'planning_archetype', 'phased'),
+            risk_level_enum=draft.risk_level_enum,
+            resolved_agents=draft.resolved_agents,
+            services=services,
+        )
+
+        # Step 12b+12b-bis — approval gates + concern-split.
+        split_phase_ids = self._apply_approval_gates(
+            draft.plan_phases,
+            risk_level_enum=draft.risk_level_enum,
+            task_summary=draft.task_summary,
+            resolved_agents=draft.resolved_agents,
+            research_concerns=draft.research_concerns,
+        )
+        draft.split_phase_ids = split_phase_ids
+
+        # Step 12d — bead hints (conditional).
+        if draft.bead_hints:
+            draft.plan_phases = self._apply_bead_hints(
+                draft.plan_phases, draft.bead_hints, services=services,
+            )
+
+        # Step 12c.4 — extract file paths from the task summary.  Done here
+        # so step 13c can see the paths; ValidationStage re-extracts
+        # independently for its own plan-reviewer call.
+        draft.extracted_paths = extract_file_paths(draft.task_summary)
+
+        # Step 13+13b+13c — context file injection.
+        self._inject_context_files(
+            draft.plan_phases,
+            default_model=draft.default_model,
+            extracted_paths=draft.extracted_paths,
+            services=services,
+        )
+
+        # Step 13d — prior-task bead attachment.
+        depends_on_task_id = self._attach_prior_beads(
+            draft.plan_phases,
+            task_id=draft.task_id,
+            task_summary=draft.task_summary,
+            services=services,
+        )
+        draft.depends_on_task_id = depends_on_task_id
+
+        # Post-enrichment safety net: HIGH/CRITICAL tasks must always have a
+        # terminal Review phase, regardless of whether complexity cap truncated
+        # code-reviewer from the roster before phase construction.
+        self._ensure_review_phase(draft, services)
+
+        # Post-enrichment safety net: when auditor was injected into the roster
+        # by RiskStage._ensure_safety_roster (compliance keywords like GDPR/SOX/
+        # HIPAA/PCI), the phase builder silently drops it because is_reviewer_agent
+        # returns True for "auditor".  Append a dedicated Audit phase here.
+        self._ensure_audit_phase(draft, services)
+
+        return draft
+
+    # ------------------------------------------------------------------
+    # Private methods
+    # ------------------------------------------------------------------
+
+    def _apply_gates(
+        self,
+        plan_phases: list[Any],
+        *,
+        stack_profile: Any,
+        gate_scope: Any,
+        project_root: Path | None,
+        services: PlannerServices,
+        isolation_overrides: dict[str, str],
+    ) -> None:
+        """Steps 12 / 12.a — QA gate decoration + project-config overlay."""
+        for phase in plan_phases:
+            if phase.gate is None:
+                phase_changed: list[str] = []
+                for _step in phase.steps:
+                    phase_changed.extend(_step.allowed_paths)
+                phase.gate = default_gate(
+                    phase.name,
+                    stack=stack_profile,
+                    changed_paths=phase_changed or None,
+                    gate_scope=gate_scope,
+                    project_root=project_root,
+                )
+
+        try:
+            apply_project_config(
+                plan_phases, services.project_config, isolation_overrides,
+            )
+        except Exception:
+            logger.warning(
+                "Applying project config failed — continuing without it",
+                exc_info=True,
+            )
+
+    def _apply_approval_gates(
+        self,
+        plan_phases: list[Any],
+        *,
+        risk_level_enum: Any,
+        task_summary: str,
+        resolved_agents: list[str],
+        research_concerns: list[tuple[str, str]] | None = None,
+    ) -> set[int]:
+        """Steps 12b / 12b-bis — approval gates and concern-splitting."""
+        from agent_baton.models.enums import RiskLevel
+
+        if risk_level_enum in (RiskLevel.HIGH, RiskLevel.CRITICAL):
+            for phase in plan_phases:
+                if phase.name.lower() in ("design", "research"):
+                    phase.approval_required = True
+                    phase.approval_description = (
+                        f"Review {phase.name.lower()} output before "
+                        f"implementation begins. Approve to continue, "
+                        f"reject to stop, or approve-with-feedback to "
+                        f"add remediation steps."
+                    )
+
+        _concerns = parse_concerns(task_summary)
+        # Fallback: use ResearchStage-provided concerns when the task summary
+        # contains no numbered markers (natural-language tasks like
+        # "audit all components" produce no regex hits).
+        if not _concerns and research_concerns:
+            _concerns = research_concerns
+
+        _split_phase_ids: set[int] = set()
+        if _concerns:
+            logger.debug(
+                "Detected %d concerns in task summary: %s",
+                len(_concerns),
+                [c[0] for c in _concerns],
+            )
+            for phase in plan_phases:
+                if phase.name.lower() in (
+                    "implement", "fix", "draft", "migrate", "audit", "assess",
+                ):
+                    split_implement_phase_by_concerns(
+                        phase, _concerns, resolved_agents, task_summary,
+                    )
+                    _split_phase_ids.add(phase.phase_id)
+        return _split_phase_ids
+
+    def _apply_bead_hints(
+        self,
+        plan_phases: list[Any],
+        hints: list[Any],
+        *,
+        services: PlannerServices,
+    ) -> list[Any]:
+        """Apply BeadAnalyzer hint objects to phases."""
+        for hint in hints:
+            try:
+                if hint.hint_type == "add_context_file":
+                    file_path = hint.metadata.get("file", "")
+                    if file_path:
+                        for phase in plan_phases:
+                            for step in phase.steps:
+                                if file_path not in step.context_files:
+                                    step.context_files.append(file_path)
+
+                elif hint.hint_type == "add_review_phase":
+                    has_review = any(
+                        p.name.lower() == "review" for p in plan_phases
+                    )
+                    if not has_review and plan_phases:
+                        last_agent = "code-reviewer"
+                        if plan_phases[-1].steps:
+                            last_agent = plan_phases[-1].steps[-1].agent_name
+                        next_id = max(p.phase_id for p in plan_phases) + 1
+                        review_phase = build_phases_for_names(
+                            ["Review"], [last_agent], "Review bead-flagged concerns",
+                            services.registry,
+                            start_phase_id=next_id,
+                        )
+                        plan_phases.extend(review_phase)
+
+                elif hint.hint_type == "add_approval_gate":
+                    for phase in plan_phases:
+                        if phase.name.lower() not in ("design", "research", "investigate"):
+                            if not phase.approval_required:
+                                phase.approval_required = True
+                                phase.approval_description = (
+                                    "Bead analysis detected decision reversals — "
+                                    "review before proceeding. "
+                                    "Approve to continue, reject to stop."
+                                )
+                            break
+            except Exception as _hint_exc:
+                logger.debug(
+                    "_apply_bead_hints: hint %s failed (non-fatal): %s",
+                    hint.hint_type, _hint_exc,
+                )
+
+        return plan_phases
+
+    def _inject_context_files(
+        self,
+        plan_phases: list[Any],
+        *,
+        default_model: str | None,
+        extracted_paths: list[str],
+        services: PlannerServices,
+    ) -> None:
+        """Steps 13 / 13b / 13c — context files, model inheritance, richness."""
+        registry = services.registry
+
+        for phase in plan_phases:
+            for step in phase.steps:
+                if not step.context_files:
+                    step.context_files = ["CLAUDE.md"]
+
+        for phase in plan_phases:
+            for step in phase.steps:
+                agent_def = registry.get(step.agent_name)
+                if agent_def and agent_def.model:
+                    step.model = agent_def.model
+                elif default_model:
+                    step.model = default_model
+                for member in step.team:
+                    member_def = registry.get(member.agent_name)
+                    if member_def and member_def.model:
+                        member.model = member_def.model
+                    elif default_model:
+                        member.model = default_model
+
+        if extracted_paths:
+            for phase in plan_phases:
+                for step in phase.steps:
+                    existing = set(step.context_files)
+                    for path in extracted_paths:
+                        if path not in existing:
+                            step.context_files.append(path)
+                            existing.add(path)
+
+    def _attach_prior_beads(
+        self,
+        plan_phases: list[Any],
+        *,
+        task_id: str,
+        task_summary: str,
+        services: PlannerServices,
+    ) -> str | None:
+        """E7 dependency detection (step 13d)."""
+        bead_store = services.bead_store
+
+        depends_on_task_id: str | None = None
+        if bead_store is not None:
+            depends_on_task_id = detect_task_dependency(task_summary, bead_store)
+            if depends_on_task_id is not None:
+                logger.info(
+                    "E7 dependency detected: task_id=%s depends on prior task %s",
+                    task_id,
+                    depends_on_task_id,
+                )
+                attach_prior_task_beads(
+                    plan_phases, depends_on_task_id, bead_store
+                )
+        return depends_on_task_id
+
+    def _ensure_audit_phase(
+        self,
+        draft: PlanDraft,
+        services: PlannerServices,
+    ) -> None:
+        """Inject a terminal Audit phase when auditor is in the resolved roster.
+
+        RiskStage._ensure_safety_roster injects "auditor" for compliance-keyword
+        tasks (GDPR, SOX, HIPAA, PCI, etc.).  The phase builder then silently
+        drops it from Implement team-steps because is_reviewer_agent("auditor")
+        returns True, and no Audit phase was built by DecompositionStage or
+        EnrichmentStage.  This safety net appends one unconditionally whenever
+        auditor is on the roster but no Audit phase exists.
+        """
+        if "auditor" not in draft.resolved_agents:
+            return
+
+        if any(_normalize_phase_name(p.name) == "audit" for p in draft.plan_phases):
+            return
+
+        max_id = max((p.phase_id for p in draft.plan_phases), default=0)
+        injected = build_phases_for_names(
+            ["Audit"],
+            ["auditor"],
+            draft.task_summary,
+            services.registry,
+            start_phase_id=max_id + 1,
+        )
+        draft.plan_phases.extend(injected)
+
+        note = (
+            f"[enrichment] Injected Audit phase (phase_id={max_id + 1}) "
+            "for compliance task — auditor was in resolved_agents but had "
+            "no dedicated phase (filtered from Implement team-steps by "
+            "is_reviewer_agent)."
+        )
+        logger.info(note)
+        draft.routing_notes.append(note)
+
+    def _ensure_review_phase(
+        self,
+        draft: PlanDraft,
+        services: PlannerServices,
+    ) -> None:
+        """Inject a terminal Review phase for HIGH/CRITICAL tasks if absent.
+
+        The complexity cap can truncate code-reviewer from the roster before
+        phase construction runs, which silently drops the Review phase.  This
+        post-enrichment check is the safety net: if the risk level warrants a
+        review checkpoint but none exists, one is appended unconditionally.
+        """
+        if draft.risk_level_enum not in (RiskLevel.HIGH, RiskLevel.CRITICAL):
+            return
+
+        if any(_normalize_phase_name(p.name) == "review" for p in draft.plan_phases):
+            return
+
+        max_id = max((p.phase_id for p in draft.plan_phases), default=0)
+        injected = build_phases_for_names(
+            ["Review"],
+            ["code-reviewer"],
+            draft.task_summary,
+            services.registry,
+            start_phase_id=max_id + 1,
+        )
+        draft.plan_phases.extend(injected)
+
+        note = (
+            f"[enrichment] Injected Review phase (phase_id={max_id + 1}) "
+            f"for {draft.risk_level_enum.value}-risk task — "
+            "code-reviewer was absent from roster due to complexity cap."
+        )
+        logger.info(note)
+        draft.routing_notes.append(note)
+
+    def _apply_archetype_gates(
+        self,
+        plan_phases: list["PlanPhase"],
+        *,
+        archetype: str,
+        risk_level_enum: "RiskLevel | None",
+    ) -> None:
+        """Apply archetype × risk gate policies to phases."""
+        config = get_archetype_config(archetype)
+        risk_key = risk_level_enum.value if risk_level_enum else "LOW"
+        policy = config.gate_policies.get(risk_key)
+        if policy is None:
+            return
+
+        from agent_baton.models.execution import PlanGate
+
+        for phase in plan_phases:
+            # Spec compliance: add review gate checking output matches plan intent
+            if policy.spec_compliance and not any(
+                getattr(phase.gate, 'gate_type', '') == 'spec'
+                for _ in [phase.gate] if phase.gate
+            ):
+                # Only add to implementation phases
+                norm_name = phase.name.lower().split(":")[0].strip()
+                if norm_name in ("implement", "fix", "draft"):
+                    if phase.gate is None:
+                        phase.gate = PlanGate(
+                            gate_type="spec",
+                            description="Verify implementation matches plan intent (spec compliance)",
+                        )
+
+            # Auditor requirement: ensure audit phase exists (handled by _ensure_audit_phase)
+            if policy.auditor_required and not phase.approval_required:
+                # Mark final phase for approval when auditor is required
+                if phase == plan_phases[-1]:
+                    phase.approval_required = True
+                    phase.approval_description = (
+                        f"Auditor review required ({risk_key} risk, {archetype} archetype)"
+                    )
+
+        # Step size enforcement: cap step estimates based on archetype ceiling
+        max_minutes = config.max_step_minutes
+        for phase in plan_phases:
+            for step in phase.steps:
+                if hasattr(step, 'max_estimated_minutes'):
+                    if step.max_estimated_minutes == 0 or step.max_estimated_minutes > max_minutes:
+                        step.max_estimated_minutes = max_minutes
+
+    # Canonical header used as idempotency sentinel — checked in both injection
+    # and duplicate detection.
+    _DECISION_CAPTURE_HEADER = (
+        "Before design begins, capture upfront decisions to prevent drift. Please answer:"
+    )
+
+    def _apply_decision_capture(
+        self,
+        plan_phases: list["PlanPhase"],
+        *,
+        archetype: str,
+        risk_level_enum: "RiskLevel | None",
+        resolved_agents: list[str],
+        services: PlannerServices,
+    ) -> None:
+        """Inject a decision-capture INTERACT step at the head of the Design phase.
+
+        Trigger condition — all three must hold:
+        - archetype is "phased"
+        - risk_level is HIGH or CRITICAL
+        - the phase list contains a "Design" phase (PHASED_CONFIG's first phase)
+
+        The injected step asks three upfront questions before any agent begins
+        coding, preventing premature drift caused by unrecorded decisions.
+        """
+        from agent_baton.models.enums import RiskLevel
+        from agent_baton.models.execution import PlanStep
+
+        # Gate 1: only PHASED archetype has decision_capture=True
+        config = get_archetype_config(archetype)
+        if not config.decision_capture:
+            return
+
+        # Gate 2: only HIGH and CRITICAL risk
+        if risk_level_enum not in (RiskLevel.HIGH, RiskLevel.CRITICAL):
+            return
+
+        # Gate 3: find the Design phase (first phase of PHASED_CONFIG template)
+        design_phase = next(
+            (p for p in plan_phases if p.name.lower().split(":")[0].strip() == "design"),
+            None,
+        )
+        if design_phase is None:
+            return
+
+        # Idempotency: skip if an interact step with the canonical header already exists
+        for step in design_phase.steps:
+            if (
+                getattr(step, 'step_type', '') == "consulting"
+                and getattr(step, 'interactive', False)
+                and self._DECISION_CAPTURE_HEADER in getattr(step, 'task_description', '')
+            ):
+                logger.debug(
+                    "_apply_decision_capture: decision-capture step already present "
+                    "in Design phase — skipping injection"
+                )
+                return
+
+        # Resolve the agent: prefer "architect" when available in the registry
+        registry = services.registry
+        agent_name = "architect" if registry.get("architect") is not None else (
+            resolved_agents[0] if resolved_agents else "architect"
+        )
+
+        description = (
+            f"{self._DECISION_CAPTURE_HEADER}\n\n"
+            "1. What are the explicit success criteria for this task?\n"
+            "2. What constraints or non-goals must we respect?\n"
+            "3. Any decisions already made (architecture, library, API shape) "
+            "we should not relitigate?"
+        )
+
+        # Shift existing step IDs to make room at position 0
+        for step in design_phase.steps:
+            parts = step.step_id.split(".")
+            if len(parts) == 2 and parts[0] == str(design_phase.phase_id):
+                try:
+                    step.step_id = f"{parts[0]}.{int(parts[1]) + 1}"
+                except ValueError:
+                    pass
+
+        capture_step = PlanStep(
+            step_id=f"{design_phase.phase_id}.1",
+            agent_name=agent_name,
+            task_description=description,
+            step_type="consulting",
+            interactive=True,
+            max_turns=3,
+            max_estimated_minutes=5,
+        )
+        design_phase.steps.insert(0, capture_step)
+
+        logger.info(
+            "_apply_decision_capture: injected decision-capture step %s "
+            "into Design phase (phase_id=%d, agent=%s, risk=%s)",
+            capture_step.step_id,
+            design_phase.phase_id,
+            agent_name,
+            risk_level_enum.value if risk_level_enum else "?",
+        )

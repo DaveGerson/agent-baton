@@ -136,16 +136,12 @@ class TestClassifierFallback:
             f"Word-boundary check failed: got {result!r} for substring-containing input"
         )
 
-    def test_keyword_classifier_does_not_call_haiku(self) -> None:
+    def test_keyword_classifier_is_deterministic(self) -> None:
         registry = MagicMock()
         registry.agents = {}
 
-        with patch(
-            "agent_baton.core.engine.classifier._call_haiku",
-            side_effect=AssertionError("KeywordClassifier must not call Haiku"),
-        ):
-            clf = KeywordClassifier()
-            result = clf.classify("Fix the broken auth endpoint", registry)
+        clf = KeywordClassifier()
+        result = clf.classify("Fix the broken auth endpoint", registry)
 
         assert result.task_type == "bug-fix"
         assert result.source == "keyword-fallback"
@@ -489,9 +485,12 @@ class TestTokenTracking:
 
         storage.close()
 
-    def test_zero_tokens_are_persisted_not_silently_skipped(
+    def test_zero_tokens_triggers_heuristic_fallback(
         self, tmp_path: Path
     ) -> None:
+        # When estimated_tokens=0 is passed and a plan is available, the executor
+        # uses the char/4 heuristic derived from the step's task_description rather
+        # than persisting a zero that would starve the budget-tuner.
         from agent_baton.core.storage.sqlite_backend import SqliteStorage
 
         db_path = tmp_path / "baton.db"
@@ -521,7 +520,10 @@ class TestTokenTracking:
         ).fetchone()
 
         assert row is not None
-        assert row["estimated_tokens"] == 0
+        # The heuristic fills in a non-zero estimate from the plan step description.
+        assert row["estimated_tokens"] > 0, (
+            "executor should apply char/4 heuristic when estimated_tokens=0 and plan is present"
+        )
 
         storage.close()
 

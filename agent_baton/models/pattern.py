@@ -68,7 +68,9 @@ class TeamPattern:
         success_rate: Fraction of tasks with outcome ``"SHIP"``.
         sample_size: Number of tasks where this team composition appeared.
         avg_token_cost: Mean estimated tokens per task for this team.
-        confidence: Calibrated confidence score in ``[0.0, 1.0]``.
+        confidence: Evidence strength score in ``[0.0, 1.0]`` — a heuristic ramp
+            based on sample size and success rate.  Not a statistical confidence
+            interval.  Use ``sample_size`` and ``success_rate`` for display.
         created_at: ISO 8601 creation timestamp.
         updated_at: ISO 8601 last refresh timestamp.
     """
@@ -125,8 +127,11 @@ class LearnedPattern:
             of the workflow that worked best.
         recommended_agents: Ordered list of agent names in the most successful
             combination observed.
-        confidence: Score in [0.0, 1.0] based on sample size and success rate.
+        confidence: Evidence strength score in [0.0, 1.0].  This is a heuristic
+            ramp, NOT a statistically validated confidence interval.
             Formula: min(1.0, (sample_size / 15) * success_rate).
+            Use ``sample_size`` and ``success_rate`` directly for display;
+            ``confidence`` is an internal ranking signal only.
         sample_size: Number of task records that contributed to this pattern.
         success_rate: Fraction of tasks in this group with outcome=="SHIP".
         avg_token_cost: Mean estimated_tokens across successful tasks.

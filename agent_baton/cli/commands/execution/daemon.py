@@ -19,6 +19,7 @@ import logging
 import os
 from pathlib import Path
 
+from agent_baton.cli.errors import EXIT_VALIDATION, user_error
 from agent_baton.core.runtime.supervisor import WorkerSupervisor
 from agent_baton.core.runtime.launcher import DryRunLauncher, AgentLauncher
 from agent_baton.models.execution import MachinePlan
@@ -80,6 +81,19 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         "--task-id", metavar="ID", default=None, dest="task_id",
         help="Namespace this daemon under a specific task ID",
     )
+    start.add_argument(
+        "--max-steps", metavar="N", type=int, default=0, dest="max_steps",
+        help="Stop daemon after N steps (0 = unlimited)",
+    )
+    start.add_argument(
+        "--token-budget", metavar="N", type=int, default=0, dest="token_budget",
+        help="Soft token cap: stop dispatching new steps when exceeded (0 = use tier default)",
+    )
+    start.add_argument(
+        "--log-format", metavar="FORMAT", default="text", dest="log_format",
+        choices=["text", "json"],
+        help="Log output format: text (default) or json (structured, for log aggregators)",
+    )
 
     status_p = sub.add_parser("status", help="Show daemon status")
     status_p.add_argument(
@@ -118,6 +132,8 @@ async def _run_daemon_with_api(
     token: str | None,
     team_context_root: Path,
     task_id: str | None = None,
+    max_steps: int = 0,
+    token_budget: int = 0,
 ) -> str:
     """Run the async worker and the HTTP API server concurrently.
 
@@ -175,11 +191,16 @@ async def _run_daemon_with_api(
         )
         engine.start(plan)
 
+    # Apply token budget cap on the engine (B1).
+    if token_budget > 0:
+        engine._token_budget = token_budget
+
     worker = TaskWorker(
         engine=engine,
         launcher=launcher,
         bus=bus,
         max_parallel=max_parallel,
+        max_steps=max_steps or None,
     )
 
     # ── FastAPI app (shares the same bus) ────────────────────────────────────
@@ -277,21 +298,18 @@ def handler(args: argparse.Namespace) -> None:
 
     if args.daemon_action == "start":
         if not args.resume and not args.plan:
-            print("Error: --plan is required (unless --resume is set)")
-            return
+            user_error("--plan is required (unless --resume is set)", exit_code=EXIT_VALIDATION)
 
         plan = None
         if args.plan:
             plan_path = Path(args.plan)
             if not plan_path.exists():
-                print(f"Error: plan file not found: {plan_path}")
-                return
+                user_error(f"plan file not found: {plan_path}", exit_code=EXIT_VALIDATION)
             try:
                 data = json.loads(plan_path.read_text(encoding="utf-8"))
                 plan = MachinePlan.from_dict(data)
             except (json.JSONDecodeError, KeyError) as exc:
-                print(f"Error: invalid plan file: {exc}")
-                return
+                user_error(f"invalid plan file: {exc}", exit_code=EXIT_VALIDATION)
 
         if args.dry_run:
             launcher = DryRunLauncher()
@@ -303,17 +321,14 @@ def handler(args: argparse.Namespace) -> None:
                 registry.load_default_paths()
                 launcher = ClaudeCodeLauncher(registry=registry)
             except RuntimeError as exc:
-                print(f"Error: {exc}")
-                print("Install Claude Code CLI or use --dry-run.")
-                return
+                user_error(str(exc), hint="Install Claude Code CLI or use --dry-run.")
 
         # Change to --project-dir before forking so all relative paths resolve
         # correctly inside the daemon process.
         if args.project_dir is not None:
             project_dir = Path(args.project_dir).resolve()
             if not project_dir.is_dir():
-                print(f"Error: project directory not found: {project_dir}")
-                return
+                user_error(f"project directory not found: {project_dir}", exit_code=EXIT_VALIDATION)
             os.chdir(project_dir)
 
         # --serve is only meaningful in foreground mode or after daemonization.
@@ -322,6 +337,9 @@ def handler(args: argparse.Namespace) -> None:
         host: str = getattr(args, "host", "127.0.0.1")
         port: int = getattr(args, "port", 8741)
         token: str | None = getattr(args, "token", None)
+        max_steps: int = getattr(args, "max_steps", 0)
+        token_budget: int = getattr(args, "token_budget", 0)
+        log_format: str = getattr(args, "log_format", "text")
 
         # Single-instance check + daemonize (skipped with --foreground).
         if not args.foreground:
@@ -367,9 +385,8 @@ def handler(args: argparse.Namespace) -> None:
             try:
                 supervisor._write_pid()
             except RuntimeError as exc:
-                print(f"Error: {exc}")
-                return
-            supervisor._setup_logging()
+                user_error(str(exc))
+            supervisor._setup_logging(log_format=log_format)
 
             logger = logging.getLogger("baton.daemon")
             summary = ""
@@ -386,6 +403,8 @@ def handler(args: argparse.Namespace) -> None:
                         token=token,
                         team_context_root=supervisor._root,
                         task_id=task_id,
+                        max_steps=max_steps,
+                        token_budget=token_budget,
                     )
                 )
             except KeyboardInterrupt:
@@ -418,10 +437,12 @@ def handler(args: argparse.Namespace) -> None:
                     launcher=launcher,
                     max_parallel=args.max_parallel,
                     resume=args.resume,
+                    max_steps=max_steps,
+                    token_budget=token_budget,
+                    log_format=log_format,
                 )
             except RuntimeError as exc:
-                print(f"Error: {exc}")
-                return
+                user_error(str(exc))
 
         # In foreground mode the process is still attached to the terminal and
         # can print the summary.  In daemon mode stdout has been redirected to
