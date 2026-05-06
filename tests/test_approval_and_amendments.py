@@ -327,6 +327,162 @@ class TestApprovalGates:
         with pytest.raises(RuntimeError):
             engine.record_approval_result(phase_id=0, result="approve")
 
+    # ====================================================================== #
+    # Hole 1 validation tests — record_approval_result must enforce that:    #
+    #   (a) status is approval_pending                                       #
+    #   (b) phase_id matches the current phase                               #
+    #   (c) phase actually requested approval                                #
+    #   (d) team-mode self-approval is rejected                              #
+    # ====================================================================== #
+
+    def test_reject_when_status_not_approval_pending(
+        self, tmp_path: Path
+    ) -> None:
+        """A stray approval recorded mid-execution must be rejected.
+
+        Without this guard, the approval would re-flip status to "running"
+        and silently mask whatever phase the engine was actually in.
+        """
+        from agent_baton.core.engine.errors import InvalidApprovalState
+
+        plan = _plan(
+            phases=[
+                _phase(phase_id=0, steps=[_step("1.1")], approval_required=True)
+            ]
+        )
+        engine = _engine(tmp_path)
+        engine.start(plan)
+        # Engine status is "running" — no approval has been requested yet.
+        with pytest.raises(InvalidApprovalState) as exc_info:
+            engine.record_approval_result(phase_id=0, result="approve")
+        assert exc_info.value.reason == InvalidApprovalState.REASON_NOT_PENDING
+        assert exc_info.value.current_status == "running"
+
+    def test_reject_phase_id_mismatch(self, tmp_path: Path) -> None:
+        """Approving phase_id=99 when phase 0 is the current must be rejected."""
+        from agent_baton.core.engine.errors import InvalidApprovalState
+
+        engine = _reach_approval(tmp_path)
+        engine.next_action()  # APPROVAL — status becomes approval_pending
+        with pytest.raises(InvalidApprovalState) as exc_info:
+            engine.record_approval_result(phase_id=99, result="approve")
+        assert exc_info.value.reason == InvalidApprovalState.REASON_PHASE_MISMATCH
+
+    def test_reject_when_phase_did_not_request_approval(
+        self, tmp_path: Path
+    ) -> None:
+        """A phase without approval_required cannot have an approval recorded.
+
+        We synthesize this by flipping status to approval_pending on disk
+        without setting approval_required on the phase — simulating a
+        future code path that incorrectly transitions into approval_pending.
+        """
+        from agent_baton.core.engine.errors import InvalidApprovalState
+
+        plan = _plan(
+            phases=[
+                _phase(phase_id=0, steps=[_step("1.1")], approval_required=False)
+            ]
+        )
+        engine = _engine(tmp_path)
+        engine.start(plan)
+        engine.record_step_result("1.1", "backend-engineer")
+        # Hack the persisted status into approval_pending without setting
+        # approval_required on the phase.
+        state = engine._load_state()
+        state.status = "approval_pending"
+        engine._save_execution(state)
+        with pytest.raises(InvalidApprovalState) as exc_info:
+            engine.record_approval_result(phase_id=0, result="approve")
+        assert exc_info.value.reason == (
+            InvalidApprovalState.REASON_NO_APPROVAL_REQUESTED
+        )
+
+    def test_team_mode_rejects_self_approval(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """In BATON_APPROVAL_MODE=team the requester cannot self-approve."""
+        from agent_baton.core.engine.errors import InvalidApprovalState
+
+        monkeypatch.setenv("BATON_APPROVAL_MODE", "team")
+        # Pin the actor identity so requester == approver in this test.
+        monkeypatch.setenv("USER", "alice")
+        monkeypatch.setenv("USERNAME", "alice")
+
+        engine = _reach_approval(tmp_path)
+        engine.next_action()  # APPROVAL — stamps requester
+        # Verify the requester was captured.
+        state = engine._load_state()
+        assert state.pending_approval_request is not None
+        assert state.pending_approval_request["requester"].startswith("alice")
+        # Now try to self-approve as the same actor.
+        with pytest.raises(InvalidApprovalState) as exc_info:
+            engine.record_approval_result(
+                phase_id=0,
+                result="approve",
+                actor=state.pending_approval_request["requester"],
+            )
+        assert exc_info.value.reason == InvalidApprovalState.REASON_SELF_APPROVAL
+
+    def test_team_mode_accepts_different_actor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """In team mode a different actor than the requester may approve."""
+        monkeypatch.setenv("BATON_APPROVAL_MODE", "team")
+        monkeypatch.setenv("USER", "alice")
+        monkeypatch.setenv("USERNAME", "alice")
+
+        engine = _reach_approval(tmp_path)
+        engine.next_action()  # APPROVAL — requester captured as alice@...
+        # Different actor approves.
+        engine.record_approval_result(
+            phase_id=0,
+            result="approve",
+            actor="bob@somewhere",
+        )
+        state = engine._load_state()
+        assert state.status == "running"
+        assert len(state.approval_results) == 1
+        assert state.approval_results[0].actor == "bob@somewhere"
+        # Pending request audit row must be cleared after a successful record.
+        assert state.pending_approval_request is None
+
+    def test_local_mode_self_approval_allowed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """In local mode the requester may self-approve (default behavior)."""
+        # Default approval mode is "local"; assert it explicitly for clarity.
+        monkeypatch.delenv("BATON_APPROVAL_MODE", raising=False)
+        monkeypatch.setenv("USER", "alice")
+        monkeypatch.setenv("USERNAME", "alice")
+
+        engine = _reach_approval(tmp_path)
+        engine.next_action()  # APPROVAL
+        state = engine._load_state()
+        requester = state.pending_approval_request["requester"]
+        # Same actor records the approval — must succeed in local mode.
+        engine.record_approval_result(
+            phase_id=0, result="approve", actor=requester
+        )
+        state = engine._load_state()
+        assert state.status == "running"
+        assert state.pending_approval_request is None
+
+    def test_pending_approval_request_persists_to_disk(
+        self, tmp_path: Path
+    ) -> None:
+        """The pending-approval audit row must roundtrip through save/load."""
+        engine = _reach_approval(tmp_path)
+        engine.next_action()  # APPROVAL — stamps the request
+        # Reload state from disk via a fresh engine.
+        engine2 = _engine(tmp_path)
+        action = engine2.resume()
+        assert action.action_type == ActionType.APPROVAL
+        state = engine2._load_state()
+        assert state.pending_approval_request is not None
+        assert state.pending_approval_request["phase_id"] == 0
+        assert "requester" in state.pending_approval_request
+
     # ------------------------------------------------------------------ #
     # Context auto-generated when approval_description is empty           #
     # ------------------------------------------------------------------ #

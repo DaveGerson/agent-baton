@@ -3783,6 +3783,24 @@ class ExecutionEngine:
     ) -> None:
         """Record a human approval decision for a phase.
 
+        Hole 1 fix — validates four pre-conditions before mutating state:
+
+        1. ``state.status == "approval_pending"`` — without this guard a
+           stray call mid-execution is accepted and re-flips status to
+           ``"running"``, masking whatever phase the engine was actually
+           in.
+        2. ``phase_id`` matches the current phase — audit rows must not be
+           filed against the wrong phase.
+        3. The current phase has ``approval_required=True`` — no approval
+           may be recorded for a phase that never asked for one.
+        4. In ``BATON_APPROVAL_MODE=team`` the recording actor must differ
+           from whoever requested the approval.  The requester identity is
+           captured by ``_approval_action`` in
+           ``state.pending_approval_request``.
+
+        Failures raise :class:`InvalidApprovalState` with a ``reason`` tag
+        from that class so callers can map specific failures to error codes.
+
         Args:
             phase_id: The phase_id requiring approval.
             result: One of ``"approve"``, ``"reject"``,
@@ -3805,6 +3823,82 @@ class ExecutionEngine:
         if not actor:
             actor = _cli_actor()
 
+        # ── Hole 1 validations ──────────────────────────────────────────────
+        from agent_baton.core.engine.errors import InvalidApprovalState
+
+        # (1) Engine must be waiting for an approval right now.
+        if state.status != "approval_pending":
+            raise InvalidApprovalState(
+                reason=InvalidApprovalState.REASON_NOT_PENDING,
+                message=(
+                    f"record_approval_result rejected: execution status is "
+                    f"{state.status!r}, not 'approval_pending'.  An approval "
+                    f"can only be recorded while the engine is genuinely "
+                    f"waiting on one — accepting a stray approval would "
+                    f"silently re-flip the status to 'running' and mask the "
+                    f"actual phase in flight."
+                ),
+                phase_id=phase_id,
+                current_status=state.status,
+                actor=actor,
+            )
+
+        # (2) phase_id argument must match the current phase.
+        current_phase = state.current_phase_obj
+        if current_phase is None or current_phase.phase_id != phase_id:
+            current_phase_id = (
+                current_phase.phase_id if current_phase is not None else None
+            )
+            raise InvalidApprovalState(
+                reason=InvalidApprovalState.REASON_PHASE_MISMATCH,
+                message=(
+                    f"record_approval_result rejected: phase_id={phase_id} "
+                    f"does not match the current phase "
+                    f"(phase_id={current_phase_id}).  Approvals must be "
+                    f"recorded against the phase that requested them."
+                ),
+                phase_id=phase_id,
+                current_status=state.status,
+                actor=actor,
+            )
+
+        # (3) The current phase must actually have requested approval.
+        if not getattr(current_phase, "approval_required", False):
+            raise InvalidApprovalState(
+                reason=InvalidApprovalState.REASON_NO_APPROVAL_REQUESTED,
+                message=(
+                    f"record_approval_result rejected: phase {phase_id} "
+                    f"({current_phase.name!r}) did not request approval "
+                    f"(approval_required=False).  Approvals cannot be "
+                    f"recorded against phases that never asked for one."
+                ),
+                phase_id=phase_id,
+                current_status=state.status,
+                actor=actor,
+            )
+
+        # (4) Team-mode self-approval guard.  In team mode the actor that
+        # records the approval must differ from whoever requested it.
+        approval_mode = os.environ.get("BATON_APPROVAL_MODE", "local").lower()
+        if approval_mode == "team":
+            request = getattr(state, "pending_approval_request", None)
+            if request is not None:
+                requester = request.get("requester", "")
+                if requester and requester == actor:
+                    raise InvalidApprovalState(
+                        reason=InvalidApprovalState.REASON_SELF_APPROVAL,
+                        message=(
+                            f"record_approval_result rejected (team mode): "
+                            f"actor {actor!r} requested this approval and "
+                            f"cannot self-approve.  A different reviewer "
+                            f"must record the decision."
+                        ),
+                        phase_id=phase_id,
+                        current_status=state.status,
+                        actor=actor,
+                        requester=requester,
+                    )
+
         approval = ApprovalResult(
             phase_id=phase_id,
             result=result,
@@ -3814,6 +3908,10 @@ class ExecutionEngine:
             rationale=rationale,
         )
         state.approval_results.append(approval)
+        # Clear the pending-approval audit row — the approval has been
+        # recorded.  Subsequent stray record_approval_result calls now hit
+        # the status != approval_pending guard above.
+        state.pending_approval_request = None
 
         if self._trace is not None:
             self._tracer.record_event(
@@ -4130,6 +4228,27 @@ class ExecutionEngine:
                     parent.deviations.append(
                         f"Conflict escalated: {conflict.conflict_id}"
                     )
+                    # Hole 1 fix: mark the current phase as approval_required
+                    # so record_approval_result's validation accepts this
+                    # path, and stamp the pending-approval audit row capturing
+                    # the requester (the executor itself, on behalf of the
+                    # conflict detector).  Without these, an approval recorded
+                    # for the team-conflict-escalation case would be rejected
+                    # as "no approval requested".
+                    current_phase = state.current_phase_obj
+                    if current_phase is not None:
+                        current_phase.approval_required = True
+                        if not current_phase.approval_description:
+                            current_phase.approval_description = (
+                                f"Team conflict escalated: "
+                                f"{conflict.conflict_id}.  Review and approve "
+                                f"to continue."
+                            )
+                        state.pending_approval_request = {
+                            "phase_id": current_phase.phase_id,
+                            "requester": _cli_actor(),
+                            "requested_at": _utcnow(),
+                        }
                     self._save_execution(state)
                     return
 
@@ -5971,10 +6090,33 @@ class ExecutionEngine:
     def _approval_action(
         self, state: ExecutionState, phase_obj: PlanPhase,
     ) -> ExecutionAction:
-        """Build an APPROVAL action for a phase requiring human review."""
+        """Build an APPROVAL action for a phase requiring human review.
+
+        Side effect (Hole 1 fix): records ``state.pending_approval_request``
+        with the requester identity and phase_id so ``record_approval_result``
+        can enforce that the approval (a) belongs to the phase that asked,
+        (b) is recorded only while ``status == "approval_pending"``, and
+        (c) in ``BATON_APPROVAL_MODE=team`` is recorded by a different actor
+        than whoever requested it.  The audit row is cleared when the
+        approval is recorded.
+        """
         context = phase_obj.approval_description or self._build_approval_context(
             state, phase_obj,
         )
+        # Stamp the pending-approval audit row.  Idempotent: if the same phase
+        # is re-emitted (e.g. after resume), preserve the original requester
+        # rather than overwriting it with whoever happens to be calling now.
+        existing = getattr(state, "pending_approval_request", None)
+        if (
+            existing is None
+            or existing.get("phase_id") != phase_obj.phase_id
+        ):
+            state.pending_approval_request = {
+                "phase_id": phase_obj.phase_id,
+                "requester": _cli_actor(),
+                "requested_at": _utcnow(),
+            }
+            self._save_execution(state)
         return ExecutionAction(
             action_type=ActionType.APPROVAL,
             message=(

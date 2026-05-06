@@ -74,3 +74,48 @@ class ExecutionVetoed(RuntimeError):
         if rationale:
             message = f"{message}\nAuditor rationale: {rationale}"
         super().__init__(message)
+
+
+class InvalidApprovalState(RuntimeError):
+    """Raised when ``record_approval_result`` is called against an invalid state.
+
+    Hole 1 fix.  Covers the four pre-conditions an approval recording must
+    satisfy:
+
+    1. ``ExecutionState.status`` is ``"approval_pending"`` — calls made
+       mid-execution would otherwise re-flip status to ``"running"`` and
+       silently mask whatever phase the engine was actually in.
+    2. The supplied ``phase_id`` matches ``state.current_phase_obj.phase_id`` —
+       audit rows must be filed against the phase that actually requested
+       approval, not an unrelated one.
+    3. The current phase has ``approval_required=True`` — an approval
+       cannot be recorded for a phase that never asked for one.
+    4. In ``BATON_APPROVAL_MODE=team`` the recording actor must differ from
+       whoever requested the approval (no self-approval).
+
+    The ``reason`` attribute is a short machine-readable tag from this class
+    (``REASON_*`` constants) so that callers (e.g. the API layer) can map
+    specific failures to HTTP status codes without parsing the message.
+    """
+
+    REASON_NOT_PENDING: str = "not_approval_pending"
+    REASON_PHASE_MISMATCH: str = "phase_mismatch"
+    REASON_NO_APPROVAL_REQUESTED: str = "no_approval_requested"
+    REASON_SELF_APPROVAL: str = "self_approval_rejected"
+
+    def __init__(
+        self,
+        *,
+        reason: str,
+        message: str,
+        phase_id: int | str | None = None,
+        current_status: str | None = None,
+        actor: str | None = None,
+        requester: str | None = None,
+    ) -> None:
+        self.reason = reason
+        self.phase_id = phase_id
+        self.current_status = current_status
+        self.actor = actor
+        self.requester = requester
+        super().__init__(message)
