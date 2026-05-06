@@ -1404,6 +1404,19 @@ class ExecutionState:
     pending_scope_expansions: list[dict] = field(default_factory=list)
     scope_expansions_applied: int = 0
 
+    # Approval-request audit (Hole 1 fix): records who requested the currently
+    # pending approval and which phase it is for.  Populated when the engine
+    # transitions into ``status == "approval_pending"``; cleared when the
+    # approval is recorded.  Used by ``record_approval_result`` to enforce:
+    #   * the approval is only accepted while the engine is genuinely waiting,
+    #   * the supplied ``phase_id`` matches the phase that asked,
+    #   * in ``BATON_APPROVAL_MODE=team`` the recording actor is not the
+    #     same identity as the requester (no self-approval).
+    # Shape: ``{"phase_id": int, "requester": str, "requested_at": ISO-8601}``
+    # or ``None`` when no approval is currently pending.  Absent in older
+    # state files; ``from_dict`` defaults to ``None``.
+    pending_approval_request: dict | None = None
+
     def __post_init__(self) -> None:
         if not self.started_at:
             self.started_at = datetime.now(timezone.utc).isoformat()
@@ -1482,6 +1495,12 @@ class ExecutionState:
             "run_cumulative_spend_usd": float(getattr(self, "run_cumulative_spend_usd", 0.0)),
             "pending_scope_expansions": list(getattr(self, "pending_scope_expansions", [])),
             "scope_expansions_applied": int(getattr(self, "scope_expansions_applied", 0)),
+            # Hole 1 fix: approval-request audit row (None when no approval pending).
+            "pending_approval_request": (
+                dict(self.pending_approval_request)
+                if getattr(self, "pending_approval_request", None) is not None
+                else None
+            ),
         }
 
     @classmethod
@@ -1519,6 +1538,12 @@ class ExecutionState:
             run_cumulative_spend_usd=float(data.get("run_cumulative_spend_usd", 0.0)),
             pending_scope_expansions=list(data.get("pending_scope_expansions", [])),
             scope_expansions_applied=int(data.get("scope_expansions_applied", 0)),
+            # Hole 1 fix: legacy state files have no approval-request audit row.
+            pending_approval_request=(
+                dict(data["pending_approval_request"])
+                if data.get("pending_approval_request") is not None
+                else None
+            ),
         )
 
 
