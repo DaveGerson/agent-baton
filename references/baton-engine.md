@@ -2125,6 +2125,7 @@ Serialised `MachinePlan` containing:
 - `git_strategy` — `commit-per-agent`, `feature-branch`, `pr-per-phase`
 - `phases[]` — ordered list of phases, each with `steps[]` and optional `gate`
 - `shared_context` — pre-built context string injected into every delegation prompt
+- `compliance_fail_closed` — `true`/`false`/`null` — per-plan override for `BATON_COMPLIANCE_FAIL_CLOSED`. Set to `true` for regulated-data, HIGH/CRITICAL risk, or audit-controlled tasks. `null` (default) defers to the env var.
 
 ### `plan.md`
 

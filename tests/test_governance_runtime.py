@@ -67,12 +67,14 @@ def _plan(
     task_id: str = "task-ws3",
     risk_level: str = "LOW",
     phases: list[PlanPhase] | None = None,
+    compliance_fail_closed: bool | None = None,
 ) -> MachinePlan:
     return MachinePlan(
         task_id=task_id,
         task_summary="WS3 governance test",
         risk_level=risk_level,
         phases=phases or [_phase()],
+        compliance_fail_closed=compliance_fail_closed,
     )
 
 
@@ -576,6 +578,164 @@ class TestComplianceFailClosed:
         assert post_state is not None
         assert post_state.status == "failed"
         assert "compliance_write_failed" in post_state.override_justification
+
+
+# ---------------------------------------------------------------------------
+# Plan-level compliance_fail_closed override
+# ---------------------------------------------------------------------------
+
+class TestPlanComplianceFailClosed:
+    """``MachinePlan.compliance_fail_closed`` overrides ``BATON_COMPLIANCE_FAIL_CLOSED``.
+
+    Resolution order: plan field (if not None) > env var > False.
+    """
+
+    def _force_write_to_raise(self, engine: ExecutionEngine) -> None:
+        """Patch the compliance writer to always raise OSError."""
+        import agent_baton.core.engine.executor as _exec_mod
+
+        original = _exec_mod.ComplianceChainWriter
+
+        class _FailingWriter:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def append(self, _entry):
+                raise OSError("simulated compliance write failure")
+
+        engine._patched_writer_orig = original
+        _exec_mod.ComplianceChainWriter = _FailingWriter
+
+    def _restore_writer(self, engine: ExecutionEngine) -> None:
+        import agent_baton.core.engine.executor as _exec_mod
+
+        if hasattr(engine, "_patched_writer_orig"):
+            _exec_mod.ComplianceChainWriter = engine._patched_writer_orig
+
+    def _make_plan(self, compliance_fail_closed: bool | None = None) -> MachinePlan:
+        return _plan(compliance_fail_closed=compliance_fail_closed)
+
+    def test_plan_true_env_unset_is_fail_closed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(a) plan.compliance_fail_closed=True + env unset → fail-closed."""
+        from agent_baton.core.engine.errors import ComplianceWriteError
+
+        monkeypatch.delenv("BATON_COMPLIANCE_FAIL_CLOSED", raising=False)
+
+        engine = ExecutionEngine(team_context_root=tmp_path)
+        plan = self._make_plan(compliance_fail_closed=True)
+        self._force_write_to_raise(engine)
+        try:
+            with pytest.raises(ComplianceWriteError):
+                engine._write_compliance_entry(
+                    {
+                        "timestamp": "now",
+                        "event_type": "agent_dispatch",
+                        "task_id": "t-plan-a",
+                        "plan_id": "t-plan-a",
+                        "step_id": "1.1",
+                        "agent_name": "backend-engineer",
+                    },
+                    plan=plan,
+                )
+        finally:
+            self._restore_writer(engine)
+
+    def test_plan_false_overrides_env_one(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(b) plan.compliance_fail_closed=False + env=1 → continue-on-failure."""
+        monkeypatch.setenv("BATON_COMPLIANCE_FAIL_CLOSED", "1")
+
+        engine = ExecutionEngine(team_context_root=tmp_path)
+        plan = self._make_plan(compliance_fail_closed=False)
+        bead_calls: list[dict] = []
+
+        def _capture_bead(*, exc, log_path, fail_closed, entry):
+            bead_calls.append({"fail_closed": fail_closed})
+
+        monkeypatch.setattr(engine, "_file_compliance_bead_warning", _capture_bead)
+        self._force_write_to_raise(engine)
+        try:
+            # Must NOT raise even though BATON_COMPLIANCE_FAIL_CLOSED=1
+            engine._write_compliance_entry(
+                {
+                    "timestamp": "now",
+                    "event_type": "agent_dispatch",
+                    "task_id": "t-plan-b",
+                    "plan_id": "t-plan-b",
+                    "step_id": "1.1",
+                    "agent_name": "backend-engineer",
+                },
+                plan=plan,
+            )
+        finally:
+            self._restore_writer(engine)
+
+        assert len(bead_calls) == 1
+        assert bead_calls[0]["fail_closed"] is False
+
+    def test_plan_none_env_one_is_fail_closed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(c) plan.compliance_fail_closed=None + env=1 → fail-closed (env governs)."""
+        from agent_baton.core.engine.errors import ComplianceWriteError
+
+        monkeypatch.setenv("BATON_COMPLIANCE_FAIL_CLOSED", "1")
+
+        engine = ExecutionEngine(team_context_root=tmp_path)
+        plan = self._make_plan(compliance_fail_closed=None)
+        self._force_write_to_raise(engine)
+        try:
+            with pytest.raises(ComplianceWriteError):
+                engine._write_compliance_entry(
+                    {
+                        "timestamp": "now",
+                        "event_type": "agent_dispatch",
+                        "task_id": "t-plan-c",
+                        "plan_id": "t-plan-c",
+                        "step_id": "1.1",
+                        "agent_name": "backend-engineer",
+                    },
+                    plan=plan,
+                )
+        finally:
+            self._restore_writer(engine)
+
+    def test_plan_none_env_unset_is_continue(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(d) plan.compliance_fail_closed=None + env unset → continue (default)."""
+        monkeypatch.delenv("BATON_COMPLIANCE_FAIL_CLOSED", raising=False)
+
+        engine = ExecutionEngine(team_context_root=tmp_path)
+        plan = self._make_plan(compliance_fail_closed=None)
+        bead_calls: list[dict] = []
+
+        def _capture_bead(*, exc, log_path, fail_closed, entry):
+            bead_calls.append({"fail_closed": fail_closed})
+
+        monkeypatch.setattr(engine, "_file_compliance_bead_warning", _capture_bead)
+        self._force_write_to_raise(engine)
+        try:
+            # Must NOT raise — default is continue-on-failure.
+            engine._write_compliance_entry(
+                {
+                    "timestamp": "now",
+                    "event_type": "agent_dispatch",
+                    "task_id": "t-plan-d",
+                    "plan_id": "t-plan-d",
+                    "step_id": "1.1",
+                    "agent_name": "backend-engineer",
+                },
+                plan=plan,
+            )
+        finally:
+            self._restore_writer(engine)
+
+        assert len(bead_calls) == 1
+        assert bead_calls[0]["fail_closed"] is False
 
 
 # ---------------------------------------------------------------------------

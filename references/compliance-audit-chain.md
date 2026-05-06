@@ -73,10 +73,28 @@ When the engine advances past a VETO under `--force` +
 auditable. `verify` still passes — overrides extend the chain rather
 than break it.
 
+## Fail-closed mode
+
+When a compliance write fails the engine can either continue (best-effort,
+the default) or halt with a `ComplianceWriteError` (fail-closed).
+
+Resolution order (first non-`null` value wins):
+
+1. `plan.compliance_fail_closed` in `plan.json` — set by the planner for
+   regulated-data or HIGH/CRITICAL-risk tasks.
+2. `BATON_COMPLIANCE_FAIL_CLOSED=1` env var — operator-level default.
+3. `false` — historical best-effort default.
+
+In fail-closed mode `state.status` is flipped to `"failed"` and
+`ComplianceWriteError` is raised before the step can continue.
+
 ## See also
 
 - `agent_baton/core/govern/compliance.py` — writer + verify + rechain
+- `agent_baton/models/execution.py` — `MachinePlan.compliance_fail_closed` field
 - `tests/govern/test_audit_chain.py` — integration tests including
   `test_rechain_then_verify_round_trip_on_pre_f03_log`
+- `tests/test_governance_runtime.py` — `TestComplianceFailClosed` and
+  `TestPlanComplianceFailClosed` for the full behavior matrix
 - `references/guardrail-presets.md` — risk-tier policy that drives
   which agents and gates emit compliance entries
