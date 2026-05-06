@@ -1,0 +1,9 @@
+{
+  "gate_type": "test",
+  "command": "pytest tests/storage/ -v --tb=short",
+  "description": "All storage tests must pass.",
+  "fail_on": [
+    "test failures",
+    "import errors"
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "phase_id": 1,
+  "result": "approve-with-feedback",
+  "feedback": "Approved, but please add docstrings to all public methods before phase 2.",
+  "decided_at": "2026-01-15T11:00:00+00:00",
+  "decision_source": "human",
+  "actor": "jdoe@workstation.local",
+  "rationale": "Code is functionally correct; documentation gap is minor and can be remediated inline."
+}
