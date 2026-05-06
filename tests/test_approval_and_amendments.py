@@ -414,13 +414,13 @@ class TestApprovalGates:
         # Verify the requester was captured.
         state = engine._load_state()
         assert state.pending_approval_request is not None
-        assert state.pending_approval_request["requester"].startswith("alice")
+        assert state.pending_approval_request.requester.startswith("alice")
         # Now try to self-approve as the same actor.
         with pytest.raises(InvalidApprovalState) as exc_info:
             engine.record_approval_result(
                 phase_id=0,
                 result="approve",
-                actor=state.pending_approval_request["requester"],
+                actor=state.pending_approval_request.requester,
             )
         assert exc_info.value.reason == InvalidApprovalState.REASON_SELF_APPROVAL
 
@@ -459,7 +459,7 @@ class TestApprovalGates:
         engine = _reach_approval(tmp_path)
         engine.next_action()  # APPROVAL
         state = engine._load_state()
-        requester = state.pending_approval_request["requester"]
+        requester = state.pending_approval_request.requester
         # Same actor records the approval — must succeed in local mode.
         engine.record_approval_result(
             phase_id=0, result="approve", actor=requester
@@ -480,8 +480,8 @@ class TestApprovalGates:
         assert action.action_type == ActionType.APPROVAL
         state = engine2._load_state()
         assert state.pending_approval_request is not None
-        assert state.pending_approval_request["phase_id"] == 0
-        assert "requester" in state.pending_approval_request
+        assert state.pending_approval_request.phase_id == 0
+        assert state.pending_approval_request.requester
 
     # ------------------------------------------------------------------ #
     # Context auto-generated when approval_description is empty           #
