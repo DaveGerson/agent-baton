@@ -407,7 +407,7 @@ class TestComplianceGateEntry:
 
 
 class TestComplianceLogResilience:
-    """Compliance write failure must never block execution."""
+    """Compliance write failure must never block execution (default mode)."""
 
     def test_bad_log_path_does_not_crash_dispatch(self, tmp_path: Path) -> None:
         engine = ExecutionEngine(team_context_root=tmp_path)
@@ -425,6 +425,157 @@ class TestComplianceLogResilience:
             assert action.action_type == ActionType.DISPATCH
         finally:
             ro_dir.chmod(0o755)
+
+
+# ---------------------------------------------------------------------------
+# Hole 2: BATON_COMPLIANCE_FAIL_CLOSED behavior
+# ---------------------------------------------------------------------------
+
+class TestComplianceFailClosed:
+    """``BATON_COMPLIANCE_FAIL_CLOSED=1`` must halt + raise on write failure.
+
+    Default (off) keeps the historical best-effort behavior — but Hole 2 also
+    upgrades the silent default to emit a bead warning so the failure is
+    visible in the audit trail rather than buried in logs.
+    """
+
+    def _force_write_to_raise(self, engine: ExecutionEngine) -> None:
+        """Patch the compliance writer to always raise OSError."""
+        # Point at a non-writable path.  The chain writer will attempt to
+        # mkdir and open it, raising PermissionError or OSError.  We use
+        # monkeypatching on the writer module to make the failure deterministic.
+        import agent_baton.core.engine.executor as _exec_mod
+
+        original = _exec_mod.ComplianceChainWriter
+
+        class _FailingWriter:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def append(self, _entry):
+                raise OSError("simulated compliance write failure")
+
+        engine._patched_writer_orig = original
+        _exec_mod.ComplianceChainWriter = _FailingWriter
+
+    def _restore_writer(self, engine: ExecutionEngine) -> None:
+        import agent_baton.core.engine.executor as _exec_mod
+
+        if hasattr(engine, "_patched_writer_orig"):
+            _exec_mod.ComplianceChainWriter = engine._patched_writer_orig
+
+    def test_default_mode_continues_and_emits_bead_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Default mode: write failure is logged + bead-warned, execution continues."""
+        monkeypatch.delenv("BATON_COMPLIANCE_FAIL_CLOSED", raising=False)
+
+        engine = ExecutionEngine(team_context_root=tmp_path)
+        # Capture bead warnings.
+        bead_calls: list[dict] = []
+
+        def _capture_bead(*, exc, log_path, fail_closed, entry):
+            bead_calls.append(
+                {
+                    "exc_type": type(exc).__name__,
+                    "fail_closed": fail_closed,
+                    "event_type": entry.get("event_type"),
+                }
+            )
+
+        monkeypatch.setattr(
+            engine, "_file_compliance_bead_warning", _capture_bead
+        )
+        self._force_write_to_raise(engine)
+        try:
+            # Direct call so we don't need to set up a full plan execution.
+            engine._write_compliance_entry(
+                {
+                    "timestamp": "now",
+                    "event_type": "agent_dispatch",
+                    "task_id": "t1",
+                    "plan_id": "t1",
+                    "step_id": "1.1",
+                    "agent_name": "backend-engineer",
+                }
+            )
+        finally:
+            self._restore_writer(engine)
+
+        # Default mode: no exception raised, execution continued.
+        # Bead warning was emitted with fail_closed=False.
+        assert len(bead_calls) == 1
+        assert bead_calls[0]["fail_closed"] is False
+        assert bead_calls[0]["exc_type"] == "OSError"
+        assert bead_calls[0]["event_type"] == "agent_dispatch"
+
+    def test_fail_closed_raises_compliance_write_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fail-closed mode: ComplianceWriteError is raised."""
+        from agent_baton.core.engine.errors import ComplianceWriteError
+
+        monkeypatch.setenv("BATON_COMPLIANCE_FAIL_CLOSED", "1")
+
+        engine = ExecutionEngine(team_context_root=tmp_path)
+        self._force_write_to_raise(engine)
+        try:
+            with pytest.raises(ComplianceWriteError) as exc_info:
+                engine._write_compliance_entry(
+                    {
+                        "timestamp": "now",
+                        "event_type": "agent_dispatch",
+                        "task_id": "t-fail-closed",
+                        "plan_id": "t-fail-closed",
+                        "step_id": "1.1",
+                        "agent_name": "backend-engineer",
+                    }
+                )
+        finally:
+            self._restore_writer(engine)
+
+        # The wrapped exception preserves the underlying error and log path.
+        assert isinstance(exc_info.value.underlying, OSError)
+        assert "compliance" in str(exc_info.value).lower()
+
+    def test_fail_closed_marks_execution_failed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fail-closed mode: state.status flips to 'failed' before raising."""
+        from agent_baton.core.engine.errors import ComplianceWriteError
+
+        # Build an engine with a real plan so _save/_load_execution work.
+        monkeypatch.delenv("BATON_COMPLIANCE_FAIL_CLOSED", raising=False)
+        engine = ExecutionEngine(team_context_root=tmp_path)
+        engine.start(_plan())
+        # Sanity: state is running before the write failure.
+        state = engine._load_execution()
+        assert state is not None
+        assert state.status == "running"
+
+        # Now turn on fail-closed and force the next compliance write to fail.
+        monkeypatch.setenv("BATON_COMPLIANCE_FAIL_CLOSED", "1")
+        self._force_write_to_raise(engine)
+        try:
+            with pytest.raises(ComplianceWriteError):
+                engine._write_compliance_entry(
+                    {
+                        "timestamp": "now",
+                        "event_type": "agent_dispatch",
+                        "task_id": state.task_id,
+                        "plan_id": state.plan.task_id,
+                        "step_id": "1.1",
+                        "agent_name": "backend-engineer",
+                    }
+                )
+        finally:
+            self._restore_writer(engine)
+
+        # State must be marked failed with a clear status reason.
+        post_state = engine._load_execution()
+        assert post_state is not None
+        assert post_state.status == "failed"
+        assert "compliance_write_failed" in post_state.override_justification
 
 
 # ---------------------------------------------------------------------------
