@@ -2,12 +2,14 @@
 
 Subcommands
 -----------
-create   Register a new Release (id, name, optional date).
-list     List Releases, optionally filtered by status.
-show     Show a Release plus the plans tagged against it.
-tag      Tag an existing plan (by ``task_id``) with a release.
-untag    Clear a plan's release tag.
-notes    Auto-generate release notes for a commit range or release (R3.3).
+create     Register a new Release (id, name, optional date).
+list       List Releases, optionally filtered by status.
+show       Show a Release plus the plans tagged against it.
+tag        Tag an existing plan (by ``task_id``) with a release.
+untag      Clear a plan's release tag.
+notes      Auto-generate release notes for a commit range or release (R3.3).
+readiness  Compute a release readiness report (R3.2; logic in
+           ``release/readiness_cmd.py``).
 
 All subcommands are additive metadata only -- they never affect plan
 execution or gating (R3.5 will introduce freeze-period gating later).
@@ -49,13 +51,41 @@ def _get_release_store(create_if_missing: bool = False):
 # ---------------------------------------------------------------------------
 
 
-def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:  # type: ignore[type-arg]
-    """Register the ``release`` subcommand."""
+def _get_or_create_release_parser(
+    subparsers: argparse._SubParsersAction,  # type: ignore[type-arg]
+) -> tuple[argparse.ArgumentParser, argparse._SubParsersAction]:  # type: ignore[type-arg]
+    """Return (release_parser, release_sub), reusing whichever module created them.
+
+    ``release/profile_cmd.py`` also registers under ``release`` cooperatively;
+    whichever module is loaded first creates the parent parser and the others
+    attach their subcommands to the shared subparsers action.
+    """
+    existing = subparsers.choices.get("release") if subparsers.choices else None
+    if existing is not None:
+        p = existing
+        sub = getattr(p, "_baton_release_sub", None)
+        if sub is None:
+            for action in getattr(p, "_actions", ()):
+                if isinstance(action, argparse._SubParsersAction):  # type: ignore[attr-defined]
+                    sub = action
+                    break
+            if sub is None:
+                sub = p.add_subparsers(dest="release_subcommand", metavar="SUBCOMMAND")
+            p._baton_release_sub = sub  # type: ignore[attr-defined]
+        return p, sub
+
     p = subparsers.add_parser(
         "release",
-        help="Manage Release entities (delivery targets) and tag plans against them",
+        help="Manage Release entities, profiles, readiness, and notes",
     )
-    sub = p.add_subparsers(dest="release_cmd", metavar="SUBCOMMAND")
+    sub = p.add_subparsers(dest="release_subcommand", metavar="SUBCOMMAND")
+    p._baton_release_sub = sub  # type: ignore[attr-defined]
+    return p, sub
+
+
+def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:  # type: ignore[type-arg]
+    """Register the ``release`` subcommand."""
+    p, sub = _get_or_create_release_parser(subparsers)
 
     # -- create --------------------------------------------------------------
     create_p = sub.add_parser("create", help="Register a new Release")
@@ -185,6 +215,33 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         help="Repository root (default: current working directory)",
     )
 
+    # -- readiness (R3.2) ----------------------------------------------------
+    readiness_p = sub.add_parser(
+        "readiness",
+        help="Compute a release readiness report for a given release ID",
+    )
+    readiness_p.add_argument("release_id", help="Release identifier to evaluate")
+    readiness_p.add_argument(
+        "--since",
+        type=int,
+        default=7,
+        metavar="DAYS",
+        help="Lookback window in days for time-bounded signals (default: 7)",
+    )
+    readiness_p.add_argument(
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help="Emit report as JSON instead of Markdown",
+    )
+    readiness_p.add_argument(
+        "--db",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Explicit path to baton.db (auto-discovered if omitted)",
+    )
+
     return p
 
 
@@ -194,14 +251,21 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
 
 
 def handler(args: argparse.Namespace) -> None:
-    cmd = getattr(args, "release_cmd", None)
+    cmd = getattr(args, "release_subcommand", None)
     if cmd is None:
         print(
             "Usage: baton release <subcommand>  "
-            "[create|list|show|tag|untag|update-status|notes]"
+            "[create|list|show|tag|untag|update-status|notes|readiness|profile]"
         )
         print("Run `baton release --help` for details.")
         return
+
+    if cmd == "profile":
+        from agent_baton.cli.commands.release import profile_cmd
+        profile_cmd.handler(args)
+        return
+
+    from agent_baton.cli.commands.release import readiness_cmd
 
     dispatch = {
         "create": _handle_create,
@@ -211,6 +275,7 @@ def handler(args: argparse.Namespace) -> None:
         "untag": _handle_untag,
         "update-status": _handle_update_status,
         "notes": _handle_notes,
+        "readiness": readiness_cmd.handle_readiness,
     }
     fn = dispatch.get(cmd)
     if fn is None:
