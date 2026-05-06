@@ -1,0 +1,77 @@
+{
+  "phase_id": 1,
+  "name": "Design and Implementation",
+  "steps": [
+    {
+      "step_id": "1.1",
+      "agent_name": "architect",
+      "task_description": "Design the new data model schema.",
+      "model": "opus",
+      "depends_on": [],
+      "deliverables": [
+        "docs/data-model.md"
+      ],
+      "allowed_paths": [
+        "docs/"
+      ],
+      "blocked_paths": [],
+      "context_files": [
+        "agent_baton/models/CLAUDE.md"
+      ],
+      "step_type": "planning",
+      "expected_outcome": "A clear data model schema document is produced."
+    },
+    {
+      "step_id": "1.2",
+      "agent_name": "backend-engineer--python",
+      "task_description": "Implement the new data model classes.",
+      "model": "sonnet",
+      "depends_on": [
+        "1.1"
+      ],
+      "deliverables": [
+        "agent_baton/models/new_model.py",
+        "tests/models/test_new_model.py"
+      ],
+      "allowed_paths": [
+        "agent_baton/models/",
+        "tests/models/"
+      ],
+      "blocked_paths": [],
+      "context_files": [
+        "docs/data-model.md"
+      ],
+      "step_type": "developing"
+    }
+  ],
+  "gate": {
+    "gate_type": "test",
+    "command": "pytest tests/ -v",
+    "description": "Full test suite must pass.",
+    "fail_on": [
+      "any test failure"
+    ]
+  },
+  "approval_required": true,
+  "approval_description": "Review the data model design before proceeding to phase 2.",
+  "feedback_questions": [
+    {
+      "question_id": "fq1",
+      "question": "Should we add a caching layer?",
+      "context": "Phase 1 profiling shows 40% of requests are repeated queries.",
+      "options": [
+        "Yes, add Redis cache",
+        "No, optimize queries instead"
+      ],
+      "option_agents": [
+        "backend-engineer--python",
+        "backend-engineer--python"
+      ],
+      "option_prompts": [
+        "Add Redis caching for {task}",
+        "Optimize database queries for {task}"
+      ]
+    }
+  ],
+  "risk_level": "MEDIUM"
+}

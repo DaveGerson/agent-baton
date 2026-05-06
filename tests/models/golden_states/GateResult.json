@@ -1,0 +1,11 @@
+{
+  "phase_id": 1,
+  "gate_type": "test",
+  "passed": true,
+  "output": "========================= 42 passed in 3.14s =========================",
+  "checked_at": "2026-01-15T10:45:00+00:00",
+  "command": "pytest tests/storage/ -v --tb=short",
+  "exit_code": 0,
+  "decision_source": "human",
+  "actor": "jdoe@workstation.local"
+}

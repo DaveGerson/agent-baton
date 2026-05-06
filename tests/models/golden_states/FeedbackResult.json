@@ -1,0 +1,8 @@
+{
+  "phase_id": 1,
+  "question_id": "q1",
+  "chosen_option": "Keep pytest",
+  "chosen_index": 0,
+  "dispatched_step_id": "2.1",
+  "decided_at": "2026-01-15T11:30:00+00:00"
+}

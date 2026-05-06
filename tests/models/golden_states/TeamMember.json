@@ -1,0 +1,32 @@
+{
+  "member_id": "1.1.a",
+  "agent_name": "backend-engineer--python",
+  "role": "lead",
+  "task_description": "Design and implement the storage layer.",
+  "model": "opus",
+  "depends_on": [],
+  "deliverables": [
+    "agent_baton/core/storage/new_store.py"
+  ],
+  "sub_team": [
+    {
+      "member_id": "1.1.a.b",
+      "agent_name": "test-engineer",
+      "role": "implementer",
+      "task_description": "Write unit tests for the storage layer.",
+      "model": "sonnet",
+      "depends_on": [
+        "1.1.a"
+      ],
+      "deliverables": [
+        "tests/storage/test_new_store.py"
+      ]
+    }
+  ],
+  "synthesis": {
+    "strategy": "merge_files",
+    "synthesis_agent": "code-reviewer",
+    "synthesis_prompt": "Combine outputs focusing on file coverage: {member_outcomes}",
+    "conflict_handling": "auto_merge"
+  }
+}
