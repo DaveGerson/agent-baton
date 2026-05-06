@@ -78,6 +78,7 @@ from agent_baton.models.execution import (
     GateResult,
     InteractionTurn,
     MachinePlan,
+    PendingApprovalRequest,
     PlanAmendment,
     PlanGate,
     PlanPhase,
@@ -4054,7 +4055,7 @@ class ExecutionEngine:
         if approval_mode == "team":
             request = getattr(state, "pending_approval_request", None)
             if request is not None:
-                requester = request.get("requester", "")
+                requester = request.requester
                 if requester and requester == actor:
                     raise InvalidApprovalState(
                         reason=InvalidApprovalState.REASON_SELF_APPROVAL,
@@ -4415,11 +4416,11 @@ class ExecutionEngine:
                                 f"{conflict.conflict_id}.  Review and approve "
                                 f"to continue."
                             )
-                        state.pending_approval_request = {
-                            "phase_id": current_phase.phase_id,
-                            "requester": _cli_actor(),
-                            "requested_at": _utcnow(),
-                        }
+                        state.pending_approval_request = PendingApprovalRequest(
+                            phase_id=current_phase.phase_id,
+                            requester=_cli_actor(),
+                            requested_at=_utcnow(),
+                        )
                     self._save_execution(state)
                     return
 
@@ -6280,13 +6281,13 @@ class ExecutionEngine:
         existing = getattr(state, "pending_approval_request", None)
         if (
             existing is None
-            or existing.get("phase_id") != phase_obj.phase_id
+            or existing.phase_id != phase_obj.phase_id
         ):
-            state.pending_approval_request = {
-                "phase_id": phase_obj.phase_id,
-                "requester": _cli_actor(),
-                "requested_at": _utcnow(),
-            }
+            state.pending_approval_request = PendingApprovalRequest(
+                phase_id=phase_obj.phase_id,
+                requester=_cli_actor(),
+                requested_at=_utcnow(),
+            )
             self._save_execution(state)
         return ExecutionAction(
             action_type=ActionType.APPROVAL,
