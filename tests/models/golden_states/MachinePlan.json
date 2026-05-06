@@ -1,0 +1,207 @@
+{
+  "task_id": "2026-01-15-add-api-v2-abc12345",
+  "task_summary": "Add API v2 endpoints with new Pydantic models.",
+  "risk_level": "MEDIUM",
+  "budget_tier": "standard",
+  "execution_mode": "phased",
+  "git_strategy": "commit-per-agent",
+  "phases": [
+    {
+      "phase_id": 1,
+      "name": "Design and Model Definition",
+      "steps": [
+        {
+          "step_id": "1.1",
+          "agent_name": "architect",
+          "task_description": "Design the new API schema and data models.",
+          "model": "opus",
+          "depends_on": [],
+          "deliverables": [
+            "docs/api-schema.md",
+            "docs/data-model.md"
+          ],
+          "allowed_paths": [
+            "docs/"
+          ],
+          "blocked_paths": [],
+          "context_files": [
+            "agent_baton/models/CLAUDE.md"
+          ],
+          "step_type": "planning",
+          "expected_outcome": "API schema document with all endpoint contracts defined."
+        },
+        {
+          "step_id": "1.2",
+          "agent_name": "backend-engineer--python",
+          "task_description": "Implement the Pydantic models as defined in the schema.",
+          "model": "sonnet",
+          "depends_on": [
+            "1.1"
+          ],
+          "deliverables": [
+            "agent_baton/models/new_models.py"
+          ],
+          "allowed_paths": [
+            "agent_baton/models/"
+          ],
+          "blocked_paths": [
+            "agent_baton/core/"
+          ],
+          "context_files": [
+            "docs/data-model.md"
+          ],
+          "step_type": "developing",
+          "expected_outcome": "All Pydantic models defined with full type hints and docstrings.",
+          "timeout_seconds": 3600
+        }
+      ],
+      "gate": {
+        "gate_type": "test",
+        "command": "pytest tests/models/ -v --tb=short",
+        "description": "Model tests must pass before proceeding.",
+        "fail_on": [
+          "test failures",
+          "import errors"
+        ]
+      },
+      "approval_required": true,
+      "approval_description": "Review the API schema and data model designs.",
+      "feedback_questions": [
+        {
+          "question_id": "fq1",
+          "question": "Should model validation be strict or permissive?",
+          "context": "Strict validation catches bugs early but may break legacy clients.",
+          "options": [
+            "Strict validation (recommended)",
+            "Permissive with warnings"
+          ],
+          "option_agents": [
+            "backend-engineer--python",
+            "architect"
+          ],
+          "option_prompts": [
+            "Apply strict Pydantic validation for {task}",
+            "Add permissive validation with deprecation warnings for {task}"
+          ]
+        }
+      ],
+      "risk_level": "LOW"
+    },
+    {
+      "phase_id": 2,
+      "name": "API Implementation and Testing",
+      "steps": [
+        {
+          "step_id": "2.1",
+          "agent_name": "backend-engineer--python",
+          "task_description": "Implement the API routes using the new models.",
+          "model": "sonnet",
+          "depends_on": [
+            "1.2"
+          ],
+          "deliverables": [
+            "agent_baton/api/routes/v2.py"
+          ],
+          "allowed_paths": [
+            "agent_baton/api/routes/"
+          ],
+          "blocked_paths": [
+            "agent_baton/models/"
+          ],
+          "context_files": [
+            "docs/api-schema.md",
+            "agent_baton/api/CLAUDE.md"
+          ],
+          "step_type": "developing",
+          "knowledge": [
+            {
+              "source": "agent-declared",
+              "pack_name": "python-web",
+              "document_name": "fastapi-dependency-injection.md",
+              "path": "/path/to/fastapi-dependency-injection.md",
+              "delivery": "inline",
+              "retrieval": "file",
+              "grounding": "Apply these DI patterns throughout the implementation.",
+              "token_estimate": 350
+            }
+          ],
+          "expected_outcome": "All API endpoints return correct status codes and response shapes.",
+          "timeout_seconds": 7200,
+          "parallel_safe": true
+        },
+        {
+          "step_id": "2.2",
+          "agent_name": "test-engineer",
+          "task_description": "Write integration tests for the new API routes.",
+          "model": "sonnet",
+          "depends_on": [
+            "1.2"
+          ],
+          "deliverables": [
+            "tests/api/test_v2_routes.py"
+          ],
+          "allowed_paths": [
+            "tests/api/"
+          ],
+          "blocked_paths": [
+            "agent_baton/"
+          ],
+          "context_files": [
+            "docs/api-schema.md"
+          ],
+          "step_type": "testing",
+          "expected_outcome": "Integration tests cover all endpoints with happy-path and error cases.",
+          "parallel_safe": true
+        }
+      ],
+      "gate": {
+        "gate_type": "test",
+        "command": "pytest tests/api/ -v --tb=long",
+        "description": "All API integration tests must pass.",
+        "fail_on": [
+          "test failures",
+          "HTTP 500 responses"
+        ]
+      },
+      "risk_level": "MEDIUM"
+    }
+  ],
+  "shared_context": "Context: This project uses FastAPI + SQLAlchemy 2.0. All models are Pydantic v2.",
+  "pattern_source": "pattern-api-feature-001",
+  "created_at": "2026-01-15T09:00:00+00:00",
+  "task_type": "feature",
+  "explicit_knowledge_packs": [
+    "python-web"
+  ],
+  "explicit_knowledge_docs": [
+    "docs/api-schema.md"
+  ],
+  "intervention_level": "medium",
+  "complexity": "medium",
+  "classification_source": "haiku",
+  "detected_stack": "python/fastapi",
+  "foresight_insights": [
+    {
+      "category": "prerequisite",
+      "description": "The new models will need migration support for existing database rows.",
+      "resolution": "Add a migration step in phase 2 for existing baton.db files.",
+      "inserted_phase_name": "",
+      "inserted_step_ids": [
+        "2.1"
+      ],
+      "confidence": 0.9,
+      "source_rule": "migration-prerequisite"
+    }
+  ],
+  "depends_on_task": null,
+  "classification_signals": "{\"keywords\": [\"api\", \"endpoint\", \"model\"]}",
+  "classification_confidence": null,
+  "archetype": "phased",
+  "max_retry_phases": 2,
+  "resource_limits": {
+    "max_concurrent_executions": 2,
+    "max_concurrent_agents": 4,
+    "max_tokens_per_minute": 0,
+    "max_concurrent_per_project": 1
+  }
+}

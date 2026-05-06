@@ -1,0 +1,6 @@
+{
+  "strategy": "agent_synthesis",
+  "synthesis_agent": "code-reviewer",
+  "synthesis_prompt": "Merge the following member outputs: {member_outcomes}",
+  "conflict_handling": "escalate"
+}

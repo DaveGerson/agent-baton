@@ -1,0 +1,76 @@
+{
+  "step_id": "1.2",
+  "agent_name": "backend-engineer--python",
+  "task_description": "Add the new /api/v1/items endpoint with full CRUD support.",
+  "model": "sonnet",
+  "depends_on": [
+    "1.1"
+  ],
+  "deliverables": [
+    "agent_baton/api/routes/items.py",
+    "tests/api/test_items.py"
+  ],
+  "allowed_paths": [
+    "agent_baton/api/routes/",
+    "tests/api/"
+  ],
+  "blocked_paths": [
+    "agent_baton/core/"
+  ],
+  "context_files": [
+    "agent_baton/api/CLAUDE.md",
+    "agent_baton/models/execution.py"
+  ],
+  "step_type": "developing",
+  "team": [
+    {
+      "member_id": "1.2.a",
+      "agent_name": "backend-engineer--python",
+      "role": "implementer",
+      "task_description": "Implement the new API endpoint.",
+      "model": "sonnet",
+      "depends_on": [],
+      "deliverables": [
+        "agent_baton/api/routes/new_endpoint.py"
+      ]
+    },
+    {
+      "member_id": "1.2.b",
+      "agent_name": "test-engineer",
+      "role": "implementer",
+      "task_description": "Write integration tests for the new endpoint.",
+      "model": "sonnet",
+      "depends_on": [
+        "1.2.a"
+      ],
+      "deliverables": [
+        "tests/api/test_new_endpoint.py"
+      ]
+    }
+  ],
+  "knowledge": [
+    {
+      "source": "planner-matched:relevance",
+      "pack_name": "python-web",
+      "document_name": "fastapi-patterns.md",
+      "path": "/path/to/fastapi-patterns.md",
+      "delivery": "inline",
+      "retrieval": "file",
+      "grounding": "Use these FastAPI patterns for the implementation.",
+      "token_estimate": 500
+    }
+  ],
+  "synthesis": {
+    "strategy": "concatenate",
+    "synthesis_agent": "code-reviewer",
+    "synthesis_prompt": "",
+    "conflict_handling": "auto_merge"
+  },
+  "mcp_servers": [
+    "filesystem"
+  ],
+  "expected_outcome": "The /api/v1/items endpoint returns 200 for GET and 201 for POST with valid payloads.",
+  "timeout_seconds": 3600,
+  "parallel_safe": true,
+  "max_estimated_minutes": 45
+}
