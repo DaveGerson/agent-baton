@@ -285,6 +285,33 @@ class TestNextAction:
         action = engine.next_action()
         assert action.phase_id == 0
 
+    def test_gate_message_uses_executor_prefix_when_no_extensions(self, tmp_path: Path) -> None:
+        """Without artifact/agent extensions the gate message is the executor-style
+        'Run gate ...' prefix (no bracket suffix)."""
+        plan = _plan(phases=[_phase(phase_id=0, steps=[_step("1.1")], gate=_gate("test", "pytest"))])
+        engine = _engine(tmp_path)
+        engine.start(plan)
+        engine.record_step_result("1.1", "backend-engineer")
+        action = engine.next_action()
+        assert action.message.startswith("Run gate 'test' for phase 0.")
+        assert "[+" not in action.message
+
+    def test_gate_message_preserves_structured_suffix_for_agent_additions(self, tmp_path: Path) -> None:
+        """When an agent declares GATE_ADDITION: signals the gate message must
+        keep the '[+agent additions: ...]' bracket suffix that GateRunner builds,
+        prefixed with the executor-style 'Run gate ...' text."""
+        plan = _plan(phases=[_phase(phase_id=0, steps=[_step("1.1")], gate=_gate("test", "pytest"))])
+        engine = _engine(tmp_path)
+        engine.start(plan)
+        outcome = "Done.\nGATE_ADDITION: npm audit --audit-level=high\n"
+        engine.record_step_result("1.1", "backend-engineer", outcome=outcome, status="complete")
+        action = engine.next_action()
+        assert action.message.startswith("Run gate 'test' for phase 0.")
+        # The structured suffix from GateRunner must survive _build_gate_action.
+        assert "agent additions" in action.message
+        # The old verbatim-command dump must not appear.
+        assert "extended with artifact validation" not in action.message
+
     def test_dispatch_second_step_in_phase(self, tmp_path: Path) -> None:
         plan = _plan(
             phases=[_phase(steps=[_step("1.1"), _step("1.2", agent_name="architect")])]
@@ -399,6 +426,45 @@ class TestRecordGateResult:
         engine = _engine(tmp_path)
         with pytest.raises(RuntimeError):
             engine.record_gate_result(phase_id=0, passed=True)
+
+    def test_gate_result_provenance_empty_when_no_extensions(self, tmp_path: Path) -> None:
+        """record_gate_result with no GATE_ADDITION signals and no runnable artifacts
+        produces a GateResult with empty provenance fields."""
+        engine = self._gate_engine(tmp_path)
+        engine.record_gate_result(phase_id=0, passed=True)
+        state = engine._load_state()
+        gr = state.gate_results[0]
+        assert gr.derived_commands == []
+        assert gr.agent_additions == []
+
+    def test_gate_result_persists_agent_additions(self, tmp_path: Path) -> None:
+        """A step that emits GATE_ADDITION: signals causes record_gate_result to
+        persist those commands on GateResult.agent_additions."""
+        plan = _plan(phases=[_phase(phase_id=0, steps=[_step("1.1")], gate=_gate())])
+        engine = ExecutionEngine(team_context_root=tmp_path)
+        engine.start(plan)
+        outcome = (
+            "Implemented security scanning.\n"
+            "GATE_ADDITION: npm audit --audit-level=high\n"
+            "GATE_ADDITION: pre-commit run --all-files\n"
+        )
+        engine.record_step_result(
+            "1.1",
+            "backend-engineer",
+            outcome=outcome,
+            status="complete",
+        )
+        engine.next_action()  # GATE action
+        engine.record_gate_result(phase_id=0, passed=True)
+
+        state = engine._load_state()
+        gr = state.gate_results[0]
+        assert "npm audit --audit-level=high" in gr.agent_additions
+        assert "pre-commit run --all-files" in gr.agent_additions
+        # to_dict() must include agent_additions (non-empty lean-payload)
+        d = gr.to_dict()
+        assert "agent_additions" in d
+        assert "npm audit --audit-level=high" in d["agent_additions"]
 
 
 # ---------------------------------------------------------------------------

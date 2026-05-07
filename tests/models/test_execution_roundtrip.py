@@ -361,6 +361,48 @@ class TestGateResult:
         golden = _golden("GateResult")
         GateResult.from_dict({**golden, "_future_field": "ignored"})
 
+    def test_provenance_fields_roundtrip(self) -> None:
+        """GateResult with both provenance fields survives a to_dict/from_dict cycle."""
+        dc = [{"command": "npm audit --audit-level=high", "source_file": "package.json", "rationale": "audit script"}]
+        aa = ["pre-commit run --all-files", "mypy src/"]
+        obj = GateResult(
+            phase_id=2,
+            gate_type="test",
+            passed=True,
+            output="all passed",
+            checked_at="2026-01-15T10:45:00+00:00",
+            command="pytest tests/ -q && npm audit --audit-level=high && pre-commit run --all-files && mypy src/",
+            exit_code=0,
+            decision_source="human",
+            actor="jdoe@workstation.local",
+            derived_commands=dc,
+            agent_additions=aa,
+        )
+        d = obj.to_dict()
+        assert d["derived_commands"] == dc
+        assert d["agent_additions"] == aa
+        # Full round-trip
+        restored = GateResult.from_dict(d)
+        assert restored.derived_commands == dc
+        assert restored.agent_additions == aa
+        assert restored.to_dict() == d
+
+    def test_provenance_fields_empty_omitted_from_to_dict(self) -> None:
+        """Lean-payload: empty provenance fields are absent from to_dict()."""
+        obj = GateResult(phase_id=1, gate_type="test", passed=True)
+        d = obj.to_dict()
+        assert "derived_commands" not in d
+        assert "agent_additions" not in d
+
+    def test_provenance_fields_default_on_legacy_dict(self) -> None:
+        """Legacy dicts without provenance fields deserialise with empty defaults."""
+        golden = _golden("GateResult")
+        assert "derived_commands" not in golden
+        assert "agent_additions" not in golden
+        obj = GateResult.from_dict(golden)
+        assert obj.derived_commands == []
+        assert obj.agent_additions == []
+
 
 # ---------------------------------------------------------------------------
 # FeedbackResult

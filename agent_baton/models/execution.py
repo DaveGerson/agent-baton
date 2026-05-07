@@ -1206,6 +1206,15 @@ class GateResult:
             ``"daemon_auto"``, ``"api"``, or ``"policy_auto"`` (A2).
         actor: Best-available identity of who triggered this gate —
             ``"$USER@$HOSTNAME"`` for CLI, ``"daemon"`` for auto (A2).
+        derived_commands: Structured record of artifact-derived gate
+            command extensions.  Each entry is a dict with ``command``,
+            ``source_file``, and ``rationale`` keys, mirroring the
+            ``ExecutionAction.derived_commands`` field.  Empty list when
+            no artifact-derived extensions were applied.
+        agent_additions: Shell commands declared by agents via
+            ``GATE_ADDITION:`` signals and appended to the gate command.
+            Mirrors ``ExecutionAction.agent_additions``.  Empty list when
+            no agent additions were declared.
     """
 
     phase_id: int
@@ -1217,9 +1226,15 @@ class GateResult:
     exit_code: int | None = None    # A6: subprocess exit code (None = manual)
     decision_source: str = ""       # A2: human | daemon_auto | api | policy_auto
     actor: str = ""                 # A2: $USER@$HOSTNAME or "daemon"
+    # Provenance of any gate-command extensions — mirrors the corresponding
+    # fields on ExecutionAction so the audit trail captures attribution
+    # without requiring a reviewer to re-parse the concatenated gate_command.
+    # Both default to empty so existing baton.db records load unchanged.
+    derived_commands: list[dict] = field(default_factory=list)  # [{"command": str, "source_file": str, "rationale": str}, ...]
+    agent_additions: list[str] = field(default_factory=list)    # commands declared via GATE_ADDITION: signals
 
     def to_dict(self) -> dict:
-        return {
+        d: dict = {
             "phase_id": self.phase_id,
             "gate_type": self.gate_type,
             "passed": self.passed,
@@ -1230,6 +1245,13 @@ class GateResult:
             "decision_source": self.decision_source,
             "actor": self.actor,
         }
+        # Lean payload: omit provenance fields when empty so existing
+        # serialised records stay byte-identical.
+        if self.derived_commands:
+            d["derived_commands"] = list(self.derived_commands)
+        if self.agent_additions:
+            d["agent_additions"] = list(self.agent_additions)
+        return d
 
     @classmethod
     def from_dict(cls, data: dict) -> GateResult:

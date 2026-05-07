@@ -69,62 +69,67 @@ def _build_knowledge_telemetry_store():
 _HANDOFF_SPILLOVER_MAX_BYTES: int = 65_536
 
 
-def _phase_files_changed(state: "ExecutionState", phase_id: int) -> list[str]:
-    """Return the deduplicated list of files changed within *phase_id*.
+def _phase_step_extensions(
+    state: "ExecutionState",
+    phase_id: int,
+) -> tuple[list[str], list[str]]:
+    """Return ``(files_changed, gate_additions)`` for *phase_id*.
 
-    Walks ``state.step_results`` and keeps every ``files_changed`` entry
-    whose ``step_id`` resolves to a step in the requested phase.  Order
-    is preserved on first sighting so downstream consumers (the artifact
-    validator, the gate command extension) get a stable input.
+    Builds a single ``step_id → phase_id`` map and walks
+    ``state.step_results`` once, collecting both lists in a single pass.
+    Deduplication is applied to each list independently (first occurrence
+    wins, insertion order preserved).
 
     The helper is module-level (not a method) so :class:`PhaseManager`
-    and other helpers can borrow it without re-importing the executor.
+    and other callers can borrow it without importing the full class.
+
+    Returns:
+        A 2-tuple of ``(files_changed, gate_additions)`` where each
+        element is a deduplicated list ordered by first appearance.
     """
     step_to_phase: dict[str, int] = {}
     for phase in state.plan.phases:
         for step in phase.steps:
             step_to_phase[step.step_id] = phase.phase_id
 
-    seen: set[str] = set()
-    out: list[str] = []
+    seen_files: set[str] = set()
+    files_out: list[str] = []
+    seen_cmds: set[str] = set()
+    cmds_out: list[str] = []
+
     for result in state.step_results:
         if step_to_phase.get(result.step_id) != phase_id:
             continue
         for f in result.files_changed or ():
-            if f and f not in seen:
-                seen.add(f)
-                out.append(f)
-    return out
+            if f and f not in seen_files:
+                seen_files.add(f)
+                files_out.append(f)
+        for cmd in result.gate_additions or ():
+            if cmd and cmd not in seen_cmds:
+                seen_cmds.add(cmd)
+                cmds_out.append(cmd)
+
+    return files_out, cmds_out
+
+
+def _phase_files_changed(state: "ExecutionState", phase_id: int) -> list[str]:
+    """Return the deduplicated list of files changed within *phase_id*.
+
+    Thin wrapper around :func:`_phase_step_extensions` for callers that
+    only need the files list.
+    """
+    files_changed, _ = _phase_step_extensions(state, phase_id)
+    return files_changed
 
 
 def _phase_gate_additions(state: "ExecutionState", phase_id: int) -> list[str]:
     """Return the deduplicated list of agent-declared gate additions for *phase_id*.
 
-    Walks ``state.step_results`` and collects every command listed in
-    ``StepResult.gate_additions`` for steps that belong to *phase_id*.
-    Deduplication is by command string (case-sensitive, first occurrence
-    wins) so the same command emitted by multiple steps in the same phase
-    appears only once in the gate.
-
-    The helper is module-level (not a method) so it mirrors the structure
-    of :func:`_phase_files_changed` and can be borrowed by non-executor
-    callers without importing the full class.
+    Thin wrapper around :func:`_phase_step_extensions` for callers that
+    only need the gate-additions list.
     """
-    step_to_phase: dict[str, int] = {}
-    for phase in state.plan.phases:
-        for step in phase.steps:
-            step_to_phase[step.step_id] = phase.phase_id
-
-    seen: set[str] = set()
-    out: list[str] = []
-    for result in state.step_results:
-        if step_to_phase.get(result.step_id) != phase_id:
-            continue
-        for cmd in result.gate_additions or ():
-            if cmd and cmd not in seen:
-                seen.add(cmd)
-                out.append(cmd)
-    return out
+    _, gate_additions = _phase_step_extensions(state, phase_id)
+    return gate_additions
 
 
 from agent_baton.models.execution import (
@@ -1293,8 +1298,17 @@ class ExecutionEngine:
         gate_type: str,
         passed: bool,
         output: str = "",
+        *,
+        derived_commands: list[dict] | None = None,
+        agent_additions: list[str] | None = None,
     ) -> None:
-        """Write a compliance entry for a gate evaluation result."""
+        """Write a compliance entry for a gate evaluation result.
+
+        The optional ``derived_commands`` and ``agent_additions`` parameters
+        allow auditors to query "which gates ran with derived or declared
+        additions" directly from the compliance log without parsing the
+        concatenated ``gate_command`` string.
+        """
         self._write_compliance_entry(
             {
                 "timestamp": _utcnow(),
@@ -1308,6 +1322,8 @@ class ExecutionEngine:
                 "gate_type": gate_type,
                 "passed": passed,
                 "output_snippet": output[:500] if output else "",
+                "derived_commands_count": len(derived_commands) if derived_commands else 0,
+                "agent_additions_count": len(agent_additions) if agent_additions else 0,
             },
             plan=state.plan,
         )
@@ -2887,6 +2903,26 @@ class ExecutionEngine:
         if not actor:
             actor = _cli_actor()
 
+        # ── Provenance: re-derive gate extensions from state ─────────────────
+        # The same values are used when building the GATE action; re-deriving
+        # them here keeps GateResult self-contained so regulated investigations
+        # can query "which gates ran with derived/agent additions" directly
+        # without re-parsing the concatenated gate_command string.
+        _, gate_additions = _phase_step_extensions(state, phase_id)
+        # Artifact-derived commands: reconstruct from the plan gate via the
+        # gate runner so GateResult.derived_commands carries the same
+        # structured attribution that ExecutionAction.derived_commands does.
+        derived_cmds: list[dict] = []
+        if phase_obj and phase_obj.gate:
+            files_changed, _ = _phase_step_extensions(state, phase_id)
+            if files_changed:
+                from agent_baton.core.engine.artifact_validator import ArtifactValidator
+                av = ArtifactValidator(self._project_root())
+                derived_cmds = [
+                    {"command": d.command, "source_file": d.source_file, "rationale": d.rationale}
+                    for d in av.derive_commands(files_changed)
+                ]
+
         gate_result = GateResult(
             phase_id=phase_id,
             gate_type=gate_type,
@@ -2897,6 +2933,8 @@ class ExecutionEngine:
             exit_code=exit_code,
             decision_source=decision_source,
             actor=actor,
+            derived_commands=derived_cmds,
+            agent_additions=gate_additions,
         )
         state.gate_results.append(gate_result)
 
@@ -2924,7 +2962,11 @@ class ExecutionEngine:
         ))
 
         # ── Compliance audit: record gate result ─────────────────────────────
-        self._compliance_gate(state, phase_id, gate_type, passed, output)
+        self._compliance_gate(
+            state, phase_id, gate_type, passed, output,
+            derived_commands=derived_cmds,
+            agent_additions=gate_additions,
+        )
 
         if not passed:
             self._publish(evt.gate_failed(
@@ -5568,7 +5610,7 @@ class ExecutionEngine:
         ``.github/workflows/*.yml`` and still see "phase passed".
 
         Agent-declared additions (``GATE_ADDITION:`` signals) are collected
-        via :func:`_phase_gate_additions` and forwarded to
+        via :func:`_phase_step_extensions` and forwarded to
         :meth:`~GateRunner.build_gate_action` as ``agent_additions``.  They
         are appended after artifact-derived commands and labelled separately
         in the action message.
@@ -5578,8 +5620,9 @@ class ExecutionEngine:
         files_changed: list[str] = []
         agent_additions: list[str] = []
         if state is not None:
-            files_changed = _phase_files_changed(state, phase_obj.phase_id)
-            agent_additions = _phase_gate_additions(state, phase_obj.phase_id)
+            files_changed, agent_additions = _phase_step_extensions(
+                state, phase_obj.phase_id
+            )
 
         action = self._gate_runner.build_gate_action(
             phase_obj.gate,
@@ -5588,17 +5631,30 @@ class ExecutionEngine:
             project_root=self._project_root() if files_changed else None,
             agent_additions=agent_additions or None,
         )
-        # Preserve the executor-style message that callers/tests rely on
-        # while still surfacing artifact-derived extensions.
+        # Rebuild the message with the executor-style prefix while
+        # preserving the structured suffix ("[+artifact checks: ...]" /
+        # "[+agent additions: ...]") that GateRunner already constructed.
+        # The condition covers both artifact derivations and agent additions
+        # so the prefix is correct for either extension source.
         base_message = (
             f"Run gate '{phase_obj.gate.gate_type}' for phase "
             f"{phase_obj.phase_id}."
         )
-        if action.gate_command != (phase_obj.gate.command or ""):
-            action.message = (
-                f"{base_message} (extended with artifact validation: "
-                f"{action.gate_command})"
-            )
+        extended = bool(action.derived_commands or action.agent_additions)
+        if extended:
+            # GateRunner message format: "<description> [+artifact checks: ...]
+            # [+agent additions: ...]".  Strip the description prefix and keep
+            # only the bracket suffix so we don't double the description text.
+            suffix = action.message
+            # Find the first bracket annotation and preserve from there.
+            bracket_pos = suffix.find(" [+")
+            if bracket_pos != -1:
+                suffix = suffix[bracket_pos:]  # e.g. " [+artifact checks: ...]"
+                action.message = f"{base_message}{suffix}"
+            else:
+                # GateRunner produced an extended message without the
+                # expected bracket format — fall back to appending as-is.
+                action.message = f"{base_message} {suffix}"
         else:
             action.message = base_message
         return action
