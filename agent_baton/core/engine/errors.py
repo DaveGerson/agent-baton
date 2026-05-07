@@ -165,6 +165,50 @@ class IllegalStateTransition(RuntimeError):
         super().__init__(message)
 
 
+class ConcurrentModificationError(RuntimeError):
+    """Raised by ``SqliteStorage.save_execution`` when OCC version CAS fails.
+
+    SQLite Phase C (slice 14).  Saves use a CAS-style UPDATE keyed on the
+    version observed at load time.  When a different process has bumped
+    the row's version between this caller's load and save, the UPDATE
+    affects zero rows — that's the signal that another writer raced us.
+
+    The executor's retry handler responds by:
+
+    1. Re-loading the row (now at the newer version).
+    2. Re-applying the in-flight delta via the appropriate
+       ``state.transition_to_X`` method (per state-mutation-proposal §1
+       category B), so the I1/I2/I9 invariants hold on the merged state.
+    3. Retrying the save.
+
+    After ``max_retries`` (default 3), the executor lets the exception
+    propagate so the operator sees a loud failure rather than silent
+    stomp.
+
+    Attributes:
+        task_id: The execution row whose CAS failed.
+        observed_version: The version this caller loaded.
+        expected_remaining_attempts: Retries left before re-raise.
+    """
+
+    def __init__(
+        self,
+        *,
+        task_id: str,
+        observed_version: int,
+        expected_remaining_attempts: int = 0,
+    ) -> None:
+        self.task_id = task_id
+        self.observed_version = observed_version
+        self.expected_remaining_attempts = expected_remaining_attempts
+        super().__init__(
+            f"Concurrent modification detected for task {task_id!r}: "
+            f"loaded version {observed_version}, but the row has "
+            f"advanced.  A different process saved between this "
+            f"caller's load and save."
+        )
+
+
 class ComplianceWriteError(RuntimeError):
     """Raised by ``_write_compliance_entry`` when fail-closed mode is enabled.
 

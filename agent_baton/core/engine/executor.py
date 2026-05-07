@@ -603,10 +603,27 @@ class ExecutionEngine:
         When the two backends diverge (SQLite fails but file succeeds), a
         WARNING is emitted with the task_id, status, and per-step status
         summary so the split-brain is visible in logs without DB inspection.
+
+        v41 (SQLite Phase C / slice 14): when the SQLite CAS update raises
+        ``ConcurrentModificationError``, the exception bubbles up rather
+        than silently falling back to file persistence — file persistence
+        does not honour OCC, so masking the conflict would re-introduce
+        the silent last-write-wins failure mode the version column exists
+        to prevent.  Higher-level callers can retry by reloading and
+        re-applying via ``state.transition_to_X`` per cross-proposal §2.2.
         """
+        from agent_baton.core.engine.errors import ConcurrentModificationError
+
         if self._storage is not None:
             try:
                 self._storage.save_execution(state)
+            except ConcurrentModificationError:
+                # OCC conflict — propagate so the caller can re-load and
+                # re-apply via the transition funnel.  Do NOT fall back
+                # to file persistence: the file backend doesn't honour
+                # OCC, so dropping to it would re-introduce the
+                # last-write-wins data loss the CAS exists to prevent.
+                raise
             except Exception as e:
                 step_summary = ", ".join(
                     f"{r.step_id}={r.status}" for r in state.step_results
@@ -633,6 +650,56 @@ class ExecutionEngine:
                     )
         else:
             self._persistence.save(state)
+
+    def _save_execution_with_occ_retry(
+        self,
+        state: ExecutionState,
+        *,
+        re_apply: "callable | None" = None,
+        max_retries: int = 3,
+    ) -> ExecutionState:
+        """Save *state* with OCC retry; re-apply via the transition funnel.
+
+        When :class:`ConcurrentModificationError` fires, this method:
+
+        1. Reloads the persisted row (now at the newer version).
+        2. If *re_apply* was supplied, calls it with the reloaded state
+           to re-apply the in-flight delta.  *re_apply* MUST mutate the
+           state via ``state.transition_to_X`` methods so the I1/I2/I9
+           invariants hold across the merge.
+        3. Retries the save up to *max_retries* times.
+
+        On exhausted retries the most recent
+        :class:`ConcurrentModificationError` propagates so the operator
+        sees a loud failure rather than silent stomp.
+
+        Cross-proposal §2.2: "the OCC retry handler needs to call
+        state.transition_to_X(...) to re-apply the conflicting write".
+        Returns the state object that was successfully saved (this may
+        differ from the input *state* after a reload).
+        """
+        from agent_baton.core.engine.errors import ConcurrentModificationError
+
+        for attempt in range(max_retries):
+            try:
+                self._save_execution(state)
+                return state
+            except ConcurrentModificationError:
+                _log.warning(
+                    "OCC conflict on task %r attempt %d/%d; reloading.",
+                    state.task_id, attempt + 1, max_retries,
+                )
+                reloaded = self._load_execution()
+                if reloaded is None:
+                    # Row vanished between conflict detection and reload.
+                    # Surface as the original exception.
+                    raise
+                if re_apply is not None:
+                    re_apply(reloaded)
+                state = reloaded
+        # Final attempt — let any conflict propagate.
+        self._save_execution(state)
+        return state
 
     def _load_execution(self) -> ExecutionState | None:
         """Load execution state via storage backend or legacy file.

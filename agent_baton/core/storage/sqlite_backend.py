@@ -136,62 +136,119 @@ class SqliteStorage:
                 {str(k): int(v) for k, v in getattr(state, "phase_retries", {}).items()}
             )
 
-            conn.execute(
-                """
-                INSERT INTO executions
-                    (task_id, status, current_phase, current_step_index,
-                     started_at, completed_at, updated_at,
-                     pending_gaps, resolved_decisions,
-                     force_override, override_justification,
-                     run_cumulative_spend_usd, scope_expansions_applied,
-                     working_branch, working_branch_head,
-                     consolidation_result_json, pending_scope_expansions_json,
-                     pending_approval_request_json, phase_retries_json)
-                VALUES (?, ?, ?, ?, ?, ?,
-                        strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
-                        ?, ?,
-                        ?, ?, ?, ?, ?, ?,
-                        ?, ?, ?, ?)
-                ON CONFLICT(task_id) DO UPDATE SET
-                    status                        = excluded.status,
-                    current_phase                 = excluded.current_phase,
-                    current_step_index            = excluded.current_step_index,
-                    completed_at                  = excluded.completed_at,
-                    updated_at                    = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
-                    pending_gaps                  = excluded.pending_gaps,
-                    resolved_decisions            = excluded.resolved_decisions,
-                    force_override                = excluded.force_override,
-                    override_justification        = excluded.override_justification,
-                    run_cumulative_spend_usd      = excluded.run_cumulative_spend_usd,
-                    scope_expansions_applied      = excluded.scope_expansions_applied,
-                    working_branch                = excluded.working_branch,
-                    working_branch_head           = excluded.working_branch_head,
-                    consolidation_result_json     = excluded.consolidation_result_json,
-                    pending_scope_expansions_json = excluded.pending_scope_expansions_json,
-                    pending_approval_request_json = excluded.pending_approval_request_json,
-                    phase_retries_json            = excluded.phase_retries_json
-                """,
-                (
-                    state.task_id,
-                    state.status,
-                    state.current_phase,
-                    state.current_step_index,
-                    state.started_at,
-                    state.completed_at or None,
-                    json.dumps([g.to_dict() for g in state.pending_gaps]),
-                    json.dumps([d.to_dict() for d in state.resolved_decisions]),
-                    1 if getattr(state, "force_override", False) else 0,
-                    getattr(state, "override_justification", "") or "",
-                    float(getattr(state, "run_cumulative_spend_usd", 0.0)),
-                    int(getattr(state, "scope_expansions_applied", 0)),
-                    getattr(state, "working_branch", "") or "",
-                    getattr(state, "working_branch_head", "") or "",
-                    cr_json,
-                    pse_json,
-                    par_json,
-                    phase_retries_json_v,
-                ),
+            # v41 (SQLite Phase C): OCC.  Try a CAS-style UPDATE keyed
+            # on the loaded version first; if no rows are affected,
+            # either the row doesn't exist (first save) or the version
+            # has advanced (concurrent writer).  Distinguish by counting
+            # the row separately.
+            loaded_version = int(getattr(state, "_loaded_version", 0))
+            update_params = (
+                state.status,
+                state.current_phase,
+                state.current_step_index,
+                state.completed_at or None,
+                json.dumps([g.to_dict() for g in state.pending_gaps]),
+                json.dumps([d.to_dict() for d in state.resolved_decisions]),
+                1 if getattr(state, "force_override", False) else 0,
+                getattr(state, "override_justification", "") or "",
+                float(getattr(state, "run_cumulative_spend_usd", 0.0)),
+                int(getattr(state, "scope_expansions_applied", 0)),
+                getattr(state, "working_branch", "") or "",
+                getattr(state, "working_branch_head", "") or "",
+                cr_json,
+                pse_json,
+                par_json,
+                phase_retries_json_v,
+                state.task_id,
+                loaded_version,
             )
+            cas_cur = conn.execute(
+                """
+                UPDATE executions SET
+                    status                        = ?,
+                    current_phase                 = ?,
+                    current_step_index            = ?,
+                    completed_at                  = ?,
+                    updated_at                    = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+                    pending_gaps                  = ?,
+                    resolved_decisions            = ?,
+                    force_override                = ?,
+                    override_justification        = ?,
+                    run_cumulative_spend_usd      = ?,
+                    scope_expansions_applied      = ?,
+                    working_branch                = ?,
+                    working_branch_head           = ?,
+                    consolidation_result_json     = ?,
+                    pending_scope_expansions_json = ?,
+                    pending_approval_request_json = ?,
+                    phase_retries_json            = ?,
+                    version                       = version + 1
+                 WHERE task_id = ? AND version = ?
+                """,
+                update_params,
+            )
+
+            if cas_cur.rowcount == 0:
+                # Either no row yet, or OCC conflict.  Distinguish.
+                exists_row = conn.execute(
+                    "SELECT version FROM executions WHERE task_id = ?",
+                    (state.task_id,),
+                ).fetchone()
+                if exists_row is None:
+                    # First save — INSERT with version=1.
+                    conn.execute(
+                        """
+                        INSERT INTO executions
+                            (task_id, status, current_phase, current_step_index,
+                             started_at, completed_at, updated_at,
+                             pending_gaps, resolved_decisions,
+                             force_override, override_justification,
+                             run_cumulative_spend_usd, scope_expansions_applied,
+                             working_branch, working_branch_head,
+                             consolidation_result_json, pending_scope_expansions_json,
+                             pending_approval_request_json, phase_retries_json,
+                             version)
+                        VALUES (?, ?, ?, ?, ?, ?,
+                                strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+                                ?, ?, ?, ?, ?, ?, ?, ?,
+                                ?, ?, ?, ?, 1)
+                        """,
+                        (
+                            state.task_id,
+                            state.status,
+                            state.current_phase,
+                            state.current_step_index,
+                            state.started_at,
+                            state.completed_at or None,
+                            json.dumps([g.to_dict() for g in state.pending_gaps]),
+                            json.dumps([d.to_dict() for d in state.resolved_decisions]),
+                            1 if getattr(state, "force_override", False) else 0,
+                            getattr(state, "override_justification", "") or "",
+                            float(getattr(state, "run_cumulative_spend_usd", 0.0)),
+                            int(getattr(state, "scope_expansions_applied", 0)),
+                            getattr(state, "working_branch", "") or "",
+                            getattr(state, "working_branch_head", "") or "",
+                            cr_json,
+                            pse_json,
+                            par_json,
+                            phase_retries_json_v,
+                        ),
+                    )
+                    state._loaded_version = 1
+                else:
+                    # OCC conflict — row's version moved.
+                    from agent_baton.core.engine.errors import (
+                        ConcurrentModificationError,
+                    )
+                    raise ConcurrentModificationError(
+                        task_id=state.task_id,
+                        observed_version=loaded_version,
+                    )
+            else:
+                # CAS update succeeded.  Reflect the bump locally so a
+                # subsequent save in the same process uses the new
+                # version as the CAS witness.
+                state._loaded_version = loaded_version + 1
 
             # v38-v40 Phase B: child tables for collection-shaped fields.
             # DELETE+INSERT keeps the row set in sync with the in-memory list,
@@ -727,7 +784,7 @@ class SqliteStorage:
                 except json.JSONDecodeError:
                     pass
 
-        return ExecutionState(
+        state_obj = ExecutionState(
             task_id=row["task_id"],
             plan=plan,
             current_phase=row["current_phase"],
@@ -765,6 +822,12 @@ class SqliteStorage:
             selfheal_attempts=selfheal_attempts_v,
             speculations=speculations_v,
         )
+        # v41 (SQLite Phase C): stash the OCC version on the in-memory
+        # state so the next save_execution can issue a CAS update.
+        state_obj._loaded_version = (
+            int(row["version"]) if "version" in exec_keys else 0
+        )
+        return state_obj
 
     def list_executions(self) -> list[str]:
         """Return task_ids for plan-level executions (those with a plans row).

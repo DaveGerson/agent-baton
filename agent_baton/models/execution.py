@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 from agent_baton.models.knowledge import (
     KnowledgeAttachment,
@@ -1319,6 +1319,13 @@ class ExecutionState(BaseModel):
     scope_expansions_applied: int = 0
     pending_approval_request: PendingApprovalRequest | None = None
     phase_retries: dict[str, int] = Field(default_factory=dict)
+
+    # SQLite Phase C (slice 14): transient OCC version observed at load
+    # time.  PrivateAttr so it does NOT appear in model_dump / to_dict —
+    # the storage layer reads it directly via the underscore-prefixed
+    # attribute when issuing the CAS UPDATE.  Default 0 matches "not
+    # loaded from a row" — fresh ExecutionState constructions skip OCC.
+    _loaded_version: int = PrivateAttr(default=0)
 
     @model_validator(mode="after")
     def _validate_invariants(self) -> Self:

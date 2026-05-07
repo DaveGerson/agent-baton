@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 40
+SCHEMA_VERSION = 41
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -1289,6 +1289,17 @@ CREATE TABLE IF NOT EXISTS speculations (
     PRIMARY KEY (task_id, spec_id)
 );
 """,
+    41: """
+-- v41: SQLite Phase C — optimistic concurrency control (OCC) version
+-- column on the executions row.  Increments on every successful save;
+-- the CAS update fails (rowcount=0) when the row's version moved
+-- between load and save, signalling a concurrent writer.
+--
+-- Default 1 for existing rows so they look freshly-written; the next
+-- save will bump them to 2 and the OCC machinery starts working
+-- immediately.  Per docs/internal/sqlite-parity-proposal.md §3.2.
+ALTER TABLE executions ADD COLUMN version INTEGER NOT NULL DEFAULT 1;
+""",
 }
 
 # =====================================================================
@@ -1324,7 +1335,9 @@ CREATE TABLE IF NOT EXISTS executions (
     consolidation_result_json     TEXT,
     pending_scope_expansions_json TEXT NOT NULL DEFAULT '[]',
     pending_approval_request_json TEXT,
-    phase_retries_json            TEXT NOT NULL DEFAULT '{}'
+    phase_retries_json            TEXT NOT NULL DEFAULT '{}',
+    -- v41 (SQLite Phase C): OCC version column for CAS-style concurrent saves.
+    version                       INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS idx_executions_status ON executions(status);
 CREATE INDEX IF NOT EXISTS idx_executions_started ON executions(started_at);
@@ -2612,6 +2625,8 @@ CREATE TABLE IF NOT EXISTS executions (
     pending_scope_expansions_json TEXT NOT NULL DEFAULT '[]',
     pending_approval_request_json TEXT,
     phase_retries_json            TEXT NOT NULL DEFAULT '{}',
+    -- v41 (SQLite Phase C): OCC version column.
+    version                       INTEGER NOT NULL DEFAULT 1,
     PRIMARY KEY (project_id, task_id)
 );
 CREATE INDEX IF NOT EXISTS idx_central_exec_status ON executions(status);
