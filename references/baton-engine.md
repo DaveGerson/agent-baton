@@ -1852,10 +1852,58 @@ ACTION: GATE
 | `gate_type` | Type of gate: `build`, `test`, `lint`, `spec`, `review` |
 | `phase_id` | Integer phase ID (pass this to `baton execute gate --phase-id`) |
 | `gate_command` | Bash command to run to evaluate the gate |
-| `message` | Human-readable description |
+| `message` | Human-readable description including bracket suffixes for any extensions |
+| `derived_commands` | *(optional)* List of dicts — `{"command", "source_file", "rationale"}` — for artifact-derived additions. Absent when empty. |
+| `agent_additions` | *(optional)* List of strings — commands declared via `GATE_ADDITION:` signals. Absent when empty. |
 
 Run `gate_command` with Bash.  Pass `--result pass` if the command exits
 0, `--result fail` otherwise.  Include the command output in `--gate-output`.
+
+**Extended gate commands.**  The engine may emit a `gate_command` that
+has been **extended** with derived commands inferred from artifacts the
+agent created or modified during the phase (CI workflow `run:` steps,
+gate-worthy `package.json` scripts, Playwright e2e, Makefile targets,
+pre-commit).  Run the entire `gate_command` string as-is and report the
+combined result — do not split, reorder, or drop the appended segments.
+Chaining is `&&`, so any derived-command failure short-circuits and
+fails the gate; the `message` field enumerates the additions (as bracket
+suffixes `[+artifact checks: ...]` / `[+agent additions: ...]`) so you
+can attribute a failure to the offending artifact.  Disable derivation
+with `BATON_ARTIFACT_VALIDATION=0` (see the env-vars table in the root
+`CLAUDE.md`).
+
+**`GATE_ADDITION:` signal.**  During its work an agent may append one or
+more lines of the form:
+
+```
+GATE_ADDITION: <command>
+```
+
+to its step outcome text.  The engine collects these across all steps in
+the phase and appends them to `gate_command` (after any artifact-derived
+commands, chained with `&&`).  Rules the agent must follow:
+
+- At most **8** `GATE_ADDITION:` lines per step (excess are silently
+  dropped).
+- The prefix is **case-insensitive** — `gate_addition:` and
+  `GATE_ADDITION:` are both recognised.
+- Each command must be a **single safe shell token sequence**: no shell
+  metacharacters (`;`, `&&`, `||`, `|`, `>`, `<`, backtick, `$(`, `&`,
+  newlines, null bytes) and no destructive patterns (`rm -rf`, `sudo`,
+  `curl | sh`, forced git push, etc.).  Violating commands are silently
+  rejected by the engine's command-safety layer — they do not appear in
+  `gate_command`.
+- Maximum command length is **256 characters**.  Longer commands are
+  rejected.
+- The declared commands are persisted on `StepResult.gate_additions` and
+  aggregated per phase.  They surface as `agent_additions` on the GATE
+  action and on the `GateResult` audit record.
+
+**Structured extension fields.**  When the GATE action carries
+`derived_commands` or `agent_additions` the orchestrator may surface
+them in its output for attribution.  Both fields follow the lean-payload
+convention: they are absent from the dict when empty.  The orchestrator
+must not fail if either field is missing.
 
 ### COMPLETE
 

@@ -947,6 +947,11 @@ class StepResult(ExecutionRecord):
         member_results: Per-member results for team steps.
         deviations: Plan deviations reported by the agent during
             execution.
+        gate_additions: Shell commands the agent declared via
+            ``GATE_ADDITION:`` signals.  Populated by
+            ``record_step_result``; persisted so they survive crash
+            recovery.  Defaults to empty list for back-compat with
+            existing ``baton.db`` rows that predate this field.
     """
 
     step_id: str
@@ -975,6 +980,7 @@ class StepResult(ExecutionRecord):
     step_type: str = "developing"   # echoed from PlanStep for analytics/queries
     updated_at: str = ""            # ISO 8601 UTC; set on every status mutation; used for bi-directional split-brain reconciliation
     outcome_spillover_path: str = ""  # relative path under execution dir to FULL outcome when truncated
+    gate_additions: list[str] = Field(default_factory=list)  # agent-declared commands via GATE_ADDITION: signals
 
     def to_dict(self) -> dict:
         # Override required to keep the empty-collection-omission semantics
@@ -1010,13 +1016,15 @@ class StepResult(ExecutionRecord):
             d["member_results"] = [m.to_dict() for m in self.member_results]
         if self.interaction_history:
             d["interaction_history"] = [t.to_dict() for t in self.interaction_history]
+        if self.gate_additions:
+            d["gate_additions"] = list(self.gate_additions)
         return d
 
-    # from_dict inherited from ExecutionRecord — TeamStepResult and
-    # InteractionTurn are now Pydantic models, so Pydantic auto-rehydrates
-    # member_results and interaction_history from dict payloads via the
-    # type annotations above.  The old __dataclass_fields__ filter is
-    # replaced by the base class's extra="ignore".
+    # from_dict inherited from ExecutionRecord — TeamStepResult,
+    # InteractionTurn are Pydantic models so Pydantic auto-rehydrates
+    # member_results / interaction_history from dict payloads.
+    # gate_additions is list[str] (primitive) and also auto-handled.
+    # The old __dataclass_fields__ filter is replaced by extra="ignore".
 
 
 class ApprovalResult(ExecutionRecord):
@@ -1151,6 +1159,15 @@ class GateResult(ExecutionRecord):
             ``"daemon_auto"``, ``"api"``, or ``"policy_auto"`` (A2).
         actor: Best-available identity of who triggered this gate —
             ``"$USER@$HOSTNAME"`` for CLI, ``"daemon"`` for auto (A2).
+        derived_commands: Structured record of artifact-derived gate
+            command extensions.  Each entry is a dict with ``command``,
+            ``source_file``, and ``rationale`` keys, mirroring the
+            ``ExecutionAction.derived_commands`` field.  Empty list when
+            no artifact-derived extensions were applied.
+        agent_additions: Shell commands declared by agents via
+            ``GATE_ADDITION:`` signals and appended to the gate command.
+            Mirrors ``ExecutionAction.agent_additions``.  Empty list when
+            no agent additions were declared.
     """
 
     phase_id: int
@@ -1162,9 +1179,34 @@ class GateResult(ExecutionRecord):
     exit_code: int | None = None    # A6: subprocess exit code (None = manual)
     decision_source: str = ""       # A2: human | daemon_auto | api | policy_auto
     actor: str = ""                 # A2: $USER@$HOSTNAME or "daemon"
+    # Provenance of any gate-command extensions — mirrors the corresponding
+    # fields on ExecutionAction so the audit trail captures attribution
+    # without requiring a reviewer to re-parse the concatenated gate_command.
+    # Both default to empty so existing baton.db records load unchanged.
+    derived_commands: list[dict] = Field(default_factory=list)  # [{"command": str, "source_file": str, "rationale": str}, ...]
+    agent_additions: list[str] = Field(default_factory=list)    # commands declared via GATE_ADDITION: signals
 
-    # to_dict / from_dict inherited from ExecutionRecord — every field is
-    # emitted unconditionally, matching the historical hand-rolled to_dict.
+    def to_dict(self) -> dict:
+        # Override needed: golden fixtures captured before the provenance
+        # fields existed; byte-identical roundtrip requires omitting the
+        # two new fields when empty.  from_dict is inherited from
+        # ExecutionRecord (extra="ignore" replaces the dataclass filter).
+        d: dict = {
+            "phase_id": self.phase_id,
+            "gate_type": self.gate_type,
+            "passed": self.passed,
+            "output": self.output,
+            "checked_at": self.checked_at,
+            "command": self.command,
+            "exit_code": self.exit_code,
+            "decision_source": self.decision_source,
+            "actor": self.actor,
+        }
+        if self.derived_commands:
+            d["derived_commands"] = list(self.derived_commands)
+        if self.agent_additions:
+            d["agent_additions"] = list(self.agent_additions)
+        return d
 
 
 # ---------------------------------------------------------------------------
@@ -1808,6 +1850,11 @@ class ExecutionAction:
     gate_type: str = ""
     gate_command: str = ""
     phase_id: int = 0
+    # Structured record of how gate_command was extended beyond the planned
+    # gate.command.  Preserves attribution for the audit trail without
+    # requiring callers to re-parse the concatenated gate_command string.
+    derived_commands: list[dict] = field(default_factory=list)  # [{"command": str, "source_file": str, "rationale": str}, ...]
+    agent_additions: list[str] = field(default_factory=list)    # commands declared via GATE_ADDITION: signals
 
     # For APPROVAL actions:
     approval_context: str = ""          # summary of phase output for reviewer
@@ -1880,6 +1927,10 @@ class ExecutionAction:
                 "gate_command": self.gate_command,
                 "phase_id": self.phase_id,
             })
+            if self.derived_commands:
+                d["derived_commands"] = list(self.derived_commands)
+            if self.agent_additions:
+                d["agent_additions"] = list(self.agent_additions)
         elif self.action_type == ActionType.APPROVAL:
             d.update({
                 "phase_id": self.phase_id,
