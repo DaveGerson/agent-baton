@@ -94,17 +94,34 @@ def _state(
     feedback_results: list[FeedbackResult] | None = None,
     takeover_records: list[dict] | None = None,
 ) -> ExecutionState:
-    return ExecutionState(
-        task_id="task-test",
-        plan=plan if plan is not None else _plan(),
-        current_phase=current_phase,
-        status=status,
-        step_results=step_results or [],
-        gate_results=gate_results or [],
-        approval_results=approval_results or [],
-        feedback_results=feedback_results or [],
-        takeover_records=takeover_records or [],
-    )
+    # Slice 13 added the I1/I2/I9 model_validator on ExecutionState; the
+    # fixture must produce a state that satisfies the invariants for the
+    # given status, otherwise construction raises.
+    from agent_baton.models.execution import PendingApprovalRequest
+    kwargs: dict = {
+        "task_id": "task-test",
+        "plan": plan if plan is not None else _plan(),
+        "current_phase": current_phase,
+        "status": status,
+        "step_results": step_results or [],
+        "gate_results": gate_results or [],
+        "approval_results": approval_results or [],
+        "feedback_results": feedback_results or [],
+        "takeover_records": takeover_records or [],
+    }
+    if status == "approval_pending":
+        kwargs["pending_approval_request"] = PendingApprovalRequest(
+            phase_id=current_phase, requester="test",
+        )
+    if status in {"complete", "failed", "cancelled"}:
+        kwargs["completed_at"] = "2026-05-07T00:00:00+00:00"
+    if status == "paused-takeover" and not (takeover_records or []):
+        kwargs["takeover_records"] = [
+            {"takeover_id": "t-1", "started_at": "2026-05-07T00:00:00+00:00",
+             "started_by": "test", "scope": "phase", "reason": "test",
+             "resumed_at": ""},
+        ]
+    return ExecutionState(**kwargs)
 
 
 # ---------------------------------------------------------------------------
