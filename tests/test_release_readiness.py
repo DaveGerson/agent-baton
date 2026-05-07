@@ -345,7 +345,7 @@ class TestJsonOutput:
         from argparse import Namespace
         from unittest.mock import patch
 
-        from agent_baton.cli.commands.release.readiness_cmd import _handle_readiness
+        from agent_baton.cli.commands.release.readiness_cmd import handle_readiness
 
         db_path = tmp_path / "baton.db"
         conn = sqlite3.connect(str(db_path))
@@ -363,7 +363,7 @@ class TestJsonOutput:
         )
 
         with patch("sys.stdout", captured):
-            _handle_readiness(args)
+            handle_readiness(args)
 
         output = captured.getvalue()
         parsed = json.loads(output)

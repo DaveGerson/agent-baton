@@ -3,6 +3,11 @@
 Computes a ``ReleaseReadinessReport`` for a given release ID and renders it
 as a human-readable Markdown table or raw JSON.
 
+The ``readiness`` subcommand is registered by ``release_cmd.py`` (which owns
+the top-level ``release`` parser); this module exposes only the handler and
+its rendering helpers. It deliberately omits a top-level ``register()`` /
+``handler()`` so the CLI auto-discovery in ``cli/main.py`` skips it.
+
 Usage::
 
     baton release readiness <release_id>
@@ -106,58 +111,10 @@ def _render_markdown(report: "ReleaseReadinessReport") -> str:  # type: ignore[n
 
 
 # ---------------------------------------------------------------------------
-# CLI registration
+# Handler (invoked from release_cmd.py's dispatch table)
 # ---------------------------------------------------------------------------
 
-def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
-    p = subparsers.add_parser(
-        "release",
-        help="Release management — readiness dashboard and release health",
-    )
-    release_sub = p.add_subparsers(dest="release_subcommand")
-
-    rr = release_sub.add_parser(
-        "readiness",
-        help="Compute a release readiness report for a given release ID",
-    )
-    rr.add_argument("release_id", help="Release identifier to evaluate")
-    rr.add_argument(
-        "--since",
-        type=int,
-        default=7,
-        metavar="DAYS",
-        help="Lookback window in days for time-bounded signals (default: 7)",
-    )
-    rr.add_argument(
-        "--json",
-        dest="as_json",
-        action="store_true",
-        help="Emit report as JSON instead of Markdown",
-    )
-    rr.add_argument(
-        "--db",
-        type=Path,
-        default=None,
-        metavar="PATH",
-        help="Explicit path to baton.db (auto-discovered if omitted)",
-    )
-    return p
-
-
-def handler(args: argparse.Namespace) -> None:
-    release_subcmd = getattr(args, "release_subcommand", None)
-    if release_subcmd is None:
-        print("Usage: baton release readiness <release_id> [--json] [--since DAYS]")
-        sys.exit(1)
-
-    if release_subcmd == "readiness":
-        _handle_readiness(args)
-    else:
-        print(f"Unknown release subcommand: {release_subcmd}", file=sys.stderr)
-        sys.exit(1)
-
-
-def _handle_readiness(args: argparse.Namespace) -> None:
+def handle_readiness(args: argparse.Namespace) -> None:
     from agent_baton.core.release.readiness import ReleaseReadinessChecker
 
     db_path: Path | None = getattr(args, "db", None) or _resolve_db_path()

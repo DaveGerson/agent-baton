@@ -17,12 +17,12 @@ Configuration (env vars until baton.yaml Wave 1.2 lands):
 """
 from __future__ import annotations
 
-import fcntl
 import json
 import logging
 import os
 import random
 import subprocess
+import sys
 import threading
 import time
 from contextlib import contextmanager
@@ -30,6 +30,11 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterator
+
+if sys.platform != "win32":
+    import fcntl
+else:
+    fcntl = None  # type: ignore[assignment]
 
 from agent_baton.utils.time import utcnow_seconds as _utcnow
 
@@ -265,6 +270,11 @@ class _FileLock:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._path.touch(exist_ok=True)
         fd = os.open(str(self._path), os.O_RDWR)
+        if fcntl is None:
+            # Windows: skip cross-process locking. Acceptable for single-user
+            # local dev; not safe under concurrent multi-process writers.
+            self._fd = fd
+            return
         deadline = time.monotonic() + self._timeout
         while True:
             try:
@@ -282,7 +292,8 @@ class _FileLock:
     def release(self) -> None:
         if self._fd is not None:
             try:
-                fcntl.flock(self._fd, fcntl.LOCK_UN)
+                if fcntl is not None:
+                    fcntl.flock(self._fd, fcntl.LOCK_UN)
                 os.close(self._fd)
             except OSError:
                 pass
