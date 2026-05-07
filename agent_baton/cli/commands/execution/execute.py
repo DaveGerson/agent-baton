@@ -308,6 +308,24 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
                               help="Cancel a running execution")
     p_cancel.add_argument("--reason", default="", help="Reason for cancellation")
 
+    # baton execute export [--task-id ID] [--to PATH]
+    # Slice 15: snapshot-only JSON export. Replaces the legacy
+    # FileStorage as a primary backend; operators can still grab a flat
+    # JSON snapshot of any execution for diff/inspection.
+    p_export = sub.add_parser(
+        "export", parents=[_task_id_parent],
+        help="Export an execution state to a JSON file (read-only snapshot)",
+    )
+    p_export.add_argument(
+        "--to",
+        default="execution-state.json",
+        dest="export_to",
+        help=(
+            "Destination path for the JSON snapshot (default: "
+            "execution-state.json in the current directory)"
+        ),
+    )
+
     # baton execute retry-gate --phase-id N [--task-id ID]
     p_retry_gate = sub.add_parser("retry-gate", parents=[_task_id_parent],
                                   help="Reset a failed gate back to pending for retry")
@@ -808,9 +826,9 @@ def handler(args: argparse.Namespace) -> None:
         validation_error(
             "supply a subcommand: start, dry-run, next, record, dispatched, gate, "
             "approve, feedback, amend, team-record, interact, complete, status, "
-            "resume, list, switch, cancel, run, retry-gate, fail, resume-budget, "
-            "verify-dispatch, audit-isolation, handoff, worktree-gc, "
-            "takeover, self-heal, speculate"
+            "resume, list, switch, cancel, export, run, retry-gate, fail, "
+            "resume-budget, verify-dispatch, audit-isolation, handoff, "
+            "worktree-gc, takeover, self-heal, speculate"
         )
 
     if args.subcommand == "list":
@@ -1468,6 +1486,36 @@ def handler(args: argparse.Namespace) -> None:
                 print(json.dumps(result, indent=2))
             else:
                 _print_action(action.to_dict())
+
+    elif args.subcommand == "export":
+        # Slice 15 (file-backend deprecation Stage 2-3): snapshot-only
+        # JSON export driven by core.storage.dump_state_to_json.
+        from pathlib import Path as _Path
+
+        from agent_baton.core.storage import dump_state_to_json
+
+        state = engine._load_execution()
+        if state is None:
+            user_error(
+                "no active execution found",
+                hint="Pass --task-id, or run 'baton execute list' to find one.",
+            )
+        out_path = _Path(getattr(args, "export_to", "execution-state.json"))
+        # context_root is the engine's team-context dir.
+        context_root = engine._root
+        dump_state_to_json(
+            task_id=state.task_id,
+            context_root=context_root,
+            out_path=out_path,
+        )
+        if args.output == "json":
+            print(json.dumps({
+                "exported": True,
+                "task_id": state.task_id,
+                "path": str(out_path),
+            }))
+        else:
+            print(f"Exported execution {state.task_id} to {out_path}.")
 
     elif args.subcommand == "cancel":
         state = engine._load_execution()

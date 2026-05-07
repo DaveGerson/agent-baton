@@ -57,8 +57,8 @@ The storage subsystem supports two backends behind a common
 
 | Backend | Class | Location | Status |
 |---------|-------|----------|--------|
-| **SQLite** | `SqliteStorage` | `core/storage/sqlite_backend.py` | Default for all new projects |
-| **File** | `FileStorage` | `core/storage/file_backend.py` | **Deprecated** — emits `DeprecationWarning` on construction. SQLite Phases A+B now reach lossless parity for `ExecutionState`. Will move to snapshot-only mode and be removed from the factory in a future release. |
+| **SQLite** | `SqliteStorage` | `core/storage/sqlite_backend.py` | The only project backend the factory returns. |
+| **File** | `FileStorage` | `core/storage/file_backend.py` | **Removed from factory** (slice 15). `get_project_storage(context_root, backend="file")` now warns and returns SqliteStorage. The class remains importable for `dump_state_to_json` (snapshot export) and any direct legacy callers — both emit `DeprecationWarning`. Run `baton storage migrate` to move legacy `execution-state.json` into `baton.db`. |
 
 **Backend auto-detection** (`core/storage/__init__.py: detect_backend`):
 

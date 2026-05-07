@@ -255,10 +255,19 @@ class TestAutoDetection:
         storage = get_project_storage(tmp_path)
         assert isinstance(storage, SqliteStorage)
 
-    def test_dir_with_json_returns_file(self, tmp_path: Path) -> None:
+    def test_dir_with_json_returns_sqlite_after_slice_15(
+        self, tmp_path: Path,
+    ) -> None:
+        """Slice 15: factory returns SqliteStorage even with legacy JSON.
+
+        ``detect_backend`` still reports 'file', but
+        ``get_project_storage`` now always constructs SqliteStorage —
+        operators run ``baton storage migrate`` to import a legacy
+        ``execution-state.json`` into ``baton.db``.
+        """
         (tmp_path / "execution-state.json").touch()
         storage = get_project_storage(tmp_path)
-        assert isinstance(storage, FileStorage)
+        assert isinstance(storage, SqliteStorage)
 
     def test_engine_created_via_auto_detect_works(self, tmp_path: Path) -> None:
         storage = get_project_storage(tmp_path)
