@@ -17,8 +17,17 @@ signal-parsing pattern in this codebase).
 """
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
+
+from agent_baton.core.engine._command_safety import (
+    MAX_GATE_COMMAND_LENGTH,
+    is_destructive,
+    is_safe_gate_command,
+)
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -106,6 +115,27 @@ def parse_gate_additions(
     for match in _GATE_ADDITION_RE.finditer(outcome):
         command = match.group(1).strip()
         if not command:
+            continue
+        # Defence in depth: reject commands that are too long, contain shell
+        # metacharacters, or match known destructive patterns.
+        if len(command) > MAX_GATE_COMMAND_LENGTH:
+            logger.warning(
+                "rejected GATE_ADDITION (too long, %d chars): %.80s",
+                len(command),
+                command,
+            )
+            continue
+        if not is_safe_gate_command(command):
+            logger.warning(
+                "rejected GATE_ADDITION (shell metacharacter): %.80s",
+                command,
+            )
+            continue
+        if is_destructive(command):
+            logger.warning(
+                "rejected GATE_ADDITION (destructive pattern): %.80s",
+                command,
+            )
             continue
         if command in seen:
             continue

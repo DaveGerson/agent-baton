@@ -50,7 +50,17 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from agent_baton.core.engine._command_safety import (
+    MAX_GATE_COMMAND_LENGTH,
+    is_destructive,
+    is_safe_gate_command,
+)
+
 logger = logging.getLogger(__name__)
+
+# Process-level flag: emit the BATON_ARTIFACT_VALIDATION=0 warning at most
+# once per process so high-frequency callers do not flood the log.
+_DISABLED_WARNING_EMITTED: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +159,13 @@ class ArtifactValidator:
         if not files_changed:
             return []
         if os.environ.get("BATON_ARTIFACT_VALIDATION", "1") == "0":
+            global _DISABLED_WARNING_EMITTED
+            if not _DISABLED_WARNING_EMITTED:
+                _DISABLED_WARNING_EMITTED = True
+                logger.warning(
+                    "ArtifactValidator disabled via BATON_ARTIFACT_VALIDATION=0;"
+                    " phase gate will not validate agent-created artifacts"
+                )
             return []
 
         derived: list[DerivedCommand] = []
@@ -196,8 +213,30 @@ class ArtifactValidator:
             return []
         run_lines = _extract_workflow_run_lines(text)
         out: list[DerivedCommand] = []
-        for cmd in run_lines[:_MAX_COMMANDS_PER_FILE]:
+        for cmd in run_lines:
+            # Skip runner-only expressions that cannot execute locally.
             if any(m in cmd for m in _UNSAFE_RUN_MARKERS):
+                continue
+            # Defence in depth: reject commands that are too long, contain
+            # shell metacharacters, or match known destructive patterns.
+            if len(cmd) > MAX_GATE_COMMAND_LENGTH:
+                logger.warning(
+                    "ArtifactValidator: rejected workflow run (too long, %d chars): %.80s",
+                    len(cmd),
+                    cmd,
+                )
+                continue
+            if not is_safe_gate_command(cmd):
+                logger.warning(
+                    "ArtifactValidator: rejected workflow run (shell metacharacter): %.80s",
+                    cmd,
+                )
+                continue
+            if is_destructive(cmd):
+                logger.warning(
+                    "ArtifactValidator: rejected workflow run (destructive pattern): %.80s",
+                    cmd,
+                )
                 continue
             out.append(
                 DerivedCommand(
@@ -206,6 +245,9 @@ class ArtifactValidator:
                     rationale=f"run-step from workflow {path}",
                 )
             )
+            # Cap AFTER filtering so unsafe lines don't consume the budget.
+            if len(out) >= _MAX_COMMANDS_PER_FILE:
+                break
         return out
 
     # ------------------------------------------------------------------
