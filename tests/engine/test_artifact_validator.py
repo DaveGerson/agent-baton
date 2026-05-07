@@ -304,3 +304,215 @@ def test_common_dir_prefix() -> None:
 def test_extract_workflow_run_lines_handles_empty_yaml() -> None:
     assert _extract_workflow_run_lines("") == []
     assert _extract_workflow_run_lines("name: foo\n") == []
+
+
+# ---------------------------------------------------------------------------
+# Makefile
+# ---------------------------------------------------------------------------
+
+
+def test_makefile_emits_gate_targets(tmp_path: Path) -> None:
+    rel = _write(
+        tmp_path,
+        "Makefile",
+        """\
+.PHONY: test lint typecheck check audit ci build deploy
+
+test:
+\tpytest -q
+
+lint:
+\truff check .
+
+typecheck:
+\tmypy src
+
+check: lint typecheck
+
+audit:
+\tpip-audit
+
+ci: test lint typecheck
+
+build:
+\tdocker build .
+
+deploy:
+\tdocker push myimage
+""",
+    )
+    derived = ArtifactValidator(tmp_path).derive_commands([rel])
+    cmds = [d.command for d in derived]
+    assert "make test" in cmds
+    assert "make lint" in cmds
+    assert "make typecheck" in cmds
+    assert "make check" in cmds
+    assert "make audit" in cmds
+    assert "make ci" in cmds
+    # Non-gate targets must not appear.
+    assert "make build" not in cmds
+    assert "make deploy" not in cmds
+
+
+def test_makefile_skips_phony_and_recipe_lines(tmp_path: Path) -> None:
+    # .PHONY line contains "test" but must not be parsed as a target.
+    # Recipe lines start with a tab and must be skipped too.
+    rel = _write(
+        tmp_path,
+        "Makefile",
+        """\
+.PHONY: test
+
+test:
+\t@echo running tests
+\tpytest -q
+""",
+    )
+    derived = ArtifactValidator(tmp_path).derive_commands([rel])
+    cmds = [d.command for d in derived]
+    assert "make test" in cmds
+    # The recipe body "pytest -q" must NOT produce a second command.
+    assert cmds.count("make test") == 1
+
+
+def test_makefile_case_sensitive_target_matching(tmp_path: Path) -> None:
+    # "Test" (capital T) is not in _GATE_MAKE_TARGETS — must be ignored.
+    rel = _write(
+        tmp_path,
+        "Makefile",
+        "Test:\n\tpytest -q\n",
+    )
+    assert ArtifactValidator(tmp_path).derive_commands([rel]) == []
+
+
+def test_makefile_caps_commands(tmp_path: Path) -> None:
+    # All 6 gate targets present — all 6 should be emitted (well under cap of 8).
+    rel = _write(
+        tmp_path,
+        "Makefile",
+        "\n".join(
+            f"{t}:\n\techo {t}" for t in ["test", "lint", "typecheck", "check", "audit", "ci"]
+        )
+        + "\n",
+    )
+    derived = ArtifactValidator(tmp_path).derive_commands([rel])
+    assert len(derived) <= 8
+    assert len(derived) == 6
+
+
+def test_makefile_subdirectory_path(tmp_path: Path) -> None:
+    # Ensure the regex matches Makefile inside subdirectories.
+    rel = _write(
+        tmp_path,
+        "backend/Makefile",
+        "test:\n\tpytest -q\n",
+    )
+    cmds = [d.command for d in ArtifactValidator(tmp_path).derive_commands([rel])]
+    assert "make test" in cmds
+
+
+def test_makefile_deduplicates_across_two_makefiles(tmp_path: Path) -> None:
+    a = _write(tmp_path, "Makefile", "test:\n\tpytest -q\n")
+    b = _write(tmp_path, "backend/Makefile", "test:\n\tpytest backend -q\n")
+    derived = ArtifactValidator(tmp_path).derive_commands([a, b])
+    assert sum(1 for d in derived if d.command == "make test") == 1
+
+
+def test_makefile_empty_returns_no_commands(tmp_path: Path) -> None:
+    rel = _write(tmp_path, "Makefile", "")
+    assert ArtifactValidator(tmp_path).derive_commands([rel]) == []
+
+
+def test_makefile_no_gate_targets_returns_no_commands(tmp_path: Path) -> None:
+    rel = _write(
+        tmp_path,
+        "Makefile",
+        "build:\n\tdocker build .\ndeploy:\n\tdocker push img\n",
+    )
+    assert ArtifactValidator(tmp_path).derive_commands([rel]) == []
+
+
+def test_makefile_disabled_via_env_var(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rel = _write(tmp_path, "Makefile", "test:\n\tpytest -q\n")
+    monkeypatch.setenv("BATON_ARTIFACT_VALIDATION", "0")
+    assert ArtifactValidator(tmp_path).derive_commands([rel]) == []
+
+
+def test_makefile_attribution(tmp_path: Path) -> None:
+    rel = _write(tmp_path, "Makefile", "test:\n\tpytest -q\n")
+    derived = ArtifactValidator(tmp_path).derive_commands([rel])
+    assert len(derived) == 1
+    assert derived[0].source_file == rel
+    assert derived[0].rationale
+    assert "test" in derived[0].rationale
+
+
+# ---------------------------------------------------------------------------
+# .pre-commit-config.yaml
+# ---------------------------------------------------------------------------
+
+
+def test_pre_commit_emits_run_all_files(tmp_path: Path) -> None:
+    rel = _write(
+        tmp_path,
+        ".pre-commit-config.yaml",
+        """\
+repos:
+  - repo: https://github.com/psf/black
+    rev: 23.1.0
+    hooks:
+      - id: black
+""",
+    )
+    cmds = [d.command for d in ArtifactValidator(tmp_path).derive_commands([rel])]
+    assert "pre-commit run --all-files" in cmds
+
+
+def test_pre_commit_yml_extension(tmp_path: Path) -> None:
+    # The regex accepts both .yaml and .yml.
+    rel = _write(
+        tmp_path,
+        ".pre-commit-config.yml",
+        "repos: []\n",
+    )
+    cmds = [d.command for d in ArtifactValidator(tmp_path).derive_commands([rel])]
+    assert "pre-commit run --all-files" in cmds
+
+
+def test_pre_commit_deduplicates_when_listed_twice(tmp_path: Path) -> None:
+    rel = _write(tmp_path, ".pre-commit-config.yaml", "repos: []\n")
+    # Pass the same path twice to exercise the seen-set deduplication.
+    derived = ArtifactValidator(tmp_path).derive_commands([rel, rel])
+    assert sum(1 for d in derived if d.command == "pre-commit run --all-files") == 1
+
+
+def test_pre_commit_disabled_via_env_var(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rel = _write(tmp_path, ".pre-commit-config.yaml", "repos: []\n")
+    monkeypatch.setenv("BATON_ARTIFACT_VALIDATION", "0")
+    assert ArtifactValidator(tmp_path).derive_commands([rel]) == []
+
+
+def test_pre_commit_malformed_yaml_returns_no_commands(tmp_path: Path) -> None:
+    # A broken YAML file must not crash the validator — it should simply
+    # return empty rather than propagating a parse exception.
+    rel = _write(
+        tmp_path,
+        ".pre-commit-config.yaml",
+        "repos:\n  - repo: [\nnot closed bracket\n",
+    )
+    # Must not raise.
+    result = ArtifactValidator(tmp_path).derive_commands([rel])
+    assert result == []
+
+
+def test_pre_commit_attribution(tmp_path: Path) -> None:
+    rel = _write(tmp_path, ".pre-commit-config.yaml", "repos: []\n")
+    derived = ArtifactValidator(tmp_path).derive_commands([rel])
+    assert len(derived) == 1
+    assert derived[0].source_file == rel
+    assert derived[0].rationale
+    assert "pre-commit" in derived[0].rationale

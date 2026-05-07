@@ -24,6 +24,12 @@ Recognised artifact types (best-effort; safe defaults):
   ``npm run <name>`` for each.
 - Playwright config (``playwright.config.{js,ts,mjs,cjs}``) — surface
   ``npm run test:e2e`` when ``package.json`` exposes that script.
+- ``Makefile`` (or ``**/Makefile``) — when targets named ``test``,
+  ``lint``, ``typecheck``, ``check``, ``audit``, or ``ci`` are declared,
+  surface ``make <target>`` for each.  Uses a tolerant line-based
+  parser; caps at :data:`_MAX_COMMANDS_PER_FILE`.
+- ``.pre-commit-config.yaml`` — surfaces ``pre-commit run --all-files``
+  when the file parses as valid YAML.
 
 Unrecognised files are ignored.  The class is stateless aside from the
 project root used to resolve relative paths and reads files only from
@@ -54,6 +60,8 @@ logger = logging.getLogger(__name__)
 _CI_WORKFLOW_RE = re.compile(r"(?:^|/)\.github/workflows/[^/]+\.ya?ml$")
 _PLAYWRIGHT_RE = re.compile(r"(?:^|/)playwright\.config\.(?:js|ts|mjs|cjs)$")
 _PACKAGE_JSON_RE = re.compile(r"(?:^|/)package\.json$")
+_MAKEFILE_RE = re.compile(r"(?:^|/)Makefile$")
+_PRE_COMMIT_RE = re.compile(r"(?:^|/)\.pre-commit-config\.ya?ml$")
 
 # Script keys in package.json that are gate-worthy: cheap to run, fail
 # fast when broken, and exactly the kind of thing agents land on first.
@@ -63,6 +71,12 @@ _GATE_SCRIPT_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^lint$"),
     re.compile(r"^typecheck$"),
     re.compile(r"^audit$"),
+)
+
+# Makefile target names that are gate-worthy.  Matching is exact and
+# case-sensitive — ``Test`` is not the same as ``test`` in make.
+_GATE_MAKE_TARGETS: frozenset[str] = frozenset(
+    {"test", "lint", "typecheck", "check", "audit", "ci"}
 )
 
 # A run-line is unsafe to lift out of a CI runner when it references
@@ -166,6 +180,10 @@ class ArtifactValidator:
             return self._derive_from_package_json(path)
         if _PLAYWRIGHT_RE.search(path):
             return self._derive_from_playwright(path, all_paths)
+        if _MAKEFILE_RE.search(path):
+            return self._derive_from_makefile(path)
+        if _PRE_COMMIT_RE.search(path):
+            return self._derive_from_pre_commit(path)
         return []
 
     # ------------------------------------------------------------------
@@ -255,6 +273,65 @@ class ArtifactValidator:
                 command="npm run test:e2e",
                 source_file=path,
                 rationale=f"playwright config edited in {path}",
+            )
+        ]
+
+    # ------------------------------------------------------------------
+    # Makefile
+    # ------------------------------------------------------------------
+
+    def _derive_from_makefile(self, path: str) -> list[DerivedCommand]:
+        text = self._read_text(path)
+        if text is None:
+            return []
+        out: list[DerivedCommand] = []
+        for line in text.splitlines():
+            # A target line looks like ``<name>:`` optionally followed by
+            # prerequisites.  Skip recipe lines (start with tab), blank
+            # lines, comments, and .PHONY declarations.
+            if not line or line[0] in ("\t", "#"):
+                continue
+            m = re.match(r"^([A-Za-z0-9_][A-Za-z0-9_./-]*):", line)
+            if m is None:
+                continue
+            target = m.group(1)
+            if target not in _GATE_MAKE_TARGETS:
+                continue
+            out.append(
+                DerivedCommand(
+                    command=f"make {target}",
+                    source_file=path,
+                    rationale=f"Makefile target '{target}' in {path}",
+                )
+            )
+            if len(out) >= _MAX_COMMANDS_PER_FILE:
+                break
+        return out
+
+    # ------------------------------------------------------------------
+    # .pre-commit-config.yaml
+    # ------------------------------------------------------------------
+
+    def _derive_from_pre_commit(self, path: str) -> list[DerivedCommand]:
+        text = self._read_text(path)
+        if text is None:
+            return []
+        # Validate that the file is parseable YAML before emitting a
+        # command — a corrupt config would cause pre-commit to error out
+        # in a way unrelated to the agent's changes.
+        try:
+            import yaml  # noqa: PLC0415
+            yaml.safe_load(text)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "ArtifactValidator: %s parse error: %s", path, exc
+            )
+            return []
+        return [
+            DerivedCommand(
+                command="pre-commit run --all-files",
+                source_file=path,
+                rationale=f"pre-commit config modified in {path}",
             )
         ]
 
