@@ -37,6 +37,7 @@ If you cannot update all four in the same change, stop and split the work.
 |---------|-------|
 | Planning | `planner.py`, `_planner_helpers.py`, `plan_reviewer.py`, `planning/` |
 | Execution loop | `executor.py`, `_executor_helpers.py`, `phase_manager.py` |
+| Gates | `gates.py`, `artifact_validator.py` (derives extra commands from agent-created CI workflows, npm scripts, Playwright config, Makefiles, pre-commit; appended to `gate.command` with `&&`) |
 | Dispatch | `dispatcher.py`, `dry_run_launcher.py`, `worktree_manager.py` |
 | Beads (signals) | `bead_signal.py`, `bead_store.py`, `bead_selector.py`, `bead_decay.py`, `bead_anchors.py` |
 | Knowledge | `knowledge_resolver.py`, `knowledge_gap.py`, `knowledge_telemetry.py` |

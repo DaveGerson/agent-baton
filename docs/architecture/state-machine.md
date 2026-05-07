@@ -130,6 +130,23 @@ When a phase has an `approval_required: true` flag *and* a gate, the
 engine emits `APPROVAL` first, then `GATE`. Either failing fails the
 phase.
 
+### Gate command extension
+
+The planned `gate.command` is the baseline. Before emitting the GATE
+action, the engine inspects the files the agent created or modified
+during the phase via
+[`ArtifactValidator`](../../agent_baton/core/engine/artifact_validator.py).
+Recognised runnable artifacts — `.github/workflows/*.yml` (`run:`
+steps), gate-worthy `package.json` scripts (`test`, `test:*`, `lint`,
+`typecheck`, `audit`), `playwright.config.*`, `Makefile` targets
+(`test`, `lint`, `typecheck`, `check`, `audit`, `ci`), and
+`.pre-commit-config.yaml` — contribute extra shell commands that are
+appended to the planned command, chained with `&&`. The phase only
+passes when both the planned gate and every derived command exit zero;
+the GATE action's `message` field enumerates the additions for the
+audit trail. Disable derivation by setting `BATON_ARTIFACT_VALIDATION=0`
+(see the env-vars table in [the root `CLAUDE.md`](../../CLAUDE.md)).
+
 ---
 
 ## 5. Persistence touchpoints

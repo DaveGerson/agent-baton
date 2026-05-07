@@ -1857,6 +1857,18 @@ ACTION: GATE
 Run `gate_command` with Bash.  Pass `--result pass` if the command exits
 0, `--result fail` otherwise.  Include the command output in `--gate-output`.
 
+**Extended gate commands.**  The engine may emit a `gate_command` that
+has been **extended** with derived commands inferred from artifacts the
+agent created or modified during the phase (CI workflow `run:` steps,
+gate-worthy `package.json` scripts, Playwright e2e, Makefile targets,
+pre-commit).  Run the entire `gate_command` string as-is and report the
+combined result — do not split, reorder, or drop the appended segments.
+Chaining is `&&`, so any derived-command failure short-circuits and
+fails the gate; the `message` field enumerates the additions so you can
+attribute a failure to the offending artifact.  Disable derivation with
+`BATON_ARTIFACT_VALIDATION=0` (see the env-vars table in the root
+`CLAUDE.md`).
+
 ### COMPLETE
 
 All phases and gates finished successfully.
