@@ -68,6 +68,34 @@ def _build_knowledge_telemetry_store():
 # bounded to protect prompt-cache hit rates.
 _HANDOFF_SPILLOVER_MAX_BYTES: int = 65_536
 
+
+def _phase_files_changed(state: "ExecutionState", phase_id: int) -> list[str]:
+    """Return the deduplicated list of files changed within *phase_id*.
+
+    Walks ``state.step_results`` and keeps every ``files_changed`` entry
+    whose ``step_id`` resolves to a step in the requested phase.  Order
+    is preserved on first sighting so downstream consumers (the artifact
+    validator, the gate command extension) get a stable input.
+
+    The helper is module-level (not a method) so :class:`PhaseManager`
+    and other helpers can borrow it without re-importing the executor.
+    """
+    step_to_phase: dict[str, int] = {}
+    for phase in state.plan.phases:
+        for step in phase.steps:
+            step_to_phase[step.step_id] = phase.phase_id
+
+    seen: set[str] = set()
+    out: list[str] = []
+    for result in state.step_results:
+        if step_to_phase.get(result.step_id) != phase_id:
+            continue
+        for f in result.files_changed or ():
+            if f and f not in seen:
+                seen.add(f)
+                out.append(f)
+    return out
+
 from agent_baton.models.execution import (
     ActionType,
     ApprovalResult,
@@ -91,6 +119,7 @@ from agent_baton.models.knowledge import KnowledgeGapSignal, ResolvedDecision
 from agent_baton.models.retrospective import ConflictRecord, TeamCompositionRecord
 from agent_baton.models.usage import AgentUsageRecord, TaskUsageRecord
 from agent_baton.core.engine.dispatcher import PromptDispatcher
+from agent_baton.core.engine.gates import GateRunner as _GateRunner
 from agent_baton.core.engine.knowledge_gap import determine_escalation, parse_knowledge_gap
 from agent_baton.core.engine.persistence import StatePersistence
 from agent_baton.core.events.bus import EventBus
@@ -314,6 +343,11 @@ class ExecutionEngine:
         # Operators can still call fail_gate() at any time to force a terminal
         # failure before the cap is reached.
         self._max_gate_retries: int = max_gate_retries
+
+        # GateRunner is stateless; we keep a singleton so the executor can
+        # delegate gate-action construction (including artifact-validation
+        # extension — see ``_build_gate_action``).
+        self._gate_runner = _GateRunner()
 
         # ── 005b Phase 2: ActionResolver wiring ─────────────────────────────
         # Stateless evaluator that maps ExecutionState -> ResolverDecision.
@@ -5080,7 +5114,11 @@ class ExecutionEngine:
             return self._state_handlers["running"]
         return handler
 
-    def _build_gate_action(self, phase_obj: PlanPhase) -> ExecutionAction:
+    def _build_gate_action(
+        self,
+        phase_obj: PlanPhase,
+        state: ExecutionState | None = None,
+    ) -> ExecutionAction:
         """Build the standard GATE action for *phase_obj*.
 
         Shared by ``EMPTY_PHASE_GATE``, ``PHASE_NEEDS_GATE``, and
@@ -5088,18 +5126,42 @@ class ExecutionEngine:
         ExecutionAction message.  ``GATE_FAILED`` uses a different (retry-
         count-aware) message and is intentionally not routed through this
         helper.
+
+        When *state* is supplied, every file the agent created or modified
+        in this phase is fed through :class:`ArtifactValidator`.  Any
+        derived validation commands (CI workflow ``run:`` steps, npm
+        scripts, Playwright e2e) are appended to the gate command with
+        ``&&`` so a phase only passes when both the planned gate and the
+        new-artifact checks succeed.  This closes the
+        "trusted-but-unverified" gap where an agent could write a broken
+        ``.github/workflows/*.yml`` and still see "phase passed".
         """
         assert phase_obj.gate is not None
-        return ExecutionAction(
-            action_type=ActionType.GATE,
-            message=(
-                f"Run gate '{phase_obj.gate.gate_type}' for phase "
-                f"{phase_obj.phase_id}."
-            ),
-            gate_type=phase_obj.gate.gate_type,
-            gate_command=phase_obj.gate.command,
+
+        files_changed: list[str] = []
+        if state is not None:
+            files_changed = _phase_files_changed(state, phase_obj.phase_id)
+
+        action = self._gate_runner.build_gate_action(
+            phase_obj.gate,
             phase_id=phase_obj.phase_id,
+            files_changed=files_changed or None,
+            project_root=self._project_root() if files_changed else None,
         )
+        # Preserve the executor-style message that callers/tests rely on
+        # while still surfacing artifact-derived extensions.
+        base_message = (
+            f"Run gate '{phase_obj.gate.gate_type}' for phase "
+            f"{phase_obj.phase_id}."
+        )
+        if action.gate_command != (phase_obj.gate.command or ""):
+            action.message = (
+                f"{base_message} (extended with artifact validation: "
+                f"{action.gate_command})"
+            )
+        else:
+            action.message = base_message
+        return action
 
     def _publish_phase_started(self, state: ExecutionState) -> None:
         """Publish ``phase_pre_start`` + ``phase_started`` events for the
@@ -5189,7 +5251,7 @@ class ExecutionEngine:
         if kind == DecisionKind.GATE_PENDING:
             phase_obj = state.current_phase_obj
             assert phase_obj is not None and phase_obj.gate is not None
-            return self._build_gate_action(phase_obj)
+            return self._build_gate_action(phase_obj, state)
 
         # ── Status: gate_failed (retry, count below cap) ────────────────────
         if kind == DecisionKind.GATE_FAILED:
@@ -5259,7 +5321,7 @@ class ExecutionEngine:
             phase_obj = state.current_phase_obj
             assert phase_obj is not None and phase_obj.gate is not None
             self._state_handler_for(state.status).handle(state, decision)
-            return self._build_gate_action(phase_obj)
+            return self._build_gate_action(phase_obj, state)
 
         # ── Empty phase: nothing left to do, advance through ────────────────
         if kind == DecisionKind.EMPTY_PHASE_ADVANCE:
@@ -5427,7 +5489,7 @@ class ExecutionEngine:
             phase_obj = state.current_phase_obj
             assert phase_obj is not None and phase_obj.gate is not None
             self._state_handler_for(state.status).handle(state, decision)
-            return self._build_gate_action(phase_obj)
+            return self._build_gate_action(phase_obj, state)
 
         # ── PHASE_ADVANCE_OK: gate passed, walk to next phase ───────────────
         if kind == DecisionKind.PHASE_ADVANCE_OK:

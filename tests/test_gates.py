@@ -139,6 +139,57 @@ def test_build_gate_action_to_dict_includes_gate_fields(runner: GateRunner) -> N
 
 
 # ---------------------------------------------------------------------------
+# build_gate_action — artifact-validation extension (regression for the
+# "trusted-but-unverified" gate bug)
+# ---------------------------------------------------------------------------
+
+
+def test_build_gate_action_appends_artifact_commands(
+    runner: GateRunner,
+    tmp_path,
+) -> None:
+    """A new ``.github/workflows/*.yml`` extends the gate command."""
+    workflow = tmp_path / ".github/workflows/ci-fast.yml"
+    workflow.parent.mkdir(parents=True)
+    workflow.write_text(
+        "jobs:\n"
+        "  audit:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: npm audit --audit-level=high\n",
+        encoding="utf-8",
+    )
+    gate = _make_gate(command="npx tsc --noEmit && npx vitest run")
+    action = runner.build_gate_action(
+        gate,
+        phase_id=4,
+        files_changed=[".github/workflows/ci-fast.yml"],
+        project_root=tmp_path,
+    )
+    assert "npx tsc --noEmit && npx vitest run" in action.gate_command
+    assert "npm audit --audit-level=high" in action.gate_command
+    assert "artifact checks" in action.message
+
+
+def test_build_gate_action_no_extension_when_files_unchanged(
+    runner: GateRunner,
+    tmp_path,
+) -> None:
+    """Plain code edits do not extend the gate."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/foo.ts").write_text("export {};", encoding="utf-8")
+    gate = _make_gate(command="npx tsc --noEmit")
+    action = runner.build_gate_action(
+        gate,
+        phase_id=1,
+        files_changed=["src/foo.ts"],
+        project_root=tmp_path,
+    )
+    assert action.gate_command == "npx tsc --noEmit"
+    assert "artifact checks" not in action.message
+
+
+# ---------------------------------------------------------------------------
 # evaluate_output
 # ---------------------------------------------------------------------------
 
