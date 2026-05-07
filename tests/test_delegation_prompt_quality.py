@@ -613,19 +613,6 @@ class TestCreatePlanOutcomeOriented:
                 assert "Define module boundaries" not in desc
                 assert "Focus on API endpoints, business logic" not in desc
 
-    @pytest.mark.xfail(
-        reason=(
-            "Product bug: when agents=['backend-engineer'] is passed explicitly, "
-            "expand_agents_for_concerns still adds security-reviewer because the "
-            "early-exit path in RosterStage only fires when both agents AND phases "
-            "are supplied. With only agents set, concern expansion runs and injects "
-            "security-reviewer, which then wins the Fix phase assignment via "
-            "assign_agents_to_phases. The backend-engineer ends up on Investigate "
-            "and Test, never Fix. Fix: RosterStage._expand_concerns should skip "
-            "concern expansion when the caller supplied an explicit agents list."
-        ),
-        strict=True,
-    )
     def test_bug_fix_steps_include_regression_instruction(
         self, planner: IntelligentPlanner
     ) -> None:
