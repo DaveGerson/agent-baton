@@ -1479,8 +1479,8 @@ def handler(args: argparse.Namespace) -> None:
                 hint="Only running executions can be cancelled.",
             )
         reason = getattr(args, "reason", "")
-        state.status = "cancelled"
-        state.completed_at = datetime.now(timezone.utc).isoformat()
+        # I2: transition_to_cancelled stamps completed_at atomically.
+        state.transition_to_cancelled()
         engine._save_execution(state)
         bus.publish(Event.create(
             topic="execution.cancelled",

@@ -290,7 +290,9 @@ class PhaseManager:
         state.current_phase += 1
         state.current_step_index = 0
         if set_status_running:
-            state.status = "running"
+            # advance_phase is the canonical phase-advance funnel; the
+            # status flip here is intentional and not Hole-1-class.
+            state.status = "running"  # noqa: state-mutation
 
     def retry_phase(self, state: ExecutionState) -> None:
         """Reset the current phase for re-execution (investigative retry).
@@ -315,4 +317,6 @@ class PhaseManager:
         state.current_step_index = sum(
             len(p.steps) for p in state.plan.phases[:state.current_phase]
         )
-        state.status = "running"
+        # retry_phase is the canonical phase-retry funnel; the status flip
+        # here is intentional and not Hole-1-class.
+        state.status = "running"  # noqa: state-mutation

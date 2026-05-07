@@ -1082,8 +1082,9 @@ class ExecutionEngine:
                 try:
                     state = self._load_execution()
                     if state is not None:
-                        state.status = "failed"
-                        state.completed_at = state.completed_at or _utcnow()
+                        state.transition_to_failed(
+                            completed_at=state.completed_at,
+                        )
                         # Surface the reason in a status-reason field.  We
                         # reuse override_justification (the closest existing
                         # operator-visible field) but only when empty.
@@ -1465,7 +1466,7 @@ class ExecutionEngine:
             state = self._load_execution()
             if state is not None:
                 state.failed_step_ids.add(step_id)
-                state.status = "failed"
+                state.transition_to_failed()
                 self._save_execution(state)
                 self._compliance_policy_event(
                     state, step_id, "",
@@ -2881,7 +2882,8 @@ class ExecutionEngine:
                     },
                     plan=state.plan,
                 )
-            state.status = "gate_failed"
+            # Non-coupled status flip; no sibling field paired with gate_failed.
+            state.status = "gate_failed"  # noqa: state-mutation
         else:
             self._publish(evt.gate_passed(
                 task_id=state.task_id,
@@ -2960,7 +2962,8 @@ class ExecutionEngine:
                 f"No failed gate result found for phase_id={phase_id}. "
                 "Check 'baton execute status' for the correct phase ID."
             )
-        state.status = "gate_pending"
+        # Non-coupled status flip; no sibling field paired with gate_pending.
+        state.status = "gate_pending"  # noqa: state-mutation
         self._save_execution(state)
 
     def fail_gate(self, phase_id: int) -> None:
@@ -2979,7 +2982,9 @@ class ExecutionEngine:
                 f"fail_gate() requires status 'gate_failed', got '{state.status}'. "
                 "Use 'baton execute fail' only after a gate has failed."
             )
-        state.status = "failed"
+        # transition_to_failed enforces I2 (completed_at stamped) and is
+        # safe from any non-terminal status; gate_failed qualifies.
+        state.transition_to_failed(reason="manual fail_gate")
         self._save_execution(state)
 
     # ── Wave 5.1 — Developer Takeover (bd-e208) ──────────────────────────────
@@ -3043,11 +3048,13 @@ class ExecutionEngine:
             last_known_worktree_head=head,
         )
 
-        # Append to state.
-        records = list(getattr(state, "takeover_records", []))
-        records.append(record.to_dict())
-        state.takeover_records = records
-        state.status = "paused-takeover"
+        # I9 funnel: append + status flip via transition method.  Without
+        # this funnel a save in between the two writes would persist a
+        # paused-takeover state with no active record.
+        record_dict = record.to_dict()
+        if not isinstance(state.takeover_records, list):
+            state.takeover_records = []
+        state.transition_to_paused_takeover(takeover_record=record_dict)
         self._save_execution(state)
 
         # Emit trace event.
@@ -3123,7 +3130,9 @@ class ExecutionEngine:
             record.resolution = "aborted"
             records_raw[active_idx] = record.to_dict()
             state.takeover_records = records_raw
-            state.status = "failed"
+            # I2: stamp completed_at on the failed transition.  Resolved
+            # the active takeover row above; no I9 row left dangling.
+            state.transition_to_failed(reason="takeover aborted")
             self._save_execution(state)
             if self._trace is not None:
                 self._tracer.record_event(
@@ -3227,17 +3236,20 @@ class ExecutionEngine:
                         "Fix the remaining issues and run 'baton execute resume' again."
                     )
 
-        # Update takeover record.
+        # Update takeover record only when the gate has actually passed.
+        # If the gate is still failing the takeover stays "active" (the
+        # record keeps resumed_at empty) — this preserves I9: status
+        # remains "paused-takeover" iff at least one record is active.
         records_raw = list(getattr(state, "takeover_records", []))
-        for i, r in enumerate(records_raw):
-            if r.get("step_id") == step_id and not r.get("resumed_at"):
-                r["resumed_at"] = _utcnow()
-                r["resolution"] = "completed" if gate_passed else "still-failing"
-                records_raw[i] = r
-                break
-        state.takeover_records = records_raw
-
         if gate_passed:
+            for i, r in enumerate(records_raw):
+                if r.get("step_id") == step_id and not r.get("resumed_at"):
+                    r["resumed_at"] = _utcnow()
+                    r["resolution"] = "completed"
+                    records_raw[i] = r
+                    break
+            state.takeover_records = records_raw
+
             # Fold back developer commits into parent branch.
             if self._worktree_mgr is not None and str(handle.path) != "/dev/null":
                 try:
@@ -3267,7 +3279,10 @@ class ExecutionEngine:
                     },
                 )
         else:
-            state.status = "paused-takeover"
+            # Status already paused-takeover from start_takeover; the
+            # active record is preserved.  No transition needed — simply
+            # persist the unchanged state for the resume cycle's sake.
+            pass
 
         self._save_execution(state)
         return gate_passed
@@ -3469,8 +3484,11 @@ class ExecutionEngine:
             steps_completed=len(state.completed_step_ids),
             steps_failed=len(state.failed_step_ids),
         ))
-        state.status = "complete"
-        state.completed_at = _utcnow()
+        # I2: atomically flip status + stamp completed_at via the
+        # transition method so a save in between cannot persist
+        # status="complete" with completed_at="" (the latter is what
+        # the retrospective reads to compute duration).
+        state.transition_to_complete()
 
         # ── Wave 1.3 (bd-86bf): sweep straggler worktrees ────────────────────
         # Any worktrees still registered in step_worktrees at completion time
@@ -4092,13 +4110,15 @@ class ExecutionEngine:
             )
 
         if result == "reject":
-            # I1: clear the audit row and flip status atomically. Doing it
-            # in this order — clear first, then flip — keeps the persisted
-            # state inside the I1 invariant: a save in the middle of the
-            # block sees status="approval_pending"/request=Pending or
-            # status="failed"/request=None, but never the torn pair.
+            # I1+I2: clear the audit row and flip status atomically. The
+            # ordering — clear first, then transition — keeps the persisted
+            # state inside the I1 invariant: a save in the middle sees
+            # status="approval_pending"/request=Pending or
+            # status="failed"/request=None+completed_at=stamped, never
+            # the torn pair.  transition_to_failed also stamps completed_at,
+            # closing the I2 gap that was previously a 6/14 omission rate.
             state.clear_approval_pending()
-            state.status = "failed"
+            state.transition_to_failed(reason="approval rejected")
         elif result == "approve":
             state.transition_to_running(from_status="approval_pending")
         elif result == "approve-with-feedback":
@@ -4651,7 +4671,9 @@ class ExecutionEngine:
             if self._enforce_token_budget and state.status not in (
                 "complete", "failed", "budget_exceeded"
             ):
-                state.status = "budget_exceeded"
+                # Non-coupled status flip; budget_exceeded is reversible
+                # via resume_budget().  Not Hole-1-class.
+                state.status = "budget_exceeded"  # noqa: state-mutation
                 _log.warning(
                     "Budget enforced: setting status=budget_exceeded. %s. "
                     "No new dispatches will be issued. "
@@ -4691,7 +4713,8 @@ class ExecutionEngine:
                 f"got '{state.status}'. "
                 "Use 'baton execute status' to check current state."
             )
-        state.status = "running"
+        # transition_to_running enforces the from_status precondition.
+        state.transition_to_running(from_status="budget_exceeded")
         self._save_execution(state)
         _log.info("Budget status cleared — execution resumed for task %s.", state.task_id)
 
@@ -6522,7 +6545,8 @@ class ExecutionEngine:
 
         # Check if all feedback questions are now resolved.
         if self._feedback_resolved_for_phase(state, current_pid):
-            state.status = "running"
+            # transition_to_running enforces the from_status precondition.
+            state.transition_to_running(from_status="feedback_pending")
         self._save_execution(state)
 
         if self._trace is not None:
@@ -6801,7 +6825,8 @@ class ExecutionEngine:
             result.outcome = (
                 f"TIMEOUT after {effective}s (elapsed {int(elapsed)}s)"
             )
-            state.status = "failed"
+            # I2: completed_at stamped via transition method.
+            state.transition_to_failed(reason="step timeout")
             self._save_execution(state)
 
             # Best-effort warning bead — must not block timeout enforcement.

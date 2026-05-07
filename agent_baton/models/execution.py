@@ -1469,6 +1469,108 @@ class ExecutionState:
         """
         self.pending_approval_request = None
 
+    def transition_to_failed(
+        self, *, reason: str = "", completed_at: str = "",
+    ) -> None:
+        """Flip status to ``"failed"`` and stamp ``completed_at`` atomically.
+
+        Closes I2 in the failed direction.  Six of the fourteen historical
+        ``state.status = "failed"`` sites did NOT set ``completed_at`` —
+        retrospectives compute duration as ``completed_at - started_at``
+        and skipped or showed ``Inf`` for those rows.  Funnelling through
+        this method makes that impossible.
+
+        Args:
+            reason: Optional human-readable failure reason.  Currently
+                stored only as a transient field for debugging; use the
+                bead store for persistent failure narratives.
+            completed_at: ISO 8601 timestamp; auto-stamped when blank.
+        """
+        stamp = completed_at or datetime.now(timezone.utc).isoformat(
+            timespec="seconds"
+        )
+        # Allowed from any non-terminal status.  Terminal-to-terminal
+        # is treated as a no-op so retried failure handlers don't double-
+        # bump completed_at.
+        if self.status in {"failed", "complete", "cancelled"}:
+            return
+        if self.status == "approval_pending":
+            self.pending_approval_request = None
+        self.completed_at = stamp
+        self.status = "failed"
+        # ``reason`` is intentionally not persisted — production callers
+        # write the reason to a bead via BeadStore.create_bead.  Kept on
+        # the signature so call sites can document it close to the call.
+        _ = reason
+
+    def transition_to_complete(self, *, completed_at: str = "") -> None:
+        """Flip status to ``"complete"`` and stamp ``completed_at`` atomically.
+
+        I2: terminal-with-timestamp.  No-op when already terminal so a
+        retried completion path doesn't shift the recorded timestamp.
+        """
+        if self.status in {"complete", "failed", "cancelled"}:
+            return
+        stamp = completed_at or datetime.now(timezone.utc).isoformat(
+            timespec="seconds"
+        )
+        self.completed_at = stamp
+        self.status = "complete"
+
+    def transition_to_cancelled(self, *, completed_at: str = "") -> None:
+        """Flip status to ``"cancelled"`` and stamp ``completed_at`` atomically.
+
+        Used by the CLI ``cancel`` verb and the REST stop-execution
+        endpoint.  Same I2 contract as ``transition_to_complete``.
+        """
+        if self.status in {"complete", "failed", "cancelled"}:
+            return
+        stamp = completed_at or datetime.now(timezone.utc).isoformat(
+            timespec="seconds"
+        )
+        self.completed_at = stamp
+        self.status = "cancelled"
+
+    def transition_to_paused_takeover(
+        self, *, takeover_record: dict | None = None,
+    ) -> None:
+        """Flip status to ``"paused-takeover"`` with an active takeover row.
+
+        I9: ``status == "paused-takeover"`` ⇒ at least one
+        ``takeover_records`` entry has empty ``resumed_at``.  Funnelling
+        the flip + record append through one method makes the invariant
+        structurally impossible to break.
+
+        Args:
+            takeover_record: The dict to append to ``takeover_records``.
+                When ``None``, an active row from existing records is
+                expected; the method then merely flips status.  Resolver
+                code at ``resolver.py:236-240`` walks the records list
+                looking for an ``resumed_at == ""`` entry.
+        """
+        if takeover_record is not None:
+            self.takeover_records.append(takeover_record)
+        # I9 belt-and-suspenders: refuse to flip if no active record
+        # exists, so the invariant cannot be observed broken.  The
+        # active-row predicate matches resolver.py.
+        active = any(
+            isinstance(r, dict) and not r.get("resumed_at")
+            for r in self.takeover_records
+        )
+        if not active:
+            from agent_baton.core.engine.errors import IllegalStateTransition
+
+            raise IllegalStateTransition(
+                from_status=self.status,
+                to_status="paused-takeover",
+                task_id=self.task_id,
+                context=(
+                    "transition_to_paused_takeover requires at least one "
+                    "active takeover record (resumed_at == '')"
+                ),
+            )
+        self.status = "paused-takeover"
+
     def transition_to_running(
         self,
         *,
