@@ -900,6 +900,11 @@ class StepResult:
         member_results: Per-member results for team steps.
         deviations: Plan deviations reported by the agent during
             execution.
+        gate_additions: Shell commands the agent declared via
+            ``GATE_ADDITION:`` signals.  Populated by
+            ``record_step_result``; persisted so they survive crash
+            recovery.  Defaults to empty list for back-compat with
+            existing ``baton.db`` rows that predate this field.
     """
 
     step_id: str
@@ -928,6 +933,7 @@ class StepResult:
     step_type: str = "developing"   # echoed from PlanStep for analytics/queries
     updated_at: str = ""            # ISO 8601 UTC; set on every status mutation; used for bi-directional split-brain reconciliation
     outcome_spillover_path: str = ""  # relative path under execution dir to FULL outcome when truncated
+    gate_additions: list[str] = field(default_factory=list)  # agent-declared commands via GATE_ADDITION: signals
 
     def to_dict(self) -> dict:
         d = {
@@ -958,6 +964,8 @@ class StepResult:
             d["member_results"] = [m.to_dict() for m in self.member_results]
         if self.interaction_history:
             d["interaction_history"] = [t.to_dict() for t in self.interaction_history]
+        if self.gate_additions:
+            d["gate_additions"] = list(self.gate_additions)
         return d
 
     @classmethod
@@ -972,10 +980,13 @@ class StepResult:
         interaction_history = [
             InteractionTurn.from_dict(t) for t in data.pop("interaction_history", [])
         ]
+        # Extract gate_additions — optional field, defaults to [] for back-compat.
+        gate_additions = data.pop("gate_additions", [])
         obj = cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
         obj.member_results = member_results
         obj.deviations = deviations
         obj.interaction_history = interaction_history
+        obj.gate_additions = gate_additions
         return obj
 
 

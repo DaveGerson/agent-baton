@@ -202,6 +202,38 @@ class TestRecordStepResult:
         with pytest.raises(RuntimeError):
             engine.record_step_result("1.1", "agent")
 
+    def test_gate_addition_signal_populates_step_result(self, tmp_path: Path) -> None:
+        """record_step_result with GATE_ADDITION: in outcome writes gate_additions."""
+        engine = self._started_engine(tmp_path)
+        outcome = (
+            "Implemented security scanning.\n"
+            "GATE_ADDITION: npm audit --audit-level=high\n"
+            "GATE_ADDITION: pre-commit run --all-files\n"
+        )
+        engine.record_step_result(
+            "1.1",
+            "backend-engineer",
+            outcome=outcome,
+            status="complete",
+        )
+        result = engine._load_state().get_step_result("1.1")
+        assert result is not None
+        assert "npm audit --audit-level=high" in result.gate_additions
+        assert "pre-commit run --all-files" in result.gate_additions
+
+    def test_gate_addition_absent_leaves_empty_list(self, tmp_path: Path) -> None:
+        """record_step_result without GATE_ADDITION: leaves gate_additions empty."""
+        engine = self._started_engine(tmp_path)
+        engine.record_step_result(
+            "1.1",
+            "backend-engineer",
+            outcome="No special signals.",
+            status="complete",
+        )
+        result = engine._load_state().get_step_result("1.1")
+        assert result is not None
+        assert result.gate_additions == []
+
 
 # ---------------------------------------------------------------------------
 # next_action() — state machine progression

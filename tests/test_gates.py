@@ -318,3 +318,94 @@ def test_plan_gate_from_dict_canonical_gate_type_still_works() -> None:
     data = {"gate_type": "lint", "command": "ruff check ."}
     gate = PlanGate.from_dict(data)
     assert gate.gate_type == "lint"
+
+
+# ---------------------------------------------------------------------------
+# build_gate_action — agent_additions extension (regression for option-2
+# declarative gate additions via GATE_ADDITION: signals)
+# ---------------------------------------------------------------------------
+
+
+def test_build_gate_action_appends_agent_additions(runner: GateRunner) -> None:
+    """agent_additions=["npm audit"] lands in the gate command and message."""
+    gate = _make_gate(command="pytest --tb=short -q")
+    action = runner.build_gate_action(
+        gate,
+        phase_id=2,
+        agent_additions=["npm audit"],
+    )
+    assert "pytest --tb=short -q" in action.gate_command
+    assert "npm audit" in action.gate_command
+    assert "agent additions" in action.message
+    assert "npm audit" in action.message
+
+
+def test_build_gate_action_agent_additions_chained_with_and(runner: GateRunner) -> None:
+    """Multiple agent_additions are chained with && in the gate command."""
+    gate = _make_gate(command="make test")
+    action = runner.build_gate_action(
+        gate,
+        phase_id=0,
+        agent_additions=["npm audit --audit-level=high", "pre-commit run --all-files"],
+    )
+    assert "make test" in action.gate_command
+    assert "npm audit --audit-level=high" in action.gate_command
+    assert "pre-commit run --all-files" in action.gate_command
+    # All three segments joined by &&
+    assert "&&" in action.gate_command
+
+
+def test_build_gate_action_agent_additions_only_no_base_command(runner: GateRunner) -> None:
+    """When gate has no planned command, agent_additions becomes the command."""
+    gate = _make_gate(command="")
+    action = runner.build_gate_action(
+        gate,
+        phase_id=1,
+        agent_additions=["my-security-scan"],
+    )
+    assert action.gate_command == "my-security-scan"
+    assert "agent additions" in action.message
+
+
+def test_build_gate_action_none_agent_additions_no_change(runner: GateRunner) -> None:
+    """Passing agent_additions=None does not alter the gate command."""
+    gate = _make_gate(command="pytest --tb=short -q")
+    action_without = runner.build_gate_action(gate, phase_id=1)
+    action_with_none = runner.build_gate_action(gate, phase_id=1, agent_additions=None)
+    assert action_without.gate_command == action_with_none.gate_command
+    assert "agent additions" not in action_with_none.message
+
+
+def test_build_gate_action_agent_additions_after_artifact_checks(
+    runner: GateRunner,
+    tmp_path,
+) -> None:
+    """Agent additions come after artifact-derived commands."""
+    workflow = tmp_path / ".github/workflows/ci.yml"
+    workflow.parent.mkdir(parents=True)
+    workflow.write_text(
+        "jobs:\n"
+        "  test:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: make test\n",
+        encoding="utf-8",
+    )
+    gate = _make_gate(command="pytest")
+    action = runner.build_gate_action(
+        gate,
+        phase_id=3,
+        files_changed=[".github/workflows/ci.yml"],
+        project_root=tmp_path,
+        agent_additions=["npm audit"],
+    )
+    # All three present
+    assert "pytest" in action.gate_command
+    assert "make test" in action.gate_command
+    assert "npm audit" in action.gate_command
+    # Ordering: pytest && <artifact> && npm audit
+    cmd = action.gate_command
+    assert cmd.index("make test") < cmd.index("npm audit")
+    # Both labels present
+    assert "artifact checks" in action.message
+    assert "agent additions" in action.message

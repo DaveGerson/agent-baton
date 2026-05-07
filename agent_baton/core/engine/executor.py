@@ -96,6 +96,37 @@ def _phase_files_changed(state: "ExecutionState", phase_id: int) -> list[str]:
                 out.append(f)
     return out
 
+
+def _phase_gate_additions(state: "ExecutionState", phase_id: int) -> list[str]:
+    """Return the deduplicated list of agent-declared gate additions for *phase_id*.
+
+    Walks ``state.step_results`` and collects every command listed in
+    ``StepResult.gate_additions`` for steps that belong to *phase_id*.
+    Deduplication is by command string (case-sensitive, first occurrence
+    wins) so the same command emitted by multiple steps in the same phase
+    appears only once in the gate.
+
+    The helper is module-level (not a method) so it mirrors the structure
+    of :func:`_phase_files_changed` and can be borrowed by non-executor
+    callers without importing the full class.
+    """
+    step_to_phase: dict[str, int] = {}
+    for phase in state.plan.phases:
+        for step in phase.steps:
+            step_to_phase[step.step_id] = phase.phase_id
+
+    seen: set[str] = set()
+    out: list[str] = []
+    for result in state.step_results:
+        if step_to_phase.get(result.step_id) != phase_id:
+            continue
+        for cmd in result.gate_additions or ():
+            if cmd and cmd not in seen:
+                seen.add(cmd)
+                out.append(cmd)
+    return out
+
+
 from agent_baton.models.execution import (
     ActionType,
     ApprovalResult,
@@ -2309,6 +2340,31 @@ class ExecutionEngine:
                         ))
             except Exception as _se_exc:
                 _log.debug("Scope expansion parsing failed (non-fatal): %s", _se_exc)
+
+        # ── Gate addition protocol ────────────────────────────────────────────
+        # Parse GATE_ADDITION: signals from the outcome and write them onto the
+        # StepResult so they are available when the gate is built for this phase.
+        # Skipped for automation steps (stdout is command output, not agent text).
+        if (
+            status in ("complete", "interrupted")
+            and outcome
+            and (_plan_step is None or _plan_step.step_type != "automation")
+        ):
+            try:
+                from agent_baton.core.engine.gate_addition import parse_gate_additions
+                _additions = parse_gate_additions(
+                    outcome,
+                    step_id=step_id,
+                    agent_name=agent_name,
+                )
+                if _additions:
+                    result.gate_additions = [a.command for a in _additions]
+                    _log.debug(
+                        "GATE_ADDITION: %d command(s) registered from step %s (%s)",
+                        len(_additions), step_id, agent_name,
+                    )
+            except Exception as _ga_exc:
+                _log.debug("Gate addition parsing failed (non-fatal): %s", _ga_exc)
 
         # Determine phase + step index for trace context.
         phase_idx, step_idx = self._locate_step(state, step_id)
@@ -5510,18 +5566,27 @@ class ExecutionEngine:
         new-artifact checks succeed.  This closes the
         "trusted-but-unverified" gap where an agent could write a broken
         ``.github/workflows/*.yml`` and still see "phase passed".
+
+        Agent-declared additions (``GATE_ADDITION:`` signals) are collected
+        via :func:`_phase_gate_additions` and forwarded to
+        :meth:`~GateRunner.build_gate_action` as ``agent_additions``.  They
+        are appended after artifact-derived commands and labelled separately
+        in the action message.
         """
         assert phase_obj.gate is not None
 
         files_changed: list[str] = []
+        agent_additions: list[str] = []
         if state is not None:
             files_changed = _phase_files_changed(state, phase_obj.phase_id)
+            agent_additions = _phase_gate_additions(state, phase_obj.phase_id)
 
         action = self._gate_runner.build_gate_action(
             phase_obj.gate,
             phase_id=phase_obj.phase_id,
             files_changed=files_changed or None,
             project_root=self._project_root() if files_changed else None,
+            agent_additions=agent_additions or None,
         )
         # Preserve the executor-style message that callers/tests rely on
         # while still surfacing artifact-derived extensions.

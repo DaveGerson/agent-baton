@@ -273,6 +273,7 @@ class GateRunner:
         files_changed: list[str] | None = None,
         project_root: Path | str | None = None,
         artifact_validator: ArtifactValidator | None = None,
+        agent_additions: list[str] | None = None,
     ) -> ExecutionAction:
         """Build an ExecutionAction with GATE type.
 
@@ -285,6 +286,12 @@ class GateRunner:
         closes the "trusted-but-unverified" gap where a phase could
         pass even though the artifacts the agent just created were
         broken on arrival.
+
+        When ``agent_additions`` is supplied, those commands are appended
+        after any artifact-derived commands, also chained with ``&&``.
+        They appear in the gate message under a separate label
+        (``[+agent additions: ...]``) so reviewers can distinguish
+        organically-derived checks from agent-declared ones.
 
         Args:
             gate: The gate to run.
@@ -300,6 +307,10 @@ class GateRunner:
                            seam).  When ``None`` and ``files_changed``
                            is non-empty, one is constructed from
                            ``project_root``.
+            agent_additions: Shell commands declared by agents via
+                           ``GATE_ADDITION:`` signals.  Appended after
+                           artifact-derived commands with ``&&``.
+                           Ignored when ``None`` or empty.
 
         Returns:
             An ExecutionAction with action_type=GATE.  ``gate_command``
@@ -322,11 +333,22 @@ class GateRunner:
             extension = " && ".join(d.command for d in derived)
             command = f"{command} && {extension}" if command else extension
 
+        # Append agent-declared additions after artifact-derived commands.
+        effective_agent_additions: list[str] = [
+            cmd for cmd in (agent_additions or []) if cmd
+        ]
+        if effective_agent_additions:
+            agent_extension = " && ".join(effective_agent_additions)
+            command = f"{command} && {agent_extension}" if command else agent_extension
+
         description = self.describe_gate(gate)
         message = f"Gate '{gate.gate_type}' for phase {phase_id}: {description}"
         if derived:
             extras = "; ".join(f"{d.command} ({d.rationale})" for d in derived)
             message = f"{message} [+artifact checks: {extras}]"
+        if effective_agent_additions:
+            agent_extras = "; ".join(effective_agent_additions)
+            message = f"{message} [+agent additions: {agent_extras}]"
 
         return ExecutionAction(
             action_type=ActionType.GATE,
