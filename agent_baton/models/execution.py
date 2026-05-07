@@ -14,7 +14,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -1568,6 +1568,120 @@ class ExecutionState:
             if r.step_id == step_id:
                 return r
         return None
+
+    # ── Hole-1-class transition methods ──────────────────────────────────────
+    # Coupled-field mutations funnelled through methods so that the I1
+    # invariant — ``status == "approval_pending"`` ⇔
+    # ``pending_approval_request is not None`` — can't drift through an
+    # early ``return`` between the status flip and the audit-row write.
+    # See docs/internal/state-mutation-proposal.md §4.
+
+    def transition_to_approval_pending(
+        self,
+        *,
+        phase_id: int,
+        requester: str,
+        requested_at: str = "",
+    ) -> None:
+        """Atomically flip into the approval-pending blocked state.
+
+        Sets ``status = "approval_pending"`` and stamps
+        ``pending_approval_request`` so the I1 invariant cannot be observed
+        torn by a concurrent save.
+
+        Args:
+            phase_id: Phase whose approval is being requested.
+            requester: Identity (CLI actor / agent ID) that asked.
+            requested_at: ISO 8601 timestamp; auto-stamped if empty.
+
+        Raises:
+            IllegalStateTransition: If current status is not one of
+                ``running``, ``gate_pending``, ``approval_pending``
+                (idempotent re-emit on resume).
+        """
+        from agent_baton.core.engine.errors import IllegalStateTransition
+
+        allowed = {"running", "gate_pending", "approval_pending"}
+        if self.status not in allowed:
+            raise IllegalStateTransition(
+                from_status=self.status,
+                to_status="approval_pending",
+                task_id=self.task_id,
+                context="transition_to_approval_pending",
+            )
+        stamp = requested_at or datetime.now(timezone.utc).isoformat(
+            timespec="seconds"
+        )
+        self.pending_approval_request = PendingApprovalRequest(
+            phase_id=phase_id,
+            requester=requester,
+            requested_at=stamp,
+        )
+        self.status = "approval_pending"
+
+    def clear_approval_pending(self) -> None:
+        """Drop the pending-approval audit row.
+
+        Used by ``record_approval_result`` after the approval has been
+        recorded.  Does NOT flip status — the caller follows up with one
+        of ``transition_to_running`` / ``transition_to_failed`` to move
+        out of the blocked state.  This split exists because the
+        approve-with-feedback path must save+reload between clearing the
+        row and the final status flip.
+        """
+        self.pending_approval_request = None
+
+    def transition_to_running(
+        self,
+        *,
+        from_status: Literal[
+            "approval_pending",
+            "feedback_pending",
+            "gate_pending",
+            "budget_exceeded",
+            "paused-takeover",
+            "pending",
+            "running",
+        ],
+    ) -> None:
+        """Flip status to ``"running"``, asserting the prior status.
+
+        Also clears ``pending_approval_request`` if it is still set —
+        leaving an audit row behind after exiting approval_pending would
+        violate I1 in the reverse direction.
+
+        Args:
+            from_status: The status the caller observed before this
+                transition.  The method asserts the actual current status
+                matches.
+
+        Raises:
+            IllegalStateTransition: If ``self.status != from_status``.
+        """
+        from agent_baton.core.engine.errors import IllegalStateTransition
+
+        _allowed_sources = {
+            "approval_pending",
+            "feedback_pending",
+            "gate_pending",
+            "budget_exceeded",
+            "paused-takeover",
+            "pending",
+            "running",
+        }
+        if from_status not in _allowed_sources or self.status != from_status:
+            raise IllegalStateTransition(
+                from_status=self.status,
+                to_status="running",
+                task_id=self.task_id,
+                context=f"transition_to_running(from_status={from_status!r})",
+            )
+        # I1 belt-and-suspenders: an inherited pending_approval_request
+        # while running is the exact failure mode the funnel exists to
+        # prevent.  Clear it on any exit out of approval_pending.
+        if from_status == "approval_pending":
+            self.pending_approval_request = None
+        self.status = "running"
 
     def to_dict(self) -> dict:
         return {

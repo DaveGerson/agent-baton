@@ -4080,10 +4080,6 @@ class ExecutionEngine:
             rationale=rationale,
         )
         state.approval_results.append(approval)
-        # Clear the pending-approval audit row — the approval has been
-        # recorded.  Subsequent stray record_approval_result calls now hit
-        # the status != approval_pending guard above.
-        state.pending_approval_request = None
 
         if self._trace is not None:
             self._tracer.record_event(
@@ -4096,13 +4092,21 @@ class ExecutionEngine:
             )
 
         if result == "reject":
+            # I1: clear the audit row and flip status atomically. Doing it
+            # in this order — clear first, then flip — keeps the persisted
+            # state inside the I1 invariant: a save in the middle of the
+            # block sees status="approval_pending"/request=Pending or
+            # status="failed"/request=None, but never the torn pair.
+            state.clear_approval_pending()
             state.status = "failed"
         elif result == "approve":
-            state.status = "running"
+            state.transition_to_running(from_status="approval_pending")
         elif result == "approve-with-feedback":
-            # Insert a remediation phase after the current phase.
-            # Save state first so _amend_from_feedback → amend_plan can see
-            # the approval result when it loads state.
+            # Insert a remediation phase after the current phase.  Hold the
+            # pending-approval audit row across the save+amend+reload so a
+            # crash mid-amend reloads as approval_pending+request, not as
+            # the I1-violating approval_pending+None.  The transition out
+            # of approval_pending happens AFTER the reload, atomically.
             self._save_execution(state)
             self._amend_from_feedback(state, phase_id, feedback)
             # amend_plan saves its own copy with the amendment applied.
@@ -4118,7 +4122,7 @@ class ExecutionEngine:
                     context="record_approval_result:approve-with-feedback",
                 )
             state = _reloaded
-            state.status = "running"
+            state.transition_to_running(from_status="approval_pending")
 
         self._save_execution(state)
 
@@ -4395,7 +4399,6 @@ class ExecutionEngine:
                 # If conflict detected and escalation requested, pause
                 # for human review instead of auto-completing.
                 if conflict and spec and spec.conflict_handling == "escalate":
-                    state.status = "approval_pending"
                     parent.status = "dispatched"  # keep step open
                     parent.deviations.append(
                         f"Conflict escalated: {conflict.conflict_id}"
@@ -4416,12 +4419,12 @@ class ExecutionEngine:
                                 f"{conflict.conflict_id}.  Review and approve "
                                 f"to continue."
                             )
-                        state.pending_approval_request = PendingApprovalRequest(
+                        state.transition_to_approval_pending(
                             phase_id=current_phase.phase_id,
                             requester=_cli_actor(),
                             requested_at=_utcnow(),
                         )
-                    self._save_execution(state)
+                        self._save_execution(state)
                     return
 
                 # Apply synthesis strategy.
@@ -6275,15 +6278,17 @@ class ExecutionEngine:
         context = phase_obj.approval_description or self._build_approval_context(
             state, phase_obj,
         )
-        # Stamp the pending-approval audit row.  Idempotent: if the same phase
-        # is re-emitted (e.g. after resume), preserve the original requester
-        # rather than overwriting it with whoever happens to be calling now.
+        # I1: status="approval_pending" ⇔ pending_approval_request != None.
+        # Funnel both writes through transition_to_approval_pending so they
+        # land atomically.  Idempotent: if the same phase is re-emitted
+        # (e.g. after resume), preserve the original requester rather than
+        # overwriting it with whoever happens to be calling now.
         existing = getattr(state, "pending_approval_request", None)
         if (
             existing is None
             or existing.phase_id != phase_obj.phase_id
         ):
-            state.pending_approval_request = PendingApprovalRequest(
+            state.transition_to_approval_pending(
                 phase_id=phase_obj.phase_id,
                 requester=_cli_actor(),
                 requested_at=_utcnow(),

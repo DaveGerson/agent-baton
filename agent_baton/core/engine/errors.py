@@ -121,6 +121,50 @@ class InvalidApprovalState(RuntimeError):
         super().__init__(message)
 
 
+class IllegalStateTransition(RuntimeError):
+    """Raised when an ``ExecutionState.transition_to_X`` precondition fails.
+
+    Hole 1 fix family.  Direct ``state.status = ...`` writes are being
+    funnelled through transition methods so that coupled-field invariants
+    (e.g. I1: ``status == "approval_pending"`` ⇔ ``pending_approval_request
+    is not None``) cannot drift by way of an early ``return`` between the
+    status flip and the audit-row write.
+
+    A transition method raises this exception when the caller attempts to
+    move the state machine from a status the transition does not allow.
+    The exception is intended to surface latent bugs — production code
+    should never trigger it under normal operation.
+
+    Attributes:
+        from_status: The status the state was in when the transition was
+            attempted.
+        to_status: The status the transition would have moved to.
+        task_id: The task whose state was being transitioned, if known.
+        context: Free-text description of the call site.
+    """
+
+    def __init__(
+        self,
+        *,
+        from_status: str,
+        to_status: str,
+        task_id: str = "",
+        context: str = "",
+    ) -> None:
+        self.from_status = from_status
+        self.to_status = to_status
+        self.task_id = task_id
+        self.context = context
+        message = (
+            f"Illegal state transition from {from_status!r} to {to_status!r}"
+        )
+        if task_id:
+            message = f"{message} for task {task_id!r}"
+        if context:
+            message = f"{message} ({context})"
+        super().__init__(message)
+
+
 class ComplianceWriteError(RuntimeError):
     """Raised by ``_write_compliance_entry`` when fail-closed mode is enabled.
 

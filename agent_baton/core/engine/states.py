@@ -120,8 +120,11 @@ class ExecutingPhaseState:
             return
 
         # ── Approval-pending: all steps complete, approval required ───────────
+        # The I1-coupled status flip + pending_approval_request stamp is
+        # owned by the engine's _approval_action via
+        # ExecutionState.transition_to_approval_pending. No-op here so the
+        # two writes are atomic in the caller.
         if kind == DecisionKind.PHASE_NEEDS_APPROVAL:
-            state.status = "approval_pending"
             return
 
         # ── Feedback-pending: all steps complete, questions not answered ──────
