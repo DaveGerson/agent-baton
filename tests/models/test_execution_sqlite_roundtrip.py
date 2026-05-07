@@ -644,6 +644,198 @@ class TestExecutionStateSqliteRoundtrip:
         assert loaded.working_branch == "feat/sqlite-phase-a"
         assert loaded.working_branch_head == "abc1234deadbeef"
 
+    def test_execution_sqlite_phase_b_json_columns_roundtrip(
+        self, store: SqliteStorage,
+    ) -> None:
+        """v37 Phase B: JSON-blob columns on executions survive save → load."""
+        from agent_baton.models.execution import (
+            ConsolidationResult,
+            PendingApprovalRequest,
+        )
+
+        plan = _minimal_plan("task-exec-rt-phase-b1")
+        state = _minimal_execution_state(plan)
+        state.consolidation_result = ConsolidationResult(
+            status="success",
+            base_commit="abc",
+            final_head="def",
+            files_changed=["a.py", "b.py"],
+            total_insertions=10,
+            total_deletions=2,
+            started_at="2026-01-15T11:00:00+00:00",
+            completed_at="2026-01-15T11:10:00+00:00",
+        )
+        state.pending_approval_request = PendingApprovalRequest(
+            phase_id=1,
+            requester="alice@workstation",
+            requested_at="2026-01-15T11:15:00+00:00",
+        )
+        state.pending_scope_expansions = [
+            {"id": "expand-1", "phase_id": 1},
+        ]
+        state.phase_retries = {"phase_1": 2, "phase_3": 1}
+
+        store.save_execution(state)
+        loaded = store.load_execution("task-exec-rt-phase-b1")
+        assert loaded is not None
+        assert loaded.consolidation_result is not None
+        assert loaded.consolidation_result.status == "success"
+        assert loaded.consolidation_result.total_insertions == 10
+        assert loaded.pending_approval_request is not None
+        assert loaded.pending_approval_request.requester == "alice@workstation"
+        assert loaded.pending_scope_expansions == [
+            {"id": "expand-1", "phase_id": 1},
+        ]
+        assert loaded.phase_retries == {"phase_1": 2, "phase_3": 1}
+
+    def test_execution_sqlite_phase_b_collection_tables_roundtrip(
+        self, store: SqliteStorage,
+    ) -> None:
+        """v38-v40 Phase B: collection child tables roundtrip cleanly."""
+        plan = _minimal_plan("task-exec-rt-phase-b2")
+        state = _minimal_execution_state(plan)
+        state.delivered_knowledge = {
+            "docs/CLAUDE.md": "1.1",
+            "docs/architecture.md": "1.2",
+        }
+        state.step_worktrees = {
+            "1.1": {
+                "worktree_path": "/tmp/wt-1.1",
+                "branch": "wt/1.1",
+                "base_branch": "main",
+                "head_sha": "abc1234",
+                "created_at": "2026-01-15T11:00:00+00:00",
+            },
+        }
+        # steps_ran_in_place is intentionally for a step that does NOT have
+        # a step_worktrees entry — exercises the §1.1 Gap 3 separation.
+        state.steps_ran_in_place = {"1.2": "worktree create failed: ENOSPC"}
+        state.takeover_records = [
+            {
+                "takeover_id": "to-1",
+                "started_at": "2026-01-15T11:05:00+00:00",
+                "started_by": "operator@host",
+                "resumed_at": "",
+                "scope": "phase-1",
+                "reason": "investigate gate failure",
+            },
+        ]
+        state.selfheal_attempts = [
+            {
+                "attempt_id": "sh-1",
+                "step_id": "1.1",
+                "started_at": "2026-01-15T11:10:00+00:00",
+                "status": "complete",
+                "cost_usd": 0.42,
+            },
+        ]
+        state.speculations = {
+            "spec-1": {
+                "spec_id": "spec-1",
+                "target_step_id": "1.2",
+                "started_at": "2026-01-15T11:12:00+00:00",
+                "status": "pending",
+                "trigger": "phase-1-completion",
+            },
+        }
+
+        store.save_execution(state)
+        loaded = store.load_execution("task-exec-rt-phase-b2")
+        assert loaded is not None
+        assert loaded.delivered_knowledge == state.delivered_knowledge
+        assert "1.1" in loaded.step_worktrees
+        assert loaded.step_worktrees["1.1"]["branch"] == "wt/1.1"
+        # The §1.1 Gap 3 separation: in-place step does NOT appear in worktrees.
+        assert "1.2" not in loaded.step_worktrees
+        assert loaded.steps_ran_in_place == {"1.2": "worktree create failed: ENOSPC"}
+        assert len(loaded.takeover_records) == 1
+        assert loaded.takeover_records[0]["takeover_id"] == "to-1"
+        assert len(loaded.selfheal_attempts) == 1
+        assert loaded.selfheal_attempts[0]["attempt_id"] == "sh-1"
+        assert "spec-1" in loaded.speculations
+        # Speculations no longer carries _phase_retries (slice 6 split).
+        assert "_phase_retries" not in loaded.speculations
+
+    def test_phase_retries_legacy_lift_from_speculations(self) -> None:
+        """Legacy state files with _phase_retries inside speculations migrate cleanly.
+
+        Slice 6 split phase_retries out of the speculations bimodal dict.
+        Older state files keyed retry counts under
+        ``speculations["_phase_retries"]``; ``ExecutionState.from_dict``
+        lifts those into the new top-level ``phase_retries`` field on load.
+        """
+        from agent_baton.models.execution import ExecutionState
+
+        legacy = {
+            "task_id": "legacy",
+            "plan": {
+                "task_id": "legacy",
+                "task_summary": "",
+                "risk_level": "LOW",
+                "budget_tier": "lean",
+                "execution_mode": "phased",
+                "git_strategy": "commit-per-agent",
+                "phases": [],
+                "shared_context": "",
+                "pattern_source": "",
+                "created_at": "2026-01-15T09:00:00+00:00",
+                "task_type": "feature",
+                "explicit_knowledge_packs": [],
+                "explicit_knowledge_docs": [],
+                "intervention_level": "low",
+                "complexity": "",
+                "classification_source": "",
+                "detected_stack": "",
+                "foresight_insights": [],
+                "depends_on_task": "",
+                "classification_signals": "",
+                "classification_confidence": 0.0,
+                "archetype": "phased",
+                "max_retry_phases": 0,
+                "compliance_fail_closed": None,
+            },
+            "current_phase": 0,
+            "current_step_index": 0,
+            "status": "running",
+            "step_results": [],
+            "gate_results": [],
+            "approval_results": [],
+            "feedback_results": [],
+            "amendments": [],
+            "started_at": "2026-01-15T09:00:00+00:00",
+            "completed_at": "",
+            "pending_gaps": [],
+            "resolved_decisions": [],
+            "delivered_knowledge": {},
+            "consolidation_result": None,
+            "force_override": False,
+            "override_justification": "",
+            "step_worktrees": {},
+            "steps_ran_in_place": {},
+            "working_branch": "",
+            "takeover_records": [],
+            "selfheal_attempts": [],
+            "speculations": {
+                "_phase_retries": {"phase_1": 2},
+                "spec-1": {
+                    "spec_id": "spec-1",
+                    "target_step_id": "1.2",
+                    "started_at": "2026-01-15T11:12:00+00:00",
+                    "status": "pending",
+                },
+            },
+            "working_branch_head": "",
+            "run_cumulative_spend_usd": 0.0,
+            "pending_scope_expansions": [],
+            "scope_expansions_applied": 0,
+            "pending_approval_request": None,
+        }
+
+        loaded = ExecutionState.from_dict(legacy)
+        assert loaded.phase_retries == {"phase_1": 2}
+        assert "_phase_retries" not in loaded.speculations
+        assert "spec-1" in loaded.speculations
+
 
 # ---------------------------------------------------------------------------
 # DDL parity — schema.py:1185 (PROJECT_SCHEMA_DDL) MUST match the column set
@@ -662,24 +854,55 @@ class TestExecutionsTableDdlParity:
     def _columns(conn) -> set[str]:
         return {row[1] for row in conn.execute("PRAGMA table_info(executions)").fetchall()}
 
+    @staticmethod
+    def _executions_alter_columns_from_migrations() -> set[str]:
+        """Extract ``executions`` column names added by ``ALTER TABLE`` rows.
+
+        Walks the live ``MIGRATIONS`` dict and returns the column-name set
+        contributed by ``ALTER TABLE executions ADD COLUMN <name>`` lines
+        across all versions.  Comment blocks are skipped (we only look at
+        lines that start with ``ALTER TABLE executions``), which side-steps
+        the SQL-comment-with-semicolon parsing problem ``str.split(';')``
+        runs into when descriptions contain semicolons.
+        """
+        import re
+
+        from agent_baton.core.storage.schema import MIGRATIONS
+
+        pattern = re.compile(
+            r"^\s*ALTER\s+TABLE\s+executions\s+ADD\s+COLUMN\s+(\w+)",
+            re.IGNORECASE,
+        )
+        cols: set[str] = set()
+        for ddl in MIGRATIONS.values():
+            for line in ddl.splitlines():
+                m = pattern.match(line)
+                if m is not None:
+                    cols.add(m.group(1))
+        return cols
+
     def test_project_schema_matches_migration_chain(self, tmp_path: Path) -> None:
-        """Fresh install (PROJECT_SCHEMA_DDL) and a migrated DB agree on executions cols.
+        """Fresh install (PROJECT_SCHEMA_DDL) and migrations agree on executions cols.
 
-        Builds two SQLite databases:
+        Builds a fresh SQLite database via ``PROJECT_SCHEMA_DDL`` and then
+        compares its ``executions`` column set against the union of:
 
-        * ``fresh.db`` — uses the ``ConnectionManager`` initialisation path,
-          which applies ``PROJECT_SCHEMA_DDL`` directly.
-        * ``migrated.db`` — same code path, but kept as the parity
-          counterpart so this test continues to be the single observable
-          gate when MIGRATIONS gains a new ``ALTER TABLE executions`` step.
+        * the v1 baseline (the columns created in PROJECT_SCHEMA_DDL when
+          no migrations have run); and
+        * every ``ALTER TABLE executions ADD COLUMN`` line in the live
+          ``MIGRATIONS`` dict.
 
-        The test's job is to make adding a v37+ column to MIGRATIONS but
-        forgetting PROJECT_SCHEMA_DDL break loudly.
+        The check is a one-way containment: every column added by an
+        ``ALTER TABLE executions`` migration MUST exist in the fresh-install
+        DDL.  A migration that adds a column but forgets the matching column
+        in ``PROJECT_SCHEMA_DDL`` (or its central-mirror twin) fails this
+        gate immediately.
+
+        See docs/internal/migration-review-summary.md §1.1 Gap 2.
         """
         import sqlite3
 
         from agent_baton.core.storage.schema import (
-            MIGRATIONS,
             PROJECT_SCHEMA_DDL,
             SCHEMA_VERSION,
         )
@@ -692,60 +915,16 @@ class TestExecutionsTableDdlParity:
         finally:
             fresh.close()
 
-        # Path 2: minimal v1 schema + walk MIGRATIONS to current version.
-        # Use a v1-shaped table that matches the pre-migration baseline
-        # (mirrors what real upgrade installs encountered).
-        migrated = sqlite3.connect(str(tmp_path / "migrated.db"))
-        try:
-            migrated.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS _schema_version (version INTEGER NOT NULL);
-                CREATE TABLE IF NOT EXISTS executions (
-                    task_id              TEXT PRIMARY KEY,
-                    status               TEXT NOT NULL DEFAULT 'running',
-                    current_phase        INTEGER NOT NULL DEFAULT 0,
-                    current_step_index   INTEGER NOT NULL DEFAULT 0,
-                    started_at           TEXT NOT NULL DEFAULT '',
-                    completed_at         TEXT,
-                    created_at           TEXT NOT NULL DEFAULT '',
-                    updated_at           TEXT NOT NULL DEFAULT ''
-                );
-                """
-            )
-            for v in sorted(MIGRATIONS):
-                # Skip migrations that touch tables that don't exist in our
-                # minimal seed; only apply the ones that target executions
-                # — we are testing executions-column parity, not the full
-                # schema replay.
-                ddl = MIGRATIONS[v]
-                for stmt in ddl.split(";"):
-                    s = stmt.strip()
-                    if not s:
-                        continue
-                    if "executions" not in s.lower():
-                        continue
-                    # Skip CREATE TABLE for executions in central mirror —
-                    # we already created the project executions above.
-                    lower = s.lower()
-                    if lower.startswith("create table") and "executions" in lower:
-                        continue
-                    try:
-                        migrated.execute(s)
-                    except sqlite3.OperationalError:
-                        # Column may already exist if a fresh-leaning baseline
-                        # was used; ignore for parity comparison purposes.
-                        pass
-            migrated_cols = self._columns(migrated)
-        finally:
-            migrated.close()
+        # Path 2: scan migrations for every executions column add.
+        migrated_added = self._executions_alter_columns_from_migrations()
 
-        # Every column in PROJECT_SCHEMA_DDL must be present in the migrated
-        # set (and vice versa) for executions specifically.
-        assert fresh_cols == migrated_cols, (
+        # Every column added by a migration must exist in the fresh DDL.
+        missing = migrated_added - fresh_cols
+        assert not missing, (
             f"executions DDL parity broken at SCHEMA_VERSION={SCHEMA_VERSION}: "
-            f"fresh-install set {sorted(fresh_cols)} != migrated set "
-            f"{sorted(migrated_cols)}.  Add the matching ALTER/column in "
-            f"PROJECT_SCHEMA_DDL or the new migration."
+            f"PROJECT_SCHEMA_DDL is missing columns added by MIGRATIONS: "
+            f"{sorted(missing)}.  Add them to PROJECT_SCHEMA_DDL and the "
+            f"central-mirror block in schema.py."
         )
 
     def test_v36_phase_a_columns_present_in_project_ddl(self) -> None:
@@ -794,5 +973,33 @@ class TestExecutionsTableDdlParity:
         ):
             assert col in block, (
                 f"v36 column {col!r} missing from the central mirror "
+                f"executions DDL"
+            )
+
+    def test_v37_phase_b_json_columns_present_in_both_ddls(self) -> None:
+        """v37 JSON-blob columns are declared in BOTH executions DDL blocks."""
+        from pathlib import Path
+
+        from agent_baton.core.storage import schema
+        from agent_baton.core.storage.schema import PROJECT_SCHEMA_DDL
+
+        v37_cols = (
+            "consolidation_result_json",
+            "pending_scope_expansions_json",
+            "pending_approval_request_json",
+            "phase_retries_json",
+        )
+        for col in v37_cols:
+            assert col in PROJECT_SCHEMA_DDL, (
+                f"v37 column {col!r} missing from PROJECT_SCHEMA_DDL"
+            )
+
+        src = Path(schema.__file__).read_text()
+        first = src.find("CREATE TABLE IF NOT EXISTS executions")
+        second = src.find("CREATE TABLE IF NOT EXISTS executions", first + 1)
+        block = src[second:second + 3000]
+        for col in v37_cols:
+            assert col in block, (
+                f"v37 column {col!r} missing from the central mirror "
                 f"executions DDL"
             )

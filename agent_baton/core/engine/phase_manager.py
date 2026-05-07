@@ -297,27 +297,19 @@ class PhaseManager:
 
         Resets the step index to the beginning of the current phase so all
         steps will be re-dispatched.  Does NOT advance the phase counter.
-        Tracks retry count in ``state.speculations["_phase_retries"]`` so
-        it persists across CLI calls.
-
-        Args:
-            state: The execution state to mutate.
+        Tracks retry count in ``state.phase_retries`` so it persists across
+        CLI calls (slice 6 split this out of ``state.speculations``).
         """
         if state.current_phase >= len(state.plan.phases):
             return
         phase = state.plan.phases[state.current_phase]
 
-        # Track retry count in speculations (persisted dict[str, dict])
-        retry_store = getattr(state, "speculations", None)
+        retry_store = getattr(state, "phase_retries", None)
         if retry_store is None:
-            state.speculations = {}
-            retry_store = state.speculations
-        if "_phase_retries" not in retry_store:
-            retry_store["_phase_retries"] = {}
+            state.phase_retries = {}
+            retry_store = state.phase_retries
         retry_key = f"phase_{phase.phase_id}"
-        retry_store["_phase_retries"][retry_key] = (
-            int(retry_store["_phase_retries"].get(retry_key, 0)) + 1
-        )
+        retry_store[retry_key] = int(retry_store.get(retry_key, 0)) + 1
 
         # Reset step index to the beginning of this phase
         state.current_step_index = sum(

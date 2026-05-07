@@ -273,6 +273,7 @@
   "takeover_records": [],
   "selfheal_attempts": [],
   "speculations": {},
+  "phase_retries": {},
   "working_branch_head": "11223344aabbccdd",
   "run_cumulative_spend_usd": 0.042,
   "pending_scope_expansions": [],

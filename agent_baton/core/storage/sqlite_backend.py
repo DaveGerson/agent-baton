@@ -119,6 +119,23 @@ class SqliteStorage:
             # Use INSERT ... ON CONFLICT DO UPDATE (safe upsert) rather than
             # INSERT OR REPLACE so that FK CASCADE children (beads, events, etc.)
             # are NOT deleted when the execution row is updated mid-flight.
+            # v37 (Phase B) JSON columns serialised here so the upsert
+            # writes them in a single round-trip with the executions row.
+            cr_obj = getattr(state, "consolidation_result", None)
+            cr_json = (
+                json.dumps(cr_obj.to_dict()) if cr_obj is not None else None
+            )
+            par_obj = getattr(state, "pending_approval_request", None)
+            par_json = (
+                json.dumps(par_obj.to_dict()) if par_obj is not None else None
+            )
+            pse_json = json.dumps(
+                list(getattr(state, "pending_scope_expansions", []))
+            )
+            phase_retries_json_v = json.dumps(
+                {str(k): int(v) for k, v in getattr(state, "phase_retries", {}).items()}
+            )
+
             conn.execute(
                 """
                 INSERT INTO executions
@@ -127,25 +144,32 @@ class SqliteStorage:
                      pending_gaps, resolved_decisions,
                      force_override, override_justification,
                      run_cumulative_spend_usd, scope_expansions_applied,
-                     working_branch, working_branch_head)
+                     working_branch, working_branch_head,
+                     consolidation_result_json, pending_scope_expansions_json,
+                     pending_approval_request_json, phase_retries_json)
                 VALUES (?, ?, ?, ?, ?, ?,
                         strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
                         ?, ?,
-                        ?, ?, ?, ?, ?, ?)
+                        ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?)
                 ON CONFLICT(task_id) DO UPDATE SET
-                    status                   = excluded.status,
-                    current_phase            = excluded.current_phase,
-                    current_step_index       = excluded.current_step_index,
-                    completed_at             = excluded.completed_at,
-                    updated_at               = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
-                    pending_gaps             = excluded.pending_gaps,
-                    resolved_decisions       = excluded.resolved_decisions,
-                    force_override           = excluded.force_override,
-                    override_justification   = excluded.override_justification,
-                    run_cumulative_spend_usd = excluded.run_cumulative_spend_usd,
-                    scope_expansions_applied = excluded.scope_expansions_applied,
-                    working_branch           = excluded.working_branch,
-                    working_branch_head      = excluded.working_branch_head
+                    status                        = excluded.status,
+                    current_phase                 = excluded.current_phase,
+                    current_step_index            = excluded.current_step_index,
+                    completed_at                  = excluded.completed_at,
+                    updated_at                    = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+                    pending_gaps                  = excluded.pending_gaps,
+                    resolved_decisions            = excluded.resolved_decisions,
+                    force_override                = excluded.force_override,
+                    override_justification        = excluded.override_justification,
+                    run_cumulative_spend_usd      = excluded.run_cumulative_spend_usd,
+                    scope_expansions_applied      = excluded.scope_expansions_applied,
+                    working_branch                = excluded.working_branch,
+                    working_branch_head           = excluded.working_branch_head,
+                    consolidation_result_json     = excluded.consolidation_result_json,
+                    pending_scope_expansions_json = excluded.pending_scope_expansions_json,
+                    pending_approval_request_json = excluded.pending_approval_request_json,
+                    phase_retries_json            = excluded.phase_retries_json
                 """,
                 (
                     state.task_id,
@@ -162,8 +186,20 @@ class SqliteStorage:
                     int(getattr(state, "scope_expansions_applied", 0)),
                     getattr(state, "working_branch", "") or "",
                     getattr(state, "working_branch_head", "") or "",
+                    cr_json,
+                    pse_json,
+                    par_json,
+                    phase_retries_json_v,
                 ),
             )
+
+            # v38-v40 Phase B: child tables for collection-shaped fields.
+            # DELETE+INSERT keeps the row set in sync with the in-memory list,
+            # matching the existing pattern used for step_results.  This
+            # write semantics is the OCC-conflict-prone point flagged for
+            # Phase C — until then, multi-process saves on the same task_id
+            # remain unsupported.
+            _replace_collection_rows(conn, state)
 
             # -- plan ----------------------------------------------------------
             _upsert_plan(conn, state.plan)
@@ -378,10 +414,12 @@ class SqliteStorage:
         """
         from agent_baton.models.execution import (
             ApprovalResult,
+            ConsolidationResult,
             ExecutionState,
             FeedbackResult,
             GateResult,
             InteractionTurn,
+            PendingApprovalRequest,
             PlanAmendment,
             StepResult,
             TeamStepResult,
@@ -585,6 +623,110 @@ class SqliteStorage:
             if "working_branch_head" in exec_keys else ""
         )
 
+        # v37 (SQLite Phase B): JSON-blob columns on executions.
+        cr_raw = (
+            row["consolidation_result_json"]
+            if "consolidation_result_json" in exec_keys else None
+        )
+        consolidation_result_v = (
+            ConsolidationResult.from_dict(json.loads(cr_raw))
+            if cr_raw else None
+        )
+        pse_raw = (
+            row["pending_scope_expansions_json"]
+            if "pending_scope_expansions_json" in exec_keys else "[]"
+        )
+        pending_scope_expansions_v = json.loads(pse_raw or "[]")
+        par_raw = (
+            row["pending_approval_request_json"]
+            if "pending_approval_request_json" in exec_keys else None
+        )
+        pending_approval_request_v = (
+            PendingApprovalRequest.from_dict(json.loads(par_raw))
+            if par_raw else None
+        )
+        pr_raw = (
+            row["phase_retries_json"]
+            if "phase_retries_json" in exec_keys else "{}"
+        )
+        phase_retries_v = {
+            str(k): int(v) for k, v in json.loads(pr_raw or "{}").items()
+        }
+
+        # v38-v40 (SQLite Phase B): child-table reads.
+        delivered_knowledge_v: dict[str, str] = {}
+        if _table_exists(conn, "delivered_knowledge"):
+            for r in conn.execute(
+                "SELECT doc_key, first_step_id FROM delivered_knowledge "
+                "WHERE task_id = ?",
+                (task_id,),
+            ).fetchall():
+                delivered_knowledge_v[r["doc_key"]] = r["first_step_id"]
+
+        step_worktrees_v: dict[str, dict] = {}
+        if _table_exists(conn, "step_worktrees"):
+            for r in conn.execute(
+                "SELECT step_id, payload_json FROM step_worktrees "
+                "WHERE task_id = ?",
+                (task_id,),
+            ).fetchall():
+                try:
+                    payload = json.loads(r["payload_json"] or "{}")
+                except json.JSONDecodeError:
+                    payload = {}
+                step_worktrees_v[r["step_id"]] = payload
+
+        steps_ran_in_place_v: dict[str, str] = {}
+        if _table_exists(conn, "steps_ran_in_place"):
+            for r in conn.execute(
+                "SELECT step_id, reason FROM steps_ran_in_place "
+                "WHERE task_id = ?",
+                (task_id,),
+            ).fetchall():
+                steps_ran_in_place_v[r["step_id"]] = r["reason"]
+
+        takeover_records_v: list[dict] = []
+        if _table_exists(conn, "takeover_records"):
+            for r in conn.execute(
+                "SELECT payload_json FROM takeover_records "
+                "WHERE task_id = ? ORDER BY rowid",
+                (task_id,),
+            ).fetchall():
+                try:
+                    takeover_records_v.append(
+                        json.loads(r["payload_json"] or "{}")
+                    )
+                except json.JSONDecodeError:
+                    pass
+
+        selfheal_attempts_v: list[dict] = []
+        if _table_exists(conn, "selfheal_attempts"):
+            for r in conn.execute(
+                "SELECT payload_json FROM selfheal_attempts "
+                "WHERE task_id = ? ORDER BY rowid",
+                (task_id,),
+            ).fetchall():
+                try:
+                    selfheal_attempts_v.append(
+                        json.loads(r["payload_json"] or "{}")
+                    )
+                except json.JSONDecodeError:
+                    pass
+
+        speculations_v: dict[str, dict] = {}
+        if _table_exists(conn, "speculations"):
+            for r in conn.execute(
+                "SELECT spec_id, payload_json FROM speculations "
+                "WHERE task_id = ?",
+                (task_id,),
+            ).fetchall():
+                try:
+                    speculations_v[r["spec_id"]] = json.loads(
+                        r["payload_json"] or "{}"
+                    )
+                except json.JSONDecodeError:
+                    pass
+
         return ExecutionState(
             task_id=row["task_id"],
             plan=plan,
@@ -612,6 +754,16 @@ class SqliteStorage:
             scope_expansions_applied=scope_expansions_applied_v,
             working_branch=working_branch_v,
             working_branch_head=working_branch_head_v,
+            consolidation_result=consolidation_result_v,
+            pending_scope_expansions=pending_scope_expansions_v,
+            pending_approval_request=pending_approval_request_v,
+            phase_retries=phase_retries_v,
+            delivered_knowledge=delivered_knowledge_v,
+            step_worktrees=step_worktrees_v,
+            steps_ran_in_place=steps_ran_in_place_v,
+            takeover_records=takeover_records_v,
+            selfheal_attempts=selfheal_attempts_v,
+            speculations=speculations_v,
         )
 
     def list_executions(self) -> list[str]:
@@ -1841,6 +1993,171 @@ class SqliteStorage:
 # ==========================================================================
 # Private helpers (module-level, not part of the public API)
 # ==========================================================================
+
+
+def _replace_collection_rows(
+    conn: sqlite3.Connection, state: "ExecutionState",  # noqa: F821
+) -> None:
+    """DELETE+INSERT all v38-v40 (Phase B) child-table rows for the execution.
+
+    Mirrors the ``state.delivered_knowledge``, ``state.step_worktrees``,
+    ``state.steps_ran_in_place``, ``state.takeover_records``,
+    ``state.selfheal_attempts``, and ``state.speculations`` collections
+    into their normalised tables.  The DELETE-then-INSERT pattern keeps
+    removed entries from sticking around — same approach used for
+    ``step_results`` in the main ``save_execution`` body.
+
+    Tolerates rows being absent from databases that have not yet run the
+    corresponding migration (``_table_exists`` fallback) so the backend
+    keeps working against partially-migrated DBs in the wild.
+    """
+    task_id = state.task_id
+
+    if _table_exists(conn, "delivered_knowledge"):
+        conn.execute(
+            "DELETE FROM delivered_knowledge WHERE task_id = ?", (task_id,),
+        )
+        for doc_key, first_step_id in (
+            getattr(state, "delivered_knowledge", {}) or {}
+        ).items():
+            conn.execute(
+                """
+                INSERT INTO delivered_knowledge
+                    (task_id, doc_key, first_step_id)
+                VALUES (?, ?, ?)
+                """,
+                (task_id, str(doc_key), str(first_step_id)),
+            )
+
+    if _table_exists(conn, "step_worktrees"):
+        conn.execute(
+            "DELETE FROM step_worktrees WHERE task_id = ?", (task_id,),
+        )
+        for step_id, payload in (
+            getattr(state, "step_worktrees", {}) or {}
+        ).items():
+            payload_dict = payload if isinstance(payload, dict) else {}
+            conn.execute(
+                """
+                INSERT INTO step_worktrees
+                    (task_id, step_id, worktree_path, branch, base_branch,
+                     head_sha, created_at, payload_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    task_id,
+                    str(step_id),
+                    str(payload_dict.get("worktree_path", "")),
+                    str(payload_dict.get("branch", "")),
+                    str(payload_dict.get("base_branch", "")),
+                    str(payload_dict.get("head_sha", "")),
+                    str(payload_dict.get("created_at", "")),
+                    json.dumps(payload_dict),
+                ),
+            )
+
+    if _table_exists(conn, "steps_ran_in_place"):
+        conn.execute(
+            "DELETE FROM steps_ran_in_place WHERE task_id = ?", (task_id,),
+        )
+        for step_id, reason in (
+            getattr(state, "steps_ran_in_place", {}) or {}
+        ).items():
+            conn.execute(
+                """
+                INSERT INTO steps_ran_in_place
+                    (task_id, step_id, reason)
+                VALUES (?, ?, ?)
+                """,
+                (task_id, str(step_id), str(reason)),
+            )
+
+    if _table_exists(conn, "takeover_records"):
+        conn.execute(
+            "DELETE FROM takeover_records WHERE task_id = ?", (task_id,),
+        )
+        for i, record in enumerate(
+            getattr(state, "takeover_records", []) or []
+        ):
+            r = record if isinstance(record, dict) else {}
+            takeover_id = str(r.get("takeover_id") or f"to-{i}")
+            conn.execute(
+                """
+                INSERT INTO takeover_records
+                    (task_id, takeover_id, started_at, started_by,
+                     resumed_at, resumed_by, scope, reason, payload_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    task_id,
+                    takeover_id,
+                    str(r.get("started_at", "")),
+                    str(r.get("started_by", "")),
+                    r.get("resumed_at") or None,
+                    r.get("resumed_by") or None,
+                    str(r.get("scope", "")),
+                    str(r.get("reason", "")),
+                    json.dumps(r),
+                ),
+            )
+
+    if _table_exists(conn, "selfheal_attempts"):
+        conn.execute(
+            "DELETE FROM selfheal_attempts WHERE task_id = ?", (task_id,),
+        )
+        for i, record in enumerate(
+            getattr(state, "selfheal_attempts", []) or []
+        ):
+            r = record if isinstance(record, dict) else {}
+            attempt_id = str(r.get("attempt_id") or f"sh-{i}")
+            conn.execute(
+                """
+                INSERT INTO selfheal_attempts
+                    (task_id, attempt_id, step_id, started_at, status,
+                     cost_usd, payload_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    task_id,
+                    attempt_id,
+                    str(r.get("step_id", "")),
+                    str(r.get("started_at", "")),
+                    str(r.get("status", "")),
+                    float(r.get("cost_usd", 0.0)),
+                    json.dumps(r),
+                ),
+            )
+
+    if _table_exists(conn, "speculations"):
+        conn.execute(
+            "DELETE FROM speculations WHERE task_id = ?", (task_id,),
+        )
+        # _phase_retries used to live inside speculations as a magic key;
+        # slice 6 (Phase B) split it out into the phase_retries_json column.
+        # The model's from_dict shim already removed it on load, so what
+        # we see here is the post-shim payload — but defend in depth.
+        for spec_id, payload in (
+            getattr(state, "speculations", {}) or {}
+        ).items():
+            if str(spec_id) == "_phase_retries":
+                continue
+            r = payload if isinstance(payload, dict) else {}
+            conn.execute(
+                """
+                INSERT INTO speculations
+                    (task_id, spec_id, started_at, target_step_id, status,
+                     payload_json)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    task_id,
+                    str(spec_id),
+                    str(r.get("started_at", "")),
+                    str(r.get("target_step_id", "")),
+                    str(r.get("status", "")),
+                    json.dumps(r),
+                ),
+            )
 
 
 def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:

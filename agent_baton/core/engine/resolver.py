@@ -438,13 +438,14 @@ class ActionResolver:
         # Investigative archetype: check if phase should retry instead of
         # advancing.  The agent signals retry by including "RETRY_PHASE" in
         # the last step's outcome text.  Retry counts are tracked in
-        # state.speculations["_phase_retries"] (persists across CLI calls).
+        # state.phase_retries (persists across CLI calls; slice 6 split
+        # this out of state.speculations to break the bimodal-dict
+        # cohabitation that confused the SpeculativePipeliner reader).
         plan = state.plan
         max_retries = getattr(plan, "max_retry_phases", 0)
         archetype = getattr(plan, "archetype", "phased")
         if archetype == "investigative" and max_retries > 0:
-            retry_store = getattr(state, "speculations", {}) or {}
-            retry_data = retry_store.get("_phase_retries", {})
+            retry_data = getattr(state, "phase_retries", {}) or {}
             retry_key = f"phase_{phase_obj.phase_id}"
             retry_count = int(retry_data.get(retry_key, 0))
 

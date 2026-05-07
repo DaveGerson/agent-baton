@@ -1479,6 +1479,16 @@ class ExecutionState:
     # shape transparently.
     pending_approval_request: PendingApprovalRequest | None = None
 
+    # SQLite Phase B (slice 6): pull the bimodal _phase_retries scratchpad
+    # OUT of speculations and into a dedicated field.  Investigative-archetype
+    # phase retry counts persist across CLI calls but have no relation to
+    # the speculation pipeline — keying both under ``speculations`` was a
+    # cohabitation that confused the SpeculativePipeliner reader (it tried to
+    # rehydrate the retry-count dict as a SpeculationRecord).  See
+    # docs/internal/sqlite-parity-proposal.md §1.1 Gap 4.
+    # Map shape: ``{"phase_<phase_id>": <retry_count>}``.
+    phase_retries: dict[str, int] = field(default_factory=dict)
+
     def __post_init__(self) -> None:
         if not self.started_at:
             self.started_at = datetime.now(timezone.utc).isoformat()
@@ -1667,6 +1677,9 @@ class ExecutionState:
             "takeover_records": list(getattr(self, "takeover_records", [])),
             "selfheal_attempts": list(getattr(self, "selfheal_attempts", [])),
             "speculations": dict(getattr(self, "speculations", {})),
+            # SQLite Phase B: investigative-archetype phase retry counts.
+            # Pulled out of the speculations bimodal scratchpad.
+            "phase_retries": dict(getattr(self, "phase_retries", {})),
             # bd-def9: rebased tip SHA after most-recent fold_back()
             "working_branch_head": getattr(self, "working_branch_head", ""),
             # end-user readiness #7: run-level cumulative spend for ceiling tracking
@@ -1684,6 +1697,21 @@ class ExecutionState:
     @classmethod
     def from_dict(cls, data: dict) -> ExecutionState:
         cr_data = data.get("consolidation_result")
+
+        # SQLite Phase B: lift _phase_retries out of speculations.  Older
+        # state files keyed phase retries inside the speculations dict
+        # under the magic ``_phase_retries`` slot — the dict was bimodal.
+        # Slice 6 separates the two; this shim makes legacy files load.
+        speculations_in = dict(data.get("speculations", {}))
+        legacy_retries = speculations_in.pop("_phase_retries", None)
+        explicit_retries = data.get("phase_retries")
+        if explicit_retries is not None:
+            phase_retries = {str(k): int(v) for k, v in explicit_retries.items()}
+        elif isinstance(legacy_retries, dict):
+            phase_retries = {str(k): int(v) for k, v in legacy_retries.items()}
+        else:
+            phase_retries = {}
+
         return cls(
             task_id=data["task_id"],
             plan=MachinePlan.from_dict(data["plan"]),
@@ -1710,7 +1738,10 @@ class ExecutionState:
             # Wave 5 (bd-e208, bd-1483, bd-9839): default to empty for legacy files
             takeover_records=list(data.get("takeover_records", [])),
             selfheal_attempts=list(data.get("selfheal_attempts", [])),
-            speculations=dict(data.get("speculations", {})),
+            # speculations no longer carries _phase_retries (split above);
+            # use the post-shim copy that has it removed.
+            speculations=speculations_in,
+            phase_retries=phase_retries,
             # bd-def9: getattr guard for legacy state files that predate this field
             working_branch_head=data.get("working_branch_head", ""),
             # end-user readiness #7: default 0.0 for legacy state files

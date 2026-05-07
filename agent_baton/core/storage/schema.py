@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 36
+SCHEMA_VERSION = 40
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -1193,6 +1193,102 @@ ALTER TABLE executions ADD COLUMN scope_expansions_applied  INTEGER NOT NULL DEF
 ALTER TABLE executions ADD COLUMN working_branch            TEXT    NOT NULL DEFAULT '';
 ALTER TABLE executions ADD COLUMN working_branch_head       TEXT    NOT NULL DEFAULT '';
 """,
+    37: """
+-- v37: SQLite Phase B step 1 — JSON-blob columns on executions for
+-- singletons and queue-shaped lists.
+--
+-- consolidation_result_json   — Singleton ConsolidationResult; written once.
+-- pending_scope_expansions_json — Queue of pending scope-expansion requests.
+-- pending_approval_request_json — I1 audit row (Hole 1 fix); nullable.
+-- phase_retries_json          — Investigative-archetype retry counts.
+--                                Pulled out of speculations bimodal dict.
+ALTER TABLE executions ADD COLUMN consolidation_result_json     TEXT;
+ALTER TABLE executions ADD COLUMN pending_scope_expansions_json TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE executions ADD COLUMN pending_approval_request_json TEXT;
+ALTER TABLE executions ADD COLUMN phase_retries_json            TEXT NOT NULL DEFAULT '{}';
+""",
+    38: """
+-- v38: SQLite Phase B step 2 — delivered_knowledge child table.
+--
+-- Maps doc key → first step_id where it was delivered.  Used by the
+-- knowledge resolver for session-level dedup.
+CREATE TABLE IF NOT EXISTS delivered_knowledge (
+    task_id        TEXT NOT NULL,
+    doc_key        TEXT NOT NULL,
+    first_step_id  TEXT NOT NULL,
+    delivered_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    PRIMARY KEY (task_id, doc_key)
+);
+CREATE INDEX IF NOT EXISTS idx_dk_step ON delivered_knowledge(task_id, first_step_id);
+""",
+    39: """
+-- v39: SQLite Phase B step 3 — worktree isolation tables.
+--
+-- step_worktrees stores actively-used WorktreeHandle records for steps
+-- that successfully created a worktree.  steps_ran_in_place keeps the
+-- separate "tried to make a worktree, fell back to in-place" reason
+-- string — these are kept apart because a step that ran in-place may NOT
+-- have a step_worktrees row at all (worktree creation failed).  Per
+-- sqlite-parity-proposal §1.1 Gap 3 we deliberately split rather than
+-- folding under a NULL-allowed shared PK.
+CREATE TABLE IF NOT EXISTS step_worktrees (
+    task_id              TEXT NOT NULL,
+    step_id              TEXT NOT NULL,
+    worktree_path        TEXT NOT NULL DEFAULT '',
+    branch               TEXT NOT NULL DEFAULT '',
+    base_branch          TEXT NOT NULL DEFAULT '',
+    head_sha             TEXT NOT NULL DEFAULT '',
+    created_at           TEXT NOT NULL DEFAULT '',
+    payload_json         TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY (task_id, step_id)
+);
+CREATE TABLE IF NOT EXISTS steps_ran_in_place (
+    task_id  TEXT NOT NULL,
+    step_id  TEXT NOT NULL,
+    reason   TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (task_id, step_id)
+);
+""",
+    40: """
+-- v40: SQLite Phase B step 4 — Human-Agent Loop tables (Wave 5).
+--
+-- takeover_records: I9 invariant relies on rows-with-empty-resumed_at.
+-- selfheal_attempts and speculations: stable shapes per Wave 5.
+CREATE TABLE IF NOT EXISTS takeover_records (
+    task_id      TEXT NOT NULL,
+    takeover_id  TEXT NOT NULL,
+    started_at   TEXT NOT NULL DEFAULT '',
+    started_by   TEXT NOT NULL DEFAULT '',
+    resumed_at   TEXT,
+    resumed_by   TEXT,
+    scope        TEXT NOT NULL DEFAULT '',
+    reason       TEXT NOT NULL DEFAULT '',
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY (task_id, takeover_id)
+);
+CREATE INDEX IF NOT EXISTS idx_takeover_active ON takeover_records(task_id) WHERE resumed_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS selfheal_attempts (
+    task_id     TEXT NOT NULL,
+    attempt_id  TEXT NOT NULL,
+    step_id     TEXT NOT NULL DEFAULT '',
+    started_at  TEXT NOT NULL DEFAULT '',
+    status      TEXT NOT NULL DEFAULT '',
+    cost_usd    REAL NOT NULL DEFAULT 0.0,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY (task_id, attempt_id)
+);
+
+CREATE TABLE IF NOT EXISTS speculations (
+    task_id         TEXT NOT NULL,
+    spec_id         TEXT NOT NULL,
+    started_at      TEXT NOT NULL DEFAULT '',
+    target_step_id  TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT '',
+    payload_json    TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY (task_id, spec_id)
+);
+""",
 }
 
 # =====================================================================
@@ -1207,26 +1303,96 @@ CREATE TABLE IF NOT EXISTS _schema_version (
 
 -- EXECUTIONS (replaces execution-state.json)
 CREATE TABLE IF NOT EXISTS executions (
-    task_id                   TEXT PRIMARY KEY,
-    status                    TEXT NOT NULL DEFAULT 'running',
-    current_phase             INTEGER NOT NULL DEFAULT 0,
-    current_step_index        INTEGER NOT NULL DEFAULT 0,
-    started_at                TEXT NOT NULL,
-    completed_at              TEXT,
-    created_at                TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    updated_at                TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    pending_gaps              TEXT NOT NULL DEFAULT '[]',
-    resolved_decisions        TEXT NOT NULL DEFAULT '[]',
+    task_id                       TEXT PRIMARY KEY,
+    status                        TEXT NOT NULL DEFAULT 'running',
+    current_phase                 INTEGER NOT NULL DEFAULT 0,
+    current_step_index            INTEGER NOT NULL DEFAULT 0,
+    started_at                    TEXT NOT NULL,
+    completed_at                  TEXT,
+    created_at                    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at                    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    pending_gaps                  TEXT NOT NULL DEFAULT '[]',
+    resolved_decisions            TEXT NOT NULL DEFAULT '[]',
     -- v36 (SQLite Phase A): six scalar fields lifted out of JSON-only persistence.
-    force_override            INTEGER NOT NULL DEFAULT 0,
-    override_justification    TEXT    NOT NULL DEFAULT '',
-    run_cumulative_spend_usd  REAL    NOT NULL DEFAULT 0.0,
-    scope_expansions_applied  INTEGER NOT NULL DEFAULT 0,
-    working_branch            TEXT    NOT NULL DEFAULT '',
-    working_branch_head       TEXT    NOT NULL DEFAULT ''
+    force_override                INTEGER NOT NULL DEFAULT 0,
+    override_justification        TEXT    NOT NULL DEFAULT '',
+    run_cumulative_spend_usd      REAL    NOT NULL DEFAULT 0.0,
+    scope_expansions_applied      INTEGER NOT NULL DEFAULT 0,
+    working_branch                TEXT    NOT NULL DEFAULT '',
+    working_branch_head           TEXT    NOT NULL DEFAULT '',
+    -- v37 (SQLite Phase B): JSON-blob columns for singletons and queues.
+    consolidation_result_json     TEXT,
+    pending_scope_expansions_json TEXT NOT NULL DEFAULT '[]',
+    pending_approval_request_json TEXT,
+    phase_retries_json            TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS idx_executions_status ON executions(status);
 CREATE INDEX IF NOT EXISTS idx_executions_started ON executions(started_at);
+
+-- v38 (SQLite Phase B): delivered_knowledge child table.
+CREATE TABLE IF NOT EXISTS delivered_knowledge (
+    task_id        TEXT NOT NULL,
+    doc_key        TEXT NOT NULL,
+    first_step_id  TEXT NOT NULL,
+    delivered_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    PRIMARY KEY (task_id, doc_key)
+);
+CREATE INDEX IF NOT EXISTS idx_dk_step ON delivered_knowledge(task_id, first_step_id);
+
+-- v39 (SQLite Phase B): worktree isolation tables.
+CREATE TABLE IF NOT EXISTS step_worktrees (
+    task_id              TEXT NOT NULL,
+    step_id              TEXT NOT NULL,
+    worktree_path        TEXT NOT NULL DEFAULT '',
+    branch               TEXT NOT NULL DEFAULT '',
+    base_branch          TEXT NOT NULL DEFAULT '',
+    head_sha             TEXT NOT NULL DEFAULT '',
+    created_at           TEXT NOT NULL DEFAULT '',
+    payload_json         TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY (task_id, step_id)
+);
+CREATE TABLE IF NOT EXISTS steps_ran_in_place (
+    task_id  TEXT NOT NULL,
+    step_id  TEXT NOT NULL,
+    reason   TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (task_id, step_id)
+);
+
+-- v40 (SQLite Phase B): Human-Agent Loop tables.
+CREATE TABLE IF NOT EXISTS takeover_records (
+    task_id      TEXT NOT NULL,
+    takeover_id  TEXT NOT NULL,
+    started_at   TEXT NOT NULL DEFAULT '',
+    started_by   TEXT NOT NULL DEFAULT '',
+    resumed_at   TEXT,
+    resumed_by   TEXT,
+    scope        TEXT NOT NULL DEFAULT '',
+    reason       TEXT NOT NULL DEFAULT '',
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY (task_id, takeover_id)
+);
+CREATE INDEX IF NOT EXISTS idx_takeover_active ON takeover_records(task_id) WHERE resumed_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS selfheal_attempts (
+    task_id     TEXT NOT NULL,
+    attempt_id  TEXT NOT NULL,
+    step_id     TEXT NOT NULL DEFAULT '',
+    started_at  TEXT NOT NULL DEFAULT '',
+    status      TEXT NOT NULL DEFAULT '',
+    cost_usd    REAL NOT NULL DEFAULT 0.0,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY (task_id, attempt_id)
+);
+
+CREATE TABLE IF NOT EXISTS speculations (
+    task_id         TEXT NOT NULL,
+    spec_id         TEXT NOT NULL,
+    started_at      TEXT NOT NULL DEFAULT '',
+    target_step_id  TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT '',
+    payload_json    TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY (task_id, spec_id)
+);
 
 -- RELEASES (R3.1: named delivery targets that plans/specs can be tagged
 -- against; R3.8 adds deployment_profile_id soft-FK).
@@ -2423,24 +2589,29 @@ CREATE INDEX IF NOT EXISTS idx_ext_mappings_source ON external_mappings(source_i
 -- ================================================================
 
 CREATE TABLE IF NOT EXISTS executions (
-    project_id                TEXT NOT NULL,
-    task_id                   TEXT NOT NULL,
-    status                    TEXT NOT NULL DEFAULT 'running',
-    current_phase             INTEGER NOT NULL DEFAULT 0,
-    current_step_index        INTEGER NOT NULL DEFAULT 0,
-    started_at                TEXT NOT NULL,
-    completed_at              TEXT,
-    created_at                TEXT NOT NULL DEFAULT '',
-    updated_at                TEXT NOT NULL DEFAULT '',
-    pending_gaps              TEXT NOT NULL DEFAULT '[]',
-    resolved_decisions        TEXT NOT NULL DEFAULT '[]',
+    project_id                    TEXT NOT NULL,
+    task_id                       TEXT NOT NULL,
+    status                        TEXT NOT NULL DEFAULT 'running',
+    current_phase                 INTEGER NOT NULL DEFAULT 0,
+    current_step_index            INTEGER NOT NULL DEFAULT 0,
+    started_at                    TEXT NOT NULL,
+    completed_at                  TEXT,
+    created_at                    TEXT NOT NULL DEFAULT '',
+    updated_at                    TEXT NOT NULL DEFAULT '',
+    pending_gaps                  TEXT NOT NULL DEFAULT '[]',
+    resolved_decisions            TEXT NOT NULL DEFAULT '[]',
     -- v36 (SQLite Phase A): six scalar fields lifted out of JSON-only persistence.
-    force_override            INTEGER NOT NULL DEFAULT 0,
-    override_justification    TEXT    NOT NULL DEFAULT '',
-    run_cumulative_spend_usd  REAL    NOT NULL DEFAULT 0.0,
-    scope_expansions_applied  INTEGER NOT NULL DEFAULT 0,
-    working_branch            TEXT    NOT NULL DEFAULT '',
-    working_branch_head       TEXT    NOT NULL DEFAULT '',
+    force_override                INTEGER NOT NULL DEFAULT 0,
+    override_justification        TEXT    NOT NULL DEFAULT '',
+    run_cumulative_spend_usd      REAL    NOT NULL DEFAULT 0.0,
+    scope_expansions_applied      INTEGER NOT NULL DEFAULT 0,
+    working_branch                TEXT    NOT NULL DEFAULT '',
+    working_branch_head           TEXT    NOT NULL DEFAULT '',
+    -- v37 (SQLite Phase B): JSON-blob columns for singletons and queues.
+    consolidation_result_json     TEXT,
+    pending_scope_expansions_json TEXT NOT NULL DEFAULT '[]',
+    pending_approval_request_json TEXT,
+    phase_retries_json            TEXT NOT NULL DEFAULT '{}',
     PRIMARY KEY (project_id, task_id)
 );
 CREATE INDEX IF NOT EXISTS idx_central_exec_status ON executions(status);
