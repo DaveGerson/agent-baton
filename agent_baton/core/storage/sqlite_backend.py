@@ -124,18 +124,28 @@ class SqliteStorage:
                 INSERT INTO executions
                     (task_id, status, current_phase, current_step_index,
                      started_at, completed_at, updated_at,
-                     pending_gaps, resolved_decisions)
+                     pending_gaps, resolved_decisions,
+                     force_override, override_justification,
+                     run_cumulative_spend_usd, scope_expansions_applied,
+                     working_branch, working_branch_head)
                 VALUES (?, ?, ?, ?, ?, ?,
                         strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
-                        ?, ?)
+                        ?, ?,
+                        ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(task_id) DO UPDATE SET
-                    status             = excluded.status,
-                    current_phase      = excluded.current_phase,
-                    current_step_index = excluded.current_step_index,
-                    completed_at       = excluded.completed_at,
-                    updated_at         = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
-                    pending_gaps       = excluded.pending_gaps,
-                    resolved_decisions = excluded.resolved_decisions
+                    status                   = excluded.status,
+                    current_phase            = excluded.current_phase,
+                    current_step_index       = excluded.current_step_index,
+                    completed_at             = excluded.completed_at,
+                    updated_at               = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+                    pending_gaps             = excluded.pending_gaps,
+                    resolved_decisions       = excluded.resolved_decisions,
+                    force_override           = excluded.force_override,
+                    override_justification   = excluded.override_justification,
+                    run_cumulative_spend_usd = excluded.run_cumulative_spend_usd,
+                    scope_expansions_applied = excluded.scope_expansions_applied,
+                    working_branch           = excluded.working_branch,
+                    working_branch_head      = excluded.working_branch_head
                 """,
                 (
                     state.task_id,
@@ -146,6 +156,12 @@ class SqliteStorage:
                     state.completed_at or None,
                     json.dumps([g.to_dict() for g in state.pending_gaps]),
                     json.dumps([d.to_dict() for d in state.resolved_decisions]),
+                    1 if getattr(state, "force_override", False) else 0,
+                    getattr(state, "override_justification", "") or "",
+                    float(getattr(state, "run_cumulative_spend_usd", 0.0)),
+                    int(getattr(state, "scope_expansions_applied", 0)),
+                    getattr(state, "working_branch", "") or "",
+                    getattr(state, "working_branch_head", "") or "",
                 ),
             )
 
@@ -543,6 +559,32 @@ class SqliteStorage:
         raw_pg = row["pending_gaps"] if "pending_gaps" in exec_keys else "[]"
         raw_rd = row["resolved_decisions"] if "resolved_decisions" in exec_keys else "[]"
 
+        # v36 (SQLite Phase A): six scalar fields. Tolerate older rows
+        # written before the migration ran by checking the column set.
+        force_override_v = (
+            bool(row["force_override"])
+            if "force_override" in exec_keys else False
+        )
+        override_justification_v = (
+            row["override_justification"]
+            if "override_justification" in exec_keys else ""
+        )
+        run_cumulative_spend_v = (
+            float(row["run_cumulative_spend_usd"])
+            if "run_cumulative_spend_usd" in exec_keys else 0.0
+        )
+        scope_expansions_applied_v = (
+            int(row["scope_expansions_applied"])
+            if "scope_expansions_applied" in exec_keys else 0
+        )
+        working_branch_v = (
+            row["working_branch"] if "working_branch" in exec_keys else ""
+        )
+        working_branch_head_v = (
+            row["working_branch_head"]
+            if "working_branch_head" in exec_keys else ""
+        )
+
         return ExecutionState(
             task_id=row["task_id"],
             plan=plan,
@@ -564,6 +606,12 @@ class SqliteStorage:
                 ResolvedDecision.from_dict(d)
                 for d in json.loads(raw_rd or "[]")
             ],
+            force_override=force_override_v,
+            override_justification=override_justification_v,
+            run_cumulative_spend_usd=run_cumulative_spend_v,
+            scope_expansions_applied=scope_expansions_applied_v,
+            working_branch=working_branch_v,
+            working_branch_head=working_branch_head_v,
         )
 
     def list_executions(self) -> list[str]:

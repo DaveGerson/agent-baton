@@ -294,6 +294,15 @@ def _minimal_execution_state(plan: MachinePlan) -> ExecutionState:
         amendments=[amend],
         started_at="2026-01-15T09:00:00+00:00",
         completed_at="",
+        # v36 (SQLite Phase A): six scalar fields now persisted; set them
+        # to non-default values so the roundtrip test catches "loaded as
+        # default" regressions.
+        force_override=True,
+        override_justification="auditor VETO override approved by lead",
+        run_cumulative_spend_usd=4.27,
+        scope_expansions_applied=2,
+        working_branch="feat/sqlite-phase-a",
+        working_branch_head="abc1234deadbeef",
     )
 
 
@@ -609,3 +618,181 @@ class TestExecutionStateSqliteRoundtrip:
         for key in ("task_id", "plan", "status", "step_results",
                     "gate_results", "approval_results", "amendments"):
             assert key in d, f"Expected key '{key}' missing from to_dict() output"
+
+    def test_execution_sqlite_phase_a_scalar_fields_roundtrip(
+        self, store: SqliteStorage,
+    ) -> None:
+        """v36 Phase A: six scalar fields survive save → load (no longer lossy).
+
+        Forms the regression net for Phase A of the SQLite parity work.
+        Each field is set to a non-default value in the fixture so a
+        "loaded as default" regression is observable here.
+        """
+        plan = _minimal_plan("task-exec-rt-phase-a")
+        state = _minimal_execution_state(plan)
+        store.save_execution(state)
+        loaded = store.load_execution("task-exec-rt-phase-a")
+        assert loaded is not None
+
+        assert loaded.force_override is True
+        assert (
+            loaded.override_justification
+            == "auditor VETO override approved by lead"
+        )
+        assert loaded.run_cumulative_spend_usd == pytest.approx(4.27)
+        assert loaded.scope_expansions_applied == 2
+        assert loaded.working_branch == "feat/sqlite-phase-a"
+        assert loaded.working_branch_head == "abc1234deadbeef"
+
+
+# ---------------------------------------------------------------------------
+# DDL parity — schema.py:1185 (PROJECT_SCHEMA_DDL) MUST match the column set
+# applied by the migration sequence in MIGRATIONS.  A migration that adds
+# a column to MIGRATIONS but forgets the matching add to PROJECT_SCHEMA_DDL
+# silently diverges fresh installs from migrated installs.  The same parity
+# rule applies to the central "synced project tables" mirror further down
+# in schema.py — both DDL blocks must agree on the executions column set.
+# See docs/internal/migration-review-summary.md §1.1 Gap 2.
+# ---------------------------------------------------------------------------
+
+class TestExecutionsTableDdlParity:
+    """Schema source-of-truth check for the executions table."""
+
+    @staticmethod
+    def _columns(conn) -> set[str]:
+        return {row[1] for row in conn.execute("PRAGMA table_info(executions)").fetchall()}
+
+    def test_project_schema_matches_migration_chain(self, tmp_path: Path) -> None:
+        """Fresh install (PROJECT_SCHEMA_DDL) and a migrated DB agree on executions cols.
+
+        Builds two SQLite databases:
+
+        * ``fresh.db`` — uses the ``ConnectionManager`` initialisation path,
+          which applies ``PROJECT_SCHEMA_DDL`` directly.
+        * ``migrated.db`` — same code path, but kept as the parity
+          counterpart so this test continues to be the single observable
+          gate when MIGRATIONS gains a new ``ALTER TABLE executions`` step.
+
+        The test's job is to make adding a v37+ column to MIGRATIONS but
+        forgetting PROJECT_SCHEMA_DDL break loudly.
+        """
+        import sqlite3
+
+        from agent_baton.core.storage.schema import (
+            MIGRATIONS,
+            PROJECT_SCHEMA_DDL,
+            SCHEMA_VERSION,
+        )
+
+        # Path 1: PROJECT_SCHEMA_DDL applied directly (fresh install).
+        fresh = sqlite3.connect(str(tmp_path / "fresh.db"))
+        try:
+            fresh.executescript(PROJECT_SCHEMA_DDL)
+            fresh_cols = self._columns(fresh)
+        finally:
+            fresh.close()
+
+        # Path 2: minimal v1 schema + walk MIGRATIONS to current version.
+        # Use a v1-shaped table that matches the pre-migration baseline
+        # (mirrors what real upgrade installs encountered).
+        migrated = sqlite3.connect(str(tmp_path / "migrated.db"))
+        try:
+            migrated.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS _schema_version (version INTEGER NOT NULL);
+                CREATE TABLE IF NOT EXISTS executions (
+                    task_id              TEXT PRIMARY KEY,
+                    status               TEXT NOT NULL DEFAULT 'running',
+                    current_phase        INTEGER NOT NULL DEFAULT 0,
+                    current_step_index   INTEGER NOT NULL DEFAULT 0,
+                    started_at           TEXT NOT NULL DEFAULT '',
+                    completed_at         TEXT,
+                    created_at           TEXT NOT NULL DEFAULT '',
+                    updated_at           TEXT NOT NULL DEFAULT ''
+                );
+                """
+            )
+            for v in sorted(MIGRATIONS):
+                # Skip migrations that touch tables that don't exist in our
+                # minimal seed; only apply the ones that target executions
+                # — we are testing executions-column parity, not the full
+                # schema replay.
+                ddl = MIGRATIONS[v]
+                for stmt in ddl.split(";"):
+                    s = stmt.strip()
+                    if not s:
+                        continue
+                    if "executions" not in s.lower():
+                        continue
+                    # Skip CREATE TABLE for executions in central mirror —
+                    # we already created the project executions above.
+                    lower = s.lower()
+                    if lower.startswith("create table") and "executions" in lower:
+                        continue
+                    try:
+                        migrated.execute(s)
+                    except sqlite3.OperationalError:
+                        # Column may already exist if a fresh-leaning baseline
+                        # was used; ignore for parity comparison purposes.
+                        pass
+            migrated_cols = self._columns(migrated)
+        finally:
+            migrated.close()
+
+        # Every column in PROJECT_SCHEMA_DDL must be present in the migrated
+        # set (and vice versa) for executions specifically.
+        assert fresh_cols == migrated_cols, (
+            f"executions DDL parity broken at SCHEMA_VERSION={SCHEMA_VERSION}: "
+            f"fresh-install set {sorted(fresh_cols)} != migrated set "
+            f"{sorted(migrated_cols)}.  Add the matching ALTER/column in "
+            f"PROJECT_SCHEMA_DDL or the new migration."
+        )
+
+    def test_v36_phase_a_columns_present_in_project_ddl(self) -> None:
+        """The six v36 Phase A columns are declared in PROJECT_SCHEMA_DDL."""
+        from agent_baton.core.storage.schema import PROJECT_SCHEMA_DDL
+
+        for col in (
+            "force_override",
+            "override_justification",
+            "run_cumulative_spend_usd",
+            "scope_expansions_applied",
+            "working_branch",
+            "working_branch_head",
+        ):
+            assert col in PROJECT_SCHEMA_DDL, (
+                f"v36 column {col!r} missing from PROJECT_SCHEMA_DDL"
+            )
+
+    def test_v36_phase_a_columns_present_in_central_ddl(self) -> None:
+        """The six v36 Phase A columns are declared in the central mirror DDL.
+
+        The central mirror lives in the same schema.py file, second
+        ``CREATE TABLE IF NOT EXISTS executions`` block.  The check is a
+        substring scan because the central DDL is not exposed as a
+        separate constant.
+        """
+        from agent_baton.core.storage import schema
+
+        # Both DDL blocks live inside this module; read the source so we
+        # cover the second-block columns even though they aren't exported.
+        from pathlib import Path
+        src = Path(schema.__file__).read_text()
+        # Locate the second occurrence of ``CREATE TABLE IF NOT EXISTS executions``.
+        first = src.find("CREATE TABLE IF NOT EXISTS executions")
+        second = src.find("CREATE TABLE IF NOT EXISTS executions", first + 1)
+        assert second > first, "Could not locate central-mirror executions DDL"
+        # Take a generous slice of the second block.
+        block = src[second:second + 2000]
+        for col in (
+            "force_override",
+            "override_justification",
+            "run_cumulative_spend_usd",
+            "scope_expansions_applied",
+            "working_branch",
+            "working_branch_head",
+        ):
+            assert col in block, (
+                f"v36 column {col!r} missing from the central mirror "
+                f"executions DDL"
+            )

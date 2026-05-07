@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 35
+SCHEMA_VERSION = 36
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -1169,6 +1169,30 @@ CREATE TABLE IF NOT EXISTS releases (
 );
 CREATE INDEX IF NOT EXISTS idx_releases_profile ON releases(deployment_profile_id);
 """,
+    36: """
+-- v36: SQLite Phase A — six scalar fields on the executions row.
+--
+-- Phase A of the SQLite parity work (docs/internal/sqlite-parity-proposal.md).
+-- Lifts six trivial scalars from ExecutionState into the executions row so
+-- save/load via the SQLite backend stops dropping them.  Phase B-D handle
+-- the remaining JSON/collection fields.
+--
+-- Forward-safe: every column has a NOT NULL DEFAULT, so existing rows
+-- pick up the default at migration time.
+--
+-- IMPORTANT: this migration MUST be paired with the matching column adds
+-- in BOTH PROJECT_SCHEMA_DDL (per-project baton.db) AND the central
+-- "synced project tables" mirror further down in this file.  A migration
+-- that updates only one DDL block silently diverges fresh installs from
+-- migrated installs.  See docs/internal/migration-review-summary.md §1.1
+-- Gap 2 for the audit trail.
+ALTER TABLE executions ADD COLUMN force_override            INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE executions ADD COLUMN override_justification    TEXT    NOT NULL DEFAULT '';
+ALTER TABLE executions ADD COLUMN run_cumulative_spend_usd  REAL    NOT NULL DEFAULT 0.0;
+ALTER TABLE executions ADD COLUMN scope_expansions_applied  INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE executions ADD COLUMN working_branch            TEXT    NOT NULL DEFAULT '';
+ALTER TABLE executions ADD COLUMN working_branch_head       TEXT    NOT NULL DEFAULT '';
+""",
 }
 
 # =====================================================================
@@ -1183,16 +1207,23 @@ CREATE TABLE IF NOT EXISTS _schema_version (
 
 -- EXECUTIONS (replaces execution-state.json)
 CREATE TABLE IF NOT EXISTS executions (
-    task_id              TEXT PRIMARY KEY,
-    status               TEXT NOT NULL DEFAULT 'running',
-    current_phase        INTEGER NOT NULL DEFAULT 0,
-    current_step_index   INTEGER NOT NULL DEFAULT 0,
-    started_at           TEXT NOT NULL,
-    completed_at         TEXT,
-    created_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    updated_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    pending_gaps         TEXT NOT NULL DEFAULT '[]',
-    resolved_decisions   TEXT NOT NULL DEFAULT '[]'
+    task_id                   TEXT PRIMARY KEY,
+    status                    TEXT NOT NULL DEFAULT 'running',
+    current_phase             INTEGER NOT NULL DEFAULT 0,
+    current_step_index        INTEGER NOT NULL DEFAULT 0,
+    started_at                TEXT NOT NULL,
+    completed_at              TEXT,
+    created_at                TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at                TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    pending_gaps              TEXT NOT NULL DEFAULT '[]',
+    resolved_decisions        TEXT NOT NULL DEFAULT '[]',
+    -- v36 (SQLite Phase A): six scalar fields lifted out of JSON-only persistence.
+    force_override            INTEGER NOT NULL DEFAULT 0,
+    override_justification    TEXT    NOT NULL DEFAULT '',
+    run_cumulative_spend_usd  REAL    NOT NULL DEFAULT 0.0,
+    scope_expansions_applied  INTEGER NOT NULL DEFAULT 0,
+    working_branch            TEXT    NOT NULL DEFAULT '',
+    working_branch_head       TEXT    NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_executions_status ON executions(status);
 CREATE INDEX IF NOT EXISTS idx_executions_started ON executions(started_at);
@@ -2392,17 +2423,24 @@ CREATE INDEX IF NOT EXISTS idx_ext_mappings_source ON external_mappings(source_i
 -- ================================================================
 
 CREATE TABLE IF NOT EXISTS executions (
-    project_id           TEXT NOT NULL,
-    task_id              TEXT NOT NULL,
-    status               TEXT NOT NULL DEFAULT 'running',
-    current_phase        INTEGER NOT NULL DEFAULT 0,
-    current_step_index   INTEGER NOT NULL DEFAULT 0,
-    started_at           TEXT NOT NULL,
-    completed_at         TEXT,
-    created_at           TEXT NOT NULL DEFAULT '',
-    updated_at           TEXT NOT NULL DEFAULT '',
-    pending_gaps         TEXT NOT NULL DEFAULT '[]',
-    resolved_decisions   TEXT NOT NULL DEFAULT '[]',
+    project_id                TEXT NOT NULL,
+    task_id                   TEXT NOT NULL,
+    status                    TEXT NOT NULL DEFAULT 'running',
+    current_phase             INTEGER NOT NULL DEFAULT 0,
+    current_step_index        INTEGER NOT NULL DEFAULT 0,
+    started_at                TEXT NOT NULL,
+    completed_at              TEXT,
+    created_at                TEXT NOT NULL DEFAULT '',
+    updated_at                TEXT NOT NULL DEFAULT '',
+    pending_gaps              TEXT NOT NULL DEFAULT '[]',
+    resolved_decisions        TEXT NOT NULL DEFAULT '[]',
+    -- v36 (SQLite Phase A): six scalar fields lifted out of JSON-only persistence.
+    force_override            INTEGER NOT NULL DEFAULT 0,
+    override_justification    TEXT    NOT NULL DEFAULT '',
+    run_cumulative_spend_usd  REAL    NOT NULL DEFAULT 0.0,
+    scope_expansions_applied  INTEGER NOT NULL DEFAULT 0,
+    working_branch            TEXT    NOT NULL DEFAULT '',
+    working_branch_head       TEXT    NOT NULL DEFAULT '',
     PRIMARY KEY (project_id, task_id)
 );
 CREATE INDEX IF NOT EXISTS idx_central_exec_status ON executions(status);

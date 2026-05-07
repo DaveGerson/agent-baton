@@ -684,8 +684,11 @@ class StorageMigrator:
             """
             INSERT OR IGNORE INTO executions
                 (task_id, status, current_phase, current_step_index,
-                 started_at, completed_at, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 started_at, completed_at, created_at, updated_at,
+                 force_override, override_justification,
+                 run_cumulative_spend_usd, scope_expansions_applied,
+                 working_branch, working_branch_head)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 state.task_id,
@@ -696,6 +699,15 @@ class StorageMigrator:
                 state.completed_at or None,
                 state.started_at,
                 state.started_at,
+                # v36 (SQLite Phase A): scalar fields lifted from the JSON
+                # backend.  Sourced via getattr to tolerate older state
+                # files that predate any of these field additions.
+                1 if getattr(state, "force_override", False) else 0,
+                getattr(state, "override_justification", "") or "",
+                float(getattr(state, "run_cumulative_spend_usd", 0.0)),
+                int(getattr(state, "scope_expansions_applied", 0)),
+                getattr(state, "working_branch", "") or "",
+                getattr(state, "working_branch_head", "") or "",
             ),
         )
         new_execution = cur.rowcount > 0
