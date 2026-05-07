@@ -757,6 +757,25 @@ class ExecutionEngine:
                         self._task_id,
                     )
                     return None
+                # Stash the SQLite row's OCC version on the file-loaded
+                # state (best-effort) so the next save_execution still
+                # walks the CAS path and detects a real conflict.  Without
+                # this, file-loaded states default to _loaded_version=0
+                # and the slice-14 split-brain recovery branch silently
+                # overwrites concurrent writers' progress.  See review
+                # finding (slice 14 follow-up) for the failure mode.
+                if file_state is not None:
+                    getter = getattr(self._storage, "get_execution_version", None)
+                    if getter is not None:
+                        try:
+                            persisted = getter(file_state.task_id)
+                            if persisted is not None:
+                                file_state._loaded_version = persisted
+                        except Exception as ver_exc:  # pragma: no cover
+                            _log.debug(
+                                "get_execution_version failed (non-fatal): %s",
+                                ver_exc,
+                            )
                 return file_state
             return state
         else:

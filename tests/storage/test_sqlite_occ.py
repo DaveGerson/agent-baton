@@ -119,3 +119,68 @@ class TestOccVersionInToDict:
         d = loaded.to_dict()
         assert "_loaded_version" not in d
         assert "version" not in d
+
+
+class TestOccFreshStateOnClaimedTaskRaises:
+    """Regression: a fresh ExecutionState built for an already-claimed
+    task_id must raise ``ConcurrentModificationError`` rather than
+    silently overwriting the persisted row.
+
+    The original slice-14 follow-up added a "split-brain recovery"
+    branch that fired whenever ``_loaded_version == 0`` AND a row
+    already existed.  That branch swallowed the conflict — a second
+    ``engine.start()`` call (or any other fresh-state-with-row
+    scenario) silently overwrote the first writer's progress.
+
+    The OCC contract per sqlite-parity-proposal §3.2 is "raise typed
+    ``ConcurrentModificationError``".  This test pins that contract
+    against fresh-state collisions so the recovery branch cannot
+    grow back unnoticed.
+    """
+
+    def test_fresh_state_with_existing_row_raises(self, tmp_path: Path) -> None:
+        store = SqliteStorage(tmp_path / "db.sqlite")
+        plan = _plan()
+
+        # Writer A saves first; row now exists at version 1.
+        state_a = _state(plan)
+        state_a.run_cumulative_spend_usd = 100.0
+        store.save_execution(state_a)
+        assert state_a._loaded_version == 1
+
+        # Writer B constructs a fresh ExecutionState for the same
+        # task_id (e.g. a second ``engine.start()`` call after a
+        # crash).  ``_loaded_version`` is 0 because no load ran.
+        state_b = _state(plan)
+        state_b.run_cumulative_spend_usd = 99999.0
+        assert state_b._loaded_version == 0
+
+        # Save MUST raise — silently overwriting A's progress would
+        # be a data-loss bug.
+        with pytest.raises(ConcurrentModificationError) as exc:
+            store.save_execution(state_b)
+        assert exc.value.task_id == plan.task_id
+        assert exc.value.observed_version == 0
+
+        # And the row must still carry A's value.
+        reloaded = store.load_execution(plan.task_id)
+        assert reloaded is not None
+        assert reloaded.run_cumulative_spend_usd == 100.0
+
+
+class TestGetExecutionVersion:
+    """``get_execution_version`` exposes the row's OCC version for the
+    file-fallback enrichment path in ``ExecutionEngine._load_execution``.
+    """
+
+    def test_returns_none_for_missing_row(self, tmp_path: Path) -> None:
+        store = SqliteStorage(tmp_path / "db.sqlite")
+        assert store.get_execution_version("does-not-exist") is None
+
+    def test_returns_persisted_version(self, tmp_path: Path) -> None:
+        store = SqliteStorage(tmp_path / "db.sqlite")
+        plan = _plan()
+        state = _state(plan)
+        store.save_execution(state)
+        store.save_execution(state)  # bump to version 2
+        assert store.get_execution_version(plan.task_id) == 2

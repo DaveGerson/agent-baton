@@ -235,45 +235,21 @@ class SqliteStorage:
                         ),
                     )
                     state._loaded_version = 1
-                elif loaded_version == 0:
-                    # Split-brain recovery: state was constructed without
-                    # going through the SQLite load path (e.g. file-backend
-                    # fallback after a SQLite load failure).  We cannot
-                    # honour OCC because we never observed a version, so
-                    # adopt the persisted row's version and force the
-                    # update — file backend "wins" in this degraded path.
-                    # See tests/test_pipeline_edge_cases.py
-                    # TestLoadFallbackOnSqliteFailure for the scenario.
-                    persisted_version = int(exists_row["version"])
-                    conn.execute(
-                        """
-                        UPDATE executions SET
-                            status                        = ?,
-                            current_phase                 = ?,
-                            current_step_index            = ?,
-                            completed_at                  = ?,
-                            updated_at                    = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
-                            pending_gaps                  = ?,
-                            resolved_decisions            = ?,
-                            force_override                = ?,
-                            override_justification        = ?,
-                            run_cumulative_spend_usd      = ?,
-                            scope_expansions_applied      = ?,
-                            working_branch                = ?,
-                            working_branch_head           = ?,
-                            consolidation_result_json     = ?,
-                            pending_scope_expansions_json = ?,
-                            pending_approval_request_json = ?,
-                            phase_retries_json            = ?,
-                            version                       = version + 1
-                         WHERE task_id = ?
-                        """,
-                        update_params[:-1],  # drop the trailing version match
-                    )
-                    state._loaded_version = persisted_version + 1
                 else:
                     # OCC conflict — row's version moved between this
-                    # caller's load and save.
+                    # caller's load and save (or a fresh state was
+                    # constructed for an already-claimed task_id).  The
+                    # earlier "split-brain recovery" branch (loaded_version
+                    # == 0 + row exists ⇒ force update) was removed
+                    # because it silently overwrote concurrent writers'
+                    # progress whenever a fresh ExecutionState was built
+                    # for an already-claimed task_id (e.g. a second
+                    # ``engine.start()`` call).  The file-fallback case
+                    # that motivated the original branch is now handled
+                    # in ``ExecutionEngine._load_execution`` by stashing
+                    # the SQLite row's version onto the file-loaded
+                    # state via ``get_execution_version`` so this CAS
+                    # UPDATE does not miss in the recovery path.
                     from agent_baton.core.engine.errors import (
                         ConcurrentModificationError,
                     )
@@ -865,6 +841,37 @@ class SqliteStorage:
             int(row["version"]) if "version" in exec_keys else 0
         )
         return state_obj
+
+    def get_execution_version(self, task_id: str) -> int | None:
+        """Return the persisted OCC ``version`` for ``task_id``, or ``None``.
+
+        Used by the executor's file-fallback load path: when SQLite either
+        raises or returns ``None`` and a state is reconstructed from the
+        on-disk JSON, we still want to learn the SQLite row's current
+        version (if a row exists) so the next CAS save can detect a true
+        OCC conflict.  Without this, a file-loaded state always carries
+        ``_loaded_version=0`` and is forced to fall through the slice-14
+        split-brain recovery branch, which silently overwrites concurrent
+        writers' progress.
+
+        Returns:
+            The integer ``version`` column when a row for ``task_id``
+            exists; ``None`` otherwise.  Errors are swallowed (returning
+            ``None``) because this is a best-effort enrichment for the
+            recovery path — the caller already has a non-CAS-safe state
+            in hand.
+        """
+        try:
+            conn = self._conn()
+            row = conn.execute(
+                "SELECT version FROM executions WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            return int(row["version"])
+        except Exception:
+            return None
 
     def list_executions(self) -> list[str]:
         """Return task_ids for plan-level executions (those with a plans row).
