@@ -1,6 +1,6 @@
 # State Mutation Proposal — Closing the Hole 1 Logical Gap
 
-**Status**: Draft (analysis only; no production code changes).
+**Status**: Draft (analysis only; no production code changes). Supersedes [pydantic-migration-mutation-audit.md](pydantic-migration-mutation-audit.md) — the audit's class-A/B/C/D taxonomy is correct but its line numbers are stale and its scope is one invariant; this document re-anchors by symbol and expands to the three Hole-1-class invariants (I1, I2, I9). Cross-walk with the SQLite parity and result-hierarchy proposals lives in [migration-review-summary.md](migration-review-summary.md).
 **Scope**: `ExecutionState`, `MachinePlan` (and nested), and the result types — pre-Pydantic-migration.
 **Recommendation in one sentence**: Adopt **alternative (d) — hybrid funnel**: route `status`, `pending_approval_request`, `completed_at`, and `takeover_records` writes through ~12 transition methods on `ExecutionState`, land it as a half-day slice **before** Pydantic Phase 1 (gated by an AST lint test), then promote those fields to `PrivateAttr` field privacy during the Pydantic migration. This closes I1 (Hole 1), I2 (terminal `completed_at`), and I9 (paused-takeover) by structural impossibility rather than by validator-after-the-fact, in **1.5–3 developer-days** total.
 

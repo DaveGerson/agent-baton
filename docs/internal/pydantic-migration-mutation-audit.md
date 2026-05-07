@@ -1,5 +1,7 @@
 # Pydantic Migration — Mutation Pattern Audit
 
+**Status**: Superseded by [state-mutation-proposal.md](state-mutation-proposal.md) and consolidated under [migration-review-summary.md](migration-review-summary.md). The line-number tables here were captured on 2026-05-06; subsequent commits have moved the cited mutation sites. The structural diagnosis (categories A/B/C/D) holds, but for actionable mutation-site work consult the superseding documents — they re-anchored the audit by symbol and class name, called out three Hole-1-class invariants (I1, I2, I9) instead of one, and prescribe a transition-method funnel rather than the validator-only stance hinted at here.
+
 Inventory of all in-place mutation patterns found in `agent_baton/` that
 touch `ExecutionState`, `MachinePlan`, and related execution models.  This
 is a pre-migration artifact for the `agent_baton/models/execution.py`
