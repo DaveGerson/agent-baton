@@ -807,8 +807,7 @@ class MachinePlan:
 # Plan amendments (recorded modifications to the plan during execution)
 # ---------------------------------------------------------------------------
 
-@dataclass
-class PlanAmendment:
+class PlanAmendment(ExecutionRecord):
     """A recorded modification to the plan during execution.
 
     Amendments are created by ``baton execute amend`` when the plan
@@ -824,7 +823,8 @@ class PlanAmendment:
         description: What was changed and why.
         phases_added: Phase IDs of newly inserted phases.
         steps_added: Step IDs of newly inserted steps.
-        created_at: ISO 8601 timestamp.
+        created_at: ISO 8601 timestamp; auto-stamped via
+            ``default_factory`` when not supplied at construction.
         feedback: Reviewer or approver feedback that motivated this
             amendment.
     """
@@ -833,42 +833,11 @@ class PlanAmendment:
     trigger: str                    # "gate_feedback", "approval_feedback", "manual"
     trigger_phase_id: int
     description: str
-    phases_added: list[int] = field(default_factory=list)   # phase_ids of new phases
-    steps_added: list[str] = field(default_factory=list)    # step_ids of new steps
-    created_at: str = ""
+    phases_added: list[int] = Field(default_factory=list)   # phase_ids of new phases
+    steps_added: list[str] = Field(default_factory=list)    # step_ids of new steps
+    created_at: str = Field(default_factory=_now_iso_seconds)
     feedback: str = ""              # reviewer/approver feedback that triggered this
-    metadata: dict[str, str] = field(default_factory=dict)  # arbitrary key/value context
-
-    def __post_init__(self) -> None:
-        if not self.created_at:
-            self.created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-    def to_dict(self) -> dict:
-        return {
-            "amendment_id": self.amendment_id,
-            "trigger": self.trigger,
-            "trigger_phase_id": self.trigger_phase_id,
-            "description": self.description,
-            "phases_added": self.phases_added,
-            "steps_added": self.steps_added,
-            "created_at": self.created_at,
-            "feedback": self.feedback,
-            "metadata": self.metadata,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict) -> PlanAmendment:
-        return cls(
-            amendment_id=data.get("amendment_id", ""),
-            trigger=data.get("trigger", "manual"),
-            trigger_phase_id=data.get("trigger_phase_id", 0),
-            description=data.get("description", ""),
-            phases_added=data.get("phases_added", []),
-            steps_added=data.get("steps_added", []),
-            created_at=data.get("created_at", ""),
-            feedback=data.get("feedback", ""),
-            metadata=data.get("metadata", {}),
-        )
+    metadata: dict[str, str] = Field(default_factory=dict)  # arbitrary key/value context
 
 
 # ---------------------------------------------------------------------------
@@ -1016,8 +985,7 @@ class StepResult:
         return obj
 
 
-@dataclass
-class ApprovalResult:
+class ApprovalResult(ExecutionRecord):
     """Outcome of a human approval checkpoint.
 
     Recorded by ``baton execute approve`` when a phase with
@@ -1029,7 +997,8 @@ class ApprovalResult:
             ``"approve-with-feedback"`` (which inserts a remediation
             phase via plan amendment).
         feedback: Optional feedback from the reviewer.
-        decided_at: ISO 8601 timestamp of the decision.
+        decided_at: ISO 8601 timestamp of the decision; auto-stamped
+            via ``default_factory`` when not supplied at construction.
         decision_source: How this approval was decided — ``"human"``,
             ``"daemon_auto"``, ``"api"``, or ``"policy_auto"`` (A2).
         actor: Best-available identity of the approver —
@@ -1041,37 +1010,10 @@ class ApprovalResult:
     phase_id: int
     result: str                     # "approve", "reject", "approve-with-feedback"
     feedback: str = ""
-    decided_at: str = ""
+    decided_at: str = Field(default_factory=_now_iso_seconds)
     decision_source: str = ""       # A2: human | daemon_auto | api | policy_auto
     actor: str = ""                 # A2: $USER@$HOSTNAME or "daemon"
     rationale: str = ""             # A2: structured rationale
-
-    def __post_init__(self) -> None:
-        if not self.decided_at:
-            self.decided_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-    def to_dict(self) -> dict:
-        return {
-            "phase_id": self.phase_id,
-            "result": self.result,
-            "feedback": self.feedback,
-            "decided_at": self.decided_at,
-            "decision_source": self.decision_source,
-            "actor": self.actor,
-            "rationale": self.rationale,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict) -> ApprovalResult:
-        return cls(
-            phase_id=data.get("phase_id", 0),
-            result=data.get("result", "approve"),
-            feedback=data.get("feedback", ""),
-            decided_at=data.get("decided_at", ""),
-            decision_source=data.get("decision_source", ""),
-            actor=data.get("actor", ""),
-            rationale=data.get("rationale", ""),
-        )
 
 
 class PendingApprovalRequest(ExecutionRecord):
@@ -1144,8 +1086,7 @@ class FeedbackQuestion:
         )
 
 
-@dataclass
-class FeedbackResult:
+class FeedbackResult(ExecutionRecord):
     """Outcome of a user's answer to a feedback question.
 
     When the user selects an option, the engine maps the choice to an
@@ -1157,7 +1098,8 @@ class FeedbackResult:
         chosen_option: The selected option text.
         chosen_index: Zero-based index into the options list.
         dispatched_step_id: Step ID created for the resulting dispatch.
-        decided_at: ISO 8601 timestamp of the decision.
+        decided_at: ISO 8601 timestamp of the decision; auto-stamped via
+            ``default_factory`` when not supplied at construction.
     """
 
     phase_id: int
@@ -1165,32 +1107,7 @@ class FeedbackResult:
     chosen_option: str
     chosen_index: int
     dispatched_step_id: str = ""
-    decided_at: str = ""
-
-    def __post_init__(self) -> None:
-        if not self.decided_at:
-            self.decided_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-    def to_dict(self) -> dict:
-        return {
-            "phase_id": self.phase_id,
-            "question_id": self.question_id,
-            "chosen_option": self.chosen_option,
-            "chosen_index": self.chosen_index,
-            "dispatched_step_id": self.dispatched_step_id,
-            "decided_at": self.decided_at,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict) -> FeedbackResult:
-        return cls(
-            phase_id=data.get("phase_id", 0),
-            question_id=data.get("question_id", ""),
-            chosen_option=data.get("chosen_option", ""),
-            chosen_index=data.get("chosen_index", 0),
-            dispatched_step_id=data.get("dispatched_step_id", ""),
-            decided_at=data.get("decided_at", ""),
-        )
+    decided_at: str = Field(default_factory=_now_iso_seconds)
 
 
 class GateResult(ExecutionRecord):
