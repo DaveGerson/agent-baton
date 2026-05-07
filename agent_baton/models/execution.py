@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from agent_baton.models.knowledge import (
     KnowledgeAttachment,
@@ -191,84 +191,36 @@ class InteractionTurn(ExecutionRecord):
 # Plan (machine-readable, JSON-serializable)
 # ---------------------------------------------------------------------------
 
-@dataclass
-class TeamMember:
-    """A member of a coordinated agent team within a step.
+# Plan-tier base.  Distinct from ExecutionRecord (which is reserved for
+# result/decision records, per result-hierarchy-proposal §8.4).  Plan
+# types — MachinePlan, PlanPhase, PlanStep, etc. — are LLM-input bound
+# rather than persisted-result bound, so they get their own base class
+# with the same forward-compat config.
+class PlanModel(BaseModel):
+    """Common base for plan-tier Pydantic models.
 
-    Team steps allow multiple agents to collaborate on a single step,
-    with intra-step dependency ordering.  Each member is dispatched
-    individually and results are collected via ``TeamStepResult``.
-
-    Attributes:
-        member_id: Hierarchical ID (e.g. ``"1.1.a"``).
-        agent_name: Name of the agent assigned to this role.
-        role: Function within the team — ``"lead"``, ``"implementer"``,
-            or ``"reviewer"``.
-        task_description: What this team member should do.
-        model: LLM model to use.
-        depends_on: Other ``member_id`` values that must complete first.
-        deliverables: Expected output artifacts.
-        sub_team: Nested team the lead coordinates.  Non-empty only when
-            ``role == "lead"``; enforced by :meth:`validate`.  The lead is
-            still dispatched as a worker — its own outcome is merged with
-            sub-team outcomes by the enclosing step's ``synthesis``.
-        synthesis: How the lead's own outcome is merged with sub-team
-            outcomes.  Meaningful only when ``sub_team`` is non-empty.
+    Provides extra="ignore" forward-compat (newer agents may emit fields
+    older planners do not know about) and the same validate_assignment=False
+    mutation semantics the dataclass plan types had.  Each subclass keeps
+    its own to_dict for conditional emission semantics — Pydantic's
+    model_dump emits all fields unconditionally, which would change the
+    on-disk JSON shape vs. the golden fixtures.
     """
 
-    member_id: str                          # e.g. "1.1.a"
-    agent_name: str
-    role: str = "implementer"               # "lead", "implementer", "reviewer"
-    task_description: str = ""
-    model: str = "sonnet"
-    depends_on: list[str] = field(default_factory=list)   # other member_ids
-    deliverables: list[str] = field(default_factory=list)
-    sub_team: list[TeamMember] = field(default_factory=list)  # nested team
-    synthesis: SynthesisSpec | None = None  # merge strategy iff sub_team non-empty
-
-    def validate(self) -> None:
-        """Raise ``ValueError`` when the member carries a ``sub_team`` but is
-        not a lead.  Sub-teams may only be attached to ``role == "lead"``."""
-        if self.sub_team and self.role != "lead":
-            raise ValueError(
-                f"TeamMember {self.member_id!r} has a sub_team but role={self.role!r}; "
-                "only role='lead' members may carry a sub_team."
-            )
-
-    def to_dict(self) -> dict:
-        d: dict = {
-            "member_id": self.member_id,
-            "agent_name": self.agent_name,
-            "role": self.role,
-            "task_description": self.task_description,
-            "model": self.model,
-            "depends_on": self.depends_on,
-            "deliverables": self.deliverables,
-        }
-        if self.sub_team:
-            d["sub_team"] = [m.to_dict() for m in self.sub_team]
-        if self.synthesis is not None:
-            d["synthesis"] = self.synthesis.to_dict()
-        return d
+    model_config = ConfigDict(
+        extra="ignore",
+        validate_assignment=False,
+        arbitrary_types_allowed=True,  # for ResourceLimits / ForesightInsight dataclasses
+    )
 
     @classmethod
-    def from_dict(cls, data: dict) -> TeamMember:
-        synth_data = data.get("synthesis")
-        return cls(
-            member_id=data["member_id"],
-            agent_name=data["agent_name"],
-            role=data.get("role", "implementer"),
-            task_description=data.get("task_description", ""),
-            model=data.get("model", "sonnet"),
-            depends_on=data.get("depends_on", []),
-            deliverables=data.get("deliverables", []),
-            sub_team=[cls.from_dict(m) for m in data.get("sub_team", [])],
-            synthesis=SynthesisSpec.from_dict(synth_data) if synth_data else None,
-        )
+    def from_dict(cls, data: dict[str, Any]) -> Self:
+        """Default deserialisation. Subclasses override when nested
+        dataclass types need explicit re-hydration."""
+        return cls(**data)
 
 
-@dataclass
-class SynthesisSpec:
+class SynthesisSpec(PlanModel):
     """Configuration for how team member outputs are combined.
 
     Attached to a :class:`PlanStep` to control how the engine merges
@@ -295,31 +247,76 @@ class SynthesisSpec:
             - ``"fail"`` — fail the team step if conflicts detected.
     """
 
-    strategy: str = "concatenate"           # concatenate | merge_files | agent_synthesis
+    strategy: str = "concatenate"
     synthesis_agent: str = "code-reviewer"
     synthesis_prompt: str = ""
-    conflict_handling: str = "auto_merge"   # auto_merge | escalate | fail
+    conflict_handling: str = "auto_merge"
 
     def to_dict(self) -> dict:
-        return {
-            "strategy": self.strategy,
-            "synthesis_agent": self.synthesis_agent,
-            "synthesis_prompt": self.synthesis_prompt,
-            "conflict_handling": self.conflict_handling,
+        return self.model_dump(mode="python")
+
+
+class TeamMember(PlanModel):
+    """A member of a coordinated agent team within a step.
+
+    Team steps allow multiple agents to collaborate on a single step,
+    with intra-step dependency ordering.  Each member is dispatched
+    individually and results are collected via ``TeamStepResult``.
+
+    Attributes:
+        member_id: Hierarchical ID (e.g. ``"1.1.a"``).
+        agent_name: Name of the agent assigned to this role.
+        role: Function within the team — ``"lead"``, ``"implementer"``,
+            or ``"reviewer"``.
+        task_description: What this team member should do.
+        model: LLM model to use.
+        depends_on: Other ``member_id`` values that must complete first.
+        deliverables: Expected output artifacts.
+        sub_team: Nested team the lead coordinates.  Non-empty only when
+            ``role == "lead"``; enforced by :meth:`validate`.  The lead is
+            still dispatched as a worker — its own outcome is merged with
+            sub-team outcomes by the enclosing step's ``synthesis``.
+        synthesis: How the lead's own outcome is merged with sub-team
+            outcomes.  Meaningful only when ``sub_team`` is non-empty.
+    """
+
+    member_id: str
+    agent_name: str
+    role: str = "implementer"
+    task_description: str = ""
+    model: str = "sonnet"
+    depends_on: list[str] = Field(default_factory=list)
+    deliverables: list[str] = Field(default_factory=list)
+    sub_team: list[TeamMember] = Field(default_factory=list)
+    synthesis: SynthesisSpec | None = None
+
+    def validate(self) -> None:
+        """Raise ``ValueError`` when the member carries a ``sub_team`` but is
+        not a lead.  Sub-teams may only be attached to ``role == "lead"``."""
+        if self.sub_team and self.role != "lead":
+            raise ValueError(
+                f"TeamMember {self.member_id!r} has a sub_team but role={self.role!r}; "
+                "only role='lead' members may carry a sub_team."
+            )
+
+    def to_dict(self) -> dict:
+        d: dict = {
+            "member_id": self.member_id,
+            "agent_name": self.agent_name,
+            "role": self.role,
+            "task_description": self.task_description,
+            "model": self.model,
+            "depends_on": list(self.depends_on),
+            "deliverables": list(self.deliverables),
         }
-
-    @classmethod
-    def from_dict(cls, data: dict) -> SynthesisSpec:
-        return cls(
-            strategy=data.get("strategy", "concatenate"),
-            synthesis_agent=data.get("synthesis_agent", "code-reviewer"),
-            synthesis_prompt=data.get("synthesis_prompt", ""),
-            conflict_handling=data.get("conflict_handling", "auto_merge"),
-        )
+        if self.sub_team:
+            d["sub_team"] = [m.to_dict() for m in self.sub_team]
+        if self.synthesis is not None:
+            d["synthesis"] = self.synthesis.to_dict()
+        return d
 
 
-@dataclass
-class PlanStep:
+class PlanStep(PlanModel):
     """A single agent assignment within a plan phase.
 
     Steps are the atomic unit of work dispatched to agents.  They carry
@@ -354,28 +351,49 @@ class PlanStep:
             dispatch concurrent worktree-isolated agents when this is ``True``.
     """
 
-    step_id: str                          # e.g. "1.1"
+    step_id: str
     agent_name: str
     task_description: str
     model: str = "sonnet"
-    depends_on: list[str] = field(default_factory=list)
-    deliverables: list[str] = field(default_factory=list)
-    allowed_paths: list[str] = field(default_factory=list)
-    blocked_paths: list[str] = field(default_factory=list)
-    context_files: list[str] = field(default_factory=list)  # files agent should read
-    team: list[TeamMember] = field(default_factory=list)    # non-empty = team step
-    knowledge: list[KnowledgeAttachment] = field(default_factory=list)  # resolved knowledge
-    synthesis: SynthesisSpec | None = None  # team output merge strategy
-    mcp_servers: list[str] = field(default_factory=list)  # MCP server names for this step
-    interactive: bool = False       # step uses multi-turn interaction protocol
-    max_turns: int = 10             # cost guard: maximum interaction turns
-    step_type: str = "developing"   # planning, developing, testing, reviewing,
-                                    # consulting, task, automation
-    command: str = ""               # shell command for automation steps
-    expected_outcome: str = ""      # Wave 3.1: 1-sentence demo statement (behavioral)
-    timeout_seconds: int = 0        # 0 = no timeout (backward-compat default)
-    parallel_safe: bool = False     # bd-a379: True when sibling steps have disjoint allowed_paths
-    max_estimated_minutes: int = 0  # 0 = no estimate; enrichment enforces ceiling
+    depends_on: list[str] = Field(default_factory=list)
+    deliverables: list[str] = Field(default_factory=list)
+    allowed_paths: list[str] = Field(default_factory=list)
+    blocked_paths: list[str] = Field(default_factory=list)
+    context_files: list[str] = Field(default_factory=list)
+    team: list[TeamMember] = Field(default_factory=list)
+    # KnowledgeAttachment lives in models/knowledge.py and is still a
+    # dataclass; arbitrary_types_allowed on PlanModel lets us hold it.
+    # The from_dict override below explicitly re-hydrates from dict.
+    knowledge: list[Any] = Field(default_factory=list)
+    synthesis: SynthesisSpec | None = None
+    mcp_servers: list[str] = Field(default_factory=list)
+    interactive: bool = False
+    max_turns: int = 10
+    step_type: str = "developing"
+    command: str = ""
+    expected_outcome: str = ""
+    timeout_seconds: int = 0
+    parallel_safe: bool = False
+    max_estimated_minutes: int = 0
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Self:
+        # KnowledgeAttachment is still a dataclass (intentionally out of
+        # scope for slice 11 to keep the diff bounded — see
+        # migration-review-summary.md §5 slice 11 scope notes).  Use its
+        # from_dict so the typed instance is constructed.
+        from agent_baton.models.knowledge import KnowledgeAttachment
+
+        data = dict(data)
+        knowledge_in = data.pop("knowledge", [])
+        knowledge_v = [
+            (k if isinstance(k, KnowledgeAttachment)
+             else KnowledgeAttachment.from_dict(k))
+            for k in knowledge_in
+        ]
+        obj = cls(**data)
+        obj.knowledge = knowledge_v
+        return obj
 
     def to_dict(self) -> dict:
         d = {
@@ -383,11 +401,11 @@ class PlanStep:
             "agent_name": self.agent_name,
             "task_description": self.task_description,
             "model": self.model,
-            "depends_on": self.depends_on,
-            "deliverables": self.deliverables,
-            "allowed_paths": self.allowed_paths,
-            "blocked_paths": self.blocked_paths,
-            "context_files": self.context_files,
+            "depends_on": list(self.depends_on),
+            "deliverables": list(self.deliverables),
+            "allowed_paths": list(self.allowed_paths),
+            "blocked_paths": list(self.blocked_paths),
+            "context_files": list(self.context_files),
             "step_type": self.step_type,
         }
         if self.team:
@@ -397,7 +415,7 @@ class PlanStep:
         if self.synthesis is not None:
             d["synthesis"] = self.synthesis.to_dict()
         if self.mcp_servers:
-            d["mcp_servers"] = self.mcp_servers
+            d["mcp_servers"] = list(self.mcp_servers)
         if self.interactive:
             d["interactive"] = self.interactive
             d["max_turns"] = self.max_turns
@@ -413,36 +431,8 @@ class PlanStep:
             d["max_estimated_minutes"] = self.max_estimated_minutes
         return d
 
-    @classmethod
-    def from_dict(cls, data: dict) -> PlanStep:
-        synthesis_data = data.get("synthesis")
-        return cls(
-            step_id=data["step_id"],
-            agent_name=data["agent_name"],
-            task_description=data.get("task_description", ""),
-            model=data.get("model", "sonnet"),
-            depends_on=data.get("depends_on", []),
-            deliverables=data.get("deliverables", []),
-            allowed_paths=data.get("allowed_paths", []),
-            blocked_paths=data.get("blocked_paths", []),
-            context_files=data.get("context_files", []),
-            team=[TeamMember.from_dict(m) for m in data.get("team", [])],
-            knowledge=[KnowledgeAttachment.from_dict(k) for k in data.get("knowledge", [])],
-            synthesis=SynthesisSpec.from_dict(synthesis_data) if synthesis_data else None,
-            mcp_servers=data.get("mcp_servers", []),
-            interactive=data.get("interactive", False),
-            max_turns=data.get("max_turns", 10),
-            step_type=data.get("step_type", "developing"),
-            command=data.get("command", ""),
-            expected_outcome=data.get("expected_outcome", ""),
-            timeout_seconds=data.get("timeout_seconds", 0),
-            parallel_safe=data.get("parallel_safe", False),
-            max_estimated_minutes=data.get("max_estimated_minutes", 0),
-        )
 
-
-@dataclass
-class PlanGate:
+class PlanGate(PlanModel):
     """A QA gate that must pass before advancing to the next phase.
 
     Gates run automated checks (tests, linting, builds) or request
@@ -458,33 +448,26 @@ class PlanGate:
         fail_on: Criteria that constitute a failure.
     """
 
-    gate_type: str              # "build", "test", "lint", "spec", "review"
-    command: str = ""           # bash command to run (e.g. "pytest")
+    gate_type: str
+    command: str = ""
     description: str = ""
-    fail_on: list[str] = field(default_factory=list)  # criteria for failure
-
-    def to_dict(self) -> dict:
-        return {
-            "gate_type": self.gate_type,
-            "command": self.command,
-            "description": self.description,
-            "fail_on": self.fail_on,
-        }
+    fail_on: list[str] = Field(default_factory=list)
 
     @classmethod
-    def from_dict(cls, data: dict) -> PlanGate:
-        # Accept both "gate_type" (canonical) and "type" (common LLM variant)
-        gate_type = data.get("gate_type") or data.get("type", "")
-        return cls(
-            gate_type=gate_type,
-            command=data.get("command", ""),
-            description=data.get("description", ""),
-            fail_on=data.get("fail_on", []),
-        )
+    def from_dict(cls, data: dict[str, Any]) -> Self:
+        # Accept both "gate_type" (canonical) and "type" (common LLM variant).
+        # The legacy variant predates the slice-11 conversion; older state
+        # files and a few test fixtures still emit the alternate spelling.
+        data = dict(data)
+        if "gate_type" not in data and "type" in data:
+            data["gate_type"] = data.pop("type")
+        return cls(**data)
+
+    def to_dict(self) -> dict:
+        return self.model_dump(mode="python")
 
 
-@dataclass
-class PlanPhase:
+class PlanPhase(PlanModel):
     """A phase in an execution plan, containing steps and an optional gate.
 
     Phases group related steps and enforce a gate check or human approval
@@ -508,12 +491,39 @@ class PlanPhase:
 
     phase_id: int
     name: str
-    steps: list[PlanStep] = field(default_factory=list)
+    steps: list[PlanStep] = Field(default_factory=list)
     gate: PlanGate | None = None
-    approval_required: bool = False         # pause for human approval after steps complete
-    approval_description: str = ""          # what the human should review
-    feedback_questions: list[FeedbackQuestion] = field(default_factory=list)  # multiple-choice feedback gate
-    risk_level: str = ""                    # bd-5bd9: optional per-phase override
+    approval_required: bool = False
+    approval_description: str = ""
+    # FeedbackQuestion is defined later in the file; the dict-typed field
+    # is hydrated by the from_dict override below.  This forward reference
+    # is unavoidable while FeedbackQuestion comes after the result types
+    # in the file order.
+    feedback_questions: list[Any] = Field(default_factory=list)
+    risk_level: str = ""
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Self:
+        data = dict(data)
+        gate_data = data.get("gate")
+        if gate_data is not None and not isinstance(gate_data, PlanGate):
+            data["gate"] = PlanGate.from_dict(gate_data)
+        # FeedbackQuestion is still defined later in the file; resolve at
+        # call time to avoid a forward-reference dance.
+        steps_in = data.pop("steps", [])
+        steps_v = [
+            (s if isinstance(s, PlanStep) else PlanStep.from_dict(s))
+            for s in steps_in
+        ]
+        fq_in = data.pop("feedback_questions", [])
+        fq_v = [
+            (q if isinstance(q, FeedbackQuestion) else FeedbackQuestion.from_dict(q))
+            for q in fq_in
+        ]
+        obj = cls(**data)
+        obj.steps = steps_v
+        obj.feedback_questions = fq_v
+        return obj
 
     def to_dict(self) -> dict:
         d: dict = {
@@ -521,7 +531,7 @@ class PlanPhase:
             "name": self.name,
             "steps": [s.to_dict() for s in self.steps],
         }
-        if self.gate:
+        if self.gate is not None:
             d["gate"] = self.gate.to_dict()
         if self.approval_required:
             d["approval_required"] = self.approval_required
@@ -532,26 +542,15 @@ class PlanPhase:
             d["risk_level"] = self.risk_level
         return d
 
-    @classmethod
-    def from_dict(cls, data: dict) -> PlanPhase:
-        gate = PlanGate.from_dict(data["gate"]) if data.get("gate") else None
-        return cls(
-            phase_id=data["phase_id"],
-            name=data["name"],
-            steps=[PlanStep.from_dict(s) for s in data.get("steps", [])],
-            gate=gate,
-            approval_required=data.get("approval_required", False),
-            approval_description=data.get("approval_description", ""),
-            feedback_questions=[
-                FeedbackQuestion.from_dict(q)
-                for q in data.get("feedback_questions", [])
-            ],
-            risk_level=data.get("risk_level", ""),
-        )
+
+def _now_iso() -> str:
+    """``MachinePlan.created_at`` factory.  Differs from ``_now_iso_seconds``
+    in that it preserves microsecond precision (the dataclass version did
+    not pass ``timespec="seconds"``)."""
+    return datetime.now(timezone.utc).isoformat()
 
 
-@dataclass
-class MachinePlan:
+class MachinePlan(PlanModel):
     """Machine-readable execution plan — the contract between planner and executor.
 
     Created by ``IntelligentPlanner.create_plan()`` and persisted as
@@ -595,37 +594,87 @@ class MachinePlan:
     budget_tier: str = "standard"
     execution_mode: str = "phased"
     git_strategy: str = "commit-per-agent"
-    phases: list[PlanPhase] = field(default_factory=list)
-    shared_context: str = ""            # pre-built context for agents
-    pattern_source: str | None = None   # pattern_id that influenced this plan
-    created_at: str = ""
-    task_type: str | None = None        # inferred task type (e.g. "feature", "bug-fix")
-    explicit_knowledge_packs: list[str] = field(default_factory=list)  # from --knowledge-pack
-    explicit_knowledge_docs: list[str] = field(default_factory=list)   # from --knowledge
-    intervention_level: str = "low"     # low | medium | high
-    complexity: str = "medium"          # light | medium | heavy
-    classification_source: str = "keyword-fallback"  # haiku | keyword-fallback
-    resource_limits: ResourceLimits | None = None  # optional concurrency constraints
-    detected_stack: str | None = None  # e.g. "python", "python/react", "typescript/react"
-    foresight_insights: list[ForesightInsight] = field(default_factory=list)  # proactive insights
-    # E7 — dependency detection: task_id this plan depends on (from prior output)
+    phases: list[PlanPhase] = Field(default_factory=list)
+    shared_context: str = ""
+    pattern_source: str | None = None
+    created_at: str = Field(default_factory=_now_iso)
+    task_type: str | None = None
+    explicit_knowledge_packs: list[str] = Field(default_factory=list)
+    explicit_knowledge_docs: list[str] = Field(default_factory=list)
+    intervention_level: str = "low"
+    complexity: str = "medium"
+    classification_source: str = "keyword-fallback"
+    # ResourceLimits and ForesightInsight remain dataclasses (slice 11
+    # scope — see migration-review-summary.md §5).  arbitrary_types_allowed
+    # on PlanModel lets us hold them; from_dict explicitly re-hydrates
+    # from dict shapes.
+    resource_limits: Any = None
+    detected_stack: str | None = None
+    foresight_insights: list[Any] = Field(default_factory=list)
     depends_on_task: str | None = None
-    # A3: persist ClassificationResult signals and confidence alongside the plan.
-    # Populated by the planner when a ClassificationResult is available.
-    # ``None`` when the classification was performed before this field existed
-    # (pre-v10 databases) or when the planner used keyword-fallback only.
-    classification_signals: str | None = None    # JSON blob from ClassificationResult.to_dict()
-    classification_confidence: float | None = None  # 0.0–1.0 confidence score
-    archetype: str = "phased"       # planning archetype: direct | phased | investigative
-    max_retry_phases: int = 0       # investigative only: max phase retries before failing
-    # Override for ``BATON_COMPLIANCE_FAIL_CLOSED``.
-    # ``True`` forces fail-closed; ``False`` forces continue-on-failure;
-    # ``None`` (default) defers to the env var.
+    classification_signals: str | None = None
+    classification_confidence: float | None = None
+    archetype: str = "phased"
+    max_retry_phases: int = 0
     compliance_fail_closed: bool | None = None
 
-    def __post_init__(self) -> None:
-        if not self.created_at:
-            self.created_at = datetime.now(timezone.utc).isoformat()
+    @model_validator(mode="after")
+    def _validate_plan_graph_integrity(self) -> Self:
+        """Hole-6: enforce plan-graph integrity invariants.
+
+        Catches LLM-output-driven plan errors at construction time so
+        downstream executor code never sees a structurally invalid plan.
+        Raises ``ValueError`` with a descriptive message; Pydantic wraps
+        it in ``ValidationError``.
+
+        Invariants:
+
+        1. **Step ID uniqueness across phases.**  Two phases sharing a
+           ``step_id`` collide in ``ExecutionState.step_results`` and
+           ``state.completed_step_ids`` — the executor would treat the
+           second occurrence as already-complete.
+        2. **Every step has a non-empty ``agent_name``.**  Empty agents
+           cannot be dispatched.
+        3. **Phase IDs are unique within a plan.**  Phase advance walks
+           by ``current_phase`` index, but lookup-by-id (used by amend
+           and resolver) collides on duplicates.
+        4. **Step ``depends_on`` references resolve to a step that
+           exists earlier in the plan.**  Forward references would deadlock
+           the dispatcher.
+
+        See migration-review-summary.md §3 (Hole-6 plan-graph integrity).
+        """
+        seen_step_ids: dict[str, int] = {}
+        seen_phase_ids: set[int] = set()
+        for phase in self.phases:
+            if phase.phase_id in seen_phase_ids:
+                raise ValueError(
+                    f"Plan-graph invariant violation: phase_id "
+                    f"{phase.phase_id} appears more than once."
+                )
+            seen_phase_ids.add(phase.phase_id)
+            for step in phase.steps:
+                if not step.agent_name:
+                    raise ValueError(
+                        f"Plan-graph invariant violation: step "
+                        f"{step.step_id!r} has empty agent_name."
+                    )
+                prior_phase = seen_step_ids.get(step.step_id)
+                if prior_phase is not None:
+                    raise ValueError(
+                        f"Plan-graph invariant violation: step_id "
+                        f"{step.step_id!r} appears in phase {prior_phase} "
+                        f"and again in phase {phase.phase_id}."
+                    )
+                seen_step_ids[step.step_id] = phase.phase_id
+                for dep in step.depends_on:
+                    if dep not in seen_step_ids:
+                        raise ValueError(
+                            f"Plan-graph invariant violation: step "
+                            f"{step.step_id!r} depends on {dep!r}, which "
+                            f"is not declared as an earlier step."
+                        )
+        return self
 
     @property
     def all_steps(self) -> list[PlanStep]:
@@ -638,6 +687,33 @@ class MachinePlan:
     @property
     def total_steps(self) -> int:
         return len(self.all_steps)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Self:
+        # ResourceLimits and ForesightInsight live in other modules and
+        # remain dataclasses for now — re-hydrate them explicitly here so
+        # the Pydantic constructor receives typed values rather than
+        # raw dicts.  PlanPhase is already Pydantic; let its from_dict
+        # handle the nested re-hydration of PlanStep/PlanGate/etc.
+        from agent_baton.models.parallel import ResourceLimits
+        from agent_baton.models.taxonomy import ForesightInsight
+
+        data = dict(data)
+        rl_data = data.get("resource_limits")
+        if rl_data is not None and not isinstance(rl_data, ResourceLimits):
+            data["resource_limits"] = ResourceLimits.from_dict(rl_data)
+        phases_in = data.pop("phases", [])
+        phases_v = [
+            (p if isinstance(p, PlanPhase) else PlanPhase.from_dict(p))
+            for p in phases_in
+        ]
+        fi_in = data.pop("foresight_insights", [])
+        fi_v = [
+            (i if isinstance(i, ForesightInsight) else ForesightInsight.from_dict(i))
+            for i in fi_in
+        ]
+        obj = cls(**data, phases=phases_v, foresight_insights=fi_v)
+        return obj
 
     def to_dict(self) -> dict:
         d = {
@@ -652,8 +728,8 @@ class MachinePlan:
             "pattern_source": self.pattern_source,
             "created_at": self.created_at,
             "task_type": self.task_type,
-            "explicit_knowledge_packs": self.explicit_knowledge_packs,
-            "explicit_knowledge_docs": self.explicit_knowledge_docs,
+            "explicit_knowledge_packs": list(self.explicit_knowledge_packs),
+            "explicit_knowledge_docs": list(self.explicit_knowledge_docs),
             "intervention_level": self.intervention_level,
             "complexity": self.complexity,
             "classification_source": self.classification_source,
@@ -669,40 +745,6 @@ class MachinePlan:
         if self.resource_limits is not None:
             d["resource_limits"] = self.resource_limits.to_dict()
         return d
-
-    @classmethod
-    def from_dict(cls, data: dict) -> MachinePlan:
-        rl_data = data.get("resource_limits")
-        return cls(
-            task_id=data["task_id"],
-            task_summary=data["task_summary"],
-            risk_level=data.get("risk_level", "LOW"),
-            budget_tier=data.get("budget_tier", "standard"),
-            execution_mode=data.get("execution_mode", "phased"),
-            git_strategy=data.get("git_strategy", "commit-per-agent"),
-            phases=[PlanPhase.from_dict(p) for p in data.get("phases", [])],
-            shared_context=data.get("shared_context", ""),
-            pattern_source=data.get("pattern_source"),
-            created_at=data.get("created_at", ""),
-            task_type=data.get("task_type"),
-            explicit_knowledge_packs=data.get("explicit_knowledge_packs", []),
-            explicit_knowledge_docs=data.get("explicit_knowledge_docs", []),
-            intervention_level=data.get("intervention_level", "low"),
-            complexity=data.get("complexity", "medium"),
-            classification_source=data.get("classification_source", "keyword-fallback"),
-            resource_limits=ResourceLimits.from_dict(rl_data) if rl_data else None,
-            detected_stack=data.get("detected_stack"),
-            foresight_insights=[
-                ForesightInsight.from_dict(i)
-                for i in data.get("foresight_insights", [])
-            ],
-            depends_on_task=data.get("depends_on_task"),
-            classification_signals=data.get("classification_signals"),
-            classification_confidence=data.get("classification_confidence"),
-            archetype=data.get("archetype", "phased"),
-            max_retry_phases=data.get("max_retry_phases", 0),
-            compliance_fail_closed=data.get("compliance_fail_closed"),
-        )
 
     def to_markdown(self) -> str:
         """Render as human-readable markdown (for plan.md)."""
@@ -1028,8 +1070,7 @@ class PendingApprovalRequest(ExecutionRecord):
     requested_at: str = Field(default_factory=_now_iso_seconds)
 
 
-@dataclass
-class FeedbackQuestion:
+class FeedbackQuestion(PlanModel):
     """A multiple-choice question presented during a feedback gate.
 
     Feedback gates present 1-4 focused questions to the user after
@@ -1052,30 +1093,12 @@ class FeedbackQuestion:
     question_id: str
     question: str
     context: str = ""
-    options: list[str] = field(default_factory=list)
-    option_agents: list[str] = field(default_factory=list)
-    option_prompts: list[str] = field(default_factory=list)
+    options: list[str] = Field(default_factory=list)
+    option_agents: list[str] = Field(default_factory=list)
+    option_prompts: list[str] = Field(default_factory=list)
 
     def to_dict(self) -> dict:
-        return {
-            "question_id": self.question_id,
-            "question": self.question,
-            "context": self.context,
-            "options": self.options,
-            "option_agents": self.option_agents,
-            "option_prompts": self.option_prompts,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict) -> FeedbackQuestion:
-        return cls(
-            question_id=data.get("question_id", ""),
-            question=data.get("question", ""),
-            context=data.get("context", ""),
-            options=data.get("options", []),
-            option_agents=data.get("option_agents", []),
-            option_prompts=data.get("option_prompts", []),
-        )
+        return self.model_dump(mode="python")
 
 
 class FeedbackResult(ExecutionRecord):

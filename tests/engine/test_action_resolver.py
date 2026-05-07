@@ -294,8 +294,11 @@ class TestDispatch:
 
     def test_team_dispatch_for_team_step(self) -> None:
         # Use a non-empty list to flag the step as a team step; the
-        # resolver only checks truthiness of step.team.
-        team_step = _step(team=[object()])
+        # resolver only checks truthiness of step.team.  Slice 11
+        # converted PlanStep to Pydantic, so the placeholder must now be
+        # a real TeamMember instance.
+        from agent_baton.models.execution import TeamMember
+        team_step = _step(team=[TeamMember(member_id="x", agent_name="dev")])
         phase = _phase(steps=[team_step])
         state = _state(plan=_plan([phase]))
         decision = ActionResolver().determine_next(state)
