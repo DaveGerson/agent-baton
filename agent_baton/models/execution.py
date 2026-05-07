@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
+from pydantic import BaseModel, ConfigDict
+
 from agent_baton.models.knowledge import (
     KnowledgeAttachment,
     KnowledgeGapSignal,
@@ -69,6 +71,70 @@ class ActionType(Enum):
     INTERACT = "interact"               # multi-turn interaction: agent responded, awaiting human input
     SWARM_DISPATCH = "swarm.dispatch"   # Wave 6.2 (bd-2b9f): trigger a SwarmDispatcher run
     CHECKPOINT = "checkpoint"            # save state + suggest fresh session to prevent context rot
+
+
+# ---------------------------------------------------------------------------
+# Result-type base class (Pydantic) — pre-Phase-1 prototype
+# ---------------------------------------------------------------------------
+#
+# Single Pydantic base for every persisted execution result/decision record.
+# Hosts the shared ``model_config`` and a default ``to_dict`` / ``from_dict``
+# pair so that subclasses can drop the recurring boilerplate (and the
+# ``cls.__dataclass_fields__`` introspection trap that breaks under Pydantic).
+#
+# Design rationale, scope, and the one-class-vs-two-level decision are
+# documented in ``docs/internal/result-hierarchy-proposal.md``.  Mutation
+# semantics (why ``frozen=False`` + ``validate_assignment=False`` are
+# required) are documented in
+# ``docs/internal/pydantic-migration-mutation-audit.md``.
+#
+# IMPORTANT: this base deliberately holds NO fields.  Promoting any single
+# field (timestamp / phase_id / decision_source / actor) to the base would
+# change the on-disk JSON shape of at least one subclass and break the
+# Phase 0 byte-identical roundtrip tests.  Each subclass keeps its own
+# field set verbatim.
+
+class ExecutionRecord(BaseModel):
+    """Common base for persisted execution result/decision records.
+
+    Provides:
+        - ``extra="ignore"`` — unknown keys in ``from_dict`` payloads are
+          dropped silently (forward-compat for older / newer state files,
+          and a structural replacement for the
+          ``cls.__dataclass_fields__`` filter that ``GateResult`` and
+          ``StepResult`` historically used).
+        - Mutable instances — list / dict fields can be ``.append``-ed in
+          place, matching the dataclass mutation semantics audited in
+          ``docs/internal/pydantic-migration-mutation-audit.md``.
+        - A default ``to_dict()`` / ``from_dict()`` pair that subclasses
+          with no conditional emission (e.g. ``GateResult``) inherit
+          unchanged.
+
+    Subclasses override ``to_dict`` only when they must omit empty nested
+    collections (e.g. ``StepResult.member_results``) or order keys for
+    fixture stability.  Subclasses override ``from_dict`` only when they
+    must re-hydrate nested objects whose types are not yet Pydantic
+    models.
+
+    Holds no fields — every subclass keeps the exact field set it had as
+    a dataclass so the on-disk JSON shape stays byte-identical with the
+    Phase 0 golden fixtures.
+    """
+
+    model_config = ConfigDict(
+        extra="ignore",             # forward-compat; replaces __dataclass_fields__ filter
+        validate_assignment=False,  # match dataclass mutation semantics (see audit Cat. 1-3)
+        arbitrary_types_allowed=False,
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Default serialisation. Override for conditional / ordered emission."""
+        return self.model_dump(mode="python")
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ExecutionRecord:
+        """Default deserialisation. ``extra="ignore"`` drops unknown keys."""
+        return cls(**data)
 
 
 # ---------------------------------------------------------------------------
@@ -1176,12 +1242,19 @@ class FeedbackResult:
         )
 
 
-@dataclass
-class GateResult:
+class GateResult(ExecutionRecord):
     """Outcome of a QA gate check.
 
     Recorded by ``baton execute gate`` after running the gate command
     and evaluating the result.
+
+    Pre-Phase-1 prototype: this is the first result type promoted onto
+    the :class:`ExecutionRecord` Pydantic base.  ``to_dict`` and
+    ``from_dict`` are inherited; the historical ``cls.__dataclass_fields__``
+    filter is replaced by the base class's ``extra="ignore"`` config.
+    The on-disk JSON shape is unchanged — verified by
+    ``tests/models/test_execution_roundtrip.py::TestGateResult`` against
+    ``tests/models/golden_states/GateResult.json``.
 
     Attributes:
         phase_id: Phase whose gate was checked.
@@ -1207,22 +1280,8 @@ class GateResult:
     decision_source: str = ""       # A2: human | daemon_auto | api | policy_auto
     actor: str = ""                 # A2: $USER@$HOSTNAME or "daemon"
 
-    def to_dict(self) -> dict:
-        return {
-            "phase_id": self.phase_id,
-            "gate_type": self.gate_type,
-            "passed": self.passed,
-            "output": self.output,
-            "checked_at": self.checked_at,
-            "command": self.command,
-            "exit_code": self.exit_code,
-            "decision_source": self.decision_source,
-            "actor": self.actor,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict) -> GateResult:
-        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+    # to_dict / from_dict inherited from ExecutionRecord — every field is
+    # emitted unconditionally, matching the historical hand-rolled to_dict.
 
 
 # ---------------------------------------------------------------------------
