@@ -18,6 +18,8 @@ from unittest.mock import MagicMock, call
 
 import pytest
 
+pytest.importorskip("libcst")
+
 from agent_baton.core.swarm.partitioner import ASTPartitioner, RenameSymbol
 
 
