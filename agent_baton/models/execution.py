@@ -875,8 +875,7 @@ class PlanAmendment:
 # Execution State (persisted between CLI calls)
 # ---------------------------------------------------------------------------
 
-@dataclass
-class TeamStepResult:
+class TeamStepResult(ExecutionRecord):
     """Result of a single team member's work within a team step.
 
     Collected individually per member and aggregated into the parent
@@ -894,26 +893,7 @@ class TeamStepResult:
     agent_name: str
     status: str = "complete"        # complete, failed
     outcome: str = ""
-    files_changed: list[str] = field(default_factory=list)
-
-    def to_dict(self) -> dict:
-        return {
-            "member_id": self.member_id,
-            "agent_name": self.agent_name,
-            "status": self.status,
-            "outcome": self.outcome,
-            "files_changed": self.files_changed,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict) -> TeamStepResult:
-        return cls(
-            member_id=data.get("member_id", ""),
-            agent_name=data.get("agent_name", ""),
-            status=data.get("status", "complete"),
-            outcome=data.get("outcome", ""),
-            files_changed=data.get("files_changed", []),
-        )
+    files_changed: list[str] = Field(default_factory=list)
 
 
 @dataclass
