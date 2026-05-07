@@ -235,8 +235,45 @@ class SqliteStorage:
                         ),
                     )
                     state._loaded_version = 1
+                elif loaded_version == 0:
+                    # Split-brain recovery: state was constructed without
+                    # going through the SQLite load path (e.g. file-backend
+                    # fallback after a SQLite load failure).  We cannot
+                    # honour OCC because we never observed a version, so
+                    # adopt the persisted row's version and force the
+                    # update — file backend "wins" in this degraded path.
+                    # See tests/test_pipeline_edge_cases.py
+                    # TestLoadFallbackOnSqliteFailure for the scenario.
+                    persisted_version = int(exists_row["version"])
+                    conn.execute(
+                        """
+                        UPDATE executions SET
+                            status                        = ?,
+                            current_phase                 = ?,
+                            current_step_index            = ?,
+                            completed_at                  = ?,
+                            updated_at                    = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+                            pending_gaps                  = ?,
+                            resolved_decisions            = ?,
+                            force_override                = ?,
+                            override_justification        = ?,
+                            run_cumulative_spend_usd      = ?,
+                            scope_expansions_applied      = ?,
+                            working_branch                = ?,
+                            working_branch_head           = ?,
+                            consolidation_result_json     = ?,
+                            pending_scope_expansions_json = ?,
+                            pending_approval_request_json = ?,
+                            phase_retries_json            = ?,
+                            version                       = version + 1
+                         WHERE task_id = ?
+                        """,
+                        update_params[:-1],  # drop the trailing version match
+                    )
+                    state._loaded_version = persisted_version + 1
                 else:
-                    # OCC conflict — row's version moved.
+                    # OCC conflict — row's version moved between this
+                    # caller's load and save.
                     from agent_baton.core.engine.errors import (
                         ConcurrentModificationError,
                     )
