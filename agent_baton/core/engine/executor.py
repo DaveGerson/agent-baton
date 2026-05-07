@@ -106,6 +106,7 @@ from agent_baton.models.execution import (
     GateResult,
     InteractionTurn,
     MachinePlan,
+    PendingApprovalRequest,
     PlanAmendment,
     PlanGate,
     PlanPhase,
@@ -239,6 +240,35 @@ def _swarm_enabled() -> bool:
     Override via env: ``BATON_SWARM_ENABLED=1``.
     """
     return os.environ.get("BATON_SWARM_ENABLED", "0").strip().lower() in ("1", "true", "yes")
+
+
+def _compliance_fail_closed_enabled(
+    plan: MachinePlan | None = None,
+) -> bool:
+    """Return True when compliance writes must fail-closed (Hole 2 fix).
+
+    Resolution order (first non-``None`` wins):
+
+    1. ``plan.compliance_fail_closed`` — set per-plan by the planning agent
+       for regulated-domain or high-risk tasks.
+    2. ``BATON_COMPLIANCE_FAIL_CLOSED`` env var — operator-level default.
+    3. ``False`` — historical best-effort default.
+
+    Default: disabled — preserves the historical best-effort behavior where
+    compliance write failures are logged and execution continues.  When
+    ``True`` the executor raises
+    :class:`agent_baton.core.engine.errors.ComplianceWriteError`, marks the
+    execution failed, and emits a bead warning so the operator is alerted.
+    Required for regulated-domain work where losing an audit entry without
+    halting is a compliance defect.
+
+    Override via env: ``BATON_COMPLIANCE_FAIL_CLOSED=1``.
+    """
+    if plan is not None and plan.compliance_fail_closed is not None:
+        return plan.compliance_fail_closed
+    return os.environ.get("BATON_COMPLIANCE_FAIL_CLOSED", "0").strip().lower() in (
+        "1", "true", "yes"
+    )
 
 
 def _cli_actor() -> str:
@@ -1021,16 +1051,37 @@ class ExecutionEngine:
 
     # ── Compliance audit helpers ─────────────────────────────────────────────
 
-    def _write_compliance_entry(self, entry: dict) -> None:
+    def _write_compliance_entry(
+        self,
+        entry: dict,
+        plan: MachinePlan | None = None,
+    ) -> None:
         """Append a compliance audit entry to the hash-chained JSONL log.
 
         F0.3 (bd-f606): all entries flow through :class:`ComplianceChainWriter`
-        so the log is tamper-evident.  Best-effort: any I/O failure is logged
-        and silently swallowed so that compliance write failures never block
-        execution.
+        so the log is tamper-evident.
+
+        Two failure modes (Hole 2 fix):
+
+        * **Default (best-effort, ``BATON_COMPLIANCE_FAIL_CLOSED`` unset or
+          ``0``):**  any I/O failure is logged at WARNING level **and** a
+          ``BEAD_WARNING`` is filed so the failure is visible in the audit
+          trail surface — not just buried in logs.  Execution continues.
+        * **Fail-closed (``BATON_COMPLIANCE_FAIL_CLOSED=1``, or
+          ``plan.compliance_fail_closed=True``):** the underlying exception
+          is wrapped in
+          :class:`agent_baton.core.engine.errors.ComplianceWriteError`,
+          ``state.status`` is flipped to ``"failed"`` with a clear status
+          reason, and the exception is raised so the caller halts the
+          current step.  Required for regulated-domain work where losing an
+          audit entry without halting is a compliance defect.
 
         ``entry`` should include at minimum: ``timestamp``, ``event_type``,
         ``task_id``, ``plan_id``, ``step_id``, and ``agent_name``.
+
+        ``plan`` is optional; when supplied, ``plan.compliance_fail_closed``
+        takes precedence over the env var (see
+        :func:`_compliance_fail_closed_enabled`).
         """
         if self._compliance_log_path is None:
             return
@@ -1039,7 +1090,116 @@ class ExecutionEngine:
             writer.append(entry)
             return
         except Exception as exc:
+            log_path_str = str(self._compliance_log_path)
+            fail_closed = _compliance_fail_closed_enabled(plan)
+
+            # Best-effort bead warning so the failure surfaces in the audit
+            # trail regardless of mode.  Bead writes themselves are best-effort
+            # — if they fail too we drop down to the log line below.
+            self._file_compliance_bead_warning(
+                exc=exc,
+                log_path=log_path_str,
+                fail_closed=fail_closed,
+                entry=entry,
+            )
+
+            if fail_closed:
+                _log.error(
+                    "Compliance audit write failed in fail-closed mode "
+                    "(BATON_COMPLIANCE_FAIL_CLOSED=1) — halting execution: %s",
+                    exc,
+                )
+                # Mark the execution as failed so resume / inspection sees a
+                # clear status reason for the halt.  Best-effort: if the state
+                # cannot be loaded (e.g. _persistence not yet initialized) we
+                # still raise — the typed exception is the contract.
+                try:
+                    state = self._load_execution()
+                    if state is not None:
+                        state.status = "failed"
+                        state.completed_at = state.completed_at or _utcnow()
+                        # Surface the reason in a status-reason field.  We
+                        # reuse override_justification (the closest existing
+                        # operator-visible field) but only when empty.
+                        if not state.override_justification:
+                            state.override_justification = (
+                                f"compliance_write_failed: "
+                                f"{type(exc).__name__}: {exc}"
+                            )
+                        self._save_execution(state)
+                except Exception as _mark_exc:  # pragma: no cover
+                    _log.debug(
+                        "Could not mark execution failed after compliance "
+                        "write failure (non-fatal): %s",
+                        _mark_exc,
+                    )
+
+                from agent_baton.core.engine.errors import ComplianceWriteError
+                raise ComplianceWriteError(
+                    underlying=exc,
+                    log_path=log_path_str,
+                ) from exc
+
             _log.warning("Compliance audit write failed (non-fatal): %s", exc)
+
+    def _file_compliance_bead_warning(
+        self,
+        *,
+        exc: BaseException,
+        log_path: str,
+        fail_closed: bool,
+        entry: dict,
+    ) -> None:
+        """File a BEAD_WARNING for a compliance audit write failure.
+
+        Hole 2 fix: even in best-effort mode the operator must see compliance
+        write failures somewhere other than a buried log line.  This filer is
+        deliberately tolerant — bead-store I/O failures are logged at DEBUG
+        and never raised, so they don't mask the original compliance failure.
+        """
+        if self._bead_store is None:
+            return
+        try:
+            from agent_baton.models.bead import Bead, _generate_bead_id
+            ts = _utcnow()
+            task_id = entry.get("task_id", "") or "unknown"
+            step_id = entry.get("step_id", "") or "compliance-audit"
+            existing_count = 0
+            try:
+                existing_count = len(
+                    self._bead_store.query(task_id=task_id, limit=10000)
+                )
+            except Exception:
+                pass
+            content = (
+                f"BEAD_WARNING: compliance-audit-write-failed "
+                f"task_id={task_id} "
+                f"step_id={step_id} "
+                f"event_type={entry.get('event_type', 'unknown')} "
+                f"error_type={type(exc).__name__} "
+                f"reason={exc} "
+                f"log_path={log_path} "
+                f"fail_closed={'1' if fail_closed else '0'}"
+            )
+            bead_id = _generate_bead_id(task_id, step_id, content, ts, existing_count)
+            bead = Bead(
+                bead_id=bead_id,
+                task_id=task_id,
+                step_id=step_id,
+                agent_name="compliance-audit",
+                bead_type="warning",
+                content=content,
+                confidence="high",
+                scope="task" if step_id == "compliance-audit" else "step",
+                created_at=ts,
+                source="agent-signal",
+            )
+            self._bead_store.write(bead)
+        except Exception as bead_exc:
+            _log.debug(
+                "Compliance audit bead-warning failed (non-fatal): %s",
+                bead_exc,
+            )
 
     def _compliance_dispatch(
         self,
@@ -1049,16 +1209,19 @@ class ExecutionEngine:
         policy_context: str = "",
     ) -> None:
         """Write a compliance entry for an agent dispatch event."""
-        self._write_compliance_entry({
-            "timestamp": _utcnow(),
-            "event_type": "agent_dispatch",
-            "task_id": state.task_id,
-            "plan_id": state.plan.task_id,
-            "step_id": step_id,
-            "agent_name": agent_name,
-            "risk_level": state.plan.risk_level,
-            "policy_context": policy_context,
-        })
+        self._write_compliance_entry(
+            {
+                "timestamp": _utcnow(),
+                "event_type": "agent_dispatch",
+                "task_id": state.task_id,
+                "plan_id": state.plan.task_id,
+                "step_id": step_id,
+                "agent_name": agent_name,
+                "risk_level": state.plan.risk_level,
+                "policy_context": policy_context,
+            },
+            plan=state.plan,
+        )
 
     def _compliance_policy_event(
         self,
@@ -1069,25 +1232,28 @@ class ExecutionEngine:
         action_taken: str,
     ) -> None:
         """Write a compliance entry for a policy violation event."""
-        self._write_compliance_entry({
-            "timestamp": _utcnow(),
-            "event_type": "policy_violation",
-            "task_id": state.task_id,
-            "plan_id": state.plan.task_id,
-            "step_id": step_id,
-            "agent_name": agent_name,
-            "risk_level": state.plan.risk_level,
-            "violations": [
-                {
-                    "rule_name": v.rule.name,
-                    "severity": v.rule.severity,
-                    "rule_type": v.rule.rule_type,
-                    "details": v.details,
-                }
-                for v in violations
-            ],
-            "action_taken": action_taken,
-        })
+        self._write_compliance_entry(
+            {
+                "timestamp": _utcnow(),
+                "event_type": "policy_violation",
+                "task_id": state.task_id,
+                "plan_id": state.plan.task_id,
+                "step_id": step_id,
+                "agent_name": agent_name,
+                "risk_level": state.plan.risk_level,
+                "violations": [
+                    {
+                        "rule_name": v.rule.name,
+                        "severity": v.rule.severity,
+                        "rule_type": v.rule.rule_type,
+                        "details": v.details,
+                    }
+                    for v in violations
+                ],
+                "action_taken": action_taken,
+            },
+            plan=state.plan,
+        )
 
     def _compliance_gate(
         self,
@@ -1098,19 +1264,22 @@ class ExecutionEngine:
         output: str = "",
     ) -> None:
         """Write a compliance entry for a gate evaluation result."""
-        self._write_compliance_entry({
-            "timestamp": _utcnow(),
-            "event_type": "gate_result",
-            "task_id": state.task_id,
-            "plan_id": state.plan.task_id,
-            "step_id": "",
-            "agent_name": "engine",
-            "risk_level": state.plan.risk_level,
-            "phase_id": phase_id,
-            "gate_type": gate_type,
-            "passed": passed,
-            "output_snippet": output[:500] if output else "",
-        })
+        self._write_compliance_entry(
+            {
+                "timestamp": _utcnow(),
+                "event_type": "gate_result",
+                "task_id": state.task_id,
+                "plan_id": state.plan.task_id,
+                "step_id": "",
+                "agent_name": "engine",
+                "risk_level": state.plan.risk_level,
+                "phase_id": phase_id,
+                "gate_type": gate_type,
+                "passed": passed,
+                "output_snippet": output[:500] if output else "",
+            },
+            plan=state.plan,
+        )
 
     # ── CI gate dispatch (Wave 4.1) ──────────────────────────────────────────
 
@@ -2485,15 +2654,88 @@ class ExecutionEngine:
                                 )
                                 return
                             else:
+                                # Single-step wave: degrade to in-place execution.
+                                # This is an explicit choice but must be visible.
                                 _log.warning(
                                     "Worktree create failed for step %s; running in-place: %s",
                                     step_id, exc,
                                 )
+                                _in_place_reason = f"WorktreeCreateError: {exc}"
+                                try:
+                                    self._worktree_mgr._file_bead_warning(
+                                        task_id=state.task_id,
+                                        step_id=step_id,
+                                        content=(
+                                            f"BEAD_WARNING: worktree-create-failed-degraded-in-place "
+                                            f"step={step_id} reason={exc}"
+                                        ),
+                                    )
+                                except Exception as _bead_exc:
+                                    _log.debug(
+                                        "BEAD_WARNING write failed for step %s (non-fatal): %s",
+                                        step_id, _bead_exc,
+                                    )
+                                # Mark the step in the audit trail so resume
+                                # logic and operators can see the degradation.
+                                _in_place = getattr(state, "steps_ran_in_place", {})
+                                _in_place[step_id] = _in_place_reason
+                                state.steps_ran_in_place = _in_place
+                                self._save_execution(state)
                         except Exception as exc:
+                            _is_parallel = self._is_step_in_parallel_wave(state, step_id)
+                            _exc_label = type(exc).__name__
                             _log.warning(
-                                "Worktree create unexpected error for step %s (non-fatal): %s",
-                                step_id, exc,
+                                "Worktree create unexpected error (%s) for step %s: %s",
+                                _exc_label, step_id, exc,
                             )
+                            if _is_parallel:
+                                # Parallel wave: unexpected errors are as serious
+                                # as WorktreeCreateError — fail the step.
+                                try:
+                                    self._worktree_mgr._file_bead_warning(
+                                        task_id=state.task_id,
+                                        step_id=step_id,
+                                        content=(
+                                            f"BEAD_WARNING: worktree-unexpected-error-parallel "
+                                            f"step={step_id} exc_type={_exc_label} reason={exc}"
+                                        ),
+                                    )
+                                except Exception as _bead_exc:
+                                    _log.debug(
+                                        "BEAD_WARNING write failed for step %s (non-fatal): %s",
+                                        step_id, _bead_exc,
+                                    )
+                                self.record_step_result(
+                                    step_id=step_id,
+                                    agent_name=agent_name,
+                                    status="failed",
+                                    error=f"WorktreeUnexpectedError({_exc_label}): {exc}",
+                                )
+                                return
+                            else:
+                                # Single-step wave: degrade to in-place but record
+                                # that this was an UNEXPECTED error, not a clean
+                                # WorktreeCreateError — the distinction matters for
+                                # triage.
+                                _in_place_reason = f"WorktreeUnexpectedError({_exc_label}): {exc}"
+                                try:
+                                    self._worktree_mgr._file_bead_warning(
+                                        task_id=state.task_id,
+                                        step_id=step_id,
+                                        content=(
+                                            f"BEAD_WARNING: worktree-unexpected-error-degraded-in-place "
+                                            f"step={step_id} exc_type={_exc_label} reason={exc}"
+                                        ),
+                                    )
+                                except Exception as _bead_exc:
+                                    _log.debug(
+                                        "BEAD_WARNING write failed for step %s (non-fatal): %s",
+                                        step_id, _bead_exc,
+                                    )
+                                _in_place = getattr(state, "steps_ran_in_place", {})
+                                _in_place[step_id] = _in_place_reason
+                                state.steps_ran_in_place = _in_place
+                                self._save_execution(state)
 
         self.record_step_result(
             step_id=step_id,
@@ -2658,18 +2900,21 @@ class ExecutionEngine:
                 # compliance audit entry so regulated environments can prove
                 # the disable was honoured.  Read each time (not cached) so
                 # a runtime toggle is respected immediately.
-                self._write_compliance_entry({
-                    "timestamp": _utcnow(),
-                    "event_type": "selfheal_suppressed",
-                    "task_id": state.task_id,
-                    "plan_id": state.plan.task_id,
-                    "step_id": "",
-                    "agent_name": "engine",
-                    "risk_level": state.plan.risk_level,
-                    "phase_id": phase_id,
-                    "gate_type": gate_type,
-                    "reason": "BATON_SELFHEAL_ENABLED not set; self-heal disabled",
-                })
+                self._write_compliance_entry(
+                    {
+                        "timestamp": _utcnow(),
+                        "event_type": "selfheal_suppressed",
+                        "task_id": state.task_id,
+                        "plan_id": state.plan.task_id,
+                        "step_id": "",
+                        "agent_name": "engine",
+                        "risk_level": state.plan.risk_level,
+                        "phase_id": phase_id,
+                        "gate_type": gate_type,
+                        "reason": "BATON_SELFHEAL_ENABLED not set; self-heal disabled",
+                    },
+                    plan=state.plan,
+                )
             state.status = "gate_failed"
         else:
             self._publish(evt.gate_passed(
@@ -3744,6 +3989,24 @@ class ExecutionEngine:
     ) -> None:
         """Record a human approval decision for a phase.
 
+        Hole 1 fix — validates four pre-conditions before mutating state:
+
+        1. ``state.status == "approval_pending"`` — without this guard a
+           stray call mid-execution is accepted and re-flips status to
+           ``"running"``, masking whatever phase the engine was actually
+           in.
+        2. ``phase_id`` matches the current phase — audit rows must not be
+           filed against the wrong phase.
+        3. The current phase has ``approval_required=True`` — no approval
+           may be recorded for a phase that never asked for one.
+        4. In ``BATON_APPROVAL_MODE=team`` the recording actor must differ
+           from whoever requested the approval.  The requester identity is
+           captured by ``_approval_action`` in
+           ``state.pending_approval_request``.
+
+        Failures raise :class:`InvalidApprovalState` with a ``reason`` tag
+        from that class so callers can map specific failures to error codes.
+
         Args:
             phase_id: The phase_id requiring approval.
             result: One of ``"approve"``, ``"reject"``,
@@ -3766,6 +4029,82 @@ class ExecutionEngine:
         if not actor:
             actor = _cli_actor()
 
+        # ── Hole 1 validations ──────────────────────────────────────────────
+        from agent_baton.core.engine.errors import InvalidApprovalState
+
+        # (1) Engine must be waiting for an approval right now.
+        if state.status != "approval_pending":
+            raise InvalidApprovalState(
+                reason=InvalidApprovalState.REASON_NOT_PENDING,
+                message=(
+                    f"record_approval_result rejected: execution status is "
+                    f"{state.status!r}, not 'approval_pending'.  An approval "
+                    f"can only be recorded while the engine is genuinely "
+                    f"waiting on one — accepting a stray approval would "
+                    f"silently re-flip the status to 'running' and mask the "
+                    f"actual phase in flight."
+                ),
+                phase_id=phase_id,
+                current_status=state.status,
+                actor=actor,
+            )
+
+        # (2) phase_id argument must match the current phase.
+        current_phase = state.current_phase_obj
+        if current_phase is None or current_phase.phase_id != phase_id:
+            current_phase_id = (
+                current_phase.phase_id if current_phase is not None else None
+            )
+            raise InvalidApprovalState(
+                reason=InvalidApprovalState.REASON_PHASE_MISMATCH,
+                message=(
+                    f"record_approval_result rejected: phase_id={phase_id} "
+                    f"does not match the current phase "
+                    f"(phase_id={current_phase_id}).  Approvals must be "
+                    f"recorded against the phase that requested them."
+                ),
+                phase_id=phase_id,
+                current_status=state.status,
+                actor=actor,
+            )
+
+        # (3) The current phase must actually have requested approval.
+        if not getattr(current_phase, "approval_required", False):
+            raise InvalidApprovalState(
+                reason=InvalidApprovalState.REASON_NO_APPROVAL_REQUESTED,
+                message=(
+                    f"record_approval_result rejected: phase {phase_id} "
+                    f"({current_phase.name!r}) did not request approval "
+                    f"(approval_required=False).  Approvals cannot be "
+                    f"recorded against phases that never asked for one."
+                ),
+                phase_id=phase_id,
+                current_status=state.status,
+                actor=actor,
+            )
+
+        # (4) Team-mode self-approval guard.  In team mode the actor that
+        # records the approval must differ from whoever requested it.
+        approval_mode = os.environ.get("BATON_APPROVAL_MODE", "local").lower()
+        if approval_mode == "team":
+            request = getattr(state, "pending_approval_request", None)
+            if request is not None:
+                requester = request.requester
+                if requester and requester == actor:
+                    raise InvalidApprovalState(
+                        reason=InvalidApprovalState.REASON_SELF_APPROVAL,
+                        message=(
+                            f"record_approval_result rejected (team mode): "
+                            f"actor {actor!r} requested this approval and "
+                            f"cannot self-approve.  A different reviewer "
+                            f"must record the decision."
+                        ),
+                        phase_id=phase_id,
+                        current_status=state.status,
+                        actor=actor,
+                        requester=requester,
+                    )
+
         approval = ApprovalResult(
             phase_id=phase_id,
             result=result,
@@ -3775,6 +4114,10 @@ class ExecutionEngine:
             rationale=rationale,
         )
         state.approval_results.append(approval)
+        # Clear the pending-approval audit row — the approval has been
+        # recorded.  Subsequent stray record_approval_result calls now hit
+        # the status != approval_pending guard above.
+        state.pending_approval_request = None
 
         if self._trace is not None:
             self._tracer.record_event(
@@ -3792,12 +4135,23 @@ class ExecutionEngine:
             state.status = "running"
         elif result == "approve-with-feedback":
             # Insert a remediation phase after the current phase.
-            # Save state first so amend_plan sees the approval result.
+            # Save state first so _amend_from_feedback → amend_plan can see
+            # the approval result when it loads state.
             self._save_execution(state)
             self._amend_from_feedback(state, phase_id, feedback)
-            # Reload state — amend_plan saved its own copy with the
-            # amendment applied.  We must pick up those changes.
-            state = self._load_execution() or state
+            # amend_plan saves its own copy with the amendment applied.
+            # Reload to pick up those changes — do NOT fall back to the
+            # pre-amendment in-memory state if the load fails, because that
+            # would silently drop the amendment from the running state while
+            # it remains recorded on disk, creating an audit split-brain.
+            from agent_baton.core.engine.errors import ExecutionStateInconsistency
+            _reloaded = self._load_execution()
+            if _reloaded is None:
+                raise ExecutionStateInconsistency(
+                    task_id=state.task_id,
+                    context="record_approval_result:approve-with-feedback",
+                )
+            state = _reloaded
             state.status = "running"
 
         self._save_execution(state)
@@ -4080,6 +4434,27 @@ class ExecutionEngine:
                     parent.deviations.append(
                         f"Conflict escalated: {conflict.conflict_id}"
                     )
+                    # Hole 1 fix: mark the current phase as approval_required
+                    # so record_approval_result's validation accepts this
+                    # path, and stamp the pending-approval audit row capturing
+                    # the requester (the executor itself, on behalf of the
+                    # conflict detector).  Without these, an approval recorded
+                    # for the team-conflict-escalation case would be rejected
+                    # as "no approval requested".
+                    current_phase = state.current_phase_obj
+                    if current_phase is not None:
+                        current_phase.approval_required = True
+                        if not current_phase.approval_description:
+                            current_phase.approval_description = (
+                                f"Team conflict escalated: "
+                                f"{conflict.conflict_id}.  Review and approve "
+                                f"to continue."
+                            )
+                        state.pending_approval_request = PendingApprovalRequest(
+                            phase_id=current_phase.phase_id,
+                            requester=_cli_actor(),
+                            requested_at=_utcnow(),
+                        )
                     self._save_execution(state)
                     return
 
@@ -5949,10 +6324,33 @@ class ExecutionEngine:
     def _approval_action(
         self, state: ExecutionState, phase_obj: PlanPhase,
     ) -> ExecutionAction:
-        """Build an APPROVAL action for a phase requiring human review."""
+        """Build an APPROVAL action for a phase requiring human review.
+
+        Side effect (Hole 1 fix): records ``state.pending_approval_request``
+        with the requester identity and phase_id so ``record_approval_result``
+        can enforce that the approval (a) belongs to the phase that asked,
+        (b) is recorded only while ``status == "approval_pending"``, and
+        (c) in ``BATON_APPROVAL_MODE=team`` is recorded by a different actor
+        than whoever requested it.  The audit row is cleared when the
+        approval is recorded.
+        """
         context = phase_obj.approval_description or self._build_approval_context(
             state, phase_obj,
         )
+        # Stamp the pending-approval audit row.  Idempotent: if the same phase
+        # is re-emitted (e.g. after resume), preserve the original requester
+        # rather than overwriting it with whoever happens to be calling now.
+        existing = getattr(state, "pending_approval_request", None)
+        if (
+            existing is None
+            or existing.phase_id != phase_obj.phase_id
+        ):
+            state.pending_approval_request = PendingApprovalRequest(
+                phase_id=phase_obj.phase_id,
+                requester=_cli_actor(),
+                requested_at=_utcnow(),
+            )
+            self._save_execution(state)
         return ExecutionAction(
             action_type=ActionType.APPROVAL,
             message=(

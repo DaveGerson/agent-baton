@@ -1,0 +1,47 @@
+{
+  "status": "success",
+  "rebased_commits": [
+    {
+      "step_id": "1.1",
+      "agent_name": "backend-engineer--python",
+      "original_hash": "deadbeef",
+      "new_hash": "cafebabe"
+    },
+    {
+      "step_id": "1.2",
+      "agent_name": "code-reviewer",
+      "original_hash": "fee1dead",
+      "new_hash": "c0ffee00"
+    }
+  ],
+  "final_head": "c0ffee00cafe1234",
+  "base_commit": "0000000000000000",
+  "files_changed": [
+    "agent_baton/core/storage/new_store.py",
+    "tests/storage/test_new_store.py"
+  ],
+  "total_insertions": 230,
+  "total_deletions": 3,
+  "attributions": [
+    {
+      "file_path": "agent_baton/core/storage/new_store.py",
+      "step_id": "1.1",
+      "agent_name": "backend-engineer--python",
+      "insertions": 142,
+      "deletions": 3
+    },
+    {
+      "file_path": "tests/storage/test_new_store.py",
+      "step_id": "1.1",
+      "agent_name": "test-engineer",
+      "insertions": 88,
+      "deletions": 0
+    }
+  ],
+  "conflict_files": [],
+  "conflict_step_id": "",
+  "skipped_steps": [],
+  "started_at": "2026-01-15T15:00:00+00:00",
+  "completed_at": "2026-01-15T15:01:30+00:00",
+  "error": ""
+}

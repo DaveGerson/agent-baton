@@ -1,0 +1,16 @@
+{
+  "amendment_id": "amend-001",
+  "trigger": "gate_feedback",
+  "trigger_phase_id": 1,
+  "description": "Added remediation step after test gate failure: fix import error in storage module.",
+  "phases_added": [],
+  "steps_added": [
+    "2.1"
+  ],
+  "created_at": "2026-01-15T12:30:00+00:00",
+  "feedback": "Tests failed due to missing import. Added a remediation step.",
+  "metadata": {
+    "gate_exit_code": "1",
+    "gate_command": "pytest tests/storage/"
+  }
+}

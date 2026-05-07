@@ -7,16 +7,9 @@ Covers:
   renumbering, audit trail, multi-amendment accumulation)
 - TestSerializationCompat — ExecutionState roundtrip and backward compat
   with old state files that pre-date the new fields
-
-NOTE on a known bug (flagged by tests):
-  ``record_approval_result`` loads state from disk, appends an ApprovalResult,
-  delegates to ``_amend_from_feedback`` (which calls ``amend_plan``, loading
-  *another* fresh copy and saving its result), then overwrites the disk with
-  the stale in-memory copy that lacks the amendment.  Tests that assert the
-  amendment is durably committed (``test_approve_with_feedback_amends_plan``
-  and ``test_amend_from_approval_feedback``) will therefore **fail** against
-  the current implementation.  They are written for the correct intended
-  behaviour and serve as regression tests once the bug is fixed.
+- TestApproveWithFeedbackRaceRegression — regression for the reload race fixed
+  in Hole 5: _load_execution returning None after amend must raise
+  ExecutionStateInconsistency rather than silently dropping the amendment.
 """
 from __future__ import annotations
 
@@ -24,6 +17,8 @@ import json
 from pathlib import Path
 
 import pytest
+
+from unittest.mock import patch
 
 from agent_baton.models.execution import (
     ActionType,
@@ -37,6 +32,7 @@ from agent_baton.models.execution import (
     PlanStep,
     StepResult,
 )
+from agent_baton.core.engine.errors import ExecutionStateInconsistency
 from agent_baton.core.engine.executor import ExecutionEngine
 
 
@@ -330,6 +326,162 @@ class TestApprovalGates:
         engine = _engine(tmp_path)
         with pytest.raises(RuntimeError):
             engine.record_approval_result(phase_id=0, result="approve")
+
+    # ====================================================================== #
+    # Hole 1 validation tests — record_approval_result must enforce that:    #
+    #   (a) status is approval_pending                                       #
+    #   (b) phase_id matches the current phase                               #
+    #   (c) phase actually requested approval                                #
+    #   (d) team-mode self-approval is rejected                              #
+    # ====================================================================== #
+
+    def test_reject_when_status_not_approval_pending(
+        self, tmp_path: Path
+    ) -> None:
+        """A stray approval recorded mid-execution must be rejected.
+
+        Without this guard, the approval would re-flip status to "running"
+        and silently mask whatever phase the engine was actually in.
+        """
+        from agent_baton.core.engine.errors import InvalidApprovalState
+
+        plan = _plan(
+            phases=[
+                _phase(phase_id=0, steps=[_step("1.1")], approval_required=True)
+            ]
+        )
+        engine = _engine(tmp_path)
+        engine.start(plan)
+        # Engine status is "running" — no approval has been requested yet.
+        with pytest.raises(InvalidApprovalState) as exc_info:
+            engine.record_approval_result(phase_id=0, result="approve")
+        assert exc_info.value.reason == InvalidApprovalState.REASON_NOT_PENDING
+        assert exc_info.value.current_status == "running"
+
+    def test_reject_phase_id_mismatch(self, tmp_path: Path) -> None:
+        """Approving phase_id=99 when phase 0 is the current must be rejected."""
+        from agent_baton.core.engine.errors import InvalidApprovalState
+
+        engine = _reach_approval(tmp_path)
+        engine.next_action()  # APPROVAL — status becomes approval_pending
+        with pytest.raises(InvalidApprovalState) as exc_info:
+            engine.record_approval_result(phase_id=99, result="approve")
+        assert exc_info.value.reason == InvalidApprovalState.REASON_PHASE_MISMATCH
+
+    def test_reject_when_phase_did_not_request_approval(
+        self, tmp_path: Path
+    ) -> None:
+        """A phase without approval_required cannot have an approval recorded.
+
+        We synthesize this by flipping status to approval_pending on disk
+        without setting approval_required on the phase — simulating a
+        future code path that incorrectly transitions into approval_pending.
+        """
+        from agent_baton.core.engine.errors import InvalidApprovalState
+
+        plan = _plan(
+            phases=[
+                _phase(phase_id=0, steps=[_step("1.1")], approval_required=False)
+            ]
+        )
+        engine = _engine(tmp_path)
+        engine.start(plan)
+        engine.record_step_result("1.1", "backend-engineer")
+        # Hack the persisted status into approval_pending without setting
+        # approval_required on the phase.
+        state = engine._load_state()
+        state.status = "approval_pending"
+        engine._save_execution(state)
+        with pytest.raises(InvalidApprovalState) as exc_info:
+            engine.record_approval_result(phase_id=0, result="approve")
+        assert exc_info.value.reason == (
+            InvalidApprovalState.REASON_NO_APPROVAL_REQUESTED
+        )
+
+    def test_team_mode_rejects_self_approval(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """In BATON_APPROVAL_MODE=team the requester cannot self-approve."""
+        from agent_baton.core.engine.errors import InvalidApprovalState
+
+        monkeypatch.setenv("BATON_APPROVAL_MODE", "team")
+        # Pin the actor identity so requester == approver in this test.
+        monkeypatch.setenv("USER", "alice")
+        monkeypatch.setenv("USERNAME", "alice")
+
+        engine = _reach_approval(tmp_path)
+        engine.next_action()  # APPROVAL — stamps requester
+        # Verify the requester was captured.
+        state = engine._load_state()
+        assert state.pending_approval_request is not None
+        assert state.pending_approval_request.requester.startswith("alice")
+        # Now try to self-approve as the same actor.
+        with pytest.raises(InvalidApprovalState) as exc_info:
+            engine.record_approval_result(
+                phase_id=0,
+                result="approve",
+                actor=state.pending_approval_request.requester,
+            )
+        assert exc_info.value.reason == InvalidApprovalState.REASON_SELF_APPROVAL
+
+    def test_team_mode_accepts_different_actor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """In team mode a different actor than the requester may approve."""
+        monkeypatch.setenv("BATON_APPROVAL_MODE", "team")
+        monkeypatch.setenv("USER", "alice")
+        monkeypatch.setenv("USERNAME", "alice")
+
+        engine = _reach_approval(tmp_path)
+        engine.next_action()  # APPROVAL — requester captured as alice@...
+        # Different actor approves.
+        engine.record_approval_result(
+            phase_id=0,
+            result="approve",
+            actor="bob@somewhere",
+        )
+        state = engine._load_state()
+        assert state.status == "running"
+        assert len(state.approval_results) == 1
+        assert state.approval_results[0].actor == "bob@somewhere"
+        # Pending request audit row must be cleared after a successful record.
+        assert state.pending_approval_request is None
+
+    def test_local_mode_self_approval_allowed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """In local mode the requester may self-approve (default behavior)."""
+        # Default approval mode is "local"; assert it explicitly for clarity.
+        monkeypatch.delenv("BATON_APPROVAL_MODE", raising=False)
+        monkeypatch.setenv("USER", "alice")
+        monkeypatch.setenv("USERNAME", "alice")
+
+        engine = _reach_approval(tmp_path)
+        engine.next_action()  # APPROVAL
+        state = engine._load_state()
+        requester = state.pending_approval_request.requester
+        # Same actor records the approval — must succeed in local mode.
+        engine.record_approval_result(
+            phase_id=0, result="approve", actor=requester
+        )
+        state = engine._load_state()
+        assert state.status == "running"
+        assert state.pending_approval_request is None
+
+    def test_pending_approval_request_persists_to_disk(
+        self, tmp_path: Path
+    ) -> None:
+        """The pending-approval audit row must roundtrip through save/load."""
+        engine = _reach_approval(tmp_path)
+        engine.next_action()  # APPROVAL — stamps the request
+        # Reload state from disk via a fresh engine.
+        engine2 = _engine(tmp_path)
+        action = engine2.resume()
+        assert action.action_type == ActionType.APPROVAL
+        state = engine2._load_state()
+        assert state.pending_approval_request is not None
+        assert state.pending_approval_request.phase_id == 0
+        assert state.pending_approval_request.requester
 
     # ------------------------------------------------------------------ #
     # Context auto-generated when approval_description is empty           #
@@ -858,3 +1010,133 @@ class TestSerializationCompat:
         assert restored.trigger == "gate_feedback"
         assert restored.phases_added == [3]
         assert restored.steps_added == ["3.1", "3.2"]
+
+
+# ===========================================================================
+# TestApproveWithFeedbackRaceRegression
+# Regression tests for Hole 5: the reload-or-fall-back race in
+# record_approval_result / approve-with-feedback.
+# ===========================================================================
+
+class TestApproveWithFeedbackRaceRegression:
+    """Regression for: _load_execution returning None after amend must raise
+    ExecutionStateInconsistency, not silently fall back to the pre-amendment
+    in-memory state.
+    """
+
+    def test_load_failure_after_amend_raises_inconsistency_error(
+        self, tmp_path: Path
+    ) -> None:
+        """Mocking _load_execution to return None after _amend_from_feedback must
+        surface ExecutionStateInconsistency — never silently proceed with the
+        pre-amendment state.
+
+        Call sequence inside record_approval_result for approve-with-feedback:
+          call 1: _require_execution (start of record_approval_result) — must succeed
+          call 2: amend_plan -> _require_execution (inside _amend_from_feedback) — must succeed
+          call 3: explicit reload after _amend_from_feedback returns — must fail (None)
+                  → this is the call that exercises the Hole-5 fix
+        """
+        plan = _plan(
+            phases=[
+                _phase(
+                    phase_id=0,
+                    steps=[_step("1.1", agent_name="backend-engineer")],
+                    approval_required=True,
+                ),
+            ]
+        )
+        engine = _engine(tmp_path)
+        engine.start(plan)
+        engine.record_step_result("1.1", "backend-engineer")
+        engine.next_action()  # APPROVAL
+
+        # After _amend_from_feedback writes to disk, the reload returns None
+        # (simulates storage corruption / backend answering stale data).
+        original_load = engine._load_execution
+
+        call_count = {"n": 0}
+
+        def _failing_load() -> ExecutionState | None:
+            call_count["n"] += 1
+            # Allow the first two calls (initial load and amend_plan's load)
+            # to succeed.  The third call is the post-amendment reload that
+            # Hole 5 guards — it should return None.
+            if call_count["n"] <= 2:
+                return original_load()
+            return None
+
+        with patch.object(engine, "_load_execution", side_effect=_failing_load):
+            with pytest.raises(ExecutionStateInconsistency) as exc_info:
+                engine.record_approval_result(
+                    phase_id=0,
+                    result="approve-with-feedback",
+                    feedback="Please add error handling",
+                )
+
+        assert exc_info.value.task_id == "task-001"
+        assert "approve-with-feedback" in exc_info.value.context
+
+    def test_load_failure_error_carries_task_id(self, tmp_path: Path) -> None:
+        """ExecutionStateInconsistency must expose the task_id for diagnostics."""
+        plan = _plan(
+            task_id="diag-task-99",
+            phases=[
+                _phase(
+                    phase_id=0,
+                    steps=[_step("1.1")],
+                    approval_required=True,
+                ),
+            ],
+        )
+        engine = _engine(tmp_path)
+        engine.start(plan)
+        engine.record_step_result("1.1", "backend-engineer")
+        engine.next_action()  # APPROVAL
+
+        original_load = engine._load_execution
+        call_count = {"n": 0}
+
+        def _failing_load() -> ExecutionState | None:
+            call_count["n"] += 1
+            if call_count["n"] <= 2:
+                return original_load()
+            return None
+
+        with patch.object(engine, "_load_execution", side_effect=_failing_load):
+            with pytest.raises(ExecutionStateInconsistency) as exc_info:
+                engine.record_approval_result(
+                    phase_id=0,
+                    result="approve-with-feedback",
+                    feedback="Needs review",
+                )
+
+        assert exc_info.value.task_id == "diag-task-99"
+
+    def test_successful_reload_does_not_raise(self, tmp_path: Path) -> None:
+        """When _load_execution succeeds (normal path), no exception must be raised."""
+        plan = _plan(
+            phases=[
+                _phase(
+                    phase_id=0,
+                    steps=[_step("1.1", agent_name="backend-engineer")],
+                    approval_required=True,
+                ),
+                _phase(phase_id=1, name="Phase 2", steps=[_step("2.1", agent_name="architect")]),
+            ]
+        )
+        engine = _engine(tmp_path)
+        engine.start(plan)
+        engine.record_step_result("1.1", "backend-engineer")
+        engine.next_action()  # APPROVAL
+
+        # Normal path — must not raise.
+        engine.record_approval_result(
+            phase_id=0,
+            result="approve-with-feedback",
+            feedback="Minor nits",
+        )
+        state = engine._load_state()
+        # Amendment must be durably saved.
+        assert len(state.amendments) == 1
+        assert state.amendments[0].trigger == "approval_feedback"

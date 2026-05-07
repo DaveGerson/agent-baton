@@ -561,6 +561,10 @@ class MachinePlan:
     classification_confidence: float | None = None  # 0.0–1.0 confidence score
     archetype: str = "phased"       # planning archetype: direct | phased | investigative
     max_retry_phases: int = 0       # investigative only: max phase retries before failing
+    # Override for ``BATON_COMPLIANCE_FAIL_CLOSED``.
+    # ``True`` forces fail-closed; ``False`` forces continue-on-failure;
+    # ``None`` (default) defers to the env var.
+    compliance_fail_closed: bool | None = None
 
     def __post_init__(self) -> None:
         if not self.created_at:
@@ -603,6 +607,7 @@ class MachinePlan:
             "classification_confidence": self.classification_confidence,
             "archetype": self.archetype,
             "max_retry_phases": self.max_retry_phases,
+            "compliance_fail_closed": self.compliance_fail_closed,
         }
         if self.resource_limits is not None:
             d["resource_limits"] = self.resource_limits.to_dict()
@@ -639,6 +644,7 @@ class MachinePlan:
             classification_confidence=data.get("classification_confidence"),
             archetype=data.get("archetype", "phased"),
             max_retry_phases=data.get("max_retry_phases", 0),
+            compliance_fail_closed=data.get("compliance_fail_closed"),
         )
 
     def to_markdown(self) -> str:
@@ -671,6 +677,8 @@ class MachinePlan:
             lines.append(f"**Explicit Knowledge Packs**: {', '.join(self.explicit_knowledge_packs)}")
         if self.explicit_knowledge_docs:
             lines.append(f"**Explicit Knowledge Docs**: {', '.join(self.explicit_knowledge_docs)}")
+        if self.compliance_fail_closed is not None:
+            lines.append(f"**Compliance Fail-Closed**: {self.compliance_fail_closed}")
         lines.append("")
 
         for phase in self.phases:
@@ -1030,6 +1038,46 @@ class ApprovalResult:
 
 
 @dataclass
+class PendingApprovalRequest:
+    """Audit row for an approval that is currently pending.
+
+    Stamped on ``ExecutionState.pending_approval_request`` when the engine
+    emits an ``APPROVAL`` action, cleared when the approval is recorded.
+    Used by the team-mode self-approval guard to compare the actor recording
+    the decision against whoever requested it.
+
+    Attributes:
+        phase_id: Phase that requested the approval.
+        requester: Best-available identity of the requester
+            (``"$USER@$HOSTNAME"`` for CLI, ``"daemon"`` for auto).
+        requested_at: ISO 8601 timestamp of when the approval was requested.
+    """
+
+    phase_id: int
+    requester: str = ""
+    requested_at: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.requested_at:
+            self.requested_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    def to_dict(self) -> dict:
+        return {
+            "phase_id": self.phase_id,
+            "requester": self.requester,
+            "requested_at": self.requested_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> PendingApprovalRequest:
+        return cls(
+            phase_id=int(data.get("phase_id", 0)),
+            requester=data.get("requester", ""),
+            requested_at=data.get("requested_at", ""),
+        )
+
+
+@dataclass
 class FeedbackQuestion:
     """A multiple-choice question presented during a feedback gate.
 
@@ -1374,6 +1422,10 @@ class ExecutionState:
     # step_worktrees maps step_id -> serialised WorktreeHandle dict.
     # Absent from legacy state files; all accessors use getattr(..., {}).
     step_worktrees: dict[str, dict] = field(default_factory=dict)
+    # steps_ran_in_place records steps that degraded to in-place execution
+    # because worktree creation failed.  Maps step_id -> reason string.
+    # Absent from legacy state files; defaults to empty dict.
+    steps_ran_in_place: dict[str, str] = field(default_factory=dict)
     # The git branch that was current when this execution started.
     # Used as base_branch for all worktree create() calls.
     working_branch: str = ""
@@ -1403,6 +1455,19 @@ class ExecutionState:
     # Processed at phase boundaries by _process_pending_expansions().
     pending_scope_expansions: list[dict] = field(default_factory=list)
     scope_expansions_applied: int = 0
+
+    # Approval-request audit (Hole 1 fix): records who requested the currently
+    # pending approval and which phase it is for.  Populated when the engine
+    # transitions into ``status == "approval_pending"``; cleared when the
+    # approval is recorded.  Used by ``record_approval_result`` to enforce:
+    #   * the approval is only accepted while the engine is genuinely waiting,
+    #   * the supplied ``phase_id`` matches the phase that asked,
+    #   * in ``BATON_APPROVAL_MODE=team`` the recording actor is not the
+    #     same identity as the requester (no self-approval).
+    # ``None`` when no approval is currently pending.  Absent in older state
+    # files; ``from_dict`` defaults to ``None`` and accepts the legacy dict
+    # shape transparently.
+    pending_approval_request: PendingApprovalRequest | None = None
 
     def __post_init__(self) -> None:
         if not self.started_at:
@@ -1471,6 +1536,8 @@ class ExecutionState:
             "override_justification": self.override_justification,
             # Wave 1.3 (bd-86bf): worktree isolation state
             "step_worktrees": dict(getattr(self, "step_worktrees", {})),
+            # steps that degraded to in-place execution after worktree failure
+            "steps_ran_in_place": dict(getattr(self, "steps_ran_in_place", {})),
             "working_branch": getattr(self, "working_branch", ""),
             # Wave 5 (bd-e208, bd-1483, bd-9839): Human-Agent Loop state
             "takeover_records": list(getattr(self, "takeover_records", [])),
@@ -1482,6 +1549,12 @@ class ExecutionState:
             "run_cumulative_spend_usd": float(getattr(self, "run_cumulative_spend_usd", 0.0)),
             "pending_scope_expansions": list(getattr(self, "pending_scope_expansions", [])),
             "scope_expansions_applied": int(getattr(self, "scope_expansions_applied", 0)),
+            # Hole 1 fix: approval-request audit row (None when no approval pending).
+            "pending_approval_request": (
+                self.pending_approval_request.to_dict()
+                if getattr(self, "pending_approval_request", None) is not None
+                else None
+            ),
         }
 
     @classmethod
@@ -1508,6 +1581,7 @@ class ExecutionState:
             override_justification=data.get("override_justification", ""),
             # Wave 1.3 (bd-86bf): worktree isolation — default to empty for legacy files
             step_worktrees=dict(data.get("step_worktrees", {})),
+            steps_ran_in_place=dict(data.get("steps_ran_in_place", {})),
             working_branch=data.get("working_branch", ""),
             # Wave 5 (bd-e208, bd-1483, bd-9839): default to empty for legacy files
             takeover_records=list(data.get("takeover_records", [])),
@@ -1519,6 +1593,14 @@ class ExecutionState:
             run_cumulative_spend_usd=float(data.get("run_cumulative_spend_usd", 0.0)),
             pending_scope_expansions=list(data.get("pending_scope_expansions", [])),
             scope_expansions_applied=int(data.get("scope_expansions_applied", 0)),
+            # Hole 1 fix: legacy state files have no approval-request audit row.
+            # Accept both the new dataclass-shaped dict and the legacy raw dict
+            # — same on-disk shape, but materialised as the typed model now.
+            pending_approval_request=(
+                PendingApprovalRequest.from_dict(data["pending_approval_request"])
+                if data.get("pending_approval_request") is not None
+                else None
+            ),
         )
 
 

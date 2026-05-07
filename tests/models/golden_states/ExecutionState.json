@@ -1,0 +1,281 @@
+{
+  "task_id": "2026-01-15-exec-state-golden-abc",
+  "plan": {
+    "task_id": "2026-01-15-exec-state-golden-abc",
+    "task_summary": "Execution state golden fixture.",
+    "risk_level": "MEDIUM",
+    "budget_tier": "standard",
+    "execution_mode": "phased",
+    "git_strategy": "commit-per-agent",
+    "phases": [
+      {
+        "phase_id": 1,
+        "name": "Design",
+        "steps": [
+          {
+            "step_id": "1.1",
+            "agent_name": "architect",
+            "task_description": "Design the new API schema.",
+            "model": "opus",
+            "depends_on": [],
+            "deliverables": [
+              "docs/api-schema.md"
+            ],
+            "allowed_paths": [
+              "docs/"
+            ],
+            "blocked_paths": [],
+            "context_files": [],
+            "step_type": "planning"
+          },
+          {
+            "step_id": "1.2",
+            "agent_name": "backend-engineer--python",
+            "task_description": "Implement the new models.",
+            "model": "sonnet",
+            "depends_on": [
+              "1.1"
+            ],
+            "deliverables": [
+              "agent_baton/models/new_models.py"
+            ],
+            "allowed_paths": [
+              "agent_baton/models/"
+            ],
+            "blocked_paths": [],
+            "context_files": [
+              "docs/api-schema.md"
+            ],
+            "step_type": "developing"
+          }
+        ],
+        "gate": {
+          "gate_type": "test",
+          "command": "pytest tests/models/ -v",
+          "description": "Model tests pass.",
+          "fail_on": [
+            "test failures"
+          ]
+        },
+        "approval_required": true,
+        "approval_description": "Review the design before implementation."
+      },
+      {
+        "phase_id": 2,
+        "name": "Implementation",
+        "steps": [
+          {
+            "step_id": "2.1",
+            "agent_name": "backend-engineer--python",
+            "task_description": "Implement the API routes.",
+            "model": "sonnet",
+            "depends_on": [
+              "1.2"
+            ],
+            "deliverables": [
+              "agent_baton/api/routes/v2.py"
+            ],
+            "allowed_paths": [
+              "agent_baton/api/routes/"
+            ],
+            "blocked_paths": [],
+            "context_files": [
+              "docs/api-schema.md"
+            ],
+            "step_type": "developing"
+          }
+        ]
+      }
+    ],
+    "shared_context": "Test execution state fixture.",
+    "pattern_source": null,
+    "created_at": "2026-01-15T09:00:00+00:00",
+    "task_type": "feature",
+    "explicit_knowledge_packs": [],
+    "explicit_knowledge_docs": [],
+    "intervention_level": "low",
+    "complexity": "medium",
+    "classification_source": "keyword-fallback",
+    "detected_stack": null,
+    "foresight_insights": [],
+    "depends_on_task": null,
+    "classification_signals": null,
+    "classification_confidence": null,
+    "archetype": "phased",
+    "max_retry_phases": 0,
+    "compliance_fail_closed": null
+  },
+  "current_phase": 1,
+  "current_step_index": 0,
+  "status": "approval_pending",
+  "step_results": [
+    {
+      "step_id": "1.1",
+      "agent_name": "architect",
+      "status": "complete",
+      "outcome": "Designed the API schema with 5 endpoints and 3 data models.",
+      "files_changed": [
+        "docs/api-schema.md"
+      ],
+      "commit_hash": "aabbccdd",
+      "estimated_tokens": 8000,
+      "input_tokens": 6500,
+      "cache_read_tokens": 1500,
+      "cache_creation_tokens": 200,
+      "output_tokens": 1800,
+      "model_id": "claude-opus-4-7",
+      "session_id": "sess-design-001",
+      "step_started_at": "2026-01-15T09:10:00+00:00",
+      "duration_seconds": 420.0,
+      "retries": 0,
+      "error": "",
+      "completed_at": "2026-01-15T09:17:00+00:00",
+      "deviations": [],
+      "step_type": "planning",
+      "updated_at": "2026-01-15T09:17:00+00:00",
+      "outcome_spillover_path": "",
+      "interaction_history": [
+        {
+          "role": "agent",
+          "content": "I have a question about the schema design approach.",
+          "timestamp": "2026-01-15T09:15:00+00:00",
+          "turn_number": 1,
+          "source": "agent"
+        },
+        {
+          "role": "human",
+          "content": "Use the existing patterns from models/execution.py as reference.",
+          "timestamp": "2026-01-15T09:17:00+00:00",
+          "turn_number": 2,
+          "source": "human"
+        }
+      ]
+    }
+  ],
+  "gate_results": [
+    {
+      "phase_id": 1,
+      "gate_type": "test",
+      "passed": true,
+      "output": "5 passed in 1.23s",
+      "checked_at": "2026-01-15T10:20:00+00:00",
+      "command": "pytest tests/models/ -v",
+      "exit_code": 0,
+      "decision_source": "human",
+      "actor": "eng@devbox.local"
+    }
+  ],
+  "approval_results": [
+    {
+      "phase_id": 1,
+      "result": "approve",
+      "feedback": "Looks good, proceed to implementation.",
+      "decided_at": "2026-01-15T10:30:00+00:00",
+      "decision_source": "human",
+      "actor": "eng@devbox.local",
+      "rationale": "Schema covers all requirements from the spec."
+    }
+  ],
+  "feedback_results": [
+    {
+      "phase_id": 1,
+      "question_id": "fq1",
+      "chosen_option": "Keep pytest",
+      "chosen_index": 0,
+      "dispatched_step_id": "1.3",
+      "decided_at": "2026-01-15T10:32:00+00:00"
+    }
+  ],
+  "amendments": [
+    {
+      "amendment_id": "amend-golden-001",
+      "trigger": "approval_feedback",
+      "trigger_phase_id": 1,
+      "description": "Added a documentation step after phase 1 approval.",
+      "phases_added": [],
+      "steps_added": [
+        "1.3"
+      ],
+      "created_at": "2026-01-15T10:35:00+00:00",
+      "feedback": "Add inline docstrings before moving to phase 2.",
+      "metadata": {
+        "source": "approval",
+        "reviewer": "eng@devbox.local"
+      }
+    }
+  ],
+  "started_at": "2026-01-15T09:00:00+00:00",
+  "completed_at": "",
+  "pending_gaps": [
+    {
+      "description": "Unclear how to handle backward compatibility for the new models.",
+      "confidence": "low",
+      "gap_type": "contextual",
+      "step_id": "1.1",
+      "agent_name": "architect",
+      "partial_outcome": "Drafted schema up to the point of the compatibility question."
+    }
+  ],
+  "resolved_decisions": [
+    {
+      "gap_description": "Unclear how to handle backward compatibility for the new models.",
+      "resolution": "Use migration validators in from_dict to handle old field names.",
+      "step_id": "1.2",
+      "timestamp": "2026-01-15T10:00:00+00:00"
+    }
+  ],
+  "delivered_knowledge": {
+    "fastapi-di.md::python-web": "1.1"
+  },
+  "consolidation_result": {
+    "status": "success",
+    "rebased_commits": [
+      {
+        "step_id": "1.1",
+        "agent_name": "architect",
+        "original_hash": "aabbccdd",
+        "new_hash": "11223344"
+      }
+    ],
+    "final_head": "11223344aabbccdd",
+    "base_commit": "00000000ffffffff",
+    "files_changed": [
+      "docs/api-schema.md"
+    ],
+    "total_insertions": 55,
+    "total_deletions": 0,
+    "attributions": [
+      {
+        "file_path": "docs/api-schema.md",
+        "step_id": "1.1",
+        "agent_name": "architect",
+        "insertions": 55,
+        "deletions": 0
+      }
+    ],
+    "conflict_files": [],
+    "conflict_step_id": "",
+    "skipped_steps": [],
+    "started_at": "2026-01-15T10:40:00+00:00",
+    "completed_at": "2026-01-15T10:41:00+00:00",
+    "error": ""
+  },
+  "force_override": false,
+  "override_justification": "",
+  "step_worktrees": {
+    "1.1": {
+      "path": "/tmp/worktrees/wt-1.1",
+      "branch": "wt/task/1.1"
+    }
+  },
+  "steps_ran_in_place": {},
+  "working_branch": "feature/add-api-v2",
+  "takeover_records": [],
+  "selfheal_attempts": [],
+  "speculations": {},
+  "working_branch_head": "11223344aabbccdd",
+  "run_cumulative_spend_usd": 0.042,
+  "pending_scope_expansions": [],
+  "scope_expansions_applied": 0,
+  "pending_approval_request": null
+}
