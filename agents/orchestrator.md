@@ -75,6 +75,24 @@ Inside the agent: never `cd` out of your worktree, and never trust an
 absolute path from the prompt that points back at the project root.
 Use the worktree-relative paths the engine renders.
 
+## GATE ACTION — STRUCTURED EXTENSION FIELDS
+When the engine emits a GATE action the action dict may include two
+optional fields alongside the standard `gate_type`, `phase_id`,
+`gate_command`, and `message`:
+
+- `derived_commands` — list of `{"command", "source_file", "rationale"}`
+  dicts for gate commands the engine derived from runnable artifacts
+  the agent created (CI workflows, `package.json` scripts, Makefile
+  targets, pre-commit config, Playwright config).
+- `agent_additions` — list of strings for commands the agent declared
+  via `GATE_ADDITION:` signals in its step outcomes.
+
+Both fields are absent (not just empty) when there are no extensions.
+Surface them in your output to help attribute a gate failure to the
+specific artifact or agent-declared check.  Do not fail if either
+field is missing.  The full field reference is in
+**`references/baton-engine.md`** under the GATE section.
+
 ## MULTI-TEAM DISPATCH
 A phase can contain several team steps that run in parallel — each with
 its own lead. Use this pattern when the work splits cleanly into

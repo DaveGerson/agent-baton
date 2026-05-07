@@ -74,14 +74,25 @@ def _execution_state(
     gate_results: list[GateResult] | None = None,
     current_phase: int = 0,
 ) -> ExecutionState:
-    return ExecutionState(
-        task_id=(plan or _plan()).task_id,
-        plan=plan or _plan(),
-        status=status,
-        current_phase=current_phase,
-        step_results=step_results or [],
-        gate_results=gate_results or [],
-    )
+    # Slice 13's I1/I2/I9 model_validator forbids constructing torn
+    # states; populate the coupled siblings to satisfy the invariants.
+    from agent_baton.models.execution import PendingApprovalRequest
+    p = plan or _plan()
+    kwargs: dict = {
+        "task_id": p.task_id,
+        "plan": p,
+        "status": status,
+        "current_phase": current_phase,
+        "step_results": step_results or [],
+        "gate_results": gate_results or [],
+    }
+    if status == "approval_pending":
+        kwargs["pending_approval_request"] = PendingApprovalRequest(
+            phase_id=current_phase, requester="test",
+        )
+    if status in {"complete", "failed", "cancelled"}:
+        kwargs["completed_at"] = "2026-05-07T00:00:00+00:00"
+    return ExecutionState(**kwargs)
 
 
 def _project_dir(tmp_path: Path, project_id: str = "nds") -> tuple[Path, PmoProject]:

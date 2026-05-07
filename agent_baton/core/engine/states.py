@@ -116,37 +116,46 @@ class ExecutingPhaseState:
             DecisionKind.EMPTY_PHASE_GATE,
             DecisionKind.PHASE_NEEDS_GATE,
         ):
-            state.status = "gate_pending"
+            # Non-coupled status flip: no I1/I2/I9 sibling field is paired
+            # with gate_pending.  Direct write is intentional and safe.
+            state.status = "gate_pending"  # noqa: state-mutation
             return
 
         # ── Approval-pending: all steps complete, approval required ───────────
+        # The I1-coupled status flip + pending_approval_request stamp is
+        # owned by the engine's _approval_action via
+        # ExecutionState.transition_to_approval_pending. No-op here so the
+        # two writes are atomic in the caller.
         if kind == DecisionKind.PHASE_NEEDS_APPROVAL:
-            state.status = "approval_pending"
             return
 
         # ── Feedback-pending: all steps complete, questions not answered ──────
         if kind == DecisionKind.PHASE_NEEDS_FEEDBACK:
-            state.status = "feedback_pending"
+            # Non-coupled status flip: no sibling field is paired with
+            # feedback_pending.  Direct write is intentional and safe.
+            state.status = "feedback_pending"  # noqa: state-mutation
             return
 
         # ── Terminal failure arms ─────────────────────────────────────────────
+        # I2: every terminal-failure path funnels through transition_to_failed
+        # so completed_at is stamped atomically with the status flip.
         if kind == DecisionKind.STEP_FAILED_IN_PHASE:
             # Engine calls _close_open_beads_at_terminal before handle().
-            state.status = "failed"
+            state.transition_to_failed(reason="step failed in phase")
             return
 
         if kind == DecisionKind.TERMINAL_FAILED:
             # Gate-exhaustion path: resolver returned TERMINAL_FAILED from a
             # 'running' status context (fail_count >= max_gate_retries while
             # state.status was 'running').  Flip to failed; engine persists.
-            state.status = "failed"
+            state.transition_to_failed(reason="gate exhausted (TERMINAL_FAILED)")
             return
 
         if kind == DecisionKind.TIMEOUT:
             # Engine writes the timeout bead and mutates the step result
             # (result.status / result.outcome / result.error / result.completed_at)
             # before calling handle(). State class only flips the overall status.
-            state.status = "failed"
+            state.transition_to_failed(reason="step timeout")
             return
 
         # Anything else from 'running' is a resolver bug — every DecisionKind
@@ -200,8 +209,10 @@ class AwaitingApprovalState:
         # ── Terminal decisions valid from blocked states ───────────────────────
         if kind == DecisionKind.TERMINAL_FAILED:
             # Gate-exhaustion while in gate_failed: resolver escalated to
-            # TERMINAL_FAILED. Flip status; engine persists.
-            state.status = "failed"
+            # TERMINAL_FAILED.  I2: stamp completed_at atomically.
+            state.transition_to_failed(
+                reason="terminal failed from blocked state"
+            )
             return
 
         if kind in (

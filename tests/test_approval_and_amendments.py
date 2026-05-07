@@ -377,11 +377,14 @@ class TestApprovalGates:
     ) -> None:
         """A phase without approval_required cannot have an approval recorded.
 
-        We synthesize this by flipping status to approval_pending on disk
-        without setting approval_required on the phase — simulating a
-        future code path that incorrectly transitions into approval_pending.
+        Slice 13 added the I1 model_validator that rejects loading a state
+        with status="approval_pending" but no pending_approval_request.
+        We use the I1-correct transition method so the persisted shape is
+        valid; the test still verifies that record_approval_result rejects
+        an approval against a phase whose approval_required is False.
         """
         from agent_baton.core.engine.errors import InvalidApprovalState
+        from agent_baton.models.execution import PendingApprovalRequest
 
         plan = _plan(
             phases=[
@@ -391,10 +394,14 @@ class TestApprovalGates:
         engine = _engine(tmp_path)
         engine.start(plan)
         engine.record_step_result("1.1", "backend-engineer")
-        # Hack the persisted status into approval_pending without setting
-        # approval_required on the phase.
+        # Move into approval_pending using the I1-correct transition.  The
+        # phase still has approval_required=False, which is what
+        # record_approval_result's REASON_NO_APPROVAL_REQUESTED guard
+        # checks for.
         state = engine._load_state()
-        state.status = "approval_pending"
+        state.transition_to_approval_pending(
+            phase_id=0, requester="test", requested_at="2026-05-07T00:00:00+00:00",
+        )
         engine._save_execution(state)
         with pytest.raises(InvalidApprovalState) as exc_info:
             engine.record_approval_result(phase_id=0, result="approve")

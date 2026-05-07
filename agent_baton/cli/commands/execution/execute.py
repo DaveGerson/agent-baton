@@ -308,6 +308,24 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
                               help="Cancel a running execution")
     p_cancel.add_argument("--reason", default="", help="Reason for cancellation")
 
+    # baton execute export [--task-id ID] [--to PATH]
+    # Slice 15: snapshot-only JSON export. Replaces the legacy
+    # FileStorage as a primary backend; operators can still grab a flat
+    # JSON snapshot of any execution for diff/inspection.
+    p_export = sub.add_parser(
+        "export", parents=[_task_id_parent],
+        help="Export an execution state to a JSON file (read-only snapshot)",
+    )
+    p_export.add_argument(
+        "--to",
+        default="execution-state.json",
+        dest="export_to",
+        help=(
+            "Destination path for the JSON snapshot (default: "
+            "execution-state.json in the current directory)"
+        ),
+    )
+
     # baton execute retry-gate --phase-id N [--task-id ID]
     p_retry_gate = sub.add_parser("retry-gate", parents=[_task_id_parent],
                                   help="Reset a failed gate back to pending for retry")
@@ -713,6 +731,18 @@ def _print_action(action: dict, *, terse: bool = False) -> None:
         print(f"  Phase:   {phase_id}")
         print(f"  Command: {gate_cmd}")
         print(f"  Message: {msg}")
+        # Structured extension fields — emitted only when present so
+        # existing parsers that key on known field labels are unaffected.
+        derived_cmds = action.get("derived_commands", [])
+        if derived_cmds:
+            print("  Derived commands:")
+            for dc in derived_cmds:
+                print(f"    - {dc.get('command', '')} (source: {dc.get('source_file', '')}; {dc.get('rationale', '')})")
+        agent_adds = action.get("agent_additions", [])
+        if agent_adds:
+            print("  Agent additions:")
+            for aa in agent_adds:
+                print(f"    - {aa}")
         # Wave 4.1 — surface CI gate context up-front so the orchestrator
         # knows this is a long-running poll, not a local subprocess gate.
         if gate_type == "ci":
@@ -808,9 +838,9 @@ def handler(args: argparse.Namespace) -> None:
         validation_error(
             "supply a subcommand: start, dry-run, next, record, dispatched, gate, "
             "approve, feedback, amend, team-record, interact, complete, status, "
-            "resume, list, switch, cancel, run, retry-gate, fail, resume-budget, "
-            "verify-dispatch, audit-isolation, handoff, worktree-gc, "
-            "takeover, self-heal, speculate"
+            "resume, list, switch, cancel, export, run, retry-gate, fail, "
+            "resume-budget, verify-dispatch, audit-isolation, handoff, "
+            "worktree-gc, takeover, self-heal, speculate"
         )
 
     if args.subcommand == "list":
@@ -1469,6 +1499,36 @@ def handler(args: argparse.Namespace) -> None:
             else:
                 _print_action(action.to_dict())
 
+    elif args.subcommand == "export":
+        # Slice 15 (file-backend deprecation Stage 2-3): snapshot-only
+        # JSON export driven by core.storage.dump_state_to_json.
+        from pathlib import Path as _Path
+
+        from agent_baton.core.storage import dump_state_to_json
+
+        state = engine._load_execution()
+        if state is None:
+            user_error(
+                "no active execution found",
+                hint="Pass --task-id, or run 'baton execute list' to find one.",
+            )
+        out_path = _Path(getattr(args, "export_to", "execution-state.json"))
+        # context_root is the engine's team-context dir.
+        context_root = engine._root
+        dump_state_to_json(
+            task_id=state.task_id,
+            context_root=context_root,
+            out_path=out_path,
+        )
+        if args.output == "json":
+            print(json.dumps({
+                "exported": True,
+                "task_id": state.task_id,
+                "path": str(out_path),
+            }))
+        else:
+            print(f"Exported execution {state.task_id} to {out_path}.")
+
     elif args.subcommand == "cancel":
         state = engine._load_execution()
         if state is None:
@@ -1479,8 +1539,8 @@ def handler(args: argparse.Namespace) -> None:
                 hint="Only running executions can be cancelled.",
             )
         reason = getattr(args, "reason", "")
-        state.status = "cancelled"
-        state.completed_at = datetime.now(timezone.utc).isoformat()
+        # I2: transition_to_cancelled stamps completed_at atomically.
+        state.transition_to_cancelled()
         engine._save_execution(state)
         bus.publish(Event.create(
             topic="execution.cancelled",

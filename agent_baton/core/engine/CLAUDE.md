@@ -37,6 +37,7 @@ If you cannot update all four in the same change, stop and split the work.
 |---------|-------|
 | Planning | `planner.py`, `_planner_helpers.py`, `plan_reviewer.py`, `planning/` |
 | Execution loop | `executor.py`, `_executor_helpers.py`, `phase_manager.py` |
+| Gates | `gates.py`, `artifact_validator.py` (derives extra commands from agent-created CI workflows, npm scripts, Playwright config, Makefiles, pre-commit; appended to `gate.command` with `&&`) |
 | Dispatch | `dispatcher.py`, `dry_run_launcher.py`, `worktree_manager.py` |
 | Beads (signals) | `bead_signal.py`, `bead_store.py`, `bead_selector.py`, `bead_decay.py`, `bead_anchors.py` |
 | Knowledge | `knowledge_resolver.py`, `knowledge_gap.py`, `knowledge_telemetry.py` |
@@ -52,3 +53,4 @@ If you cannot update all four in the same change, stop and split the work.
 - Don't add a state to `ExecutionState` without updating the dispatch table and the agent-side protocol.
 - Don't bypass `dispatcher.py` to spawn agents directly from another module.
 - Don't read or write `baton.db` from this directory — go through `core/storage/`.
+- **Don't write `state.status`, `state.completed_at`, or `state.pending_approval_request` directly** outside `models/execution.py`. Use the `state.transition_to_*` methods so coupled-field writes (Hole-1-class invariants I1, I2, I9) cannot drift through an early `return`. The static lint at `tests/static/test_no_direct_status_writes.py` enforces this; if a call site genuinely needs the direct write, append `# noqa: state-mutation` and document why.

@@ -139,6 +139,99 @@ def test_build_gate_action_to_dict_includes_gate_fields(runner: GateRunner) -> N
 
 
 # ---------------------------------------------------------------------------
+# build_gate_action — artifact-validation extension (regression for the
+# "trusted-but-unverified" gate bug)
+# ---------------------------------------------------------------------------
+
+
+def test_build_gate_action_appends_artifact_commands(
+    runner: GateRunner,
+    tmp_path,
+) -> None:
+    """A new ``.github/workflows/*.yml`` extends the gate command."""
+    workflow = tmp_path / ".github/workflows/ci-fast.yml"
+    workflow.parent.mkdir(parents=True)
+    workflow.write_text(
+        "jobs:\n"
+        "  audit:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: npm audit --audit-level=high\n",
+        encoding="utf-8",
+    )
+    gate = _make_gate(command="npx tsc --noEmit && npx vitest run")
+    action = runner.build_gate_action(
+        gate,
+        phase_id=4,
+        files_changed=[".github/workflows/ci-fast.yml"],
+        project_root=tmp_path,
+    )
+    assert "npx tsc --noEmit && npx vitest run" in action.gate_command
+    assert "npm audit --audit-level=high" in action.gate_command
+    assert "artifact checks" in action.message
+    # Structured field: derived_commands must carry attribution for each cmd.
+    assert len(action.derived_commands) >= 1
+    dc = action.derived_commands[0]
+    assert dc["command"] == "npm audit --audit-level=high"
+    assert dc["source_file"] == ".github/workflows/ci-fast.yml"
+    assert dc["rationale"]
+    # agent_additions must be empty when none supplied.
+    assert action.agent_additions == []
+
+
+def test_build_gate_action_derived_commands_in_to_dict(
+    runner: GateRunner,
+    tmp_path,
+) -> None:
+    """to_dict() includes derived_commands when non-empty."""
+    workflow = tmp_path / ".github/workflows/ci.yml"
+    workflow.parent.mkdir(parents=True)
+    workflow.write_text(
+        "jobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: pytest -q\n",
+        encoding="utf-8",
+    )
+    gate = _make_gate(command="make test")
+    action = runner.build_gate_action(
+        gate,
+        phase_id=1,
+        files_changed=[".github/workflows/ci.yml"],
+        project_root=tmp_path,
+    )
+    d = action.to_dict()
+    assert "derived_commands" in d
+    assert isinstance(d["derived_commands"], list)
+    assert len(d["derived_commands"]) >= 1
+    assert d["derived_commands"][0]["command"] == "pytest -q"
+    # agent_additions key must be absent when empty (lean-payload convention).
+    assert "agent_additions" not in d
+
+
+def test_build_gate_action_no_extension_when_files_unchanged(
+    runner: GateRunner,
+    tmp_path,
+) -> None:
+    """Plain code edits do not extend the gate."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/foo.ts").write_text("export {};", encoding="utf-8")
+    gate = _make_gate(command="npx tsc --noEmit")
+    action = runner.build_gate_action(
+        gate,
+        phase_id=1,
+        files_changed=["src/foo.ts"],
+        project_root=tmp_path,
+    )
+    assert action.gate_command == "npx tsc --noEmit"
+    assert "artifact checks" not in action.message
+    # No extension — both structured fields must be empty.
+    assert action.derived_commands == []
+    assert action.agent_additions == []
+    # to_dict() must omit both keys entirely (lean-payload convention).
+    d = action.to_dict()
+    assert "derived_commands" not in d
+    assert "agent_additions" not in d
+
+
+# ---------------------------------------------------------------------------
 # evaluate_output
 # ---------------------------------------------------------------------------
 
@@ -267,3 +360,111 @@ def test_plan_gate_from_dict_canonical_gate_type_still_works() -> None:
     data = {"gate_type": "lint", "command": "ruff check ."}
     gate = PlanGate.from_dict(data)
     assert gate.gate_type == "lint"
+
+
+# ---------------------------------------------------------------------------
+# build_gate_action — agent_additions extension (regression for option-2
+# declarative gate additions via GATE_ADDITION: signals)
+# ---------------------------------------------------------------------------
+
+
+def test_build_gate_action_appends_agent_additions(runner: GateRunner) -> None:
+    """agent_additions=["npm audit"] lands in the gate command and message."""
+    gate = _make_gate(command="pytest --tb=short -q")
+    action = runner.build_gate_action(
+        gate,
+        phase_id=2,
+        agent_additions=["npm audit"],
+    )
+    assert "pytest --tb=short -q" in action.gate_command
+    assert "npm audit" in action.gate_command
+    assert "agent additions" in action.message
+    assert "npm audit" in action.message
+    # Structured field: agent_additions carries the commands verbatim.
+    assert action.agent_additions == ["npm audit"]
+    # No artifact-derived commands when files_changed is not supplied.
+    assert action.derived_commands == []
+    # to_dict() includes agent_additions when non-empty.
+    d = action.to_dict()
+    assert d["agent_additions"] == ["npm audit"]
+    assert "derived_commands" not in d
+
+
+def test_build_gate_action_agent_additions_chained_with_and(runner: GateRunner) -> None:
+    """Multiple agent_additions are chained with && in the gate command."""
+    gate = _make_gate(command="make test")
+    action = runner.build_gate_action(
+        gate,
+        phase_id=0,
+        agent_additions=["npm audit --audit-level=high", "pre-commit run --all-files"],
+    )
+    assert "make test" in action.gate_command
+    assert "npm audit --audit-level=high" in action.gate_command
+    assert "pre-commit run --all-files" in action.gate_command
+    # All three segments joined by &&
+    assert "&&" in action.gate_command
+
+
+def test_build_gate_action_agent_additions_only_no_base_command(runner: GateRunner) -> None:
+    """When gate has no planned command, agent_additions becomes the command."""
+    gate = _make_gate(command="")
+    action = runner.build_gate_action(
+        gate,
+        phase_id=1,
+        agent_additions=["my-security-scan"],
+    )
+    assert action.gate_command == "my-security-scan"
+    assert "agent additions" in action.message
+
+
+def test_build_gate_action_none_agent_additions_no_change(runner: GateRunner) -> None:
+    """Passing agent_additions=None does not alter the gate command."""
+    gate = _make_gate(command="pytest --tb=short -q")
+    action_without = runner.build_gate_action(gate, phase_id=1)
+    action_with_none = runner.build_gate_action(gate, phase_id=1, agent_additions=None)
+    assert action_without.gate_command == action_with_none.gate_command
+    assert "agent additions" not in action_with_none.message
+
+
+def test_build_gate_action_agent_additions_after_artifact_checks(
+    runner: GateRunner,
+    tmp_path,
+) -> None:
+    """Agent additions come after artifact-derived commands."""
+    workflow = tmp_path / ".github/workflows/ci.yml"
+    workflow.parent.mkdir(parents=True)
+    workflow.write_text(
+        "jobs:\n"
+        "  test:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: make test\n",
+        encoding="utf-8",
+    )
+    gate = _make_gate(command="pytest")
+    action = runner.build_gate_action(
+        gate,
+        phase_id=3,
+        files_changed=[".github/workflows/ci.yml"],
+        project_root=tmp_path,
+        agent_additions=["npm audit"],
+    )
+    # All three present
+    assert "pytest" in action.gate_command
+    assert "make test" in action.gate_command
+    assert "npm audit" in action.gate_command
+    # Ordering: pytest && <artifact> && npm audit
+    cmd = action.gate_command
+    assert cmd.index("make test") < cmd.index("npm audit")
+    # Both labels present
+    assert "artifact checks" in action.message
+    assert "agent additions" in action.message
+    # Structured fields: both populated independently.
+    assert len(action.derived_commands) >= 1
+    assert action.derived_commands[0]["command"] == "make test"
+    assert action.derived_commands[0]["source_file"] == ".github/workflows/ci.yml"
+    assert action.agent_additions == ["npm audit"]
+    # to_dict() carries both keys.
+    d = action.to_dict()
+    assert "derived_commands" in d
+    assert d["agent_additions"] == ["npm audit"]

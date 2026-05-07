@@ -92,15 +92,21 @@ class TestFindStep:
         assert find_step(state, "2.2") is step_c
 
     def test_find_step_returns_first_match(self):
-        # If two steps somehow share an ID (shouldn't happen in practice),
-        # we still return the first encountered.
+        # If two steps somehow share an ID (slice 11's Hole-6 validator
+        # now blocks this at construction time, but find_step still
+        # tolerates it as a defence-in-depth — synthesize the colliding
+        # plan post-construction so the validator is bypassed).
         step_a = _make_step("1.1")
         step_b = _make_step("1.1")
         state = _make_state(
             _make_plan(
-                _make_phase(1, step_a, step_b),
+                _make_phase(1, step_a),
             )
         )
+        # Bypass the validator by appending the duplicate step after
+        # construction.  validate_assignment=False on PlanModel keeps
+        # this assignment from re-running the @model_validator.
+        state.plan.phases[0].steps.append(step_b)
         assert find_step(state, "1.1") is step_a
 
     def test_find_step_empty_plan(self):

@@ -1,21 +1,34 @@
 """Storage subsystem — pluggable backends for execution data persistence.
 
 Provides a ``StorageBackend`` protocol implemented by:
-- ``SqliteStorage`` — SQLite database (new default for all projects)
-- ``FileStorage`` — Legacy JSON/JSONL flat files (backward compatible)
+
+* ``SqliteStorage`` — SQLite database (the only project backend the
+  factory now returns).
+
+Slice 15 of the SQLite-parity migration removes ``FileStorage`` from
+the factory.  ``FileStorage`` remains importable for legacy code paths
+that still construct it directly (it emits ``DeprecationWarning`` on
+construction per slice 10) and for the export helper
+``dump_state_to_json``, but ``get_project_storage`` is now SQLite-only.
+
+If a legacy file-only project needs upgrading, run
+``baton storage migrate`` to move ``execution-state.json`` into
+``baton.db``.
 
 Usage::
 
     from agent_baton.core.storage import get_project_storage, StorageBackend
 
-    storage = get_project_storage(context_root)  # auto-detects backend
+    storage = get_project_storage(context_root)
     engine = ExecutionEngine(storage=storage)
 """
 from __future__ import annotations
 
-from agent_baton.core.storage.protocol import StorageBackend
-
+import json
+import warnings
 from pathlib import Path
+
+from agent_baton.core.storage.protocol import StorageBackend
 
 _BATON_DB = "baton.db"
 _TEAM_CONTEXT = ".claude/team-context"
@@ -27,6 +40,10 @@ def detect_backend(context_root: Path) -> str:
     1. If baton.db exists → 'sqlite'
     2. If execution-state.json or executions/ dir exists → 'file'
     3. Default for new projects → 'sqlite'
+
+    Slice 15: the factory no longer respects 'file', but
+    ``detect_backend`` keeps reporting it so ``baton storage migrate``
+    can offer a one-shot migration path.
     """
     if (context_root / _BATON_DB).exists():
         return "sqlite"
@@ -41,21 +58,66 @@ def get_project_storage(
     context_root: Path,
     backend: str | None = None,
 ):
-    """Factory: return the appropriate project storage backend.
+    """Factory: return the project's SQLite storage backend.
+
+    Slice 15 (file-backend deprecation Stage 3) removes ``FileStorage``
+    from this factory.  Callers that explicitly pass ``backend="file"``
+    receive a deprecation warning AND a SqliteStorage — the file backend
+    was never safe under multi-process load and SQLite Phases A/B/C now
+    reach lossless parity for ``ExecutionState``.
 
     Args:
-        context_root: Path to .claude/team-context/.
-        backend: Force 'sqlite' or 'file'. If None, auto-detect.
+        context_root: Path to ``.claude/team-context/``.
+        backend: Historically ``"sqlite"`` or ``"file"``; the latter is
+            now ignored with a warning.
     """
-    if backend is None:
-        backend = detect_backend(context_root)
+    if backend == "file":
+        warnings.warn(
+            "backend='file' is no longer supported in get_project_storage. "
+            "Returning SqliteStorage. If a legacy "
+            "execution-state.json needs migrating, run "
+            "`baton storage migrate` first.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+    from agent_baton.core.storage.sqlite_backend import SqliteStorage
+    return SqliteStorage(context_root / _BATON_DB)
 
-    if backend == "sqlite":
-        from agent_baton.core.storage.sqlite_backend import SqliteStorage
-        return SqliteStorage(context_root / _BATON_DB)
-    else:
-        from agent_baton.core.storage.file_backend import FileStorage
-        return FileStorage(context_root)
+
+def dump_state_to_json(
+    task_id: str,
+    *,
+    context_root: Path,
+    out_path: Path,
+) -> None:
+    """Snapshot-only export of an execution state to a JSON file.
+
+    Stage 3 of the file-backend deprecation: the file backend is no
+    longer a primary backend, but operators may still want a flat JSON
+    snapshot of an execution for diff/inspection.  This helper loads
+    via SQLite, calls ``state.to_dict()``, and writes the result to
+    *out_path*.
+
+    Used by the ``baton execute export`` CLI verb.
+
+    Args:
+        task_id: Task whose state to export.
+        context_root: Path to ``.claude/team-context/`` — the same path
+            ``get_project_storage`` consumes.
+        out_path: Destination file path (typically ``execution-state.json``).
+
+    Raises:
+        FileNotFoundError: When *task_id* has no row in ``baton.db``.
+    """
+    storage = get_project_storage(context_root)
+    state = storage.load_execution(task_id)
+    if state is None:
+        raise FileNotFoundError(
+            f"No execution state found for task_id={task_id!r} in "
+            f"{context_root / _BATON_DB}."
+        )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(state.to_dict(), indent=2), encoding="utf-8")
 
 
 def get_pmo_storage(pmo_db_path: Path | None = None):

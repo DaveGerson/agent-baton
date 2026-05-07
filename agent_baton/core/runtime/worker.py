@@ -510,7 +510,10 @@ class TaskWorker:
                         else:
                             _state = self._engine._load_execution()
                             if _state is not None:
-                                _state.status = "failed"
+                                # I2: completed_at stamped atomically.
+                                _state.transition_to_failed(
+                                    reason="auto-fail: gate retries exceeded",
+                                )
                                 self._engine._save_execution(_state)
             except asyncio.TimeoutError:
                 self._engine.record_gate_result(
@@ -527,7 +530,10 @@ class TaskWorker:
                     self._gate_retry_counts.pop(phase_id, None)
                     _state = self._engine._load_execution()
                     if _state is not None:
-                        _state.status = "failed"
+                        # I2: completed_at stamped atomically.
+                        _state.transition_to_failed(
+                            reason="gate timeout retries exceeded",
+                        )
                         self._engine._save_execution(_state)
             return
 

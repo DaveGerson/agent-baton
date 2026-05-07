@@ -68,6 +68,70 @@ def _build_knowledge_telemetry_store():
 # bounded to protect prompt-cache hit rates.
 _HANDOFF_SPILLOVER_MAX_BYTES: int = 65_536
 
+
+def _phase_step_extensions(
+    state: "ExecutionState",
+    phase_id: int,
+) -> tuple[list[str], list[str]]:
+    """Return ``(files_changed, gate_additions)`` for *phase_id*.
+
+    Builds a single ``step_id → phase_id`` map and walks
+    ``state.step_results`` once, collecting both lists in a single pass.
+    Deduplication is applied to each list independently (first occurrence
+    wins, insertion order preserved).
+
+    The helper is module-level (not a method) so :class:`PhaseManager`
+    and other callers can borrow it without importing the full class.
+
+    Returns:
+        A 2-tuple of ``(files_changed, gate_additions)`` where each
+        element is a deduplicated list ordered by first appearance.
+    """
+    step_to_phase: dict[str, int] = {}
+    for phase in state.plan.phases:
+        for step in phase.steps:
+            step_to_phase[step.step_id] = phase.phase_id
+
+    seen_files: set[str] = set()
+    files_out: list[str] = []
+    seen_cmds: set[str] = set()
+    cmds_out: list[str] = []
+
+    for result in state.step_results:
+        if step_to_phase.get(result.step_id) != phase_id:
+            continue
+        for f in result.files_changed or ():
+            if f and f not in seen_files:
+                seen_files.add(f)
+                files_out.append(f)
+        for cmd in result.gate_additions or ():
+            if cmd and cmd not in seen_cmds:
+                seen_cmds.add(cmd)
+                cmds_out.append(cmd)
+
+    return files_out, cmds_out
+
+
+def _phase_files_changed(state: "ExecutionState", phase_id: int) -> list[str]:
+    """Return the deduplicated list of files changed within *phase_id*.
+
+    Thin wrapper around :func:`_phase_step_extensions` for callers that
+    only need the files list.
+    """
+    files_changed, _ = _phase_step_extensions(state, phase_id)
+    return files_changed
+
+
+def _phase_gate_additions(state: "ExecutionState", phase_id: int) -> list[str]:
+    """Return the deduplicated list of agent-declared gate additions for *phase_id*.
+
+    Thin wrapper around :func:`_phase_step_extensions` for callers that
+    only need the gate-additions list.
+    """
+    _, gate_additions = _phase_step_extensions(state, phase_id)
+    return gate_additions
+
+
 from agent_baton.models.execution import (
     ActionType,
     ApprovalResult,
@@ -92,6 +156,7 @@ from agent_baton.models.knowledge import KnowledgeGapSignal, ResolvedDecision
 from agent_baton.models.retrospective import ConflictRecord, TeamCompositionRecord
 from agent_baton.models.usage import AgentUsageRecord, TaskUsageRecord
 from agent_baton.core.engine.dispatcher import PromptDispatcher
+from agent_baton.core.engine.gates import GateRunner as _GateRunner
 from agent_baton.core.engine.knowledge_gap import determine_escalation, parse_knowledge_gap
 from agent_baton.core.engine.persistence import StatePersistence
 from agent_baton.core.events.bus import EventBus
@@ -386,6 +451,11 @@ class ExecutionEngine:
         # failure before the cap is reached.
         self._max_gate_retries: int = max_gate_retries
 
+        # GateRunner is stateless; we keep a singleton so the executor can
+        # delegate gate-action construction (including artifact-validation
+        # extension — see ``_build_gate_action``).
+        self._gate_runner = _GateRunner()
+
         # ── 005b Phase 2: ActionResolver wiring ─────────────────────────────
         # Stateless evaluator that maps ExecutionState -> ResolverDecision.
         # Hidden private attribute (per design §3.3) — public constructor is
@@ -644,10 +714,27 @@ class ExecutionEngine:
         When the two backends diverge (SQLite fails but file succeeds), a
         WARNING is emitted with the task_id, status, and per-step status
         summary so the split-brain is visible in logs without DB inspection.
+
+        v41 (SQLite Phase C / slice 14): when the SQLite CAS update raises
+        ``ConcurrentModificationError``, the exception bubbles up rather
+        than silently falling back to file persistence — file persistence
+        does not honour OCC, so masking the conflict would re-introduce
+        the silent last-write-wins failure mode the version column exists
+        to prevent.  Higher-level callers can retry by reloading and
+        re-applying via ``state.transition_to_X`` per cross-proposal §2.2.
         """
+        from agent_baton.core.engine.errors import ConcurrentModificationError
+
         if self._storage is not None:
             try:
                 self._storage.save_execution(state)
+            except ConcurrentModificationError:
+                # OCC conflict — propagate so the caller can re-load and
+                # re-apply via the transition funnel.  Do NOT fall back
+                # to file persistence: the file backend doesn't honour
+                # OCC, so dropping to it would re-introduce the
+                # last-write-wins data loss the CAS exists to prevent.
+                raise
             except Exception as e:
                 step_summary = ", ".join(
                     f"{r.step_id}={r.status}" for r in state.step_results
@@ -674,6 +761,56 @@ class ExecutionEngine:
                     )
         else:
             self._persistence.save(state)
+
+    def _save_execution_with_occ_retry(
+        self,
+        state: ExecutionState,
+        *,
+        re_apply: "callable | None" = None,
+        max_retries: int = 3,
+    ) -> ExecutionState:
+        """Save *state* with OCC retry; re-apply via the transition funnel.
+
+        When :class:`ConcurrentModificationError` fires, this method:
+
+        1. Reloads the persisted row (now at the newer version).
+        2. If *re_apply* was supplied, calls it with the reloaded state
+           to re-apply the in-flight delta.  *re_apply* MUST mutate the
+           state via ``state.transition_to_X`` methods so the I1/I2/I9
+           invariants hold across the merge.
+        3. Retries the save up to *max_retries* times.
+
+        On exhausted retries the most recent
+        :class:`ConcurrentModificationError` propagates so the operator
+        sees a loud failure rather than silent stomp.
+
+        Cross-proposal §2.2: "the OCC retry handler needs to call
+        state.transition_to_X(...) to re-apply the conflicting write".
+        Returns the state object that was successfully saved (this may
+        differ from the input *state* after a reload).
+        """
+        from agent_baton.core.engine.errors import ConcurrentModificationError
+
+        for attempt in range(max_retries):
+            try:
+                self._save_execution(state)
+                return state
+            except ConcurrentModificationError:
+                _log.warning(
+                    "OCC conflict on task %r attempt %d/%d; reloading.",
+                    state.task_id, attempt + 1, max_retries,
+                )
+                reloaded = self._load_execution()
+                if reloaded is None:
+                    # Row vanished between conflict detection and reload.
+                    # Surface as the original exception.
+                    raise
+                if re_apply is not None:
+                    re_apply(reloaded)
+                state = reloaded
+        # Final attempt — let any conflict propagate.
+        self._save_execution(state)
+        return state
 
     def _load_execution(self) -> ExecutionState | None:
         """Load execution state via storage backend or legacy file.
@@ -731,6 +868,25 @@ class ExecutionEngine:
                         self._task_id,
                     )
                     return None
+                # Stash the SQLite row's OCC version on the file-loaded
+                # state (best-effort) so the next save_execution still
+                # walks the CAS path and detects a real conflict.  Without
+                # this, file-loaded states default to _loaded_version=0
+                # and the slice-14 split-brain recovery branch silently
+                # overwrites concurrent writers' progress.  See review
+                # finding (slice 14 follow-up) for the failure mode.
+                if file_state is not None:
+                    getter = getattr(self._storage, "get_execution_version", None)
+                    if getter is not None:
+                        try:
+                            persisted = getter(file_state.task_id)
+                            if persisted is not None:
+                                file_state._loaded_version = persisted
+                        except Exception as ver_exc:  # pragma: no cover
+                            _log.debug(
+                                "get_execution_version failed (non-fatal): %s",
+                                ver_exc,
+                            )
                 return file_state
             return state
         else:
@@ -1123,8 +1279,9 @@ class ExecutionEngine:
                 try:
                     state = self._load_execution()
                     if state is not None:
-                        state.status = "failed"
-                        state.completed_at = state.completed_at or _utcnow()
+                        state.transition_to_failed(
+                            completed_at=state.completed_at,
+                        )
                         # Surface the reason in a status-reason field.  We
                         # reuse override_justification (the closest existing
                         # operator-visible field) but only when empty.
@@ -1269,8 +1426,17 @@ class ExecutionEngine:
         gate_type: str,
         passed: bool,
         output: str = "",
+        *,
+        derived_commands: list[dict] | None = None,
+        agent_additions: list[str] | None = None,
     ) -> None:
-        """Write a compliance entry for a gate evaluation result."""
+        """Write a compliance entry for a gate evaluation result.
+
+        The optional ``derived_commands`` and ``agent_additions`` parameters
+        allow auditors to query "which gates ran with derived or declared
+        additions" directly from the compliance log without parsing the
+        concatenated ``gate_command`` string.
+        """
         self._write_compliance_entry(
             {
                 "timestamp": _utcnow(),
@@ -1284,6 +1450,8 @@ class ExecutionEngine:
                 "gate_type": gate_type,
                 "passed": passed,
                 "output_snippet": output[:500] if output else "",
+                "derived_commands_count": len(derived_commands) if derived_commands else 0,
+                "agent_additions_count": len(agent_additions) if agent_additions else 0,
             },
             plan=state.plan,
         )
@@ -1506,7 +1674,7 @@ class ExecutionEngine:
             state = self._load_execution()
             if state is not None:
                 state.failed_step_ids.add(step_id)
-                state.status = "failed"
+                state.transition_to_failed()
                 self._save_execution(state)
                 self._compliance_policy_event(
                     state, step_id, "",
@@ -1587,6 +1755,16 @@ class ExecutionEngine:
         if self._worktree_mgr is not None:
             _working_branch = self._detect_branch()
 
+        # I1: when start() flips to approval_pending for HIGH-risk pre-flight,
+        # stamp the pending_approval_request audit row in the same construction
+        # so the state passes the slice-13 model_validator on save+reload.
+        _initial_par = None
+        if initial_status == "approval_pending" and plan.phases:
+            _initial_par = PendingApprovalRequest(
+                phase_id=plan.phases[0].phase_id,
+                requester=_cli_actor(),
+                requested_at=_utcnow(),
+            )
         state = ExecutionState(
             task_id=plan.task_id,
             plan=plan,
@@ -1596,6 +1774,7 @@ class ExecutionEngine:
             force_override=self._force_override,
             override_justification=self._override_justification,
             working_branch=_working_branch,
+            pending_approval_request=_initial_par,
         )
 
         # Initialise trace (in-memory; committed to disk on complete()).
@@ -2317,6 +2496,31 @@ class ExecutionEngine:
             except Exception as _se_exc:
                 _log.debug("Scope expansion parsing failed (non-fatal): %s", _se_exc)
 
+        # ── Gate addition protocol ────────────────────────────────────────────
+        # Parse GATE_ADDITION: signals from the outcome and write them onto the
+        # StepResult so they are available when the gate is built for this phase.
+        # Skipped for automation steps (stdout is command output, not agent text).
+        if (
+            status in ("complete", "interrupted")
+            and outcome
+            and (_plan_step is None or _plan_step.step_type != "automation")
+        ):
+            try:
+                from agent_baton.core.engine.gate_addition import parse_gate_additions
+                _additions = parse_gate_additions(
+                    outcome,
+                    step_id=step_id,
+                    agent_name=agent_name,
+                )
+                if _additions:
+                    result.gate_additions = [a.command for a in _additions]
+                    _log.debug(
+                        "GATE_ADDITION: %d command(s) registered from step %s (%s)",
+                        len(_additions), step_id, agent_name,
+                    )
+            except Exception as _ga_exc:
+                _log.debug("Gate addition parsing failed (non-fatal): %s", _ga_exc)
+
         # Determine phase + step index for trace context.
         phase_idx, step_idx = self._locate_step(state, step_id)
         if phase_idx == -1:
@@ -2920,6 +3124,26 @@ class ExecutionEngine:
         if not actor:
             actor = _cli_actor()
 
+        # ── Provenance: re-derive gate extensions from state ─────────────────
+        # The same values are used when building the GATE action; re-deriving
+        # them here keeps GateResult self-contained so regulated investigations
+        # can query "which gates ran with derived/agent additions" directly
+        # without re-parsing the concatenated gate_command string.
+        _, gate_additions = _phase_step_extensions(state, phase_id)
+        # Artifact-derived commands: reconstruct from the plan gate via the
+        # gate runner so GateResult.derived_commands carries the same
+        # structured attribution that ExecutionAction.derived_commands does.
+        derived_cmds: list[dict] = []
+        if phase_obj and phase_obj.gate:
+            files_changed, _ = _phase_step_extensions(state, phase_id)
+            if files_changed:
+                from agent_baton.core.engine.artifact_validator import ArtifactValidator
+                av = ArtifactValidator(self._project_root())
+                derived_cmds = [
+                    {"command": d.command, "source_file": d.source_file, "rationale": d.rationale}
+                    for d in av.derive_commands(files_changed)
+                ]
+
         gate_result = GateResult(
             phase_id=phase_id,
             gate_type=gate_type,
@@ -2930,6 +3154,8 @@ class ExecutionEngine:
             exit_code=exit_code,
             decision_source=decision_source,
             actor=actor,
+            derived_commands=derived_cmds,
+            agent_additions=gate_additions,
         )
         state.gate_results.append(gate_result)
 
@@ -2957,7 +3183,11 @@ class ExecutionEngine:
         ))
 
         # ── Compliance audit: record gate result ─────────────────────────────
-        self._compliance_gate(state, phase_id, gate_type, passed, output)
+        self._compliance_gate(
+            state, phase_id, gate_type, passed, output,
+            derived_commands=derived_cmds,
+            agent_additions=gate_additions,
+        )
 
         if not passed:
             self._publish(evt.gate_failed(
@@ -3004,7 +3234,8 @@ class ExecutionEngine:
                     },
                     plan=state.plan,
                 )
-            state.status = "gate_failed"
+            # Non-coupled status flip; no sibling field paired with gate_failed.
+            state.status = "gate_failed"  # noqa: state-mutation
         else:
             self._publish(evt.gate_passed(
                 task_id=state.task_id,
@@ -3083,7 +3314,8 @@ class ExecutionEngine:
                 f"No failed gate result found for phase_id={phase_id}. "
                 "Check 'baton execute status' for the correct phase ID."
             )
-        state.status = "gate_pending"
+        # Non-coupled status flip; no sibling field paired with gate_pending.
+        state.status = "gate_pending"  # noqa: state-mutation
         self._save_execution(state)
 
     def fail_gate(self, phase_id: int) -> None:
@@ -3102,7 +3334,9 @@ class ExecutionEngine:
                 f"fail_gate() requires status 'gate_failed', got '{state.status}'. "
                 "Use 'baton execute fail' only after a gate has failed."
             )
-        state.status = "failed"
+        # transition_to_failed enforces I2 (completed_at stamped) and is
+        # safe from any non-terminal status; gate_failed qualifies.
+        state.transition_to_failed(reason="manual fail_gate")
         self._save_execution(state)
 
     # ── Wave 5.1 — Developer Takeover (bd-e208) ──────────────────────────────
@@ -3166,11 +3400,13 @@ class ExecutionEngine:
             last_known_worktree_head=head,
         )
 
-        # Append to state.
-        records = list(getattr(state, "takeover_records", []))
-        records.append(record.to_dict())
-        state.takeover_records = records
-        state.status = "paused-takeover"
+        # I9 funnel: append + status flip via transition method.  Without
+        # this funnel a save in between the two writes would persist a
+        # paused-takeover state with no active record.
+        record_dict = record.to_dict()
+        if not isinstance(state.takeover_records, list):
+            state.takeover_records = []
+        state.transition_to_paused_takeover(takeover_record=record_dict)
         self._save_execution(state)
 
         # Emit trace event.
@@ -3246,7 +3482,9 @@ class ExecutionEngine:
             record.resolution = "aborted"
             records_raw[active_idx] = record.to_dict()
             state.takeover_records = records_raw
-            state.status = "failed"
+            # I2: stamp completed_at on the failed transition.  Resolved
+            # the active takeover row above; no I9 row left dangling.
+            state.transition_to_failed(reason="takeover aborted")
             self._save_execution(state)
             if self._trace is not None:
                 self._tracer.record_event(
@@ -3350,17 +3588,20 @@ class ExecutionEngine:
                         "Fix the remaining issues and run 'baton execute resume' again."
                     )
 
-        # Update takeover record.
+        # Update takeover record only when the gate has actually passed.
+        # If the gate is still failing the takeover stays "active" (the
+        # record keeps resumed_at empty) — this preserves I9: status
+        # remains "paused-takeover" iff at least one record is active.
         records_raw = list(getattr(state, "takeover_records", []))
-        for i, r in enumerate(records_raw):
-            if r.get("step_id") == step_id and not r.get("resumed_at"):
-                r["resumed_at"] = _utcnow()
-                r["resolution"] = "completed" if gate_passed else "still-failing"
-                records_raw[i] = r
-                break
-        state.takeover_records = records_raw
-
         if gate_passed:
+            for i, r in enumerate(records_raw):
+                if r.get("step_id") == step_id and not r.get("resumed_at"):
+                    r["resumed_at"] = _utcnow()
+                    r["resolution"] = "completed"
+                    records_raw[i] = r
+                    break
+            state.takeover_records = records_raw
+
             # Fold back developer commits into parent branch.
             if self._worktree_mgr is not None and str(handle.path) != "/dev/null":
                 try:
@@ -3390,7 +3631,10 @@ class ExecutionEngine:
                     },
                 )
         else:
-            state.status = "paused-takeover"
+            # Status already paused-takeover from start_takeover; the
+            # active record is preserved.  No transition needed — simply
+            # persist the unchanged state for the resume cycle's sake.
+            pass
 
         self._save_execution(state)
         return gate_passed
@@ -3592,8 +3836,11 @@ class ExecutionEngine:
             steps_completed=len(state.completed_step_ids),
             steps_failed=len(state.failed_step_ids),
         ))
-        state.status = "complete"
-        state.completed_at = _utcnow()
+        # I2: atomically flip status + stamp completed_at via the
+        # transition method so a save in between cannot persist
+        # status="complete" with completed_at="" (the latter is what
+        # the retrospective reads to compute duration).
+        state.transition_to_complete()
 
         # ── Wave 1.3 (bd-86bf): sweep straggler worktrees ────────────────────
         # Any worktrees still registered in step_worktrees at completion time
@@ -4203,10 +4450,6 @@ class ExecutionEngine:
             rationale=rationale,
         )
         state.approval_results.append(approval)
-        # Clear the pending-approval audit row — the approval has been
-        # recorded.  Subsequent stray record_approval_result calls now hit
-        # the status != approval_pending guard above.
-        state.pending_approval_request = None
 
         if self._trace is not None:
             self._tracer.record_event(
@@ -4219,13 +4462,23 @@ class ExecutionEngine:
             )
 
         if result == "reject":
-            state.status = "failed"
+            # I1+I2: clear the audit row and flip status atomically. The
+            # ordering — clear first, then transition — keeps the persisted
+            # state inside the I1 invariant: a save in the middle sees
+            # status="approval_pending"/request=Pending or
+            # status="failed"/request=None+completed_at=stamped, never
+            # the torn pair.  transition_to_failed also stamps completed_at,
+            # closing the I2 gap that was previously a 6/14 omission rate.
+            state.clear_approval_pending()
+            state.transition_to_failed(reason="approval rejected")
         elif result == "approve":
-            state.status = "running"
+            state.transition_to_running(from_status="approval_pending")
         elif result == "approve-with-feedback":
-            # Insert a remediation phase after the current phase.
-            # Save state first so _amend_from_feedback → amend_plan can see
-            # the approval result when it loads state.
+            # Insert a remediation phase after the current phase.  Hold the
+            # pending-approval audit row across the save+amend+reload so a
+            # crash mid-amend reloads as approval_pending+request, not as
+            # the I1-violating approval_pending+None.  The transition out
+            # of approval_pending happens AFTER the reload, atomically.
             self._save_execution(state)
             self._amend_from_feedback(state, phase_id, feedback)
             # amend_plan saves its own copy with the amendment applied.
@@ -4241,7 +4494,7 @@ class ExecutionEngine:
                     context="record_approval_result:approve-with-feedback",
                 )
             state = _reloaded
-            state.status = "running"
+            state.transition_to_running(from_status="approval_pending")
 
         self._save_execution(state)
 
@@ -4518,7 +4771,6 @@ class ExecutionEngine:
                 # If conflict detected and escalation requested, pause
                 # for human review instead of auto-completing.
                 if conflict and spec and spec.conflict_handling == "escalate":
-                    state.status = "approval_pending"
                     parent.status = "dispatched"  # keep step open
                     parent.deviations.append(
                         f"Conflict escalated: {conflict.conflict_id}"
@@ -4539,12 +4791,12 @@ class ExecutionEngine:
                                 f"{conflict.conflict_id}.  Review and approve "
                                 f"to continue."
                             )
-                        state.pending_approval_request = PendingApprovalRequest(
+                        state.transition_to_approval_pending(
                             phase_id=current_phase.phase_id,
                             requester=_cli_actor(),
                             requested_at=_utcnow(),
                         )
-                    self._save_execution(state)
+                        self._save_execution(state)
                     return
 
                 # Apply synthesis strategy.
@@ -4771,7 +5023,9 @@ class ExecutionEngine:
             if self._enforce_token_budget and state.status not in (
                 "complete", "failed", "budget_exceeded"
             ):
-                state.status = "budget_exceeded"
+                # Non-coupled status flip; budget_exceeded is reversible
+                # via resume_budget().  Not Hole-1-class.
+                state.status = "budget_exceeded"  # noqa: state-mutation
                 _log.warning(
                     "Budget enforced: setting status=budget_exceeded. %s. "
                     "No new dispatches will be issued. "
@@ -4811,7 +5065,8 @@ class ExecutionEngine:
                 f"got '{state.status}'. "
                 "Use 'baton execute status' to check current state."
             )
-        state.status = "running"
+        # transition_to_running enforces the from_status precondition.
+        state.transition_to_running(from_status="budget_exceeded")
         self._save_execution(state)
         _log.info("Budget status cleared — execution resumed for task %s.", state.task_id)
 
@@ -5578,7 +5833,11 @@ class ExecutionEngine:
             return self._state_handlers["running"]
         return handler
 
-    def _build_gate_action(self, phase_obj: PlanPhase) -> ExecutionAction:
+    def _build_gate_action(
+        self,
+        phase_obj: PlanPhase,
+        state: ExecutionState | None = None,
+    ) -> ExecutionAction:
         """Build the standard GATE action for *phase_obj*.
 
         Shared by ``EMPTY_PHASE_GATE``, ``PHASE_NEEDS_GATE``, and
@@ -5586,18 +5845,65 @@ class ExecutionEngine:
         ExecutionAction message.  ``GATE_FAILED`` uses a different (retry-
         count-aware) message and is intentionally not routed through this
         helper.
+
+        When *state* is supplied, every file the agent created or modified
+        in this phase is fed through :class:`ArtifactValidator`.  Any
+        derived validation commands (CI workflow ``run:`` steps, npm
+        scripts, Playwright e2e) are appended to the gate command with
+        ``&&`` so a phase only passes when both the planned gate and the
+        new-artifact checks succeed.  This closes the
+        "trusted-but-unverified" gap where an agent could write a broken
+        ``.github/workflows/*.yml`` and still see "phase passed".
+
+        Agent-declared additions (``GATE_ADDITION:`` signals) are collected
+        via :func:`_phase_step_extensions` and forwarded to
+        :meth:`~GateRunner.build_gate_action` as ``agent_additions``.  They
+        are appended after artifact-derived commands and labelled separately
+        in the action message.
         """
         assert phase_obj.gate is not None
-        return ExecutionAction(
-            action_type=ActionType.GATE,
-            message=(
-                f"Run gate '{phase_obj.gate.gate_type}' for phase "
-                f"{phase_obj.phase_id}."
-            ),
-            gate_type=phase_obj.gate.gate_type,
-            gate_command=phase_obj.gate.command,
+
+        files_changed: list[str] = []
+        agent_additions: list[str] = []
+        if state is not None:
+            files_changed, agent_additions = _phase_step_extensions(
+                state, phase_obj.phase_id
+            )
+
+        action = self._gate_runner.build_gate_action(
+            phase_obj.gate,
             phase_id=phase_obj.phase_id,
+            files_changed=files_changed or None,
+            project_root=self._project_root() if files_changed else None,
+            agent_additions=agent_additions or None,
         )
+        # Rebuild the message with the executor-style prefix while
+        # preserving the structured suffix ("[+artifact checks: ...]" /
+        # "[+agent additions: ...]") that GateRunner already constructed.
+        # The condition covers both artifact derivations and agent additions
+        # so the prefix is correct for either extension source.
+        base_message = (
+            f"Run gate '{phase_obj.gate.gate_type}' for phase "
+            f"{phase_obj.phase_id}."
+        )
+        extended = bool(action.derived_commands or action.agent_additions)
+        if extended:
+            # GateRunner message format: "<description> [+artifact checks: ...]
+            # [+agent additions: ...]".  Strip the description prefix and keep
+            # only the bracket suffix so we don't double the description text.
+            suffix = action.message
+            # Find the first bracket annotation and preserve from there.
+            bracket_pos = suffix.find(" [+")
+            if bracket_pos != -1:
+                suffix = suffix[bracket_pos:]  # e.g. " [+artifact checks: ...]"
+                action.message = f"{base_message}{suffix}"
+            else:
+                # GateRunner produced an extended message without the
+                # expected bracket format — fall back to appending as-is.
+                action.message = f"{base_message} {suffix}"
+        else:
+            action.message = base_message
+        return action
 
     def _publish_phase_started(self, state: ExecutionState) -> None:
         """Publish ``phase_pre_start`` + ``phase_started`` events for the
@@ -5687,7 +5993,7 @@ class ExecutionEngine:
         if kind == DecisionKind.GATE_PENDING:
             phase_obj = state.current_phase_obj
             assert phase_obj is not None and phase_obj.gate is not None
-            return self._build_gate_action(phase_obj)
+            return self._build_gate_action(phase_obj, state)
 
         # ── Status: gate_failed (retry, count below cap) ────────────────────
         if kind == DecisionKind.GATE_FAILED:
@@ -5757,7 +6063,7 @@ class ExecutionEngine:
             phase_obj = state.current_phase_obj
             assert phase_obj is not None and phase_obj.gate is not None
             self._state_handler_for(state.status).handle(state, decision)
-            return self._build_gate_action(phase_obj)
+            return self._build_gate_action(phase_obj, state)
 
         # ── Empty phase: nothing left to do, advance through ────────────────
         if kind == DecisionKind.EMPTY_PHASE_ADVANCE:
@@ -5925,7 +6231,7 @@ class ExecutionEngine:
             phase_obj = state.current_phase_obj
             assert phase_obj is not None and phase_obj.gate is not None
             self._state_handler_for(state.status).handle(state, decision)
-            return self._build_gate_action(phase_obj)
+            return self._build_gate_action(phase_obj, state)
 
         # ── PHASE_ADVANCE_OK: gate passed, walk to next phase ───────────────
         if kind == DecisionKind.PHASE_ADVANCE_OK:
@@ -6398,15 +6704,17 @@ class ExecutionEngine:
         context = phase_obj.approval_description or self._build_approval_context(
             state, phase_obj,
         )
-        # Stamp the pending-approval audit row.  Idempotent: if the same phase
-        # is re-emitted (e.g. after resume), preserve the original requester
-        # rather than overwriting it with whoever happens to be calling now.
+        # I1: status="approval_pending" ⇔ pending_approval_request != None.
+        # Funnel both writes through transition_to_approval_pending so they
+        # land atomically.  Idempotent: if the same phase is re-emitted
+        # (e.g. after resume), preserve the original requester rather than
+        # overwriting it with whoever happens to be calling now.
         existing = getattr(state, "pending_approval_request", None)
         if (
             existing is None
             or existing.phase_id != phase_obj.phase_id
         ):
-            state.pending_approval_request = PendingApprovalRequest(
+            state.transition_to_approval_pending(
                 phase_id=phase_obj.phase_id,
                 requester=_cli_actor(),
                 requested_at=_utcnow(),
@@ -6651,7 +6959,8 @@ class ExecutionEngine:
 
         # Check if all feedback questions are now resolved.
         if self._feedback_resolved_for_phase(state, current_pid):
-            state.status = "running"
+            # transition_to_running enforces the from_status precondition.
+            state.transition_to_running(from_status="feedback_pending")
         self._save_execution(state)
 
         if self._trace is not None:
@@ -6930,7 +7239,8 @@ class ExecutionEngine:
             result.outcome = (
                 f"TIMEOUT after {effective}s (elapsed {int(elapsed)}s)"
             )
-            state.status = "failed"
+            # I2: completed_at stamped via transition method.
+            state.transition_to_failed(reason="step timeout")
             self._save_execution(state)
 
             # Best-effort warning bead — must not block timeout enforcement.

@@ -93,18 +93,24 @@ class TestGetProjectStorage:
         assert isinstance(backend, SqliteStorage)
         backend.close()
 
-    def test_legacy_files_returns_file_storage(self, tmp_path: Path) -> None:
-        """Factory returns FileStorage when execution-state.json exists."""
+    def test_legacy_files_returns_sqlite_storage(self, tmp_path: Path) -> None:
+        """Slice 15: factory returns SqliteStorage even with legacy files.
+
+        ``detect_backend`` still reports 'file' so the migrate command
+        can find legacy projects, but ``get_project_storage`` no longer
+        instantiates FileStorage.  Operators run ``baton storage migrate``
+        to import legacy execution-state.json into SQLite.
+        """
         (tmp_path / "execution-state.json").write_text("{}", encoding="utf-8")
         backend = get_project_storage(tmp_path)
-        assert isinstance(backend, FileStorage)
+        assert isinstance(backend, SqliteStorage)
         backend.close()
 
-    def test_executions_dir_returns_file_storage(self, tmp_path: Path) -> None:
-        """Factory returns FileStorage when executions/ dir exists."""
+    def test_executions_dir_returns_sqlite_storage(self, tmp_path: Path) -> None:
+        """Slice 15: factory returns SqliteStorage even with executions/ dir."""
         (tmp_path / "executions").mkdir()
         backend = get_project_storage(tmp_path)
-        assert isinstance(backend, FileStorage)
+        assert isinstance(backend, SqliteStorage)
         backend.close()
 
     def test_force_sqlite_overrides_detection(self, tmp_path: Path) -> None:
@@ -114,11 +120,23 @@ class TestGetProjectStorage:
         assert isinstance(backend, SqliteStorage)
         backend.close()
 
-    def test_force_file_overrides_detection(self, tmp_path: Path) -> None:
-        """Explicit backend='file' overrides detection even with baton.db."""
+    def test_force_file_warns_and_falls_back_to_sqlite(
+        self, tmp_path: Path,
+    ) -> None:
+        """Slice 15: backend='file' emits a deprecation warning and
+        returns SqliteStorage anyway.  Pinning legacy callers to file
+        storage is no longer supported."""
+        import warnings as _warnings
         (tmp_path / "baton.db").touch()
-        backend = get_project_storage(tmp_path, backend="file")
-        assert isinstance(backend, FileStorage)
+        with _warnings.catch_warnings(record=True) as caught:
+            _warnings.simplefilter("always")
+            backend = get_project_storage(tmp_path, backend="file")
+        assert isinstance(backend, SqliteStorage)
+        assert any(
+            issubclass(w.category, DeprecationWarning)
+            and "backend='file' is no longer supported" in str(w.message)
+            for w in caught
+        )
         backend.close()
 
     def test_sqlite_db_placed_in_context_root(self, tmp_path: Path) -> None:
@@ -129,10 +147,16 @@ class TestGetProjectStorage:
         backend.close()
 
     def test_file_storage_context_root_property(self, tmp_path: Path) -> None:
-        """FileStorage has context_root pointing to the given directory."""
-        (tmp_path / "execution-state.json").write_text("{}", encoding="utf-8")
-        backend = get_project_storage(tmp_path)
-        assert isinstance(backend, FileStorage)
+        """FileStorage still exposes context_root when constructed directly.
+
+        Slice 15 removed FileStorage from the factory but it remains
+        importable for the export helper (dump_state_to_json) and any
+        legacy code that constructs it directly.
+        """
+        import warnings as _warnings
+        with _warnings.catch_warnings():
+            _warnings.simplefilter("ignore", DeprecationWarning)
+            backend = FileStorage(tmp_path)
         assert backend.context_root == tmp_path
         backend.close()
 

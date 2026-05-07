@@ -136,6 +136,7 @@ cymbal impact <symbol>          # blast radius before edits
 | `BATON_SPECULATE_ENABLED` | Enable/disable speculative pipelining | `0` |
 | `BATON_SOULS_ENABLED` | Enable/disable soul registry for agent identity | `0` |
 | `BATON_PLANNER_HARD_GATE` | Enable hard validation gate that blocks bad plans | unset |
+| `BATON_ARTIFACT_VALIDATION` | Derive extra gate commands from agent-created runnable artifacts (CI workflows, npm scripts, Playwright config, Makefile targets, pre-commit). Set to `0` to suppress derivation and run only the planned `gate.command`. | `1` |
 | `BATON_PREDICT_ENABLED` | Enable predictive dispatch system | `0` |
 | `BATON_OTEL_ENABLED` | Enable OpenTelemetry JSONL export | unset |
 | `BATON_COMPLIANCE_FAIL_CLOSED` | Halt execution + raise on compliance audit write failure (regulated-domain). When unset/`0`, failures are logged + a bead warning is emitted, execution continues. Can be overridden per-plan via `MachinePlan.compliance_fail_closed` (plan value takes precedence). | `0` |

@@ -408,7 +408,9 @@ async def cancel_execution(
 
     state = engine._load_state()  # noqa: SLF001
     if state is not None and state.status == "running":
-        state.status = "failed"
+        # I2: stamp completed_at atomically; the REST stop endpoint
+        # historically left it blank.
+        state.transition_to_failed(reason="rest stop endpoint")
         engine._save_execution(state)  # noqa: SLF001
 
     return {"cancelled": True, "task_id": task_id}
