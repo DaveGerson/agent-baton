@@ -515,11 +515,23 @@ class EnrichmentStage:
                 )
                 return
 
-        # Resolve the agent: prefer "architect" when available in the registry
+        # Resolve the agent: prefer "architect" from the resolved roster first
+        # (respects explicit --agents overrides), then fall back to architect from
+        # the registry, then the first resolved agent, then a hard default.
         registry = services.registry
-        agent_name = "architect" if registry.get("architect") is not None else (
-            resolved_agents[0] if resolved_agents else "architect"
-        )
+        _roster_bases = [a.split("--")[0] for a in resolved_agents]
+        if "architect" in _roster_bases:
+            agent_name = resolved_agents[_roster_bases.index("architect")]
+        elif resolved_agents:
+            # Use the first non-reviewer from the explicit roster so that
+            # decision-capture honours --agents overrides (bd-explicit-override).
+            from agent_baton.core.orchestration.router import is_reviewer_agent
+            non_reviewers = [a for a in resolved_agents if not is_reviewer_agent(a)]
+            agent_name = non_reviewers[0] if non_reviewers else resolved_agents[0]
+        elif registry.get("architect") is not None:
+            agent_name = "architect"
+        else:
+            agent_name = "architect"
 
         description = (
             f"{self._DECISION_CAPTURE_HEADER}\n\n"

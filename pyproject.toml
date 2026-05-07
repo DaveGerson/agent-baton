@@ -99,7 +99,7 @@ include = ["agent_baton*"]
 [tool.setuptools.package-data]
 agent_baton = [
     "_bundled_agents/*.md",
-    "visualize/*.html",
+    "_bundled_visualize/*.html",
 ]
 
 [tool.pytest.ini_options]
