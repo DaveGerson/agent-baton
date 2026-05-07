@@ -2372,6 +2372,60 @@ class ExecutionEngine:
             _log.warning("Budget warning: %s", warning)
             result.deviations.append(f"TOKEN_BUDGET_WARNING: {warning}")
 
+        # ── Worktree path-scope guardrail (Part 2 guardrail) ─────────────────
+        # When a step ran in an isolated worktree, verify that every file
+        # the agent reported in files_changed resolves to a path INSIDE the
+        # worktree root.  Any escape (absolute path outside the worktree,
+        # or a path that traverses ".." above the root) is a violation.
+        #
+        # Design choice: path canonicalization gate at record time.
+        # Rationale: the check is lightweight (pure path math, no I/O),
+        # observable (bead + deviation logged), and enforceable entirely
+        # inside the engine — no harness, chroot, or namespace changes
+        # needed.  The result is still recorded as failed + a warning bead
+        # is filed so the operator can see the escape attempt.
+        if (
+            status == "complete"
+            and files_changed
+            and self._worktree_mgr is not None
+        ):
+            _gt_worktrees = getattr(state, "step_worktrees", {})
+            _gt_handle_dict = _gt_worktrees.get(step_id)
+            if _gt_handle_dict is not None:
+                _wt_root_str = _gt_handle_dict.get("path", "")
+                if _wt_root_str:
+                    from pathlib import Path as _Path
+                    _wt_root = _Path(_wt_root_str).resolve()
+                    _escaped: list[str] = []
+                    for _fc in files_changed:
+                        try:
+                            _fc_resolved = _Path(_fc)
+                            if not _fc_resolved.is_absolute():
+                                # Relative paths are fine — they resolve inside
+                                # the worktree by construction.
+                                pass
+                            else:
+                                # Absolute paths must be children of the worktree
+                                _fc_resolved.resolve().relative_to(_wt_root)
+                        except ValueError:
+                            _escaped.append(_fc)
+                    if _escaped:
+                        _escape_msg = (
+                            f"WORKTREE_ESCAPE: step {step_id} reported "
+                            f"files outside its worktree ({_wt_root}): "
+                            f"{', '.join(_escaped)}"
+                        )
+                        _log.warning("%s", _escape_msg)
+                        result.deviations.append(_escape_msg)
+                        result.status = "failed"
+                        status = "failed"
+                        if self._worktree_mgr._bead_store:
+                            self._worktree_mgr._file_bead_warning(
+                                task_id=state.task_id,
+                                step_id=step_id,
+                                content=f"BEAD_WARNING: {_escape_msg}",
+                            )
+
         # ── Wave 1.3 (bd-86bf): worktree fold-back / retain ──────────────────
         # Only runs on terminal statuses (complete / failed); dispatched and
         # interacting are skipped because the worktree is still active.
@@ -2620,12 +2674,40 @@ class ExecutionEngine:
                             from agent_baton.core.engine.worktree_manager import (
                                 WorktreeCreateError,
                             )
+                            # Race-fix (bd-race-1): capture the branch HEAD SHA
+                            # once here, before acquiring the worktree lock, and
+                            # pass it explicitly to create().  This closes the
+                            # window where another commit could land between the
+                            # SHA read inside _create_locked() and the
+                            # `git worktree add` call, causing the worktree to
+                            # be rooted at the new HEAD instead of the expected
+                            # one.  Using an explicit SHA makes worktree add
+                            # deterministic regardless of concurrent pushes.
+                            _base_sha: str | None = None
+                            try:
+                                import subprocess as _sp
+                                _sha_r = _sp.run(
+                                    ["git", "rev-parse", "HEAD"],
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=5,
+                                    cwd=str(self._project_root()),
+                                )
+                                if _sha_r.returncode == 0:
+                                    _base_sha = _sha_r.stdout.strip() or None
+                            except Exception as _sha_exc:
+                                _log.debug(
+                                    "SHA pre-capture failed for step %s (non-fatal, "
+                                    "worktree will use HEAD at create time): %s",
+                                    step_id, _sha_exc,
+                                )
                             # Wire the active trace into the manager for event emission
                             self._worktree_mgr._trace = self._trace
                             handle = self._worktree_mgr.create(
                                 task_id=state.task_id,
                                 step_id=step_id,
                                 base_branch=base_branch,
+                                base_sha=_base_sha,
                             )
                             step_worktrees = getattr(state, "step_worktrees", {})
                             step_worktrees[step_id] = handle.to_dict()

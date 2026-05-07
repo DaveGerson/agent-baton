@@ -71,13 +71,39 @@ class StepScheduler:
         step_id: str,
         launcher: AgentLauncher,
         mcp_servers: list[str] | None = None,
+        cwd_override: str | None = None,
+        task_id: str = "",
     ) -> LaunchResult:
-        """Dispatch a single step, respecting the concurrency limit."""
+        """Dispatch a single step, respecting the concurrency limit.
+
+        Args:
+            cwd_override: When set, the agent subprocess is launched with
+                this directory as its working directory.  Used for Wave 1.3
+                worktree isolation to run each agent inside its isolated
+                worktree.  Forwarded to the launcher via kwargs so
+                non-worktree launchers (e.g. ``DryRunLauncher``) can safely
+                ignore it.
+            task_id: Optional task identifier propagated to the subprocess as
+                ``BATON_TASK_ID`` when ``cwd_override`` is set.
+        """
         async with self._semaphore:
             self._active += 1
             try:
+                # Forward cwd_override and task_id as keyword arguments.
+                # Launchers that do not support these kwargs (e.g. DryRunLauncher)
+                # simply ignore them because they accept **kwargs or have no such
+                # parameter — the Protocol does not declare them, but concrete
+                # implementations (ClaudeCodeLauncher) do, so we pass via kwargs
+                # and rely on duck-typing.
+                launch_kwargs: dict = {}
+                if cwd_override:
+                    launch_kwargs["cwd_override"] = cwd_override
+                if task_id:
+                    launch_kwargs["task_id"] = task_id
                 return await launcher.launch(
-                    agent_name, model, prompt, step_id, mcp_servers=mcp_servers
+                    agent_name, model, prompt, step_id,
+                    mcp_servers=mcp_servers,
+                    **launch_kwargs,
                 )
             finally:
                 self._active -= 1
@@ -90,8 +116,13 @@ class StepScheduler:
         """Dispatch multiple steps in parallel, bounded by *max_concurrent*.
 
         Each step dict must contain: ``agent_name``, ``model``, ``prompt``,
-        ``step_id``.  An optional ``mcp_servers`` key (list of strings) may
-        be included to enable selective MCP pass-through for that step.
+        ``step_id``.  Optional keys:
+
+        - ``mcp_servers`` (list of strings): enable selective MCP pass-through.
+        - ``cwd_override`` (str): working directory for the agent subprocess
+          (Wave 1.3 worktree isolation).
+        - ``task_id`` (str): task identifier forwarded as ``BATON_TASK_ID``.
+
         Returns results in the same order as *steps*.
         """
         tasks = [
@@ -102,6 +133,8 @@ class StepScheduler:
                 step_id=s["step_id"],
                 launcher=launcher,
                 mcp_servers=s.get("mcp_servers") or None,
+                cwd_override=s.get("cwd_override") or None,
+                task_id=s.get("task_id") or "",
             )
             for s in steps
         ]

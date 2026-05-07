@@ -173,11 +173,29 @@ class TaskWorker:
 
                 # Mark ALL steps (including automation) as dispatched so the
                 # engine does not re-dispatch them while they are in-flight.
+                # After mark_dispatched() the engine may have created an
+                # isolated worktree for the step.  We read back the worktree
+                # path here so it can be forwarded to the launcher as
+                # cwd_override (Wave 1.3 / bd-86bf daemon-dispatch fix).
+                _worktree_paths: dict[str, str] = {}
                 for a in actions:
                     self._engine.mark_dispatched(
                         a.step_id,
                         a.agent_name or "automation",
                     )
+                    # Read back the worktree path created by mark_dispatched().
+                    try:
+                        _wt_state = self._engine._load_execution()  # type: ignore[attr-defined]
+                        _wt_dict = (
+                            getattr(_wt_state, "step_worktrees", {}).get(a.step_id)
+                            if _wt_state else None
+                        )
+                        if _wt_dict:
+                            _wt_path = _wt_dict.get("path") or ""
+                            if _wt_path:
+                                _worktree_paths[a.step_id] = _wt_path
+                    except Exception:
+                        pass
 
                 # Event ownership: Worker publishes step-level events.
                 # Task-level and phase-level events are published by ExecutionEngine.
@@ -263,6 +281,13 @@ class TaskWorker:
                             "prompt": a.delegation_prompt,
                             "step_id": a.step_id,
                             "mcp_servers": a.mcp_servers,
+                            # Wave 1.3 worktree isolation (daemon-dispatch fix):
+                            # forward the worktree path captured after
+                            # mark_dispatched() so the agent subprocess runs
+                            # inside its isolated worktree rather than the
+                            # parent tree.  Empty string → no override.
+                            "cwd_override": _worktree_paths.get(a.step_id, ""),
+                            "task_id": task_id,
                         }
                         for a in agent_actions
                     ]
