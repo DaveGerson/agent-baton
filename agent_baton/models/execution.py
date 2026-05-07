@@ -865,8 +865,7 @@ class TeamStepResult(ExecutionRecord):
     files_changed: list[str] = Field(default_factory=list)
 
 
-@dataclass
-class StepResult:
+class StepResult(ExecutionRecord):
     """Outcome of a single step execution.
 
     Recorded by ``baton execute record`` after each agent dispatch
@@ -912,7 +911,7 @@ class StepResult:
     agent_name: str
     status: str = "complete"        # complete, failed, dispatched
     outcome: str = ""               # free-text summary
-    files_changed: list[str] = field(default_factory=list)
+    files_changed: list[str] = Field(default_factory=list)
     commit_hash: str = ""
     estimated_tokens: int = 0
     # Real per-step token fields (populated by session JSONL scanner).
@@ -928,20 +927,25 @@ class StepResult:
     retries: int = 0
     error: str = ""
     completed_at: str = ""
-    member_results: list[TeamStepResult] = field(default_factory=list)  # team step results
-    deviations: list[str] = field(default_factory=list)  # plan deviations reported by agent
-    interaction_history: list[InteractionTurn] = field(default_factory=list)  # multi-turn exchange
+    member_results: list[TeamStepResult] = Field(default_factory=list)
+    deviations: list[str] = Field(default_factory=list)
+    interaction_history: list[InteractionTurn] = Field(default_factory=list)
     step_type: str = "developing"   # echoed from PlanStep for analytics/queries
     updated_at: str = ""            # ISO 8601 UTC; set on every status mutation; used for bi-directional split-brain reconciliation
     outcome_spillover_path: str = ""  # relative path under execution dir to FULL outcome when truncated
 
     def to_dict(self) -> dict:
+        # Override required to keep the empty-collection-omission semantics
+        # of the dataclass-era to_dict — golden fixtures and call-site
+        # snapshots assume member_results / interaction_history are absent
+        # when empty.  Deviations is emitted unconditionally even when
+        # empty (matches the historical hand-rolled output).
         d = {
             "step_id": self.step_id,
             "agent_name": self.agent_name,
             "status": self.status,
             "outcome": self.outcome,
-            "files_changed": self.files_changed,
+            "files_changed": list(self.files_changed),
             "commit_hash": self.commit_hash,
             "estimated_tokens": self.estimated_tokens,
             "input_tokens": self.input_tokens,
@@ -955,7 +959,7 @@ class StepResult:
             "retries": self.retries,
             "error": self.error,
             "completed_at": self.completed_at,
-            "deviations": self.deviations,
+            "deviations": list(self.deviations),
             "step_type": self.step_type,
             "updated_at": self.updated_at,
             "outcome_spillover_path": self.outcome_spillover_path,
@@ -966,23 +970,11 @@ class StepResult:
             d["interaction_history"] = [t.to_dict() for t in self.interaction_history]
         return d
 
-    @classmethod
-    def from_dict(cls, data: dict) -> StepResult:
-        data = dict(data)  # don't mutate caller's dict
-        member_results = [
-            TeamStepResult.from_dict(m) for m in data.pop("member_results", [])
-        ]
-        # Extract deviations before passing remaining fields to __init__
-        deviations = data.pop("deviations", [])
-        # Extract interaction_history before passing remaining fields to __init__
-        interaction_history = [
-            InteractionTurn.from_dict(t) for t in data.pop("interaction_history", [])
-        ]
-        obj = cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
-        obj.member_results = member_results
-        obj.deviations = deviations
-        obj.interaction_history = interaction_history
-        return obj
+    # from_dict inherited from ExecutionRecord — TeamStepResult and
+    # InteractionTurn are now Pydantic models, so Pydantic auto-rehydrates
+    # member_results and interaction_history from dict payloads via the
+    # type annotations above.  The old __dataclass_fields__ filter is
+    # replaced by the base class's extra="ignore".
 
 
 class ApprovalResult(ExecutionRecord):
