@@ -1148,8 +1148,7 @@ class GateResult(ExecutionRecord):
 # Consolidation models (cherry-pick rebase of agent commits)
 # ---------------------------------------------------------------------------
 
-@dataclass
-class FileAttribution:
+class FileAttribution(ExecutionRecord):
     """Per-file change attribution to a specific step.
 
     Populated by ``CommitConsolidator._diff_stats()`` after each
@@ -1169,28 +1168,8 @@ class FileAttribution:
     insertions: int = 0
     deletions: int = 0
 
-    def to_dict(self) -> dict:
-        return {
-            "file_path": self.file_path,
-            "step_id": self.step_id,
-            "agent_name": self.agent_name,
-            "insertions": self.insertions,
-            "deletions": self.deletions,
-        }
 
-    @classmethod
-    def from_dict(cls, data: dict) -> FileAttribution:
-        return cls(
-            file_path=data.get("file_path", ""),
-            step_id=data.get("step_id", ""),
-            agent_name=data.get("agent_name", ""),
-            insertions=data.get("insertions", 0),
-            deletions=data.get("deletions", 0),
-        )
-
-
-@dataclass
-class ConsolidationResult:
+class ConsolidationResult(ExecutionRecord):
     """Outcome of rebasing agent commits onto the feature branch.
 
     Stored on ``ExecutionState.consolidation_result`` after
@@ -1223,58 +1202,24 @@ class ConsolidationResult:
     """
 
     status: str = "success"          # success | partial | conflict
-    rebased_commits: list[dict] = field(default_factory=list)
+    rebased_commits: list[dict] = Field(default_factory=list)
     final_head: str = ""
     base_commit: str = ""
-    files_changed: list[str] = field(default_factory=list)
+    files_changed: list[str] = Field(default_factory=list)
     total_insertions: int = 0
     total_deletions: int = 0
-    attributions: list[FileAttribution] = field(default_factory=list)
-    conflict_files: list[str] = field(default_factory=list)
+    attributions: list[FileAttribution] = Field(default_factory=list)
+    conflict_files: list[str] = Field(default_factory=list)
     conflict_step_id: str = ""
-    skipped_steps: list[str] = field(default_factory=list)
+    skipped_steps: list[str] = Field(default_factory=list)
     started_at: str = ""
     completed_at: str = ""
     error: str = ""
 
-    def to_dict(self) -> dict:
-        return {
-            "status": self.status,
-            "rebased_commits": list(self.rebased_commits),
-            "final_head": self.final_head,
-            "base_commit": self.base_commit,
-            "files_changed": self.files_changed,
-            "total_insertions": self.total_insertions,
-            "total_deletions": self.total_deletions,
-            "attributions": [a.to_dict() for a in self.attributions],
-            "conflict_files": self.conflict_files,
-            "conflict_step_id": self.conflict_step_id,
-            "skipped_steps": self.skipped_steps,
-            "started_at": self.started_at,
-            "completed_at": self.completed_at,
-            "error": self.error,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict) -> ConsolidationResult:
-        return cls(
-            status=data.get("status", "success"),
-            rebased_commits=list(data.get("rebased_commits", [])),
-            final_head=data.get("final_head", ""),
-            base_commit=data.get("base_commit", ""),
-            files_changed=data.get("files_changed", []),
-            total_insertions=data.get("total_insertions", 0),
-            total_deletions=data.get("total_deletions", 0),
-            attributions=[
-                FileAttribution.from_dict(a) for a in data.get("attributions", [])
-            ],
-            conflict_files=data.get("conflict_files", []),
-            conflict_step_id=data.get("conflict_step_id", ""),
-            skipped_steps=data.get("skipped_steps", []),
-            started_at=data.get("started_at", ""),
-            completed_at=data.get("completed_at", ""),
-            error=data.get("error", ""),
-        )
+    # to_dict / from_dict inherited from ExecutionRecord — every field is
+    # emitted unconditionally (matching the legacy hand-rolled to_dict),
+    # and FileAttribution rehydration is handled automatically via the
+    # nested type annotation.
 
 
 @dataclass
