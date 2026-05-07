@@ -1,6 +1,6 @@
 """``baton migrate-storage`` -- DEPRECATED alias.
 
-Use ``baton storage migrate`` instead.
+Use ``baton sync --migrate-storage`` instead.
 
 This module keeps the old top-level ``baton migrate-storage`` command working
 so that existing scripts and CI pipelines are not broken.  A deprecation
@@ -15,9 +15,9 @@ import sys
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     p = subparsers.add_parser(
         "migrate-storage",
-        help="[DEPRECATED] Use 'baton storage migrate' instead",
+        help="[DEPRECATED] Use 'baton sync --migrate-storage' instead",
         description=(
-            "DEPRECATED: Use 'baton storage migrate' instead.\n\n"
+            "DEPRECATED: Use 'baton sync --migrate-storage' instead.\n\n"
             "Scans the team-context directory for existing JSON/JSONL files "
             "and imports them into baton.db."
         ),
@@ -56,7 +56,7 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
 
 def handler(args: argparse.Namespace) -> None:
     print(
-        "warning: `baton migrate-storage` is deprecated; use `baton storage migrate`"
+        "warning: `baton migrate-storage` is deprecated; use `baton sync --migrate-storage`"
         " instead. This alias will be removed in a future release.",
         file=sys.stderr,
     )
