@@ -366,3 +366,121 @@ class TestHandlerNextTerseJson:
         result_terse = self._run_next_json(action, terse=True)
         result_plain = self._run_next_json(action, terse=False)
         assert result_terse == result_plain
+
+
+# ---------------------------------------------------------------------------
+# _print_action — GATE structured extension fields (derived_commands / agent_additions)
+# ---------------------------------------------------------------------------
+
+
+class TestPrintActionGateExtensions:
+    """Verify that _print_action emits derived_commands and agent_additions
+    blocks when present, and omits them when empty.
+
+    These are additive fields under the existing GATE branch — the existing
+    Action/Type/Phase/Command/Message block must be unchanged.
+    """
+
+    def _gate_action_extended(
+        self,
+        *,
+        derived_commands: list[dict] | None = None,
+        agent_additions: list[str] | None = None,
+    ) -> dict:
+        d = {
+            "action_type": ActionType.GATE.value,
+            "gate_type": "test",
+            "phase_id": 2,
+            "gate_command": "pytest tests/ -q",
+            "message": "Run test gate",
+        }
+        if derived_commands:
+            d["derived_commands"] = derived_commands
+        if agent_additions:
+            d["agent_additions"] = agent_additions
+        return d
+
+    def test_existing_gate_fields_unchanged_when_extensions_absent(self) -> None:
+        """Core gate fields still appear when no extension fields are present."""
+        action = _gate_action()
+        out = _capture(_print_action, action)
+        assert "ACTION: GATE" in out
+        assert "Type:    tests" in out
+        assert "Phase:   1" in out
+        assert "Command: pytest tests/ -x -q" in out
+        assert "Message: Run tests" in out
+
+    def test_derived_commands_block_emitted_when_present(self) -> None:
+        """'Derived commands:' block appears when derived_commands is non-empty."""
+        dc = [
+            {"command": "npm audit --audit-level=high", "source_file": "package.json", "rationale": "audit script"},
+        ]
+        action = self._gate_action_extended(derived_commands=dc)
+        out = _capture(_print_action, action)
+        assert "Derived commands:" in out
+        assert "npm audit --audit-level=high" in out
+        assert "package.json" in out
+        assert "audit script" in out
+
+    def test_agent_additions_block_emitted_when_present(self) -> None:
+        """'Agent additions:' block appears when agent_additions is non-empty."""
+        action = self._gate_action_extended(agent_additions=["pre-commit run --all-files"])
+        out = _capture(_print_action, action)
+        assert "Agent additions:" in out
+        assert "pre-commit run --all-files" in out
+
+    def test_derived_commands_block_absent_when_empty(self) -> None:
+        """No 'Derived commands:' block when the list is empty or absent."""
+        action = _gate_action()  # no derived_commands key
+        out = _capture(_print_action, action)
+        assert "Derived commands:" not in out
+
+    def test_agent_additions_block_absent_when_empty(self) -> None:
+        """No 'Agent additions:' block when the list is empty or absent."""
+        action = _gate_action()  # no agent_additions key
+        out = _capture(_print_action, action)
+        assert "Agent additions:" not in out
+
+    def test_both_blocks_emitted_when_both_present(self) -> None:
+        """Both blocks appear when both extension fields are non-empty."""
+        dc = [{"command": "make test", "source_file": "Makefile", "rationale": "test target"}]
+        aa = ["npm audit"]
+        action = self._gate_action_extended(derived_commands=dc, agent_additions=aa)
+        out = _capture(_print_action, action)
+        assert "Derived commands:" in out
+        assert "make test" in out
+        assert "Agent additions:" in out
+        assert "npm audit" in out
+
+    def test_multiple_derived_commands_all_listed(self) -> None:
+        """Each entry in derived_commands gets its own bullet line."""
+        dc = [
+            {"command": "pytest -q", "source_file": "ci.yml", "rationale": "test"},
+            {"command": "npm run lint", "source_file": "ci.yml", "rationale": "lint"},
+        ]
+        action = self._gate_action_extended(derived_commands=dc)
+        out = _capture(_print_action, action)
+        assert "pytest -q" in out
+        assert "npm run lint" in out
+
+    def test_multiple_agent_additions_all_listed(self) -> None:
+        """Each item in agent_additions gets its own bullet line."""
+        aa = ["npm audit --audit-level=high", "pre-commit run --all-files"]
+        action = self._gate_action_extended(agent_additions=aa)
+        out = _capture(_print_action, action)
+        assert "npm audit --audit-level=high" in out
+        assert "pre-commit run --all-files" in out
+
+    def test_existing_gate_fields_present_alongside_extensions(self) -> None:
+        """Core gate fields are unaffected when extension blocks are added."""
+        dc = [{"command": "pytest -q", "source_file": "ci.yml", "rationale": "test"}]
+        action = self._gate_action_extended(derived_commands=dc)
+        out = _capture(_print_action, action)
+        # Core fields still intact.
+        assert "ACTION: GATE" in out
+        assert "Type:    test" in out
+        assert "Phase:   2" in out
+        assert "Command: pytest tests/ -q" in out
+        assert "Message: Run test gate" in out
+        # And the new block is also present.
+        assert "Derived commands:" in out

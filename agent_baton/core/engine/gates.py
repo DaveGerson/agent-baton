@@ -356,6 +356,11 @@ class GateRunner:
             gate_type=gate.gate_type,
             gate_command=command,
             phase_id=phase_id,
+            derived_commands=[
+                {"command": d.command, "source_file": d.source_file, "rationale": d.rationale}
+                for d in derived
+            ],
+            agent_additions=effective_agent_additions,
         )
 
     # ------------------------------------------------------------------

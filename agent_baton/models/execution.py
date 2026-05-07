@@ -1673,6 +1673,11 @@ class ExecutionAction:
     gate_type: str = ""
     gate_command: str = ""
     phase_id: int = 0
+    # Structured record of how gate_command was extended beyond the planned
+    # gate.command.  Preserves attribution for the audit trail without
+    # requiring callers to re-parse the concatenated gate_command string.
+    derived_commands: list[dict] = field(default_factory=list)  # [{"command": str, "source_file": str, "rationale": str}, ...]
+    agent_additions: list[str] = field(default_factory=list)    # commands declared via GATE_ADDITION: signals
 
     # For APPROVAL actions:
     approval_context: str = ""          # summary of phase output for reviewer
@@ -1745,6 +1750,10 @@ class ExecutionAction:
                 "gate_command": self.gate_command,
                 "phase_id": self.phase_id,
             })
+            if self.derived_commands:
+                d["derived_commands"] = list(self.derived_commands)
+            if self.agent_additions:
+                d["agent_additions"] = list(self.agent_additions)
         elif self.action_type == ActionType.APPROVAL:
             d.update({
                 "phase_id": self.phase_id,

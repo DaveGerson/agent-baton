@@ -713,6 +713,18 @@ def _print_action(action: dict, *, terse: bool = False) -> None:
         print(f"  Phase:   {phase_id}")
         print(f"  Command: {gate_cmd}")
         print(f"  Message: {msg}")
+        # Structured extension fields — emitted only when present so
+        # existing parsers that key on known field labels are unaffected.
+        derived_cmds = action.get("derived_commands", [])
+        if derived_cmds:
+            print("  Derived commands:")
+            for dc in derived_cmds:
+                print(f"    - {dc.get('command', '')} (source: {dc.get('source_file', '')}; {dc.get('rationale', '')})")
+        agent_adds = action.get("agent_additions", [])
+        if agent_adds:
+            print("  Agent additions:")
+            for aa in agent_adds:
+                print(f"    - {aa}")
         # Wave 4.1 — surface CI gate context up-front so the orchestrator
         # knows this is a long-running poll, not a local subprocess gate.
         if gate_type == "ci":

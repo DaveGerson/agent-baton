@@ -564,3 +564,89 @@ class TestExecutionState:
         from agent_baton.models.execution import ExecutionState
         obj = ExecutionState.from_dict(golden)
         assert obj.to_dict()["delivered_knowledge"] == golden["delivered_knowledge"]
+
+
+# ---------------------------------------------------------------------------
+# ExecutionAction — to_dict() structured field tests for GATE extensions
+# ---------------------------------------------------------------------------
+
+
+class TestExecutionActionGateExtensions:
+    """Tests that derived_commands and agent_additions are serialised correctly
+    by ``ExecutionAction.to_dict()`` under the lean-payload convention (present
+    only when non-empty)."""
+
+    def _gate_action(self, **kwargs):
+        from agent_baton.models.execution import ExecutionAction, ActionType
+        return ExecutionAction(action_type=ActionType.GATE, **kwargs)
+
+    def test_empty_extension_fields_omitted_from_to_dict(self) -> None:
+        """When both lists are empty, neither key appears in to_dict()."""
+        action = self._gate_action(gate_type="test", gate_command="pytest -q", phase_id=1)
+        d = action.to_dict()
+        assert "derived_commands" not in d
+        assert "agent_additions" not in d
+
+    def test_derived_commands_present_when_non_empty(self) -> None:
+        """to_dict() includes derived_commands when the list is non-empty."""
+        dc = [{"command": "npm audit", "source_file": "package.json", "rationale": "audit script"}]
+        action = self._gate_action(
+            gate_type="test",
+            gate_command="pytest -q && npm audit",
+            phase_id=2,
+            derived_commands=dc,
+        )
+        d = action.to_dict()
+        assert "derived_commands" in d
+        assert d["derived_commands"] == dc
+        # agent_additions still absent when empty.
+        assert "agent_additions" not in d
+
+    def test_agent_additions_present_when_non_empty(self) -> None:
+        """to_dict() includes agent_additions when the list is non-empty."""
+        aa = ["pre-commit run --all-files"]
+        action = self._gate_action(
+            gate_type="lint",
+            gate_command="ruff check . && pre-commit run --all-files",
+            phase_id=0,
+            agent_additions=aa,
+        )
+        d = action.to_dict()
+        assert "agent_additions" in d
+        assert d["agent_additions"] == aa
+        # derived_commands still absent when empty.
+        assert "derived_commands" not in d
+
+    def test_both_extension_fields_present_simultaneously(self) -> None:
+        """Both keys appear when both lists are non-empty."""
+        dc = [{"command": "make test", "source_file": "Makefile", "rationale": "test target"}]
+        aa = ["npm audit --audit-level=high"]
+        action = self._gate_action(
+            gate_type="test",
+            gate_command="pytest && make test && npm audit --audit-level=high",
+            phase_id=3,
+            derived_commands=dc,
+            agent_additions=aa,
+        )
+        d = action.to_dict()
+        assert d["derived_commands"] == dc
+        assert d["agent_additions"] == aa
+
+    def test_to_dict_preserves_action_type_as_string(self) -> None:
+        """action_type is serialised as a plain string for protocol consumers."""
+        from agent_baton.models.execution import ActionType
+        action = self._gate_action(gate_type="build", gate_command="make build", phase_id=1)
+        assert action.to_dict()["action_type"] == ActionType.GATE.value
+
+    def test_to_dict_extensions_are_copies_not_references(self) -> None:
+        """Mutating the returned list must not affect the action's fields."""
+        dc = [{"command": "pytest", "source_file": "ci.yml", "rationale": "test"}]
+        action = self._gate_action(
+            gate_type="test",
+            gate_command="pytest",
+            phase_id=1,
+            derived_commands=dc,
+        )
+        returned = action.to_dict()["derived_commands"]
+        returned.append({"command": "INJECTED", "source_file": "", "rationale": ""})
+        assert len(action.derived_commands) == 1  # original unaffected
