@@ -88,6 +88,7 @@ class EnrichmentStage:
             task_summary=draft.task_summary,
             resolved_agents=draft.resolved_agents,
             research_concerns=draft.research_concerns,
+            phases=draft.phases,
         )
         draft.split_phase_ids = split_phase_ids
 
@@ -178,8 +179,15 @@ class EnrichmentStage:
         task_summary: str,
         resolved_agents: list[str],
         research_concerns: list[tuple[str, str]] | None = None,
+        phases: list[dict] | None = None,
     ) -> set[int]:
-        """Steps 12b / 12b-bis — approval gates and concern-splitting."""
+        """Steps 12b / 12b-bis — approval gates and concern-splitting.
+
+        The ``phases`` parameter carries the caller-supplied explicit phase
+        list (``draft.phases``).  When it is not None the caller fully
+        specified the plan shape, so concern-splitting is skipped — the
+        same guard used in ``RosterStage._expand_concerns`` (bd-b32d57b).
+        """
         from agent_baton.models.enums import RiskLevel
 
         if risk_level_enum in (RiskLevel.HIGH, RiskLevel.CRITICAL):
@@ -193,6 +201,15 @@ class EnrichmentStage:
                         f"add remediation steps."
                     )
 
+        _split_phase_ids: set[int] = set()
+
+        # Skip concern-splitting when the caller supplied explicit phases.
+        # Splitting would silently restructure the user's chosen Implement
+        # phase into parallel concern steps with agent reassignment — the
+        # same anti-pattern that was fixed in RosterStage._expand_concerns.
+        if phases is not None:
+            return _split_phase_ids
+
         _concerns = parse_concerns(task_summary)
         # Fallback: use ResearchStage-provided concerns when the task summary
         # contains no numbered markers (natural-language tasks like
@@ -200,7 +217,6 @@ class EnrichmentStage:
         if not _concerns and research_concerns:
             _concerns = research_concerns
 
-        _split_phase_ids: set[int] = set()
         if _concerns:
             logger.debug(
                 "Detected %d concerns in task summary: %s",

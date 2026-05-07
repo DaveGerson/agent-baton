@@ -759,3 +759,60 @@ class TestPolicyEngineCalledDuringPlan:
 
         assert captured, "Expected PolicyEngine to be passed to IntelligentPlanner"
         assert isinstance(captured[0], PolicyEngine)
+
+
+# ---------------------------------------------------------------------------
+# EnrichmentStage: concern-splitting must not override explicit phases
+# ---------------------------------------------------------------------------
+
+
+class TestEnrichmentStageExplicitPhasesGuard:
+    """Regression test for bd-b32d57b analogue in EnrichmentStage.
+
+    EnrichmentStage._apply_approval_gates called split_implement_phase_by_concerns
+    regardless of whether the caller supplied explicit phases. A user passing
+    phases=[{"name": "Implement", "agents": ["architect"]}] with a 3+-concern
+    task summary had their Implement phase silently restructured into parallel
+    concern steps with agent reassignment.
+
+    Same anti-pattern as RosterStage._expand_concerns (fixed in b32d57b).
+    The guard ``if phases is not None: return`` must short-circuit splitting.
+    """
+
+    def test_explicit_phases_not_concern_split(self, base_planner: IntelligentPlanner) -> None:
+        """Explicit Implement phase with single architect agent survives 3-concern summary."""
+        # Task summary contains 3 numbered concern markers — enough to trigger
+        # split_implement_phase_by_concerns (MIN_CONCERNS_FOR_SPLIT = 3).
+        task_summary = (
+            "Refactor the authentication module. "
+            "(1) Extract token validation into a standalone service. "
+            "(2) Replace legacy session store with Redis. "
+            "(3) Add structured logging for all auth events."
+        )
+        explicit_phases = [{"name": "Implement", "agents": ["architect"]}]
+
+        plan = base_planner.create_plan(
+            task_summary,
+            agents=["architect"],
+            phases=explicit_phases,
+        )
+
+        # Find all Implement-class phases (name starts with "implement")
+        implement_phases = [
+            p for p in plan.phases
+            if p.name.lower().split(":")[0].strip() == "implement"
+        ]
+
+        # There must be exactly one Implement phase — concern-splitting would
+        # produce one sub-phase per concern (3 here) if the guard were absent.
+        assert len(implement_phases) == 1, (
+            f"Expected 1 Implement phase, got {len(implement_phases)}: "
+            f"{[p.name for p in implement_phases]}"
+        )
+
+        # The single Implement phase must retain the user's chosen agent.
+        impl = implement_phases[0]
+        step_agents = [s.agent_name.split("--")[0] for s in impl.steps]
+        assert any(a == "architect" for a in step_agents), (
+            f"Expected 'architect' in Implement step agents, got {step_agents}"
+        )
