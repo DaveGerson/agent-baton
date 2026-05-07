@@ -211,13 +211,32 @@ class IntelligentPlanner:
         ]
 
         if self._last_pattern_used is not None:
+            p = self._last_pattern_used
             lines.append(
-                f"Pattern `{self._last_pattern_used.pattern_id}` applied "
-                f"(confidence={self._last_pattern_used.confidence:.0%}, "
-                f"success_rate={self._last_pattern_used.success_rate:.0%})."
+                f"Pattern `{p.pattern_id}` applied "
+                f"(confidence={p.confidence:.0%}, "
+                f"success_rate={p.success_rate:.0%}, "
+                f"sample_size={p.sample_size})."
             )
+            if p.recommended_template:
+                lines.append(f"Recommended template: *{p.recommended_template}*")
+        elif plan.pattern_source:
+            lines.append(f"Pattern **{plan.pattern_source}** was applied.")
         else:
             lines.append("Default phase templates used (no learned pattern applied).")
+
+        lines.append("")
+        lines.append("## Task Classification")
+        if self._last_task_classification is not None:
+            tc = self._last_task_classification
+            lines.append(f"**Source:** {tc.source}")
+            lines.append(f"**Task Type:** {tc.task_type}")
+            lines.append(f"**Complexity:** {tc.complexity}")
+            lines.append(f"**Reasoning:** {tc.reasoning}")
+            lines.append(f"**Selected Agents:** {', '.join(tc.agents)}")
+            lines.append(f"**Selected Phases:** {', '.join(tc.phases)}")
+        else:
+            lines.append("No task classification available.")
 
         lines.append("")
         lines.append("## Score Warnings")
@@ -250,6 +269,8 @@ class IntelligentPlanner:
             if cls.signals_found:
                 lines.append(f"Signals: {', '.join(cls.signals_found)}")
             lines.append(f"Confidence: {cls.confidence}")
+            if cls.explanation:
+                lines.append(f"**Explanation:** {cls.explanation}")
         else:
             lines.append("No classifier configured.")
 
@@ -279,6 +300,36 @@ class IntelligentPlanner:
             for step_id, estimate in self._last_team_cost_estimates.items():
                 lines.append(f"- Step {step_id}: ~{estimate:,} tokens")
 
+        lines.append("")
+        lines.append("## Plan Review")
+        if self._last_review_result is not None:
+            rr = self._last_review_result
+            if rr.source == "skipped-light":
+                lines.append("Skipped — light complexity plan.")
+            elif rr.splits_applied > 0 or rr.teams_created > 0 or rr.dependencies_added > 0 or rr.warnings:
+                lines.append(f"**Source:** {rr.source}")
+                if rr.splits_applied:
+                    lines.append(
+                        f"**Steps split:** {rr.splits_applied} broad step(s) "
+                        f"split into parallel concern-scoped steps."
+                    )
+                if rr.teams_created:
+                    lines.append(
+                        f"**Teams created:** {rr.teams_created} broad step(s) "
+                        f"converted to same-agent team(s) with scoped members."
+                    )
+                if rr.dependencies_added:
+                    lines.append(
+                        f"**Dependencies added:** {rr.dependencies_added} "
+                        f"missing dependency edge(s) inserted."
+                    )
+                for w in rr.warnings:
+                    lines.append(f"- {w}")
+            else:
+                lines.append(f"No structural issues found (source: {rr.source}).")
+        else:
+            lines.append("Plan review not run.")
+
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
@@ -295,6 +346,7 @@ class IntelligentPlanner:
         self._last_policy_violations = []
         self._last_routing_notes = []
         self._last_pattern_used = None
+        self._last_retro_feedback = None
         self._last_team_cost_estimates = {}
 
     def _review_plan_with_cli(self, draft: PlanDraft) -> PlanDraft:

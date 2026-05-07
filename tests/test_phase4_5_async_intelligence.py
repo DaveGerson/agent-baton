@@ -1093,3 +1093,409 @@ class TestPlannerTeamCostEstimates:
         )
         context = planner._build_shared_context(plan)
         assert "50%" in context
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for 5 explain_plan regressions from refactor 9652e07
+# ---------------------------------------------------------------------------
+
+def _make_explain_plan(tmp_path: Path) -> tuple:
+    """Return (planner, minimal_plan) wired for explain_plan tests.
+
+    The planner has an isolated team-context dir.  The plan is a minimal
+    MachinePlan with one phase and one step — enough for all section
+    renderers to run without hitting real classifiers or the network.
+    """
+    from agent_baton.core.engine.planner import IntelligentPlanner
+
+    ctx = tmp_path / "team-context"
+    ctx.mkdir(parents=True, exist_ok=True)
+    planner = IntelligentPlanner(team_context_root=ctx)
+
+    # Zero-out all _last_* to start clean
+    planner._last_pattern_used = None
+    planner._last_score_warnings = []
+    planner._last_routing_notes = []
+    planner._last_classification = None
+    planner._last_policy_violations = []
+    planner._last_task_classification = None
+    planner._last_foresight_insights = []
+    planner._last_team_cost_estimates = {}
+    planner._last_review_result = None
+    planner._last_retro_feedback = None
+
+    plan = MachinePlan(
+        task_id="explain-test",
+        task_summary="Regression test task",
+        budget_tier="standard",
+        phases=[
+            PlanPhase(
+                phase_id=1,
+                name="Implement",
+                steps=[
+                    PlanStep(
+                        step_id="1.1",
+                        agent_name="backend-engineer",
+                        task_description="Do the work",
+                    )
+                ],
+            )
+        ],
+    )
+    return planner, plan
+
+
+class TestExplainPlanRegressions:
+    """Regression tests for the 5 explain_plan behaviors dropped by refactor 9652e07.
+
+    None of these had tests before; this class ensures future refactors
+    break loudly if any section is silently removed again.
+    """
+
+    # ------------------------------------------------------------------
+    # Finding 1 (HIGH): ## Task Classification section
+    # ------------------------------------------------------------------
+
+    def test_task_classification_section_header_present(
+        self, tmp_path: Path
+    ) -> None:
+        """explain_plan must emit a ## Task Classification section."""
+        from agent_baton.core.engine.classifier import TaskClassification
+
+        planner, plan = _make_explain_plan(tmp_path)
+        planner._last_task_classification = TaskClassification(
+            task_type="new-feature",
+            complexity="medium",
+            agents=["backend-engineer", "test-engineer"],
+            phases=["Design", "Implement", "Test"],
+            reasoning="Standard feature work",
+            source="keyword",
+        )
+        output = planner.explain_plan(plan)
+        assert "## Task Classification" in output
+
+    def test_task_classification_source_field_rendered(
+        self, tmp_path: Path
+    ) -> None:
+        """Task Classification section must include the classifier source."""
+        from agent_baton.core.engine.classifier import TaskClassification
+
+        planner, plan = _make_explain_plan(tmp_path)
+        planner._last_task_classification = TaskClassification(
+            task_type="bug-fix",
+            complexity="light",
+            agents=["backend-engineer"],
+            phases=["Implement"],
+            reasoning="Tiny one-liner fix",
+            source="haiku-classifier",
+        )
+        output = planner.explain_plan(plan)
+        assert "haiku-classifier" in output
+
+    def test_task_classification_reasoning_rendered(
+        self, tmp_path: Path
+    ) -> None:
+        """Task Classification section must include tc.reasoning."""
+        from agent_baton.core.engine.classifier import TaskClassification
+
+        planner, plan = _make_explain_plan(tmp_path)
+        planner._last_task_classification = TaskClassification(
+            task_type="migration",
+            complexity="medium",
+            agents=["backend-engineer"],
+            phases=["Implement"],
+            reasoning="Moving tables across schemas",
+            source="keyword",
+        )
+        output = planner.explain_plan(plan)
+        assert "Moving tables across schemas" in output
+
+    def test_task_classification_agents_and_phases_rendered(
+        self, tmp_path: Path
+    ) -> None:
+        """Task Classification section must include selected agents and phases."""
+        from agent_baton.core.engine.classifier import TaskClassification
+
+        planner, plan = _make_explain_plan(tmp_path)
+        planner._last_task_classification = TaskClassification(
+            task_type="new-feature",
+            complexity="medium",
+            agents=["architect", "test-engineer"],
+            phases=["Design", "Test"],
+            reasoning="Standard",
+            source="keyword",
+        )
+        output = planner.explain_plan(plan)
+        assert "architect" in output
+        assert "Design" in output
+
+    def test_task_classification_absent_renders_fallback(
+        self, tmp_path: Path
+    ) -> None:
+        """When _last_task_classification is None, a fallback line appears."""
+        planner, plan = _make_explain_plan(tmp_path)
+        planner._last_task_classification = None
+        output = planner.explain_plan(plan)
+        assert "## Task Classification" in output
+        assert "No task classification available." in output
+
+    # ------------------------------------------------------------------
+    # Finding 2 (HIGH): ## Plan Review three-state block
+    # ------------------------------------------------------------------
+
+    def test_plan_review_section_header_always_present(
+        self, tmp_path: Path
+    ) -> None:
+        """explain_plan must always emit a ## Plan Review section."""
+        planner, plan = _make_explain_plan(tmp_path)
+        output = planner.explain_plan(plan)
+        assert "## Plan Review" in output
+
+    def test_plan_review_skipped_light_state(self, tmp_path: Path) -> None:
+        """When source == 'skipped-light', the section says 'Skipped'."""
+        from agent_baton.core.engine.plan_reviewer import PlanReviewResult
+
+        planner, plan = _make_explain_plan(tmp_path)
+        planner._last_review_result = PlanReviewResult(source="skipped-light")
+        output = planner.explain_plan(plan)
+        assert "## Plan Review" in output
+        assert "Skipped" in output
+
+    def test_plan_review_clean_state(self, tmp_path: Path) -> None:
+        """When review ran but found nothing, the section shows 'No structural issues'."""
+        from agent_baton.core.engine.plan_reviewer import PlanReviewResult
+
+        planner, plan = _make_explain_plan(tmp_path)
+        planner._last_review_result = PlanReviewResult(
+            source="heuristic",
+            splits_applied=0,
+            teams_created=0,
+            dependencies_added=0,
+            warnings=[],
+        )
+        output = planner.explain_plan(plan)
+        assert "## Plan Review" in output
+        assert "No structural issues" in output
+
+    def test_plan_review_active_changes_splits_applied(
+        self, tmp_path: Path
+    ) -> None:
+        """When splits_applied > 0 the section renders the count."""
+        from agent_baton.core.engine.plan_reviewer import PlanReviewResult
+
+        planner, plan = _make_explain_plan(tmp_path)
+        planner._last_review_result = PlanReviewResult(
+            source="heuristic",
+            splits_applied=2,
+            teams_created=0,
+            dependencies_added=0,
+            warnings=[],
+        )
+        output = planner.explain_plan(plan)
+        assert "## Plan Review" in output
+        assert "splits_applied" in output.lower() or "Steps split" in output or "2" in output
+
+    def test_plan_review_active_changes_teams_created(
+        self, tmp_path: Path
+    ) -> None:
+        """When teams_created > 0 the section mentions teams."""
+        from agent_baton.core.engine.plan_reviewer import PlanReviewResult
+
+        planner, plan = _make_explain_plan(tmp_path)
+        planner._last_review_result = PlanReviewResult(
+            source="heuristic",
+            splits_applied=0,
+            teams_created=1,
+            dependencies_added=0,
+            warnings=["watch out"],
+        )
+        output = planner.explain_plan(plan)
+        assert "Teams created" in output or "teams_created" in output.lower()
+
+    def test_plan_review_warnings_rendered(self, tmp_path: Path) -> None:
+        """Warnings from the review result must appear in the section."""
+        from agent_baton.core.engine.plan_reviewer import PlanReviewResult
+
+        planner, plan = _make_explain_plan(tmp_path)
+        planner._last_review_result = PlanReviewResult(
+            source="heuristic",
+            splits_applied=0,
+            teams_created=1,
+            dependencies_added=0,
+            warnings=["overlapping agent scopes detected"],
+        )
+        output = planner.explain_plan(plan)
+        assert "overlapping agent scopes detected" in output
+
+    def test_plan_review_not_run_shows_fallback(self, tmp_path: Path) -> None:
+        """When _last_review_result is None, a 'not run' message appears."""
+        planner, plan = _make_explain_plan(tmp_path)
+        planner._last_review_result = None
+        output = planner.explain_plan(plan)
+        assert "## Plan Review" in output
+        assert "not run" in output.lower() or "Plan review not run" in output
+
+    # ------------------------------------------------------------------
+    # Finding 3 (MEDIUM): Pattern Influence completeness
+    # ------------------------------------------------------------------
+
+    def test_pattern_influence_includes_sample_size(
+        self, tmp_path: Path
+    ) -> None:
+        """Pattern Influence section must include sample_size when pattern is set."""
+        from agent_baton.models.pattern import LearnedPattern
+
+        planner, plan = _make_explain_plan(tmp_path)
+        planner._last_pattern_used = LearnedPattern(
+            pattern_id="new-feature-001",
+            task_type="new-feature",
+            stack=None,
+            recommended_template="phased delivery",
+            recommended_agents=["backend-engineer"],
+            confidence=0.88,
+            sample_size=42,
+            success_rate=0.91,
+            avg_token_cost=100_000,
+            evidence=["task-1"],
+            created_at="2026-01-01T00:00:00Z",
+            updated_at="2026-01-01T00:00:00Z",
+        )
+        output = planner.explain_plan(plan)
+        assert "42" in output  # sample_size
+
+    def test_pattern_influence_includes_recommended_template(
+        self, tmp_path: Path
+    ) -> None:
+        """Pattern Influence section must include recommended_template when set."""
+        from agent_baton.models.pattern import LearnedPattern
+
+        planner, plan = _make_explain_plan(tmp_path)
+        planner._last_pattern_used = LearnedPattern(
+            pattern_id="bug-fix-001",
+            task_type="bug-fix",
+            stack=None,
+            recommended_template="targeted hotfix",
+            recommended_agents=["backend-engineer"],
+            confidence=0.75,
+            sample_size=10,
+            success_rate=0.85,
+            avg_token_cost=60_000,
+            evidence=["task-x"],
+            created_at="2026-01-01T00:00:00Z",
+            updated_at="2026-01-01T00:00:00Z",
+        )
+        output = planner.explain_plan(plan)
+        assert "targeted hotfix" in output
+
+    def test_pattern_influence_pattern_source_fallback(
+        self, tmp_path: Path
+    ) -> None:
+        """When _last_pattern_used is None but plan.pattern_source is set,
+        the section must say 'Pattern X was applied' rather than 'Default'.
+        """
+        planner, plan = _make_explain_plan(tmp_path)
+        planner._last_pattern_used = None
+        # Inject pattern_source onto the plan object (MachinePlan is mutable Pydantic)
+        plan.pattern_source = "learned-pattern-xyz"
+        output = planner.explain_plan(plan)
+        assert "learned-pattern-xyz" in output
+        assert "Default phase templates used" not in output
+
+    # ------------------------------------------------------------------
+    # Finding 4 (LOW): Data Classification explanation field
+    # ------------------------------------------------------------------
+
+    def test_data_classification_explanation_rendered_when_present(
+        self, tmp_path: Path
+    ) -> None:
+        """When cls.explanation is non-empty it must appear in the output."""
+        from agent_baton.core.govern.classifier import ClassificationResult
+        from agent_baton.models.enums import RiskLevel
+
+        planner, plan = _make_explain_plan(tmp_path)
+        planner._last_classification = ClassificationResult(
+            risk_level=RiskLevel.HIGH,
+            guardrail_preset="Regulated Data",
+            signals_found=["regulated:hipaa"],
+            confidence="high",
+            explanation="HIPAA keyword matched in task description.",
+        )
+        output = planner.explain_plan(plan)
+        assert "HIPAA keyword matched in task description." in output
+
+    def test_data_classification_explanation_absent_when_empty(
+        self, tmp_path: Path
+    ) -> None:
+        """When cls.explanation is empty the Explanation line must not appear."""
+        from agent_baton.core.govern.classifier import ClassificationResult
+        from agent_baton.models.enums import RiskLevel
+
+        planner, plan = _make_explain_plan(tmp_path)
+        planner._last_classification = ClassificationResult(
+            risk_level=RiskLevel.LOW,
+            guardrail_preset="Standard Development",
+            signals_found=[],
+            confidence="high",
+            explanation="",
+        )
+        output = planner.explain_plan(plan)
+        assert "**Explanation:**" not in output
+
+    # ------------------------------------------------------------------
+    # Finding 5 (MEDIUM): _reset_explainability_state missing _last_retro_feedback
+    # ------------------------------------------------------------------
+
+    def test_reset_explainability_state_clears_retro_feedback(
+        self, tmp_path: Path
+    ) -> None:
+        """_reset_explainability_state() must set _last_retro_feedback to None."""
+        from agent_baton.core.engine.planner import IntelligentPlanner
+
+        ctx = tmp_path / "team-context"
+        ctx.mkdir(parents=True, exist_ok=True)
+        planner = IntelligentPlanner(team_context_root=ctx)
+
+        # Inject stale retro feedback to simulate a previous successful call
+        planner._last_retro_feedback = {"stale": "data"}
+
+        # Call reset directly (as create_plan does at the top of each call)
+        planner._reset_explainability_state()
+
+        assert planner._last_retro_feedback is None
+
+    def test_stale_retro_feedback_cleared_after_pipeline_exception(
+        self, tmp_path: Path
+    ) -> None:
+        """If the pipeline raises mid-run, _last_retro_feedback must NOT
+        retain the value from the previous successful call.
+
+        This is the core regression: _reset_explainability_state() is called
+        at the top of create_plan(), so if the pipeline blows up before
+        _sync_last_state() can write the new value, the attribute must be
+        None (reset), not the stale value from the prior call.
+        """
+        from unittest.mock import patch
+        from agent_baton.core.engine.planner import IntelligentPlanner
+
+        ctx = tmp_path / "team-context"
+        ctx.mkdir(parents=True, exist_ok=True)
+        planner = IntelligentPlanner(team_context_root=ctx)
+
+        # Simulate a prior successful call that left retro feedback behind
+        planner._last_retro_feedback = {"previous": "feedback"}
+
+        # Force the pipeline to raise AFTER _reset_explainability_state() runs
+        # but BEFORE _sync_last_state() can write the new value.
+        with patch.object(
+            planner._pipeline,
+            "run",
+            side_effect=RuntimeError("injected mid-pipeline failure"),
+        ):
+            try:
+                planner.create_plan("Any task")
+            except RuntimeError:
+                pass  # Expected — we injected this
+
+        # After the exception, _last_retro_feedback must be None (reset),
+        # not the stale {"previous": "feedback"} from the prior call.
+        assert planner._last_retro_feedback is None
