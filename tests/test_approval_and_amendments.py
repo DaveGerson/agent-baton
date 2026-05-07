@@ -10,6 +10,9 @@ Covers:
 - TestApproveWithFeedbackRaceRegression — regression for the reload race fixed
   in Hole 5: _load_execution returning None after amend must raise
   ExecutionStateInconsistency rather than silently dropping the amendment.
+- TestFeedbackResultRaceRegression — sister-bug regression for the same
+  reload race in record_feedback_result (Hole 5 sister, structurally
+  identical to the approval-feedback path).
 """
 from __future__ import annotations
 
@@ -24,6 +27,7 @@ from agent_baton.models.execution import (
     ActionType,
     ApprovalResult,
     ExecutionState,
+    FeedbackQuestion,
     GateResult,
     MachinePlan,
     PlanAmendment,
@@ -1140,3 +1144,165 @@ class TestApproveWithFeedbackRaceRegression:
         # Amendment must be durably saved.
         assert len(state.amendments) == 1
         assert state.amendments[0].trigger == "approval_feedback"
+
+
+# ===========================================================================
+# TestFeedbackResultRaceRegression
+# Regression tests for the Hole 5 sister bug in record_feedback_result —
+# the structurally identical reload-or-fall-back race on the feedback path.
+# ===========================================================================
+
+
+def _feedback_question(
+    question_id: str = "q1",
+    question: str = "Which layout style?",
+    options: list[str] | None = None,
+    option_agents: list[str] | None = None,
+    option_prompts: list[str] | None = None,
+) -> FeedbackQuestion:
+    """Construct a feedback question for record_feedback_result tests."""
+    return FeedbackQuestion(
+        question_id=question_id,
+        question=question,
+        context="Layout choice for the dashboard.",
+        options=options or ["Grid", "List", "Card"],
+        option_agents=option_agents or [
+            "frontend-engineer",
+            "frontend-engineer",
+            "frontend-engineer",
+        ],
+        option_prompts=option_prompts or [
+            "Implement a grid layout for: {task}",
+            "Implement a list layout for: {task}",
+            "Implement a card layout for: {task}",
+        ],
+    )
+
+
+def _phase_with_feedback(
+    phase_id: int = 0,
+    questions: list[FeedbackQuestion] | None = None,
+) -> PlanPhase:
+    """Build a phase that holds a feedback gate (steps + feedback_questions)."""
+    return PlanPhase(
+        phase_id=phase_id,
+        name="Implementation",
+        steps=[_step("1.1", agent_name="backend-engineer")],
+        feedback_questions=questions or [_feedback_question()],
+    )
+
+
+def _reach_feedback_gate(
+    tmp_path: Path,
+    *,
+    task_id: str = "task-001",
+    questions: list[FeedbackQuestion] | None = None,
+) -> ExecutionEngine:
+    """Drive an engine to the FEEDBACK action just before record_feedback_result."""
+    plan = _plan(
+        task_id=task_id,
+        phases=[_phase_with_feedback(phase_id=0, questions=questions)],
+    )
+    engine = _engine(tmp_path)
+    engine.start(plan)
+    engine.record_step_result("1.1", "backend-engineer")
+    engine.next_action()  # consume FEEDBACK action
+    return engine
+
+
+class TestFeedbackResultRaceRegression:
+    """Regression for the Hole 5 sister bug in record_feedback_result.
+
+    record_feedback_result has the same structural shape as
+    record_approval_result's approve-with-feedback branch: it calls
+    amend_plan, then reloads state from disk to pick up the amendment's
+    renumbered phase_ids. The previous code wrote
+    ``state = self._load_execution() or state`` — silently falling back to
+    the pre-amendment in-memory state on load failure and creating a
+    split-brain (amendment durable on disk, but never observed by the
+    running engine). The fix raises ExecutionStateInconsistency instead.
+    """
+
+    def test_load_failure_after_amend_raises_inconsistency_error(
+        self, tmp_path: Path
+    ) -> None:
+        """Mocking _load_execution to return None after amend_plan must
+        surface ExecutionStateInconsistency — never silently proceed with
+        the pre-amendment state.
+
+        Call sequence inside record_feedback_result:
+          call 1: _require_execution at start of record_feedback_result — must succeed
+          call 2: amend_plan -> _require_execution — must succeed
+          call 3: explicit reload after amend_plan returns — must fail (None)
+                  → this is the call that exercises the sister-bug fix
+        """
+        engine = _reach_feedback_gate(tmp_path)
+
+        original_load = engine._load_execution
+        call_count = {"n": 0}
+
+        def _failing_load() -> ExecutionState | None:
+            call_count["n"] += 1
+            # Allow the first two calls (initial load and amend_plan's load)
+            # to succeed.  The third call is the post-amendment reload that
+            # the sister-bug fix guards — it should return None.
+            if call_count["n"] <= 2:
+                return original_load()
+            return None
+
+        with patch.object(engine, "_load_execution", side_effect=_failing_load):
+            with pytest.raises(ExecutionStateInconsistency) as exc_info:
+                engine.record_feedback_result(
+                    phase_id=0,
+                    question_id="q1",
+                    chosen_index=0,
+                )
+
+        assert exc_info.value.task_id == "task-001"
+        assert exc_info.value.context == "record_feedback_result"
+
+    def test_load_failure_error_carries_task_id(self, tmp_path: Path) -> None:
+        """ExecutionStateInconsistency must expose the task_id for diagnostics."""
+        engine = _reach_feedback_gate(tmp_path, task_id="diag-task-77")
+
+        original_load = engine._load_execution
+        call_count = {"n": 0}
+
+        def _failing_load() -> ExecutionState | None:
+            call_count["n"] += 1
+            if call_count["n"] <= 2:
+                return original_load()
+            return None
+
+        with patch.object(engine, "_load_execution", side_effect=_failing_load):
+            with pytest.raises(ExecutionStateInconsistency) as exc_info:
+                engine.record_feedback_result(
+                    phase_id=0,
+                    question_id="q1",
+                    chosen_index=0,
+                )
+
+        assert exc_info.value.task_id == "diag-task-77"
+        assert exc_info.value.context == "record_feedback_result"
+
+    def test_successful_reload_does_not_raise(self, tmp_path: Path) -> None:
+        """When _load_execution succeeds (normal path), no exception must be raised
+        and the amendment must be durably persisted.
+        """
+        engine = _reach_feedback_gate(tmp_path)
+
+        # Normal path — must not raise.
+        engine.record_feedback_result(
+            phase_id=0,
+            question_id="q1",
+            chosen_index=0,
+        )
+
+        state = engine._load_execution()
+        assert state is not None
+        # Amendment recorded with the feedback trigger.
+        assert len(state.amendments) == 1
+        assert state.amendments[0].trigger == "feedback"
+        # The feedback result is persisted on the reloaded state.
+        assert len(state.feedback_results) == 1
+        assert state.feedback_results[0].question_id == "q1"

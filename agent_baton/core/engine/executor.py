@@ -6531,8 +6531,19 @@ class ExecutionEngine:
         )
 
         # Reload to pick up the amendment's renumbered state (including
-        # updated phase_ids on feedback_results).
-        state = self._load_execution() or state
+        # updated phase_ids on feedback_results).  Do NOT fall back to the
+        # pre-amendment in-memory state if the load fails: that would
+        # silently drop the amendment from the running state while it
+        # remains recorded on disk, creating an audit split-brain (Hole 5
+        # sister bug to record_approval_result).
+        from agent_baton.core.engine.errors import ExecutionStateInconsistency
+        _reloaded = self._load_execution()
+        if _reloaded is None:
+            raise ExecutionStateInconsistency(
+                task_id=state.task_id,
+                context="record_feedback_result",
+            )
+        state = _reloaded
 
         # Find the feedback result in the reloaded state (in-memory
         # fb_result reference is stale after amend_plan reload + save).
