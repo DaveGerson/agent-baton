@@ -213,6 +213,14 @@ def _swarm_enabled() -> bool:
     return os.environ.get("BATON_SWARM_ENABLED", "0").strip().lower() in ("1", "true", "yes")
 
 
+# bd-fcntl-win: process-wide flag for the one-time Windows fail-closed warning.
+# Tracks whether ``_compliance_fail_closed_enabled()`` has already emitted the
+# "fcntl unavailable" warning so operators don't get spammed once per call.
+# Module-level (not lru_cache) so tests can reset it via monkeypatch when they
+# need to assert the warning fires on a fresh process.
+_warned_about_windows_locking: bool = False
+
+
 def _compliance_fail_closed_enabled(
     plan: MachinePlan | None = None,
 ) -> bool:
@@ -234,12 +242,45 @@ def _compliance_fail_closed_enabled(
     halting is a compliance defect.
 
     Override via env: ``BATON_COMPLIANCE_FAIL_CLOSED=1``.
+
+    **Windows locking caveat (bd-fcntl-win).**  Commit 8879079 made ``fcntl``
+    imports optional so the worktree manager can run on Windows; that change
+    also silently disables the ``fcntl.flock`` guard inside the compliance
+    chain writer (see ``agent_baton/core/govern/compliance.py:_flock_path``).
+    When fail-closed mode is active on Windows the audit chain is therefore
+    *not* protected against concurrent writers, even though the operator has
+    explicitly opted into hardened auditing.  We emit a single
+    ``_log.warning`` per process the first time fail-closed is determined to
+    be ON on Windows so operators see the gap in their logs.  Placed here
+    (rather than in ``ComplianceChainWriter.__init__``) because this is the
+    single gating function for fail-closed mode — one warning point, no
+    per-writer-instance noise.
     """
+    import sys
+
+    enabled: bool
     if plan is not None and plan.compliance_fail_closed is not None:
-        return plan.compliance_fail_closed
-    return os.environ.get("BATON_COMPLIANCE_FAIL_CLOSED", "0").strip().lower() in (
-        "1", "true", "yes"
-    )
+        enabled = plan.compliance_fail_closed
+    else:
+        enabled = os.environ.get(
+            "BATON_COMPLIANCE_FAIL_CLOSED", "0"
+        ).strip().lower() in ("1", "true", "yes")
+
+    if enabled and sys.platform == "win32":
+        global _warned_about_windows_locking
+        if not _warned_about_windows_locking:
+            _warned_about_windows_locking = True
+            _log.warning(
+                "Compliance fail-closed mode is enabled on Windows, but the "
+                "compliance audit chain's concurrent-writer protection "
+                "(fcntl.flock) is unavailable on this platform. The audit "
+                "chain at compliance-audit.jsonl is NOT protected against "
+                "corruption from concurrent writers. Regulated-domain "
+                "deployments requiring tamper-evident auditing should run "
+                "agent-baton on a POSIX platform (Linux/macOS) where "
+                "fcntl.flock is available."
+            )
+    return enabled
 
 
 def _cli_actor() -> str:
