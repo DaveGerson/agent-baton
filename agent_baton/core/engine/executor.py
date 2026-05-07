@@ -1547,6 +1547,16 @@ class ExecutionEngine:
         if self._worktree_mgr is not None:
             _working_branch = self._detect_branch()
 
+        # I1: when start() flips to approval_pending for HIGH-risk pre-flight,
+        # stamp the pending_approval_request audit row in the same construction
+        # so the state passes the slice-13 model_validator on save+reload.
+        _initial_par = None
+        if initial_status == "approval_pending" and plan.phases:
+            _initial_par = PendingApprovalRequest(
+                phase_id=plan.phases[0].phase_id,
+                requester=_cli_actor(),
+                requested_at=_utcnow(),
+            )
         state = ExecutionState(
             task_id=plan.task_id,
             plan=plan,
@@ -1556,6 +1566,7 @@ class ExecutionEngine:
             force_override=self._force_override,
             override_justification=self._override_justification,
             working_branch=_working_branch,
+            pending_approval_request=_initial_par,
         )
 
         # Initialise trace (in-memory; committed to disk on complete()).

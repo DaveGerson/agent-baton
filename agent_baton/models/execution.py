@@ -1245,8 +1245,7 @@ class ConsolidationResult(ExecutionRecord):
     # nested type annotation.
 
 
-@dataclass
-class ExecutionState:
+class ExecutionState(BaseModel):
     """Persistent state of a running execution, saved between CLI calls.
 
     Serialized as ``execution-state.json`` in the execution directory.
@@ -1275,100 +1274,106 @@ class ExecutionState:
             yet been attempted or is not applicable.
     """
 
+    # Pydantic config: extra="ignore" preserves the dataclass-era
+    # forward-compat semantics (older state files with extra keys load
+    # unchanged).  validate_assignment=False matches dataclass mutation:
+    # callers do state.step_results.append(...) etc. and we don't want
+    # Pydantic to revalidate the whole model on every assignment.
+    # arbitrary_types_allowed=True keeps the still-dataclass nested
+    # types (KnowledgeGapSignal, ResolvedDecision) buildable.
+    model_config = ConfigDict(
+        extra="ignore",
+        validate_assignment=False,
+        arbitrary_types_allowed=True,
+    )
+
     task_id: str
     plan: MachinePlan
-    current_phase: int = 0              # index into plan.phases
-    current_step_index: int = 0         # index into current phase's steps
-    status: str = "running"             # running, gate_pending, approval_pending, feedback_pending, complete, failed, cancelled
-    step_results: list[StepResult] = field(default_factory=list)
-    gate_results: list[GateResult] = field(default_factory=list)
-    approval_results: list[ApprovalResult] = field(default_factory=list)
-    feedback_results: list[FeedbackResult] = field(default_factory=list)
-    amendments: list[PlanAmendment] = field(default_factory=list)
-    started_at: str = ""
+    current_phase: int = 0
+    current_step_index: int = 0
+    status: str = "running"
+    step_results: list[StepResult] = Field(default_factory=list)
+    gate_results: list[GateResult] = Field(default_factory=list)
+    approval_results: list[ApprovalResult] = Field(default_factory=list)
+    feedback_results: list[FeedbackResult] = Field(default_factory=list)
+    amendments: list[PlanAmendment] = Field(default_factory=list)
+    started_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     completed_at: str = ""
-    pending_gaps: list[KnowledgeGapSignal] = field(default_factory=list)
-    resolved_decisions: list[ResolvedDecision] = field(default_factory=list)
-    # Session-level knowledge deduplication: maps doc key → step_id where
-    # it was first delivered inline.  Empty on fresh starts; absent in older
-    # state files (graceful default applied in from_dict).
-    delivered_knowledge: dict[str, str] = field(default_factory=dict)
-    # Populated by CommitConsolidator.consolidate() at execution completion.
-    # None until consolidation is attempted; absent in older state files
-    # (graceful default applied in from_dict).
+    # KnowledgeGapSignal and ResolvedDecision live in models/knowledge.py
+    # and remain dataclasses; arbitrary_types_allowed lets us hold them.
+    pending_gaps: list[Any] = Field(default_factory=list)
+    resolved_decisions: list[Any] = Field(default_factory=list)
+    delivered_knowledge: dict[str, str] = Field(default_factory=dict)
     consolidation_result: ConsolidationResult | None = None
-    # F0.3 — auditor VETO override (bd-f606).  When True the executor
-    # advances past a VETO'd HIGH/CRITICAL phase but appends an Override
-    # row to compliance-audit.jsonl via ComplianceChainWriter.
-    # Justification is required when force_override=True; the CLI rejects
-    # --force without --justification.
     force_override: bool = False
     override_justification: str = ""
-
-    # Wave 1.3 (bd-86bf): Worktree isolation fields.
-    # step_worktrees maps step_id -> serialised WorktreeHandle dict.
-    # Absent from legacy state files; all accessors use getattr(..., {}).
-    step_worktrees: dict[str, dict] = field(default_factory=dict)
-    # steps_ran_in_place records steps that degraded to in-place execution
-    # because worktree creation failed.  Maps step_id -> reason string.
-    # Absent from legacy state files; defaults to empty dict.
-    steps_ran_in_place: dict[str, str] = field(default_factory=dict)
-    # The git branch that was current when this execution started.
-    # Used as base_branch for all worktree create() calls.
+    step_worktrees: dict[str, dict] = Field(default_factory=dict)
+    steps_ran_in_place: dict[str, str] = Field(default_factory=dict)
     working_branch: str = ""
-    # bd-def9: SHA of the rebased tip of working_branch after the most-recent
-    # successful fold_back().  Empty until the first fold-back completes.
     working_branch_head: str = ""
-
-    # Wave 5 (bd-e208, bd-1483, bd-9839): Human-Agent Loop fields.
-    # All fields use getattr(state, "...", default) in accessors for legacy
-    # file load compatibility.
-    #
-    # bd-e208: Takeover records — active record has empty resumed_at.
-    takeover_records: list[dict] = field(default_factory=list)
-    # bd-1483: Self-heal attempt records.
-    selfheal_attempts: list[dict] = field(default_factory=list)
-    # bd-9839: Speculation records — keyed by spec_id.
-    speculations: dict[str, dict] = field(default_factory=dict)
-
-    # End-user readiness #7: cumulative USD spent across all subsystems
-    # (self-heal, speculation, immune sweeps) for this run.  Persisted so a
-    # resumed run picks up counting where it left off rather than resetting
-    # to zero and allowing the ceiling to be exceeded.
-    # Default 0.0 for legacy state files (getattr guard in all accessors).
+    takeover_records: list[dict] = Field(default_factory=list)
+    selfheal_attempts: list[dict] = Field(default_factory=list)
+    speculations: dict[str, dict] = Field(default_factory=dict)
     run_cumulative_spend_usd: float = 0.0
-
-    # Scope expansion: queued expansion requests detected during execution.
-    # Processed at phase boundaries by _process_pending_expansions().
-    pending_scope_expansions: list[dict] = field(default_factory=list)
+    pending_scope_expansions: list[dict] = Field(default_factory=list)
     scope_expansions_applied: int = 0
-
-    # Approval-request audit (Hole 1 fix): records who requested the currently
-    # pending approval and which phase it is for.  Populated when the engine
-    # transitions into ``status == "approval_pending"``; cleared when the
-    # approval is recorded.  Used by ``record_approval_result`` to enforce:
-    #   * the approval is only accepted while the engine is genuinely waiting,
-    #   * the supplied ``phase_id`` matches the phase that asked,
-    #   * in ``BATON_APPROVAL_MODE=team`` the recording actor is not the
-    #     same identity as the requester (no self-approval).
-    # ``None`` when no approval is currently pending.  Absent in older state
-    # files; ``from_dict`` defaults to ``None`` and accepts the legacy dict
-    # shape transparently.
     pending_approval_request: PendingApprovalRequest | None = None
+    phase_retries: dict[str, int] = Field(default_factory=dict)
 
-    # SQLite Phase B (slice 6): pull the bimodal _phase_retries scratchpad
-    # OUT of speculations and into a dedicated field.  Investigative-archetype
-    # phase retry counts persist across CLI calls but have no relation to
-    # the speculation pipeline — keying both under ``speculations`` was a
-    # cohabitation that confused the SpeculativePipeliner reader (it tried to
-    # rehydrate the retry-count dict as a SpeculationRecord).  See
-    # docs/internal/sqlite-parity-proposal.md §1.1 Gap 4.
-    # Map shape: ``{"phase_<phase_id>": <retry_count>}``.
-    phase_retries: dict[str, int] = field(default_factory=dict)
+    @model_validator(mode="after")
+    def _validate_invariants(self) -> Self:
+        """I1/I2/I9 belt-and-suspenders for state loaded from disk.
 
-    def __post_init__(self) -> None:
-        if not self.started_at:
-            self.started_at = datetime.now(timezone.utc).isoformat()
+        These mirror the transition methods' preconditions so any
+        ExecutionState constructed from a legacy state file or a
+        Pydantic ``model_validate`` call surfaces invariant violations
+        immediately rather than at the next save.
+
+        Per cross-proposal §2.3 (state loaded from disk with violating
+        shape should raise loud).
+
+        Invariants:
+
+        * **I1**: ``status == "approval_pending"`` ⇔
+          ``pending_approval_request is not None``.
+        * **I2**: terminal ``status in {"complete","failed","cancelled"}``
+          ⇒ ``completed_at != ""``.  Slice 12 closed every Python-side
+          path; this validator catches state files that pre-date the
+          fix being persisted with empty ``completed_at``.
+        * **I9**: ``status == "paused-takeover"`` ⇒ at least one
+          ``takeover_records`` entry has empty ``resumed_at``.
+        """
+        # I1
+        is_approval_pending = self.status == "approval_pending"
+        has_request = self.pending_approval_request is not None
+        if is_approval_pending != has_request:
+            raise ValueError(
+                f"I1 invariant violation on task {self.task_id!r}: "
+                f"status={self.status!r} but "
+                f"pending_approval_request="
+                f"{'set' if has_request else 'None'}.  Expected "
+                f"approval_pending ⇔ pending_approval_request != None."
+            )
+        # I2 — only enforce on load (state files with empty completed_at
+        # in terminal states pre-date the slice 12 funnel).  Auto-fill
+        # rather than raise so existing state files stay loadable.
+        if self.status in {"complete", "failed", "cancelled"} and not self.completed_at:
+            self.completed_at = datetime.now(timezone.utc).isoformat(
+                timespec="seconds"
+            )
+        # I9
+        if self.status == "paused-takeover":
+            active = any(
+                isinstance(r, dict) and not r.get("resumed_at")
+                for r in self.takeover_records
+            )
+            if not active:
+                raise ValueError(
+                    f"I9 invariant violation on task {self.task_id!r}: "
+                    f"status='paused-takeover' but no takeover_records "
+                    f"entry has empty resumed_at."
+                )
+        return self
 
     @property
     def current_phase_obj(self) -> PlanPhase | None:

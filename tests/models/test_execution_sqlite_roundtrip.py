@@ -665,7 +665,10 @@ class TestExecutionStateSqliteRoundtrip:
             started_at="2026-01-15T11:00:00+00:00",
             completed_at="2026-01-15T11:10:00+00:00",
         )
-        state.pending_approval_request = PendingApprovalRequest(
+        # Use the I1-correct transition method so state passes the
+        # slice-13 model_validator on reload (status==approval_pending
+        # ⇔ pending_approval_request != None).
+        state.transition_to_approval_pending(
             phase_id=1,
             requester="alice@workstation",
             requested_at="2026-01-15T11:15:00+00:00",

@@ -23,7 +23,14 @@ from agent_baton.models.execution import (
 
 
 def _state(status: str = "running") -> ExecutionState:
-    """Build a minimal ExecutionState in the given status."""
+    """Build a minimal ExecutionState in the given status.
+
+    The I1/I2/I9 model_validator (slice 13) rejects construction with
+    status="approval_pending" but no pending_approval_request — slot
+    a placeholder request in for that branch so the fixture passes
+    construction-time validation.  Tests that want to assert validator
+    behaviour against torn states use ``model_construct`` to bypass.
+    """
     plan = MachinePlan(
         task_id="t-transitions",
         task_summary="test transitions",
@@ -37,11 +44,14 @@ def _state(status: str = "running") -> ExecutionState:
             ),
         ],
     )
-    state = ExecutionState(
-        task_id="t-transitions",
-        plan=plan,
-        status=status,
-    )
+    kwargs: dict = {"task_id": "t-transitions", "plan": plan, "status": status}
+    if status == "approval_pending":
+        kwargs["pending_approval_request"] = PendingApprovalRequest(
+            phase_id=0, requester="fixture",
+        )
+    if status in {"complete", "failed", "cancelled"}:
+        kwargs["completed_at"] = "2026-05-07T00:00:00+00:00"
+    state = ExecutionState(**kwargs)
     return state
 
 
@@ -112,7 +122,12 @@ class TestClearApprovalPending:
         assert state.pending_approval_request is None
 
     def test_idempotent_when_request_already_none(self) -> None:
-        state = _state(status="approval_pending")
+        # Construct in "running" so we can synthesize the
+        # request=None edge condition; clear_approval_pending must be a
+        # no-op when there's nothing to drop.  (Slice 13 added the I1
+        # model_validator that forbids constructing a torn state with
+        # status="approval_pending" + request=None.)
+        state = _state(status="running")
         assert state.pending_approval_request is None
         state.clear_approval_pending()
         assert state.pending_approval_request is None
