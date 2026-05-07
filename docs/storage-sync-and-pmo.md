@@ -58,7 +58,7 @@ The storage subsystem supports two backends behind a common
 | Backend | Class | Location | Status |
 |---------|-------|----------|--------|
 | **SQLite** | `SqliteStorage` | `core/storage/sqlite_backend.py` | Default for all new projects |
-| **File** | `FileStorage` | `core/storage/file_backend.py` | Legacy, backward-compatible |
+| **File** | `FileStorage` | `core/storage/file_backend.py` | **Deprecated** — emits `DeprecationWarning` on construction. SQLite Phases A+B now reach lossless parity for `ExecutionState`. Will move to snapshot-only mode and be removed from the factory in a future release. |
 
 **Backend auto-detection** (`core/storage/__init__.py: detect_backend`):
 
