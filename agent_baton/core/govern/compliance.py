@@ -23,16 +23,18 @@ F0.3 additions:
 - ``parse_auditor_verdict()`` backward-compat mapper for existing logs.
 - ``ComplianceChainWriter`` for appending hash-chained entries to
   ``compliance-audit.jsonl`` with process-safe ``fcntl.flock`` locking
-  (resolves bd-4fea concurrent-writer race).
+  (resolves bd-4fea concurrent-writer race).  ``fcntl`` is POSIX-only;
+  on Windows the lock is skipped (acceptable for single-user local dev,
+  not safe under concurrent multi-process writers).
 - ``verify_chain()`` and ``rechain()`` helpers consumed by the CLI.
 """
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import os
 import re
+import sys
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -42,6 +44,11 @@ from typing import Any, Iterator
 
 from agent_baton.models.usage import TaskUsageRecord
 from agent_baton.models.enums import RiskLevel
+
+if sys.platform != "win32":
+    import fcntl
+else:
+    fcntl = None  # type: ignore[assignment]
 
 
 # ---------------------------------------------------------------------------
@@ -181,11 +188,13 @@ def _flock_path(target: Path) -> Iterator[None]:
     lock_path = target.with_suffix(target.suffix + ".lock")
     fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        if fcntl is not None:
+            fcntl.flock(fd, fcntl.LOCK_EX)
         try:
             yield
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            if fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
         os.close(fd)
 
