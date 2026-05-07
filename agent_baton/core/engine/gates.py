@@ -31,8 +31,13 @@ import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Callable
 
+from agent_baton.core.engine.artifact_validator import (
+    ArtifactValidator,
+    DerivedCommand,
+)
 from agent_baton.core.govern.spec_validator import SpecValidator
 from agent_baton.models.execution import ActionType, ExecutionAction, GateResult, PlanGate
 
@@ -266,19 +271,52 @@ class GateRunner:
         phase_id: int,
         *,
         files_changed: list[str] | None = None,
+        project_root: Path | str | None = None,
+        artifact_validator: ArtifactValidator | None = None,
+        agent_additions: list[str] | None = None,
     ) -> ExecutionAction:
         """Build an ExecutionAction with GATE type.
 
         Tells the caller what command to run or what to check.
 
+        When ``files_changed`` includes new runnable artifacts (CI
+        workflows, npm scripts, Playwright configs), the
+        :class:`ArtifactValidator` derives extra shell commands and
+        appends them to ``gate.command`` chained with ``&&``.  This
+        closes the "trusted-but-unverified" gap where a phase could
+        pass even though the artifacts the agent just created were
+        broken on arrival.
+
+        When ``agent_additions`` is supplied, those commands are appended
+        after any artifact-derived commands, also chained with ``&&``.
+        They appear in the gate message under a separate label
+        (``[+agent additions: ...]``) so reviewers can distinguish
+        organically-derived checks from agent-declared ones.
+
         Args:
             gate: The gate to run.
             phase_id: Index of the phase that just completed.
             files_changed: Optional list of files changed in this phase.
-                           Used to populate {files} placeholders in commands.
+                           Used to populate {files} placeholders in
+                           commands and to drive artifact validation.
+            project_root: Filesystem root for resolving ``files_changed``
+                           when the validator needs to read file contents
+                           (workflow YAML, package.json scripts).  When
+                           ``None``, only path-based derivations fire.
+            artifact_validator: Inject a pre-built validator (test
+                           seam).  When ``None`` and ``files_changed``
+                           is non-empty, one is constructed from
+                           ``project_root``.
+            agent_additions: Shell commands declared by agents via
+                           ``GATE_ADDITION:`` signals.  Appended after
+                           artifact-derived commands with ``&&``.
+                           Ignored when ``None`` or empty.
 
         Returns:
-            An ExecutionAction with action_type=GATE.
+            An ExecutionAction with action_type=GATE.  ``gate_command``
+            carries the planned command followed by any derived
+            commands.  ``message`` enumerates derived commands so the
+            orchestrator and audit trail surface what was added.
         """
         command = gate.command or ""
 
@@ -286,8 +324,31 @@ class GateRunner:
             files_str = " ".join(files_changed)
             command = command.replace("{files}", files_str)
 
+        derived: list[DerivedCommand] = []
+        if files_changed:
+            validator = artifact_validator or ArtifactValidator(project_root)
+            derived = validator.derive_commands(files_changed)
+
+        if derived:
+            extension = " && ".join(d.command for d in derived)
+            command = f"{command} && {extension}" if command else extension
+
+        # Append agent-declared additions after artifact-derived commands.
+        effective_agent_additions: list[str] = [
+            cmd for cmd in (agent_additions or []) if cmd
+        ]
+        if effective_agent_additions:
+            agent_extension = " && ".join(effective_agent_additions)
+            command = f"{command} && {agent_extension}" if command else agent_extension
+
         description = self.describe_gate(gate)
         message = f"Gate '{gate.gate_type}' for phase {phase_id}: {description}"
+        if derived:
+            extras = "; ".join(f"{d.command} ({d.rationale})" for d in derived)
+            message = f"{message} [+artifact checks: {extras}]"
+        if effective_agent_additions:
+            agent_extras = "; ".join(effective_agent_additions)
+            message = f"{message} [+agent additions: {agent_extras}]"
 
         return ExecutionAction(
             action_type=ActionType.GATE,
@@ -295,6 +356,11 @@ class GateRunner:
             gate_type=gate.gate_type,
             gate_command=command,
             phase_id=phase_id,
+            derived_commands=[
+                {"command": d.command, "source_file": d.source_file, "rationale": d.rationale}
+                for d in derived
+            ],
+            agent_additions=effective_agent_additions,
         )
 
     # ------------------------------------------------------------------

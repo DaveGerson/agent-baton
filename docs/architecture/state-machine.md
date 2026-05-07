@@ -130,6 +130,47 @@ When a phase has an `approval_required: true` flag *and* a gate, the
 engine emits `APPROVAL` first, then `GATE`. Either failing fails the
 phase.
 
+### Gate command extension
+
+The planned `gate.command` is the baseline. Before emitting the GATE
+action, the engine inspects the files the agent created or modified
+during the phase via
+[`ArtifactValidator`](../../agent_baton/core/engine/artifact_validator.py).
+Recognised runnable artifacts — `.github/workflows/*.yml` (`run:`
+steps), gate-worthy `package.json` scripts (`test`, `test:*`, `lint`,
+`typecheck`, `audit`), `playwright.config.*`, `Makefile` targets
+(`test`, `lint`, `typecheck`, `check`, `audit`, `ci`), and
+`.pre-commit-config.yaml` — contribute extra shell commands that are
+appended to the planned command, chained with `&&`. The phase only
+passes when both the planned gate and every derived command exit zero;
+the GATE action's `message` field carries bracket suffixes
+(`[+artifact checks: ...]` / `[+agent additions: ...]`) so the
+orchestrator can attribute a failure to the offending artifact or
+agent-declared check.  Disable artifact derivation by setting
+`BATON_ARTIFACT_VALIDATION=0` (see the env-vars table in
+[the root `CLAUDE.md`](../../CLAUDE.md)).
+
+**`GATE_ADDITION:` signal.**  An agent may declare additional gate
+commands by including lines of the form `GATE_ADDITION: <command>` in
+its step outcome.  The engine collects these across all steps in the
+phase (via `_phase_step_extensions` in `executor.py`) and appends them
+to `gate_command` after artifact-derived commands, also chained with
+`&&`.  Up to 8 additions per step are accepted; excess, unsafe (shell
+metacharacters), and destructive-pattern commands are silently dropped
+by the command-safety layer in
+[`_command_safety.py`](../../agent_baton/core/engine/_command_safety.py).
+Maximum command length is 256 characters.
+
+**Structured provenance fields.**  The GATE action carries two optional
+fields — `derived_commands` (list of `{command, source_file, rationale}`
+dicts) and `agent_additions` (list of strings) — that expose structured
+attribution without requiring callers to re-parse `gate_command`.  These
+same fields are persisted on `GateResult` (recorded at
+`record_gate_result()` time) and included in the compliance audit entry
+(`derived_commands_count`, `agent_additions_count`) so regulated
+investigations can query which gates ran with extensions without parsing
+the concatenated command.
+
 ---
 
 ## 5. Persistence touchpoints
