@@ -1,8 +1,8 @@
 # Migration Review Summary — SQLite parity, ExecutionRecord base, state-mutation funnel
 
-**Status**: Draft
-**Date**: 2026-05-07
-**Branch**: `claude/review-execution-planning-KTQqv` @ `b453297`
+**Status**: Implemented (Terminal Option C — full plan, slices 1-15)
+**Date**: 2026-05-07 (review) / 2026-05-07 (implementation)
+**Branch**: `claude/review-execution-planning-KTQqv` @ `b453297` (initial review) → through `a886ce9+` (implementation HEAD)
 **Reviews**:
   - [sqlite-parity-proposal.md](sqlite-parity-proposal.md)
   - [result-hierarchy-proposal.md](result-hierarchy-proposal.md)
