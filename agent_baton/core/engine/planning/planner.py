@@ -261,14 +261,23 @@ class IntelligentPlanner:
         else:
             lines.append("No policy violations detected.")
 
+        lines.append("")
+        lines.append("## Foresight Insights")
         if self._last_foresight_insights:
-            lines.append("")
-            lines.append("## Foresight Insights")
             for ins in self._last_foresight_insights:
                 lines.append(
                     f"- [{ins.category}] {ins.description}"
+                    + (f" (rule: {ins.source_rule})" if ins.source_rule else "")
                     + (f" (phase: {ins.inserted_phase_name})" if ins.inserted_phase_name else "")
                 )
+        else:
+            lines.append("No foresight triggers matched — plan is self-contained.")
+
+        if self._last_team_cost_estimates:
+            lines.append("")
+            lines.append("## Team Cost Estimates")
+            for step_id, estimate in self._last_team_cost_estimates.items():
+                lines.append(f"- Step {step_id}: ~{estimate:,} tokens")
 
         return "\n".join(lines)
 
