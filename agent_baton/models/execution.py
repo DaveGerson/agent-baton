@@ -14,9 +14,9 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from agent_baton.models.knowledge import (
     KnowledgeAttachment,
@@ -132,17 +132,31 @@ class ExecutionRecord(BaseModel):
         return self.model_dump(mode="python")
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> ExecutionRecord:
-        """Default deserialisation. ``extra="ignore"`` drops unknown keys."""
+    def from_dict(cls, data: dict[str, Any]) -> Self:
+        """Default deserialisation. ``extra="ignore"`` drops unknown keys.
+
+        Returns the concrete subclass type rather than ``ExecutionRecord``
+        so Pyright accepts ``GateResult.from_dict(...)`` as ``GateResult``.
+        Per result-hierarchy-proposal §8.5 (Pyright concern).
+        """
         return cls(**data)
+
+
+def _now_iso_seconds() -> str:
+    """Auto-stamp factory used by Pydantic leaf records.
+
+    Replaces the ``__post_init__`` empty-string-then-stamp idiom from the
+    dataclass era.  The golden fixtures already carry concrete timestamps,
+    so this factory only fires when a record is constructed without one.
+    """
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 # ---------------------------------------------------------------------------
 # Interaction history (multi-turn step conversations)
 # ---------------------------------------------------------------------------
 
-@dataclass
-class InteractionTurn:
+class InteractionTurn(ExecutionRecord):
     """A single turn in a multi-turn agent interaction.
 
     Recorded in :class:`StepResult.interaction_history` for interactive steps
@@ -153,8 +167,8 @@ class InteractionTurn:
         role: Either ``"agent"`` (step output) or ``"human"`` (orchestrator
             input via ``baton execute interact``).
         content: The text of this turn.
-        timestamp: ISO 8601 timestamp, auto-set in ``__post_init__`` when
-            not supplied.
+        timestamp: ISO 8601 timestamp, auto-stamped via ``default_factory``
+            when not supplied at construction.
         turn_number: Sequential 1-based turn index within the interaction.
         source: Origin of a human-role turn.  One of:
 
@@ -167,33 +181,10 @@ class InteractionTurn:
     """
 
     role: str                   # "agent" or "human"
-    content: str
-    timestamp: str = ""
+    content: str = ""
+    timestamp: str = Field(default_factory=_now_iso_seconds)
     turn_number: int = 0
     source: str = "human"       # "human" | "auto-agent" | "webhook"
-
-    def __post_init__(self) -> None:
-        if not self.timestamp:
-            self.timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-    def to_dict(self) -> dict:
-        return {
-            "role": self.role,
-            "content": self.content,
-            "timestamp": self.timestamp,
-            "turn_number": self.turn_number,
-            "source": self.source,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict) -> InteractionTurn:
-        return cls(
-            role=data.get("role", "agent"),
-            content=data.get("content", ""),
-            timestamp=data.get("timestamp", ""),
-            turn_number=data.get("turn_number", 0),
-            source=data.get("source", "human"),
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -1103,8 +1094,7 @@ class ApprovalResult:
         )
 
 
-@dataclass
-class PendingApprovalRequest:
+class PendingApprovalRequest(ExecutionRecord):
     """Audit row for an approval that is currently pending.
 
     Stamped on ``ExecutionState.pending_approval_request`` when the engine
@@ -1121,26 +1111,7 @@ class PendingApprovalRequest:
 
     phase_id: int
     requester: str = ""
-    requested_at: str = ""
-
-    def __post_init__(self) -> None:
-        if not self.requested_at:
-            self.requested_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-    def to_dict(self) -> dict:
-        return {
-            "phase_id": self.phase_id,
-            "requester": self.requester,
-            "requested_at": self.requested_at,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict) -> PendingApprovalRequest:
-        return cls(
-            phase_id=int(data.get("phase_id", 0)),
-            requester=data.get("requester", ""),
-            requested_at=data.get("requested_at", ""),
-        )
+    requested_at: str = Field(default_factory=_now_iso_seconds)
 
 
 @dataclass
