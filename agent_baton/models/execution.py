@@ -14,7 +14,9 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, Literal, Self
+
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 from agent_baton.models.knowledge import (
     KnowledgeAttachment,
@@ -72,11 +74,89 @@ class ActionType(Enum):
 
 
 # ---------------------------------------------------------------------------
+# Result-type base class (Pydantic) — pre-Phase-1 prototype
+# ---------------------------------------------------------------------------
+#
+# Single Pydantic base for every persisted execution result/decision record.
+# Hosts the shared ``model_config`` and a default ``to_dict`` / ``from_dict``
+# pair so that subclasses can drop the recurring boilerplate (and the
+# ``cls.__dataclass_fields__`` introspection trap that breaks under Pydantic).
+#
+# Design rationale, scope, and the one-class-vs-two-level decision are
+# documented in ``docs/internal/result-hierarchy-proposal.md``.  Mutation
+# semantics (why ``frozen=False`` + ``validate_assignment=False`` are
+# required) are documented in
+# ``docs/internal/pydantic-migration-mutation-audit.md``.
+#
+# IMPORTANT: this base deliberately holds NO fields.  Promoting any single
+# field (timestamp / phase_id / decision_source / actor) to the base would
+# change the on-disk JSON shape of at least one subclass and break the
+# Phase 0 byte-identical roundtrip tests.  Each subclass keeps its own
+# field set verbatim.
+
+class ExecutionRecord(BaseModel):
+    """Common base for persisted execution result/decision records.
+
+    Provides:
+        - ``extra="ignore"`` — unknown keys in ``from_dict`` payloads are
+          dropped silently (forward-compat for older / newer state files,
+          and a structural replacement for the
+          ``cls.__dataclass_fields__`` filter that ``GateResult`` and
+          ``StepResult`` historically used).
+        - Mutable instances — list / dict fields can be ``.append``-ed in
+          place, matching the dataclass mutation semantics audited in
+          ``docs/internal/pydantic-migration-mutation-audit.md``.
+        - A default ``to_dict()`` / ``from_dict()`` pair that subclasses
+          with no conditional emission (e.g. ``GateResult``) inherit
+          unchanged.
+
+    Subclasses override ``to_dict`` only when they must omit empty nested
+    collections (e.g. ``StepResult.member_results``) or order keys for
+    fixture stability.  Subclasses override ``from_dict`` only when they
+    must re-hydrate nested objects whose types are not yet Pydantic
+    models.
+
+    Holds no fields — every subclass keeps the exact field set it had as
+    a dataclass so the on-disk JSON shape stays byte-identical with the
+    Phase 0 golden fixtures.
+    """
+
+    model_config = ConfigDict(
+        extra="ignore",             # forward-compat; replaces __dataclass_fields__ filter
+        validate_assignment=False,  # match dataclass mutation semantics (see audit Cat. 1-3)
+        arbitrary_types_allowed=False,
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Default serialisation. Override for conditional / ordered emission."""
+        return self.model_dump(mode="python")
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Self:
+        """Default deserialisation. ``extra="ignore"`` drops unknown keys.
+
+        Returns the concrete subclass type rather than ``ExecutionRecord``
+        so Pyright accepts ``GateResult.from_dict(...)`` as ``GateResult``.
+        Per result-hierarchy-proposal §8.5 (Pyright concern).
+        """
+        return cls(**data)
+
+
+def _now_iso_seconds() -> str:
+    """Auto-stamp factory used by Pydantic leaf records.
+
+    Replaces the ``__post_init__`` empty-string-then-stamp idiom from the
+    dataclass era.  The golden fixtures already carry concrete timestamps,
+    so this factory only fires when a record is constructed without one.
+    """
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+# ---------------------------------------------------------------------------
 # Interaction history (multi-turn step conversations)
 # ---------------------------------------------------------------------------
 
-@dataclass
-class InteractionTurn:
+class InteractionTurn(ExecutionRecord):
     """A single turn in a multi-turn agent interaction.
 
     Recorded in :class:`StepResult.interaction_history` for interactive steps
@@ -87,8 +167,8 @@ class InteractionTurn:
         role: Either ``"agent"`` (step output) or ``"human"`` (orchestrator
             input via ``baton execute interact``).
         content: The text of this turn.
-        timestamp: ISO 8601 timestamp, auto-set in ``__post_init__`` when
-            not supplied.
+        timestamp: ISO 8601 timestamp, auto-stamped via ``default_factory``
+            when not supplied at construction.
         turn_number: Sequential 1-based turn index within the interaction.
         source: Origin of a human-role turn.  One of:
 
@@ -101,117 +181,46 @@ class InteractionTurn:
     """
 
     role: str                   # "agent" or "human"
-    content: str
-    timestamp: str = ""
+    content: str = ""
+    timestamp: str = Field(default_factory=_now_iso_seconds)
     turn_number: int = 0
     source: str = "human"       # "human" | "auto-agent" | "webhook"
-
-    def __post_init__(self) -> None:
-        if not self.timestamp:
-            self.timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-    def to_dict(self) -> dict:
-        return {
-            "role": self.role,
-            "content": self.content,
-            "timestamp": self.timestamp,
-            "turn_number": self.turn_number,
-            "source": self.source,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict) -> InteractionTurn:
-        return cls(
-            role=data.get("role", "agent"),
-            content=data.get("content", ""),
-            timestamp=data.get("timestamp", ""),
-            turn_number=data.get("turn_number", 0),
-            source=data.get("source", "human"),
-        )
 
 
 # ---------------------------------------------------------------------------
 # Plan (machine-readable, JSON-serializable)
 # ---------------------------------------------------------------------------
 
-@dataclass
-class TeamMember:
-    """A member of a coordinated agent team within a step.
+# Plan-tier base.  Distinct from ExecutionRecord (which is reserved for
+# result/decision records, per result-hierarchy-proposal §8.4).  Plan
+# types — MachinePlan, PlanPhase, PlanStep, etc. — are LLM-input bound
+# rather than persisted-result bound, so they get their own base class
+# with the same forward-compat config.
+class PlanModel(BaseModel):
+    """Common base for plan-tier Pydantic models.
 
-    Team steps allow multiple agents to collaborate on a single step,
-    with intra-step dependency ordering.  Each member is dispatched
-    individually and results are collected via ``TeamStepResult``.
-
-    Attributes:
-        member_id: Hierarchical ID (e.g. ``"1.1.a"``).
-        agent_name: Name of the agent assigned to this role.
-        role: Function within the team — ``"lead"``, ``"implementer"``,
-            or ``"reviewer"``.
-        task_description: What this team member should do.
-        model: LLM model to use.
-        depends_on: Other ``member_id`` values that must complete first.
-        deliverables: Expected output artifacts.
-        sub_team: Nested team the lead coordinates.  Non-empty only when
-            ``role == "lead"``; enforced by :meth:`validate`.  The lead is
-            still dispatched as a worker — its own outcome is merged with
-            sub-team outcomes by the enclosing step's ``synthesis``.
-        synthesis: How the lead's own outcome is merged with sub-team
-            outcomes.  Meaningful only when ``sub_team`` is non-empty.
+    Provides extra="ignore" forward-compat (newer agents may emit fields
+    older planners do not know about) and the same validate_assignment=False
+    mutation semantics the dataclass plan types had.  Each subclass keeps
+    its own to_dict for conditional emission semantics — Pydantic's
+    model_dump emits all fields unconditionally, which would change the
+    on-disk JSON shape vs. the golden fixtures.
     """
 
-    member_id: str                          # e.g. "1.1.a"
-    agent_name: str
-    role: str = "implementer"               # "lead", "implementer", "reviewer"
-    task_description: str = ""
-    model: str = "sonnet"
-    depends_on: list[str] = field(default_factory=list)   # other member_ids
-    deliverables: list[str] = field(default_factory=list)
-    sub_team: list[TeamMember] = field(default_factory=list)  # nested team
-    synthesis: SynthesisSpec | None = None  # merge strategy iff sub_team non-empty
-
-    def validate(self) -> None:
-        """Raise ``ValueError`` when the member carries a ``sub_team`` but is
-        not a lead.  Sub-teams may only be attached to ``role == "lead"``."""
-        if self.sub_team and self.role != "lead":
-            raise ValueError(
-                f"TeamMember {self.member_id!r} has a sub_team but role={self.role!r}; "
-                "only role='lead' members may carry a sub_team."
-            )
-
-    def to_dict(self) -> dict:
-        d: dict = {
-            "member_id": self.member_id,
-            "agent_name": self.agent_name,
-            "role": self.role,
-            "task_description": self.task_description,
-            "model": self.model,
-            "depends_on": self.depends_on,
-            "deliverables": self.deliverables,
-        }
-        if self.sub_team:
-            d["sub_team"] = [m.to_dict() for m in self.sub_team]
-        if self.synthesis is not None:
-            d["synthesis"] = self.synthesis.to_dict()
-        return d
+    model_config = ConfigDict(
+        extra="ignore",
+        validate_assignment=False,
+        arbitrary_types_allowed=True,  # for ResourceLimits / ForesightInsight dataclasses
+    )
 
     @classmethod
-    def from_dict(cls, data: dict) -> TeamMember:
-        synth_data = data.get("synthesis")
-        return cls(
-            member_id=data["member_id"],
-            agent_name=data["agent_name"],
-            role=data.get("role", "implementer"),
-            task_description=data.get("task_description", ""),
-            model=data.get("model", "sonnet"),
-            depends_on=data.get("depends_on", []),
-            deliverables=data.get("deliverables", []),
-            sub_team=[cls.from_dict(m) for m in data.get("sub_team", [])],
-            synthesis=SynthesisSpec.from_dict(synth_data) if synth_data else None,
-        )
+    def from_dict(cls, data: dict[str, Any]) -> Self:
+        """Default deserialisation. Subclasses override when nested
+        dataclass types need explicit re-hydration."""
+        return cls(**data)
 
 
-@dataclass
-class SynthesisSpec:
+class SynthesisSpec(PlanModel):
     """Configuration for how team member outputs are combined.
 
     Attached to a :class:`PlanStep` to control how the engine merges
@@ -238,31 +247,76 @@ class SynthesisSpec:
             - ``"fail"`` — fail the team step if conflicts detected.
     """
 
-    strategy: str = "concatenate"           # concatenate | merge_files | agent_synthesis
+    strategy: str = "concatenate"
     synthesis_agent: str = "code-reviewer"
     synthesis_prompt: str = ""
-    conflict_handling: str = "auto_merge"   # auto_merge | escalate | fail
+    conflict_handling: str = "auto_merge"
 
     def to_dict(self) -> dict:
-        return {
-            "strategy": self.strategy,
-            "synthesis_agent": self.synthesis_agent,
-            "synthesis_prompt": self.synthesis_prompt,
-            "conflict_handling": self.conflict_handling,
+        return self.model_dump(mode="python")
+
+
+class TeamMember(PlanModel):
+    """A member of a coordinated agent team within a step.
+
+    Team steps allow multiple agents to collaborate on a single step,
+    with intra-step dependency ordering.  Each member is dispatched
+    individually and results are collected via ``TeamStepResult``.
+
+    Attributes:
+        member_id: Hierarchical ID (e.g. ``"1.1.a"``).
+        agent_name: Name of the agent assigned to this role.
+        role: Function within the team — ``"lead"``, ``"implementer"``,
+            or ``"reviewer"``.
+        task_description: What this team member should do.
+        model: LLM model to use.
+        depends_on: Other ``member_id`` values that must complete first.
+        deliverables: Expected output artifacts.
+        sub_team: Nested team the lead coordinates.  Non-empty only when
+            ``role == "lead"``; enforced by :meth:`validate`.  The lead is
+            still dispatched as a worker — its own outcome is merged with
+            sub-team outcomes by the enclosing step's ``synthesis``.
+        synthesis: How the lead's own outcome is merged with sub-team
+            outcomes.  Meaningful only when ``sub_team`` is non-empty.
+    """
+
+    member_id: str
+    agent_name: str
+    role: str = "implementer"
+    task_description: str = ""
+    model: str = "sonnet"
+    depends_on: list[str] = Field(default_factory=list)
+    deliverables: list[str] = Field(default_factory=list)
+    sub_team: list[TeamMember] = Field(default_factory=list)
+    synthesis: SynthesisSpec | None = None
+
+    def validate(self) -> None:
+        """Raise ``ValueError`` when the member carries a ``sub_team`` but is
+        not a lead.  Sub-teams may only be attached to ``role == "lead"``."""
+        if self.sub_team and self.role != "lead":
+            raise ValueError(
+                f"TeamMember {self.member_id!r} has a sub_team but role={self.role!r}; "
+                "only role='lead' members may carry a sub_team."
+            )
+
+    def to_dict(self) -> dict:
+        d: dict = {
+            "member_id": self.member_id,
+            "agent_name": self.agent_name,
+            "role": self.role,
+            "task_description": self.task_description,
+            "model": self.model,
+            "depends_on": list(self.depends_on),
+            "deliverables": list(self.deliverables),
         }
-
-    @classmethod
-    def from_dict(cls, data: dict) -> SynthesisSpec:
-        return cls(
-            strategy=data.get("strategy", "concatenate"),
-            synthesis_agent=data.get("synthesis_agent", "code-reviewer"),
-            synthesis_prompt=data.get("synthesis_prompt", ""),
-            conflict_handling=data.get("conflict_handling", "auto_merge"),
-        )
+        if self.sub_team:
+            d["sub_team"] = [m.to_dict() for m in self.sub_team]
+        if self.synthesis is not None:
+            d["synthesis"] = self.synthesis.to_dict()
+        return d
 
 
-@dataclass
-class PlanStep:
+class PlanStep(PlanModel):
     """A single agent assignment within a plan phase.
 
     Steps are the atomic unit of work dispatched to agents.  They carry
@@ -297,28 +351,49 @@ class PlanStep:
             dispatch concurrent worktree-isolated agents when this is ``True``.
     """
 
-    step_id: str                          # e.g. "1.1"
+    step_id: str
     agent_name: str
     task_description: str
     model: str = "sonnet"
-    depends_on: list[str] = field(default_factory=list)
-    deliverables: list[str] = field(default_factory=list)
-    allowed_paths: list[str] = field(default_factory=list)
-    blocked_paths: list[str] = field(default_factory=list)
-    context_files: list[str] = field(default_factory=list)  # files agent should read
-    team: list[TeamMember] = field(default_factory=list)    # non-empty = team step
-    knowledge: list[KnowledgeAttachment] = field(default_factory=list)  # resolved knowledge
-    synthesis: SynthesisSpec | None = None  # team output merge strategy
-    mcp_servers: list[str] = field(default_factory=list)  # MCP server names for this step
-    interactive: bool = False       # step uses multi-turn interaction protocol
-    max_turns: int = 10             # cost guard: maximum interaction turns
-    step_type: str = "developing"   # planning, developing, testing, reviewing,
-                                    # consulting, task, automation
-    command: str = ""               # shell command for automation steps
-    expected_outcome: str = ""      # Wave 3.1: 1-sentence demo statement (behavioral)
-    timeout_seconds: int = 0        # 0 = no timeout (backward-compat default)
-    parallel_safe: bool = False     # bd-a379: True when sibling steps have disjoint allowed_paths
-    max_estimated_minutes: int = 0  # 0 = no estimate; enrichment enforces ceiling
+    depends_on: list[str] = Field(default_factory=list)
+    deliverables: list[str] = Field(default_factory=list)
+    allowed_paths: list[str] = Field(default_factory=list)
+    blocked_paths: list[str] = Field(default_factory=list)
+    context_files: list[str] = Field(default_factory=list)
+    team: list[TeamMember] = Field(default_factory=list)
+    # KnowledgeAttachment lives in models/knowledge.py and is still a
+    # dataclass; arbitrary_types_allowed on PlanModel lets us hold it.
+    # The from_dict override below explicitly re-hydrates from dict.
+    knowledge: list[Any] = Field(default_factory=list)
+    synthesis: SynthesisSpec | None = None
+    mcp_servers: list[str] = Field(default_factory=list)
+    interactive: bool = False
+    max_turns: int = 10
+    step_type: str = "developing"
+    command: str = ""
+    expected_outcome: str = ""
+    timeout_seconds: int = 0
+    parallel_safe: bool = False
+    max_estimated_minutes: int = 0
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Self:
+        # KnowledgeAttachment is still a dataclass (intentionally out of
+        # scope for slice 11 to keep the diff bounded — see
+        # migration-review-summary.md §5 slice 11 scope notes).  Use its
+        # from_dict so the typed instance is constructed.
+        from agent_baton.models.knowledge import KnowledgeAttachment
+
+        data = dict(data)
+        knowledge_in = data.pop("knowledge", [])
+        knowledge_v = [
+            (k if isinstance(k, KnowledgeAttachment)
+             else KnowledgeAttachment.from_dict(k))
+            for k in knowledge_in
+        ]
+        obj = cls(**data)
+        obj.knowledge = knowledge_v
+        return obj
 
     def to_dict(self) -> dict:
         d = {
@@ -326,11 +401,11 @@ class PlanStep:
             "agent_name": self.agent_name,
             "task_description": self.task_description,
             "model": self.model,
-            "depends_on": self.depends_on,
-            "deliverables": self.deliverables,
-            "allowed_paths": self.allowed_paths,
-            "blocked_paths": self.blocked_paths,
-            "context_files": self.context_files,
+            "depends_on": list(self.depends_on),
+            "deliverables": list(self.deliverables),
+            "allowed_paths": list(self.allowed_paths),
+            "blocked_paths": list(self.blocked_paths),
+            "context_files": list(self.context_files),
             "step_type": self.step_type,
         }
         if self.team:
@@ -340,7 +415,7 @@ class PlanStep:
         if self.synthesis is not None:
             d["synthesis"] = self.synthesis.to_dict()
         if self.mcp_servers:
-            d["mcp_servers"] = self.mcp_servers
+            d["mcp_servers"] = list(self.mcp_servers)
         if self.interactive:
             d["interactive"] = self.interactive
             d["max_turns"] = self.max_turns
@@ -356,36 +431,8 @@ class PlanStep:
             d["max_estimated_minutes"] = self.max_estimated_minutes
         return d
 
-    @classmethod
-    def from_dict(cls, data: dict) -> PlanStep:
-        synthesis_data = data.get("synthesis")
-        return cls(
-            step_id=data["step_id"],
-            agent_name=data["agent_name"],
-            task_description=data.get("task_description", ""),
-            model=data.get("model", "sonnet"),
-            depends_on=data.get("depends_on", []),
-            deliverables=data.get("deliverables", []),
-            allowed_paths=data.get("allowed_paths", []),
-            blocked_paths=data.get("blocked_paths", []),
-            context_files=data.get("context_files", []),
-            team=[TeamMember.from_dict(m) for m in data.get("team", [])],
-            knowledge=[KnowledgeAttachment.from_dict(k) for k in data.get("knowledge", [])],
-            synthesis=SynthesisSpec.from_dict(synthesis_data) if synthesis_data else None,
-            mcp_servers=data.get("mcp_servers", []),
-            interactive=data.get("interactive", False),
-            max_turns=data.get("max_turns", 10),
-            step_type=data.get("step_type", "developing"),
-            command=data.get("command", ""),
-            expected_outcome=data.get("expected_outcome", ""),
-            timeout_seconds=data.get("timeout_seconds", 0),
-            parallel_safe=data.get("parallel_safe", False),
-            max_estimated_minutes=data.get("max_estimated_minutes", 0),
-        )
 
-
-@dataclass
-class PlanGate:
+class PlanGate(PlanModel):
     """A QA gate that must pass before advancing to the next phase.
 
     Gates run automated checks (tests, linting, builds) or request
@@ -401,33 +448,26 @@ class PlanGate:
         fail_on: Criteria that constitute a failure.
     """
 
-    gate_type: str              # "build", "test", "lint", "spec", "review"
-    command: str = ""           # bash command to run (e.g. "pytest")
+    gate_type: str
+    command: str = ""
     description: str = ""
-    fail_on: list[str] = field(default_factory=list)  # criteria for failure
-
-    def to_dict(self) -> dict:
-        return {
-            "gate_type": self.gate_type,
-            "command": self.command,
-            "description": self.description,
-            "fail_on": self.fail_on,
-        }
+    fail_on: list[str] = Field(default_factory=list)
 
     @classmethod
-    def from_dict(cls, data: dict) -> PlanGate:
-        # Accept both "gate_type" (canonical) and "type" (common LLM variant)
-        gate_type = data.get("gate_type") or data.get("type", "")
-        return cls(
-            gate_type=gate_type,
-            command=data.get("command", ""),
-            description=data.get("description", ""),
-            fail_on=data.get("fail_on", []),
-        )
+    def from_dict(cls, data: dict[str, Any]) -> Self:
+        # Accept both "gate_type" (canonical) and "type" (common LLM variant).
+        # The legacy variant predates the slice-11 conversion; older state
+        # files and a few test fixtures still emit the alternate spelling.
+        data = dict(data)
+        if "gate_type" not in data and "type" in data:
+            data["gate_type"] = data.pop("type")
+        return cls(**data)
+
+    def to_dict(self) -> dict:
+        return self.model_dump(mode="python")
 
 
-@dataclass
-class PlanPhase:
+class PlanPhase(PlanModel):
     """A phase in an execution plan, containing steps and an optional gate.
 
     Phases group related steps and enforce a gate check or human approval
@@ -451,12 +491,39 @@ class PlanPhase:
 
     phase_id: int
     name: str
-    steps: list[PlanStep] = field(default_factory=list)
+    steps: list[PlanStep] = Field(default_factory=list)
     gate: PlanGate | None = None
-    approval_required: bool = False         # pause for human approval after steps complete
-    approval_description: str = ""          # what the human should review
-    feedback_questions: list[FeedbackQuestion] = field(default_factory=list)  # multiple-choice feedback gate
-    risk_level: str = ""                    # bd-5bd9: optional per-phase override
+    approval_required: bool = False
+    approval_description: str = ""
+    # FeedbackQuestion is defined later in the file; the dict-typed field
+    # is hydrated by the from_dict override below.  This forward reference
+    # is unavoidable while FeedbackQuestion comes after the result types
+    # in the file order.
+    feedback_questions: list[Any] = Field(default_factory=list)
+    risk_level: str = ""
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Self:
+        data = dict(data)
+        gate_data = data.get("gate")
+        if gate_data is not None and not isinstance(gate_data, PlanGate):
+            data["gate"] = PlanGate.from_dict(gate_data)
+        # FeedbackQuestion is still defined later in the file; resolve at
+        # call time to avoid a forward-reference dance.
+        steps_in = data.pop("steps", [])
+        steps_v = [
+            (s if isinstance(s, PlanStep) else PlanStep.from_dict(s))
+            for s in steps_in
+        ]
+        fq_in = data.pop("feedback_questions", [])
+        fq_v = [
+            (q if isinstance(q, FeedbackQuestion) else FeedbackQuestion.from_dict(q))
+            for q in fq_in
+        ]
+        obj = cls(**data)
+        obj.steps = steps_v
+        obj.feedback_questions = fq_v
+        return obj
 
     def to_dict(self) -> dict:
         d: dict = {
@@ -464,7 +531,7 @@ class PlanPhase:
             "name": self.name,
             "steps": [s.to_dict() for s in self.steps],
         }
-        if self.gate:
+        if self.gate is not None:
             d["gate"] = self.gate.to_dict()
         if self.approval_required:
             d["approval_required"] = self.approval_required
@@ -475,26 +542,15 @@ class PlanPhase:
             d["risk_level"] = self.risk_level
         return d
 
-    @classmethod
-    def from_dict(cls, data: dict) -> PlanPhase:
-        gate = PlanGate.from_dict(data["gate"]) if data.get("gate") else None
-        return cls(
-            phase_id=data["phase_id"],
-            name=data["name"],
-            steps=[PlanStep.from_dict(s) for s in data.get("steps", [])],
-            gate=gate,
-            approval_required=data.get("approval_required", False),
-            approval_description=data.get("approval_description", ""),
-            feedback_questions=[
-                FeedbackQuestion.from_dict(q)
-                for q in data.get("feedback_questions", [])
-            ],
-            risk_level=data.get("risk_level", ""),
-        )
+
+def _now_iso() -> str:
+    """``MachinePlan.created_at`` factory.  Differs from ``_now_iso_seconds``
+    in that it preserves microsecond precision (the dataclass version did
+    not pass ``timespec="seconds"``)."""
+    return datetime.now(timezone.utc).isoformat()
 
 
-@dataclass
-class MachinePlan:
+class MachinePlan(PlanModel):
     """Machine-readable execution plan — the contract between planner and executor.
 
     Created by ``IntelligentPlanner.create_plan()`` and persisted as
@@ -538,37 +594,87 @@ class MachinePlan:
     budget_tier: str = "standard"
     execution_mode: str = "phased"
     git_strategy: str = "commit-per-agent"
-    phases: list[PlanPhase] = field(default_factory=list)
-    shared_context: str = ""            # pre-built context for agents
-    pattern_source: str | None = None   # pattern_id that influenced this plan
-    created_at: str = ""
-    task_type: str | None = None        # inferred task type (e.g. "feature", "bug-fix")
-    explicit_knowledge_packs: list[str] = field(default_factory=list)  # from --knowledge-pack
-    explicit_knowledge_docs: list[str] = field(default_factory=list)   # from --knowledge
-    intervention_level: str = "low"     # low | medium | high
-    complexity: str = "medium"          # light | medium | heavy
-    classification_source: str = "keyword-fallback"  # haiku | keyword-fallback
-    resource_limits: ResourceLimits | None = None  # optional concurrency constraints
-    detected_stack: str | None = None  # e.g. "python", "python/react", "typescript/react"
-    foresight_insights: list[ForesightInsight] = field(default_factory=list)  # proactive insights
-    # E7 — dependency detection: task_id this plan depends on (from prior output)
+    phases: list[PlanPhase] = Field(default_factory=list)
+    shared_context: str = ""
+    pattern_source: str | None = None
+    created_at: str = Field(default_factory=_now_iso)
+    task_type: str | None = None
+    explicit_knowledge_packs: list[str] = Field(default_factory=list)
+    explicit_knowledge_docs: list[str] = Field(default_factory=list)
+    intervention_level: str = "low"
+    complexity: str = "medium"
+    classification_source: str = "keyword-fallback"
+    # ResourceLimits and ForesightInsight remain dataclasses (slice 11
+    # scope — see migration-review-summary.md §5).  arbitrary_types_allowed
+    # on PlanModel lets us hold them; from_dict explicitly re-hydrates
+    # from dict shapes.
+    resource_limits: Any = None
+    detected_stack: str | None = None
+    foresight_insights: list[Any] = Field(default_factory=list)
     depends_on_task: str | None = None
-    # A3: persist ClassificationResult signals and confidence alongside the plan.
-    # Populated by the planner when a ClassificationResult is available.
-    # ``None`` when the classification was performed before this field existed
-    # (pre-v10 databases) or when the planner used keyword-fallback only.
-    classification_signals: str | None = None    # JSON blob from ClassificationResult.to_dict()
-    classification_confidence: float | None = None  # 0.0–1.0 confidence score
-    archetype: str = "phased"       # planning archetype: direct | phased | investigative
-    max_retry_phases: int = 0       # investigative only: max phase retries before failing
-    # Override for ``BATON_COMPLIANCE_FAIL_CLOSED``.
-    # ``True`` forces fail-closed; ``False`` forces continue-on-failure;
-    # ``None`` (default) defers to the env var.
+    classification_signals: str | None = None
+    classification_confidence: float | None = None
+    archetype: str = "phased"
+    max_retry_phases: int = 0
     compliance_fail_closed: bool | None = None
 
-    def __post_init__(self) -> None:
-        if not self.created_at:
-            self.created_at = datetime.now(timezone.utc).isoformat()
+    @model_validator(mode="after")
+    def _validate_plan_graph_integrity(self) -> Self:
+        """Hole-6: enforce plan-graph integrity invariants.
+
+        Catches LLM-output-driven plan errors at construction time so
+        downstream executor code never sees a structurally invalid plan.
+        Raises ``ValueError`` with a descriptive message; Pydantic wraps
+        it in ``ValidationError``.
+
+        Invariants:
+
+        1. **Step ID uniqueness across phases.**  Two phases sharing a
+           ``step_id`` collide in ``ExecutionState.step_results`` and
+           ``state.completed_step_ids`` — the executor would treat the
+           second occurrence as already-complete.
+        2. **Every step has a non-empty ``agent_name``.**  Empty agents
+           cannot be dispatched.
+        3. **Phase IDs are unique within a plan.**  Phase advance walks
+           by ``current_phase`` index, but lookup-by-id (used by amend
+           and resolver) collides on duplicates.
+        4. **Step ``depends_on`` references resolve to a step that
+           exists earlier in the plan.**  Forward references would deadlock
+           the dispatcher.
+
+        See migration-review-summary.md §3 (Hole-6 plan-graph integrity).
+        """
+        seen_step_ids: dict[str, int] = {}
+        seen_phase_ids: set[int] = set()
+        for phase in self.phases:
+            if phase.phase_id in seen_phase_ids:
+                raise ValueError(
+                    f"Plan-graph invariant violation: phase_id "
+                    f"{phase.phase_id} appears more than once."
+                )
+            seen_phase_ids.add(phase.phase_id)
+            for step in phase.steps:
+                if not step.agent_name:
+                    raise ValueError(
+                        f"Plan-graph invariant violation: step "
+                        f"{step.step_id!r} has empty agent_name."
+                    )
+                prior_phase = seen_step_ids.get(step.step_id)
+                if prior_phase is not None:
+                    raise ValueError(
+                        f"Plan-graph invariant violation: step_id "
+                        f"{step.step_id!r} appears in phase {prior_phase} "
+                        f"and again in phase {phase.phase_id}."
+                    )
+                seen_step_ids[step.step_id] = phase.phase_id
+                for dep in step.depends_on:
+                    if dep not in seen_step_ids:
+                        raise ValueError(
+                            f"Plan-graph invariant violation: step "
+                            f"{step.step_id!r} depends on {dep!r}, which "
+                            f"is not declared as an earlier step."
+                        )
+        return self
 
     @property
     def all_steps(self) -> list[PlanStep]:
@@ -581,6 +687,33 @@ class MachinePlan:
     @property
     def total_steps(self) -> int:
         return len(self.all_steps)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Self:
+        # ResourceLimits and ForesightInsight live in other modules and
+        # remain dataclasses for now — re-hydrate them explicitly here so
+        # the Pydantic constructor receives typed values rather than
+        # raw dicts.  PlanPhase is already Pydantic; let its from_dict
+        # handle the nested re-hydration of PlanStep/PlanGate/etc.
+        from agent_baton.models.parallel import ResourceLimits
+        from agent_baton.models.taxonomy import ForesightInsight
+
+        data = dict(data)
+        rl_data = data.get("resource_limits")
+        if rl_data is not None and not isinstance(rl_data, ResourceLimits):
+            data["resource_limits"] = ResourceLimits.from_dict(rl_data)
+        phases_in = data.pop("phases", [])
+        phases_v = [
+            (p if isinstance(p, PlanPhase) else PlanPhase.from_dict(p))
+            for p in phases_in
+        ]
+        fi_in = data.pop("foresight_insights", [])
+        fi_v = [
+            (i if isinstance(i, ForesightInsight) else ForesightInsight.from_dict(i))
+            for i in fi_in
+        ]
+        obj = cls(**data, phases=phases_v, foresight_insights=fi_v)
+        return obj
 
     def to_dict(self) -> dict:
         d = {
@@ -595,8 +728,8 @@ class MachinePlan:
             "pattern_source": self.pattern_source,
             "created_at": self.created_at,
             "task_type": self.task_type,
-            "explicit_knowledge_packs": self.explicit_knowledge_packs,
-            "explicit_knowledge_docs": self.explicit_knowledge_docs,
+            "explicit_knowledge_packs": list(self.explicit_knowledge_packs),
+            "explicit_knowledge_docs": list(self.explicit_knowledge_docs),
             "intervention_level": self.intervention_level,
             "complexity": self.complexity,
             "classification_source": self.classification_source,
@@ -612,40 +745,6 @@ class MachinePlan:
         if self.resource_limits is not None:
             d["resource_limits"] = self.resource_limits.to_dict()
         return d
-
-    @classmethod
-    def from_dict(cls, data: dict) -> MachinePlan:
-        rl_data = data.get("resource_limits")
-        return cls(
-            task_id=data["task_id"],
-            task_summary=data["task_summary"],
-            risk_level=data.get("risk_level", "LOW"),
-            budget_tier=data.get("budget_tier", "standard"),
-            execution_mode=data.get("execution_mode", "phased"),
-            git_strategy=data.get("git_strategy", "commit-per-agent"),
-            phases=[PlanPhase.from_dict(p) for p in data.get("phases", [])],
-            shared_context=data.get("shared_context", ""),
-            pattern_source=data.get("pattern_source"),
-            created_at=data.get("created_at", ""),
-            task_type=data.get("task_type"),
-            explicit_knowledge_packs=data.get("explicit_knowledge_packs", []),
-            explicit_knowledge_docs=data.get("explicit_knowledge_docs", []),
-            intervention_level=data.get("intervention_level", "low"),
-            complexity=data.get("complexity", "medium"),
-            classification_source=data.get("classification_source", "keyword-fallback"),
-            resource_limits=ResourceLimits.from_dict(rl_data) if rl_data else None,
-            detected_stack=data.get("detected_stack"),
-            foresight_insights=[
-                ForesightInsight.from_dict(i)
-                for i in data.get("foresight_insights", [])
-            ],
-            depends_on_task=data.get("depends_on_task"),
-            classification_signals=data.get("classification_signals"),
-            classification_confidence=data.get("classification_confidence"),
-            archetype=data.get("archetype", "phased"),
-            max_retry_phases=data.get("max_retry_phases", 0),
-            compliance_fail_closed=data.get("compliance_fail_closed"),
-        )
 
     def to_markdown(self) -> str:
         """Render as human-readable markdown (for plan.md)."""
@@ -750,8 +849,7 @@ class MachinePlan:
 # Plan amendments (recorded modifications to the plan during execution)
 # ---------------------------------------------------------------------------
 
-@dataclass
-class PlanAmendment:
+class PlanAmendment(ExecutionRecord):
     """A recorded modification to the plan during execution.
 
     Amendments are created by ``baton execute amend`` when the plan
@@ -767,7 +865,8 @@ class PlanAmendment:
         description: What was changed and why.
         phases_added: Phase IDs of newly inserted phases.
         steps_added: Step IDs of newly inserted steps.
-        created_at: ISO 8601 timestamp.
+        created_at: ISO 8601 timestamp; auto-stamped via
+            ``default_factory`` when not supplied at construction.
         feedback: Reviewer or approver feedback that motivated this
             amendment.
     """
@@ -776,50 +875,18 @@ class PlanAmendment:
     trigger: str                    # "gate_feedback", "approval_feedback", "manual"
     trigger_phase_id: int
     description: str
-    phases_added: list[int] = field(default_factory=list)   # phase_ids of new phases
-    steps_added: list[str] = field(default_factory=list)    # step_ids of new steps
-    created_at: str = ""
+    phases_added: list[int] = Field(default_factory=list)   # phase_ids of new phases
+    steps_added: list[str] = Field(default_factory=list)    # step_ids of new steps
+    created_at: str = Field(default_factory=_now_iso_seconds)
     feedback: str = ""              # reviewer/approver feedback that triggered this
-    metadata: dict[str, str] = field(default_factory=dict)  # arbitrary key/value context
-
-    def __post_init__(self) -> None:
-        if not self.created_at:
-            self.created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-    def to_dict(self) -> dict:
-        return {
-            "amendment_id": self.amendment_id,
-            "trigger": self.trigger,
-            "trigger_phase_id": self.trigger_phase_id,
-            "description": self.description,
-            "phases_added": self.phases_added,
-            "steps_added": self.steps_added,
-            "created_at": self.created_at,
-            "feedback": self.feedback,
-            "metadata": self.metadata,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict) -> PlanAmendment:
-        return cls(
-            amendment_id=data.get("amendment_id", ""),
-            trigger=data.get("trigger", "manual"),
-            trigger_phase_id=data.get("trigger_phase_id", 0),
-            description=data.get("description", ""),
-            phases_added=data.get("phases_added", []),
-            steps_added=data.get("steps_added", []),
-            created_at=data.get("created_at", ""),
-            feedback=data.get("feedback", ""),
-            metadata=data.get("metadata", {}),
-        )
+    metadata: dict[str, str] = Field(default_factory=dict)  # arbitrary key/value context
 
 
 # ---------------------------------------------------------------------------
 # Execution State (persisted between CLI calls)
 # ---------------------------------------------------------------------------
 
-@dataclass
-class TeamStepResult:
+class TeamStepResult(ExecutionRecord):
     """Result of a single team member's work within a team step.
 
     Collected individually per member and aggregated into the parent
@@ -837,30 +904,10 @@ class TeamStepResult:
     agent_name: str
     status: str = "complete"        # complete, failed
     outcome: str = ""
-    files_changed: list[str] = field(default_factory=list)
-
-    def to_dict(self) -> dict:
-        return {
-            "member_id": self.member_id,
-            "agent_name": self.agent_name,
-            "status": self.status,
-            "outcome": self.outcome,
-            "files_changed": self.files_changed,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict) -> TeamStepResult:
-        return cls(
-            member_id=data.get("member_id", ""),
-            agent_name=data.get("agent_name", ""),
-            status=data.get("status", "complete"),
-            outcome=data.get("outcome", ""),
-            files_changed=data.get("files_changed", []),
-        )
+    files_changed: list[str] = Field(default_factory=list)
 
 
-@dataclass
-class StepResult:
+class StepResult(ExecutionRecord):
     """Outcome of a single step execution.
 
     Recorded by ``baton execute record`` after each agent dispatch
@@ -911,7 +958,7 @@ class StepResult:
     agent_name: str
     status: str = "complete"        # complete, failed, dispatched
     outcome: str = ""               # free-text summary
-    files_changed: list[str] = field(default_factory=list)
+    files_changed: list[str] = Field(default_factory=list)
     commit_hash: str = ""
     estimated_tokens: int = 0
     # Real per-step token fields (populated by session JSONL scanner).
@@ -927,21 +974,26 @@ class StepResult:
     retries: int = 0
     error: str = ""
     completed_at: str = ""
-    member_results: list[TeamStepResult] = field(default_factory=list)  # team step results
-    deviations: list[str] = field(default_factory=list)  # plan deviations reported by agent
-    interaction_history: list[InteractionTurn] = field(default_factory=list)  # multi-turn exchange
+    member_results: list[TeamStepResult] = Field(default_factory=list)
+    deviations: list[str] = Field(default_factory=list)
+    interaction_history: list[InteractionTurn] = Field(default_factory=list)
     step_type: str = "developing"   # echoed from PlanStep for analytics/queries
     updated_at: str = ""            # ISO 8601 UTC; set on every status mutation; used for bi-directional split-brain reconciliation
     outcome_spillover_path: str = ""  # relative path under execution dir to FULL outcome when truncated
-    gate_additions: list[str] = field(default_factory=list)  # agent-declared commands via GATE_ADDITION: signals
+    gate_additions: list[str] = Field(default_factory=list)  # agent-declared commands via GATE_ADDITION: signals
 
     def to_dict(self) -> dict:
+        # Override required to keep the empty-collection-omission semantics
+        # of the dataclass-era to_dict — golden fixtures and call-site
+        # snapshots assume member_results / interaction_history are absent
+        # when empty.  Deviations is emitted unconditionally even when
+        # empty (matches the historical hand-rolled output).
         d = {
             "step_id": self.step_id,
             "agent_name": self.agent_name,
             "status": self.status,
             "outcome": self.outcome,
-            "files_changed": self.files_changed,
+            "files_changed": list(self.files_changed),
             "commit_hash": self.commit_hash,
             "estimated_tokens": self.estimated_tokens,
             "input_tokens": self.input_tokens,
@@ -955,7 +1007,7 @@ class StepResult:
             "retries": self.retries,
             "error": self.error,
             "completed_at": self.completed_at,
-            "deviations": self.deviations,
+            "deviations": list(self.deviations),
             "step_type": self.step_type,
             "updated_at": self.updated_at,
             "outcome_spillover_path": self.outcome_spillover_path,
@@ -968,30 +1020,14 @@ class StepResult:
             d["gate_additions"] = list(self.gate_additions)
         return d
 
-    @classmethod
-    def from_dict(cls, data: dict) -> StepResult:
-        data = dict(data)  # don't mutate caller's dict
-        member_results = [
-            TeamStepResult.from_dict(m) for m in data.pop("member_results", [])
-        ]
-        # Extract deviations before passing remaining fields to __init__
-        deviations = data.pop("deviations", [])
-        # Extract interaction_history before passing remaining fields to __init__
-        interaction_history = [
-            InteractionTurn.from_dict(t) for t in data.pop("interaction_history", [])
-        ]
-        # Extract gate_additions — optional field, defaults to [] for back-compat.
-        gate_additions = data.pop("gate_additions", [])
-        obj = cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
-        obj.member_results = member_results
-        obj.deviations = deviations
-        obj.interaction_history = interaction_history
-        obj.gate_additions = gate_additions
-        return obj
+    # from_dict inherited from ExecutionRecord — TeamStepResult,
+    # InteractionTurn are Pydantic models so Pydantic auto-rehydrates
+    # member_results / interaction_history from dict payloads.
+    # gate_additions is list[str] (primitive) and also auto-handled.
+    # The old __dataclass_fields__ filter is replaced by extra="ignore".
 
 
-@dataclass
-class ApprovalResult:
+class ApprovalResult(ExecutionRecord):
     """Outcome of a human approval checkpoint.
 
     Recorded by ``baton execute approve`` when a phase with
@@ -1003,7 +1039,8 @@ class ApprovalResult:
             ``"approve-with-feedback"`` (which inserts a remediation
             phase via plan amendment).
         feedback: Optional feedback from the reviewer.
-        decided_at: ISO 8601 timestamp of the decision.
+        decided_at: ISO 8601 timestamp of the decision; auto-stamped
+            via ``default_factory`` when not supplied at construction.
         decision_source: How this approval was decided — ``"human"``,
             ``"daemon_auto"``, ``"api"``, or ``"policy_auto"`` (A2).
         actor: Best-available identity of the approver —
@@ -1015,41 +1052,13 @@ class ApprovalResult:
     phase_id: int
     result: str                     # "approve", "reject", "approve-with-feedback"
     feedback: str = ""
-    decided_at: str = ""
+    decided_at: str = Field(default_factory=_now_iso_seconds)
     decision_source: str = ""       # A2: human | daemon_auto | api | policy_auto
     actor: str = ""                 # A2: $USER@$HOSTNAME or "daemon"
     rationale: str = ""             # A2: structured rationale
 
-    def __post_init__(self) -> None:
-        if not self.decided_at:
-            self.decided_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-    def to_dict(self) -> dict:
-        return {
-            "phase_id": self.phase_id,
-            "result": self.result,
-            "feedback": self.feedback,
-            "decided_at": self.decided_at,
-            "decision_source": self.decision_source,
-            "actor": self.actor,
-            "rationale": self.rationale,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict) -> ApprovalResult:
-        return cls(
-            phase_id=data.get("phase_id", 0),
-            result=data.get("result", "approve"),
-            feedback=data.get("feedback", ""),
-            decided_at=data.get("decided_at", ""),
-            decision_source=data.get("decision_source", ""),
-            actor=data.get("actor", ""),
-            rationale=data.get("rationale", ""),
-        )
-
-
-@dataclass
-class PendingApprovalRequest:
+class PendingApprovalRequest(ExecutionRecord):
     """Audit row for an approval that is currently pending.
 
     Stamped on ``ExecutionState.pending_approval_request`` when the engine
@@ -1066,30 +1075,10 @@ class PendingApprovalRequest:
 
     phase_id: int
     requester: str = ""
-    requested_at: str = ""
-
-    def __post_init__(self) -> None:
-        if not self.requested_at:
-            self.requested_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-    def to_dict(self) -> dict:
-        return {
-            "phase_id": self.phase_id,
-            "requester": self.requester,
-            "requested_at": self.requested_at,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict) -> PendingApprovalRequest:
-        return cls(
-            phase_id=int(data.get("phase_id", 0)),
-            requester=data.get("requester", ""),
-            requested_at=data.get("requested_at", ""),
-        )
+    requested_at: str = Field(default_factory=_now_iso_seconds)
 
 
-@dataclass
-class FeedbackQuestion:
+class FeedbackQuestion(PlanModel):
     """A multiple-choice question presented during a feedback gate.
 
     Feedback gates present 1-4 focused questions to the user after
@@ -1112,34 +1101,15 @@ class FeedbackQuestion:
     question_id: str
     question: str
     context: str = ""
-    options: list[str] = field(default_factory=list)
-    option_agents: list[str] = field(default_factory=list)
-    option_prompts: list[str] = field(default_factory=list)
+    options: list[str] = Field(default_factory=list)
+    option_agents: list[str] = Field(default_factory=list)
+    option_prompts: list[str] = Field(default_factory=list)
 
     def to_dict(self) -> dict:
-        return {
-            "question_id": self.question_id,
-            "question": self.question,
-            "context": self.context,
-            "options": self.options,
-            "option_agents": self.option_agents,
-            "option_prompts": self.option_prompts,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict) -> FeedbackQuestion:
-        return cls(
-            question_id=data.get("question_id", ""),
-            question=data.get("question", ""),
-            context=data.get("context", ""),
-            options=data.get("options", []),
-            option_agents=data.get("option_agents", []),
-            option_prompts=data.get("option_prompts", []),
-        )
+        return self.model_dump(mode="python")
 
 
-@dataclass
-class FeedbackResult:
+class FeedbackResult(ExecutionRecord):
     """Outcome of a user's answer to a feedback question.
 
     When the user selects an option, the engine maps the choice to an
@@ -1151,7 +1121,8 @@ class FeedbackResult:
         chosen_option: The selected option text.
         chosen_index: Zero-based index into the options list.
         dispatched_step_id: Step ID created for the resulting dispatch.
-        decided_at: ISO 8601 timestamp of the decision.
+        decided_at: ISO 8601 timestamp of the decision; auto-stamped via
+            ``default_factory`` when not supplied at construction.
     """
 
     phase_id: int
@@ -1159,40 +1130,22 @@ class FeedbackResult:
     chosen_option: str
     chosen_index: int
     dispatched_step_id: str = ""
-    decided_at: str = ""
-
-    def __post_init__(self) -> None:
-        if not self.decided_at:
-            self.decided_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-    def to_dict(self) -> dict:
-        return {
-            "phase_id": self.phase_id,
-            "question_id": self.question_id,
-            "chosen_option": self.chosen_option,
-            "chosen_index": self.chosen_index,
-            "dispatched_step_id": self.dispatched_step_id,
-            "decided_at": self.decided_at,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict) -> FeedbackResult:
-        return cls(
-            phase_id=data.get("phase_id", 0),
-            question_id=data.get("question_id", ""),
-            chosen_option=data.get("chosen_option", ""),
-            chosen_index=data.get("chosen_index", 0),
-            dispatched_step_id=data.get("dispatched_step_id", ""),
-            decided_at=data.get("decided_at", ""),
-        )
+    decided_at: str = Field(default_factory=_now_iso_seconds)
 
 
-@dataclass
-class GateResult:
+class GateResult(ExecutionRecord):
     """Outcome of a QA gate check.
 
     Recorded by ``baton execute gate`` after running the gate command
     and evaluating the result.
+
+    Pre-Phase-1 prototype: this is the first result type promoted onto
+    the :class:`ExecutionRecord` Pydantic base.  ``to_dict`` and
+    ``from_dict`` are inherited; the historical ``cls.__dataclass_fields__``
+    filter is replaced by the base class's ``extra="ignore"`` config.
+    The on-disk JSON shape is unchanged — verified by
+    ``tests/models/test_execution_roundtrip.py::TestGateResult`` against
+    ``tests/models/golden_states/GateResult.json``.
 
     Attributes:
         phase_id: Phase whose gate was checked.
@@ -1230,10 +1183,14 @@ class GateResult:
     # fields on ExecutionAction so the audit trail captures attribution
     # without requiring a reviewer to re-parse the concatenated gate_command.
     # Both default to empty so existing baton.db records load unchanged.
-    derived_commands: list[dict] = field(default_factory=list)  # [{"command": str, "source_file": str, "rationale": str}, ...]
-    agent_additions: list[str] = field(default_factory=list)    # commands declared via GATE_ADDITION: signals
+    derived_commands: list[dict] = Field(default_factory=list)  # [{"command": str, "source_file": str, "rationale": str}, ...]
+    agent_additions: list[str] = Field(default_factory=list)    # commands declared via GATE_ADDITION: signals
 
     def to_dict(self) -> dict:
+        # Override needed: golden fixtures captured before the provenance
+        # fields existed; byte-identical roundtrip requires omitting the
+        # two new fields when empty.  from_dict is inherited from
+        # ExecutionRecord (extra="ignore" replaces the dataclass filter).
         d: dict = {
             "phase_id": self.phase_id,
             "gate_type": self.gate_type,
@@ -1245,25 +1202,18 @@ class GateResult:
             "decision_source": self.decision_source,
             "actor": self.actor,
         }
-        # Lean payload: omit provenance fields when empty so existing
-        # serialised records stay byte-identical.
         if self.derived_commands:
             d["derived_commands"] = list(self.derived_commands)
         if self.agent_additions:
             d["agent_additions"] = list(self.agent_additions)
         return d
 
-    @classmethod
-    def from_dict(cls, data: dict) -> GateResult:
-        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
-
 
 # ---------------------------------------------------------------------------
 # Consolidation models (cherry-pick rebase of agent commits)
 # ---------------------------------------------------------------------------
 
-@dataclass
-class FileAttribution:
+class FileAttribution(ExecutionRecord):
     """Per-file change attribution to a specific step.
 
     Populated by ``CommitConsolidator._diff_stats()`` after each
@@ -1283,28 +1233,8 @@ class FileAttribution:
     insertions: int = 0
     deletions: int = 0
 
-    def to_dict(self) -> dict:
-        return {
-            "file_path": self.file_path,
-            "step_id": self.step_id,
-            "agent_name": self.agent_name,
-            "insertions": self.insertions,
-            "deletions": self.deletions,
-        }
 
-    @classmethod
-    def from_dict(cls, data: dict) -> FileAttribution:
-        return cls(
-            file_path=data.get("file_path", ""),
-            step_id=data.get("step_id", ""),
-            agent_name=data.get("agent_name", ""),
-            insertions=data.get("insertions", 0),
-            deletions=data.get("deletions", 0),
-        )
-
-
-@dataclass
-class ConsolidationResult:
+class ConsolidationResult(ExecutionRecord):
     """Outcome of rebasing agent commits onto the feature branch.
 
     Stored on ``ExecutionState.consolidation_result`` after
@@ -1337,62 +1267,27 @@ class ConsolidationResult:
     """
 
     status: str = "success"          # success | partial | conflict
-    rebased_commits: list[dict] = field(default_factory=list)
+    rebased_commits: list[dict] = Field(default_factory=list)
     final_head: str = ""
     base_commit: str = ""
-    files_changed: list[str] = field(default_factory=list)
+    files_changed: list[str] = Field(default_factory=list)
     total_insertions: int = 0
     total_deletions: int = 0
-    attributions: list[FileAttribution] = field(default_factory=list)
-    conflict_files: list[str] = field(default_factory=list)
+    attributions: list[FileAttribution] = Field(default_factory=list)
+    conflict_files: list[str] = Field(default_factory=list)
     conflict_step_id: str = ""
-    skipped_steps: list[str] = field(default_factory=list)
+    skipped_steps: list[str] = Field(default_factory=list)
     started_at: str = ""
     completed_at: str = ""
     error: str = ""
 
-    def to_dict(self) -> dict:
-        return {
-            "status": self.status,
-            "rebased_commits": list(self.rebased_commits),
-            "final_head": self.final_head,
-            "base_commit": self.base_commit,
-            "files_changed": self.files_changed,
-            "total_insertions": self.total_insertions,
-            "total_deletions": self.total_deletions,
-            "attributions": [a.to_dict() for a in self.attributions],
-            "conflict_files": self.conflict_files,
-            "conflict_step_id": self.conflict_step_id,
-            "skipped_steps": self.skipped_steps,
-            "started_at": self.started_at,
-            "completed_at": self.completed_at,
-            "error": self.error,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict) -> ConsolidationResult:
-        return cls(
-            status=data.get("status", "success"),
-            rebased_commits=list(data.get("rebased_commits", [])),
-            final_head=data.get("final_head", ""),
-            base_commit=data.get("base_commit", ""),
-            files_changed=data.get("files_changed", []),
-            total_insertions=data.get("total_insertions", 0),
-            total_deletions=data.get("total_deletions", 0),
-            attributions=[
-                FileAttribution.from_dict(a) for a in data.get("attributions", [])
-            ],
-            conflict_files=data.get("conflict_files", []),
-            conflict_step_id=data.get("conflict_step_id", ""),
-            skipped_steps=data.get("skipped_steps", []),
-            started_at=data.get("started_at", ""),
-            completed_at=data.get("completed_at", ""),
-            error=data.get("error", ""),
-        )
+    # to_dict / from_dict inherited from ExecutionRecord — every field is
+    # emitted unconditionally (matching the legacy hand-rolled to_dict),
+    # and FileAttribution rehydration is handled automatically via the
+    # nested type annotation.
 
 
-@dataclass
-class ExecutionState:
+class ExecutionState(BaseModel):
     """Persistent state of a running execution, saved between CLI calls.
 
     Serialized as ``execution-state.json`` in the execution directory.
@@ -1421,90 +1316,113 @@ class ExecutionState:
             yet been attempted or is not applicable.
     """
 
+    # Pydantic config: extra="ignore" preserves the dataclass-era
+    # forward-compat semantics (older state files with extra keys load
+    # unchanged).  validate_assignment=False matches dataclass mutation:
+    # callers do state.step_results.append(...) etc. and we don't want
+    # Pydantic to revalidate the whole model on every assignment.
+    # arbitrary_types_allowed=True keeps the still-dataclass nested
+    # types (KnowledgeGapSignal, ResolvedDecision) buildable.
+    model_config = ConfigDict(
+        extra="ignore",
+        validate_assignment=False,
+        arbitrary_types_allowed=True,
+    )
+
     task_id: str
     plan: MachinePlan
-    current_phase: int = 0              # index into plan.phases
-    current_step_index: int = 0         # index into current phase's steps
-    status: str = "running"             # running, gate_pending, approval_pending, feedback_pending, complete, failed, cancelled
-    step_results: list[StepResult] = field(default_factory=list)
-    gate_results: list[GateResult] = field(default_factory=list)
-    approval_results: list[ApprovalResult] = field(default_factory=list)
-    feedback_results: list[FeedbackResult] = field(default_factory=list)
-    amendments: list[PlanAmendment] = field(default_factory=list)
-    started_at: str = ""
+    current_phase: int = 0
+    current_step_index: int = 0
+    status: str = "running"
+    step_results: list[StepResult] = Field(default_factory=list)
+    gate_results: list[GateResult] = Field(default_factory=list)
+    approval_results: list[ApprovalResult] = Field(default_factory=list)
+    feedback_results: list[FeedbackResult] = Field(default_factory=list)
+    amendments: list[PlanAmendment] = Field(default_factory=list)
+    started_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     completed_at: str = ""
-    pending_gaps: list[KnowledgeGapSignal] = field(default_factory=list)
-    resolved_decisions: list[ResolvedDecision] = field(default_factory=list)
-    # Session-level knowledge deduplication: maps doc key → step_id where
-    # it was first delivered inline.  Empty on fresh starts; absent in older
-    # state files (graceful default applied in from_dict).
-    delivered_knowledge: dict[str, str] = field(default_factory=dict)
-    # Populated by CommitConsolidator.consolidate() at execution completion.
-    # None until consolidation is attempted; absent in older state files
-    # (graceful default applied in from_dict).
+    # KnowledgeGapSignal and ResolvedDecision live in models/knowledge.py
+    # and remain dataclasses; arbitrary_types_allowed lets us hold them.
+    pending_gaps: list[Any] = Field(default_factory=list)
+    resolved_decisions: list[Any] = Field(default_factory=list)
+    delivered_knowledge: dict[str, str] = Field(default_factory=dict)
     consolidation_result: ConsolidationResult | None = None
-    # F0.3 — auditor VETO override (bd-f606).  When True the executor
-    # advances past a VETO'd HIGH/CRITICAL phase but appends an Override
-    # row to compliance-audit.jsonl via ComplianceChainWriter.
-    # Justification is required when force_override=True; the CLI rejects
-    # --force without --justification.
     force_override: bool = False
     override_justification: str = ""
-
-    # Wave 1.3 (bd-86bf): Worktree isolation fields.
-    # step_worktrees maps step_id -> serialised WorktreeHandle dict.
-    # Absent from legacy state files; all accessors use getattr(..., {}).
-    step_worktrees: dict[str, dict] = field(default_factory=dict)
-    # steps_ran_in_place records steps that degraded to in-place execution
-    # because worktree creation failed.  Maps step_id -> reason string.
-    # Absent from legacy state files; defaults to empty dict.
-    steps_ran_in_place: dict[str, str] = field(default_factory=dict)
-    # The git branch that was current when this execution started.
-    # Used as base_branch for all worktree create() calls.
+    step_worktrees: dict[str, dict] = Field(default_factory=dict)
+    steps_ran_in_place: dict[str, str] = Field(default_factory=dict)
     working_branch: str = ""
-    # bd-def9: SHA of the rebased tip of working_branch after the most-recent
-    # successful fold_back().  Empty until the first fold-back completes.
     working_branch_head: str = ""
-
-    # Wave 5 (bd-e208, bd-1483, bd-9839): Human-Agent Loop fields.
-    # All fields use getattr(state, "...", default) in accessors for legacy
-    # file load compatibility.
-    #
-    # bd-e208: Takeover records — active record has empty resumed_at.
-    takeover_records: list[dict] = field(default_factory=list)
-    # bd-1483: Self-heal attempt records.
-    selfheal_attempts: list[dict] = field(default_factory=list)
-    # bd-9839: Speculation records — keyed by spec_id.
-    speculations: dict[str, dict] = field(default_factory=dict)
-
-    # End-user readiness #7: cumulative USD spent across all subsystems
-    # (self-heal, speculation, immune sweeps) for this run.  Persisted so a
-    # resumed run picks up counting where it left off rather than resetting
-    # to zero and allowing the ceiling to be exceeded.
-    # Default 0.0 for legacy state files (getattr guard in all accessors).
+    takeover_records: list[dict] = Field(default_factory=list)
+    selfheal_attempts: list[dict] = Field(default_factory=list)
+    speculations: dict[str, dict] = Field(default_factory=dict)
     run_cumulative_spend_usd: float = 0.0
-
-    # Scope expansion: queued expansion requests detected during execution.
-    # Processed at phase boundaries by _process_pending_expansions().
-    pending_scope_expansions: list[dict] = field(default_factory=list)
+    pending_scope_expansions: list[dict] = Field(default_factory=list)
     scope_expansions_applied: int = 0
-
-    # Approval-request audit (Hole 1 fix): records who requested the currently
-    # pending approval and which phase it is for.  Populated when the engine
-    # transitions into ``status == "approval_pending"``; cleared when the
-    # approval is recorded.  Used by ``record_approval_result`` to enforce:
-    #   * the approval is only accepted while the engine is genuinely waiting,
-    #   * the supplied ``phase_id`` matches the phase that asked,
-    #   * in ``BATON_APPROVAL_MODE=team`` the recording actor is not the
-    #     same identity as the requester (no self-approval).
-    # ``None`` when no approval is currently pending.  Absent in older state
-    # files; ``from_dict`` defaults to ``None`` and accepts the legacy dict
-    # shape transparently.
     pending_approval_request: PendingApprovalRequest | None = None
+    phase_retries: dict[str, int] = Field(default_factory=dict)
 
-    def __post_init__(self) -> None:
-        if not self.started_at:
-            self.started_at = datetime.now(timezone.utc).isoformat()
+    # SQLite Phase C (slice 14): transient OCC version observed at load
+    # time.  PrivateAttr so it does NOT appear in model_dump / to_dict —
+    # the storage layer reads it directly via the underscore-prefixed
+    # attribute when issuing the CAS UPDATE.  Default 0 matches "not
+    # loaded from a row" — fresh ExecutionState constructions skip OCC.
+    _loaded_version: int = PrivateAttr(default=0)
+
+    @model_validator(mode="after")
+    def _validate_invariants(self) -> Self:
+        """I1/I2/I9 belt-and-suspenders for state loaded from disk.
+
+        These mirror the transition methods' preconditions so any
+        ExecutionState constructed from a legacy state file or a
+        Pydantic ``model_validate`` call surfaces invariant violations
+        immediately rather than at the next save.
+
+        Per cross-proposal §2.3 (state loaded from disk with violating
+        shape should raise loud).
+
+        Invariants:
+
+        * **I1**: ``status == "approval_pending"`` ⇔
+          ``pending_approval_request is not None``.
+        * **I2**: terminal ``status in {"complete","failed","cancelled"}``
+          ⇒ ``completed_at != ""``.  Slice 12 closed every Python-side
+          path; this validator catches state files that pre-date the
+          fix being persisted with empty ``completed_at``.
+        * **I9**: ``status == "paused-takeover"`` ⇒ at least one
+          ``takeover_records`` entry has empty ``resumed_at``.
+        """
+        # I1
+        is_approval_pending = self.status == "approval_pending"
+        has_request = self.pending_approval_request is not None
+        if is_approval_pending != has_request:
+            raise ValueError(
+                f"I1 invariant violation on task {self.task_id!r}: "
+                f"status={self.status!r} but "
+                f"pending_approval_request="
+                f"{'set' if has_request else 'None'}.  Expected "
+                f"approval_pending ⇔ pending_approval_request != None."
+            )
+        # I2 — only enforce on load (state files with empty completed_at
+        # in terminal states pre-date the slice 12 funnel).  Auto-fill
+        # rather than raise so existing state files stay loadable.
+        if self.status in {"complete", "failed", "cancelled"} and not self.completed_at:
+            self.completed_at = datetime.now(timezone.utc).isoformat(
+                timespec="seconds"
+            )
+        # I9
+        if self.status == "paused-takeover":
+            active = any(
+                isinstance(r, dict) and not r.get("resumed_at")
+                for r in self.takeover_records
+            )
+            if not active:
+                raise ValueError(
+                    f"I9 invariant violation on task {self.task_id!r}: "
+                    f"status='paused-takeover' but no takeover_records "
+                    f"entry has empty resumed_at."
+                )
+        return self
 
     @property
     def current_phase_obj(self) -> PlanPhase | None:
@@ -1543,6 +1461,222 @@ class ExecutionState:
                 return r
         return None
 
+    # ── Hole-1-class transition methods ──────────────────────────────────────
+    # Coupled-field mutations funnelled through methods so that the I1
+    # invariant — ``status == "approval_pending"`` ⇔
+    # ``pending_approval_request is not None`` — can't drift through an
+    # early ``return`` between the status flip and the audit-row write.
+    # See docs/internal/state-mutation-proposal.md §4.
+
+    def transition_to_approval_pending(
+        self,
+        *,
+        phase_id: int,
+        requester: str,
+        requested_at: str = "",
+    ) -> None:
+        """Atomically flip into the approval-pending blocked state.
+
+        Sets ``status = "approval_pending"`` and stamps
+        ``pending_approval_request`` so the I1 invariant cannot be observed
+        torn by a concurrent save.
+
+        Args:
+            phase_id: Phase whose approval is being requested.
+            requester: Identity (CLI actor / agent ID) that asked.
+            requested_at: ISO 8601 timestamp; auto-stamped if empty.
+
+        Raises:
+            IllegalStateTransition: If current status is not one of
+                ``running``, ``gate_pending``, ``approval_pending``
+                (idempotent re-emit on resume).
+        """
+        from agent_baton.core.engine.errors import IllegalStateTransition
+
+        allowed = {"running", "gate_pending", "approval_pending"}
+        if self.status not in allowed:
+            raise IllegalStateTransition(
+                from_status=self.status,
+                to_status="approval_pending",
+                task_id=self.task_id,
+                context="transition_to_approval_pending",
+            )
+        stamp = requested_at or datetime.now(timezone.utc).isoformat(
+            timespec="seconds"
+        )
+        self.pending_approval_request = PendingApprovalRequest(
+            phase_id=phase_id,
+            requester=requester,
+            requested_at=stamp,
+        )
+        self.status = "approval_pending"
+
+    def clear_approval_pending(self) -> None:
+        """Drop the pending-approval audit row.
+
+        Used by ``record_approval_result`` after the approval has been
+        recorded.  Does NOT flip status — the caller follows up with one
+        of ``transition_to_running`` / ``transition_to_failed`` to move
+        out of the blocked state.  This split exists because the
+        approve-with-feedback path must save+reload between clearing the
+        row and the final status flip.
+        """
+        self.pending_approval_request = None
+
+    def transition_to_failed(
+        self, *, reason: str = "", completed_at: str = "",
+    ) -> None:
+        """Flip status to ``"failed"`` and stamp ``completed_at`` atomically.
+
+        Closes I2 in the failed direction.  Six of the fourteen historical
+        ``state.status = "failed"`` sites did NOT set ``completed_at`` —
+        retrospectives compute duration as ``completed_at - started_at``
+        and skipped or showed ``Inf`` for those rows.  Funnelling through
+        this method makes that impossible.
+
+        Args:
+            reason: Optional human-readable failure reason.  Currently
+                stored only as a transient field for debugging; use the
+                bead store for persistent failure narratives.
+            completed_at: ISO 8601 timestamp; auto-stamped when blank.
+        """
+        stamp = completed_at or datetime.now(timezone.utc).isoformat(
+            timespec="seconds"
+        )
+        # Allowed from any non-terminal status.  Terminal-to-terminal
+        # is treated as a no-op so retried failure handlers don't double-
+        # bump completed_at.
+        if self.status in {"failed", "complete", "cancelled"}:
+            return
+        if self.status == "approval_pending":
+            self.pending_approval_request = None
+        self.completed_at = stamp
+        self.status = "failed"
+        # ``reason`` is intentionally not persisted — production callers
+        # write the reason to a bead via BeadStore.create_bead.  Kept on
+        # the signature so call sites can document it close to the call.
+        _ = reason
+
+    def transition_to_complete(self, *, completed_at: str = "") -> None:
+        """Flip status to ``"complete"`` and stamp ``completed_at`` atomically.
+
+        I2: terminal-with-timestamp.  No-op when already terminal so a
+        retried completion path doesn't shift the recorded timestamp.
+        """
+        if self.status in {"complete", "failed", "cancelled"}:
+            return
+        stamp = completed_at or datetime.now(timezone.utc).isoformat(
+            timespec="seconds"
+        )
+        self.completed_at = stamp
+        self.status = "complete"
+
+    def transition_to_cancelled(self, *, completed_at: str = "") -> None:
+        """Flip status to ``"cancelled"`` and stamp ``completed_at`` atomically.
+
+        Used by the CLI ``cancel`` verb and the REST stop-execution
+        endpoint.  Same I2 contract as ``transition_to_complete``.
+        """
+        if self.status in {"complete", "failed", "cancelled"}:
+            return
+        stamp = completed_at or datetime.now(timezone.utc).isoformat(
+            timespec="seconds"
+        )
+        self.completed_at = stamp
+        self.status = "cancelled"
+
+    def transition_to_paused_takeover(
+        self, *, takeover_record: dict | None = None,
+    ) -> None:
+        """Flip status to ``"paused-takeover"`` with an active takeover row.
+
+        I9: ``status == "paused-takeover"`` ⇒ at least one
+        ``takeover_records`` entry has empty ``resumed_at``.  Funnelling
+        the flip + record append through one method makes the invariant
+        structurally impossible to break.
+
+        Args:
+            takeover_record: The dict to append to ``takeover_records``.
+                When ``None``, an active row from existing records is
+                expected; the method then merely flips status.  Resolver
+                code at ``resolver.py:236-240`` walks the records list
+                looking for an ``resumed_at == ""`` entry.
+        """
+        if takeover_record is not None:
+            self.takeover_records.append(takeover_record)
+        # I9 belt-and-suspenders: refuse to flip if no active record
+        # exists, so the invariant cannot be observed broken.  The
+        # active-row predicate matches resolver.py.
+        active = any(
+            isinstance(r, dict) and not r.get("resumed_at")
+            for r in self.takeover_records
+        )
+        if not active:
+            from agent_baton.core.engine.errors import IllegalStateTransition
+
+            raise IllegalStateTransition(
+                from_status=self.status,
+                to_status="paused-takeover",
+                task_id=self.task_id,
+                context=(
+                    "transition_to_paused_takeover requires at least one "
+                    "active takeover record (resumed_at == '')"
+                ),
+            )
+        self.status = "paused-takeover"
+
+    def transition_to_running(
+        self,
+        *,
+        from_status: Literal[
+            "approval_pending",
+            "feedback_pending",
+            "gate_pending",
+            "budget_exceeded",
+            "paused-takeover",
+            "pending",
+            "running",
+        ],
+    ) -> None:
+        """Flip status to ``"running"``, asserting the prior status.
+
+        Also clears ``pending_approval_request`` if it is still set —
+        leaving an audit row behind after exiting approval_pending would
+        violate I1 in the reverse direction.
+
+        Args:
+            from_status: The status the caller observed before this
+                transition.  The method asserts the actual current status
+                matches.
+
+        Raises:
+            IllegalStateTransition: If ``self.status != from_status``.
+        """
+        from agent_baton.core.engine.errors import IllegalStateTransition
+
+        _allowed_sources = {
+            "approval_pending",
+            "feedback_pending",
+            "gate_pending",
+            "budget_exceeded",
+            "paused-takeover",
+            "pending",
+            "running",
+        }
+        if from_status not in _allowed_sources or self.status != from_status:
+            raise IllegalStateTransition(
+                from_status=self.status,
+                to_status="running",
+                task_id=self.task_id,
+                context=f"transition_to_running(from_status={from_status!r})",
+            )
+        # I1 belt-and-suspenders: an inherited pending_approval_request
+        # while running is the exact failure mode the funnel exists to
+        # prevent.  Clear it on any exit out of approval_pending.
+        if from_status == "approval_pending":
+            self.pending_approval_request = None
+        self.status = "running"
+
     def to_dict(self) -> dict:
         return {
             "task_id": self.task_id,
@@ -1576,6 +1710,9 @@ class ExecutionState:
             "takeover_records": list(getattr(self, "takeover_records", [])),
             "selfheal_attempts": list(getattr(self, "selfheal_attempts", [])),
             "speculations": dict(getattr(self, "speculations", {})),
+            # SQLite Phase B: investigative-archetype phase retry counts.
+            # Pulled out of the speculations bimodal scratchpad.
+            "phase_retries": dict(getattr(self, "phase_retries", {})),
             # bd-def9: rebased tip SHA after most-recent fold_back()
             "working_branch_head": getattr(self, "working_branch_head", ""),
             # end-user readiness #7: run-level cumulative spend for ceiling tracking
@@ -1593,6 +1730,21 @@ class ExecutionState:
     @classmethod
     def from_dict(cls, data: dict) -> ExecutionState:
         cr_data = data.get("consolidation_result")
+
+        # SQLite Phase B: lift _phase_retries out of speculations.  Older
+        # state files keyed phase retries inside the speculations dict
+        # under the magic ``_phase_retries`` slot — the dict was bimodal.
+        # Slice 6 separates the two; this shim makes legacy files load.
+        speculations_in = dict(data.get("speculations", {}))
+        legacy_retries = speculations_in.pop("_phase_retries", None)
+        explicit_retries = data.get("phase_retries")
+        if explicit_retries is not None:
+            phase_retries = {str(k): int(v) for k, v in explicit_retries.items()}
+        elif isinstance(legacy_retries, dict):
+            phase_retries = {str(k): int(v) for k, v in legacy_retries.items()}
+        else:
+            phase_retries = {}
+
         return cls(
             task_id=data["task_id"],
             plan=MachinePlan.from_dict(data["plan"]),
@@ -1619,7 +1771,10 @@ class ExecutionState:
             # Wave 5 (bd-e208, bd-1483, bd-9839): default to empty for legacy files
             takeover_records=list(data.get("takeover_records", [])),
             selfheal_attempts=list(data.get("selfheal_attempts", [])),
-            speculations=dict(data.get("speculations", {})),
+            # speculations no longer carries _phase_retries (split above);
+            # use the post-shim copy that has it removed.
+            speculations=speculations_in,
+            phase_retries=phase_retries,
             # bd-def9: getattr guard for legacy state files that predate this field
             working_branch_head=data.get("working_branch_head", ""),
             # end-user readiness #7: default 0.0 for legacy state files

@@ -673,10 +673,27 @@ class ExecutionEngine:
         When the two backends diverge (SQLite fails but file succeeds), a
         WARNING is emitted with the task_id, status, and per-step status
         summary so the split-brain is visible in logs without DB inspection.
+
+        v41 (SQLite Phase C / slice 14): when the SQLite CAS update raises
+        ``ConcurrentModificationError``, the exception bubbles up rather
+        than silently falling back to file persistence — file persistence
+        does not honour OCC, so masking the conflict would re-introduce
+        the silent last-write-wins failure mode the version column exists
+        to prevent.  Higher-level callers can retry by reloading and
+        re-applying via ``state.transition_to_X`` per cross-proposal §2.2.
         """
+        from agent_baton.core.engine.errors import ConcurrentModificationError
+
         if self._storage is not None:
             try:
                 self._storage.save_execution(state)
+            except ConcurrentModificationError:
+                # OCC conflict — propagate so the caller can re-load and
+                # re-apply via the transition funnel.  Do NOT fall back
+                # to file persistence: the file backend doesn't honour
+                # OCC, so dropping to it would re-introduce the
+                # last-write-wins data loss the CAS exists to prevent.
+                raise
             except Exception as e:
                 step_summary = ", ".join(
                     f"{r.step_id}={r.status}" for r in state.step_results
@@ -703,6 +720,56 @@ class ExecutionEngine:
                     )
         else:
             self._persistence.save(state)
+
+    def _save_execution_with_occ_retry(
+        self,
+        state: ExecutionState,
+        *,
+        re_apply: "callable | None" = None,
+        max_retries: int = 3,
+    ) -> ExecutionState:
+        """Save *state* with OCC retry; re-apply via the transition funnel.
+
+        When :class:`ConcurrentModificationError` fires, this method:
+
+        1. Reloads the persisted row (now at the newer version).
+        2. If *re_apply* was supplied, calls it with the reloaded state
+           to re-apply the in-flight delta.  *re_apply* MUST mutate the
+           state via ``state.transition_to_X`` methods so the I1/I2/I9
+           invariants hold across the merge.
+        3. Retries the save up to *max_retries* times.
+
+        On exhausted retries the most recent
+        :class:`ConcurrentModificationError` propagates so the operator
+        sees a loud failure rather than silent stomp.
+
+        Cross-proposal §2.2: "the OCC retry handler needs to call
+        state.transition_to_X(...) to re-apply the conflicting write".
+        Returns the state object that was successfully saved (this may
+        differ from the input *state* after a reload).
+        """
+        from agent_baton.core.engine.errors import ConcurrentModificationError
+
+        for attempt in range(max_retries):
+            try:
+                self._save_execution(state)
+                return state
+            except ConcurrentModificationError:
+                _log.warning(
+                    "OCC conflict on task %r attempt %d/%d; reloading.",
+                    state.task_id, attempt + 1, max_retries,
+                )
+                reloaded = self._load_execution()
+                if reloaded is None:
+                    # Row vanished between conflict detection and reload.
+                    # Surface as the original exception.
+                    raise
+                if re_apply is not None:
+                    re_apply(reloaded)
+                state = reloaded
+        # Final attempt — let any conflict propagate.
+        self._save_execution(state)
+        return state
 
     def _load_execution(self) -> ExecutionState | None:
         """Load execution state via storage backend or legacy file.
@@ -760,6 +827,25 @@ class ExecutionEngine:
                         self._task_id,
                     )
                     return None
+                # Stash the SQLite row's OCC version on the file-loaded
+                # state (best-effort) so the next save_execution still
+                # walks the CAS path and detects a real conflict.  Without
+                # this, file-loaded states default to _loaded_version=0
+                # and the slice-14 split-brain recovery branch silently
+                # overwrites concurrent writers' progress.  See review
+                # finding (slice 14 follow-up) for the failure mode.
+                if file_state is not None:
+                    getter = getattr(self._storage, "get_execution_version", None)
+                    if getter is not None:
+                        try:
+                            persisted = getter(file_state.task_id)
+                            if persisted is not None:
+                                file_state._loaded_version = persisted
+                        except Exception as ver_exc:  # pragma: no cover
+                            _log.debug(
+                                "get_execution_version failed (non-fatal): %s",
+                                ver_exc,
+                            )
                 return file_state
             return state
         else:
@@ -1152,8 +1238,9 @@ class ExecutionEngine:
                 try:
                     state = self._load_execution()
                     if state is not None:
-                        state.status = "failed"
-                        state.completed_at = state.completed_at or _utcnow()
+                        state.transition_to_failed(
+                            completed_at=state.completed_at,
+                        )
                         # Surface the reason in a status-reason field.  We
                         # reuse override_justification (the closest existing
                         # operator-visible field) but only when empty.
@@ -1546,7 +1633,7 @@ class ExecutionEngine:
             state = self._load_execution()
             if state is not None:
                 state.failed_step_ids.add(step_id)
-                state.status = "failed"
+                state.transition_to_failed()
                 self._save_execution(state)
                 self._compliance_policy_event(
                     state, step_id, "",
@@ -1627,6 +1714,16 @@ class ExecutionEngine:
         if self._worktree_mgr is not None:
             _working_branch = self._detect_branch()
 
+        # I1: when start() flips to approval_pending for HIGH-risk pre-flight,
+        # stamp the pending_approval_request audit row in the same construction
+        # so the state passes the slice-13 model_validator on save+reload.
+        _initial_par = None
+        if initial_status == "approval_pending" and plan.phases:
+            _initial_par = PendingApprovalRequest(
+                phase_id=plan.phases[0].phase_id,
+                requester=_cli_actor(),
+                requested_at=_utcnow(),
+            )
         state = ExecutionState(
             task_id=plan.task_id,
             plan=plan,
@@ -1636,6 +1733,7 @@ class ExecutionEngine:
             force_override=self._force_override,
             override_justification=self._override_justification,
             working_branch=_working_branch,
+            pending_approval_request=_initial_par,
         )
 
         # Initialise trace (in-memory; committed to disk on complete()).
@@ -3013,7 +3111,8 @@ class ExecutionEngine:
                     },
                     plan=state.plan,
                 )
-            state.status = "gate_failed"
+            # Non-coupled status flip; no sibling field paired with gate_failed.
+            state.status = "gate_failed"  # noqa: state-mutation
         else:
             self._publish(evt.gate_passed(
                 task_id=state.task_id,
@@ -3092,7 +3191,8 @@ class ExecutionEngine:
                 f"No failed gate result found for phase_id={phase_id}. "
                 "Check 'baton execute status' for the correct phase ID."
             )
-        state.status = "gate_pending"
+        # Non-coupled status flip; no sibling field paired with gate_pending.
+        state.status = "gate_pending"  # noqa: state-mutation
         self._save_execution(state)
 
     def fail_gate(self, phase_id: int) -> None:
@@ -3111,7 +3211,9 @@ class ExecutionEngine:
                 f"fail_gate() requires status 'gate_failed', got '{state.status}'. "
                 "Use 'baton execute fail' only after a gate has failed."
             )
-        state.status = "failed"
+        # transition_to_failed enforces I2 (completed_at stamped) and is
+        # safe from any non-terminal status; gate_failed qualifies.
+        state.transition_to_failed(reason="manual fail_gate")
         self._save_execution(state)
 
     # ── Wave 5.1 — Developer Takeover (bd-e208) ──────────────────────────────
@@ -3175,11 +3277,13 @@ class ExecutionEngine:
             last_known_worktree_head=head,
         )
 
-        # Append to state.
-        records = list(getattr(state, "takeover_records", []))
-        records.append(record.to_dict())
-        state.takeover_records = records
-        state.status = "paused-takeover"
+        # I9 funnel: append + status flip via transition method.  Without
+        # this funnel a save in between the two writes would persist a
+        # paused-takeover state with no active record.
+        record_dict = record.to_dict()
+        if not isinstance(state.takeover_records, list):
+            state.takeover_records = []
+        state.transition_to_paused_takeover(takeover_record=record_dict)
         self._save_execution(state)
 
         # Emit trace event.
@@ -3255,7 +3359,9 @@ class ExecutionEngine:
             record.resolution = "aborted"
             records_raw[active_idx] = record.to_dict()
             state.takeover_records = records_raw
-            state.status = "failed"
+            # I2: stamp completed_at on the failed transition.  Resolved
+            # the active takeover row above; no I9 row left dangling.
+            state.transition_to_failed(reason="takeover aborted")
             self._save_execution(state)
             if self._trace is not None:
                 self._tracer.record_event(
@@ -3359,17 +3465,20 @@ class ExecutionEngine:
                         "Fix the remaining issues and run 'baton execute resume' again."
                     )
 
-        # Update takeover record.
+        # Update takeover record only when the gate has actually passed.
+        # If the gate is still failing the takeover stays "active" (the
+        # record keeps resumed_at empty) — this preserves I9: status
+        # remains "paused-takeover" iff at least one record is active.
         records_raw = list(getattr(state, "takeover_records", []))
-        for i, r in enumerate(records_raw):
-            if r.get("step_id") == step_id and not r.get("resumed_at"):
-                r["resumed_at"] = _utcnow()
-                r["resolution"] = "completed" if gate_passed else "still-failing"
-                records_raw[i] = r
-                break
-        state.takeover_records = records_raw
-
         if gate_passed:
+            for i, r in enumerate(records_raw):
+                if r.get("step_id") == step_id and not r.get("resumed_at"):
+                    r["resumed_at"] = _utcnow()
+                    r["resolution"] = "completed"
+                    records_raw[i] = r
+                    break
+            state.takeover_records = records_raw
+
             # Fold back developer commits into parent branch.
             if self._worktree_mgr is not None and str(handle.path) != "/dev/null":
                 try:
@@ -3399,7 +3508,10 @@ class ExecutionEngine:
                     },
                 )
         else:
-            state.status = "paused-takeover"
+            # Status already paused-takeover from start_takeover; the
+            # active record is preserved.  No transition needed — simply
+            # persist the unchanged state for the resume cycle's sake.
+            pass
 
         self._save_execution(state)
         return gate_passed
@@ -3601,8 +3713,11 @@ class ExecutionEngine:
             steps_completed=len(state.completed_step_ids),
             steps_failed=len(state.failed_step_ids),
         ))
-        state.status = "complete"
-        state.completed_at = _utcnow()
+        # I2: atomically flip status + stamp completed_at via the
+        # transition method so a save in between cannot persist
+        # status="complete" with completed_at="" (the latter is what
+        # the retrospective reads to compute duration).
+        state.transition_to_complete()
 
         # ── Wave 1.3 (bd-86bf): sweep straggler worktrees ────────────────────
         # Any worktrees still registered in step_worktrees at completion time
@@ -4212,10 +4327,6 @@ class ExecutionEngine:
             rationale=rationale,
         )
         state.approval_results.append(approval)
-        # Clear the pending-approval audit row — the approval has been
-        # recorded.  Subsequent stray record_approval_result calls now hit
-        # the status != approval_pending guard above.
-        state.pending_approval_request = None
 
         if self._trace is not None:
             self._tracer.record_event(
@@ -4228,13 +4339,23 @@ class ExecutionEngine:
             )
 
         if result == "reject":
-            state.status = "failed"
+            # I1+I2: clear the audit row and flip status atomically. The
+            # ordering — clear first, then transition — keeps the persisted
+            # state inside the I1 invariant: a save in the middle sees
+            # status="approval_pending"/request=Pending or
+            # status="failed"/request=None+completed_at=stamped, never
+            # the torn pair.  transition_to_failed also stamps completed_at,
+            # closing the I2 gap that was previously a 6/14 omission rate.
+            state.clear_approval_pending()
+            state.transition_to_failed(reason="approval rejected")
         elif result == "approve":
-            state.status = "running"
+            state.transition_to_running(from_status="approval_pending")
         elif result == "approve-with-feedback":
-            # Insert a remediation phase after the current phase.
-            # Save state first so _amend_from_feedback → amend_plan can see
-            # the approval result when it loads state.
+            # Insert a remediation phase after the current phase.  Hold the
+            # pending-approval audit row across the save+amend+reload so a
+            # crash mid-amend reloads as approval_pending+request, not as
+            # the I1-violating approval_pending+None.  The transition out
+            # of approval_pending happens AFTER the reload, atomically.
             self._save_execution(state)
             self._amend_from_feedback(state, phase_id, feedback)
             # amend_plan saves its own copy with the amendment applied.
@@ -4250,7 +4371,7 @@ class ExecutionEngine:
                     context="record_approval_result:approve-with-feedback",
                 )
             state = _reloaded
-            state.status = "running"
+            state.transition_to_running(from_status="approval_pending")
 
         self._save_execution(state)
 
@@ -4527,7 +4648,6 @@ class ExecutionEngine:
                 # If conflict detected and escalation requested, pause
                 # for human review instead of auto-completing.
                 if conflict and spec and spec.conflict_handling == "escalate":
-                    state.status = "approval_pending"
                     parent.status = "dispatched"  # keep step open
                     parent.deviations.append(
                         f"Conflict escalated: {conflict.conflict_id}"
@@ -4548,12 +4668,12 @@ class ExecutionEngine:
                                 f"{conflict.conflict_id}.  Review and approve "
                                 f"to continue."
                             )
-                        state.pending_approval_request = PendingApprovalRequest(
+                        state.transition_to_approval_pending(
                             phase_id=current_phase.phase_id,
                             requester=_cli_actor(),
                             requested_at=_utcnow(),
                         )
-                    self._save_execution(state)
+                        self._save_execution(state)
                     return
 
                 # Apply synthesis strategy.
@@ -4780,7 +4900,9 @@ class ExecutionEngine:
             if self._enforce_token_budget and state.status not in (
                 "complete", "failed", "budget_exceeded"
             ):
-                state.status = "budget_exceeded"
+                # Non-coupled status flip; budget_exceeded is reversible
+                # via resume_budget().  Not Hole-1-class.
+                state.status = "budget_exceeded"  # noqa: state-mutation
                 _log.warning(
                     "Budget enforced: setting status=budget_exceeded. %s. "
                     "No new dispatches will be issued. "
@@ -4820,7 +4942,8 @@ class ExecutionEngine:
                 f"got '{state.status}'. "
                 "Use 'baton execute status' to check current state."
             )
-        state.status = "running"
+        # transition_to_running enforces the from_status precondition.
+        state.transition_to_running(from_status="budget_exceeded")
         self._save_execution(state)
         _log.info("Budget status cleared — execution resumed for task %s.", state.task_id)
 
@@ -6458,15 +6581,17 @@ class ExecutionEngine:
         context = phase_obj.approval_description or self._build_approval_context(
             state, phase_obj,
         )
-        # Stamp the pending-approval audit row.  Idempotent: if the same phase
-        # is re-emitted (e.g. after resume), preserve the original requester
-        # rather than overwriting it with whoever happens to be calling now.
+        # I1: status="approval_pending" ⇔ pending_approval_request != None.
+        # Funnel both writes through transition_to_approval_pending so they
+        # land atomically.  Idempotent: if the same phase is re-emitted
+        # (e.g. after resume), preserve the original requester rather than
+        # overwriting it with whoever happens to be calling now.
         existing = getattr(state, "pending_approval_request", None)
         if (
             existing is None
             or existing.phase_id != phase_obj.phase_id
         ):
-            state.pending_approval_request = PendingApprovalRequest(
+            state.transition_to_approval_pending(
                 phase_id=phase_obj.phase_id,
                 requester=_cli_actor(),
                 requested_at=_utcnow(),
@@ -6700,7 +6825,8 @@ class ExecutionEngine:
 
         # Check if all feedback questions are now resolved.
         if self._feedback_resolved_for_phase(state, current_pid):
-            state.status = "running"
+            # transition_to_running enforces the from_status precondition.
+            state.transition_to_running(from_status="feedback_pending")
         self._save_execution(state)
 
         if self._trace is not None:
@@ -6979,7 +7105,8 @@ class ExecutionEngine:
             result.outcome = (
                 f"TIMEOUT after {effective}s (elapsed {int(elapsed)}s)"
             )
-            state.status = "failed"
+            # I2: completed_at stamped via transition method.
+            state.transition_to_failed(reason="step timeout")
             self._save_execution(state)
 
             # Best-effort warning bead — must not block timeout enforcement.

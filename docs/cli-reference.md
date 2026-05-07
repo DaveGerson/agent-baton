@@ -365,6 +365,28 @@ re-dispatched.
 
 ---
 
+#### `baton execute export`
+
+Snapshot an execution's full state to a JSON file (read-only).
+
+```
+baton execute export [--task-id ID] [--to PATH]
+```
+
+Replaces the legacy `FileStorage` primary backend (removed from the
+factory in slice 15 of the SQLite-parity migration). The default
+output path is `execution-state.json` in the current working directory;
+the parent directory is created if it doesn't exist.
+
+The exported JSON is `state.to_dict()` — exactly the on-disk shape the
+file backend used to write — so existing tooling that consumed
+`execution-state.json` continues to work against the export.
+
+Storage-internal fields like the OCC `version` and the in-memory
+`_loaded_version` PrivateAttr are intentionally omitted.
+
+---
+
 #### `baton execute list`
 
 List all executions (active and completed).

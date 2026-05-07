@@ -3,10 +3,18 @@
 Delegates to StatePersistence, UsageLogger, AgentTelemetry, EventPersistence,
 TraceRecorder, RetrospectiveEngine, PatternLearner, BudgetTuner, and
 ContextManager so legacy projects continue to work unchanged.
+
+Deprecation status (slice 10 / SQLite parity Phase D Stage 1): with
+SQLite Phases A+B at parity for every ExecutionState field, the file
+backend is now treated as a legacy fallback.  Constructing a
+``FileStorage`` emits :class:`DeprecationWarning`; the recommended
+backend is :class:`SqliteStorage`.  Stages 2-3 (snapshot-only mode,
+removal from the factory) land in slice 15.
 """
 from __future__ import annotations
 
 import json
+import warnings
 from pathlib import Path
 
 from agent_baton.core.engine.persistence import StatePersistence
@@ -38,6 +46,20 @@ class FileStorage:
     """
 
     def __init__(self, context_root: Path) -> None:
+        # Stage 1 of the file-backend deprecation (slice 10 of the SQLite
+        # parity migration plan).  SQLite Phases A+B reach lossless parity
+        # for ExecutionState; new projects should use ``SqliteStorage``.
+        # The warning fires for every direct FileStorage construction.
+        # Tests that exercise the file backend deliberately suppress this
+        # via ``warnings.catch_warnings()``.
+        warnings.warn(
+            "FileStorage is deprecated as a primary storage backend. "
+            "Use SqliteStorage (the default for new projects). "
+            "FileStorage will move to snapshot-only mode in a future "
+            "release and be removed from the StorageBackend factory.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self._root = context_root
 
     @property

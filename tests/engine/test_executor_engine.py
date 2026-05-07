@@ -59,10 +59,14 @@ def _step(step_id: str = "1.1") -> PlanStep:
 
 
 def _phase(phase_id: int = 0, steps: list[PlanStep] | None = None) -> PlanPhase:
+    # Default step_id includes phase_id so multi-phase fixtures produce
+    # unique step IDs across phases (slice 11's Hole-6 plan-graph
+    # validator rejects phase-spanning step_id collisions).
+    default_step = _step(step_id=f"{phase_id}.1")
     return PlanPhase(
         phase_id=phase_id,
         name=f"phase-{phase_id}",
-        steps=steps if steps is not None else [_step()],
+        steps=steps if steps is not None else [default_step],
     )
 
 

@@ -1289,9 +1289,18 @@ async def retry_step(
     card, project_root, context_root = _resolve_worker_context(card_id, scanner, store)
 
     try:
-        backend = detect_backend(context_root)
-        storage = get_project_storage(context_root, backend=backend)
+        # Slice 15 fallback: SQLite first, then file backend for legacy
+        # un-migrated projects.  Detect BEFORE constructing the SQLite
+        # store, because SqliteStorage() creates baton.db as a side
+        # effect — calling detect_backend afterwards would always see
+        # 'sqlite' even on a previously file-only project.
+        was_file_only = detect_backend(context_root) == "file"
+        storage = get_project_storage(context_root)
         state = storage.load_execution(card_id)
+        if state is None and was_file_only:
+            from agent_baton.core.engine.persistence import StatePersistence
+            sp = StatePersistence(context_root, task_id=card_id)
+            state = sp.load()
     except Exception as exc:
         raise HTTPException(
             status_code=500,
@@ -1387,9 +1396,18 @@ async def skip_step(
     card, project_root, context_root = _resolve_worker_context(card_id, scanner, store)
 
     try:
-        backend = detect_backend(context_root)
-        storage = get_project_storage(context_root, backend=backend)
+        # Slice 15 fallback: SQLite first, then file backend for legacy
+        # un-migrated projects.  Detect BEFORE constructing the SQLite
+        # store, because SqliteStorage() creates baton.db as a side
+        # effect — calling detect_backend afterwards would always see
+        # 'sqlite' even on a previously file-only project.
+        was_file_only = detect_backend(context_root) == "file"
+        storage = get_project_storage(context_root)
         state = storage.load_execution(card_id)
+        if state is None and was_file_only:
+            from agent_baton.core.engine.persistence import StatePersistence
+            sp = StatePersistence(context_root, task_id=card_id)
+            state = sp.load()
     except Exception as exc:
         raise HTTPException(
             status_code=500,
@@ -1725,9 +1743,16 @@ async def list_pending_gates(
         context_root = project_root / ".claude" / "team-context"
         storage = None
         try:
-            backend = detect_backend(context_root)
-            storage = get_project_storage(context_root, backend=backend)
+            # Slice 15: file fallback for legacy un-migrated projects.
+            # detect_backend BEFORE constructing storage — SqliteStorage
+            # creates baton.db as a side effect.
+            was_file_only = detect_backend(context_root) == "file"
+            storage = get_project_storage(context_root)
             state = storage.load_execution(card.card_id)
+            if state is None and was_file_only:
+                from agent_baton.core.engine.persistence import StatePersistence
+                sp = StatePersistence(context_root, task_id=card.card_id)
+                state = sp.load()
         except Exception:
             state = None
 
@@ -2520,9 +2545,18 @@ async def get_card_changelist(
 
     context_root = project_root / ".claude" / "team-context"
     try:
-        backend = detect_backend(context_root)
-        storage = get_project_storage(context_root, backend=backend)
+        # Slice 15 fallback: SQLite first, then file backend for legacy
+        # un-migrated projects.  Detect BEFORE constructing the SQLite
+        # store, because SqliteStorage() creates baton.db as a side
+        # effect — calling detect_backend afterwards would always see
+        # 'sqlite' even on a previously file-only project.
+        was_file_only = detect_backend(context_root) == "file"
+        storage = get_project_storage(context_root)
         state = storage.load_execution(card_id)
+        if state is None and was_file_only:
+            from agent_baton.core.engine.persistence import StatePersistence
+            sp = StatePersistence(context_root, task_id=card_id)
+            state = sp.load()
     except Exception as exc:
         raise HTTPException(
             status_code=500,
@@ -2620,9 +2654,18 @@ async def merge_card(
 
     context_root = project_root / ".claude" / "team-context"
     try:
-        backend = detect_backend(context_root)
-        storage = get_project_storage(context_root, backend=backend)
+        # Slice 15 fallback: SQLite first, then file backend for legacy
+        # un-migrated projects.  Detect BEFORE constructing the SQLite
+        # store, because SqliteStorage() creates baton.db as a side
+        # effect — calling detect_backend afterwards would always see
+        # 'sqlite' even on a previously file-only project.
+        was_file_only = detect_backend(context_root) == "file"
+        storage = get_project_storage(context_root)
         state = storage.load_execution(card_id)
+        if state is None and was_file_only:
+            from agent_baton.core.engine.persistence import StatePersistence
+            sp = StatePersistence(context_root, task_id=card_id)
+            state = sp.load()
     except Exception as exc:
         raise HTTPException(
             status_code=500,

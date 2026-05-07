@@ -67,11 +67,28 @@ def _plan(phases: list[PlanPhase] | None = None) -> MachinePlan:
 
 
 def _state(status: str = "running") -> ExecutionState:
-    return ExecutionState(
-        task_id="task-test",
-        plan=_plan(),
-        status=status,
-    )
+    # Slice 13's I1/I2/I9 model_validator forbids constructing torn
+    # states; the fixture must produce a state that satisfies the
+    # invariants for the requested status.
+    from agent_baton.models.execution import PendingApprovalRequest
+    kwargs: dict = {
+        "task_id": "task-test",
+        "plan": _plan(),
+        "status": status,
+    }
+    if status == "approval_pending":
+        kwargs["pending_approval_request"] = PendingApprovalRequest(
+            phase_id=0, requester="test",
+        )
+    if status in {"complete", "failed", "cancelled"}:
+        kwargs["completed_at"] = "2026-05-07T00:00:00+00:00"
+    if status == "paused-takeover":
+        kwargs["takeover_records"] = [
+            {"takeover_id": "t-1", "started_at": "2026-05-07T00:00:00+00:00",
+             "started_by": "test", "scope": "phase", "reason": "test",
+             "resumed_at": ""},
+        ]
+    return ExecutionState(**kwargs)
 
 
 def _decision(kind: DecisionKind, **kwargs) -> ResolverDecision:
@@ -230,10 +247,23 @@ class TestExecutingPhaseState:
 
     # ── Approval / feedback flips ────────────────────────────────────────────
 
-    def test_phase_needs_approval_flips_to_approval_pending(self) -> None:
+    def test_phase_needs_approval_is_noop(self) -> None:
+        """Slice 2: I1-coupled flip moved to executor's _approval_action.
+
+        ExecutingPhaseState used to flip state.status for
+        PHASE_NEEDS_APPROVAL but that left the
+        pending_approval_request stamping to a different code path
+        (different file, different commit), risking I1 violations on
+        a save in between. Slice 2 made the state-class arm a no-op
+        and gave _approval_action ownership of the
+        transition_to_approval_pending call so the two writes are
+        atomic.
+        """
         state = self._state()
+        # The handler must NOT flip status — that's the engine's job
+        # via transition_to_approval_pending in _approval_action.
         self.handler.handle(state, _decision(DecisionKind.PHASE_NEEDS_APPROVAL, phase_id=0))
-        assert state.status == "approval_pending"
+        assert state.status == "running"
 
     def test_phase_needs_feedback_flips_to_feedback_pending(self) -> None:
         state = self._state()

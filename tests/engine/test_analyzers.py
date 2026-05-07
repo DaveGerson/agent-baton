@@ -86,10 +86,21 @@ class TestDependencyAnalyzer:
         assert "not found" not in caplog.text
 
     def test_forward_reference_emits_warning(self, caplog: Any) -> None:
-        """A step depending on a step not yet seen generates a warning."""
+        """A step depending on a step not yet seen generates a warning.
+
+        Slice 11's Hole-6 validator now rejects unknown depends_on at
+        MachinePlan construction time; this analyzer warning was the
+        pre-Hole-6 runtime fallback.  Bypass the model_validator by
+        mutating depends_on after construction so the analyzer's
+        legacy warning path is still exercised.
+        """
         import logging
-        step1 = _make_step("1.1", depends_on=["99.99"])  # unknown dep
+        step1 = _make_step("1.1")  # construct without bad dep
         plan = _make_plan([_make_phase(steps=[step1])])
+        # Inject the forward reference post-construction; Pydantic's
+        # validate_assignment=False on PlanModel allows it without
+        # re-running the validator.
+        plan.phases[0].steps[0].depends_on = ["99.99"]
 
         analyzer = DependencyAnalyzer()
         with caplog.at_level(logging.WARNING):

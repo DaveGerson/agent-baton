@@ -53,3 +53,4 @@ If you cannot update all four in the same change, stop and split the work.
 - Don't add a state to `ExecutionState` without updating the dispatch table and the agent-side protocol.
 - Don't bypass `dispatcher.py` to spawn agents directly from another module.
 - Don't read or write `baton.db` from this directory — go through `core/storage/`.
+- **Don't write `state.status`, `state.completed_at`, or `state.pending_approval_request` directly** outside `models/execution.py`. Use the `state.transition_to_*` methods so coupled-field writes (Hole-1-class invariants I1, I2, I9) cannot drift through an early `return`. The static lint at `tests/static/test_no_direct_status_writes.py` enforces this; if a call site genuinely needs the direct write, append `# noqa: state-mutation` and document why.
