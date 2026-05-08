@@ -346,9 +346,9 @@ class TestBeadFeedbackWiring:
             conn.execute(
                 "INSERT OR IGNORE INTO executions "
                 "(task_id, status, current_phase, current_step_index, "
-                " started_at, created_at, updated_at) "
+                " started_at, created_at, updated_at, version) "
                 "VALUES (?, 'running', 0, 0, "
-                "'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                "'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 0)",
                 (task_id,),
             )
             conn.commit()
@@ -441,9 +441,9 @@ class TestBeadsSurviveSaveExecution:
             conn.execute(
                 "INSERT OR IGNORE INTO executions "
                 "(task_id, status, current_phase, current_step_index, "
-                " started_at, created_at, updated_at) "
+                " started_at, created_at, updated_at, version) "
                 "VALUES (?, 'running', 0, 0, "
-                "'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                "'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 0)",
                 (task_id,),
             )
             conn.commit()

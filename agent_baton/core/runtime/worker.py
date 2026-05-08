@@ -620,7 +620,7 @@ class TaskWorker:
                 res_data = self._decision_manager.get_resolution(req.request_id)
                 if res_data is not None:
                     result = res_data.get("chosen_option", "approve")
-                    feedback = res_data.get("rationale", "")
+                    feedback = res_data.get("rationale") or ""
                 else:
                     result = "approve"
                     feedback = ""
