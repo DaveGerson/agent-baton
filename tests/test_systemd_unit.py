@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import configparser
+import os
 import subprocess
 from pathlib import Path
 
@@ -40,17 +41,15 @@ def test_install_sh_exits_nonzero_without_root():
     """install.sh must refuse to run as a non-root user."""
     assert _INSTALL_SH.exists(), f"install.sh missing: {_INSTALL_SH}"
 
-    # Run under 'nobody' if possible, otherwise just check exit code directly
-    # by running as current unprivileged user (in CI / test env).
+    # Cannot test non-root guard when already running as root.
+    if os.getuid() == 0:
+        pytest.skip("Running as root — cannot test non-root guard")
+
     result = subprocess.run(
         ["bash", str(_INSTALL_SH)],
         capture_output=True,
         text=True,
     )
-    # If we're not root this should fail; if somehow running as root, skip.
-    if result.returncode == 0:
-        pytest.skip("Running as root — cannot test non-root guard")
-
     assert result.returncode != 0
     assert "root" in result.stderr.lower()
 

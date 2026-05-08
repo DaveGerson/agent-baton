@@ -128,7 +128,7 @@ def test_old_migrate_storage_still_works_with_deprecation_warning() -> None:
     assert "deprecated" in warning.lower() or "WARN" in warning, (
         f"Expected deprecation warning on stderr, got: {warning!r}"
     )
-    assert "baton storage migrate" in warning, (
+    assert "baton sync --migrate-storage" in warning, (
         f"Expected new command name in warning, got: {warning!r}"
     )
 
@@ -158,7 +158,7 @@ def test_old_verify_package_still_works_with_deprecation_warning() -> None:
     assert "deprecated" in warning.lower() or "WARN" in warning, (
         f"Expected deprecation warning on stderr, got: {warning!r}"
     )
-    assert "baton install verify" in warning, (
+    assert "baton sync --verify" in warning, (
         f"Expected new command name in warning, got: {warning!r}"
     )
 

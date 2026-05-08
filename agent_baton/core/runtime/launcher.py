@@ -124,8 +124,14 @@ class DryRunLauncher:
         prompt: str,
         step_id: str = "",
         mcp_servers: list[str] | None = None,
+        **kwargs: object,
     ) -> LaunchResult:
-        """Record the launch and return the pre-configured or default result."""
+        """Record the launch and return the pre-configured or default result.
+
+        ``**kwargs`` absorbs Wave 1.3 worktree extensions (``cwd_override``,
+        ``task_id``) so DryRunLauncher stays compatible when the scheduler
+        forwards those kwargs.
+        """
         self.launches.append(
             {"agent_name": agent_name, "model": model, "step_id": step_id}
         )

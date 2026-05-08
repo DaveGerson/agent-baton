@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+pytest.importorskip("libcst")
+
 from agent_baton.core.swarm.partitioner import (
     ASTPartitioner,
     CodeChunk,

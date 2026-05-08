@@ -208,6 +208,20 @@ class TestAdapterRegistry:
 
 
 class TestAdoAdapterConnect:
+    @pytest.fixture(autouse=True)
+    def _mock_requests_available(self):
+        """Ensure 'requests' appears importable so connect() passes _ensure_requests().
+
+        The requests package is not installed in the test environment, but
+        connect() calls _ensure_requests() before validating org/project/PAT.
+        We mock the module to present as importable; tests that specifically
+        exercise the ImportError path override with patch.dict({"requests": None}).
+        """
+        import sys
+        fake_requests = MagicMock()
+        with patch.dict(sys.modules, {"requests": fake_requests}):
+            yield fake_requests
+
     def test_connect_raises_if_no_org(self, monkeypatch):
         monkeypatch.setenv("ADO_PAT", "mytoken")
         adapter = AdoAdapter()
@@ -227,9 +241,10 @@ class TestAdoAdapterConnect:
             adapter.connect({"organization": "org", "project": "proj"})
 
     def test_connect_raises_if_requests_missing(self, monkeypatch):
+        import sys
         monkeypatch.setenv("ADO_PAT", "token")
         adapter = AdoAdapter()
-        with patch.dict("sys.modules", {"requests": None}):
+        with patch.dict(sys.modules, {"requests": None}):
             with pytest.raises(ImportError, match="requests"):
                 adapter.connect({"organization": "org", "project": "proj"})
 
@@ -394,6 +409,14 @@ def _mock_batch_response(raws: list[dict]) -> MagicMock:
 
 
 class TestAdoAdapterFetchItems:
+    @pytest.fixture(autouse=True)
+    def _mock_requests_available(self):
+        """Ensure 'requests' appears importable for connect() and fetch_items()."""
+        import sys
+        fake_requests = MagicMock()
+        with patch.dict(sys.modules, {"requests": fake_requests}):
+            yield fake_requests
+
     def _make_adapter(self, monkeypatch) -> AdoAdapter:
         monkeypatch.setenv("ADO_PAT", "tok")
         adapter = AdoAdapter()
@@ -530,6 +553,14 @@ class TestAdoAdapterFetchItems:
 
 
 class TestAdoAdapterFetchItem:
+    @pytest.fixture(autouse=True)
+    def _mock_requests_available(self):
+        """Ensure 'requests' appears importable for connect() and fetch_item()."""
+        import sys
+        fake_requests = MagicMock()
+        with patch.dict(sys.modules, {"requests": fake_requests}):
+            yield fake_requests
+
     def _make_adapter(self, monkeypatch) -> AdoAdapter:
         monkeypatch.setenv("ADO_PAT", "tok")
         adapter = AdoAdapter()

@@ -65,9 +65,21 @@ When the `orchestrator` agent is invoked:
 
 Recipes for common tasks: [docs/orchestrator-usage.md](docs/orchestrator-usage.md). Protocol contract from the agent side: [references/baton-engine.md](references/baton-engine.md).
 
+### Briefing specialists (mandatory)
+
+When writing the prompt for a DISPATCH action:
+
+- State the **goal** and **verification criteria** (e.g., "make these 4 tests pass; regression suite must stay green"). Do not prescribe which files to touch.
+- Include just enough context for judgment calls: what we already know, what we've ruled out.
+- Identify obvious file boundaries so parallel agents don't collide, but let the specialist decide what else to change.
+- **Trust scope extensions.** If the specialist makes an adjacent fix that is clearly correct, keep it. Only revert scope extensions that introduce risk.
+- After the specialist commits, inspect the diff before merging — review, don't rubber-stamp.
+
 ## Concurrent agent isolation (mandatory)
 
 When dispatching parallel `Agent` calls that touch tracked files, use `isolation: "worktree"`. Branch checkout alone does not isolate uncommitted changes — the parent HEAD silently drifts during multi-agent dispatch.
+
+When dispatching a worktree-isolated specialist, include the expected branch-tip SHA in the prompt. The specialist MUST run `git rev-parse HEAD` on startup and confirm it matches the SHA you provided. If it does not match, the specialist must NOT edit files — it should fetch+reset to the expected SHA or abort and report back. This prevents the "agent edits parent tree because worktree was based on stale state" failure mode. Also require the specialist to confirm `git worktree list` shows it on its assigned worktree before proceeding.
 
 ## Autonomous incident handling (mandatory)
 

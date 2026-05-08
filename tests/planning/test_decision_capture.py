@@ -163,8 +163,9 @@ class TestPhasedHighRiskInjectsDecisionCapture:
             services=services,
         )
 
-        # "architect" is registered — must be preferred over the resolved agent
-        assert phases[0].steps[0].agent_name == "architect"
+        # When the resolved roster doesn't contain "architect", the first
+        # non-reviewer from the roster is used (honours --agents overrides).
+        assert phases[0].steps[0].agent_name == "backend-engineer"
 
 
 # ---------------------------------------------------------------------------

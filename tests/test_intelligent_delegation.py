@@ -291,16 +291,16 @@ class TestAgentExpertiseLevel:
         self, planner: IntelligentPlanner
     ) -> None:
         # long-agent has 250-word instructions
-        assert planner._agent_expertise_level("long-agent") == "expert"
+        assert planner._agent_expertise_level("long-agent", planner._registry) == "expert"
 
     def test_standard_for_agent_with_few_words(
         self, planner: IntelligentPlanner
     ) -> None:
         # short-agent has ~5 words
-        assert planner._agent_expertise_level("short-agent") == "standard"
+        assert planner._agent_expertise_level("short-agent", planner._registry) == "standard"
 
     def test_minimal_for_unknown_agent(self, planner: IntelligentPlanner) -> None:
-        assert planner._agent_expertise_level("nonexistent-agent") == "minimal"
+        assert planner._agent_expertise_level("nonexistent-agent", planner._registry) == "minimal"
 
     def test_boundary_at_201_words_is_expert(
         self, planner: IntelligentPlanner, tmp_path: Path, agents_dir: Path
@@ -308,7 +308,7 @@ class TestAgentExpertiseLevel:
         """201 words is above the 200-word threshold → expert."""
         _make_agent_file(agents_dir, "boundary-agent", _rich_instructions(201))
         planner._registry.load_directory(agents_dir)
-        assert planner._agent_expertise_level("boundary-agent") == "expert"
+        assert planner._agent_expertise_level("boundary-agent", planner._registry) == "expert"
 
     def test_boundary_at_200_words_is_standard(
         self, planner: IntelligentPlanner, tmp_path: Path, agents_dir: Path
@@ -316,14 +316,14 @@ class TestAgentExpertiseLevel:
         """Exactly 200 words is NOT above threshold → standard."""
         _make_agent_file(agents_dir, "at-boundary-agent", _rich_instructions(200))
         planner._registry.load_directory(agents_dir)
-        assert planner._agent_expertise_level("at-boundary-agent") == "standard"
+        assert planner._agent_expertise_level("at-boundary-agent", planner._registry) == "standard"
 
     def test_expertise_independent_of_model_field(
         self, planner: IntelligentPlanner
     ) -> None:
         """Model preference should not affect expertise classification."""
         # long-agent has model=opus; expertise is derived from word count alone
-        assert planner._agent_expertise_level("long-agent") == "expert"
+        assert planner._agent_expertise_level("long-agent", planner._registry) == "expert"
 
 
 class TestAgentHasOutputSpec:
@@ -332,22 +332,22 @@ class TestAgentHasOutputSpec:
     def test_returns_true_for_when_you_finish_marker(
         self, planner: IntelligentPlanner
     ) -> None:
-        assert planner._agent_has_output_spec("output-spec-agent") is True
+        assert planner._agent_has_output_spec("output-spec-agent", planner._registry) is True
 
     def test_returns_true_for_deliverables_marker(
         self, planner: IntelligentPlanner
     ) -> None:
-        assert planner._agent_has_output_spec("deliverables-agent") is True
+        assert planner._agent_has_output_spec("deliverables-agent", planner._registry) is True
 
     def test_returns_false_for_plain_agent(
         self, planner: IntelligentPlanner
     ) -> None:
-        assert planner._agent_has_output_spec("short-agent") is False
+        assert planner._agent_has_output_spec("short-agent", planner._registry) is False
 
     def test_returns_false_for_unknown_agent(
         self, planner: IntelligentPlanner
     ) -> None:
-        assert planner._agent_has_output_spec("no-such-agent") is False
+        assert planner._agent_has_output_spec("no-such-agent", planner._registry) is False
 
     @pytest.mark.parametrize("marker", [
         "output format",
@@ -365,7 +365,7 @@ class TestAgentHasOutputSpec:
             f"This agent provides results.\n\n## {marker.title()}\nSome content here.",
         )
         planner._registry.load_directory(agents_dir)
-        assert planner._agent_has_output_spec(agent_name) is True
+        assert planner._agent_has_output_spec(agent_name, planner._registry) is True
 
     def test_case_insensitive_marker_detection(
         self, planner: IntelligentPlanner, agents_dir: Path
@@ -376,7 +376,7 @@ class TestAgentHasOutputSpec:
             "## OUTPUT FORMAT\nProvide JSON.",
         )
         planner._registry.load_directory(agents_dir)
-        assert planner._agent_has_output_spec("uppercase-marker-agent") is True
+        assert planner._agent_has_output_spec("uppercase-marker-agent", planner._registry) is True
 
 
 class TestModelInheritance:

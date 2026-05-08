@@ -6,7 +6,7 @@ from pathlib import Path
 
 from agent_baton.visualize.snapshot import PlanSnapshot
 
-_TEMPLATE_PATH = Path(__file__).parent / "web_template.html"
+_TEMPLATE_PATH = Path(__file__).parent.parent / "_bundled_visualize" / "web_template.html"
 
 
 def render_html(snapshot: PlanSnapshot) -> str:

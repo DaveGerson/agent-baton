@@ -240,7 +240,13 @@ class RosterStage:
         subtask_data: list[dict] | None,
     ) -> list[str]:
         """Steps 5d / 5d-cap — cross-concern expansion + complexity cap."""
-        if subtask_data is None:
+        # Skip concern expansion when the caller supplied an explicit agents
+        # list.  Expanding would add specialists (e.g. security-reviewer for
+        # auth keywords) that then displace the caller's chosen agent from
+        # the phase they implicitly care about.  Subtask decomposition already
+        # handles its own per-subtask expansion before reaching this point,
+        # so the subtask_data guard is still required for the non-explicit path.
+        if agents is None and subtask_data is None:
             resolved_agents = expand_agents_for_concerns(
                 resolved_agents, task_summary,
             )
