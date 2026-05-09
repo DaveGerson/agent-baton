@@ -16,6 +16,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from tests._subprocess_helpers import cli_subprocess_env
+
 import pytest
 
 from agent_baton.models.usage import AgentUsageRecord, TaskUsageRecord
@@ -430,6 +432,7 @@ def _run_cli(args: list[str], env_cwd: str) -> subprocess.CompletedProcess:
         capture_output=True,
         text=True,
         cwd=env_cwd,
+        env=cli_subprocess_env(),
     )
 
 

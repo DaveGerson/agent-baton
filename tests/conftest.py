@@ -285,3 +285,61 @@ def synthetic_parallel_plan():
 
     return _build
 
+
+# ---------------------------------------------------------------------------
+# CI git-signing suppression
+# ---------------------------------------------------------------------------
+
+def _disable_git_signing_for_tests(monkeypatch) -> None:
+    """Set GIT_CONFIG_COUNT/KEY/VALUE env vars so every subprocess git
+    invocation inherits commit.gpgsign=false and tag.gpgsign=false.
+
+    This prevents the harness GPG signer from rejecting subprocess-spawned
+    commits with HTTP 400 "missing source" in CI environments.
+    """
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "2")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "commit.gpgsign")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "false")
+    monkeypatch.setenv("GIT_CONFIG_KEY_1", "tag.gpgsign")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_1", "false")
+
+
+@pytest.fixture(autouse=True, scope="session")
+def disable_git_signing(tmp_path_factory):
+    """Session-scoped autouse fixture — disables GPG signing for all
+    subprocess git calls spawned during the test session.
+
+    Uses a fresh monkeypatch instance (not the function-scoped one) so it
+    applies for the entire session without conflicting with per-test patches.
+    """
+    import os
+
+    os.environ.setdefault("GIT_CONFIG_COUNT", "0")
+
+    count = int(os.environ.get("GIT_CONFIG_COUNT", "0"))
+    # Append our two overrides to whatever is already set.
+    base = count
+
+    os.environ["GIT_CONFIG_KEY_%d" % base] = "commit.gpgsign"
+    os.environ["GIT_CONFIG_VALUE_%d" % base] = "false"
+    os.environ["GIT_CONFIG_KEY_%d" % (base + 1)] = "tag.gpgsign"
+    os.environ["GIT_CONFIG_VALUE_%d" % (base + 1)] = "false"
+    os.environ["GIT_CONFIG_COUNT"] = str(base + 2)
+
+    yield
+
+    # Teardown: restore original count (best-effort; env cleanup on session end).
+    if base == 0:
+        # We set the env from scratch — clean up completely.
+        for key in [
+            "GIT_CONFIG_COUNT",
+            "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
+            "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_1",
+        ]:
+            os.environ.pop(key, None)
+    else:
+        os.environ["GIT_CONFIG_COUNT"] = str(base)
+        for idx in (base, base + 1):
+            os.environ.pop("GIT_CONFIG_KEY_%d" % idx, None)
+            os.environ.pop("GIT_CONFIG_VALUE_%d" % idx, None)
+

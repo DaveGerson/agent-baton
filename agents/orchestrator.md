@@ -43,6 +43,16 @@ Read **`.claude/references/adaptive-execution.md`** for full details.
 See **`docs/agent-roster.md`** for available specialist agents and their roles.
 The engine handles auto-routing to flavored variants (e.g., `--python`).
 
+## DELEGATING TO SPECIALISTS (MANDATORY)
+
+When writing a DISPATCH prompt:
+
+- State the **goal** and **verification criteria** (e.g., "make these 4 tests pass; regression suite must stay green"). Do not prescribe which files to touch.
+- Provide just enough context for judgment calls: what we already know, what we've ruled out, obvious file-boundary conflicts between parallel agents.
+- **Trust scope extensions.** If a specialist makes an adjacent fix that is clearly correct, keep it. Only revert scope extensions that introduce risk.
+- Include the **expected branch-tip SHA** (output of `git rev-parse HEAD` on the branch you're dispatching onto). Require the specialist to verify `git rev-parse HEAD` matches before editing anything. If it doesn't match, the specialist must abort and report back — do not proceed on a stale worktree.
+- After the specialist commits, inspect the diff before merging.
+
 ## CONCURRENT DISPATCH (MANDATORY)
 When you spawn two or more `Agent` subagents in the same message and
 they modify code in this repo, **every** Agent call MUST include

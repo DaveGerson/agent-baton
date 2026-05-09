@@ -39,8 +39,8 @@ _COMMAND_GROUPS: dict[str, list[str]] = {
 # Deprecated top-level commands — kept for backward compatibility.
 # These still work but print a WARN to stderr on each invocation.
 _DEPRECATED_HELP: dict[str, str] = {
-    "migrate-storage": "use 'baton storage migrate' instead",
-    "verify-package": "use 'baton install verify' instead",
+    "migrate-storage": "use 'baton sync --migrate-storage' instead",
+    "verify-package": "use 'baton sync --verify' instead",
     "improve": "use 'baton learn improve' instead",
     "evolve": "use 'baton learn run-cycle' instead",
     "experiment": "use 'baton learn run-cycle' instead",

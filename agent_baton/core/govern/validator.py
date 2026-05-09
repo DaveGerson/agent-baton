@@ -257,7 +257,11 @@ class AgentValidator:
                     errors=[f"'{directory}' is not a directory"],
                 )
             ]
+        # Exclude non-agent markdown files (directory READMEs, config docs).
+        _NON_AGENT_FILES = {"CLAUDE.md", "README.md"}
         results: list[ValidationResult] = []
         for md_file in sorted(directory.glob("*.md")):
+            if md_file.name in _NON_AGENT_FILES:
+                continue
             results.append(self.validate_file(md_file))
         return results

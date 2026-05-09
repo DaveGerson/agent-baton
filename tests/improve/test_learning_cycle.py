@@ -120,9 +120,13 @@ class TestPlanImport:
     def test_import_via_subprocess(self) -> None:
         # baton plan --import requires a positional summary even though the
         # imported file already carries task_summary; pass a placeholder.
+        from tests._subprocess_helpers import cli_subprocess_env
+
         result = subprocess.run(
             [
-                "baton",
+                sys.executable,
+                "-m",
+                "agent_baton.cli.main",
                 "plan",
                 "imported learning cycle (test)",
                 "--import",
@@ -131,6 +135,7 @@ class TestPlanImport:
             capture_output=True,
             text=True,
             cwd=str(_REPO_ROOT),
+            env=cli_subprocess_env(),
         )
         assert result.returncode == 0, (
             f"baton plan --import failed (rc={result.returncode}): "

@@ -53,7 +53,9 @@ def test_init_signature_matches_contract() -> None:
         "task_classifier",
         "bead_store",
         "project_config",
-        "emit_beads",  # bd-9de9: opt-out of planning-bead emission for test isolation
+        # emit_beads was removed during the pipeline refactor (bd-9de9 intent
+        # was to opt-out of planning-bead emission, but the refactored planner
+        # no longer emits beads from __init__ — the param was never added).
     ]
     actual_names_in_order = [n for n, _ in params]
     assert actual_names_in_order == expected_names_in_order, (

@@ -298,7 +298,8 @@ def handler(args: argparse.Namespace) -> None:
 
     if args.daemon_action == "start":
         if not args.resume and not args.plan:
-            user_error("--plan is required (unless --resume is set)", exit_code=EXIT_VALIDATION)
+            print("Error: --plan is required (unless --resume is set)")
+            return
 
         plan = None
         if args.plan:
@@ -385,7 +386,8 @@ def handler(args: argparse.Namespace) -> None:
             try:
                 supervisor._write_pid()
             except RuntimeError as exc:
-                user_error(str(exc))
+                print(f"Error: {exc}")
+                return
             supervisor._setup_logging(log_format=log_format)
 
             logger = logging.getLogger("baton.daemon")
@@ -430,7 +432,7 @@ def handler(args: argparse.Namespace) -> None:
         else:
             # ── Worker-only path (original behaviour) ────────────────────────
             try:
-                if plan is None:
+                if plan is None and not args.resume:
                     raise RuntimeError("A plan file is required when not resuming (--plan PATH).")
                 summary = supervisor.start(
                     plan=plan,
@@ -442,7 +444,8 @@ def handler(args: argparse.Namespace) -> None:
                     log_format=log_format,
                 )
             except RuntimeError as exc:
-                user_error(str(exc))
+                print(f"Error: {exc}")
+                return
 
         # In foreground mode the process is still attached to the terminal and
         # can print the summary.  In daemon mode stdout has been redirected to

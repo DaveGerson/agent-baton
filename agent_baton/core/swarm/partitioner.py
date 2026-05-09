@@ -53,10 +53,13 @@ except ImportError:  # pragma: no cover
 
 def _require_libcst() -> None:
     if not _LIBCST_AVAILABLE:
-        raise ImportError(
-            "libcst is required for ASTPartitioner.  "
-            "Install it: pip install 'libcst>=1.0' or add libcst>=1.0 to "
-            "your project dependencies (pyproject.toml [project.optional-dependencies] swarm)."
+        from agent_baton.cli.errors import BatonError
+        raise BatonError(
+            "libcst is required for ASTPartitioner but is not installed.",
+            hint=(
+                "Install it with: pip install 'agent-baton[swarm]'  "
+                "or: pip install 'libcst>=1.0'"
+            ),
         )
 
 
@@ -342,7 +345,7 @@ class ASTPartitioner:
             List of :class:`CodeChunk` values with static independence proofs.
 
         Raises:
-            ImportError: If libcst is not installed.
+            BatonError: If libcst is not installed (includes an install hint).
             IndependenceViolation: If chunks cannot be made independent
                 (falls back to a single sequential chunk).
         """

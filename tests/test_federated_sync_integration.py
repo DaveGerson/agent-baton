@@ -1157,7 +1157,7 @@ class TestKnowledgeDeliverySync:
             current_phase=1,
             current_step_index=0,
             started_at="2026-01-01T00:00:00Z",
-            completed_at=None,
+            completed_at="",
             step_results=[],
             gate_results=[],
             approval_results=[],

@@ -830,3 +830,176 @@ class TestBuildPolicyApprovalContext:
         warn = [PolicyViolation("backend-engineer", _warn_rule(), "advisory")]
         ctx = _build_policy_approval_context(step, block, warn, "standard_dev")
         assert "Warn-severity" in ctx
+
+
+# ---------------------------------------------------------------------------
+# Windows fail-closed warning (bd-fcntl-win)
+# ---------------------------------------------------------------------------
+
+class TestWindowsComplianceLockingWarning:
+    """Fail-closed on Windows must emit a one-time warning about missing flock.
+
+    Commit 8879079 made ``fcntl`` imports optional so the worktree manager can
+    run on Windows.  As a side-effect, the compliance chain writer's
+    ``fcntl.flock`` guard becomes a silent no-op on Windows.  When
+    ``BATON_COMPLIANCE_FAIL_CLOSED=1`` is set on Windows, the operator
+    believes they have a hardened audit chain that's actually unprotected
+    against concurrent writers.  ``_compliance_fail_closed_enabled`` must
+    surface this gap via a single ``_log.warning`` per process.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_warning_flag(self, monkeypatch: pytest.MonkeyPatch):
+        """Reset the module-level ``_warned_about_windows_locking`` flag.
+
+        The flag is process-wide by design so the warning fires once per
+        operator session.  Tests need a clean slate so we monkeypatch it
+        back to ``False`` before each test and restore on teardown.
+        """
+        import agent_baton.core.engine.executor as _exec_mod
+
+        monkeypatch.setattr(_exec_mod, "_warned_about_windows_locking", False)
+
+    def test_warning_emitted_once_on_windows_when_fail_closed_via_env(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Windows + fail-closed env var: warning fires once, not on subsequent calls."""
+        import sys
+
+        from agent_baton.core.engine.executor import _compliance_fail_closed_enabled
+
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setenv("BATON_COMPLIANCE_FAIL_CLOSED", "1")
+
+        with caplog.at_level("WARNING", logger="agent_baton.core.engine.executor"):
+            assert _compliance_fail_closed_enabled() is True
+            first_call_records = [
+                rec for rec in caplog.records
+                if rec.levelname == "WARNING"
+                and "Compliance fail-closed mode is enabled on Windows" in rec.message
+            ]
+            assert len(first_call_records) == 1, (
+                f"expected exactly one Windows-locking warning on first call, "
+                f"got {len(first_call_records)}: {[r.message for r in caplog.records]}"
+            )
+
+            # Subsequent invocations must NOT re-emit the warning.
+            caplog.clear()
+            assert _compliance_fail_closed_enabled() is True
+            assert _compliance_fail_closed_enabled() is True
+            repeat_records = [
+                rec for rec in caplog.records
+                if "Compliance fail-closed mode is enabled on Windows" in rec.message
+            ]
+            assert repeat_records == [], (
+                f"warning re-emitted on subsequent calls: "
+                f"{[r.message for r in repeat_records]}"
+            )
+
+    def test_warning_emitted_once_on_windows_when_fail_closed_via_plan(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Windows + fail-closed plan field: warning fires once, even with env unset."""
+        import sys
+
+        from agent_baton.core.engine.executor import _compliance_fail_closed_enabled
+
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.delenv("BATON_COMPLIANCE_FAIL_CLOSED", raising=False)
+
+        plan = _plan()
+        plan.compliance_fail_closed = True
+
+        with caplog.at_level("WARNING", logger="agent_baton.core.engine.executor"):
+            assert _compliance_fail_closed_enabled(plan) is True
+            assert _compliance_fail_closed_enabled(plan) is True
+
+            warning_records = [
+                rec for rec in caplog.records
+                if rec.levelname == "WARNING"
+                and "Compliance fail-closed mode is enabled on Windows" in rec.message
+            ]
+            assert len(warning_records) == 1
+
+    def test_no_warning_on_windows_when_fail_closed_disabled(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Windows + fail-closed OFF: no warning (the gap is irrelevant)."""
+        import sys
+
+        from agent_baton.core.engine.executor import _compliance_fail_closed_enabled
+
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.delenv("BATON_COMPLIANCE_FAIL_CLOSED", raising=False)
+
+        with caplog.at_level("WARNING", logger="agent_baton.core.engine.executor"):
+            assert _compliance_fail_closed_enabled() is False
+            warning_records = [
+                rec for rec in caplog.records
+                if "Windows" in rec.message
+            ]
+            assert warning_records == []
+
+    def test_no_warning_on_linux_when_fail_closed_via_env(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Linux + fail-closed env var: NO warning (flock is available)."""
+        import sys
+
+        from agent_baton.core.engine.executor import _compliance_fail_closed_enabled
+
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.setenv("BATON_COMPLIANCE_FAIL_CLOSED", "1")
+
+        with caplog.at_level("WARNING", logger="agent_baton.core.engine.executor"):
+            assert _compliance_fail_closed_enabled() is True
+            assert _compliance_fail_closed_enabled() is True
+            warning_records = [
+                rec for rec in caplog.records
+                if "Windows" in rec.message
+            ]
+            assert warning_records == [], (
+                f"unexpected Windows warning on linux: "
+                f"{[r.message for r in warning_records]}"
+            )
+
+    def test_no_warning_on_linux_when_fail_closed_via_plan(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Linux + fail-closed plan field: NO warning regardless of resolution path."""
+        import sys
+
+        from agent_baton.core.engine.executor import _compliance_fail_closed_enabled
+
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.delenv("BATON_COMPLIANCE_FAIL_CLOSED", raising=False)
+
+        plan = _plan()
+        plan.compliance_fail_closed = True
+
+        with caplog.at_level("WARNING", logger="agent_baton.core.engine.executor"):
+            assert _compliance_fail_closed_enabled(plan) is True
+            warning_records = [
+                rec for rec in caplog.records
+                if "Windows" in rec.message
+            ]
+            assert warning_records == []
+
+    def test_no_warning_on_darwin_when_fail_closed_enabled(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """macOS (POSIX): flock is available, no warning needed."""
+        import sys
+
+        from agent_baton.core.engine.executor import _compliance_fail_closed_enabled
+
+        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.setenv("BATON_COMPLIANCE_FAIL_CLOSED", "1")
+
+        with caplog.at_level("WARNING", logger="agent_baton.core.engine.executor"):
+            assert _compliance_fail_closed_enabled() is True
+            warning_records = [
+                rec for rec in caplog.records
+                if "Windows" in rec.message
+            ]
+            assert warning_records == []

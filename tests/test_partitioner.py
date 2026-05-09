@@ -9,15 +9,24 @@ These tests verify:
 2. The single-chunk fallback still works — semantic preservation.
 3. No warning bead is emitted for a clean, parseable file.
 4. The bead content includes both the file path and the libcst error message.
+
+Also includes a regression test (test 6) for the missing-libcst case:
+  when libcst is not installed, ASTPartitioner.partition() must raise
+  BatonError (not ImportError) with an installation hint.
 """
 from __future__ import annotations
 
+import sys
+import unittest.mock
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
+pytest.importorskip("libcst")
+
+from agent_baton.cli.errors import BatonError
 from agent_baton.core.swarm.partitioner import ASTPartitioner, RenameSymbol
 
 
@@ -213,4 +222,44 @@ def test_partition_warning_bead_emitted_at_most_once_per_file(tmp_path: Path) ->
     assert len(parse_failure_calls) == 1, (
         f"Expected exactly 1 parse-failure bead across two partition() calls, "
         f"got {len(parse_failure_calls)}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 6 (regression): missing libcst raises BatonError, not ImportError
+# ---------------------------------------------------------------------------
+
+
+def test_partition_raises_baton_error_when_libcst_missing(tmp_path: Path) -> None:
+    """When libcst is not installed, partition() must raise BatonError with an install hint.
+
+    Regression for the bug where a missing optional dependency produced a raw
+    ImportError that surfaced as an unformatted Python traceback rather than a
+    clean user-readable message.
+    """
+    import agent_baton.core.swarm.partitioner as _partitioner_mod
+
+    # Temporarily patch _LIBCST_AVAILABLE to False to simulate a missing libcst.
+    with patch.object(_partitioner_mod, "_LIBCST_AVAILABLE", False):
+        partitioner = ASTPartitioner(tmp_path)
+        with pytest.raises(BatonError) as exc_info:
+            partitioner.partition(RenameSymbol(old="OldName", new="NewName"))
+
+    err = exc_info.value
+    err_str = str(err)
+
+    # The error must name libcst so the user knows what to install.
+    assert "libcst" in err_str, (
+        f"Expected 'libcst' in the error message, got: {err_str!r}"
+    )
+
+    # The error must include an install command so the user knows how to fix it.
+    assert "pip install" in err_str, (
+        f"Expected 'pip install' in the error message, got: {err_str!r}"
+    )
+
+    # It must be a BatonError (structured), not a bare ImportError.
+    assert not isinstance(err, ImportError), (
+        "The raised exception must be BatonError, not ImportError — "
+        "raw ImportError looks like a bug to the user."
     )

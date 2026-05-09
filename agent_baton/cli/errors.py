@@ -10,6 +10,25 @@ EXIT_RUNTIME = 1    # Runtime error (file I/O, backend failure, system error)
 EXIT_VALIDATION = 2  # Validation error (bad input, missing required arg, invalid format)
 
 
+class BatonError(RuntimeError):
+    """Structured runtime error for agent-baton subsystems.
+
+    Raised in preference to bare ``RuntimeError`` or ``ImportError`` so that
+    callers (CLI, API, tests) can distinguish user-facing errors from
+    unexpected programming faults.
+
+    Attributes:
+        message: Human-readable description of the failure.
+        hint: Optional recovery suggestion (e.g. an install command).
+    """
+
+    def __init__(self, message: str, *, hint: str = "") -> None:
+        self.message = message
+        self.hint = hint
+        full = message if not hint else f"{message}\n  hint: {hint}"
+        super().__init__(full)
+
+
 def user_error(
     msg: str,
     *,

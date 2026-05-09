@@ -274,7 +274,7 @@ class TestFetchExternalAnnotations:
     def test_returns_empty_when_central_db_absent(self, tmp_path):
         planner = self._make_planner(tmp_path)
         # No central.db at ~/.baton/central.db in the patched home.
-        with patch("agent_baton.core.engine.planner.Path.home", return_value=tmp_path):
+        with patch("pathlib.Path.home", return_value=tmp_path):
             result = planner._fetch_external_annotations("implement login page")
         assert result == []
 
@@ -286,7 +286,7 @@ class TestFetchExternalAnnotations:
         store.close()
 
         planner = self._make_planner(tmp_path)
-        with patch("agent_baton.core.engine.planner.Path.home", return_value=tmp_path):
+        with patch("pathlib.Path.home", return_value=tmp_path):
             result = planner._fetch_external_annotations("implement login page")
         assert result == []
 
@@ -301,7 +301,7 @@ class TestFetchExternalAnnotations:
         assert target.exists()
 
         planner = self._make_planner(tmp_path)
-        with patch("agent_baton.core.engine.planner.Path.home", return_value=tmp_path):
+        with patch("pathlib.Path.home", return_value=tmp_path):
             result = planner._fetch_external_annotations("implement login page authentication")
         # "implement", "login", "page" all appear in JIRA-42 title
         assert len(result) >= 1
@@ -313,7 +313,7 @@ class TestFetchExternalAnnotations:
         _make_central_db(baton_dir)
 
         planner = self._make_planner(tmp_path)
-        with patch("agent_baton.core.engine.planner.Path.home", return_value=tmp_path):
+        with patch("pathlib.Path.home", return_value=tmp_path):
             result = planner._fetch_external_annotations("unrelated database migration task")
         # "unrelated", "database", "migration" not in JIRA-42 or JIRA-43 titles
         assert result == []
@@ -337,7 +337,7 @@ class TestFetchExternalAnnotations:
         _make_central_db(baton_dir)
 
         planner = self._make_planner(tmp_path)
-        with patch("agent_baton.core.engine.planner.Path.home", return_value=tmp_path):
+        with patch("pathlib.Path.home", return_value=tmp_path):
             result = planner._fetch_external_annotations("login page implementation")
         # Each annotation should be "EXTERNAL-ID (title)" format.
         for annotation in result:
@@ -352,7 +352,7 @@ class TestFetchExternalAnnotations:
         from agent_baton.core.engine.planner import IntelligentPlanner
         planner = IntelligentPlanner(team_context_root=tmp_path)
 
-        with patch("agent_baton.core.engine.planner.Path.home", return_value=tmp_path):
+        with patch("pathlib.Path.home", return_value=tmp_path):
             plan = planner.create_plan("implement login page authentication for users")
 
         assert "Relates to:" in plan.shared_context
