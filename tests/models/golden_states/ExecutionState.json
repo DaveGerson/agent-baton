@@ -103,7 +103,9 @@
     "classification_confidence": null,
     "archetype": "phased",
     "max_retry_phases": 0,
-    "compliance_fail_closed": null
+    "compliance_fail_closed": null,
+    "completion_condition": null,
+    "max_amend_cycles": 3
   },
   "current_phase": 1,
   "current_step_index": 0,

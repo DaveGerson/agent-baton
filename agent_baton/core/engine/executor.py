@@ -3089,6 +3089,25 @@ class ExecutionEngine:
             count += 1
         return count >= 2
 
+    def _team_mailbox(self, step_id: str) -> "TeamMailbox | None":
+        """Open the per-team mailbox for *step_id* (A2.b).
+
+        Returns ``None`` when the team_context_root is unset (rare, only
+        in oddly-constructed test fixtures). Never raises — mailbox is
+        a non-essential telemetry surface and must not break dispatch.
+        """
+        if self._root is None:
+            return None
+        try:
+            from agent_baton.core.engine.mailbox import TeamMailbox
+            return TeamMailbox(self._root, f"team-{step_id}")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "TeamMailbox open failed for step %s (non-fatal): %s",
+                step_id, exc,
+            )
+            return None
+
     def _evaluate_goal_after_gate(
         self,
         state: "ExecutionState",
@@ -4988,6 +5007,48 @@ class ExecutionEngine:
                 # Apply synthesis strategy.
                 self._apply_synthesis(plan_step, parent)
                 parent.completed_at = _utcnow()
+                # A2.b: parent step complete → emit teammate_idle per member
+                # so consumers (UI, future Claude Code hook bridge) see the
+                # team has come to rest.
+                _mailbox = self._team_mailbox(step_id)
+                if _mailbox is not None:
+                    try:
+                        for mr in parent.member_results:
+                            _mailbox.append(
+                                "teammate_idle",
+                                from_member=mr.member_id,
+                                subject=f"{mr.agent_name} idle",
+                                payload={"final_status": mr.status},
+                            )
+                    except Exception as _mb_exc:  # noqa: BLE001
+                        logger.debug(
+                            "Mailbox teammate_idle emission failed (non-fatal): %s",
+                            _mb_exc,
+                        )
+
+        # A2.b: emit task_completed / task_failed for the member just recorded.
+        _mailbox = self._team_mailbox(step_id)
+        if _mailbox is not None and status in ("complete", "failed"):
+            try:
+                _mailbox.append(
+                    "task_completed" if status == "complete" else "task_failed",
+                    from_member=member_id,
+                    task_ref=member_id,
+                    subject=(
+                        f"{agent_name} {'completed' if status == 'complete' else 'failed'}"
+                    ),
+                    body=(outcome or "")[:1500],
+                    payload={
+                        "agent_name": agent_name,
+                        "step_id": step_id,
+                        "files_changed_count": len(files_changed or []),
+                    },
+                )
+            except Exception as _mb_exc:  # noqa: BLE001
+                logger.debug(
+                    "Mailbox member-result emission failed (non-fatal): %s",
+                    _mb_exc,
+                )
 
         # ── Bead signal protocol (team dispatch path) ────────────────────────
         # Mirror the same bead signal extraction done in record_step_result so
@@ -7014,6 +7075,114 @@ class ExecutionEngine:
                 lines.append("")
         return "\n".join(lines)
 
+    def request_team_member_plan_approval(
+        self,
+        step_id: str,
+        member_id: str,
+        plan_text: str,
+        *,
+        agent_name: str = "",
+    ) -> None:
+        """Record that a team member is requesting lead approval of its
+        plan before implementing (A2.c).
+
+        This is a *lead-gated* approval, distinct from the human-gated
+        ``ApprovalResult`` path. It is recorded purely via the team
+        mailbox so the lead-orchestrator can read it, decide, and
+        respond. The engine state machine is unaffected — a team member
+        in plan-approval mode remains ``status == "dispatched"`` from
+        the executor's perspective.
+
+        Args:
+            step_id: Parent team step id (e.g. ``"1.1"``).
+            member_id: Member requesting approval (e.g. ``"1.1.a"``).
+            plan_text: The plan the member proposes to implement.
+            agent_name: Optional agent name for the mailbox subject.
+        """
+        mailbox = self._team_mailbox(step_id)
+        if mailbox is None:
+            logger.warning(
+                "Plan approval request for member %s could not be "
+                "recorded: mailbox unavailable.",
+                member_id,
+            )
+            return
+        try:
+            mailbox.append(
+                "plan_approval_requested",
+                from_member=member_id,
+                to_member="lead",
+                task_ref=member_id,
+                subject=(
+                    f"{agent_name + ' ' if agent_name else ''}plan approval requested"
+                ),
+                body=plan_text[:8000],
+                payload={"step_id": step_id, "agent_name": agent_name},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Plan approval request mailbox emission failed (non-fatal): %s",
+                exc,
+            )
+
+    def decide_team_member_plan_approval(
+        self,
+        step_id: str,
+        member_id: str,
+        approved: bool,
+        feedback: str = "",
+        *,
+        deciding_lead: str = "lead",
+    ) -> None:
+        """Lead's decision on a previously requested team member plan (A2.c).
+
+        Emits a ``plan_approval_decided`` mailbox event. The member
+        agent watches the mailbox and proceeds (or revises) accordingly.
+
+        Args:
+            step_id: Parent team step id.
+            member_id: Member whose plan was reviewed.
+            approved: True to authorise implementation; False to reject.
+            feedback: Required when ``approved=False``; recommended on
+                approval to convey criteria. Surfaced in the mailbox
+                event body.
+            deciding_lead: Member id of the deciding lead (default
+                ``"lead"`` — the top-level team lead).
+        """
+        if not approved and not feedback.strip():
+            raise ValueError(
+                "feedback is required when rejecting a team member plan "
+                "(approved=False)."
+            )
+        mailbox = self._team_mailbox(step_id)
+        if mailbox is None:
+            logger.warning(
+                "Plan approval decision for member %s could not be "
+                "recorded: mailbox unavailable.",
+                member_id,
+            )
+            return
+        try:
+            mailbox.append(
+                "plan_approval_decided",
+                from_member=deciding_lead,
+                to_member=member_id,
+                task_ref=member_id,
+                subject=(
+                    "plan approved" if approved else "plan rejected — revise"
+                ),
+                body=feedback,
+                payload={
+                    "approved": bool(approved),
+                    "step_id": step_id,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Plan approval decision mailbox emission failed (non-fatal): %s",
+                exc,
+            )
+
     def record_feedback_result(
         self,
         phase_id: int,
@@ -7307,6 +7476,40 @@ class ExecutionEngine:
                 delegation_prompt=prompt,
                 step_id=member.member_id,
             ))
+
+            # A2.b: emit task_created on the team mailbox the FIRST time
+            # we dispatch this member. Dedupe via the mailbox itself so a
+            # subsequent next_action() call (before record_team_member_result)
+            # does not duplicate the event. Best-effort; mailbox failures
+            # must never block dispatch.
+            _mailbox = self._team_mailbox(step.step_id)
+            if _mailbox is not None:
+                try:
+                    already_emitted = any(
+                        e.event_type == "task_created"
+                        and e.to_member == member.member_id
+                        for e in _mailbox.read_all()
+                    )
+                    if not already_emitted:
+                        _mailbox.append(
+                            "task_created",
+                            from_member="lead",
+                            to_member=member.member_id,
+                            task_ref=member.member_id,
+                            subject=f"{member.agent_name} dispatched ({member.role})",
+                            payload={
+                                "agent_name": member.agent_name,
+                                "role": member.role,
+                                "model": member.model,
+                                "step_id": step.step_id,
+                            },
+                        )
+                except Exception as _mb_exc:  # noqa: BLE001
+                    _log.debug(
+                        "Mailbox task_created emission failed for member %s "
+                        "(non-fatal): %s",
+                        member.member_id, _mb_exc,
+                    )
 
         if not member_actions:
             # All dispatchable members are blocked — WAIT.

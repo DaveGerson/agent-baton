@@ -88,7 +88,7 @@ Deferred. Only revisit if regulated-domain work needs auditor agent intervention
 
 ## Cross-cutting cleanups
 
-- **Delete or wire `SWARM_DISPATCH`.** Today it's an `ActionType` value the resolver never emits (`models/execution.py:72`). This is principle-#5 silent-failure surface — either remove the enum entry or wire it through. Recommend **delete**; the `TEAM_DISPATCH` path covers the use case.
+- **~~Delete~~ Audit `SWARM_DISPATCH`.** The initial recon (this design's source) reported `SWARM_DISPATCH` as an unwired stub. Closer inspection during implementation showed a real subsystem: `core/swarm/` (dispatcher, reconciler, signoff), `cli/commands/swarm_cmd.py`, gated by `BATON_SWARM_ENABLED`, with multiple test files (`tests/test_swarm_*.py`, `tests/test_archetype_execution_models.py`) asserting the ActionType enum value. The resolver does not currently *emit* `SWARM_DISPATCH` from the standard execute path, but the value is consumed by the swarm CLI and its tests. **Action: leave the enum in place; do NOT delete.** A separate retrospective should decide whether to formally promote the swarm subsystem to GA or sunset it; that decision belongs with the swarm subsystem owners, not in scope for the Agent Teams + `/goal` work.
 - **`docs/invariants.md`** — write the `_print_action()` shape as a contract entry. Required before G2 is ever reconsidered.
 - **Agent frontmatter audit** for skills/mcpServers dependencies (see A1.e).
 
