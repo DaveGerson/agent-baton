@@ -18,7 +18,7 @@ This is a living document. Each commit on `claude/research-release-notes-sFoUg` 
 
 | # | Change | Files | Complexity | Status |
 |---|---|---|---|---|
-| 1 | Fix `ActionType` doc drift (9 → 10; CHECKPOINT documented) | `CLAUDE.md`, `agent_baton/models/CLAUDE.md` | S | done (pending commit) |
+| 1 | Fix `ActionType` doc drift (9 → 10; CHECKPOINT documented) | `CLAUDE.md`, `agent_baton/models/CLAUDE.md` | S | done (b4924a5) |
 | 2 | Add shipped-agents validator regression test (baseline) | `tests/agents/test_shipped_agents_validate.py` (new) | S | pending |
 | 3 | Expand agent frontmatter validator for CC 2.1.x fields | `agent_baton/core/govern/validator.py`, `agents/CLAUDE.md`, `tests/govern/test_validator_new_fields.py` (new) | M | pending |
 | 4 | Document confirmed `permissionMode` allow-list | `agents/CLAUDE.md`, `docs/agent-roster.md` | S | pending |
