@@ -549,6 +549,16 @@ def handler(args: argparse.Namespace) -> None:
     )
     print("  Done.", file=sys.stderr)
 
+    # A1.d: surface claude-teams + long-running resumability warnings.
+    try:
+        from agent_baton.core.engine.team_backends import (
+            check_resumability_constraints,
+        )
+        for _warn in check_resumability_constraints(plan):
+            print(f"warning: {_warn}", file=sys.stderr)
+    except Exception:  # noqa: BLE001 — diagnostic only, never fatal
+        pass
+
     # G1: stamp goal fields onto the plan after creation. We do this
     # post-creation (rather than threading through planner.create_plan)
     # to keep the planner signature stable and let `baton goal` reuse

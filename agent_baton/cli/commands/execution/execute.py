@@ -236,6 +236,14 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     p_team.add_argument("--files", default="", help="Comma-separated files changed")
     p_team.add_argument("--outcome-spillover-path", default="", dest="outcome_spillover_path",
                         help="Relative path (under per-task execution dir) to a spillover file holding the FULL member outcome when --outcome was truncated. When omitted, the engine attempts to auto-detect from a TRUNCATED breadcrumb in --outcome.")
+    p_team.add_argument("--hook-source", dest="hook_source", default="",
+                        choices=["", "claude-teams"],
+                        help=(
+                            "When set, indicates this team-record invocation "
+                            "came from an external hook (e.g. Claude Code "
+                            "Agent Teams TaskCompleted). The bridge tags the "
+                            "mailbox event payload accordingly. A1.c."
+                        ))
 
     # baton execute interact --step-id ID (--input TEXT | --done)
     p_interact = sub.add_parser("interact", parents=[_task_id_parent],
@@ -1315,10 +1323,29 @@ def handler(args: argparse.Namespace) -> None:
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
             sys.exit(1)
+        # A1.c: when invoked from an external hook (e.g. Claude Code
+        # Agent Teams TaskCompleted), tag the mailbox with the source
+        # so consumers (UI, audits) can attribute the event.
+        _hook_source = getattr(args, "hook_source", "")
+        if _hook_source:
+            try:
+                from agent_baton.core.engine.mailbox import TeamMailbox
+                _mb = TeamMailbox(engine._root, f"team-{args.step_id}")
+                _mb.append(
+                    "teammate_message",
+                    from_member=args.member_id,
+                    to_member="lead",
+                    task_ref=args.member_id,
+                    subject=f"hook bridge: {_hook_source} → team-record",
+                    payload={"hook_source": _hook_source, "status": args.status},
+                )
+            except Exception:  # noqa: BLE001 — best effort
+                pass
         if getattr(args, "output", "text") == "json":
-            print(json.dumps({"status": "recorded", "step_id": args.step_id, "member_id": args.member_id, "agent": args.agent, "result": args.status}))
+            print(json.dumps({"status": "recorded", "step_id": args.step_id, "member_id": args.member_id, "agent": args.agent, "result": args.status, "hook_source": _hook_source}))
         else:
-            print(f"Team member recorded: {args.member_id} ({args.agent}) — {args.status}")
+            suffix = f" [via {_hook_source} hook]" if _hook_source else ""
+            print(f"Team member recorded: {args.member_id} ({args.agent}) — {args.status}{suffix}")
 
     elif args.subcommand == "interact":
         step_id = args.step_id

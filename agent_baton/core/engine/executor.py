@@ -7409,6 +7409,23 @@ class ExecutionEngine:
                 leader_member_id=leader.member_id if leader else "",
             )
 
+        # A1.a/b: invoke the configured TeamBackend's dispatch hook
+        # exactly once per team step (idempotent: gated on absence of a
+        # parent StepResult). Best-effort — failures never block.
+        if state.get_step_result(step.step_id) is None and self._root is not None:
+            try:
+                from agent_baton.core.engine.team_backends import select_team_backend
+                _backend = select_team_backend()
+                _backend.on_team_dispatched(
+                    plan=state.plan, step=step,
+                    team_context_root=self._root,
+                )
+            except Exception as _be_exc:  # noqa: BLE001
+                _log.debug(
+                    "TeamBackend.on_team_dispatched failed (non-fatal): %s",
+                    _be_exc,
+                )
+
         # Flatten nested teams into one dispatchable list.  A lead with
         # sub_team is added FIRST, followed by its sub-team members — this
         # matches the "lead runs as worker AND coordinator" contract.
