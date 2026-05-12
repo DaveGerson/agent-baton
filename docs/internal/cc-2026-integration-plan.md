@@ -18,7 +18,7 @@ This is a living document. Each commit on `claude/research-release-notes-sFoUg` 
 
 | # | Change | Files | Complexity | Status |
 |---|---|---|---|---|
-| 1 | Fix `ActionType` doc drift (9 → 10; CHECKPOINT documented) | `CLAUDE.md`, `agent_baton/models/CLAUDE.md`, `references/baton-engine.md`, `agents/orchestrator.md` | S | pending |
+| 1 | Fix `ActionType` doc drift (9 → 10; CHECKPOINT documented) | `CLAUDE.md`, `agent_baton/models/CLAUDE.md` | S | done (pending commit) |
 | 2 | Add shipped-agents validator regression test (baseline) | `tests/agents/test_shipped_agents_validate.py` (new) | S | pending |
 | 3 | Expand agent frontmatter validator for CC 2.1.x fields | `agent_baton/core/govern/validator.py`, `agents/CLAUDE.md`, `tests/govern/test_validator_new_fields.py` (new) | M | pending |
 | 4 | Document confirmed `permissionMode` allow-list | `agents/CLAUDE.md`, `docs/agent-roster.md` | S | pending |
@@ -139,4 +139,7 @@ When a Tier-1 commit lands:
 
 ### Decisions made
 
-(none yet)
+- **Tier-1 #1 (ActionType doc drift)** — Scope reduced from 4 files to 2.
+  - `agents/orchestrator.md` does not enumerate ActionTypes; skipped to avoid introducing a one-off mention.
+  - `references/baton-engine.md` enumerates only 6 of the 9 pre-CHECKPOINT action types (already missing `FEEDBACK`, `INTERACT`, `SWARM_DISPATCH`). Adding only `CHECKPOINT` would extend that inconsistency. **Deferred** to a separate effort: document all missing action types in `references/baton-engine.md` (new follow-up below).
+- New follow-up: **document missing action types in `references/baton-engine.md`** — FEEDBACK, INTERACT, SWARM_DISPATCH (and CHECKPOINT once it lands as more than enum-only). Not strictly part of the 2026 release-notes integration but surfaced during Tier-1 #1. Track as its own item; could go before, with, or after Tier-1 #7.
