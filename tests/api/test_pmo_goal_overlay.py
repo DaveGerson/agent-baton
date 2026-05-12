@@ -32,6 +32,7 @@ def test_execution_detail_response_has_goal_and_turn_count() -> None:
         elapsed_seconds=42.0,
     )
     assert resp.turn_count == 0
+    assert resp.tokens_used_usd == 0.0
     assert isinstance(resp.goal, _GoalOverlay)
     assert resp.goal.completion_condition is None
 
@@ -45,6 +46,7 @@ def test_execution_detail_response_with_goal() -> None:
         started_at="2026-05-12T00:00:00Z",
         elapsed_seconds=42.0,
         turn_count=7,
+        tokens_used_usd=4.23,
         goal=_GoalOverlay(
             completion_condition="all integration tests pass",
             goal_status="active",
@@ -55,11 +57,14 @@ def test_execution_detail_response_with_goal() -> None:
         ),
     )
     assert resp.turn_count == 7
+    assert resp.tokens_used_usd == 4.23
     assert resp.goal.goal_status == "active"
     assert resp.goal.amend_cycles_used == 1
     assert resp.goal.last_check_met is False
 
     payload = resp.model_dump()
     assert "turn_count" in payload
+    assert "tokens_used_usd" in payload
+    assert payload["tokens_used_usd"] == 4.23
     assert payload["goal"]["completion_condition"] == "all integration tests pass"
     assert payload["goal"]["max_amend_cycles"] == 3

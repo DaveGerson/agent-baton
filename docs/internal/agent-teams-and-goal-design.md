@@ -79,7 +79,7 @@ baton goal "<condition>" [--max-amend-cycles N]
 | **A1.a** `TeamBackend` protocol | `agent_baton/core/engine/dispatcher.py` (add `TeamBackend` Protocol; default impl = current worktree logic, new impl = `ClaudeTeamsBackend`) | Pluggable backend. |
 | **A1.b** Backend selector | `BATON_TEAMS_BACKEND` env var, plumbed through `core/engine/config.py` (or equivalent) | Opt-in switch. |
 | **A1.c** Hook bridge | New CLI: `baton execute record-team-member-result --hook-source claude-teams` invoked from a `TaskCompleted` shell hook | Connect Claude Code hook lifecycle → baton executor. |
-| **A1.d** Planner awareness of resumability constraint | Planner: when `BATON_TEAMS_BACKEND=claude-teams` and budget tier ≥ `long-running`, refuse to place team phases late in the plan | Prevents footguns. |
+| **A1.d** Planner awareness of resumability constraint | Planner: when `BATON_TEAMS_BACKEND=claude-teams` and budget tier ≥ `long-running`, emit a warning by default and refuse the plan when `BATON_TEAMS_STRICT_RESUMABILITY=1`. The two-mode split keeps the default planner usable while still satisfying the design's "refuse" intent under an opt-in flag. | Prevents footguns. |
 | **A1.e** Skills/MCP gap audit | `agents/CLAUDE.md` (document the limitation); audit each agent in `agents/` and tag those whose `skills`/`mcpServers` frontmatter is load-bearing | Avoid silently broken teammates. |
 
 ### Phase 3 — conditional (G2)

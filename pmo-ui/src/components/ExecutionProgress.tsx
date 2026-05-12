@@ -38,6 +38,7 @@ interface ExecutionDetail {
   // G1.f overlay fields. Defaults applied client-side when older
   // backends omit them so the component stays robust to deploys.
   turn_count?: number;
+  tokens_used_usd?: number;
   goal?: GoalOverlay;
 }
 
@@ -501,6 +502,13 @@ export function ExecutionProgress({ card, onClose }: Props) {
             <StatChip label="Status" value={detail?.status ?? card.column} color={statusColor(detail?.status ?? card.column)} />
             {detail?.turn_count !== undefined && detail.turn_count > 0 && (
               <StatChip label="Turns" value={`${detail.turn_count}`} color={T.tangerine} />
+            )}
+            {detail?.tokens_used_usd !== undefined && detail.tokens_used_usd > 0 && (
+              <StatChip
+                label="Spend"
+                value={`$${detail.tokens_used_usd.toFixed(2)}`}
+                color={T.tangerine}
+              />
             )}
             {card.agents.length > 0 && (
               <StatChip label="Agents" value={card.agents.join(', ')} color={T.blueberry} />

@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import re
 import sys
 import uuid
@@ -550,12 +551,29 @@ def handler(args: argparse.Namespace) -> None:
     print("  Done.", file=sys.stderr)
 
     # A1.d: surface claude-teams + long-running resumability warnings.
+    # Strict mode (BATON_TEAMS_STRICT_RESUMABILITY=1) treats the warning
+    # as a hard error and refuses the plan, matching the design's
+    # "refuse to place team phases late" wording. Default is a warning
+    # so the planner stays usable when the user accepts the trade-off.
     try:
         from agent_baton.core.engine.team_backends import (
             check_resumability_constraints,
         )
-        for _warn in check_resumability_constraints(plan):
+        _warnings = check_resumability_constraints(plan)
+        _strict = os.environ.get("BATON_TEAMS_STRICT_RESUMABILITY", "0").strip() == "1"
+        for _warn in _warnings:
             print(f"warning: {_warn}", file=sys.stderr)
+        if _warnings and _strict:
+            print(
+                "error: BATON_TEAMS_STRICT_RESUMABILITY=1 and the plan "
+                "violates resumability constraints; refusing to save. "
+                "Unset the flag, restructure the plan, or change "
+                "BATON_TEAMS_BACKEND.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+    except SystemExit:
+        raise
     except Exception:  # noqa: BLE001 — diagnostic only, never fatal
         pass
 

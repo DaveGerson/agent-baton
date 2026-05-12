@@ -263,6 +263,7 @@ class _ExecutionDetailResponse(BaseModel):
     elapsed_seconds: float
     # G1.f overlay
     turn_count: int = 0
+    tokens_used_usd: float = 0.0
     goal: _GoalOverlay = _GoalOverlay()
 
 
@@ -328,10 +329,12 @@ async def get_card_execution(
         started_dt = datetime.now(timezone.utc)
     elapsed = (datetime.now(timezone.utc) - started_dt.replace(tzinfo=timezone.utc if started_dt.tzinfo is None else started_dt.tzinfo)).total_seconds()
 
-    # G1.f: read live ExecutionState for goal-loop overlay + turn count.
-    # Best-effort: any failure leaves the overlay at defaults so the
-    # endpoint stays usable for cards without an active execution.
+    # G1.f: read live ExecutionState for goal-loop overlay + turn count
+    # + cumulative spend. Best-effort: any failure leaves the overlay at
+    # defaults so the endpoint stays usable for cards without an active
+    # execution.
     turn_count = 0
+    tokens_used_usd = 0.0
     goal_overlay = _GoalOverlay()
     if project_path:
         try:
@@ -347,6 +350,9 @@ async def get_card_execution(
                     state = sp.load()
                 if state is not None:
                     turn_count = int(getattr(state, "turn_count", 0) or 0)
+                    tokens_used_usd = float(
+                        getattr(state, "run_cumulative_spend_usd", 0.0) or 0.0
+                    )
                     plan = state.plan
                     if getattr(plan, "completion_condition", None):
                         last_check = state.goal_checks[-1] if state.goal_checks else None
@@ -374,6 +380,7 @@ async def get_card_execution(
         started_at=started_at,
         elapsed_seconds=max(0, elapsed),
         turn_count=turn_count,
+        tokens_used_usd=tokens_used_usd,
         goal=goal_overlay,
     )
 
