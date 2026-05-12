@@ -1512,6 +1512,40 @@ threshold.  The shared context includes the cost as a percentage of
 budget (e.g. "~45,000 tokens (90% of lean budget)") so dispatched
 agents can self-regulate scope.
 
+## 17. Goal-driven execution (G1)
+
+When the active plan has a `completion_condition`, the engine evaluates
+the goal at every gate-pass boundary inside `record_gate_result`. A
+`GoalEvaluator` (`stub` / `haiku` / `opus`, selected via
+`BATON_GOAL_EVALUATOR` + presence of `ANTHROPIC_API_KEY`) returns a
+structured `GoalCheck`; if not met and the amend budget has remaining
+cycles AND the evaluator authored follow-up phases, the engine
+inserts them with `trigger="goal_round_out"` so they execute before
+any other planned phase. A universal safety rail overrides
+`met=True` to `False` whenever the most recent gate did not pass.
+
+No new `ActionType` is introduced — the wire format from
+`_print_action()` is unchanged. Termination: `goal_status` settles to
+`"met"`, `"exhausted"`, or remains `"active"`; standard execution
+flow then proceeds to `COMPLETE` / `FAILED` as usual. See
+`agent_baton/core/engine/goal_evaluator.py`.
+
+## 18. Team backend selection (A1)
+
+`BATON_TEAMS_BACKEND` selects how team steps are realised:
+
+| Value | Behavior |
+|-------|----------|
+| `worktree` (default) | Existing parallel-dispatch path under git worktree isolation. Fully resumable. |
+| `claude-teams` | Experimental: writes a spawn-prompt artifact to `.claude/team-context/teams/team-{step_id}/spawn.md` directing an outer Claude Code session to create an Agent Team via `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`. Not resumable; one team at a time; no nested teams; `skills`/`mcpServers` frontmatter NOT honored on teammates. |
+
+In both backends, baton's TeamMailbox (`.claude/team-context/mailbox/team-{step_id}.jsonl`)
+captures the Agent Teams hook taxonomy (`task_created`,
+`task_completed`, `task_failed`, `teammate_idle`, `plan_approval_*`),
+emitted from `_team_dispatch_action` and `record_team_member_result`.
+`baton execute team-record --hook-source claude-teams` is the bridge
+an external `TaskCompleted` hook calls back into.
+
 ---
 
 ## Appendix: Data Models
