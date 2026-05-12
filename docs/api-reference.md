@@ -1375,6 +1375,48 @@ curl http://127.0.0.1:8741/api/v1/pmo/board/NDS
 
 #### Projects
 
+##### `GET /api/v1/pmo/cards/{card_id}/execution`
+
+Return execution progress for a PMO card, including the goal-loop overlay (G1.f).
+
+**Path parameters:**
+
+| Param | Type | Description |
+|---|---|---|
+| `card_id` | string | PMO card identifier (matches the underlying `task_id`) |
+
+**Response:** `ExecutionDetailResponse`
+
+| Field | Type | Description |
+|---|---|---|
+| `task_id` | string | Card / task identifier |
+| `status` | string | Card column / execution status |
+| `current_phase` | string | Current phase label |
+| `steps` | list[StepEvent] | Execution event log (dispatches, gates, step results, bead alerts) |
+| `started_at` | string | ISO 8601 |
+| `elapsed_seconds` | float | Wall-clock since `started_at` |
+| `turn_count` | int | Orchestrator turns observed by the engine (G1.f) |
+| `goal` | GoalOverlay | Goal-loop telemetry; defaults to empty when the plan has no `completion_condition` |
+
+`GoalOverlay`:
+
+| Field | Type | Description |
+|---|---|---|
+| `completion_condition` | string \| null | The goal text the plan was created against |
+| `goal_status` | string | `""` / `"active"` / `"met"` / `"exhausted"` |
+| `amend_cycles_used` | int | Round-out cycles used so far |
+| `max_amend_cycles` | int | Plan-level cap |
+| `checks_count` | int | Number of evaluator checks recorded |
+| `last_check_met` | bool \| null | Most recent evaluator verdict |
+
+**Example:**
+
+```bash
+curl http://127.0.0.1:8741/api/v1/pmo/cards/task-abc123/execution
+```
+
+---
+
 ##### `GET /api/v1/pmo/projects`
 
 List all registered PMO projects.

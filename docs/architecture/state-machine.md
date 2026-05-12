@@ -246,3 +246,52 @@ see [../engine-and-runtime.md §5](../engine-and-runtime.md).
 | WAL mode for SQLite | [core/storage/connection.py](../../agent_baton/core/storage/connection.py) |
 | Auto-sync is best-effort | `auto_sync_current_project()` in [core/storage/sync.py](../../agent_baton/core/storage/sync.py) |
 | `_print_action()` is the wire format | [cli/commands/execution/execute.py:568](../../agent_baton/cli/commands/execution/execute.py) |
+
+---
+
+## 8. Goal-driven execution (G1)
+
+When a plan is created with a `completion_condition` (`baton plan --goal` or
+`baton goal`), the engine evaluates the goal at every gate-pass boundary
+before advancing to the next phase. The evaluation is internal to
+`record_gate_result` — no new `ActionType` is emitted and the
+`_print_action()` wire format is unchanged.
+
+```
+gate passes
+  └─→ _evaluate_goal_after_gate(state, passed_phase_id, last_gate_passed=True)
+        ├─ select_evaluator()  (stub | Haiku | Opus, env-gated)
+        ├─ evaluator.evaluate(state, plan, last_gate_passed=True)
+        ├─ safety rail: if met=True but last_gate_passed=False → force met=False
+        ├─ append GoalCheck to state.goal_checks
+        └─ branch:
+              met                                        → goal_status = "met"
+              not_met, cycles_used < max, suggestions   → inline amend_plan
+                                                            cycles_used += 1
+                                                            goal_status = "active"
+              not_met, cycles_used >= max               → goal_status = "exhausted"
+  └─→ advance_phase
+```
+
+Termination is reached on `goal_status == "met"` (natural completion),
+`goal_status == "exhausted"` (FAILED with reason), or
+`BATON_RUN_TOKEN_CEILING` hit.
+
+## 9. Team dispatch hooks (A2)
+
+When `_team_dispatch_action` emits the parallel DISPATCH actions for a
+team step, it also writes mailbox events to
+`.claude/team-context/mailbox/team-{step_id}.jsonl`:
+
+| When | Event |
+|------|-------|
+| First dispatch of each member | `task_created` |
+| `record_team_member_result(complete)` | `task_completed` |
+| `record_team_member_result(failed)` | `task_failed` |
+| Parent step finalises | `teammate_idle` per member |
+| `request_team_member_plan_approval()` | `plan_approval_requested` |
+| `decide_team_member_plan_approval()` | `plan_approval_decided` |
+
+The mailbox is an append-only JSONL file retained past team teardown
+(audit requirement). See
+[`agent_baton/core/engine/mailbox.py`](../../agent_baton/core/engine/mailbox.py).

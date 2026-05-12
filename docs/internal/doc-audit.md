@@ -446,3 +446,26 @@ per §4.4. The CLI prints anchored URLs into delegation prompts in
 multiple places; renames are observable failures, not silent ones.
 Verify with `grep -rn 'docs/architecture.md#' .claude/ agents/
 references/ agent_baton/` before deleting any old anchor.
+
+---
+
+## 2026-05-12 — `/goal` + Agent Teams (ADR-24)
+
+Captured in:
+
+- **Public**:
+  - `docs/design-decisions.md` — ADR-24
+  - `docs/cli-reference.md` — `baton plan --goal` row, new `baton goal` command section, `baton execute team-record --hook-source` flag
+  - `docs/api-reference.md` — `GET /api/v1/pmo/cards/{card_id}/execution` section (goal overlay + turn_count)
+  - `docs/architecture/state-machine.md` — §8 goal evaluation flow, §9 team dispatch mailbox events
+  - `CLAUDE.md` (root) — env vars: `BATON_GOAL_EVALUATOR`, `BATON_TEAMS_BACKEND`
+  - `agents/CLAUDE.md` — teammate-safety section calling out the `skills` / `mcpServers` gap when `claude-teams` backend is selected
+
+- **Internal**:
+  - `docs/internal/agent-teams-and-goal-design.md` — the working design doc (Draft) covering A3 + G1 with wrap-and-refine. SWARM_DISPATCH cleanup recommendation withdrawn after closer inspection of `core/swarm/`.
+
+Code lives under `agent_baton/core/engine/{goal_evaluator,mailbox,team_backends}.py`,
+`agent_baton/cli/commands/goal_cmd.py`, with engine wiring in
+`core/engine/executor.py` (the goal-at-gate-boundary helper and the
+mailbox emission inside `_team_dispatch_action` / `record_team_member_result`).
+Tests live alongside in `tests/engine/`, `tests/cli/`, `tests/api/`.
