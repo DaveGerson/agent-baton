@@ -140,6 +140,7 @@ from agent_baton.models.execution import (
     FeedbackQuestion,
     FeedbackResult,
     GateResult,
+    GoalCheck,
     InteractionTurn,
     MachinePlan,
     PendingApprovalRequest,
@@ -2155,6 +2156,9 @@ class ExecutionEngine:
             )
 
         state = self._require_execution("record_step_result")
+        # G1: bump turn_count for the overlay. Every `record_*` call is
+        # one orchestrator turn; the gate path bumps it too.
+        state.turn_count += 1
 
         # ── Interacting status: multi-turn interaction protocol ────────────────
         # When an interactive step reports status="interacting", we append the
@@ -3085,6 +3089,168 @@ class ExecutionEngine:
             count += 1
         return count >= 2
 
+    def _evaluate_goal_after_gate(
+        self,
+        state: "ExecutionState",
+        *,
+        passed_phase_id: int,
+        last_gate_passed: bool,
+    ) -> None:
+        """Run the GoalEvaluator at a phase boundary (G1).
+
+        Called from ``record_gate_result`` BEFORE ``advance_phase`` when
+        a gate passes.  No-op when ``plan.completion_condition`` is unset.
+
+        On not-met with remaining amend budget, calls ``amend_plan`` with
+        ``insert_after_phase=passed_phase_id`` so the round-out phases
+        land before any other planned phase.
+
+        Side effects:
+            * Appends a ``GoalCheck`` to ``state.goal_checks``.
+            * May mutate ``state.amend_cycles_used`` and ``state.goal_status``.
+            * May call ``self.amend_plan(...)``.
+        """
+        plan = state.plan
+        if not plan.completion_condition:
+            return
+
+        from agent_baton.core.engine.goal_evaluator import select_evaluator
+
+        evaluator = select_evaluator()
+        check_id = f"g{len(state.goal_checks) + 1}"
+        try:
+            check = evaluator.evaluate(
+                state=state,
+                plan=plan,
+                last_gate_passed=last_gate_passed,
+                check_id=check_id,
+            )
+        except Exception as exc:  # noqa: BLE001 — never let goal eval crash the loop
+            logger.warning(
+                "Goal evaluator raised (%s); skipping goal check at phase %s",
+                exc, passed_phase_id,
+            )
+            return
+
+        state.goal_checks.append(check)
+
+        if check.met:
+            state.goal_status = "met"
+            logger.info(
+                "Goal met after phase %s (check %s, confidence %.2f).",
+                passed_phase_id, check.check_id, check.confidence,
+            )
+            return
+
+        # Not met: try to round out, if budget remains.
+        remaining = plan.max_amend_cycles - state.amend_cycles_used
+        if remaining <= 0:
+            state.goal_status = "exhausted"
+            logger.info(
+                "Goal not met and amend budget exhausted "
+                "(%d/%d cycles used). Execution will complete with "
+                "goal_status='exhausted'.",
+                state.amend_cycles_used, plan.max_amend_cycles,
+            )
+            return
+
+        if not check.suggested_phases:
+            # Evaluator can't (or won't) author follow-up work. Mark
+            # active so the orchestrator at least sees a deliberate
+            # not-yet-met status; the next gate boundary will re-evaluate.
+            state.goal_status = "active"
+            logger.info(
+                "Goal not met at phase %s; evaluator suggested no "
+                "follow-up phases. Continuing without amendment.",
+                passed_phase_id,
+            )
+            return
+
+        # Convert dicts → PlanPhase. Skip any that fail validation; the
+        # round-out loop must never crash the gate path.
+        new_phases: list[PlanPhase] = []
+        for raw in check.suggested_phases:
+            if not isinstance(raw, dict):
+                continue
+            try:
+                new_phases.append(PlanPhase.from_dict(raw))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Skipping malformed suggested_phase from evaluator: %s",
+                    exc,
+                )
+
+        if not new_phases:
+            state.goal_status = "active"
+            logger.info(
+                "Goal not met at phase %s; all suggested_phases failed "
+                "validation. Continuing without amendment.",
+                passed_phase_id,
+            )
+            return
+
+        # Renumber to avoid collisions with existing phase_ids.
+        next_id = max((p.phase_id for p in plan.phases), default=0) + 1
+        for ph in new_phases:
+            ph.phase_id = next_id
+            next_id += 1
+
+        # Inline the amendment so we mutate the same state object the
+        # caller holds — calling self.amend_plan() would reload state
+        # from disk, causing the caller's reference to go stale.
+        try:
+            amendment = PlanAmendment(
+                amendment_id=f"amend-{len(state.amendments) + 1}",
+                trigger="goal_round_out",
+                trigger_phase_id=passed_phase_id,
+                description=(
+                    f"Goal round-out (cycle "
+                    f"{state.amend_cycles_used + 1}/"
+                    f"{plan.max_amend_cycles}): "
+                    f"{check.reasoning[:200]}"
+                ),
+                feedback="; ".join(check.missing[:5]),
+            )
+            # Insert after the phase whose gate just passed.
+            insert_idx = next(
+                (i + 1 for i, p in enumerate(state.plan.phases)
+                 if p.phase_id == passed_phase_id),
+                len(state.plan.phases),
+            )
+            for i, phase in enumerate(new_phases):
+                state.plan.phases.insert(insert_idx + i, phase)
+                amendment.phases_added.append(phase.phase_id)
+            state.amendments.append(amendment)
+            if self._trace is not None:
+                self._tracer.record_event(
+                    self._trace,
+                    "replan",
+                    agent_name=None,
+                    phase=passed_phase_id,
+                    step=0,
+                    details={
+                        "amendment_id": amendment.amendment_id,
+                        "description": amendment.description,
+                        "phases_added": amendment.phases_added,
+                        "trigger": "goal_round_out",
+                    },
+                )
+            state.amend_cycles_used += 1
+            state.goal_status = "active"
+            logger.info(
+                "Goal round-out cycle %d/%d: added %d phase(s) after "
+                "phase %s.",
+                state.amend_cycles_used, plan.max_amend_cycles,
+                len(new_phases), passed_phase_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Goal round-out amendment failed (%s); marking "
+                "goal_status='active' and continuing.",
+                exc,
+            )
+            state.goal_status = "active"
+
     def record_gate_result(
         self,
         phase_id: int,
@@ -3114,6 +3280,8 @@ class ExecutionEngine:
             actor: Best-available identity string (A2).
         """
         state = self._require_execution("record_gate_result")
+        # G1: bump turn_count for the overlay.
+        state.turn_count += 1
 
         phase_obj = state.current_phase_obj
         gate_type = phase_obj.gate.gate_type if (phase_obj and phase_obj.gate) else "unknown"
@@ -3243,6 +3411,15 @@ class ExecutionEngine:
                 gate_type=gate_type,
                 output=output,
             ))
+            # G1: evaluate goal at the phase boundary BEFORE advancing.
+            # If the evaluator amends the plan, the new phases will be
+            # inserted after `phase_id`, so the subsequent advance lands
+            # on them instead of the next pre-planned phase.
+            self._evaluate_goal_after_gate(
+                state,
+                passed_phase_id=phase_id,
+                last_gate_passed=True,
+            )
             # Advance to next phase via PhaseManager so event publication
             # mirrors the PHASE_ADVANCE_OK arm in _apply_resolver_decision
             # (bd-0a63).  current_phase is a 0-based index into plan.phases;
@@ -4120,6 +4297,15 @@ class ExecutionEngine:
             f"Gates passed: {gates_passed}",
             f"Elapsed: {int(elapsed)}s",
         ]
+        # G1: surface goal-loop outcome when the plan had a goal.
+        if state.plan.completion_condition:
+            status_text = state.goal_status or "active"
+            summary_lines.append(
+                f"Goal: \"{state.plan.completion_condition[:80]}\" "
+                f"[{status_text}; {state.amend_cycles_used}/"
+                f"{state.plan.max_amend_cycles} round-out cycles used; "
+                f"{len(state.goal_checks)} check(s)]"
+            )
         if trace_path:
             summary_lines.append(f"Trace: {trace_path}")
         summary_lines.append(f"Retrospective: {retro_path}")

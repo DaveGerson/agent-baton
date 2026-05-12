@@ -188,6 +188,30 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
             "'smoke' runs import-only (build gates) or collect-only (test gates)."
         ),
     )
+    p.add_argument(
+        "--goal",
+        dest="goal",
+        default=None,
+        metavar="CONDITION",
+        help=(
+            "Set a completion condition (G1, /goal wrap). The engine "
+            "evaluates the goal at phase boundaries and uses amend_plan "
+            "to round out gaps until the condition is met, the amend "
+            "budget is exhausted, or BATON_RUN_TOKEN_CEILING is hit. "
+            "See docs/internal/agent-teams-and-goal-design.md."
+        ),
+    )
+    p.add_argument(
+        "--max-amend-cycles",
+        dest="max_amend_cycles",
+        type=int,
+        default=3,
+        metavar="N",
+        help=(
+            "Maximum number of goal-driven round-out cycles. Only "
+            "meaningful with --goal. Default: 3."
+        ),
+    )
     return p
 
 
@@ -447,6 +471,13 @@ def handler(args: argparse.Namespace) -> None:
             )
             sys.exit(1)
 
+        # G1: --goal on the CLI overrides any completion_condition in
+        # the imported file.
+        goal_text = getattr(args, "goal", None)
+        if goal_text:
+            plan.completion_condition = goal_text
+            plan.max_amend_cycles = max(0, getattr(args, "max_amend_cycles", 3))
+
         if args.save:
             from agent_baton.core.orchestration.context import ContextManager
 
@@ -517,6 +548,15 @@ def handler(args: argparse.Namespace) -> None:
         gate_scope=getattr(args, "gate_scope", "focused"),
     )
     print("  Done.", file=sys.stderr)
+
+    # G1: stamp goal fields onto the plan after creation. We do this
+    # post-creation (rather than threading through planner.create_plan)
+    # to keep the planner signature stable and let `baton goal` reuse
+    # the same path.
+    goal_text = getattr(args, "goal", None)
+    if goal_text:
+        plan.completion_condition = goal_text
+        plan.max_amend_cycles = max(0, getattr(args, "max_amend_cycles", 3))
 
     # --dry-run: print compact forecast and exit without writing anything.
     if getattr(args, "dry_run", False):

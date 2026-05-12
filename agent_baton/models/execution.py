@@ -617,6 +617,13 @@ class MachinePlan(PlanModel):
     archetype: str = "phased"
     max_retry_phases: int = 0
     compliance_fail_closed: bool | None = None
+    # Goal-driven execution (G1, see docs/internal/agent-teams-and-goal-design.md).
+    # Set when the plan is created via `baton goal "<condition>"`. The engine
+    # invokes a GoalEvaluator at phase boundaries and uses amend_plan() to
+    # round out gaps until the condition is met, the amend budget is exhausted,
+    # or BATON_RUN_TOKEN_CEILING is hit.
+    completion_condition: str | None = None
+    max_amend_cycles: int = 3
 
     @model_validator(mode="after")
     def _validate_plan_graph_integrity(self) -> Self:
@@ -741,6 +748,8 @@ class MachinePlan(PlanModel):
             "archetype": self.archetype,
             "max_retry_phases": self.max_retry_phases,
             "compliance_fail_closed": self.compliance_fail_closed,
+            "completion_condition": self.completion_condition,
+            "max_amend_cycles": self.max_amend_cycles,
         }
         if self.resource_limits is not None:
             d["resource_limits"] = self.resource_limits.to_dict()
@@ -778,6 +787,9 @@ class MachinePlan(PlanModel):
             lines.append(f"**Explicit Knowledge Docs**: {', '.join(self.explicit_knowledge_docs)}")
         if self.compliance_fail_closed is not None:
             lines.append(f"**Compliance Fail-Closed**: {self.compliance_fail_closed}")
+        if self.completion_condition:
+            lines.append(f"**Goal**: {self.completion_condition}")
+            lines.append(f"**Max Amend Cycles**: {self.max_amend_cycles}")
         lines.append("")
 
         for phase in self.phases:
@@ -872,7 +884,7 @@ class PlanAmendment(ExecutionRecord):
     """
 
     amendment_id: str
-    trigger: str                    # "gate_feedback", "approval_feedback", "manual"
+    trigger: str                    # "gate_feedback", "approval_feedback", "manual", "goal_round_out"
     trigger_phase_id: int
     description: str
     phases_added: list[int] = Field(default_factory=list)   # phase_ids of new phases
@@ -880,6 +892,49 @@ class PlanAmendment(ExecutionRecord):
     created_at: str = Field(default_factory=_now_iso_seconds)
     feedback: str = ""              # reviewer/approver feedback that triggered this
     metadata: dict[str, str] = Field(default_factory=dict)  # arbitrary key/value context
+
+
+# ---------------------------------------------------------------------------
+# Goal evaluation (G1: /goal wrap-and-refine — see
+# docs/internal/agent-teams-and-goal-design.md)
+# ---------------------------------------------------------------------------
+
+class GoalCheck(ExecutionRecord):
+    """Result of a goal evaluation at a phase boundary.
+
+    Produced by ``GoalEvaluator`` and persisted under
+    ``ExecutionState.goal_checks``.  When ``met`` is False and the amend
+    budget has remaining cycles, ``suggested_phases`` feeds
+    ``amend_plan()`` to round out the plan.
+
+    Attributes:
+        check_id: Monotonic id for this check (``"g1"``, ``"g2"``, ...).
+        evaluated_at: ISO 8601 timestamp.
+        phase_id: Phase that triggered the evaluation.
+        completion_condition: The goal text being evaluated.
+        met: True iff the evaluator believes the goal is satisfied.
+        confidence: 0.0-1.0 evaluator confidence.
+        last_gate_passed: True iff the most-recent gate passed; required
+            to be True for ``met=True`` to be accepted.
+        missing: Plain-text gaps the evaluator identified.
+        suggested_phases: Phase dicts (compatible with ``PlanPhase``) to
+            feed into ``amend_plan`` when not met.
+        reasoning: Short summary of evaluator reasoning (audit trail).
+        evaluator_source: "stub" or "haiku" or "opus" — which evaluator
+            produced this check.
+    """
+
+    check_id: str
+    evaluated_at: str = Field(default_factory=_now_iso_seconds)
+    phase_id: int
+    completion_condition: str
+    met: bool
+    confidence: float = 0.0
+    last_gate_passed: bool = False
+    missing: list[str] = Field(default_factory=list)
+    suggested_phases: list[dict[str, Any]] = Field(default_factory=list)
+    reasoning: str = ""
+    evaluator_source: str = "stub"
 
 
 # ---------------------------------------------------------------------------
@@ -1361,6 +1416,17 @@ class ExecutionState(BaseModel):
     scope_expansions_applied: int = 0
     pending_approval_request: PendingApprovalRequest | None = None
     phase_retries: dict[str, int] = Field(default_factory=dict)
+
+    # Goal-driven execution (G1).  ``goal_checks`` is the audit trail of
+    # GoalEvaluator runs at phase boundaries; ``amend_cycles_used`` counts
+    # round-out cycles spent against ``plan.max_amend_cycles``.
+    # ``goal_status`` is one of: "active" (loop in progress), "met"
+    # (evaluator confirmed; will terminate as COMPLETE), "exhausted"
+    # (amend budget hit; will terminate as FAILED), or "" (no goal set).
+    goal_checks: list[GoalCheck] = Field(default_factory=list)
+    amend_cycles_used: int = 0
+    goal_status: str = ""
+    turn_count: int = 0
 
     # SQLite Phase C (slice 14): transient OCC version observed at load
     # time.  PrivateAttr so it does NOT appear in model_dump / to_dict —
