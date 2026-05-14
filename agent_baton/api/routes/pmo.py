@@ -241,6 +241,19 @@ class _StepEvent(BaseModel):
     message: str | None = None
 
 
+class _GoalOverlay(BaseModel):
+    """Goal-loop telemetry surfaced to the PMO UI (G1.f).
+
+    Empty/None on plans without a completion_condition.
+    """
+    completion_condition: str | None = None
+    goal_status: str = ""           # "", "active", "met", "exhausted"
+    amend_cycles_used: int = 0
+    max_amend_cycles: int = 0
+    checks_count: int = 0
+    last_check_met: bool | None = None
+
+
 class _ExecutionDetailResponse(BaseModel):
     task_id: str
     status: str
@@ -248,6 +261,10 @@ class _ExecutionDetailResponse(BaseModel):
     steps: list[_StepEvent]
     started_at: str
     elapsed_seconds: float
+    # G1.f overlay
+    turn_count: int = 0
+    tokens_used_usd: float = 0.0
+    goal: _GoalOverlay = _GoalOverlay()
 
 
 @router.get("/pmo/cards/{card_id}/execution")
@@ -312,6 +329,49 @@ async def get_card_execution(
         started_dt = datetime.now(timezone.utc)
     elapsed = (datetime.now(timezone.utc) - started_dt.replace(tzinfo=timezone.utc if started_dt.tzinfo is None else started_dt.tzinfo)).total_seconds()
 
+    # G1.f: read live ExecutionState for goal-loop overlay + turn count
+    # + cumulative spend. Best-effort: any failure leaves the overlay at
+    # defaults so the endpoint stays usable for cards without an active
+    # execution.
+    turn_count = 0
+    tokens_used_usd = 0.0
+    goal_overlay = _GoalOverlay()
+    if project_path:
+        try:
+            from agent_baton.core.storage import detect_backend, get_project_storage
+            context_root = project_path / ".claude" / "team-context"
+            if context_root.exists():
+                was_file_only = detect_backend(context_root) == "file"
+                storage = get_project_storage(context_root)
+                state = storage.load_execution(card_id)
+                if state is None and was_file_only:
+                    from agent_baton.core.engine.persistence import StatePersistence
+                    sp = StatePersistence(context_root, task_id=card_id)
+                    state = sp.load()
+                if state is not None:
+                    turn_count = int(getattr(state, "turn_count", 0) or 0)
+                    tokens_used_usd = float(
+                        getattr(state, "run_cumulative_spend_usd", 0.0) or 0.0
+                    )
+                    plan = state.plan
+                    if getattr(plan, "completion_condition", None):
+                        last_check = state.goal_checks[-1] if state.goal_checks else None
+                        goal_overlay = _GoalOverlay(
+                            completion_condition=plan.completion_condition,
+                            goal_status=getattr(state, "goal_status", "") or "",
+                            amend_cycles_used=int(
+                                getattr(state, "amend_cycles_used", 0) or 0
+                            ),
+                            max_amend_cycles=int(plan.max_amend_cycles),
+                            checks_count=len(state.goal_checks),
+                            last_check_met=(
+                                bool(last_check.met) if last_check else None
+                            ),
+                        )
+        except Exception:
+            # Overlay is non-essential; never let it break the endpoint.
+            pass
+
     return _ExecutionDetailResponse(
         task_id=card_id,
         status=status,
@@ -319,6 +379,9 @@ async def get_card_execution(
         steps=events,
         started_at=started_at,
         elapsed_seconds=max(0, elapsed),
+        turn_count=turn_count,
+        tokens_used_usd=tokens_used_usd,
+        goal=goal_overlay,
     )
 
 

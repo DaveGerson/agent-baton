@@ -74,6 +74,8 @@ baton plan SUMMARY [options]
 | `--knowledge PATH` | No | -- | Attach a knowledge document file globally to all steps (repeatable) |
 | `--knowledge-pack PACK` | No | -- | Attach a knowledge pack by name globally to all steps (repeatable) |
 | `--intervention LEVEL` | No | `low` | Escalation threshold for knowledge gaps: `low`, `medium`, `high` |
+| `--goal CONDITION` | No | -- | Completion condition (G1). The engine evaluates the goal after each gate passes and uses `amend_plan` to round out gaps until met, exhausted, or the token ceiling is hit. |
+| `--max-amend-cycles N` | No | `3` | Goal round-out budget (meaningful only with `--goal`). |
 
 **Examples:**
 
@@ -94,6 +96,50 @@ baton plan "Add caching layer" --json
 ```
 
 **Related:** `baton execute start`, `baton classify`, `baton detect`
+
+---
+
+### `baton goal`
+
+Plan against a completion condition and let the engine drive amend cycles until met (G1).
+
+```
+baton goal CONDITION [options]
+```
+
+| Argument | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `CONDITION` | Yes | -- | A single quoted sentence describing what "done" means |
+| `--max-amend-cycles N` | No | `3` | Maximum goal-driven round-out cycles |
+| `--task-type TYPE` | No | auto | Passed through to `baton plan` |
+| `--complexity LEVEL` | No | auto | `light` / `medium` / `heavy` |
+| `--project PATH` | No | cwd | Project root |
+| `--knowledge PATH` | No | -- | Repeatable; passed through |
+| `--knowledge-pack PACK` | No | -- | Repeatable; passed through |
+| `--model NAME` | No | -- | Default model for dispatched agents |
+| `--gate-scope SCOPE` | No | `focused` | `focused` / `full` / `smoke` |
+| `--intervention LEVEL` | No | `low` | Knowledge-gap escalation aggressiveness |
+| `--explain` | No | false | Write an `explanation.md` alongside the saved plan |
+| `--verbose` | No | false | Print the full plan markdown after save |
+| `--no-execute` | No | false | Stop after planning; do not print "next: baton execute start" |
+
+**Behavior:** equivalent to `baton plan CONDITION --save --goal CONDITION --max-amend-cycles N` followed by guidance to run `baton execute start`. The engine evaluates the goal at every gate-pass boundary; if not met and budget remains, it inserts evaluator-suggested phases via `amend_plan`. Termination conditions: goal met, amend budget exhausted, or `BATON_RUN_TOKEN_CEILING` hit.
+
+**Evaluator selection** (via `BATON_GOAL_EVALUATOR` env var):
+- `stub` — deterministic, no LLM (default fallback)
+- `haiku` (default when `ANTHROPIC_API_KEY` is set) — Claude Haiku 4.5
+- `opus` — Claude Opus 4.7
+
+**Safety rail:** any evaluator that returns `met=True` is overridden to `met=False` unless the most-recent gate passed. This prevents premature claims.
+
+**Example:**
+
+```bash
+baton goal "all four integration tests pass under load" --max-amend-cycles 5
+baton execute start
+```
+
+See [docs/internal/agent-teams-and-goal-design.md](internal/agent-teams-and-goal-design.md) for the design rationale.
 
 ---
 
@@ -308,6 +354,7 @@ baton execute team-record --step-id S --member-id M --agent NAME [options] [--ta
 | `--status` | No | `complete` | `complete` or `failed` |
 | `--outcome TEXT` | No | `""` | Summary of work done |
 | `--files F` | No | `""` | Comma-separated files changed |
+| `--hook-source SOURCE` | No | `""` | When invoked from an external Claude Code Agent Teams hook, set to `claude-teams`. Tags the team mailbox event with the source for audit. See A1.c in `docs/internal/agent-teams-and-goal-design.md`. |
 
 ---
 

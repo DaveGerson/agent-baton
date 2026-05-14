@@ -19,6 +19,15 @@ interface StepEvent {
   description?: string; // bead description
 }
 
+interface GoalOverlay {
+  completion_condition: string | null;
+  goal_status: '' | 'active' | 'met' | 'exhausted';
+  amend_cycles_used: number;
+  max_amend_cycles: number;
+  checks_count: number;
+  last_check_met: boolean | null;
+}
+
 interface ExecutionDetail {
   task_id: string;
   status: string;
@@ -26,6 +35,11 @@ interface ExecutionDetail {
   steps: StepEvent[];
   started_at: string;
   elapsed_seconds: number;
+  // G1.f overlay fields. Defaults applied client-side when older
+  // backends omit them so the component stays robust to deploys.
+  turn_count?: number;
+  tokens_used_usd?: number;
+  goal?: GoalOverlay;
 }
 
 interface FlagAlert {
@@ -483,14 +497,30 @@ export function ExecutionProgress({ card, onClose }: Props) {
           </div>
 
           {/* Stat chips */}
-          <div style={{ display: 'flex', gap: 10, marginTop: 8 }}>
+          <div style={{ display: 'flex', gap: 10, marginTop: 8, flexWrap: 'wrap' }}>
             <StatChip label="Gates" value={`${card.gates_passed}`} color={T.mint} />
             <StatChip label="Status" value={detail?.status ?? card.column} color={statusColor(detail?.status ?? card.column)} />
+            {detail?.turn_count !== undefined && detail.turn_count > 0 && (
+              <StatChip label="Turns" value={`${detail.turn_count}`} color={T.tangerine} />
+            )}
+            {detail?.tokens_used_usd !== undefined && detail.tokens_used_usd > 0 && (
+              <StatChip
+                label="Spend"
+                value={`$${detail.tokens_used_usd.toFixed(2)}`}
+                color={T.tangerine}
+              />
+            )}
             {card.agents.length > 0 && (
               <StatChip label="Agents" value={card.agents.join(', ')} color={T.blueberry} />
             )}
           </div>
         </div>
+
+        {/* Goal banner (G1.f) — visible only when the plan was created
+            with a completion_condition. Mirrors the `/goal` overlay. */}
+        {detail?.goal?.completion_condition && (
+          <GoalBanner goal={detail.goal} />
+        )}
 
         {/* Skip reason prompt */}
         {skipPrompt && (
@@ -748,6 +778,76 @@ export function ExecutionProgress({ card, onClose }: Props) {
 // ---------------------------------------------------------------------------
 // Sub-components
 // ---------------------------------------------------------------------------
+
+function GoalBanner({ goal }: { goal: GoalOverlay }) {
+  const statusColors: Record<string, { bg: string; border: string; pill: string }> = {
+    met: { bg: T.bg3, border: T.mint, pill: T.mint },
+    exhausted: { bg: T.cherrySoft, border: T.cherry, pill: T.cherry },
+    active: { bg: T.butterSoft, border: T.butter, pill: T.butter },
+    '': { bg: T.bg3, border: T.border, pill: T.text2 },
+  };
+  const colors = statusColors[goal.goal_status] ?? statusColors[''];
+  const statusText = goal.goal_status || 'active';
+  return (
+    <div style={{
+      padding: '8px 16px',
+      background: colors.bg,
+      borderBottom: `2px solid ${colors.border}`,
+      display: 'flex',
+      alignItems: 'center',
+      gap: 10,
+      fontFamily: FONTS.body,
+      fontSize: FONT_SIZES.sm,
+      flexShrink: 0,
+    }}>
+      <span style={{
+        fontWeight: 800,
+        textTransform: 'uppercase',
+        fontSize: 10,
+        letterSpacing: 0.5,
+        color: T.text2,
+        flexShrink: 0,
+      }}>
+        Goal
+      </span>
+      <span style={{
+        flex: 1,
+        color: T.text0,
+        minWidth: 0,
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap',
+      }} title={goal.completion_condition ?? undefined}>
+        "{goal.completion_condition}"
+      </span>
+      <span style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 4,
+        fontSize: FONT_SIZES.xs,
+        border: `1.5px solid ${colors.pill}`,
+        borderRadius: 999,
+        padding: '2px 8px',
+        color: colors.pill,
+        fontWeight: 800,
+        textTransform: 'uppercase',
+        letterSpacing: 0.5,
+        flexShrink: 0,
+      }}>
+        {statusText}
+      </span>
+      <span style={{
+        fontFamily: FONTS.mono,
+        fontSize: 10,
+        color: T.text2,
+        flexShrink: 0,
+      }}>
+        round-out {goal.amend_cycles_used}/{goal.max_amend_cycles}
+        {goal.checks_count > 0 && ` · ${goal.checks_count} check${goal.checks_count === 1 ? '' : 's'}`}
+      </span>
+    </div>
+  );
+}
 
 function StatChip({ label, value, color }: { label: string; value: string; color: string }) {
   return (

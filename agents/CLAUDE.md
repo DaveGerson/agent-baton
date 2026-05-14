@@ -43,3 +43,28 @@ The `description` field is what the orchestrator's router matches against — wr
 ## Roster
 
 See [../docs/agent-roster.md](../docs/agent-roster.md) for the human-readable roster (capabilities, when to use which, tool grants).
+
+## Teammate-safety: `skills` and `mcpServers` frontmatter (A1.e)
+
+Claude Code's experimental Agent Teams feature does **NOT** honor the
+`skills:` or `mcpServers:` frontmatter fields when a subagent definition is
+used as a teammate. From the [Agent Teams docs](https://code.claude.com/docs/en/agent-teams):
+
+> The `skills` and `mcpServers` frontmatter fields in a subagent definition
+> are not applied when that definition runs as a teammate. Teammates load
+> skills and MCP servers from your project and user settings, the same as a
+> regular session.
+
+If `BATON_TEAMS_BACKEND=claude-teams` is in use and an agent here depends on
+`skills` or `mcpServers` frontmatter for correctness, it CANNOT be used as a
+Claude-Teams teammate without a wrapper that re-injects the missing context
+via the spawn prompt.
+
+A linter helper lives in `agent_baton/core/engine/team_backends.py`:
+
+```python
+from agent_baton.core.engine.team_backends import audit_agents_for_teammate_safety
+audit_agents_for_teammate_safety(Path("agents/"))  # → {agent_name: ["skills", "mcpServers"]}
+```
+
+Run this when adding a new agent that you intend to be usable as a teammate.

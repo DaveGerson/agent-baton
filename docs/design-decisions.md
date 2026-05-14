@@ -1095,3 +1095,63 @@ pack (`planning-taxonomy`) and reference doc (`planning-taxonomy.md`)
 deliver the taxonomy to agents and users respectively.
 
 **Status**: Implemented (2026-03-29)
+
+---
+
+## ADR-24: `/goal` wrap-and-refine + Agent Teams mailbox
+
+**Decision**: Integrate Claude Code's `/goal` (v2.1.139, May 2026)
+completion-condition primitive and the experimental Agent Teams feature
+(v2.1.32+) into baton via two parallel slices.
+
+* **`/goal` (G1)** — `MachinePlan` gains a `completion_condition` field
+  and `max_amend_cycles` budget. A new `GoalEvaluator` (stub +
+  Anthropic Haiku/Opus strategies, gated on `BATON_GOAL_EVALUATOR` +
+  `ANTHROPIC_API_KEY`) runs at every gate-pass boundary; on
+  not-met-with-budget-remaining it inserts evaluator-suggested phases
+  via an inline plan amendment so the executor's in-flight state stays
+  consistent. A universal safety rail forces `met=False` whenever the
+  most recent gate did not pass. `baton goal "<condition>"` wraps
+  `baton plan --save --goal=<condition>`; the PMO API surfaces a
+  GoalOverlay (status, cycles used, checks count) and the
+  `ExecutionProgress` UI renders a goal banner.
+
+* **Agent Teams (A2 + A1)** — A2 (unconditional): a per-team
+  append-only `TeamMailbox` at `.claude/team-context/mailbox/`
+  captures Claude Code Agent Teams' hook taxonomy (`task_created`,
+  `task_completed`, `task_failed`, `teammate_idle`, `plan_approval_*`)
+  on top of baton's existing `TEAM_DISPATCH` path. `ExecutionEngine`
+  emits these events from `_team_dispatch_action` and
+  `record_team_member_result`. New
+  `request_team_member_plan_approval` /
+  `decide_team_member_plan_approval` methods record lead-gated plan
+  approvals (mailbox-only; the state machine is unaffected). A1
+  (opt-in behind `BATON_TEAMS_BACKEND=claude-teams`): a `TeamBackend`
+  protocol with `WorktreeTeamBackend` (default, no-op) and
+  `ClaudeTeamsBackend` (writes a spawn-prompt artifact directing an
+  outer Claude Code session to create a real Agent Team).
+  `baton execute team-record --hook-source claude-teams` is the bridge
+  an external TaskCompleted hook calls back into. The planner emits a
+  warning when `claude-teams + long-running` would place team phases
+  past the resumability cliff.
+
+**Rationale**: `/goal` and Agent Teams both push toward longer-running
+autonomous work. baton already has the substrate for parallel team
+dispatch (`TEAM_DISPATCH` is wired end-to-end) and for plan amendment
+(`amend_plan`); G1 reuses both rather than inventing a new
+`ActionType.GOAL`. A1 is held behind a flag because Claude Code's
+Agent Teams feature has hard limitations that conflict with baton's
+invariants — no in-process resume, one team at a time, no nested
+teams, `skills`/`mcpServers` frontmatter not honored on teammates.
+A2's mailbox model (precedent: gastown) captures the coordination
+patterns from Agent Teams without inheriting those constraints.
+
+**Deferred**: A first-class `ActionType.GOAL` (G2 in the design doc)
+is deferred until regulated-domain auditor work needs discrete,
+observable goal-check events. The cleanup of `SWARM_DISPATCH` flagged
+in the initial design was withdrawn after closer inspection — the
+swarm subsystem is wired through `core/swarm/` and gated by
+`BATON_SWARM_ENABLED`.
+
+**Status**: Implemented (2026-05-12). Design doc:
+`docs/internal/agent-teams-and-goal-design.md`.
