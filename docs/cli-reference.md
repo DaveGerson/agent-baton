@@ -2137,7 +2137,7 @@ in [references/baton-engine.md](../references/baton-engine.md#environment-variab
 | `BATON_SWARM_ENABLED` | Required in addition to `BATON_EXPERIMENTAL=swarm` to dispatch a swarm refactor. | unset |
 | `BATON_SOULS_ENABLED` | Wave 6.1 Part B persistent agent souls (signing + revocation). | `0` |
 | `BATON_GASTOWN_ENABLED` | Wave 6.1 Part A git-notes bead persistence. Dual-writes each bead to `refs/notes/baton-beads` (warn-only; SQLite is the source of truth). Default ON; `0` restores SQLite-only behaviour. | `1` |
-| `BATON_BD_BACKEND` | ADR-13b bead-store backend: `sqlite` \| `bd` \| `auto`. `bd` runs off the external `bd` CLI (gastownhall/beads) as system of record. Default `sqlite` during the staged migration. | `sqlite` |
+| `BATON_BD_BACKEND` | ADR-13b bead-store backend: `sqlite` \| `bd` \| `auto`. `bd` runs off the external `bd` CLI (gastownhall/beads) as system of record; `auto` (default) uses `bd` when present, else SQLite. | `auto` |
 | `BATON_BD_ENABLED` | Master switch for the `bd` backend (affects `auto`). | `1` |
 | `BATON_BD_BIN` | `bd` binary path/name. | `bd` |
 | `BATON_BD_PREFIX` | Issue prefix for `bd init` (matches baton's `bd-<hash>` IDs). | `bd` |

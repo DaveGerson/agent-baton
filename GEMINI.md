@@ -84,7 +84,7 @@ cymbal impact <symbol>          # blast radius before edits
 | `BATON_SPECULATE_ENABLED` | Enable/disable speculative pipelining | `0` |
 | `BATON_SOULS_ENABLED` | Enable/disable soul registry for agent identity | `0` |
 | `BATON_GASTOWN_ENABLED` | Enable/disable Gastown git-notes bead persistence (dual-write to `refs/notes/baton-beads`, warn-only; SQLite stays source of truth). Default ON; set `0` for SQLite-only. | `1` |
-| `BATON_BD_BACKEND` | Bead-store backend (ADR-13b): `sqlite` \| `bd` \| `auto`. `bd` uses the external `bd` CLI as system of record. Default `sqlite` during staged migration. | `sqlite` |
+| `BATON_BD_BACKEND` | Bead-store backend (ADR-13b): `sqlite` \| `bd` \| `auto`. `bd` uses the external `bd` CLI as system of record; `auto` (default) uses `bd` when present, else SQLite. | `auto` |
 | `BATON_BD_ENABLED` / `BATON_BD_BIN` / `BATON_BD_PREFIX` | Master switch (default `1`), binary path (default `bd`), and `bd init` issue prefix (default `bd`) for the beads backend. | — |
 | `BATON_PLANNER_HARD_GATE` | Enable hard validation gate that blocks bad plans | unset |
 | `BATON_PREDICT_ENABLED` | Enable predictive dispatch system | `0` |

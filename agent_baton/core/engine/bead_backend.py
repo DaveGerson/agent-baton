@@ -24,7 +24,11 @@ from pathlib import Path
 _log = logging.getLogger(__name__)
 
 _BACKEND_ENV = "BATON_BD_BACKEND"
-_DEFAULT_BACKEND = "sqlite"
+# ADR-13b step F — behavioural cutover: default to ``auto``.  When ``bd`` is
+# enabled (BATON_BD_ENABLED!=0) and the binary is present (the installer puts
+# it there), the engine runs off beads; otherwise it falls back to the SQLite
+# store so environments without ``bd`` (some CI) keep working.
+_DEFAULT_BACKEND = "auto"
 
 
 def selected_backend() -> str:

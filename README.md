@@ -808,7 +808,7 @@ pmo-ui/            <- React/Vite PMO frontend
 | `BATON_SWARM_ENABLED` | Required (in addition to `BATON_EXPERIMENTAL=swarm`) to actually dispatch a swarm refactor. | unset |
 | `BATON_SOULS_ENABLED` / `BATON_EXEC_BEADS_ENABLED` | Feature flags for persistent agent souls (Wave 6.1B) and executable beads (Wave 6.1C). | unset |
 | `BATON_GASTOWN_ENABLED` | Gastown git-notes bead persistence (Wave 6.1A). When on, bead writes are mirrored to `refs/notes/baton-beads` (warn-only; SQLite remains the source of truth) so memory survives across clones and worktrees. On by default; set `0` for SQLite-only. | `1` |
-| `BATON_BD_BACKEND` | Bead-store backend (ADR-13b): `sqlite`, `bd` (use the external [beads](https://github.com/gastownhall/beads) `bd` CLI as system of record), or `auto` (bd when present, else SQLite). The installer auto-installs `bd`. Default `sqlite` during the staged migration. | `sqlite` |
+| `BATON_BD_BACKEND` | Bead-store backend (ADR-13b): `sqlite`, `bd` (use the external [beads](https://github.com/gastownhall/beads) `bd` CLI as system of record), or `auto` (bd when present, else SQLite). The installer auto-installs `bd`, so `auto` runs off beads by default. | `auto` |
 | `BATON_BD_ENABLED` / `BATON_BD_BIN` / `BATON_BD_PREFIX` | Beads backend master switch (`1`), `bd` binary path (`bd`), and `bd init` issue prefix (`bd`). | — |
 | `BATON_SKIP_GIT_NOTES_SETUP` | Set to `1` to silence the install-time git-notes replication setup and the runtime warning emitted by `NotesAdapter.write()` when the wildcard refspec is missing. | unset |
 | `ANTHROPIC_API_KEY` | Required for AI classification (`pip install agent-baton[classify]`) and the Haiku planner classifier | none |
