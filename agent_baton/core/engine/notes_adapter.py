@@ -527,10 +527,20 @@ class NotesAdapter:
 
     @staticmethod
     def compute_script_sha(script_body: str) -> str:
-        """Return the SHA-256 hex digest of *script_body* (UTF-8 encoded)."""
-        return hashlib.sha256(script_body.encode("utf-8")).hexdigest()
+        """Return the SHA-256 hex digest of *script_body* (UTF-8 encoded).
+
+        Re-export shim — implementation lives in
+        :mod:`agent_baton.core.exec.script_hash`.
+        """
+        from agent_baton.core.exec.script_hash import compute_script_sha
+        return compute_script_sha(script_body)
 
     @staticmethod
     def script_ref_for(content_sha: str) -> str:
-        """Return the canonical sub-ref string for a script keyed by *content_sha*."""
-        return f"refs/notes/baton-bead-scripts/{content_sha}"
+        """Return the canonical sub-ref string for a script keyed by *content_sha*.
+
+        Re-export shim — implementation lives in
+        :mod:`agent_baton.core.exec.script_hash`.
+        """
+        from agent_baton.core.exec.script_hash import script_ref_for
+        return script_ref_for(content_sha)

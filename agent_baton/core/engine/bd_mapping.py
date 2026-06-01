@@ -17,7 +17,7 @@ of bd-native fields so externally-authored issues are still visible as beads.
 from __future__ import annotations
 
 from agent_baton.core.engine.bd_client import BD_BUILTIN_TYPES
-from agent_baton.models.bead import Bead
+from agent_baton.models.bead import Bead, ExecutableBead
 
 # Metadata key under which the full baton bead dict is stored.
 _BATON_META_KEY = "baton"
@@ -118,7 +118,13 @@ def bd_issue_to_bead(issue: dict) -> Bead:
     baton_blob = metadata.get(_BATON_META_KEY) if isinstance(metadata, dict) else None
 
     if isinstance(baton_blob, dict) and baton_blob.get("bead_id"):
-        bead = Bead.from_dict(baton_blob)
+        # ADR-13b WP-1 §3: reconstruct the correct subtype so that
+        # ExecutableBead fields (interpreter, script_sha, script_body, etc.)
+        # survive the bd round-trip rather than being silently dropped.
+        if baton_blob.get("bead_type") == "executable":
+            bead: Bead = ExecutableBead.from_dict(baton_blob)
+        else:
+            bead = Bead.from_dict(baton_blob)
         # bd is authoritative for lifecycle state.
         bd_status = str(issue.get("status", "") or "")
         if bd_status:

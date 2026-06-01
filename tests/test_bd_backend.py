@@ -17,7 +17,7 @@ from agent_baton.core.engine.bd_mapping import (
     bead_to_create_kwargs,
 )
 from agent_baton.core.engine.bead_backend import make_bead_store, selected_backend
-from agent_baton.models.bead import Bead, BeadLink
+from agent_baton.models.bead import Bead, BeadLink, ExecutableBead
 
 _BD_AVAILABLE = shutil.which("bd") is not None
 
@@ -140,6 +140,126 @@ def test_quarantine_status_roundtrips_via_label():
     }
     restored = bd_issue_to_bead(issue)
     assert restored.status == "quarantine"
+
+
+# ---------------------------------------------------------------------------
+# ADR-13b WP-1 §3 — ExecutableBead subtype reconstruction via bd_mapping
+# ---------------------------------------------------------------------------
+
+
+def _make_executable_issue(
+    *,
+    bead_id: str = "bd-exec1",
+    interpreter: str = "bash",
+    script_sha: str = "abc123",
+    script_ref: str = "refs/notes/baton-bead-scripts/abc123",
+    script_body: str = "#!/bin/bash\necho hello",
+    status: str = "open",
+) -> dict:
+    """Build a minimal bd issue dict carrying an ExecutableBead baton blob."""
+    bead = ExecutableBead(
+        bead_id=bead_id,
+        task_id="T-exe",
+        step_id="1.1",
+        agent_name="engineer",
+        bead_type="executable",
+        content="A hello-world script",
+        interpreter=interpreter,
+        script_sha=script_sha,
+        script_ref=script_ref,
+        script_body=script_body,
+        status=status,
+    )
+    from agent_baton.core.engine.bd_mapping import bead_to_create_kwargs
+
+    kw = bead_to_create_kwargs(bead)
+    return {
+        "id": bead_id,
+        "title": kw["title"],
+        "status": status,
+        "issue_type": kw["issue_type"],
+        "labels": kw["labels"],
+        "metadata": kw["metadata"],
+    }
+
+
+def test_executable_bead_reconstructed_as_subtype():
+    """bd_issue_to_bead must return an ExecutableBead for bead_type='executable'."""
+    issue = _make_executable_issue()
+    restored = bd_issue_to_bead(issue)
+    assert isinstance(restored, ExecutableBead), (
+        f"Expected ExecutableBead, got {type(restored).__name__}"
+    )
+    assert restored.bead_type == "executable"
+    assert restored.interpreter == "bash"
+    assert restored.script_sha == "abc123"
+    assert restored.script_ref == "refs/notes/baton-bead-scripts/abc123"
+
+
+def test_executable_bead_script_body_survives_roundtrip():
+    """script_body must round-trip through the baton metadata blob."""
+    issue = _make_executable_issue(script_body="#!/bin/bash\necho roundtrip")
+    restored = bd_issue_to_bead(issue)
+    assert isinstance(restored, ExecutableBead)
+    assert restored.script_body == "#!/bin/bash\necho roundtrip"
+
+
+def test_executable_bead_script_body_in_to_dict():
+    """ExecutableBead.to_dict() must include script_body."""
+    bead = ExecutableBead(
+        bead_id="bd-x",
+        task_id="T-1",
+        step_id="1.1",
+        agent_name="eng",
+        bead_type="executable",
+        content="test",
+        script_body="echo hello",
+        script_sha="deadbeef",
+        script_ref="refs/notes/baton-bead-scripts/deadbeef",
+    )
+    d = bead.to_dict()
+    assert d["script_body"] == "echo hello"
+
+
+def test_executable_bead_from_dict_with_script_body():
+    """ExecutableBead.from_dict() must restore script_body from the blob."""
+    blob = {
+        "bead_id": "bd-y",
+        "task_id": "T-2",
+        "step_id": "1.2",
+        "agent_name": "eng",
+        "bead_type": "executable",
+        "content": "test",
+        "script_body": "echo restored",
+        "script_sha": "cafebabe",
+        "script_ref": "refs/notes/baton-bead-scripts/cafebabe",
+    }
+    bead = ExecutableBead.from_dict(blob)
+    assert bead.script_body == "echo restored"
+    assert bead.script_sha == "cafebabe"
+
+
+def test_non_executable_bead_still_reconstructed_as_base_bead():
+    """Beads with bead_type != 'executable' must remain plain Bead instances."""
+    from agent_baton.core.engine.bd_mapping import bead_to_create_kwargs
+
+    plain_bead = Bead(
+        bead_id="bd-plain",
+        task_id="T-3",
+        step_id="1.1",
+        agent_name="arch",
+        bead_type="decision",
+        content="Use SQLite",
+    )
+    kw = bead_to_create_kwargs(plain_bead)
+    issue = {
+        "id": "bd-plain",
+        "status": "open",
+        "metadata": kw["metadata"],
+    }
+    restored = bd_issue_to_bead(issue)
+    # Must be exactly Bead, NOT ExecutableBead.
+    assert type(restored) is Bead
 
 
 # ---------------------------------------------------------------------------

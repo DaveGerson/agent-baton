@@ -98,7 +98,6 @@ class ExecutableBeadRunner:
                 required but unavailable.
         """
         from agent_baton.core.exec.script_lint import ScriptLinter
-        from agent_baton.core.engine.notes_adapter import NotesAdapter
 
         # 1. Lint.
         linter = ScriptLinter()
@@ -113,11 +112,19 @@ class ExecutableBeadRunner:
             )
 
         # 2. Compute content SHA and script_ref.
-        content_sha = NotesAdapter.compute_script_sha(script_body)
-        script_ref = NotesAdapter.script_ref_for(content_sha)
+        from agent_baton.core.exec.script_hash import (
+            compute_script_sha,
+            script_ref_for,
+        )
+        content_sha = compute_script_sha(script_body)
+        script_ref = script_ref_for(content_sha)
         bead.script_sha = content_sha
         bead.script_ref = script_ref
         bead.exec_ref = script_ref
+        # ADR-13b WP-1 §3: store the body inline so the bd backend can serve
+        # it without a git-notes round-trip.  The notes write below is kept
+        # as a best-effort fallback for the SQLite + gastown path.
+        bead.script_body = script_body
 
         # 3. Soul signature when souls enabled.
         if _is_souls_enabled():
@@ -214,7 +221,18 @@ class ExecutableBeadRunner:
         return ExecutableBead.from_dict(raw.to_dict())
 
     def _load_script(self, bead: "ExecutableBead") -> str:
-        """Load script body from git notes or raise."""
+        """Load script body from the bead itself or git notes, or raise.
+
+        ADR-13b WP-1 §3: prefer the inline ``script_body`` field that is
+        persisted in the bead's metadata blob (works with both the SQLite
+        and bd backends).  Fall back to git notes for beads created before
+        this field was added.
+        """
+        # Fast path: body was stored inline (bd backend or new SQLite beads).
+        if bead.script_body:
+            return bead.script_body
+
+        # Legacy path: body lives in git notes (old SQLite + gastown beads).
         if not bead.script_sha:
             raise ValueError(
                 f"ExecutableBead {bead.bead_id} has no script_sha — cannot load script."

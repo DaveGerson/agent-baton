@@ -25,15 +25,27 @@ Design constraints:
 The synthesized text is also persisted to the ``handoff_beads`` table
 for audit (see :mod:`agent_baton.cli.commands.bead_cmd` for the read
 surface).
+
+ADR-13b WP-1 §A:
+  :meth:`HandoffSynthesizer.synthesize_for_dispatch` now accepts a
+  ``DerivedBeadStore | sqlite3.Connection | None`` as the ``conn``
+  parameter.  When a ``DerivedBeadStore`` is passed, the handoff row is
+  persisted there instead of the legacy baton.db connection.  Bead queries
+  (discoveries + blockers) are sourced from ``bead_store`` when supplied,
+  falling back to the raw ``conn`` SQL path for backward-compatibility with
+  the SQLite backend.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import logging
-from typing import Any, Iterable
+from typing import TYPE_CHECKING, Any, Iterable
 
 from agent_baton.utils.time import utcnow_zulu as _utcnow
+
+if TYPE_CHECKING:
+    from agent_baton.core.storage.derived_bead_store import DerivedBeadStore
 
 _log = logging.getLogger(__name__)
 
@@ -211,6 +223,73 @@ def _stable_handoff_id(task_id: str, from_step_id: str, to_step_id: str) -> str:
     return f"hf-{h[:12]}"
 
 
+def _is_derived_bead_store(obj: Any) -> bool:
+    """Return True when *obj* is a DerivedBeadStore instance.
+
+    Uses duck-typing / class-name check to avoid a circular import — the
+    synthesizer lives in ``core/intel/`` while ``DerivedBeadStore`` lives in
+    ``core/storage/``.
+    """
+    return type(obj).__name__ == "DerivedBeadStore"
+
+
+def _query_beads_for_step_via_store(
+    store: Any,
+    *,
+    task_id: str,
+    step_id: str,
+) -> list[dict[str, Any]]:
+    """Query discoveries for *step_id* via a bead store's ``query()`` method.
+
+    Returns the same dict shape as :func:`_query_beads_for_step`.
+    """
+    if store is None or not task_id or not step_id:
+        return []
+    try:
+        beads = store.query(task_id=task_id, limit=500)
+        out: list[dict[str, Any]] = []
+        for b in beads:
+            if getattr(b, "step_id", "") == step_id:
+                out.append({
+                    "bead_id": b.bead_id,
+                    "bead_type": b.bead_type,
+                    "content": b.content or "",
+                    "status": b.status,
+                    "agent_name": b.agent_name,
+                })
+        return out
+    except Exception as exc:  # noqa: BLE001
+        _log.debug("_query_beads_for_step_via_store failed: %s", exc)
+        return []
+
+
+def _query_open_warnings_via_store(
+    store: Any,
+    *,
+    task_id: str,
+) -> list[dict[str, Any]]:
+    """Query open warning beads via a bead store's ``query()`` method.
+
+    Returns the same dict shape as :func:`_query_open_warnings`.
+    """
+    if store is None or not task_id:
+        return []
+    try:
+        beads = store.query(task_id=task_id, bead_type="warning", status="open", limit=200)
+        out: list[dict[str, Any]] = []
+        for b in beads:
+            out.append({
+                "bead_id": b.bead_id,
+                "content": b.content or "",
+                "files": list(b.affected_files or []),
+                "tags": list(b.tags or []),
+            })
+        return out
+    except Exception as exc:  # noqa: BLE001
+        _log.debug("_query_open_warnings_via_store failed: %s", exc)
+        return []
+
+
 class HandoffSynthesizer:
     """Synthesize a compact handoff document between consecutive steps."""
 
@@ -221,6 +300,8 @@ class HandoffSynthesizer:
         conn: Any,
         *,
         task_id: str | None = None,
+        bead_store: Any = None,
+        derived: "DerivedBeadStore | None" = None,
     ) -> str | None:
         """Build a ~400-char handoff text from prior_step_result for next_step.
 
@@ -231,12 +312,26 @@ class HandoffSynthesizer:
             next_step: The PlanStep about to be dispatched.  Used to
                 derive the domain (allowed_paths / context_files) for
                 blocker filtering.
-            conn: Open sqlite3 connection on the project baton.db.  Used
-                to query the ``beads`` and ``bead_tags`` tables for
-                discoveries + blockers.  Pass ``None`` to skip both
-                queries (file-only handoff).
+            conn: Open sqlite3 connection on the project baton.db, a
+                :class:`~agent_baton.core.storage.derived_bead_store.DerivedBeadStore`,
+                or ``None``.  When a raw sqlite3 connection is supplied,
+                discoveries + blockers are queried directly via SQL
+                (SQLite backend path).  When a ``DerivedBeadStore`` is
+                supplied, *bead_store* is used for bead queries and the
+                handoff row is persisted to the derived DB.  Pass ``None``
+                to skip bead queries (file-only handoff).
             task_id: Task scope for bead queries.  When omitted, falls
                 back to ``prior_step_result.task_id`` if present.
+            bead_store: Optional bead store (``BeadStore`` or
+                ``BdBeadStore``) used to query discoveries and blockers
+                when *conn* is a ``DerivedBeadStore`` or ``None``.
+                Ignored when *conn* is a raw sqlite3 connection.
+            derived: Optional
+                :class:`~agent_baton.core.storage.derived_bead_store.DerivedBeadStore`
+                used to persist the handoff row.  When omitted and *conn*
+                is a ``DerivedBeadStore``, *conn* itself is used.
+                Ignored when *conn* is a raw sqlite3 connection (the row
+                is written to that connection instead).
 
         Returns:
             Handoff text (already capped at ``HANDOFF_MAX_CHARS``) or
@@ -247,7 +342,10 @@ class HandoffSynthesizer:
             return None
         try:
             return self._synthesize_inner(
-                prior_step_result, next_step, conn, task_id=task_id
+                prior_step_result, next_step, conn,
+                task_id=task_id,
+                bead_store=bead_store,
+                derived=derived,
             )
         except Exception as exc:  # noqa: BLE001
             _log.debug("HandoffSynthesizer.synthesize_for_dispatch failed: %s", exc)
@@ -264,6 +362,8 @@ class HandoffSynthesizer:
         conn: Any,
         *,
         task_id: str | None,
+        bead_store: Any = None,
+        derived: "DerivedBeadStore | None" = None,
     ) -> str | None:
         prior_step_id = _safe_attr(prior_step_result, "step_id", "") or ""
         next_step_id = _safe_attr(next_step, "step_id", "") or ""
@@ -277,15 +377,32 @@ class HandoffSynthesizer:
         )
         outcome = _gate_outcome_line(prior_step_result)
 
-        # Discoveries — beads created by the prior step.
         resolved_task_id = task_id or _safe_attr(prior_step_result, "task_id", "") or ""
-        discoveries = _query_beads_for_step(
-            conn, task_id=resolved_task_id, step_id=prior_step_id
-        )
+
+        # Determine whether conn is a raw sqlite3 connection or a DerivedBeadStore.
+        _is_derived_store = _is_derived_bead_store(conn)
+
+        # Discoveries and blockers: prefer bead_store query; fall back to
+        # raw SQL when only a sqlite3 connection is available.
+        if bead_store is not None or _is_derived_store:
+            discoveries = _query_beads_for_step_via_store(
+                bead_store,
+                task_id=resolved_task_id,
+                step_id=prior_step_id,
+            )
+            all_warnings = _query_open_warnings_via_store(
+                bead_store,
+                task_id=resolved_task_id,
+            )
+        else:
+            # Legacy path: raw sqlite3 connection (SQLite backend).
+            discoveries = _query_beads_for_step(
+                conn, task_id=resolved_task_id, step_id=prior_step_id
+            )
+            all_warnings = _query_open_warnings(conn, task_id=resolved_task_id)
 
         # Blockers — open warnings whose files/tags overlap the next step.
         next_tokens = _next_step_domain_tokens(next_step)
-        all_warnings = _query_open_warnings(conn, task_id=resolved_task_id)
         blockers: list[dict[str, Any]] = []
         for w in all_warnings:
             wf = set(w.get("files") or [])
@@ -349,39 +466,67 @@ class HandoffSynthesizer:
         # Persist (best-effort).  Persistence failure does NOT suppress
         # the returned text — the prompt-side benefit must not depend on
         # the audit-side write succeeding.
-        if conn is not None and resolved_task_id:
-            try:
-                self._persist(
-                    conn,
-                    task_id=resolved_task_id,
-                    from_step_id=prior_step_id,
-                    to_step_id=next_step_id,
-                    content=body,
-                )
-            except Exception as exc:  # noqa: BLE001
-                _log.debug("HandoffSynthesizer._persist failed: %s", exc)
+        if resolved_task_id:
+            # Resolve the write target: DerivedBeadStore > explicit derived >
+            # raw sqlite3 conn.
+            persist_target: Any = None
+            if derived is not None:
+                persist_target = derived
+            elif _is_derived_store:
+                persist_target = conn
+            elif conn is not None:
+                persist_target = conn
+            if persist_target is not None:
+                try:
+                    self._persist(
+                        persist_target,
+                        task_id=resolved_task_id,
+                        from_step_id=prior_step_id,
+                        to_step_id=next_step_id,
+                        content=body,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    _log.debug("HandoffSynthesizer._persist failed: %s", exc)
 
         return body
 
     @staticmethod
     def _persist(
-        conn: Any,
+        target: Any,
         *,
         task_id: str,
         from_step_id: str,
         to_step_id: str,
         content: str,
     ) -> None:
-        """Idempotent INSERT-OR-REPLACE into handoff_beads."""
+        """Idempotent INSERT-OR-REPLACE into handoff_beads.
+
+        *target* may be a raw ``sqlite3.Connection`` (legacy SQLite path)
+        or a :class:`~agent_baton.core.storage.derived_bead_store.DerivedBeadStore`
+        (bd / derived-DB path).
+        """
         handoff_id = _stable_handoff_id(task_id, from_step_id, to_step_id)
-        conn.execute(
-            "INSERT OR REPLACE INTO handoff_beads "
-            "(handoff_id, task_id, from_step_id, to_step_id, content, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (handoff_id, task_id, from_step_id, to_step_id, content, _utcnow()),
-        )
-        try:
-            conn.commit()
-        except Exception:
-            # Some test fixtures pass autocommit connections.
-            pass
+        now = _utcnow()
+
+        if _is_derived_bead_store(target):
+            # Persist via DerivedBeadStore — use its connection() context manager.
+            with target.connection() as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO handoff_beads "
+                    "(handoff_id, task_id, from_step_id, to_step_id, content, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (handoff_id, task_id, from_step_id, to_step_id, content, now),
+                )
+        else:
+            # Legacy path: raw sqlite3 connection.
+            target.execute(
+                "INSERT OR REPLACE INTO handoff_beads "
+                "(handoff_id, task_id, from_step_id, to_step_id, content, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (handoff_id, task_id, from_step_id, to_step_id, content, now),
+            )
+            try:
+                target.commit()
+            except Exception:
+                # Some test fixtures pass autocommit connections.
+                pass

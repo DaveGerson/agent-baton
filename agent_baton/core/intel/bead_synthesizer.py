@@ -26,6 +26,15 @@ Design constraints (from spec):
   * Pure deterministic graph synthesis.
   * Best-effort: never raises in production paths; logs and returns a
     zero-counts result on failure.
+
+ADR-13b WP-1 §A:
+  :func:`synthesize_beads` is the new entry point that reads beads via a
+  store object (compatible with both ``BeadStore`` and ``BdBeadStore``) and
+  writes edges / clusters to a
+  :class:`~agent_baton.core.storage.derived_bead_store.DerivedBeadStore`
+  connection.  The legacy ``BeadSynthesizer.synthesize(conn)`` path is kept
+  intact for the SQLite backend so existing tests and callers continue to
+  work without modification.
 """
 from __future__ import annotations
 
@@ -33,9 +42,12 @@ import hashlib
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import Iterable
+from typing import TYPE_CHECKING, Iterable
 
 from agent_baton.utils.time import utcnow_zulu as _utcnow
+
+if TYPE_CHECKING:
+    from agent_baton.core.storage.derived_bead_store import DerivedBeadStore
 
 _log = logging.getLogger(__name__)
 
@@ -414,3 +426,105 @@ class BeadSynthesizer:
             if snippet:
                 return snippet[0][:60]
         return members[0]
+
+
+# ---------------------------------------------------------------------------
+# ADR-13b WP-1 §A — store-based entry point
+# ---------------------------------------------------------------------------
+
+
+def synthesize_beads(store, derived: "DerivedBeadStore") -> SynthesisResult:
+    """Run bead-graph synthesis reading from *store* and writing to *derived*.
+
+    This is the new, backend-agnostic entry point introduced by ADR-13b WP-1.
+    It replaces the direct ``BeadSynthesizer().synthesize(store._conn())``
+    pattern used by the executor and CLI so that both ``BeadStore`` (SQLite)
+    and ``BdBeadStore`` (bd CLI) can be used as the bead source.
+
+    Args:
+        store: Any object exposing ``query(status="open", limit=N)`` that
+            returns a list of :class:`~agent_baton.models.bead.Bead` objects.
+            Compatible with both ``BeadStore`` and ``BdBeadStore``.
+        derived: A :class:`~agent_baton.core.storage.derived_bead_store.DerivedBeadStore`
+            instance.  Edges and clusters are written here.
+
+    Returns:
+        :class:`SynthesisResult` with counts of work performed.
+        Never raises — surfaces failures in the ``errors`` field.
+    """
+    result = SynthesisResult()
+    try:
+        beads_objs = store.query(status="open", limit=2000)
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("synthesize_beads: store.query failed: %s", exc)
+        result.errors.append(f"store_query_failed: {exc}")
+        return result
+
+    # Convert Bead model objects to the dict shape the synthesizer needs.
+    beads: list[dict] = [
+        {
+            "bead_id": b.bead_id,
+            "bead_type": b.bead_type or "",
+            "content": b.content or "",
+            "tags": list(b.tags or []),
+            "files": list(b.affected_files or []),
+        }
+        for b in beads_objs
+    ]
+
+    with derived.connection() as conn:
+        synth = BeadSynthesizer()
+        # Delegate to the class internals, which operate on an open conn.
+        if len(beads) < 2:
+            synth._refresh_clusters(conn, beads, edges=[], result=result)
+            return result
+
+        edges_for_clustering: list[tuple[str, str, float]] = []
+        now = _utcnow()
+
+        for i in range(len(beads)):
+            for j in range(i + 1, len(beads)):
+                a, b = beads[i], beads[j]
+                result.pairs_examined += 1
+
+                file_w = _jaccard(a["files"], b["files"])
+                if file_w > 0.0:
+                    synth._upsert_edge(
+                        conn, a["bead_id"], b["bead_id"],
+                        "file_overlap", file_w, now,
+                    )
+                    result.edges_added += 1
+                    if file_w >= CLUSTER_MIN_WEIGHT:
+                        edges_for_clustering.append(
+                            (a["bead_id"], b["bead_id"], file_w)
+                        )
+
+                tag_w = _jaccard(a["tags"], b["tags"])
+                if tag_w > 0.0:
+                    synth._upsert_edge(
+                        conn, a["bead_id"], b["bead_id"],
+                        "tag_overlap", tag_w, now,
+                    )
+                    result.edges_added += 1
+
+                if synth._is_conflict(a, b):
+                    synth._upsert_edge(
+                        conn, a["bead_id"], b["bead_id"],
+                        "conflict", 1.0, now,
+                    )
+                    result.edges_added += 1
+                    result.conflicts_flagged += 1
+
+        try:
+            conn.commit()
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("synthesize_beads: edge commit failed: %s", exc)
+            result.errors.append(f"edge_commit_failed: {exc}")
+
+        try:
+            synth._refresh_clusters(conn, beads, edges_for_clustering, result)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("synthesize_beads: cluster refresh failed: %s", exc)
+            result.errors.append(f"cluster_failed: {exc}")
+
+    return result

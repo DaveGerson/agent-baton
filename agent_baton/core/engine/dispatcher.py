@@ -386,6 +386,7 @@ class PromptDispatcher:
         handoff_conn: "object | None" = None,
         handoff_task_id: str = "",
         phase_summaries_section: str = "",
+        handoff_bead_store: "object | None" = None,
     ) -> str:
         """Build a complete delegation prompt for an agent.
 
@@ -510,6 +511,7 @@ class PromptDispatcher:
                     step,
                     handoff_conn,
                     task_id=handoff_task_id or None,
+                    bead_store=handoff_bead_store,
                 )
                 if _handoff_text:
                     if len(_handoff_text) > HANDOFF_MAX_CHARS:
