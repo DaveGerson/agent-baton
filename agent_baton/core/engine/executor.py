@@ -613,7 +613,18 @@ class ExecutionEngine:
                             _log.debug(
                                 "SoulRouter init skipped (non-fatal): %s", _soul_init_exc
                             )
-                    self._bead_store = BeadStore(_bead_db, soul_router=_soul_router)
+                    # Gastown Part A (bd-971d): dual-write bead memory to
+                    # git-notes when BATON_GASTOWN_ENABLED != 0 (default ON in
+                    # Phase M1).  repo_root is derived by BeadStore from the
+                    # db path when not supplied; warn-only on any notes failure.
+                    from agent_baton.core.engine.bead_store import (
+                        gastown_dual_write_enabled as _gastown_enabled,
+                    )
+                    self._bead_store = BeadStore(
+                        _bead_db,
+                        soul_router=_soul_router,
+                        gastown_dual_write=_gastown_enabled(),
+                    )
             except Exception as _bead_init_exc:
                 _log.debug(
                     "BeadStore init skipped (non-fatal): %s", _bead_init_exc

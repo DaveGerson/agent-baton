@@ -91,12 +91,15 @@ def _get_bead_store():
     for the discovery order (bd-ce64: walks upward so worktree subagents
     find the project-root baton.db).
     """
-    from agent_baton.core.engine.bead_store import BeadStore
+    from agent_baton.core.engine.bead_store import (
+        BeadStore,
+        gastown_dual_write_enabled,
+    )
 
     db = _resolve_db_path()
     if not db.exists():
         return None
-    return BeadStore(db)
+    return BeadStore(db, gastown_dual_write=gastown_dual_write_enabled())
 
 
 def _get_or_create_bead_store():
@@ -110,11 +113,14 @@ def _get_or_create_bead_store():
 
     Returns a :class:`~agent_baton.core.engine.bead_store.BeadStore` instance.
     """
-    from agent_baton.core.engine.bead_store import BeadStore
+    from agent_baton.core.engine.bead_store import (
+        BeadStore,
+        gastown_dual_write_enabled,
+    )
 
     db = _resolve_db_path()
     db.parent.mkdir(parents=True, exist_ok=True)
-    return BeadStore(db)
+    return BeadStore(db, gastown_dual_write=gastown_dual_write_enabled())
 
 
 def _get_active_task_id() -> str | None:

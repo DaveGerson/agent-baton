@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -41,6 +42,35 @@ if TYPE_CHECKING:
     from agent_baton.models.bead import Bead, BeadLink
 
 _log = logging.getLogger(__name__)
+
+
+# Gastown Part A (bd-2870/bd-971d) — env gate for git-notes dual-write.
+# Phase M1 flip: dual-write is ON by default at the runtime construction
+# sites (executor, CLI bead store, launcher) so bead memory persists to
+# ``refs/notes/baton-beads`` as part of the normal flow.  Set
+# ``BATON_GASTOWN_ENABLED=0`` to restore the pre-M1 SQLite-only behaviour.
+#
+# This is intentionally a *call-site* gate, not the ``BeadStore`` kwarg
+# default: the ``gastown_dual_write`` kwarg stays ``False`` so direct library
+# construction is deterministic and env-independent (see ``__init__``).
+_GASTOWN_ENV = "BATON_GASTOWN_ENABLED"
+
+
+def gastown_dual_write_enabled() -> bool:
+    """Return True when Gastown git-notes dual-write is enabled (default ON).
+
+    Controlled by the ``BATON_GASTOWN_ENABLED`` environment variable.  Any of
+    ``0`` / ``false`` / ``no`` / empty disables it; everything else (including
+    the unset default) enables it.  Runtime construction sites pass the result
+    of this helper as ``gastown_dual_write=`` so the whole engine flips with a
+    single env var.
+    """
+    return os.environ.get(_GASTOWN_ENV, "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "",
+    )
 
 
 class BeadStore:

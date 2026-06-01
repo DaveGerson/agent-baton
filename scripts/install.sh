@@ -50,12 +50,16 @@ if [ ! -d "$AGENTS_DIR" ]; then
     exit 1
 fi
 
+# Gastown git-notes bead persistence (Phase M1): ON by default, matching the
+# runtime default (BATON_GASTOWN_ENABLED=1).  --no-gastown opts out; --gastown
+# is kept as a backward-compatible no-op for callers that still pass it.
 UPGRADE=false
-GASTOWN=false
+GASTOWN=true
 for arg in "$@"; do
     case "$arg" in
-        --upgrade)  UPGRADE=true ;;
-        --gastown)  GASTOWN=true ;;
+        --upgrade)     UPGRADE=true ;;
+        --gastown)     GASTOWN=true ;;
+        --no-gastown)  GASTOWN=false ;;
     esac
 done
 
@@ -344,8 +348,9 @@ else
 fi
 
 # ── Step 6: Gastown (git-notes bead persistence) ─────────
-# Gated by --gastown flag.  Phase M0 default: OFF.
-# Enable in Phase M1+ once the dual-write window starts.
+# Phase M1 default: ON (matches runtime default BATON_GASTOWN_ENABLED=1).
+# Pass --no-gastown to skip this git config (or set BATON_GASTOWN_ENABLED=0
+# at runtime to disable dual-write without touching git config).
 if [ "$GASTOWN" = true ]; then
     echo ""
     echo "  STEP 6: Gastown Git-Notes Bead Persistence"
@@ -371,9 +376,11 @@ if [ "$GASTOWN" = true ]; then
                 echo "  + git config: remote.origin.fetch notes refspec added" || \
                 echo "  ! notes fetch refspec config failed (non-fatal)"
         fi
+        echo "  ~ bead memory now persists to refs/notes/baton-beads (BATON_GASTOWN_ENABLED=1)"
     else
         echo "  ! Not inside a git repository — Gastown git config skipped"
-        echo "    Run 'git init' first, then re-run install.sh --gastown"
+        echo "    Bead memory still works (SQLite); run 'git init' then re-run install.sh"
+        echo "    to enable cross-clone git-notes replication, or pass --no-gastown to silence."
     fi
 fi
 

@@ -135,6 +135,7 @@ cymbal impact <symbol>          # blast radius before edits
 | `BATON_SELFHEAL_ENABLED` | Enable/disable self-heal escalation on failures | `0` |
 | `BATON_SPECULATE_ENABLED` | Enable/disable speculative pipelining | `0` |
 | `BATON_SOULS_ENABLED` | Enable/disable soul registry for agent identity | `0` |
+| `BATON_GASTOWN_ENABLED` | Enable/disable Gastown git-notes bead persistence (Wave 6.1 Part A). When on, every bead `write()` also mirrors the bead as a JSON note in `refs/notes/baton-beads` and maintains the `bead_anchors` index (warn-only on failure — SQLite stays the source of truth). Wired at the runtime construction sites (executor, CLI bead store, launcher) and configured by `install.sh`/`install.ps1` by default. Set to `0` for SQLite-only behaviour. | `1` |
 | `BATON_PLANNER_HARD_GATE` | Enable hard validation gate that blocks bad plans | unset |
 | `BATON_ARTIFACT_VALIDATION` | Derive extra gate commands from agent-created runnable artifacts (CI workflows, npm scripts, Playwright config, Makefile targets, pre-commit). Set to `0` to suppress derivation and run only the planned `gate.command`. | `1` |
 | `BATON_PREDICT_ENABLED` | Enable predictive dispatch system | `0` |

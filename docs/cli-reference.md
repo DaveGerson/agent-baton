@@ -2127,6 +2127,7 @@ in [references/baton-engine.md](../references/baton-engine.md#environment-variab
 | `BATON_EXPERIMENTAL` | CSV opt-in for experimental subsystems. Required for `baton swarm` (`BATON_EXPERIMENTAL=swarm`). Exits with code 2 if unset. | unset |
 | `BATON_SWARM_ENABLED` | Required in addition to `BATON_EXPERIMENTAL=swarm` to dispatch a swarm refactor. | unset |
 | `BATON_SOULS_ENABLED` | Wave 6.1 Part B persistent agent souls (signing + revocation). | `0` |
+| `BATON_GASTOWN_ENABLED` | Wave 6.1 Part A git-notes bead persistence. Dual-writes each bead to `refs/notes/baton-beads` (warn-only; SQLite is the source of truth). Default ON; `0` restores SQLite-only behaviour. | `1` |
 | `BATON_PREDICT_ENABLED` | Wave 6.2 Part C predictive computation watcher / classifier / dispatcher. | `0` |
 | `BATON_IMMUNE_ENABLED` | Immune-system monitoring loop. | `0` |
 | `BATON_EXEC_BEADS_ENABLED` | Wave 6.1 Part C executable beads. Sandbox is process-level only — see `references/baton-patterns.md` trust-boundary section before extending to external-origin input. | `0` |

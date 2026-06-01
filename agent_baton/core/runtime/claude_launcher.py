@@ -746,7 +746,13 @@ class ClaudeCodeLauncher:
                 source="agent-signal",
                 created_at=ts,
             )
-            store = BeadStore(self._config.bead_db_path)
+            from agent_baton.core.engine.bead_store import (
+                gastown_dual_write_enabled as _gastown_enabled,
+            )
+            store = BeadStore(
+                self._config.bead_db_path,
+                gastown_dual_write=_gastown_enabled(),
+            )
             store.write(bead)
         except Exception as exc:  # noqa: BLE001
             logger.debug(

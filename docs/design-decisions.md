@@ -532,6 +532,58 @@ concurrent-write contention that Agent Baton doesn't have (serialized executor).
 
 ---
 
+## ADR-13a: Gastown Git-Notes Bead Persistence (M1 flip) + `.beads/` Interop Adapter
+
+**Decision**: (1) Flip the Wave 6.1 Part A git-notes dual-write from OFF
+(Phase M0) to ON by default (Phase M1) via a `BATON_GASTOWN_ENABLED`
+environment gate (default `1`), wired at the runtime construction sites
+(executor, CLI bead store, launcher) and configured by `install.sh` /
+`install.ps1` by default. (2) Implement the previously-deferred `.beads/`
+interop path as a read adapter (`BeadsAdapter`) on the `ExternalSourceAdapter`
+protocol, registered as `baton source add beads`, reading the documented
+`.beads/issues.jsonl` interchange file. SQLite (`baton.db`) remains the source
+of truth in both cases.
+
+**Context**: ADR-13 built the native bead memory and a git-notes dual-write
+mirror (`refs/notes/baton-beads` via `NotesAdapter` + `bead_anchors`), but left
+it unwired — `gastown_dual_write` defaulted to `False` at every call site, so
+the durability and cross-clone/worktree benefits were never realized in normal
+flows. ADR-13 also deferred `.beads/` interop until the external Beads on-disk
+format stabilized. The `bd` project has since settled on Dolt-embedded storage
+with `.beads/issues.jsonl` as the *documented, stable interchange/export
+surface* ("useful for review, migration, and interoperability"), which is the
+right seam to bridge without taking a Go-binary or Dolt runtime dependency.
+
+**What this does NOT change**: We still do **not** adopt the `bd` Go CLI, the
+Dolt engine, or the `.beads/` directory as a *runtime dependency* (ADR-13
+stands). The interop adapter reads the JSONL interchange file only; there is no
+subprocess shell-out to `bd` on any critical path. SQLite remains authoritative
+and the git-notes mirror is warn-only — a notes failure never rolls back or
+fails a SQLite write.
+
+**Key trade-offs**:
+
+- **Call-site gate vs. kwarg default**: The `BeadStore(gastown_dual_write=...)`
+  kwarg default stays `False` so direct library construction is deterministic
+  and env-independent; the env gate (`gastown_dual_write_enabled()`) is applied
+  only at the runtime construction sites. This flips the engine with one env var
+  while keeping the library contract (and existing tests) stable.
+
+- **Default ON**: Chosen so bead memory "deploys as part of the flow" without
+  extra flags. Reversible per-project with `BATON_GASTOWN_ENABLED=0` or
+  `install.sh --no-gastown` / `install.ps1 -NoGastown`.
+
+- **Read-only interop adapter**: `BeadsAdapter` implements the read side of
+  `ExternalSourceAdapter` (`connect`/`fetch_items`/`fetch_item`), mapping beads
+  `issue_type`/`status`/`priority` onto `ExternalItem`. Writing back to
+  `.beads/` is intentionally out of scope (the protocol is read-mostly; external
+  writes are explicit and gated elsewhere).
+
+**Status**: Implemented (2026-06-01) — M1 dual-write default-on; `BeadsAdapter`
+read interop via `baton source add beads`.
+
+---
+
 ## ADR-14: Learning Automation System (Hybrid Ledger + Improvement Pipeline)
 
 **Decision**: Build a closed-loop learning system using a new
