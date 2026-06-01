@@ -584,14 +584,15 @@ class ExecutionEngine:
         # Resolve compliance log path now that _root is known.
         self._compliance_log_path = self._root / "compliance-audit.jsonl"
 
-        # ── Bead memory store (schema v4, Inspired by beads-ai/beads-cli) ───
+        # ── Bead memory store (ADR-13b: backend-agnostic via make_bead_store) ──
         # Initialised from the same db_path as _storage.  Silently None when
         # the storage backend is unavailable or uses an older schema — all
         # bead operations degrade gracefully.
         self._bead_store = None
+        self._derived_store = None  # DerivedBeadStore (edges/clusters/handoffs)
         if storage is not None:
             try:
-                from agent_baton.core.engine.bead_store import BeadStore
+                from agent_baton.core.engine.bead_backend import make_bead_store
                 _bead_db = storage.db_path
                 if isinstance(_bead_db, Path):
                     # Wave 6.1 Part B (bd-d975): construct SoulRouter when
@@ -613,7 +614,25 @@ class ExecutionEngine:
                             _log.debug(
                                 "SoulRouter init skipped (non-fatal): %s", _soul_init_exc
                             )
-                    self._bead_store = BeadStore(_bead_db, soul_router=_soul_router)
+                    # ADR-13b WP-G: bd is now the mandatory bead backend.
+                    self._bead_store = make_bead_store(
+                        _bead_db,
+                        soul_router=_soul_router,
+                    )
+                    # ADR-13b WP-1 §2: DerivedBeadStore alongside the bead
+                    # store for edges, clusters, and handoffs.  Lives at
+                    # baton-derived.db next to baton.db.
+                    try:
+                        from agent_baton.core.storage.derived_bead_store import (
+                            DerivedBeadStore,
+                        )
+                        _derived_db = _bead_db.parent / "baton-derived.db"
+                        self._derived_store = DerivedBeadStore(_derived_db)
+                    except Exception as _ds_init_exc:
+                        _log.debug(
+                            "DerivedBeadStore init skipped (non-fatal): %s",
+                            _ds_init_exc,
+                        )
             except Exception as _bead_init_exc:
                 _log.debug(
                     "BeadStore init skipped (non-fatal): %s", _bead_init_exc
@@ -994,7 +1013,7 @@ class ExecutionEngine:
 
         Runs after every phase boundary (both empty-phase fast-path and the
         normal completion path).  Inferred edges + clusters land in the
-        ``bead_edges`` / ``bead_clusters`` tables (schema v28).
+        ``bead_edges`` / ``bead_clusters`` tables (schema v28 / baton-derived.db).
 
         Failure here MUST NEVER block phase advancement — wrap everything,
         log at debug, and return.
@@ -1002,10 +1021,18 @@ class ExecutionEngine:
         if self._bead_store is None:
             return
         try:
-            from agent_baton.core.intel.bead_synthesizer import BeadSynthesizer
+            if self._derived_store is not None:
+                # ADR-13b WP-1 §A: backend-agnostic path — reads from store,
+                # writes to the derived DB (works for both SQLite and bd).
+                from agent_baton.core.intel.bead_synthesizer import synthesize_beads
 
-            conn = self._bead_store._conn()
-            result = BeadSynthesizer().synthesize(conn)
+                result = synthesize_beads(self._bead_store, self._derived_store)
+            else:
+                # No derived store available (bd backend or no derived DB yet).
+                # ADR-13b WP-G: the legacy SQLite _conn() fallback has been
+                # removed — bd backend has no _conn() and synthesis requires
+                # a derived store (DerivedBeadStore).
+                return
             if result.edges_added or result.clusters_created or result.conflicts_flagged:
                 _log.debug(
                     "BeadSynthesizer post-phase: %d edges, %d clusters, %d conflicts",
@@ -6731,8 +6758,13 @@ class ExecutionEngine:
                 if _r.step_id != step.step_id and _r.status == "complete":
                     _prior_step_result = _r
                     break
-            _handoff_conn = None
-            if self._storage is not None:
+            # ADR-13b WP-1 §A: pass derived store (or raw conn fallback) so
+            # HandoffSynthesizer can persist to baton-derived.db and query
+            # beads via the store rather than raw SQL.
+            _handoff_conn: object = None
+            if self._derived_store is not None:
+                _handoff_conn = self._derived_store
+            elif self._storage is not None:
                 try:
                     _handoff_conn = self._storage._conn()
                 except Exception:  # noqa: BLE001
@@ -6753,6 +6785,7 @@ class ExecutionEngine:
                 handoff_conn=_handoff_conn,
                 handoff_task_id=state.task_id or "",
                 phase_summaries_section=_phase_summaries_section,
+                handoff_bead_store=self._bead_store,
             )
             # Persist the updated delivered_knowledge map so subsequent
             # dispatches in this run know which docs are already inlined.

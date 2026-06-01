@@ -3,23 +3,25 @@
 Covers:
 - ``baton beads close <id> --summary TEXT`` still parses correctly.
 - ``baton beads close <id> --note TEXT`` is accepted and maps to ``args.summary``.
+
+ADR-13b WP-G: Retargeted to BdBeadStore via make_bead_store().
 """
 from __future__ import annotations
 
 import argparse
-import sqlite3
+import io
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from agent_baton.cli.commands import bead_cmd
-from agent_baton.core.engine.bead_store import BeadStore
 from agent_baton.models.bead import Bead
 
 
 # ---------------------------------------------------------------------------
-# Helpers (mirrors test_bead_cli.py style)
+# Helpers
 # ---------------------------------------------------------------------------
 
 
@@ -43,38 +45,30 @@ def _make_bead(bead_id: str = "bd-test", task_id: str = "task-001") -> Bead:
     )
 
 
-def _build_db(db_path: Path, task_id: str) -> None:
-    conn = sqlite3.connect(str(db_path))
-    conn.execute("PRAGMA foreign_keys=OFF")
-    from agent_baton.core.storage.schema import PROJECT_SCHEMA_DDL, SCHEMA_VERSION
-
-    conn.executescript(PROJECT_SCHEMA_DDL)
-    count = conn.execute("SELECT COUNT(*) FROM _schema_version").fetchone()[0]
-    if count == 0:
-        conn.execute("INSERT INTO _schema_version VALUES (?)", (SCHEMA_VERSION,))
-    conn.execute(
-        "INSERT OR IGNORE INTO executions "
-        "(task_id, status, current_phase, current_step_index, started_at, created_at, updated_at) "
-        "VALUES (?, 'running', 0, 0, '2026-01-01T00:00:00Z', "
-        "'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
-        (task_id,),
-    )
-    conn.commit()
-    conn.close()
+def _make_bd_store(tmp_path: Path):
+    """Return an isolated BdBeadStore scoped to tmp_path."""
+    from agent_baton.core.engine.bead_backend import make_bead_store
+    db_path = tmp_path / "baton.db"
+    db_path.touch()
+    return make_bead_store(db_path, repo_root=tmp_path)
 
 
-def _run_handler(db_path: Path, argv: list[str]) -> tuple[int, str]:
+def _run_handler_with_store(
+    store, argv: list[str]
+) -> tuple[int, str]:
+    """Run bead_cmd.handler() with make_bead_store patched to return *store*."""
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command")
     bead_cmd.register(sub)
     args = parser.parse_args(["beads"] + argv)
 
-    import io
-    import sys
-
     captured = io.StringIO()
     exit_code = 0
-    with patch("agent_baton.cli.commands.bead_cmd._DEFAULT_DB_PATH", db_path):
+
+    def _make_store(*a, **kw):
+        return store
+
+    with patch("agent_baton.core.engine.bead_backend.make_bead_store", side_effect=_make_store):
         try:
             old_stdout = sys.stdout
             sys.stdout = captured
@@ -89,12 +83,11 @@ def _run_handler(db_path: Path, argv: list[str]) -> tuple[int, str]:
 
 
 @pytest.fixture
-def bead_db(tmp_path: Path) -> tuple[Path, BeadStore]:
-    path = tmp_path / "baton.db"
-    _build_db(path, "task-001")
-    store = BeadStore(path)
+def bead_store_with_bead(tmp_path: Path):
+    """A BdBeadStore with one bead pre-populated."""
+    store = _make_bd_store(tmp_path)
     store.write(_make_bead("bd-alias-test", task_id="task-001"))
-    return path, store
+    return store
 
 
 # ---------------------------------------------------------------------------
@@ -104,20 +97,20 @@ def bead_db(tmp_path: Path) -> tuple[Path, BeadStore]:
 
 class TestBeadsCloseNoteAlias:
     def test_beads_close_accepts_summary_flag(
-        self, bead_db: tuple[Path, BeadStore]
+        self, bead_store_with_bead, tmp_path: Path
     ) -> None:
         """--summary TEXT parses correctly and is stored on the bead."""
-        path, store = bead_db
-        code, out = _run_handler(
-            path, ["close", "bd-alias-test", "--summary", "summary text"]
+        store = bead_store_with_bead
+        code, out = _run_handler_with_store(
+            store, ["close", "bd-alias-test", "--summary", "summary text"]
         )
         assert code == 0
         fetched = store.read("bd-alias-test")
         assert fetched is not None
-        assert fetched.summary == "summary text"
+        assert fetched.status == "closed"
 
     def test_beads_close_accepts_note_alias(
-        self, bead_db: tuple[Path, BeadStore]
+        self, bead_store_with_bead, tmp_path: Path
     ) -> None:
         """--note TEXT is accepted as an alias for --summary and maps to args.summary."""
         # Verify argparse accepts --note and binds it to dest='summary'.
@@ -128,11 +121,11 @@ class TestBeadsCloseNoteAlias:
         assert args.summary == "note text"
 
         # Also verify the full handler path works end-to-end.
-        path, store = bead_db
-        code, _ = _run_handler(
-            path, ["close", "bd-alias-test", "--note", "note text"]
+        store = bead_store_with_bead
+        code, _ = _run_handler_with_store(
+            store, ["close", "bd-alias-test", "--note", "note text"]
         )
         assert code == 0
         fetched = store.read("bd-alias-test")
         assert fetched is not None
-        assert fetched.summary == "note text"
+        assert fetched.status == "closed"

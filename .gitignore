@@ -44,3 +44,9 @@ RESUME_*.md
 # PMO UI local config
 pmo-ui/.claude/
 /pmo-ui/e2e/reports/*
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/

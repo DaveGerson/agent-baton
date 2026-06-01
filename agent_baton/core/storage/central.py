@@ -423,3 +423,148 @@ class CentralStore:
 
     def _conn(self) -> sqlite3.Connection:
         return self._conn_mgr.get_connection()
+
+
+# ---------------------------------------------------------------------------
+# ADR-13b WP-2 §5 — Export-based central bead projection
+# ---------------------------------------------------------------------------
+
+
+def export_beads_to_central(
+    project_id: str,
+    project_root: Path,
+    central_db_path: Path | None = None,
+) -> int:
+    """Upsert a minimal bead projection from a project's bead store into central.db.
+
+    Reads open beads from the project's bead store (via
+    :func:`~agent_baton.core.engine.bead_backend.make_bead_store`) and
+    upserts a minimal projection into the ``beads`` table in ``central.db``.
+
+    The projection contains: ``project_id, bead_id, bead_type, status,
+    agent_name, created_at``.  All other columns use their DDL defaults.
+
+    This replaces the old ``SyncTableSpec("beads", ...)`` row-replication
+    path removed in ADR-13b WP-2.  The NOC ``/noc/aggregate/incidents``
+    endpoint that counts ``beads WHERE bead_type = 'warning'`` continues to
+    work unchanged because this function keeps the central projection current.
+
+    Args:
+        project_id: Stable project identifier (used as PK prefix in central.db).
+        project_root: Project root directory — passed to ``make_bead_store``
+            as ``repo_root`` so the bd backend locates ``.beads/``.
+        central_db_path: Path to ``central.db``.  Defaults to
+            ``~/.baton/central.db``.
+
+    Returns:
+        Number of rows upserted.
+
+    Raises:
+        Does NOT raise — logs and returns 0 on any failure so sync callers
+        can continue without interruption.
+
+    Note:
+        Wired into :func:`~agent_baton.core.storage.sync.auto_sync_current_project`
+        (ADR-13b WP-G).  ``bd`` is now the mandatory bead backend so this runs
+        on every sync.
+    """
+    _log_export = _log.getChild("export_beads_to_central")
+
+    resolved_central = central_db_path or _CENTRAL_DB_DEFAULT
+    if not resolved_central.exists():
+        _log_export.debug(
+            "export_beads_to_central: central.db not found at %s — skipping",
+            resolved_central,
+        )
+        return 0
+
+    # Locate the project baton.db.
+    project_root_path = Path(project_root)
+    db_path = project_root_path / ".claude" / "team-context" / "baton.db"
+
+    try:
+        from agent_baton.core.engine.bead_backend import make_bead_store
+
+        store = make_bead_store(db_path, repo_root=project_root_path)
+        beads = store.query(limit=50000)
+    except Exception as exc:  # noqa: BLE001
+        _log_export.warning(
+            "export_beads_to_central: failed to read beads from project %s: %s",
+            project_id, exc,
+        )
+        return 0
+
+    if not beads:
+        return 0
+
+    central = CentralStore(resolved_central)
+    conn = central._conn()
+
+    # Self-heal: central DBs that already ran the v42 drop (ADR-13b WP-G) no
+    # longer have the bead projection table.  Recreate it (and the discoveries
+    # view) idempotently so the projection + NOC counts work regardless of when
+    # the central DB was migrated.  Fresh central DBs already have it from
+    # CENTRAL_SCHEMA_DDL; CREATE ... IF NOT EXISTS makes this a no-op there.
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS beads (
+            project_id TEXT NOT NULL, bead_id TEXT NOT NULL, task_id TEXT,
+            step_id TEXT NOT NULL DEFAULT '', agent_name TEXT NOT NULL DEFAULT '',
+            bead_type TEXT NOT NULL, content TEXT NOT NULL DEFAULT '',
+            confidence TEXT NOT NULL DEFAULT 'medium', scope TEXT NOT NULL DEFAULT 'step',
+            tags TEXT NOT NULL DEFAULT '[]', affected_files TEXT NOT NULL DEFAULT '[]',
+            status TEXT NOT NULL DEFAULT 'open', created_at TEXT NOT NULL DEFAULT '',
+            closed_at TEXT NOT NULL DEFAULT '', summary TEXT NOT NULL DEFAULT '',
+            links TEXT NOT NULL DEFAULT '[]', source TEXT NOT NULL DEFAULT 'agent-signal',
+            token_estimate INTEGER NOT NULL DEFAULT 0, quality_score REAL NOT NULL DEFAULT 0.0,
+            retrieval_count INTEGER NOT NULL DEFAULT 0, signed_by TEXT NOT NULL DEFAULT '',
+            signature TEXT NOT NULL DEFAULT '', PRIMARY KEY (project_id, bead_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_central_beads_type ON beads(bead_type);
+        CREATE INDEX IF NOT EXISTS idx_central_beads_status ON beads(status);
+        """
+    )
+
+    upserted = 0
+    for b in beads:
+        try:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO beads
+                    (project_id, bead_id, bead_type, status, agent_name,
+                     created_at, task_id, step_id, content)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    project_id,
+                    b.bead_id,
+                    b.bead_type or "",
+                    b.status or "open",
+                    b.agent_name or "",
+                    b.created_at or "",
+                    b.task_id or None,
+                    b.step_id or "",
+                    b.content or "",
+                ),
+            )
+            upserted += 1
+        except Exception as exc:  # noqa: BLE001
+            _log_export.debug(
+                "export_beads_to_central: skipping bead %s: %s",
+                b.bead_id, exc,
+            )
+
+    try:
+        conn.commit()
+    except Exception as exc:  # noqa: BLE001
+        _log_export.warning(
+            "export_beads_to_central: commit failed for project %s: %s",
+            project_id, exc,
+        )
+        return 0
+
+    _log_export.debug(
+        "export_beads_to_central: upserted %d beads for project %s",
+        upserted, project_id,
+    )
+    return upserted

@@ -532,6 +532,120 @@ concurrent-write contention that Agent Baton doesn't have (serialized executor).
 
 ---
 
+## ADR-13a: Gastown Git-Notes Bead Persistence (M1 flip) + `.beads/` Interop Adapter
+
+**Decision**: (1) Flip the Wave 6.1 Part A git-notes dual-write from OFF
+(Phase M0) to ON by default (Phase M1) via a `BATON_GASTOWN_ENABLED`
+environment gate (default `1`), wired at the runtime construction sites
+(executor, CLI bead store, launcher) and configured by `install.sh` /
+`install.ps1` by default. (2) Implement the previously-deferred `.beads/`
+interop path as a read adapter (`BeadsAdapter`) on the `ExternalSourceAdapter`
+protocol, registered as `baton source add beads`, reading the documented
+`.beads/issues.jsonl` interchange file. SQLite (`baton.db`) remains the source
+of truth in both cases.
+
+**Context**: ADR-13 built the native bead memory and a git-notes dual-write
+mirror (`refs/notes/baton-beads` via `NotesAdapter` + `bead_anchors`), but left
+it unwired — `gastown_dual_write` defaulted to `False` at every call site, so
+the durability and cross-clone/worktree benefits were never realized in normal
+flows. ADR-13 also deferred `.beads/` interop until the external Beads on-disk
+format stabilized. The `bd` project has since settled on Dolt-embedded storage
+with `.beads/issues.jsonl` as the *documented, stable interchange/export
+surface* ("useful for review, migration, and interoperability"), which is the
+right seam to bridge without taking a Go-binary or Dolt runtime dependency.
+
+**What this does NOT change**: We still do **not** adopt the `bd` Go CLI, the
+Dolt engine, or the `.beads/` directory as a *runtime dependency* (ADR-13
+stands). The interop adapter reads the JSONL interchange file only; there is no
+subprocess shell-out to `bd` on any critical path. SQLite remains authoritative
+and the git-notes mirror is warn-only — a notes failure never rolls back or
+fails a SQLite write.
+
+**Key trade-offs**:
+
+- **Call-site gate vs. kwarg default**: The `BeadStore(gastown_dual_write=...)`
+  kwarg default stays `False` so direct library construction is deterministic
+  and env-independent; the env gate (`gastown_dual_write_enabled()`) is applied
+  only at the runtime construction sites. This flips the engine with one env var
+  while keeping the library contract (and existing tests) stable.
+
+- **Default ON**: Chosen so bead memory "deploys as part of the flow" without
+  extra flags. Reversible per-project with `BATON_GASTOWN_ENABLED=0` or
+  `install.sh --no-gastown` / `install.ps1 -NoGastown`.
+
+- **Read-only interop adapter**: `BeadsAdapter` implements the read side of
+  `ExternalSourceAdapter` (`connect`/`fetch_items`/`fetch_item`), mapping beads
+  `issue_type`/`status`/`priority` onto `ExternalItem`. Writing back to
+  `.beads/` is intentionally out of scope (the protocol is read-mostly; external
+  writes are explicit and gated elsewhere).
+
+**Status**: Implemented (2026-06-01) — M1 dual-write default-on; `BeadsAdapter`
+read interop via `baton source add beads`.
+
+---
+
+## ADR-13b: Go All-In on Beads — `bd` as the Bead/Issue System of Record
+
+**Status**: **Implemented (WP-G teardown complete 2026-06-01).** `bd` is the
+only mandatory bead backend. SQLite bead tables, Gastown git-notes plumbing,
+and the `BeadStore`/`NotesAdapter` classes have been deleted. All migration
+phases are done.
+
+**Decision**: Use the external Beads tool (`bd`, github.com/gastownhall/beads)
+as the **sole system of record** for bead/issue memory. The installer
+auto-installs `bd`; the runtime routes bead CRUD, dependency edges, and
+ready-queue computation through `bd`. baton-specific fields that have no native
+`bd` column are preserved **losslessly** in `bd`'s free-form `metadata` (under
+a `baton` key) plus queryable `labels`.
+
+**Why this reverses ADR-13**: ADR-13 rejected a `bd`/Dolt runtime dependency to
+protect the pip-only install story and avoid upstream churn. The operator has
+chosen to accept those costs to get beads' full feature set (distributed graph,
+Dolt history/branching, federation, `bd ready`, agent-native ergonomics) as a
+first-class backend rather than a reimplementation.
+
+**Architecture (post-WP-G)**:
+
+- `core/engine/bd_client.py` — the single subprocess seam to `bd` (all
+  invocations use `--json`; typed `BdError`/`BdNotAvailable`).
+- `core/engine/bd_mapping.py` — lossless `Bead` ⇄ `bd` issue mapping via the
+  `metadata.baton` blob + synthetic labels (`bead-type:`, `scope:`, `source:`,
+  `task:`). Issues authored directly in `bd` (no baton blob) still surface as
+  beads via a best-effort field map.
+- `core/engine/bd_bead_store.py` — `BdBeadStore` implements the bead store
+  surface (`write`/`read`/`query`/`ready`/`close`/`annotate`/`link`).
+- `core/engine/bead_backend.py` — `make_bead_store()` always returns
+  `BdBeadStore` or raises `BdNotAvailable`.
+
+**Deleted in WP-G**: `bead_store.py`, `notes_adapter.py`, `notes_replication.py`,
+`bead_anchors.py`. All SQLite bead tables dropped via schema v42 migration.
+
+**ID strategy**: `bd init -p bd` sets the issue prefix to `bd` so generated IDs
+match baton's historical `bd-<hash>` scheme; baton passes its own `bead_id` via
+`bd create --id`.
+
+**Migration history**:
+
+1. **Phase 1** — `bd` client, mapping, `BdBeadStore`, backend selector,
+   installer auto-install, env vars, tests.
+2. **Phase 2** — migrate direct-SQLite consumers to the store interface.
+3. **Phase 3 / WP-G (complete)** — removed SQLite bead tables, deleted
+   Gastown git-notes plumbing, made `bd` mandatory, schema version bumped to 42
+   with DROP TABLE migration, all 10 legacy callers migrated to `make_bead_store()`.
+
+**Key trade-offs**:
+
+- **Lossless metadata blob vs. native columns**: storing the full bead dict in
+  `metadata.baton` guarantees round-trip fidelity; native fields (title/
+  description/type/status/labels/deps) are also populated so `bd`'s own
+  queries stay meaningful.
+- **Subprocess on the bead path**: each bead op is a `bd` invocation. Acceptable
+  because bead writes are not on the latency-critical dispatch loop.
+- **Install story**: pip-only is no longer sufficient — `bd` (a Go binary) is
+  a required runtime dependency, installed via npm/Homebrew by the installer.
+
+---
+
 ## ADR-14: Learning Automation System (Hybrid Ledger + Improvement Pipeline)
 
 **Decision**: Build a closed-loop learning system using a new

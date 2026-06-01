@@ -50,12 +50,17 @@ if [ ! -d "$AGENTS_DIR" ]; then
     exit 1
 fi
 
+# ADR-13b WP-G: Gastown git-notes bead persistence removed.
+# --gastown / --no-gastown are kept as no-ops for backward compatibility with
+# callers that still pass them; they have no runtime effect.
 UPGRADE=false
-GASTOWN=false
+NO_BEADS=false
 for arg in "$@"; do
     case "$arg" in
-        --upgrade)  UPGRADE=true ;;
-        --gastown)  GASTOWN=true ;;
+        --upgrade)     UPGRADE=true ;;
+        --gastown)     : ;;   # no-op — Gastown removed in WP-G
+        --no-gastown)  : ;;   # no-op — Gastown removed in WP-G
+        --no-beads)    NO_BEADS=true ;;
     esac
 done
 
@@ -343,38 +348,40 @@ else
     echo "    Run from inside a git repo, or set BATON_SKIP_GIT_NOTES_SETUP=1 to silence this."
 fi
 
-# ── Step 6: Gastown (git-notes bead persistence) ─────────
-# Gated by --gastown flag.  Phase M0 default: OFF.
-# Enable in Phase M1+ once the dual-write window starts.
-if [ "$GASTOWN" = true ]; then
-    echo ""
-    echo "  STEP 6: Gastown Git-Notes Bead Persistence"
-    echo "  ───────────────────────────────────────────"
-    if git rev-parse --git-dir &>/dev/null 2>&1; then
-        # Carry bead notes across rebases
-        git config --local notes.rewriteRef "refs/notes/baton-beads" 2>/dev/null && \
-            echo "  + git config: notes.rewriteRef set" || \
-            echo "  ! notes.rewriteRef config failed (non-fatal)"
-
-        # Register the JSON-aware bead merge driver
-        git config --local merge.baton-notes.driver \
-            "scripts/baton-notes-merge %O %A %B" 2>/dev/null && \
-            echo "  + git config: merge.baton-notes.driver set" || \
-            echo "  ! merge driver config failed (non-fatal)"
-
-        # Fetch bead notes from origin on git fetch/pull (idempotent)
-        _NOTES_FETCH="+refs/notes/baton-beads:refs/notes/baton-beads"
-        if git config --local --get-all remote.origin.fetch | grep -qF "$_NOTES_FETCH" 2>/dev/null; then
-            echo "  ~ remote.origin.fetch: notes refspec already present"
-        else
-            git config --local --add remote.origin.fetch "$_NOTES_FETCH" 2>/dev/null && \
-                echo "  + git config: remote.origin.fetch notes refspec added" || \
-                echo "  ! notes fetch refspec config failed (non-fatal)"
-        fi
-    else
-        echo "  ! Not inside a git repository — Gastown git config skipped"
-        echo "    Run 'git init' first, then re-run install.sh --gastown"
+# ── Step 6: Beads (bd) CLI — bead/issue backend (ADR-13b WP-G) ──
+# bd is now the ONLY mandatory bead backend — SQLite fallback removed.
+# Auto-install it here so it "deploys as part of the flow."
+# Skippable with --no-beads or BATON_SKIP_BEADS_INSTALL=1.
+install_beads() {
+    if command -v bd &>/dev/null; then
+        echo "  ~ bd already installed: $(bd version 2>/dev/null | head -1)"
+        return 0
     fi
+    if command -v npm &>/dev/null; then
+        echo "  Installing beads (bd) via npm (@beads/bd)..."
+        if npm install -g @beads/bd &>/dev/null && command -v bd &>/dev/null; then
+            echo "  + bd installed: $(bd version 2>/dev/null | head -1)"
+            return 0
+        fi
+    fi
+    if command -v brew &>/dev/null; then
+        echo "  Installing beads (bd) via Homebrew..."
+        if brew install beads &>/dev/null && command -v bd &>/dev/null; then
+            echo "  + bd installed: $(bd version 2>/dev/null | head -1)"
+            return 0
+        fi
+    fi
+    echo "  ! Could not auto-install bd. Install it manually:"
+    echo "      npm install -g @beads/bd      (or)  brew install beads"
+    echo "    bd is now REQUIRED — baton will raise BdNotAvailable without it."
+    return 0
+}
+
+if [ "${BATON_SKIP_BEADS_INSTALL:-0}" != "1" ] && [ "$NO_BEADS" != true ]; then
+    echo ""
+    echo "  STEP 6: Beads (bd) CLI — mandatory bead backend"
+    echo "  ───────────────────────────────────────────────"
+    install_beads
 fi
 
 # ── Summary ────────────────────────────────────────────────

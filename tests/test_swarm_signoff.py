@@ -612,28 +612,27 @@ def test_directive_summary_replace_import() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 19. BeadStore.find_recent_approvals
+# 19. BdBeadStore.find_recent_approvals
 # ---------------------------------------------------------------------------
 
 
-def test_find_recent_approvals_returns_empty_on_no_table() -> None:
-    """Graceful degradation when beads table does not exist."""
-    from agent_baton.core.engine.bead_store import BeadStore
-    import tempfile
-    import sqlite3
+def test_find_recent_approvals_returns_empty_on_bd_error() -> None:
+    """Graceful degradation when BdBeadStore.query() fails (e.g. bd error).
 
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-        db_path = Path(f.name)
+    ADR-13b WP-G: BeadStore (SQLite) removed; BdBeadStore is the only backend.
+    Graceful degradation is tested by mocking the store's query to raise.
+    """
+    from unittest.mock import MagicMock
+    from agent_baton.core.engine.bd_bead_store import BdBeadStore
+    from agent_baton.core.engine.bd_client import BdError
 
-    # Create a DB with no beads table
-    conn = sqlite3.connect(str(db_path))
-    conn.close()
+    mock_client = MagicMock()
+    store = BdBeadStore(mock_client)
+    store._initialised = True
+    mock_client.list.side_effect = BdError("no beads database found")
 
-    store = BeadStore(db_path=db_path)
-    # _table_exists should return False; find_recent_approvals returns []
     result = store.find_recent_approvals(tag="swarm-refactor", max_age_minutes=5)
     assert result == []
-    db_path.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------

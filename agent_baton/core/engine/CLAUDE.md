@@ -39,13 +39,13 @@ If you cannot update all four in the same change, stop and split the work.
 | Execution loop | `executor.py`, `_executor_helpers.py`, `phase_manager.py` |
 | Gates | `gates.py`, `artifact_validator.py` (derives extra commands from agent-created CI workflows, npm scripts, Playwright config, Makefiles, pre-commit; appended to `gate.command` with `&&`) |
 | Dispatch | `dispatcher.py`, `dry_run_launcher.py`, `worktree_manager.py` |
-| Beads (signals) | `bead_signal.py`, `bead_store.py`, `bead_selector.py`, `bead_decay.py`, `bead_anchors.py` |
+| Beads (signals) | `bead_signal.py`, `bead_selector.py`, `bead_decay.py` |
+| Beads backend (ADR-13b WP-G) | `bd_client.py` (subprocess seam to the external `bd` CLI), `bd_mapping.py` (lossless Bead⇄bd issue mapping), `bd_bead_store.py` (`BdBeadStore` — the only bead store implementation), `bead_backend.py` (`make_bead_store()` — always returns `BdBeadStore`) |
 | Knowledge | `knowledge_resolver.py`, `knowledge_gap.py`, `knowledge_telemetry.py` |
 | Self-heal | `selfheal.py`, `takeover.py` |
 | Souls (identity) | `soul_registry.py`, `soul_router.py` |
 | Speculation | `speculator.py`, `foresight.py` |
 | Cost / classification | `cost_estimator.py`, `classifier.py` |
-| Notes (worktree-aware persistence) | `notes_adapter.py`, `notes_replication.py` |
 | Team coordination | `team_board.py`, `team_registry.py`, `team_tools.py` |
 
 ## Don'ts

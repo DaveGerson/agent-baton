@@ -91,10 +91,10 @@ def handler(args: argparse.Namespace) -> None:
     # Wire bead store for F12 quality metrics in scorecards
     bead_store = None
     try:
-        from agent_baton.core.engine.bead_store import BeadStore
+        from agent_baton.core.engine.bead_backend import make_bead_store
         db_path = Path(".claude/team-context/baton.db")
         if db_path.exists():
-            bead_store = BeadStore(db_path)
+            bead_store = make_bead_store(db_path)
     except Exception:
         pass
 

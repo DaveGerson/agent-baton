@@ -202,19 +202,30 @@ def _file_gh_unavailable_bead(message: str) -> None:
     """
     try:
         from datetime import datetime, timezone
+        from pathlib import Path as _Path
 
-        from agent_baton.core.storage.bead_store import BeadStore  # type: ignore
-        from agent_baton.models.bead import Bead  # type: ignore
+        from agent_baton.core.engine.bead_backend import make_bead_store
+        from agent_baton.models.bead import Bead, _generate_bead_id  # type: ignore[attr-defined]
 
-        bead = Bead(
-            bead_id=f"bd-knowharvest-{int(datetime.now(timezone.utc).timestamp())}",
-            type="warning",
-            title="knowledge.harvest.reviews degraded — gh CLI unavailable",
-            body=message,
-            tags=["knowledge", "harvester", "gh"],
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        content = f"knowledge.harvest.reviews degraded — gh CLI unavailable: {message}"
+        bead_id = _generate_bead_id(
+            task_id="", step_id="harvest", content=content, timestamp=ts, bead_count=0
         )
-        store = BeadStore()
-        store.write(bead)
+        bead = Bead(
+            bead_id=bead_id,
+            task_id="",
+            step_id="harvest",
+            agent_name="knowledge-harvester",
+            bead_type="warning",
+            content=content,
+            tags=["knowledge", "harvester", "gh"],
+            created_at=ts,
+        )
+        _db = _Path(".claude/team-context/baton.db")
+        if _db.exists():
+            store = make_bead_store(_db)
+            store.write(bead)
     except Exception:
         # Bead system unavailable — degradation is acceptable; the user
         # already sees the error message in stderr.

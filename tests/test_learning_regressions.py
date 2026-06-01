@@ -362,30 +362,18 @@ class TestBeadSignalParsing:
     def test_bead_signals_parse_and_write_roundtrip(
         self, tmp_path: Path
     ) -> None:
-        """parse_bead_signals -> BeadStore.write -> BeadStore.query roundtrip.
+        """parse_bead_signals -> BdBeadStore.write -> BdBeadStore.query roundtrip.
 
-        The beads table has FK to executions(task_id), so a matching executions
-        row is seeded via SqliteStorage before the bead is written.
+        ADR-13b WP-G: BeadStore (SQLite) was removed.  The roundtrip now uses
+        BdBeadStore via make_bead_store().  No FK seeding needed (bd has no FK
+        constraints on task_id).
         """
-        from agent_baton.core.storage.sqlite_backend import SqliteStorage
-        from agent_baton.core.engine.bead_store import BeadStore
+        from agent_baton.core.engine.bead_backend import make_bead_store
         from agent_baton.core.engine.bead_signal import parse_bead_signals
 
         db_path = tmp_path / "baton.db"
-        storage = SqliteStorage(db_path)
-
-        # Seed an executions row to satisfy the beads FK constraint.
-        conn = storage._conn_mgr.get_connection()
-        conn.execute(
-            "INSERT OR IGNORE INTO executions "
-            "(task_id, status, current_phase, current_step_index, "
-            " started_at, created_at, updated_at) "
-            "VALUES (?, 'running', 0, 0, "
-            " datetime('now'), datetime('now'), datetime('now'))",
-            ("task-beads-e2e",),
-        )
-        conn.commit()
-        storage.close()
+        db_path.touch()
+        bead_store = make_bead_store(db_path, repo_root=tmp_path)
 
         outcome = (
             "Feature implemented.\n"
@@ -400,15 +388,13 @@ class TestBeadSignalParsing:
         )
         assert len(beads) == 1, "parse_bead_signals must find the BEAD_DISCOVERY signal"
 
-        bead_store = BeadStore(db_path)
         written_id = bead_store.write(beads[0])
         assert written_id, (
-            "BeadStore.write must return a non-empty bead_id; "
-            "empty string means the write failed (check FK constraints)"
+            "BdBeadStore.write must return a non-empty bead_id"
         )
 
         queried = bead_store.query(task_id="task-beads-e2e")
-        assert len(queried) >= 1, "BeadStore.query must return the written bead"
+        assert len(queried) >= 1, "BdBeadStore.query must return the written bead"
         assert any("middleware" in b.content for b in queried), (
             "Queried bead content must include the BEAD_DISCOVERY message"
         )

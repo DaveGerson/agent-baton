@@ -108,8 +108,8 @@ def _improve_handler_impl(args: argparse.Namespace) -> None:
     ledger = None
     if storage is not None:
         try:
-            from agent_baton.core.engine.bead_store import BeadStore
-            bead_store = BeadStore(storage.db_path)
+            from agent_baton.core.engine.bead_backend import make_bead_store
+            bead_store = make_bead_store(storage.db_path)
         except Exception:
             pass
         try:

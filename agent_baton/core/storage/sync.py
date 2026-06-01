@@ -131,10 +131,12 @@ SYNCABLE_TABLES: list[SyncTableSpec] = [
         has_autoincrement_pk=True,
     ),
     SyncTableSpec("shared_context", ["task_id"]),
-    # -- Bead memory tables (schema v4, Inspired by beads-ai/beads-cli) ------
-    # beads must come before bead_tags (FK dependency order).
-    SyncTableSpec("beads", ["bead_id"]),
-    SyncTableSpec("bead_tags", ["bead_id", "tag"]),
+    # NOTE(ADR-13b WP-2): beads and bead_tags SyncTableSpec entries removed.
+    # Beads now live in the bd backend (.beads/issues.jsonl) and are exported
+    # to central.db via export_beads_to_central() in core/storage/central.py
+    # rather than through the row-replication path.  Syncing empty tables
+    # would produce misleading zero-count rows in central.db once the bead
+    # tables are dropped in Phase G.
     # -- Learning automation tables (schema v5) ----------------------------
     SyncTableSpec("learning_issues", ["issue_id"]),
 ]
@@ -616,4 +618,22 @@ def auto_sync_current_project() -> SyncResult | None:
         "auto_sync_current_project: syncing project %s from %s",
         best_project_id, db_path,
     )
-    return engine.push(best_project_id, db_path, trigger="auto")
+    result = engine.push(best_project_id, db_path, trigger="auto")
+
+    # ADR-13b WP-G: export bead projection to central.db so NOC cross-project
+    # counts stay live.  Only runs when the bd backend is active (bd is now
+    # mandatory so this always runs, but we guard defensively).
+    try:
+        from agent_baton.core.storage.central import export_beads_to_central
+        export_beads_to_central(
+            project_id=best_project_id,
+            project_root=best_path,
+            central_db_path=central_path,
+        )
+    except Exception as _bead_export_exc:
+        _log.warning(
+            "auto_sync_current_project: bead export failed (non-fatal): %s",
+            _bead_export_exc,
+        )
+
+    return result

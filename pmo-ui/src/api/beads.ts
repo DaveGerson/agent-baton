@@ -2,9 +2,9 @@
 // Beads API client (DX.6)
 // ---------------------------------------------------------------------------
 // The PMO surfaces beads as a graph + timeline.  The backend route at
-// `/api/v1/pmo/beads` is being authored in parallel (see bead bd-aade);
-// until it lands, this module falls back to a representative fixture so
-// the UI is reviewable end-to-end.
+// `/api/v1/pmo/beads` reads from the project's bead store (SQLite or the
+// `bd` backend, per ADR-13b); this module falls back to a representative
+// fixture when the route is unavailable so the UI stays reviewable.
 // ---------------------------------------------------------------------------
 
 const BASE = '/api/v1/pmo';
@@ -17,7 +17,8 @@ export type BeadType =
   | 'discovery'
   | 'task'
   | 'message'
-  | 'message_ack';
+  | 'message_ack'
+  | 'executable';
 
 export type BeadStatus = 'open' | 'closed' | 'archived';
 
@@ -344,6 +345,7 @@ export const BEAD_TYPE_COLOR: Record<BeadType, string> = {
   task:        T.crust,            // golden
   message:     T.cherrySoft,       // soft pink
   message_ack: T.mintSoft,         // soft mint
+  executable:  '#8b5cf6',          // violet
 };
 
 export const BEAD_TYPE_LABEL: Record<BeadType, string> = {
@@ -355,6 +357,7 @@ export const BEAD_TYPE_LABEL: Record<BeadType, string> = {
   task:        'Task',
   message:     'Message',
   message_ack: 'Message Ack',
+  executable:  'Executable',
 };
 
 export const LINK_TYPE_STYLE: Record<BeadLinkType, { color: string; dash: string; label: string }> = {

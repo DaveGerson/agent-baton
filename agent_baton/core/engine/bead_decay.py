@@ -18,7 +18,7 @@ import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from agent_baton.core.engine.bead_store import BeadStore
+    from agent_baton.core.engine.bd_bead_store import BdBeadStore as BeadStore  # WP-G: alias for migration
 
 _log = logging.getLogger(__name__)
 

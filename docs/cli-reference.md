@@ -1856,8 +1856,10 @@ baton cquery --table executions
 
 ### `baton source`
 
-Manage external work-item source connections (ADO adapter implemented;
-Jira, GitHub, Linear adapters not yet implemented).
+Manage external work-item source connections. Adapters: `ado`, `github`,
+`jira`, `linear`, and `beads`. The `beads` adapter is local interop — it reads
+an external [Beads](https://github.com/gastownhall/beads) project's exported
+`.beads/issues.jsonl` interchange file (no `bd` Go binary or Dolt dependency).
 
 #### `baton source add`
 
@@ -1867,18 +1869,25 @@ baton source add TYPE --name NAME [options]
 
 | Argument | Required | Description |
 |----------|----------|-------------|
-| `TYPE` | Yes | Source type: `ado` (others not yet implemented) |
+| `TYPE` | Yes | Source type: `ado`, `github`, `jira`, `linear`, `beads` |
 | `--name NAME` | Yes | Display name for this source |
-| `--org ORG` | No | Organization or account name |
-| `--project PROJECT` | No | Project name within the source |
+| `--org ORG` | No | Organization or account name (ADO/GitHub; email for Jira) |
+| `--project PROJECT` | No | Project name within the source (ADO/Jira/Linear) |
 | `--pat-env ENV_VAR` | No | Environment variable name holding the PAT/token |
 | `--url URL` | No | Base URL for self-hosted instances |
+| `--config JSON` | No | Extra adapter config as a JSON object, merged into the stored config. The `beads` adapter uses `{"beads_dir": ".beads"}` |
 
-**Example:**
+**Examples:**
 
 ```bash
+# Azure DevOps
 baton source add ado --name "Team Board" \
     --org contoso --project "Data Platform" --pat-env ADO_PAT
+
+# Local Beads project (reads .beads/issues.jsonl; run `bd export` first)
+baton source add beads --name "Local Beads" \
+    --config '{"beads_dir": ".beads"}'
+baton source sync beads-beads
 ```
 
 #### `baton source list`
@@ -2127,10 +2136,13 @@ in [references/baton-engine.md](../references/baton-engine.md#environment-variab
 | `BATON_EXPERIMENTAL` | CSV opt-in for experimental subsystems. Required for `baton swarm` (`BATON_EXPERIMENTAL=swarm`). Exits with code 2 if unset. | unset |
 | `BATON_SWARM_ENABLED` | Required in addition to `BATON_EXPERIMENTAL=swarm` to dispatch a swarm refactor. | unset |
 | `BATON_SOULS_ENABLED` | Wave 6.1 Part B persistent agent souls (signing + revocation). | `0` |
+| `BATON_BD_BACKEND` | ADR-13b WP-G bead backend. `bd` is the only supported value — SQLite fallback removed. Other values log a deprecation warning and `BdNotAvailable` is raised if `bd` is missing. | `bd` |
+| `BATON_BD_ENABLED` | Kept for backward compatibility; has no effect after WP-G — `bd` is always required. | `1` |
+| `BATON_BD_BIN` | `bd` binary path/name. | `bd` |
+| `BATON_BD_PREFIX` | Issue prefix for `bd init` (matches baton's `bd-<hash>` IDs). | `bd` |
 | `BATON_PREDICT_ENABLED` | Wave 6.2 Part C predictive computation watcher / classifier / dispatcher. | `0` |
 | `BATON_IMMUNE_ENABLED` | Immune-system monitoring loop. | `0` |
 | `BATON_EXEC_BEADS_ENABLED` | Wave 6.1 Part C executable beads. Sandbox is process-level only — see `references/baton-patterns.md` trust-boundary section before extending to external-origin input. | `0` |
-| `BATON_SKIP_GIT_NOTES_SETUP` | Silence install-time git-notes refspec setup and the runtime warning emitted by `NotesAdapter.write()` when the wildcard refspec is missing. | unset |
 | `BATON_SELFHEAL_ENABLED` | Enable speculator/selfheal escalation on gate failure. Falsy values (`0`, `false`, `no`) are honoured and emit a `selfheal_suppressed` row to `compliance-audit.jsonl`. | `0` |
 | `BATON_WORKTREE_STALE_HOURS` | Worktree GC stale threshold in hours; legacy alias `BATON_WORKTREE_GC_HOURS`. GC runs on every `baton execute complete`. | `4` |
 | `BATON_API_TOKEN` | Bearer token for the FastAPI server (`baton serve`). CLI `--token` flag takes precedence. | unset |

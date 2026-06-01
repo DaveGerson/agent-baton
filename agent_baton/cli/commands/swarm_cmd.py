@@ -751,19 +751,19 @@ def _file_team_override_audit_bead(
 
 
 def _get_bead_store():
-    """Return a BeadStore for the project baton.db, or None on failure.
+    """Return a bead store for the project baton.db, or None on failure.
 
     Resolution order (mirrors BATON_DB_PATH convention from claude_launcher.py):
     1. BATON_DB_PATH environment variable.
     2. Walk up from cwd looking for .claude/team-context/baton.db.
     """
     try:
-        from agent_baton.core.engine.bead_store import BeadStore
+        from agent_baton.core.engine.bead_backend import make_bead_store
 
         db_path = _find_baton_db()
         if db_path is None:
             return None
-        return BeadStore(db_path=db_path)
+        return make_bead_store(db_path)
     except Exception as exc:
         _log.debug("_get_bead_store: %s", exc)
         return None

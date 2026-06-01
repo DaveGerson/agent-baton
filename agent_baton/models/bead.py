@@ -7,9 +7,8 @@ outcomes, and planning notes -- produced by agents during execution.  They
 persist across steps and phases, enabling downstream agents to inherit
 upstream context without re-reading raw output.
 
-Unlike the original Beads project (which uses Dolt or JSONL), these models
-are backed natively by Agent Baton's existing SQLite storage layer.  See
-``core/engine/bead_store.py`` for persistence and
+After ADR-13b WP-G, these models are backed by the external ``bd`` CLI.  See
+``core/engine/bd_bead_store.py`` (``BdBeadStore``) for persistence and
 ``docs/superpowers/specs/2026-04-12-bead-memory-design.md`` for the full
 design rationale.
 """
@@ -316,6 +315,11 @@ class ExecutableBead(Bead):
     interpreter: str = ""        # 'bash' | 'python' | 'ast-grep' | 'pytest'
     script_sha: str = ""         # SHA-256 of script body
     script_ref: str = ""         # 'refs/notes/baton-bead-scripts:<sha>'
+    # ADR-13b WP-1 §3: script body stored inline so the bd backend can
+    # serve it without relying on git notes.  Defaults to "" so existing
+    # beads round-trip unchanged.  ``script_sha`` / ``script_ref`` stay as
+    # the content-address identity pair for dedup and cross-referencing.
+    script_body: str = ""
     runtime_limits: dict = field(default_factory=lambda: {
         "timeout_s": 30,
         "mem_mb": 256,
@@ -336,6 +340,9 @@ class ExecutableBead(Bead):
             "interpreter": self.interpreter,
             "script_sha": self.script_sha,
             "script_ref": self.script_ref,
+            # ADR-13b WP-1 §3: script body travels in the metadata blob so
+            # BdBeadStore can serve it without a git-notes round-trip.
+            "script_body": self.script_body,
             "runtime_limits": self.runtime_limits,
             "last_run_at": self.last_run_at,
             "last_exit_code": self.last_exit_code,
@@ -376,6 +383,8 @@ class ExecutableBead(Bead):
             interpreter=data.get("interpreter", ""),
             script_sha=data.get("script_sha", ""),
             script_ref=data.get("script_ref", ""),
+            # ADR-13b WP-1 §3: load inline body (empty string for legacy beads).
+            script_body=data.get("script_body", ""),
             runtime_limits=data.get("runtime_limits", {
                 "timeout_s": 30, "mem_mb": 256, "net": False,
             }),

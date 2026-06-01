@@ -434,6 +434,6 @@ def _build_launcher() -> object:
 
 
 def _build_bead_store(db_path: Path) -> object:
-    """Build a BeadStore for *db_path*."""
-    from agent_baton.core.engine.bead_store import BeadStore
-    return BeadStore(db_path=db_path)
+    """Build a bead store for *db_path* via the bd backend."""
+    from agent_baton.core.engine.bead_backend import make_bead_store
+    return make_bead_store(db_path)

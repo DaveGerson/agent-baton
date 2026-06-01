@@ -717,7 +717,7 @@ class ClaudeCodeLauncher:
         try:
             from datetime import datetime, timezone
 
-            from agent_baton.core.engine.bead_store import BeadStore
+            from agent_baton.core.engine.bead_backend import make_bead_store
             from agent_baton.models.bead import Bead, _generate_bead_id  # type: ignore[attr-defined]
 
             content = (
@@ -746,7 +746,7 @@ class ClaudeCodeLauncher:
                 source="agent-signal",
                 created_at=ts,
             )
-            store = BeadStore(self._config.bead_db_path)
+            store = make_bead_store(self._config.bead_db_path)
             store.write(bead)
         except Exception as exc:  # noqa: BLE001
             logger.debug(

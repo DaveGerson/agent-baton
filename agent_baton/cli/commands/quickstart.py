@@ -222,11 +222,11 @@ def _generate_starter_plan(
 
     bead_store = None
     try:
-        from agent_baton.core.engine.bead_store import BeadStore
+        from agent_baton.core.engine.bead_backend import make_bead_store
 
         db_path = ctx_dir / "baton.db"
         if db_path.exists():
-            bead_store = BeadStore(db_path)
+            bead_store = make_bead_store(db_path)
     except Exception:
         bead_store = None
 

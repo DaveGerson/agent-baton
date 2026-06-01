@@ -135,6 +135,10 @@ cymbal impact <symbol>          # blast radius before edits
 | `BATON_SELFHEAL_ENABLED` | Enable/disable self-heal escalation on failures | `0` |
 | `BATON_SPECULATE_ENABLED` | Enable/disable speculative pipelining | `0` |
 | `BATON_SOULS_ENABLED` | Enable/disable soul registry for agent identity | `0` |
+| `BATON_BD_BACKEND` | Bead-store backend (ADR-13b WP-G). `bd` is now the only supported value — SQLite fallback and `auto` mode removed. Any other value logs a deprecation warning and raises `BdNotAvailable` if `bd` binary is missing. | `bd` |
+| `BATON_BD_ENABLED` | Kept for backward compatibility. Has no effect after WP-G — `bd` is always required. | `1` |
+| `BATON_BD_BIN` | Path/name of the `bd` binary used by `BdClient`. | `bd` |
+| `BATON_BD_PREFIX` | Issue prefix passed to `bd init` so generated IDs match baton's `bd-<hash>` scheme. | `bd` |
 | `BATON_PLANNER_HARD_GATE` | Enable hard validation gate that blocks bad plans | unset |
 | `BATON_ARTIFACT_VALIDATION` | Derive extra gate commands from agent-created runnable artifacts (CI workflows, npm scripts, Playwright config, Makefile targets, pre-commit). Set to `0` to suppress derivation and run only the planned `gate.command`. | `1` |
 | `BATON_PREDICT_ENABLED` | Enable predictive dispatch system | `0` |

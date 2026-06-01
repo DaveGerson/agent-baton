@@ -84,23 +84,27 @@ def _resolve_db_path() -> Path:
 
 
 def _get_bead_store():
-    """Resolve the BeadStore for the current project.
+    """Resolve the bead store for the current project.
 
-    Returns a :class:`~agent_baton.core.engine.bead_store.BeadStore` instance
-    or ``None`` when the database is not found.  See :func:`_resolve_db_path`
+    Returns a bead store (SQLite or bd backend, per ``BATON_BD_BACKEND``) or
+    ``None`` when the database is not found.  See :func:`_resolve_db_path`
     for the discovery order (bd-ce64: walks upward so worktree subagents
     find the project-root baton.db).
+
+    ADR-13b WP-2: delegates to :func:`~agent_baton.core.engine.bead_backend.make_bead_store`
+    instead of instantiating ``BeadStore`` directly so that the bd backend is
+    available when ``BATON_BD_BACKEND=bd``.
     """
-    from agent_baton.core.engine.bead_store import BeadStore
+    from agent_baton.core.engine.bead_backend import make_bead_store
 
     db = _resolve_db_path()
     if not db.exists():
         return None
-    return BeadStore(db)
+    return make_bead_store(db, repo_root=_derive_project_root(db))
 
 
 def _get_or_create_bead_store():
-    """Resolve the BeadStore, creating the parent directory and DB if needed.
+    """Resolve the bead store, creating the parent directory and DB if needed.
 
     Unlike :func:`_get_bead_store`, this helper is used by the ``create``
     subcommand which must work even when no ``baton execute start`` has been
@@ -108,13 +112,35 @@ def _get_or_create_bead_store():
     constructing the store so that a fresh project does not fail with
     ``FileNotFoundError``.
 
-    Returns a :class:`~agent_baton.core.engine.bead_store.BeadStore` instance.
+    ADR-13b WP-2: delegates to :func:`~agent_baton.core.engine.bead_backend.make_bead_store`.
     """
-    from agent_baton.core.engine.bead_store import BeadStore
+    from agent_baton.core.engine.bead_backend import make_bead_store
 
     db = _resolve_db_path()
     db.parent.mkdir(parents=True, exist_ok=True)
-    return BeadStore(db)
+    return make_bead_store(db, repo_root=_derive_project_root(db))
+
+
+def _derive_project_root(db_path: Path) -> Path:
+    """Walk upward from *db_path* to the project root containing ``.git``/``.beads``.
+
+    Mirrors the heuristic in ``bead_backend._derive_repo_root`` but is
+    inlined here so the CLI can pass an explicit ``repo_root`` to
+    ``make_bead_store`` rather than relying on the backend to re-discover it.
+    """
+    candidate = db_path.parent
+    for _ in range(10):
+        if (candidate / ".git").exists() or (candidate / ".beads").exists():
+            return candidate
+        parent = candidate.parent
+        if parent == candidate:
+            break
+        candidate = parent
+    # .claude/team-context/baton.db -> project root is two levels up.
+    try:
+        return db_path.parent.parent.parent
+    except Exception:
+        return db_path.parent
 
 
 def _get_active_task_id() -> str | None:
@@ -936,52 +962,61 @@ def _handle_graph(args: argparse.Namespace) -> None:
 
 
 def _query_bead_edges_for(bead_ids: set[str]) -> list[tuple[str, str, str, float]]:
-    """Fetch bead_edges where both endpoints are in *bead_ids*.
+    """Fetch bead_edges where either endpoint is in *bead_ids*.
 
-    Defensive: returns ``[]`` when the table is missing or the query fails.
+    ADR-13b WP-2: reads from :class:`~agent_baton.core.storage.derived_bead_store.DerivedBeadStore`
+    (``baton-derived.db``) instead of querying ``bead_edges`` in ``baton.db``
+    directly.  The derived DB is populated by ``baton beads synthesize``.
+
+    Returns ``[]`` when the derived DB is absent or the query fails.
     """
     if not bead_ids:
         return []
-    db = _DEFAULT_DB_PATH.resolve()
-    if not db.exists():
+    db = _resolve_db_path()
+    derived_path = db.parent / "baton-derived.db"
+    if not derived_path.exists():
         return []
     try:
-        import sqlite3
-        conn = sqlite3.connect(str(db))
-        # Detect table presence to stay graceful on older schemas.
-        has_table = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='bead_edges'"
-        ).fetchone()
-        if not has_table:
-            conn.close()
-            return []
-        placeholders = ",".join("?" * len(bead_ids))
-        ids_list = list(bead_ids)
-        rows = conn.execute(
-            f"SELECT src_bead_id, dst_bead_id, edge_type, weight "
-            f"FROM bead_edges "
-            f"WHERE src_bead_id IN ({placeholders}) "
-            f"AND dst_bead_id IN ({placeholders}) "
-            f"ORDER BY edge_type, weight DESC, src_bead_id",
-            ids_list + ids_list,
-        ).fetchall()
-        conn.close()
-        return [(r[0], r[1], r[2], float(r[3])) for r in rows]
+        from agent_baton.core.storage.derived_bead_store import DerivedBeadStore
+
+        derived = DerivedBeadStore(derived_path)
+        edge_dicts = derived.edges_for(list(bead_ids))
+        # Filter to only edges where BOTH endpoints are in bead_ids (graph view
+        # should only show intra-task edges; edges to external beads are noise).
+        return [
+            (
+                e["src_bead_id"],
+                e["dst_bead_id"],
+                e["edge_type"],
+                float(e["weight"]),
+            )
+            for e in edge_dicts
+            if e["src_bead_id"] in bead_ids and e["dst_bead_id"] in bead_ids
+        ]
     except Exception:
         return []
 
 
 def _handle_synthesize(args: argparse.Namespace) -> None:
-    """Run the BeadSynthesizer manually and print counts."""
+    """Run the BeadSynthesizer manually and print counts.
+
+    ADR-13b WP-2: uses :func:`~agent_baton.core.intel.bead_synthesizer.synthesize_beads`
+    (the store-agnostic entry point) and writes edges/clusters to
+    ``baton-derived.db`` via :class:`~agent_baton.core.storage.derived_bead_store.DerivedBeadStore`.
+    """
     store = _get_bead_store()
     if store is None:
         print("No baton.db found in .claude/team-context/.", file=sys.stderr)
         sys.exit(1)
 
-    from agent_baton.core.intel.bead_synthesizer import BeadSynthesizer
+    from agent_baton.core.intel.bead_synthesizer import synthesize_beads
+    from agent_baton.core.storage.derived_bead_store import DerivedBeadStore
 
-    conn = store._conn()
-    result = BeadSynthesizer().synthesize(conn)
+    db = _resolve_db_path()
+    derived_path = db.parent / "baton-derived.db"
+    derived = DerivedBeadStore(derived_path)
+
+    result = synthesize_beads(store, derived)
 
     if getattr(args, "as_json", False):
         print(json.dumps(result.to_dict(), indent=2))
@@ -999,32 +1034,34 @@ def _handle_synthesize(args: argparse.Namespace) -> None:
 
 
 def _handle_clusters(args: argparse.Namespace) -> None:
-    """List bead clusters discovered by the synthesizer."""
-    db = _DEFAULT_DB_PATH.resolve()
-    if not db.exists():
-        print("No baton.db found in .claude/team-context/.", file=sys.stderr)
-        sys.exit(1)
+    """List bead clusters discovered by the synthesizer.
+
+    ADR-13b WP-2: reads clusters from ``baton-derived.db`` via
+    :class:`~agent_baton.core.storage.derived_bead_store.DerivedBeadStore`
+    instead of querying ``bead_clusters`` in ``baton.db`` directly.
+    """
+    db = _resolve_db_path()
+    derived_path = db.parent / "baton-derived.db"
+    if not derived_path.exists():
+        if getattr(args, "as_json", False):
+            print("[]")
+        else:
+            print(
+                "No baton-derived.db found. "
+                "Run `baton beads synthesize` first."
+            )
+        return
+
+    from agent_baton.core.storage.derived_bead_store import DerivedBeadStore
 
     try:
-        import sqlite3
-        conn = sqlite3.connect(str(db))
-        has_table = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='bead_clusters'"
-        ).fetchone()
-        if not has_table:
-            print("bead_clusters table not present (older schema).")
-            conn.close()
-            return
-        rows = conn.execute(
-            "SELECT cluster_id, label, bead_ids, created_at "
-            "FROM bead_clusters ORDER BY created_at DESC, cluster_id"
-        ).fetchall()
-        conn.close()
+        derived = DerivedBeadStore(derived_path)
+        cluster_dicts = derived.clusters()
     except Exception as exc:
         print(f"Failed to read bead_clusters: {exc}", file=sys.stderr)
         sys.exit(1)
 
-    if not rows:
+    if not cluster_dicts:
         if getattr(args, "as_json", False):
             print("[]")
         else:
@@ -1033,27 +1070,27 @@ def _handle_clusters(args: argparse.Namespace) -> None:
 
     if getattr(args, "as_json", False):
         out = []
-        for cluster_id, label, bead_ids_json, created_at in rows:
+        for c in cluster_dicts:
             try:
-                members = json.loads(bead_ids_json)
+                members = json.loads(c["bead_ids"]) if isinstance(c["bead_ids"], str) else c["bead_ids"]
             except Exception:
                 members = []
             out.append({
-                "cluster_id": cluster_id,
-                "label": label,
+                "cluster_id": c["cluster_id"],
+                "label": c["label"],
                 "bead_ids": members,
-                "created_at": created_at,
+                "created_at": c["created_at"],
             })
         print(json.dumps(out, indent=2))
         return
 
-    print(f"Bead clusters ({len(rows)}):")
-    for cluster_id, label, bead_ids_json, _created_at in rows:
+    print(f"Bead clusters ({len(cluster_dicts)}):")
+    for c in cluster_dicts:
         try:
-            members = json.loads(bead_ids_json)
+            members = json.loads(c["bead_ids"]) if isinstance(c["bead_ids"], str) else c["bead_ids"]
         except Exception:
             members = []
-        print(f"  {cluster_id}  [{label}]  ({len(members)} bead(s))")
+        print(f"  {c['cluster_id']}  [{c['label']}]  ({len(members)} bead(s))")
         for bid in members:
             print(f"    - {bid}")
 
@@ -1061,10 +1098,11 @@ def _handle_clusters(args: argparse.Namespace) -> None:
 def _handle_handoffs(args: argparse.Namespace) -> None:
     """List automated handoff documents synthesized for a task (Wave 3.2).
 
-    Reads ``handoff_beads`` rows directly via sqlite3 — the table is
-    populated by :class:`agent_baton.core.intel.handoff_synthesizer.
-    HandoffSynthesizer` whenever the dispatcher hands off from one step
-    to the next.  No-op when the table doesn't exist (older schema).
+    ADR-13b WP-2: reads ``handoff_beads`` rows from ``baton-derived.db`` via
+    :class:`~agent_baton.core.storage.derived_bead_store.DerivedBeadStore`
+    instead of querying ``baton.db`` directly.  The derived DB is populated
+    by the HandoffSynthesizer whenever the dispatcher hands off from one step
+    to the next.
     """
     task_id: str | None = (
         getattr(args, "task_id", None)
@@ -1080,28 +1118,20 @@ def _handle_handoffs(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     db = _resolve_db_path()
-    if not db.exists():
-        print(f"No baton.db found at {db}.", file=sys.stderr)
-        sys.exit(1)
+    derived_path = db.parent / "baton-derived.db"
+
+    if not derived_path.exists():
+        if getattr(args, "as_json", False):
+            print("[]")
+        else:
+            print(f"No handoff beads found for task {task_id}.")
+        return
+
+    from agent_baton.core.storage.derived_bead_store import DerivedBeadStore
 
     try:
-        import sqlite3
-        conn = sqlite3.connect(str(db))
-        has_table = conn.execute(
-            "SELECT 1 FROM sqlite_master "
-            "WHERE type='table' AND name='handoff_beads'"
-        ).fetchone()
-        if not has_table:
-            print("handoff_beads table not present (older schema).")
-            conn.close()
-            return
-        rows = conn.execute(
-            "SELECT handoff_id, from_step_id, to_step_id, created_at, content "
-            "FROM handoff_beads WHERE task_id = ? "
-            "ORDER BY created_at ASC, handoff_id ASC",
-            (task_id,),
-        ).fetchall()
-        conn.close()
+        derived = DerivedBeadStore(derived_path)
+        handoff_dicts = derived.handoffs(task_id)
     except Exception as exc:  # noqa: BLE001
         print(f"Failed to read handoff_beads: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -1109,27 +1139,27 @@ def _handle_handoffs(args: argparse.Namespace) -> None:
     if getattr(args, "as_json", False):
         out = [
             {
-                "handoff_id": h_id,
-                "from_step_id": frm,
-                "to_step_id": to,
-                "created_at": ts,
-                "content": content,
+                "handoff_id": h["handoff_id"],
+                "from_step_id": h["from_step_id"],
+                "to_step_id": h["to_step_id"],
+                "created_at": h["created_at"],
+                "content": h["content"],
             }
-            for (h_id, frm, to, ts, content) in rows
+            for h in handoff_dicts
         ]
         print(json.dumps(out, indent=2))
         return
 
-    if not rows:
+    if not handoff_dicts:
         print(f"No handoff beads found for task {task_id}.")
         return
 
-    print(f"Handoff beads for task {task_id} ({len(rows)}):")
+    print(f"Handoff beads for task {task_id} ({len(handoff_dicts)}):")
     print(f"  {'HANDOFF_ID':<16} {'FROM → TO':<14} {'CREATED_AT':<22} CONTENT")
-    for h_id, frm, to, ts, content in rows:
-        snippet = (content or "").splitlines()[0][:60] if content else ""
-        arrow = f"{frm or '-'} → {to or '-'}"
-        print(f"  {h_id:<16} {arrow:<14} {ts:<22} {snippet}")
+    for h in handoff_dicts:
+        snippet = (h["content"] or "").splitlines()[0][:60] if h["content"] else ""
+        arrow = f"{h['from_step_id'] or '-'} → {h['to_step_id'] or '-'}"
+        print(f"  {h['handoff_id']:<16} {arrow:<14} {h['created_at']:<22} {snippet}")
 
 
 # ---------------------------------------------------------------------------
@@ -1338,13 +1368,13 @@ def _handle_create_exec(args: argparse.Namespace) -> None:
     # Build ExecutableBead.
     from datetime import datetime, timezone
 
-    from agent_baton.core.engine.notes_adapter import NotesAdapter
+    from agent_baton.core.exec.script_hash import compute_script_sha, script_ref_for
     from agent_baton.models.bead import ExecutableBead
 
     task_id: str = args.task_id or os.environ.get("BATON_TASK_ID", "") or ""
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    content_sha = NotesAdapter.compute_script_sha(script_body)
-    script_ref = NotesAdapter.script_ref_for(content_sha)
+    content_sha = compute_script_sha(script_body)
+    script_ref = script_ref_for(content_sha)
 
     description = args.content or f"Executable {args.interpreter} script from {script_path.name}"
     bead = ExecutableBead(

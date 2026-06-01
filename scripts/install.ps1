@@ -4,7 +4,13 @@
 param(
     [ValidateSet("user", "project", "")]
     [string]$Scope = "",
-    [switch]$Upgrade
+    [switch]$Upgrade,
+    # ADR-13b WP-G: -NoGastown / -Gastown kept as no-ops for backward compat.
+    # Gastown git-notes persistence has been removed.
+    [switch]$NoGastown,
+    # Beads (bd) CLI bead/issue backend (ADR-13b): auto-installed by default.
+    # Pass -NoBeads to skip.
+    [switch]$NoBeads
 )
 
 Write-Host ""
@@ -409,6 +415,31 @@ if (-not (Test-Path $BatonDir)) {
     }
     if (Test-Path $centralDb) {
         Write-Host "  ~ central.db exists — will be upgraded on next baton command" -ForegroundColor Yellow
+    }
+}
+
+# ── Step 5: Beads (bd) CLI — mandatory bead backend (ADR-13b WP-G) ─
+# bd is now the ONLY bead backend — SQLite fallback removed in WP-G.
+# Auto-install it so beads memory deploys as part of the flow.
+# Skippable with -NoBeads or BATON_SKIP_BEADS_INSTALL=1.
+if (-not $NoBeads -and $env:BATON_SKIP_BEADS_INSTALL -ne "1") {
+    Write-Host ""
+    Write-Host "  STEP 5: Beads (bd) CLI — mandatory bead backend" -ForegroundColor Cyan
+    Write-Host "  ────────────────────────────────────────────────"
+    if (Get-Command bd -ErrorAction SilentlyContinue) {
+        Write-Host "  ~ bd already installed: $((bd version 2>$null) | Select-Object -First 1)" -ForegroundColor Yellow
+    } elseif (Get-Command npm -ErrorAction SilentlyContinue) {
+        Write-Host "  Installing beads (bd) via npm (@beads/bd)..." -ForegroundColor White
+        npm install -g @beads/bd 2>$null | Out-Null
+        if (Get-Command bd -ErrorAction SilentlyContinue) {
+            Write-Host "  + bd installed: $((bd version 2>$null) | Select-Object -First 1)" -ForegroundColor Green
+        } else {
+            Write-Host "  ! Could not auto-install bd. Install manually: npm install -g @beads/bd" -ForegroundColor Yellow
+            Write-Host "    bd is now REQUIRED — baton will raise BdNotAvailable without it." -ForegroundColor White
+        }
+    } else {
+        Write-Host "  ! npm not found — install bd manually: npm install -g @beads/bd" -ForegroundColor Yellow
+        Write-Host "    bd is now REQUIRED — baton will raise BdNotAvailable without it." -ForegroundColor White
     }
 }
 

@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING
 from agent_baton.utils.time import utcnow_zulu as _utcnow_str
 
 if TYPE_CHECKING:
-    from agent_baton.core.engine.bead_store import BeadStore
+    from agent_baton.core.engine.bd_bead_store import BdBeadStore as BeadStore  # WP-G: alias for migration
     from agent_baton.core.govern.budget import BudgetEnforcer
     from agent_baton.core.immune.daemon import ImmuneConfig
     from agent_baton.core.immune.sweeper import SweepFinding
