@@ -3,8 +3,10 @@
 Verifies that:
 
 1. Fresh project installs (PROJECT_SCHEMA_DDL) do NOT create bead tables.
-2. Fresh central installs (CENTRAL_SCHEMA_DDL) do NOT create bead tables
-   or the v_cross_project_discoveries view.
+2. Fresh central installs (CENTRAL_SCHEMA_DDL) drop the per-project bead
+   tables but KEEP the read-only ``beads`` projection + the
+   ``v_cross_project_discoveries`` view (export-fed; ADR-13b §5 / WP-G
+   follow-up) so NOC + cross-project analytics keep working.
 3. Upgrading an old database from v41 to v42 DROPs the bead tables (and
    is idempotent if they were already absent).
 4. SCHEMA_VERSION == 42 and MIGRATIONS[42] exists with DROP TABLE statements.
@@ -72,8 +74,16 @@ def test_fresh_project_install_has_no_bead_tables(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_fresh_central_install_has_no_bead_tables(tmp_path: Path) -> None:
-    """A new central.db must not contain any SQLite bead tables."""
+# central.db is special: it KEEPS a read-only `beads` PROJECTION (ADR-13b §5,
+# WP-G follow-up) — refreshed by export_beads_to_central — so NOC counts and
+# the cross-project discoveries view keep working.  The synthesizer/anchor/tag
+# tables (per-project analytics) are still dropped there.
+CENTRAL_DROPPED_TABLES = DROPPED_TABLES - {"beads"}
+
+
+def test_fresh_central_install_has_no_synthesizer_bead_tables(tmp_path: Path) -> None:
+    """A new central.db drops the per-project bead tables but KEEPS the
+    `beads` projection that feeds NOC + cross-project analytics."""
     from agent_baton.core.storage.connection import ConnectionManager
     from agent_baton.core.storage.schema import CENTRAL_SCHEMA_DDL, SCHEMA_VERSION
 
@@ -81,12 +91,14 @@ def test_fresh_central_install_has_no_bead_tables(tmp_path: Path) -> None:
     cm.configure_schema(CENTRAL_SCHEMA_DDL, SCHEMA_VERSION)
     conn = cm.get_connection()
     tables = _table_set(conn)
-    stray = DROPPED_TABLES & tables
-    assert not stray, f"Fresh central DB still has bead tables: {stray}"
+    stray = CENTRAL_DROPPED_TABLES & tables
+    assert not stray, f"Fresh central DB still has dropped bead tables: {stray}"
+    # The export-fed projection MUST remain.
+    assert "beads" in tables, "central.db is missing the bead projection table"
 
 
-def test_fresh_central_install_has_no_bead_views(tmp_path: Path) -> None:
-    """A new central.db must not contain the v_cross_project_discoveries view."""
+def test_fresh_central_install_keeps_discoveries_view(tmp_path: Path) -> None:
+    """A new central.db retains v_cross_project_discoveries (over the projection)."""
     from agent_baton.core.storage.connection import ConnectionManager
     from agent_baton.core.storage.schema import CENTRAL_SCHEMA_DDL, SCHEMA_VERSION
 
@@ -94,8 +106,9 @@ def test_fresh_central_install_has_no_bead_views(tmp_path: Path) -> None:
     cm.configure_schema(CENTRAL_SCHEMA_DDL, SCHEMA_VERSION)
     conn = cm.get_connection()
     views = _view_set(conn)
-    stray = DROPPED_VIEWS & views
-    assert not stray, f"Fresh central DB still has bead views: {stray}"
+    assert "v_cross_project_discoveries" in views, (
+        "central.db is missing the v_cross_project_discoveries projection view"
+    )
 
 
 # ---------------------------------------------------------------------------
