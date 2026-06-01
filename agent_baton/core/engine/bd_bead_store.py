@@ -1,0 +1,202 @@
+"""``bd``-backed bead store (ADR-13b — full replacement of the SQLite store).
+
+:class:`BdBeadStore` implements the same public surface as the legacy
+:class:`~agent_baton.core.engine.bead_store.BeadStore` (``write`` / ``read`` /
+``query`` / ``ready`` / ``close`` / ``annotate`` / ``link``) but persists to
+the real ``bd`` tool via :class:`~agent_baton.core.engine.bd_client.BdClient`.
+
+This is the seam that lets the rest of the engine "run off beads" with minimal
+call-site churn: anything holding a bead store keeps calling the same methods.
+
+Phase status
+------------
+The seven core CRUD/relationship methods are implemented against ``bd``.  The
+analytics helpers that the legacy store grew (``decay``, ``update_quality_score``,
+``increment_retrieval_count``, conflict resolution) are intentionally light in
+this phase — quality/retrieval counters live in the baton metadata blob and are
+updated in place; bead decay maps onto ``bd``'s own compaction and is a no-op
+here.  See ADR-13b for the staged migration of the remaining consumers.
+"""
+from __future__ import annotations
+
+import logging
+
+from agent_baton.core.engine.bd_client import BdClient, BdError
+from agent_baton.core.engine.bd_mapping import (
+    bd_issue_to_bead,
+    bd_status_for,
+    bead_labels,
+    bead_to_create_kwargs,
+)
+from agent_baton.models.bead import Bead
+
+_log = logging.getLogger(__name__)
+
+# baton link_type -> bd dependency type.  bd's core dependency relation is
+# "blocks"; the richer baton vocabulary is preserved in the bead's metadata
+# blob, with a best-effort bd dependency created for graph-meaningful kinds.
+_LINK_TO_BD_DEP = {
+    "blocks": "blocks",
+    "blocked_by": "blocks",
+    "discovered_from": "discovered-from",
+    "relates_to": "related",
+    "validates": "related",
+    "contradicts": "related",
+    "extends": "related",
+}
+
+
+class BdBeadStore:
+    """A bead store backed by the external ``bd`` CLI.
+
+    Args:
+        client: A configured :class:`BdClient`.  The store calls ``init()``
+            lazily on first write so a fresh project bootstraps automatically.
+    """
+
+    def __init__(self, client: BdClient) -> None:
+        self._bd = client
+        self._initialised = False
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    def _ensure_init(self) -> None:
+        if not self._initialised:
+            self._bd.init()
+            self._initialised = True
+
+    # ------------------------------------------------------------------
+    # Writes
+    # ------------------------------------------------------------------
+
+    def write(self, bead: Bead) -> str:
+        """Create or update *bead* in bd; returns the bead_id ("" on failure)."""
+        try:
+            self._ensure_init()
+            existing = self._bd.show(bead.bead_id) if bead.bead_id else None
+            if existing is None:
+                kwargs = bead_to_create_kwargs(bead)
+                created = self._bd.create(**kwargs)
+                bead_id = str(created.get("id") or bead.bead_id)
+                # Set non-open lifecycle state if the bead arrived closed/etc.
+                if bead.status != "open":
+                    self._bd.update(bead_id, status=bd_status_for(bead))
+            else:
+                bead_id = bead.bead_id
+                self._bd.update(
+                    bead_id,
+                    status=bd_status_for(bead),
+                    set_labels=bead_labels(bead),
+                    metadata={"baton": bead.to_dict()},
+                )
+            # Best-effort dependency edges.
+            for link in bead.links or []:
+                dep_type = _LINK_TO_BD_DEP.get(link.link_type, "related")
+                try:
+                    self._bd.dep_add(bead_id, link.target_bead_id, dep_type)
+                except BdError as exc:
+                    _log.debug("BdBeadStore.link skipped (%s): %s", link.link_type, exc)
+            return bead_id
+        except BdError as exc:
+            _log.warning("BdBeadStore.write failed for %s: %s", bead.bead_id, exc)
+            return ""
+
+    def close(self, bead_id: str, summary: str) -> None:
+        """Close a bead and record *summary* as a note."""
+        try:
+            self._ensure_init()
+            if summary:
+                self._bd.note(bead_id, summary)
+            self._bd.close(bead_id, reason=summary or "")
+        except BdError as exc:
+            _log.warning("BdBeadStore.close failed for %s: %s", bead_id, exc)
+
+    def annotate(self, bead_id: str, note: str, agent_name: str | None = None) -> None:
+        """Append *note* (optionally attributed) to a bead."""
+        try:
+            self._ensure_init()
+            text = f"[{agent_name}] {note}" if agent_name else note
+            self._bd.note(bead_id, text)
+        except BdError as exc:
+            _log.warning("BdBeadStore.annotate failed for %s: %s", bead_id, exc)
+
+    def link(self, source_id: str, target_id: str, link_type: str) -> None:
+        """Create a typed link (mapped to a bd dependency)."""
+        try:
+            self._ensure_init()
+            self._bd.dep_add(source_id, target_id, _LINK_TO_BD_DEP.get(link_type, "related"))
+        except BdError as exc:
+            _log.warning("BdBeadStore.link failed %s->%s: %s", source_id, target_id, exc)
+
+    # ------------------------------------------------------------------
+    # Reads
+    # ------------------------------------------------------------------
+
+    def read(self, bead_id: str) -> Bead | None:
+        """Return a bead by id, or ``None``."""
+        try:
+            issue = self._bd.show(bead_id)
+        except BdError as exc:
+            _log.warning("BdBeadStore.read failed for %s: %s", bead_id, exc)
+            return None
+        return bd_issue_to_bead(issue) if issue else None
+
+    def query(
+        self,
+        *,
+        task_id: str | None = None,
+        agent_name: str | None = None,
+        bead_type: str | None = None,
+        status: str | None = None,
+        tags: list[str] | None = None,
+        limit: int = 100,
+    ) -> list[Bead]:
+        """Filtered search (AND semantics), newest first.
+
+        Pushes the cheap facet filters down to ``bd`` via labels, then applies
+        the remaining predicates in Python against the reconstructed beads so
+        baton-specific fields (agent_name, confidence, …) filter correctly.
+        """
+        label_filters: list[str] = []
+        if task_id is not None:
+            label_filters.append(f"task:{task_id}")
+        if bead_type is not None:
+            label_filters.append(f"bead-type:{bead_type}")
+        try:
+            issues = self._bd.list(labels=label_filters or None)
+        except BdError as exc:
+            _log.warning("BdBeadStore.query failed: %s", exc)
+            return []
+
+        beads = [bd_issue_to_bead(i) for i in issues]
+
+        def _keep(b: Bead) -> bool:
+            if task_id is not None and b.task_id != task_id:
+                return False
+            if agent_name is not None and b.agent_name != agent_name:
+                return False
+            if bead_type is not None and b.bead_type != bead_type:
+                return False
+            if status is not None and b.status != status:
+                return False
+            if tags and not set(tags).issubset(set(b.tags or [])):
+                return False
+            return True
+
+        beads = [b for b in beads if _keep(b)]
+        beads.sort(key=lambda b: b.created_at, reverse=True)
+        return beads[:limit]
+
+    def ready(self, task_id: str) -> list[Bead]:
+        """Return ready (unblocked, open) beads, scoped to *task_id*."""
+        try:
+            issues = self._bd.ready()
+        except BdError as exc:
+            _log.warning("BdBeadStore.ready failed: %s", exc)
+            return []
+        beads = [bd_issue_to_bead(i) for i in issues]
+        if task_id:
+            beads = [b for b in beads if b.task_id == task_id or not b.task_id]
+        return beads

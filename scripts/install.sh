@@ -55,11 +55,13 @@ fi
 # is kept as a backward-compatible no-op for callers that still pass it.
 UPGRADE=false
 GASTOWN=true
+NO_BEADS=false
 for arg in "$@"; do
     case "$arg" in
         --upgrade)     UPGRADE=true ;;
         --gastown)     GASTOWN=true ;;
         --no-gastown)  GASTOWN=false ;;
+        --no-beads)    NO_BEADS=true ;;
     esac
 done
 
@@ -382,6 +384,43 @@ if [ "$GASTOWN" = true ]; then
         echo "    Bead memory still works (SQLite); run 'git init' then re-run install.sh"
         echo "    to enable cross-clone git-notes replication, or pass --no-gastown to silence."
     fi
+fi
+
+# ── Step 7: Beads (bd) CLI — bead/issue backend (ADR-13b) ────
+# Going all-in on beads: the runtime can use the real `bd` tool as the bead
+# store (BATON_BD_BACKEND=bd|auto).  Auto-install it here so it "deploys as
+# part of the flow."  Skippable with --no-beads or BATON_SKIP_BEADS_INSTALL=1.
+install_beads() {
+    if command -v bd &>/dev/null; then
+        echo "  ~ bd already installed: $(bd version 2>/dev/null | head -1)"
+        return 0
+    fi
+    if command -v npm &>/dev/null; then
+        echo "  Installing beads (bd) via npm (@beads/bd)..."
+        if npm install -g @beads/bd &>/dev/null && command -v bd &>/dev/null; then
+            echo "  + bd installed: $(bd version 2>/dev/null | head -1)"
+            return 0
+        fi
+    fi
+    if command -v brew &>/dev/null; then
+        echo "  Installing beads (bd) via Homebrew..."
+        if brew install beads &>/dev/null && command -v bd &>/dev/null; then
+            echo "  + bd installed: $(bd version 2>/dev/null | head -1)"
+            return 0
+        fi
+    fi
+    echo "  ! Could not auto-install bd. Install it manually:"
+    echo "      npm install -g @beads/bd      (or)  brew install beads"
+    echo "    Then beads memory activates with BATON_BD_BACKEND=auto."
+    echo "    Without bd, baton falls back to the built-in SQLite bead store."
+    return 0
+}
+
+if [ "${BATON_SKIP_BEADS_INSTALL:-0}" != "1" ] && [ "$NO_BEADS" != true ]; then
+    echo ""
+    echo "  STEP 7: Beads (bd) CLI — bead/issue backend"
+    echo "  ───────────────────────────────────────────"
+    install_beads
 fi
 
 # ── Summary ────────────────────────────────────────────────

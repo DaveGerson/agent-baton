@@ -584,6 +584,73 @@ read interop via `baton source add beads`.
 
 ---
 
+## ADR-13b: Go All-In on Beads — `bd` as the Bead/Issue System of Record
+
+**Status**: **Supersedes ADR-13's "no `bd` binary" constraint.** Adopted
+2026-06-01 by explicit operator decision. Staged migration in progress.
+
+**Decision**: Use the external Beads tool (`bd`, github.com/gastownhall/beads)
+as the **system of record** for bead/issue memory, replacing the native SQLite
+bead store. The installer auto-installs `bd`; the runtime routes bead CRUD,
+dependency edges, and ready-queue computation through `bd`. baton-specific
+fields that have no native `bd` column are preserved **losslessly** in `bd`'s
+free-form `metadata` (under a `baton` key) plus queryable `labels`.
+
+**Why this reverses ADR-13**: ADR-13 rejected a `bd`/Dolt runtime dependency to
+protect the pip-only install story and avoid upstream churn. The operator has
+chosen to accept those costs to get beads' full feature set (distributed graph,
+Dolt history/branching, federation, `bd ready`, agent-native ergonomics) as a
+first-class backend rather than a reimplementation. ADR-13's reasoning remains
+valid for anyone who keeps `BATON_BD_BACKEND=sqlite`; this ADR adds `bd` as the
+forward default.
+
+**Architecture**:
+
+- `core/engine/bd_client.py` — the single subprocess seam to `bd` (all
+  invocations use `--json`; typed `BdError`/`BdNotAvailable`).
+- `core/engine/bd_mapping.py` — lossless `Bead` ⇄ `bd` issue mapping via the
+  `metadata.baton` blob + synthetic labels (`bead-type:`, `scope:`, `source:`,
+  `task:`). Issues authored directly in `bd` (no baton blob) still surface as
+  beads via a best-effort field map.
+- `core/engine/bd_bead_store.py` — `BdBeadStore` implements the legacy
+  `BeadStore` surface (`write`/`read`/`query`/`ready`/`close`/`annotate`/
+  `link`) so consumers need no API change.
+- `core/engine/bead_backend.py` — `make_bead_store()` selects the backend from
+  `BATON_BD_BACKEND` (`sqlite` | `bd` | `auto`).
+
+**ID strategy**: `bd init -p bd` sets the issue prefix to `bd` so generated IDs
+match baton's historical `bd-<hash>` scheme; baton passes its own `bead_id` via
+`bd create --id`.
+
+**Staged migration (accepts temporary breakage, per operator)**:
+
+1. **Phase 1 (this change)** — `bd` client, mapping, `BdBeadStore`, backend
+   selector, installer auto-install, env vars, tests. Default backend stays
+   `sqlite` so the suite stays green; the `bd` path is proven by integration
+   tests against the real binary.
+2. **Phase 2** — migrate direct-SQLite consumers (CLI `beads` direct queries,
+   `BeadSynthesizer`/clusters/handoffs, executable beads, PMO API + React UI,
+   `SyncEngine`) to read through the store interface or `bd export` JSONL.
+3. **Phase 3** — flip the default to `auto`, remove the SQLite bead tables and
+   the Gastown git-notes mirror (ADR-13a) they superseded, and update the full
+   test suite.
+
+**Key trade-offs**:
+
+- **Lossless metadata blob vs. native columns**: storing the full bead dict in
+  `metadata.baton` guarantees round-trip fidelity today without waiting for
+  `bd` schema parity; native fields (title/description/type/status/labels/deps)
+  are also populated so `bd`'s own queries and `.beads/issues.jsonl` interchange
+  stay meaningful.
+- **Subprocess on the bead path**: each bead op is a `bd` invocation. Acceptable
+  because bead writes are not on the latency-critical dispatch loop and `bd`
+  embedded-Dolt calls are fast; batching is a future optimisation.
+- **Install story**: pip-only is no longer sufficient — `bd` (a Go binary) is
+  now a runtime dependency, installed via npm/Homebrew by the installer. This is
+  the explicit cost ADR-13 avoided and ADR-13b accepts.
+
+---
+
 ## ADR-14: Learning Automation System (Hybrid Ledger + Improvement Pipeline)
 
 **Decision**: Build a closed-loop learning system using a new

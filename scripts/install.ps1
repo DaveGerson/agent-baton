@@ -8,7 +8,10 @@ param(
     # Gastown git-notes bead persistence (Phase M1): configured by default to
     # match the runtime default (BATON_GASTOWN_ENABLED=1).  Pass -NoGastown to
     # skip the git config.
-    [switch]$NoGastown
+    [switch]$NoGastown,
+    # Beads (bd) CLI bead/issue backend (ADR-13b): auto-installed by default.
+    # Pass -NoBeads to skip.
+    [switch]$NoBeads
 )
 
 Write-Host ""
@@ -460,6 +463,30 @@ if (-not $NoGastown) {
         Write-Host "  ! Not inside a git repository — Gastown git config skipped" -ForegroundColor Yellow
         Write-Host "    Bead memory still works (SQLite); run 'git init' then re-run to enable" -ForegroundColor White
         Write-Host "    cross-clone git-notes replication, or pass -NoGastown to silence." -ForegroundColor White
+    }
+}
+
+# ── Step 6: Beads (bd) CLI — bead/issue backend (ADR-13b) ────
+# Auto-install the real `bd` tool so beads memory "deploys as part of the
+# flow." Skippable with -NoBeads or BATON_SKIP_BEADS_INSTALL=1.
+if (-not $NoBeads -and $env:BATON_SKIP_BEADS_INSTALL -ne "1") {
+    Write-Host ""
+    Write-Host "  STEP 6: Beads (bd) CLI — bead/issue backend" -ForegroundColor Cyan
+    Write-Host "  ───────────────────────────────────────────"
+    if (Get-Command bd -ErrorAction SilentlyContinue) {
+        Write-Host "  ~ bd already installed: $((bd version 2>$null) | Select-Object -First 1)" -ForegroundColor Yellow
+    } elseif (Get-Command npm -ErrorAction SilentlyContinue) {
+        Write-Host "  Installing beads (bd) via npm (@beads/bd)..." -ForegroundColor White
+        npm install -g @beads/bd 2>$null | Out-Null
+        if (Get-Command bd -ErrorAction SilentlyContinue) {
+            Write-Host "  + bd installed: $((bd version 2>$null) | Select-Object -First 1)" -ForegroundColor Green
+        } else {
+            Write-Host "  ! Could not auto-install bd. Install manually: npm install -g @beads/bd" -ForegroundColor Yellow
+            Write-Host "    Without bd, baton falls back to the built-in SQLite bead store." -ForegroundColor White
+        }
+    } else {
+        Write-Host "  ! npm not found — install bd manually: npm install -g @beads/bd" -ForegroundColor Yellow
+        Write-Host "    Then beads memory activates with BATON_BD_BACKEND=auto." -ForegroundColor White
     }
 }
 
