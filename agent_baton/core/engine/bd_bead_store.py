@@ -164,8 +164,12 @@ class BdBeadStore:
             label_filters.append(f"task:{task_id}")
         if bead_type is not None:
             label_filters.append(f"bead-type:{bead_type}")
+        # Push the common ``open`` filter down to bd to avoid fetching every
+        # issue on hot paths (synthesize/export). archived/quarantine have no
+        # native bd status, so those stay Python-side below.
+        bd_status = "open" if status == "open" else ""
         try:
-            issues = self._bd.list(labels=label_filters or None)
+            issues = self._bd.list(status=bd_status, labels=label_filters or None)
         except BdError as exc:
             _log.warning("BdBeadStore.query failed: %s", exc)
             return []
@@ -188,6 +192,36 @@ class BdBeadStore:
         beads = [b for b in beads if _keep(b)]
         beads.sort(key=lambda b: b.created_at, reverse=True)
         return beads[:limit]
+
+    def update_quality_score(self, bead_id: str, delta: float) -> None:
+        """Adjust a bead's quality score (BEAD_FEEDBACK), persisted in metadata.
+
+        Read-modify-write the baton metadata blob so feedback survives on the
+        bd backend rather than silently no-opping.  Parity with
+        ``BeadStore.update_quality_score``.
+        """
+        try:
+            bead = self.read(bead_id)
+            if bead is None:
+                return
+            bead.quality_score = float(bead.quality_score) + float(delta)
+            self._bd.update(bead_id, metadata={"baton": bead.to_dict()})
+        except BdError as exc:
+            _log.warning("BdBeadStore.update_quality_score failed for %s: %s", bead_id, exc)
+
+    def increment_retrieval_count(self, bead_id: str) -> None:
+        """Increment a bead's retrieval counter, persisted in metadata.
+
+        Parity with ``BeadStore.increment_retrieval_count``.
+        """
+        try:
+            bead = self.read(bead_id)
+            if bead is None:
+                return
+            bead.retrieval_count = int(bead.retrieval_count) + 1
+            self._bd.update(bead_id, metadata={"baton": bead.to_dict()})
+        except BdError as exc:
+            _log.warning("BdBeadStore.increment_retrieval_count failed for %s: %s", bead_id, exc)
 
     def ready(self, task_id: str) -> list[Bead]:
         """Return ready (unblocked, open) beads, scoped to *task_id*."""

@@ -1034,12 +1034,18 @@ class ExecutionEngine:
                 from agent_baton.core.intel.bead_synthesizer import synthesize_beads
 
                 result = synthesize_beads(self._bead_store, self._derived_store)
-            else:
-                # Legacy path: raw SQLite connection.
+            elif hasattr(self._bead_store, "_conn"):
+                # Legacy SQLite-only fallback when no derived store was built.
+                # The bd backend has no ``_conn()``; guard so we skip cleanly
+                # instead of raising into the broad except below (ADR-13b
+                # review blocker #3).
                 from agent_baton.core.intel.bead_synthesizer import BeadSynthesizer
 
                 conn = self._bead_store._conn()
                 result = BeadSynthesizer().synthesize(conn)
+            else:
+                # bd backend without a derived store — nothing to synthesize.
+                return
             if result.edges_added or result.clusters_created or result.conflicts_flagged:
                 _log.debug(
                     "BeadSynthesizer post-phase: %d edges, %d clusters, %d conflicts",

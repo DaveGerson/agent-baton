@@ -379,6 +379,10 @@ class TestPMOBeadResponseFieldParity:
     def populated_client(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         from fastapi.testclient import TestClient
 
+        # This fixture seeds beads through the SQLite BeadStore, so the API
+        # must read from the same backend. Pin sqlite (the default is now
+        # `auto`, which resolves to bd on hosts where bd is installed).
+        monkeypatch.setenv("BATON_BD_BACKEND", "sqlite")
         monkeypatch.chdir(tmp_path)
         db_dir = tmp_path / ".claude" / "team-context"
         db_dir.mkdir(parents=True)
@@ -514,6 +518,10 @@ class TestPMOBeadResponseFieldParityBd:
 
         db_path = tmp_path / ".claude" / "team-context" / "baton.db"
         db_path.parent.mkdir(parents=True, exist_ok=True)
+        # A real bd-backed project still has a baton.db (execution state lives
+        # there; only beads moved to bd). The PMO endpoint guards on
+        # db_path.exists(), so materialise it — the bd store never reads it.
+        db_path.touch()
         store = make_bead_store(db_path, repo_root=tmp_path)
         return store
 

@@ -280,7 +280,7 @@ def _collect_open_beads(conn: sqlite3.Connection) -> list[MetricSample]:
     try:
         from agent_baton.core.engine.bead_backend import make_bead_store
 
-        store = make_bead_store(db_path)
+        store = make_bead_store(db_path, repo_root=db_path.parent.parent.parent)
         open_beads = store.query(status="open", limit=10000)
     except Exception:
         return []

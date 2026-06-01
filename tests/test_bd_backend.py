@@ -399,6 +399,19 @@ class TestBdIntegration:
         all_task = store.query(task_id="T-42")
         assert {b.bead_id for b in all_task} == {"bd-aaaa", "bd-bbbb"}
 
+    def test_quality_score_and_retrieval_count_persist(self, tmp_path, monkeypatch):
+        """ADR-13b review blocker #2: BEAD_FEEDBACK analytics must persist on bd."""
+        store = self._store(tmp_path, monkeypatch)
+        store.write(_sample_bead(bead_id="bd-qual"))
+        store.update_quality_score("bd-qual", 0.5)
+        store.update_quality_score("bd-qual", 0.25)
+        store.increment_retrieval_count("bd-qual")
+        store.increment_retrieval_count("bd-qual")
+        got = store.read("bd-qual")
+        assert got is not None
+        assert abs(got.quality_score - 0.75) < 1e-9
+        assert got.retrieval_count == 2
+
     def test_close_marks_closed(self, tmp_path, monkeypatch):
         store = self._store(tmp_path, monkeypatch)
         store.write(_sample_bead(bead_id="bd-cccc"))

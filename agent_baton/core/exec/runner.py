@@ -230,6 +230,19 @@ class ExecutableBeadRunner:
         """
         # Fast path: body was stored inline (bd backend or new SQLite beads).
         if bead.script_body:
+            # Integrity guard: the body now travels in the bead metadata blob
+            # (and thus in .beads/issues.jsonl). Verify it against the SHA
+            # recorded at store() time so a tampered body cannot execute
+            # silently. Beads created before script_sha existed skip the check.
+            if bead.script_sha:
+                from agent_baton.core.exec.script_hash import compute_script_sha
+                actual = compute_script_sha(bead.script_body)
+                if actual != bead.script_sha:
+                    raise ValueError(
+                        f"ExecutableBead {bead.bead_id} script_body failed integrity "
+                        f"check (sha {actual[:8]} != recorded {bead.script_sha[:8]}) — "
+                        "the script may have been tampered with; refusing to run."
+                    )
             return bead.script_body
 
         # Legacy path: body lives in git notes (old SQLite + gastown beads).

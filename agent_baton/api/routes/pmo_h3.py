@@ -323,7 +323,7 @@ async def list_arch_beads(
     try:
         from agent_baton.core.engine.bead_backend import make_bead_store
 
-        store = make_bead_store(db_path)
+        store = make_bead_store(db_path, repo_root=db_path.parent.parent.parent)
         # Query without a bead_type filter and filter in Python so we can
         # match two types in one pass, compatible with both backends.
         status_filter: str | None = status if status not in ("", "all") else None
@@ -379,7 +379,7 @@ async def review_arch_bead(
             from agent_baton.core.engine.bead_backend import make_bead_store
             from agent_baton.models.bead import Bead, BeadLink
 
-            store = make_bead_store(db_path)
+            store = make_bead_store(db_path, repo_root=db_path.parent.parent.parent)
             now = datetime.now(timezone.utc).isoformat()
             review_bead = Bead(
                 bead_id=follow_up_id,
@@ -548,7 +548,7 @@ async def list_beads(
     try:
         from agent_baton.core.engine.bead_backend import make_bead_store
 
-        store = make_bead_store(db_path)
+        store = make_bead_store(db_path, repo_root=db_path.parent.parent.parent)
         beads = store.query(
             task_id=task_id,
             bead_type=bead_type,

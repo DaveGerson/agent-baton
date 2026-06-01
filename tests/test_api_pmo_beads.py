@@ -28,6 +28,14 @@ from agent_baton.api.server import create_app  # noqa: E402
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _pin_sqlite_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ADR-13b: these tests seed beads through the SQLite BeadStore and assert
+    against the endpoint, so the API must read the same backend. The default is
+    now ``auto`` (resolves to bd where installed); pin sqlite here."""
+    monkeypatch.setenv("BATON_BD_BACKEND", "sqlite")
+
+
 @pytest.fixture()
 def empty_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     """Spin up the API with a tmp cwd so the bead store finds no DB."""
