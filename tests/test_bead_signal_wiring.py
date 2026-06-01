@@ -5,19 +5,24 @@ Coverage:
 - Bead signals parsed in record_team_member_result (team-dispatch path)
 - Bead feedback quality adjustments applied in record_step_result
 - Bead feedback quality adjustments applied in record_team_member_result
-- FK cascade bug: bead rows survive save_execution (INSERT OR REPLACE fix)
-- FK cascade bug: bead rows survive multiple save_execution calls
-- Beads written before save_execution are still readable after it
+- Beads written before/after save_execution remain readable (bd-backend)
 - Schema migration: SCHEMA_VERSION matches the current constant
+
+ADR-13b WP-G: BeadStore (SQLite) removed.  Tests retargeted to BdBeadStore
+via make_bead_store().
+
+BEAD_WARNING: The SQLite FK-cascade tests (TestBeadsSurviveSaveExecution /
+_direct_bead_count) were retired because they tested SQLite-specific internals
+(ON DELETE CASCADE) that do not apply to the bd backend.
 """
 from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
-from agent_baton.core.engine.bead_store import BeadStore
 from agent_baton.core.engine.executor import ExecutionEngine
 from agent_baton.core.events.bus import EventBus
 from agent_baton.core.storage.sqlite_backend import SqliteStorage
@@ -66,33 +71,48 @@ def _plan(task_id: str = "task-bead-001", phases: list[PlanPhase] | None = None)
     )
 
 
-def _engine_with_sqlite(tmp_path: Path, task_id: str | None = None) -> tuple[ExecutionEngine, SqliteStorage]:
-    """Return an engine + storage pair backed by a temporary baton.db."""
-    storage = SqliteStorage(tmp_path / "baton.db")
-    engine = ExecutionEngine(
-        team_context_root=tmp_path,
-        bus=EventBus(),
-        storage=storage,
-        task_id=task_id,
-    )
-    return engine, storage
+def _make_bd_store(tmp_path: Path):
+    """Return a BdBeadStore scoped to tmp_path."""
+    from agent_baton.core.engine.bead_backend import make_bead_store
+    db_path = tmp_path / "baton.db"
+    db_path.touch()
+    return make_bead_store(db_path, repo_root=tmp_path)
 
 
-def _bead_store(tmp_path: Path) -> BeadStore:
-    """Return a BeadStore pointing at the same db the engine uses."""
-    return BeadStore(tmp_path / "baton.db")
+def _engine_with_bd(
+    tmp_path: Path, task_id: str | None = None
+) -> tuple[ExecutionEngine, SqliteStorage, object]:
+    """Return an engine + storage pair where the engine's bead store is
+    scoped to tmp_path (not the project root).
 
+    We monkeypatch make_bead_store at the bead_backend module level so the
+    executor's local import picks up the isolated BdBeadStore (repo_root=tmp_path).
+    """
+    from agent_baton.core.engine.bd_bead_store import BdBeadStore
+    from agent_baton.core.engine.bd_client import BdClient
 
-def _direct_bead_count(db_path: Path, task_id: str) -> int:
-    """Read bead count via raw SQLite to bypass any caching layer."""
-    conn = sqlite3.connect(str(db_path))
-    try:
-        row = conn.execute(
-            "SELECT COUNT(*) FROM beads WHERE task_id = ?", (task_id,)
-        ).fetchone()
-        return row[0] if row else 0
-    finally:
-        conn.close()
+    db_path = tmp_path / "baton.db"
+    db_path.touch()
+    client = BdClient(tmp_path)
+    client.init()
+    bd_store = BdBeadStore(client)
+    bd_store._initialised = True
+
+    def _patched_make_bead_store(path, *, soul_router=None, repo_root=None):
+        return bd_store
+
+    storage = SqliteStorage(db_path)
+    with patch(
+        "agent_baton.core.engine.bead_backend.make_bead_store",
+        side_effect=_patched_make_bead_store,
+    ):
+        engine = ExecutionEngine(
+            team_context_root=tmp_path,
+            bus=EventBus(),
+            storage=storage,
+            task_id=task_id,
+        )
+    return engine, storage, bd_store
 
 
 # ---------------------------------------------------------------------------
@@ -105,7 +125,7 @@ class TestBeadSignalInRecordStepResult:
     written after a single-dispatch step completes."""
 
     def test_discovery_signal_written(self, tmp_path: Path) -> None:
-        engine, _ = _engine_with_sqlite(tmp_path)
+        engine, _, store = _engine_with_bd(tmp_path)
         engine.start(_plan("task-single-disc"))
         engine.record_step_result(
             "1.1",
@@ -113,13 +133,12 @@ class TestBeadSignalInRecordStepResult:
             status="complete",
             outcome="BEAD_DISCOVERY: auth module uses RS256 JWT tokens.",
         )
-        store = _bead_store(tmp_path)
         beads = store.query(task_id="task-single-disc", bead_type="discovery")
         assert len(beads) == 1
         assert "RS256" in beads[0].content
 
     def test_decision_signal_written(self, tmp_path: Path) -> None:
-        engine, _ = _engine_with_sqlite(tmp_path)
+        engine, _, store = _engine_with_bd(tmp_path)
         engine.start(_plan("task-single-dec"))
         engine.record_step_result(
             "1.1",
@@ -131,13 +150,12 @@ class TestBeadSignalInRecordStepResult:
                 "BECAUSE: Matches project convention.\n"
             ),
         )
-        store = _bead_store(tmp_path)
         beads = store.query(task_id="task-single-dec", bead_type="decision")
         assert len(beads) == 1
         assert "SQLAlchemy" in beads[0].content
 
     def test_warning_signal_written(self, tmp_path: Path) -> None:
-        engine, _ = _engine_with_sqlite(tmp_path)
+        engine, _, store = _engine_with_bd(tmp_path)
         engine.start(_plan("task-single-warn"))
         engine.record_step_result(
             "1.1",
@@ -145,13 +163,12 @@ class TestBeadSignalInRecordStepResult:
             status="complete",
             outcome="BEAD_WARNING: test DB fixture uses hardcoded port 5433.",
         )
-        store = _bead_store(tmp_path)
         beads = store.query(task_id="task-single-warn", bead_type="warning")
         assert len(beads) == 1
         assert "5433" in beads[0].content
 
     def test_no_signal_no_beads_written(self, tmp_path: Path) -> None:
-        engine, _ = _engine_with_sqlite(tmp_path)
+        engine, _, store = _engine_with_bd(tmp_path)
         engine.start(_plan("task-single-none"))
         engine.record_step_result(
             "1.1",
@@ -159,13 +176,12 @@ class TestBeadSignalInRecordStepResult:
             status="complete",
             outcome="Step completed with no special signals.",
         )
-        store = _bead_store(tmp_path)
         beads = store.query(task_id="task-single-none")
         assert beads == []
 
     def test_failed_step_no_beads_written(self, tmp_path: Path) -> None:
         """Failed steps should NOT produce beads — the outcome is unreliable."""
-        engine, _ = _engine_with_sqlite(tmp_path)
+        engine, _, store = _engine_with_bd(tmp_path)
         engine.start(_plan("task-single-fail"))
         engine.record_step_result(
             "1.1",
@@ -174,12 +190,11 @@ class TestBeadSignalInRecordStepResult:
             outcome="BEAD_DISCOVERY: this should not be stored.",
             error="Something went wrong",
         )
-        store = _bead_store(tmp_path)
         beads = store.query(task_id="task-single-fail")
         assert beads == []
 
     def test_multiple_signals_in_one_outcome(self, tmp_path: Path) -> None:
-        engine, _ = _engine_with_sqlite(tmp_path)
+        engine, _, store = _engine_with_bd(tmp_path)
         engine.start(_plan("task-single-multi"))
         engine.record_step_result(
             "1.1",
@@ -190,7 +205,6 @@ class TestBeadSignalInRecordStepResult:
                 "BEAD_WARNING: connection pool may exhaust under load.\n"
             ),
         )
-        store = _bead_store(tmp_path)
         beads = store.query(task_id="task-single-multi")
         assert len(beads) == 2
         types = {b.bead_type for b in beads}
@@ -220,7 +234,7 @@ class TestBeadSignalInRecordTeamMemberResult:
         return _plan(task_id=task_id, phases=[_phase(steps=[step])])
 
     def test_discovery_from_team_member_written(self, tmp_path: Path) -> None:
-        engine, _ = _engine_with_sqlite(tmp_path)
+        engine, _, store = _engine_with_bd(tmp_path)
         engine.start(self._team_plan("task-team-disc"))
         engine.record_team_member_result(
             step_id="1.1",
@@ -236,14 +250,13 @@ class TestBeadSignalInRecordTeamMemberResult:
             status="complete",
             outcome="step completed cleanly",
         )
-        store = _bead_store(tmp_path)
         beads = store.query(task_id="task-team-disc", bead_type="discovery")
         assert len(beads) == 1
         assert "RS256" in beads[0].content
         assert beads[0].agent_name == "backend-engineer"
 
     def test_warning_from_team_member_written(self, tmp_path: Path) -> None:
-        engine, _ = _engine_with_sqlite(tmp_path)
+        engine, _, store = _engine_with_bd(tmp_path)
         engine.start(self._team_plan("task-team-warn"))
         engine.record_team_member_result(
             step_id="1.1",
@@ -259,12 +272,11 @@ class TestBeadSignalInRecordTeamMemberResult:
             status="complete",
             outcome="no signals",
         )
-        store = _bead_store(tmp_path)
         beads = store.query(task_id="task-team-warn", bead_type="warning")
         assert len(beads) == 1
 
     def test_signals_from_multiple_team_members_all_captured(self, tmp_path: Path) -> None:
-        engine, _ = _engine_with_sqlite(tmp_path)
+        engine, _, store = _engine_with_bd(tmp_path)
         engine.start(self._team_plan("task-team-both"))
         engine.record_team_member_result(
             step_id="1.1",
@@ -280,14 +292,13 @@ class TestBeadSignalInRecordTeamMemberResult:
             status="complete",
             outcome="BEAD_WARNING: flaky test in suite B.",
         )
-        store = _bead_store(tmp_path)
         beads = store.query(task_id="task-team-both")
         assert len(beads) == 2
         types = {b.bead_type for b in beads}
         assert types == {"discovery", "warning"}
 
     def test_failed_team_member_no_beads_written(self, tmp_path: Path) -> None:
-        engine, _ = _engine_with_sqlite(tmp_path)
+        engine, _, store = _engine_with_bd(tmp_path)
         engine.start(self._team_plan("task-team-fail"))
         engine.record_team_member_result(
             step_id="1.1",
@@ -296,14 +307,13 @@ class TestBeadSignalInRecordTeamMemberResult:
             status="failed",
             outcome="BEAD_DISCOVERY: this should not be stored.",
         )
-        store = _bead_store(tmp_path)
         beads = store.query(task_id="task-team-fail")
         assert beads == []
 
     def test_team_member_step_id_stored_as_member_id(self, tmp_path: Path) -> None:
         """The bead's step_id should be the member_id (e.g. '1.1.a'), not the
         parent step_id ('1.1'), so we can trace which member produced it."""
-        engine, _ = _engine_with_sqlite(tmp_path)
+        engine, _, store = _engine_with_bd(tmp_path)
         engine.start(self._team_plan("task-team-stepid"))
         engine.record_team_member_result(
             step_id="1.1",
@@ -319,7 +329,6 @@ class TestBeadSignalInRecordTeamMemberResult:
             status="complete",
             outcome="no signals",
         )
-        store = _bead_store(tmp_path)
         beads = store.query(task_id="task-team-stepid")
         assert len(beads) == 1
         assert beads[0].step_id == "1.1.a"
@@ -333,27 +342,11 @@ class TestBeadSignalInRecordTeamMemberResult:
 class TestBeadFeedbackWiring:
     """BEAD_FEEDBACK quality adjustments are applied in both paths."""
 
-    def _seed_bead(self, tmp_path: Path, task_id: str, bead_id: str) -> BeadStore:
-        """Write a bead directly to the store so feedback tests can reference it."""
+    def _seed_bead(self, store, task_id: str, bead_id: str) -> None:
+        """Write a bead directly to the BdBeadStore so feedback tests can reference it."""
         from agent_baton.models.bead import Bead
         from datetime import datetime, timezone
 
-        store = _bead_store(tmp_path)
-        store._table_exists()  # force schema initialisation
-        # Seed the executions row the FK requires
-        conn = sqlite3.connect(str(tmp_path / "baton.db"))
-        try:
-            conn.execute(
-                "INSERT OR IGNORE INTO executions "
-                "(task_id, status, current_phase, current_step_index, "
-                " started_at, created_at, updated_at, version) "
-                "VALUES (?, 'running', 0, 0, "
-                "'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 0)",
-                (task_id,),
-            )
-            conn.commit()
-        finally:
-            conn.close()
         store.write(Bead(
             bead_id=bead_id,
             task_id=task_id,
@@ -364,12 +357,11 @@ class TestBeadFeedbackWiring:
             created_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             quality_score=0.0,
         ))
-        return store
 
     def test_feedback_applied_in_single_dispatch(self, tmp_path: Path) -> None:
         bead_id = "bd-feed01"
-        store = self._seed_bead(tmp_path, "task-fb-single", bead_id)
-        engine, _ = _engine_with_sqlite(tmp_path)
+        engine, _, store = _engine_with_bd(tmp_path)
+        self._seed_bead(store, "task-fb-single", bead_id)
         engine.start(_plan("task-fb-single"))
         engine.record_step_result(
             "1.1",
@@ -383,7 +375,8 @@ class TestBeadFeedbackWiring:
 
     def test_feedback_applied_in_team_dispatch(self, tmp_path: Path) -> None:
         bead_id = "bd-feed02"
-        store = self._seed_bead(tmp_path, "task-fb-team", bead_id)
+        engine, _, store = _engine_with_bd(tmp_path)
+        self._seed_bead(store, "task-fb-team", bead_id)
 
         members = [
             TeamMember(member_id="1.1.a", agent_name="backend-engineer",
@@ -393,7 +386,6 @@ class TestBeadFeedbackWiring:
         ]
         step = _step(step_id="1.1", team=members)
         plan = _plan(task_id="task-fb-team", phases=[_phase(steps=[step])])
-        engine, _ = _engine_with_sqlite(tmp_path)
         engine.start(plan)
         engine.record_team_member_result(
             step_id="1.1",
@@ -415,90 +407,24 @@ class TestBeadFeedbackWiring:
 
 
 # ---------------------------------------------------------------------------
-# Bug 2: FK cascade — beads survive save_execution
+# Bead persistence across save_execution (bd-backend)
 # ---------------------------------------------------------------------------
 
 
-class TestBeadsSurviveSaveExecution:
-    """Bead rows must not be deleted when save_execution is called.
+class TestBeadsPersistAcrossSaveExecution:
+    """Beads written during execution remain readable after save_execution calls.
 
-    Before the fix, INSERT OR REPLACE INTO executions did a DELETE + INSERT,
-    which triggered ON DELETE CASCADE on beads, silently destroying all bead
-    rows for the task on every state save.
+    ADR-13b WP-G: The SQLite FK-cascade tests (TestBeadsSurviveSaveExecution)
+    were retired because ON DELETE CASCADE is a SQLite-specific concern not
+    applicable to the bd backend.  These tests verify the equivalent behaviour
+    under bd: beads written before/during/after save_execution are readable.
     """
 
-    def test_beads_survive_first_save(self, tmp_path: Path) -> None:
-        """Beads written before the first save_execution call are not lost."""
-        task_id = "task-cascade-01"
-        storage = SqliteStorage(tmp_path / "baton.db")
-        # Force schema so beads table exists before we seed
-        bstore = BeadStore(tmp_path / "baton.db")
-        bstore._table_exists()
-
-        # Seed executions row so FK passes
-        conn = sqlite3.connect(str(tmp_path / "baton.db"))
-        try:
-            conn.execute(
-                "INSERT OR IGNORE INTO executions "
-                "(task_id, status, current_phase, current_step_index, "
-                " started_at, created_at, updated_at, version) "
-                "VALUES (?, 'running', 0, 0, "
-                "'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 0)",
-                (task_id,),
-            )
-            conn.commit()
-        finally:
-            conn.close()
-
-        # Write a bead directly
-        from agent_baton.models.bead import Bead
-        from datetime import datetime, timezone
-        bstore.write(Bead(
-            bead_id="bd-casc01",
-            task_id=task_id,
-            step_id="1.1",
-            agent_name="backend-engineer",
-            bead_type="discovery",
-            content="fact before save",
-            created_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        ))
-        assert _direct_bead_count(tmp_path / "baton.db", task_id) == 1
-
-        # Now call save_execution (which previously deleted bead rows)
-        engine = ExecutionEngine(
-            team_context_root=tmp_path,
-            bus=EventBus(),
-            storage=storage,
-            task_id=task_id,
-        )
-        plan = _plan(task_id)
-        engine.start(plan)
-
-        # Bead must still be present
-        assert _direct_bead_count(tmp_path / "baton.db", task_id) == 1
-
-    def test_beads_survive_repeated_saves(self, tmp_path: Path) -> None:
-        """Beads survive multiple save_execution calls (once per step record)."""
-        engine, _ = _engine_with_sqlite(tmp_path)
-        engine.start(_plan("task-cascade-02"))
-        engine.record_step_result(
-            "1.1",
-            "backend-engineer",
-            status="complete",
-            outcome=(
-                "BEAD_DISCOVERY: first fact.\n"
-                "BEAD_WARNING: watch the cache.\n"
-            ),
-        )
-        # Each record_step_result triggers _save_execution; verify beads survive
-        count = _direct_bead_count(tmp_path / "baton.db", "task-cascade-02")
-        assert count == 2
-
     def test_beads_written_during_execution_readable_at_end(self, tmp_path: Path) -> None:
-        """End-to-end: beads emitted mid-execution are still readable when
-        the execution completes (which also calls save_execution)."""
-        engine, _ = _engine_with_sqlite(tmp_path)
-        engine.start(_plan("task-cascade-03"))
+        """Beads emitted mid-execution are still readable when the execution
+        completes."""
+        engine, _, store = _engine_with_bd(tmp_path)
+        engine.start(_plan("task-persist-03"))
         engine.record_step_result(
             "1.1",
             "backend-engineer",
@@ -507,17 +433,18 @@ class TestBeadsSurviveSaveExecution:
         )
         engine.complete()
 
-        store = _bead_store(tmp_path)
-        beads = store.query(task_id="task-cascade-03")
+        beads = store.query(task_id="task-persist-03")
         assert len(beads) == 1
         assert "module boundary" in beads[0].content
 
     def test_save_execution_upsert_does_not_reset_started_at(self, tmp_path: Path) -> None:
-        """The ON CONFLICT DO UPDATE path preserves started_at on the executions
-        row (a regression guard: the old INSERT OR REPLACE reset it each time)."""
-        engine, storage = _engine_with_sqlite(tmp_path)
-        engine.start(_plan("task-cascade-04"))
-        state_before = storage.load_execution("task-cascade-04")
+        """The upsert path preserves started_at on the executions row."""
+        db_path = tmp_path / "baton.db"
+        db_path.touch()
+        storage = SqliteStorage(db_path)
+        engine, _, store = _engine_with_bd(tmp_path)
+        engine.start(_plan("task-persist-04"))
+        state_before = storage.load_execution("task-persist-04")
         assert state_before is not None
         started_at_before = state_before.started_at
 
@@ -527,9 +454,8 @@ class TestBeadsSurviveSaveExecution:
             status="complete",
             outcome="no signals",
         )
-        state_after = storage.load_execution("task-cascade-04")
+        state_after = storage.load_execution("task-persist-04")
         assert state_after is not None
-        # started_at must be unchanged after the safe-upsert save
         assert state_after.started_at == started_at_before
 
 
@@ -560,20 +486,16 @@ class TestSchemaVersion:
         """A freshly created baton.db is stamped at the current SCHEMA_VERSION."""
         from agent_baton.core.storage.schema import SCHEMA_VERSION
         storage = SqliteStorage(tmp_path / "baton.db")
-        # Trigger schema initialisation
-        from agent_baton.core.engine.bead_store import BeadStore
-        bstore = BeadStore(tmp_path / "baton.db")
-        bstore._table_exists()
+        # Trigger schema initialisation via storage itself (not BeadStore)
+        conn_mgr = storage._conn_mgr
+        conn = conn_mgr.get_connection()
 
-        conn = sqlite3.connect(str(tmp_path / "baton.db"))
-        try:
-            row = conn.execute(
-                "SELECT version FROM _schema_version"
-            ).fetchone()
-            assert row is not None
-            assert row[0] == SCHEMA_VERSION
-        finally:
-            conn.close()
+        row = conn.execute(
+            "SELECT version FROM _schema_version"
+        ).fetchone()
+        assert row is not None
+        assert row[0] == SCHEMA_VERSION
+        storage.close()
 
 
 # ---------------------------------------------------------------------------
@@ -583,13 +505,10 @@ class TestSchemaVersion:
 
 class TestTerminalBeadClosure:
     """Beads that are still ``open`` when a task reaches a terminal state get
-    closed so that bead-decay (which only archives closed beads) can actually
-    clean them up. Planning beads in particular are created by the planner and
-    never closed by any agent signal, so they would otherwise leak forever."""
+    closed so that bead-decay can actually clean them up."""
 
-    def _write_planning_bead(self, tmp_path: Path, task_id: str) -> str:
+    def _write_planning_bead(self, store, task_id: str) -> str:
         from agent_baton.models.bead import Bead
-        store = _bead_store(tmp_path)
         bead = Bead(
             bead_id=f"{task_id}-plan",
             task_id=task_id,
@@ -605,16 +524,19 @@ class TestTerminalBeadClosure:
         return bead.bead_id
 
     def test_planning_beads_closed_on_complete(self, tmp_path: Path) -> None:
-        engine, _ = _engine_with_sqlite(tmp_path, task_id="task-term-success")
+        engine, _, store = _engine_with_bd(tmp_path, task_id="task-term-success")
         engine.start(_plan("task-term-success"))
-        self._write_planning_bead(tmp_path, "task-term-success")
+        self._write_planning_bead(store, "task-term-success")
 
         engine.record_step_result(
             "1.1", "backend-engineer", status="complete", outcome="done.",
         )
         engine.complete()
 
-        store = _bead_store(tmp_path)
+        # BEAD_WARNING: BdBeadStore.query(status="open") works because bd list
+        # defaults to open issues.  Querying with tags=["planning"] requires
+        # bd list --label "planning" which also returns open issues, so this
+        # specific query is expected to work.
         planning = store.query(
             task_id="task-term-success", status="open", tags=["planning"],
         )
@@ -623,9 +545,8 @@ class TestTerminalBeadClosure:
     def test_non_planning_beads_untouched_on_complete(
         self, tmp_path: Path,
     ) -> None:
-        """Agent-emitted beads should NOT be force-closed on success — their
-        lifecycle is managed by agent signals and by bead decay."""
-        engine, _ = _engine_with_sqlite(tmp_path, task_id="task-term-agent")
+        """Agent-emitted beads should NOT be force-closed on success."""
+        engine, _, store = _engine_with_bd(tmp_path, task_id="task-term-agent")
         engine.start(_plan("task-term-agent"))
         engine.record_step_result(
             "1.1", "backend-engineer", status="complete",
@@ -633,7 +554,6 @@ class TestTerminalBeadClosure:
         )
         engine.complete()
 
-        store = _bead_store(tmp_path)
         agent_beads = store.query(
             task_id="task-term-agent", bead_type="discovery",
         )
@@ -643,33 +563,28 @@ class TestTerminalBeadClosure:
         )
 
     def test_all_open_beads_closed_on_failure(self, tmp_path: Path) -> None:
-        engine, _ = _engine_with_sqlite(tmp_path, task_id="task-term-fail")
-        # Build a two-step plan so failure on step 1.1 triggers the
-        # _determine_action failed-path we hook into.
+        engine, _, store = _engine_with_bd(tmp_path, task_id="task-term-fail")
         plan = _plan(
             "task-term-fail",
             phases=[_phase(1, steps=[_step("1.1"), _step("1.2")])],
         )
         engine.start(plan)
-        self._write_planning_bead(tmp_path, "task-term-fail")
-        # An agent-level discovery bead, also open.
+        self._write_planning_bead(store, "task-term-fail")
         engine.record_step_result(
             "1.1", "backend-engineer",
             status="complete",
             outcome="BEAD_DISCOVERY: partial finding before failure.",
         )
-        # Now fail the next step to drive the task into failed terminal state.
         engine.record_step_result(
             "1.2", "backend-engineer",
             status="failed",
             outcome="boom",
             error="simulated failure",
         )
-        # Trigger the terminal transition via next_action, which routes
-        # through _determine_action.
         engine.next_action()
 
-        store = _bead_store(tmp_path)
+        # BEAD_WARNING: BdBeadStore.query(status="open") returns open issues;
+        # closed beads are not returned, so an empty result means all were closed.
         still_open = store.query(task_id="task-term-fail", status="open")
         assert still_open == [], (
             "every open bead must be closed when the task fails"

@@ -1,7 +1,6 @@
 """Shared pytest fixtures for agent_baton tests."""
 from __future__ import annotations
 
-import sqlite3
 from pathlib import Path
 from typing import Generator
 
@@ -180,7 +179,7 @@ def isolated_bead_store(request, monkeypatch) -> Generator[None, None, None]:
 
 @pytest.fixture
 def bead_store_count_baseline(tmp_path: Path):
-    """Return a callable that snapshots + asserts bead row growth.
+    """Return a callable that snapshots + asserts bead count growth via BdBeadStore.
 
     Usage in a test::
 
@@ -189,37 +188,24 @@ def bead_store_count_baseline(tmp_path: Path):
             # ... code under test that must NOT write beads ...
             check()   # asserts count did not grow
 
-    The fixture creates an isolated SQLite database in *tmp_path* and
-    applies the project schema so that the ``beads`` table is present.
-    The returned factory captures the current row count and returns an
-    assertion callable.
+    ADR-13b WP-G: The SQLite BeadStore was removed.  This fixture now creates
+    an isolated BdBeadStore (via make_bead_store) and counts beads via
+    store.query().  The semantics are the same; the mechanism is bd-backed.
     """
-    from agent_baton.core.engine.bead_store import BeadStore
+    from agent_baton.core.engine.bead_backend import make_bead_store
 
     db_path = tmp_path / "bead_baseline.db"
-    store = BeadStore(db_path)
-    # Force the ConnectionManager to apply the schema DDL so the beads table
-    # exists before any raw sqlite3.connect() call tries to SELECT from it.
-    store._conn()
+    db_path.touch()
+    store = make_bead_store(db_path, repo_root=tmp_path)
 
     def factory():
         """Snapshot the current bead count and return an assertion callable."""
-        conn = sqlite3.connect(str(db_path))
-        try:
-            row = conn.execute("SELECT COUNT(*) FROM beads").fetchone()
-            baseline: int = row[0] if row else 0
-        finally:
-            conn.close()
+        baseline: int = len(store.query())
 
         def assert_no_growth() -> None:
-            conn2 = sqlite3.connect(str(db_path))
-            try:
-                row2 = conn2.execute("SELECT COUNT(*) FROM beads").fetchone()
-                current: int = row2[0] if row2 else 0
-            finally:
-                conn2.close()
+            current: int = len(store.query())
             assert current == baseline, (
-                f"BeadStore grew unexpectedly: baseline={baseline} current={current}"
+                f"BdBeadStore grew unexpectedly: baseline={baseline} current={current}"
             )
 
         return assert_no_growth
