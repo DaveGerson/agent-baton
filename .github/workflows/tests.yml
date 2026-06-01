@@ -26,14 +26,18 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Set up Node (for the bd CLI)
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
       - name: Install beads (bd) — the mandatory bead backend
+        env:
+          # The @beads/bd npm postinstall download is flaky on CI runners, so
+          # fetch the pinned release binary directly (deterministic + auditable).
+          BD_VERSION: "1.0.5"
         run: |
-          npm install -g @beads/bd
+          set -euo pipefail
+          url="https://github.com/gastownhall/beads/releases/download/v${BD_VERSION}/beads_${BD_VERSION}_linux_amd64.tar.gz"
+          echo "Downloading $url"
+          curl -fsSL -o /tmp/bd.tar.gz "$url"
+          tar -xzf /tmp/bd.tar.gz -C /tmp bd
+          sudo install -m 0755 /tmp/bd /usr/local/bin/bd
           bd version
 
       - name: Sync bundled agents
