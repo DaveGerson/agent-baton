@@ -1,0 +1,69 @@
+name: Tests (bd backend)
+
+# ADR-13b: `bd` (gastownhall/beads) is the mandatory bead/issue backend. CI
+# installs it so the bead-backed suite runs the way production does. Triggered
+# on PRs and pushes to the main branches; widen the test selection over time as
+# the broader suite is hardened for CI.
+on:
+  push:
+    branches: ["master", "claude/**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bead-suite:
+    name: Bead suite (bd backend)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node (for the bd CLI)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install beads (bd) — the mandatory bead backend
+        run: |
+          npm install -g @beads/bd
+          bd version
+
+      - name: Sync bundled agents
+        run: bash scripts/sync_bundled_agents.sh
+
+      - name: Install agent-baton (+ test/api extras)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,pmo]"
+
+      - name: Collection smoke (catches import/collection breakage repo-wide)
+        run: python -m pytest --co -q
+
+      - name: Bead suite (exercises the bd backend end-to-end)
+        env:
+          BATON_BD_BACKEND: bd
+        run: |
+          python -m pytest -p no:cacheprovider -q \
+            tests/test_bead_cli.py \
+            tests/test_bead_cmd_cli.py \
+            tests/test_bead_tiers234.py \
+            tests/test_executable_beads.py \
+            tests/test_adr13b_wp2.py \
+            tests/test_bd_backend.py \
+            tests/test_bead_signal_wiring.py \
+            tests/test_synthesize_beads.py \
+            tests/test_learning_regressions.py \
+            tests/test_soul_verify_revocation_through_callers.py \
+            tests/test_swarm_signoff.py \
+            tests/test_team_board.py \
+            tests/test_api_pmo_beads.py \
+            tests/storage/ \
+            tests/static/test_no_direct_bead_store_construction.py
