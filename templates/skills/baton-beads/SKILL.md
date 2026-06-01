@@ -100,7 +100,7 @@ transitively traceable: bead -> step -> commit -> diff.
 - Include commit hashes in close summaries so beads stay traceable after branch merges
 - Use `--file` flags on creation so `baton beads list` can filter by affected path
 - Run `baton beads cleanup --dry-run` before major merges to identify stale beads
-- After rebases, bead git-notes survive if `notes.rewriteRef` is configured (install.sh Step 6 sets this with `--gastown`)
+- After rebases, bead git-notes survive if `notes.rewriteRef` is configured (the installer sets this by default; opt out with `install.sh --no-gastown` / `install.ps1 -NoGastown`, or `BATON_GASTOWN_ENABLED=0`)
 
 ## Post-Interaction Context
 
