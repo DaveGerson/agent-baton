@@ -1856,8 +1856,10 @@ baton cquery --table executions
 
 ### `baton source`
 
-Manage external work-item source connections (ADO adapter implemented;
-Jira, GitHub, Linear adapters not yet implemented).
+Manage external work-item source connections. Adapters: `ado`, `github`,
+`jira`, `linear`, and `beads`. The `beads` adapter is local interop — it reads
+an external [Beads](https://github.com/gastownhall/beads) project's exported
+`.beads/issues.jsonl` interchange file (no `bd` Go binary or Dolt dependency).
 
 #### `baton source add`
 
@@ -1867,18 +1869,25 @@ baton source add TYPE --name NAME [options]
 
 | Argument | Required | Description |
 |----------|----------|-------------|
-| `TYPE` | Yes | Source type: `ado` (others not yet implemented) |
+| `TYPE` | Yes | Source type: `ado`, `github`, `jira`, `linear`, `beads` |
 | `--name NAME` | Yes | Display name for this source |
-| `--org ORG` | No | Organization or account name |
-| `--project PROJECT` | No | Project name within the source |
+| `--org ORG` | No | Organization or account name (ADO/GitHub; email for Jira) |
+| `--project PROJECT` | No | Project name within the source (ADO/Jira/Linear) |
 | `--pat-env ENV_VAR` | No | Environment variable name holding the PAT/token |
 | `--url URL` | No | Base URL for self-hosted instances |
+| `--config JSON` | No | Extra adapter config as a JSON object, merged into the stored config. The `beads` adapter uses `{"beads_dir": ".beads"}` |
 
-**Example:**
+**Examples:**
 
 ```bash
+# Azure DevOps
 baton source add ado --name "Team Board" \
     --org contoso --project "Data Platform" --pat-env ADO_PAT
+
+# Local Beads project (reads .beads/issues.jsonl; run `bd export` first)
+baton source add beads --name "Local Beads" \
+    --config '{"beads_dir": ".beads"}'
+baton source sync beads-beads
 ```
 
 #### `baton source list`

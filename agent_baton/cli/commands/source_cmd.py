@@ -8,7 +8,7 @@ sync        Pull work items from a source into central.db.
 remove      Remove a registered external source.
 map         Map an external item to a baton project/task.
 
-Supported adapters: ADO, GitHub, Jira, Linear.  Each adapter module lives in
+Supported adapters: ADO, GitHub, Jira, Linear, Beads (local .beads/issues.jsonl interop).  Each adapter module lives in
 ``agent_baton/core/storage/adapters/`` and self-registers via
 ``AdapterRegistry.register()`` on import.
 """
@@ -27,7 +27,7 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     """Register the ``source`` subcommand group."""
     p = subparsers.add_parser(
         "source",
-        help="Manage external work-item source connections (ado, github, jira, linear)",
+        help="Manage external work-item source connections (ado, github, jira, linear, beads)",
     )
     sub = p.add_subparsers(dest="subcommand")
 
@@ -36,7 +36,7 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     p_add.add_argument(
         "source_type",
         metavar="TYPE",
-        help="Source type: ado, github, jira, linear",
+        help="Source type: ado, github, jira, linear, beads",
     )
     p_add.add_argument(
         "--name",
@@ -69,6 +69,17 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         default="",
         metavar="URL",
         help="Base URL for self-hosted instances (Jira Server, GitHub Enterprise)",
+    )
+    p_add.add_argument(
+        "--config",
+        default="",
+        dest="config_json",
+        metavar="JSON",
+        help=(
+            "Extra adapter config as a JSON object, merged into the stored "
+            "config.  For the beads adapter, e.g. "
+            "--config '{\"beads_dir\": \".beads\"}'"
+        ),
     )
 
     # baton source list
@@ -153,19 +164,24 @@ def _add(args: argparse.Namespace) -> None:
     """Register an external source in central.db."""
     import json
 
-    _IMPLEMENTED_TYPES = {"ado", "github", "jira", "linear"}
+    _IMPLEMENTED_TYPES = {"ado", "github", "jira", "linear", "beads"}
     if args.source_type not in _IMPLEMENTED_TYPES:
         print(f"error: unknown source type '{args.source_type}'")
         print(f"supported types: {', '.join(sorted(_IMPLEMENTED_TYPES))}")
         sys.exit(1)
 
-    # Build a stable source_id from type + org + project
-    parts = [args.source_type]
-    if args.org:
-        parts.append(args.org.lower().replace(" ", "-"))
-    if args.source_project:
-        parts.append(args.source_project.lower().replace(" ", "-"))
-    source_id = "-".join(parts)
+    # Parse optional --config JSON (merged into the stored config below).
+    extra_config: dict = {}
+    if getattr(args, "config_json", ""):
+        try:
+            parsed = json.loads(args.config_json)
+        except json.JSONDecodeError as exc:
+            print(f"error: --config is not valid JSON: {exc}")
+            sys.exit(1)
+        if not isinstance(parsed, dict):
+            print("error: --config must be a JSON object (e.g. '{\"beads_dir\": \".beads\"}')")
+            sys.exit(1)
+        extra_config = parsed
 
     config = {
         "org": args.org,
@@ -173,6 +189,21 @@ def _add(args: argparse.Namespace) -> None:
         "pat_env": args.pat_env,
         "url": args.url,
     }
+    config.update(extra_config)
+
+    # Build a stable source_id.  For the local beads adapter the org/project
+    # flags don't apply — derive it from the beads_dir instead.
+    if args.source_type == "beads":
+        beads_dir = str(config.get("beads_dir") or config.get("path") or ".beads")
+        slug = beads_dir.strip("/").replace("/", "-").replace(".", "") or "beads"
+        source_id = f"beads-{slug}"
+    else:
+        parts = [args.source_type]
+        if args.org:
+            parts.append(args.org.lower().replace(" ", "-"))
+        if args.source_project:
+            parts.append(args.source_project.lower().replace(" ", "-"))
+        source_id = "-".join(parts)
 
     try:
         from agent_baton.core.storage.central import CentralStore
@@ -244,7 +275,7 @@ def _list(_args: argparse.Namespace) -> None:
     if not rows:
         print("No external sources registered.")
         print("Add one with: baton source add <type> --name NAME ...")
-        print("Supported types: ado, github, jira, linear")
+        print("Supported types: ado, github, jira, linear, beads")
         return
 
     print(f"External Sources ({len(rows)} registered)")
@@ -306,6 +337,7 @@ def _sync(args: argparse.Namespace) -> None:
         import agent_baton.core.storage.adapters.github  # noqa: F401  # type: ignore[import]
         import agent_baton.core.storage.adapters.jira  # noqa: F401  # type: ignore[import]
         import agent_baton.core.storage.adapters.linear  # noqa: F401  # type: ignore[import]
+        import agent_baton.core.storage.adapters.beads  # noqa: F401  # type: ignore[import]
     except ImportError:
         pass
 
@@ -365,6 +397,14 @@ def _sync(args: argparse.Namespace) -> None:
             config = {
                 "team_key": raw_config.get("project", ""),
                 "token_env_var": raw_config.get("pat_env", "LINEAR_API_KEY"),
+            }
+        elif source_type == "beads":
+            config = {
+                "beads_dir": raw_config.get("beads_dir")
+                or raw_config.get("path")
+                or ".beads",
+                # Pass the registered id so synced rows join back to it.
+                "source_id": source_id,
             }
         else:
             config = dict(raw_config)

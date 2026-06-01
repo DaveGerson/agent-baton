@@ -16,7 +16,7 @@ The only place that touches `baton.db` and the on-disk team-context layout. Inhe
 | `queries.py` | Named query helpers (no inline SQL elsewhere) |
 | `sync.py` | Cross-worktree sync of notes and beads |
 | `*_store.py` (e.g. `release_store`, `slo_store`, `user_store`, `handoff_store`, `deployment_profile_store`, `conflict_store`) | One store per persisted aggregate |
-| `adapters/` | External-system adapters (`ado.py`, `github.py`, `jira.py`, `linear.py`) |
+| `adapters/` | External-system adapters (`ado.py`, `github.py`, `jira.py`, `linear.py`, `beads.py`) |
 
 ## Mandatory rules
 
@@ -35,7 +35,7 @@ The only place that touches `baton.db` and the on-disk team-context layout. Inhe
 
 ## Adapters
 
-External-system adapters (`adapters/ado.py`, `github.py`, `jira.py`, `linear.py`) translate Baton concepts to/from external APIs. They:
+External-system adapters (`adapters/ado.py`, `github.py`, `jira.py`, `linear.py`, `beads.py`) translate Baton concepts to/from external APIs (or, for `beads.py`, the external `bd` tool's `.beads/issues.jsonl` interchange file — no Go binary or Dolt dependency). They:
 
 - Are read-mostly. Writes to external systems are explicit and gated by a guardrail.
 - Hold no state — credentials come from settings/env, not module-level globals.
