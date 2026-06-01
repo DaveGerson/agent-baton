@@ -7,9 +7,8 @@ outcomes, and planning notes -- produced by agents during execution.  They
 persist across steps and phases, enabling downstream agents to inherit
 upstream context without re-reading raw output.
 
-Unlike the original Beads project (which uses Dolt or JSONL), these models
-are backed natively by Agent Baton's existing SQLite storage layer.  See
-``core/engine/bead_store.py`` for persistence and
+After ADR-13b WP-G, these models are backed by the external ``bd`` CLI.  See
+``core/engine/bd_bead_store.py`` (``BdBeadStore``) for persistence and
 ``docs/superpowers/specs/2026-04-12-bead-memory-design.md`` for the full
 design rationale.
 """

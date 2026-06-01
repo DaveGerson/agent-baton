@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 41
+SCHEMA_VERSION = 42
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -1300,6 +1300,31 @@ CREATE TABLE IF NOT EXISTS speculations (
 -- immediately.  Per docs/internal/sqlite-parity-proposal.md §3.2.
 ALTER TABLE executions ADD COLUMN version INTEGER NOT NULL DEFAULT 1;
 """,
+    42: """
+-- v42: ADR-13b WP-G — remove SQLite bead tables.
+--
+-- The bead system of record is now the external ``bd`` CLI (``.beads/``
+-- directory).  The SQLite tables ``beads``, ``bead_tags``,
+-- ``bead_anchors``, ``bead_edges``, ``bead_clusters``, and
+-- ``handoff_beads`` are no longer written by baton and are dropped here.
+--
+-- ROLLBACK: restore the pre-migration backup created by
+-- migration_backup.backup_db() before this migration runs.  The backup
+-- is named ``baton.db.bak-41-<timestamp>``.  The restore script is at
+-- ``scripts/restore_baton_db.sh``.
+--
+-- Applied to BOTH project and central databases via
+-- ConnectionManager._run_migrations().  The central database also carries
+-- these tables and they are dropped there as well.
+--
+-- Note: SQLite DROP TABLE IF EXISTS is idempotent — safe to re-apply.
+DROP TABLE IF EXISTS bead_tags;
+DROP TABLE IF EXISTS bead_edges;
+DROP TABLE IF EXISTS bead_clusters;
+DROP TABLE IF EXISTS handoff_beads;
+DROP TABLE IF EXISTS bead_anchors;
+DROP TABLE IF EXISTS beads;
+""",
 }
 
 # =====================================================================
@@ -1948,91 +1973,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_learning_issues_type_target_open
     ON learning_issues(issue_type, target)
     WHERE status NOT IN ('resolved', 'wontfix');
 
--- BEADS (Inspired by Steve Yegge's Beads agent memory system, beads-ai/beads-cli)
--- Discrete units of structured memory produced by agents during execution.
--- task_id is nullable: NULL means project-scoped bead (no execution parent).
--- Task-scoped beads (task_id IS NOT NULL) are validated by the FK constraint
--- under SQLite MATCH SIMPLE semantics (NULL bypasses the FK check).
-CREATE TABLE IF NOT EXISTS beads (
-    bead_id          TEXT PRIMARY KEY,
-    task_id          TEXT,
-    step_id          TEXT NOT NULL,
-    agent_name       TEXT NOT NULL,
-    bead_type        TEXT NOT NULL,
-    content          TEXT NOT NULL DEFAULT '',
-    confidence       TEXT NOT NULL DEFAULT 'medium',
-    scope            TEXT NOT NULL DEFAULT 'step',
-    tags             TEXT NOT NULL DEFAULT '[]',
-    affected_files   TEXT NOT NULL DEFAULT '[]',
-    status           TEXT NOT NULL DEFAULT 'open',
-    created_at       TEXT NOT NULL,
-    closed_at        TEXT NOT NULL DEFAULT '',
-    summary          TEXT NOT NULL DEFAULT '',
-    links            TEXT NOT NULL DEFAULT '[]',
-    source           TEXT NOT NULL DEFAULT 'agent-signal',
-    token_estimate   INTEGER NOT NULL DEFAULT 0,
-    quality_score    REAL    NOT NULL DEFAULT 0.0,
-    retrieval_count  INTEGER NOT NULL DEFAULT 0,
-    signed_by        TEXT    NOT NULL DEFAULT '',
-    signature        TEXT    NOT NULL DEFAULT '',
-    FOREIGN KEY (task_id) REFERENCES executions(task_id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS idx_beads_task ON beads(task_id);
-CREATE INDEX IF NOT EXISTS idx_beads_agent ON beads(agent_name);
-CREATE INDEX IF NOT EXISTS idx_beads_type ON beads(bead_type);
-CREATE INDEX IF NOT EXISTS idx_beads_status ON beads(status);
-
--- BEAD_TAGS (normalised for efficient tag-based retrieval)
-CREATE TABLE IF NOT EXISTS bead_tags (
-    bead_id  TEXT NOT NULL,
-    tag      TEXT NOT NULL,
-    PRIMARY KEY (bead_id, tag),
-    FOREIGN KEY (bead_id) REFERENCES beads(bead_id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS idx_bead_tags_tag ON bead_tags(tag);
-
--- BEAD_EDGES (v28: BeadSynthesizer — inferred typed edges between beads)
--- edge_type ∈ {"file_overlap", "tag_overlap", "conflict"}.  weight is a
--- jaccard-style overlap in [0.0, 1.0].  Idempotent UPSERT on PK.
-CREATE TABLE IF NOT EXISTS bead_edges (
-    src_bead_id  TEXT NOT NULL,
-    dst_bead_id  TEXT NOT NULL,
-    edge_type    TEXT NOT NULL,
-    weight       REAL NOT NULL DEFAULT 0.0,
-    created_at   TEXT NOT NULL DEFAULT '',
-    PRIMARY KEY (src_bead_id, dst_bead_id, edge_type),
-    FOREIGN KEY (src_bead_id) REFERENCES beads(bead_id) ON DELETE CASCADE,
-    FOREIGN KEY (dst_bead_id) REFERENCES beads(bead_id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS idx_bead_edges_src  ON bead_edges(src_bead_id);
-CREATE INDEX IF NOT EXISTS idx_bead_edges_dst  ON bead_edges(dst_bead_id);
-CREATE INDEX IF NOT EXISTS idx_bead_edges_type ON bead_edges(edge_type);
-
--- BEAD_CLUSTERS (v28: BeadSynthesizer — connected components over edges)
-CREATE TABLE IF NOT EXISTS bead_clusters (
-    cluster_id  TEXT PRIMARY KEY,
-    label       TEXT NOT NULL DEFAULT '',
-    bead_ids    TEXT NOT NULL DEFAULT '[]',
-    created_at  TEXT NOT NULL DEFAULT ''
-);
-
--- HANDOFF_BEADS (v29: HandoffSynthesizer — Wave 3.2)
--- Persisted record of automated handoff documents synthesized between
--- consecutive steps in a single task's execution chain.  Resolves
--- bd-65d4 / bd-61a5.  See agent_baton/core/intel/handoff_synthesizer.py
--- and dispatcher.build_delegation_prompt for the read-side surface.
-CREATE TABLE IF NOT EXISTS handoff_beads (
-    handoff_id   TEXT PRIMARY KEY,
-    task_id      TEXT NOT NULL DEFAULT '',
-    from_step_id TEXT NOT NULL DEFAULT '',
-    to_step_id   TEXT NOT NULL DEFAULT '',
-    content      TEXT NOT NULL DEFAULT '',
-    created_at   TEXT NOT NULL DEFAULT ''
-);
-CREATE INDEX IF NOT EXISTS idx_handoff_beads_task ON handoff_beads(task_id);
-CREATE INDEX IF NOT EXISTS idx_handoff_beads_from ON handoff_beads(from_step_id);
-CREATE INDEX IF NOT EXISTS idx_handoff_beads_to   ON handoff_beads(to_step_id);
-
 -- DEBATES (v30: D4 Multi-Agent Debate — Tier-4 research feature)
 -- Persists structured multi-agent debates run via ``baton debate``.
 -- Each row captures the question, full transcript (JSON-encoded list of
@@ -2326,17 +2266,6 @@ CREATE TABLE IF NOT EXISTS agent_context (
 );
 CREATE INDEX IF NOT EXISTS idx_agent_context_agent ON agent_context(agent_name);
 
--- BEAD_ANCHORS (Gastown Part A, v31, bd-2870): bead_id → anchor_commit index
--- for O(1) git-notes reads.  Updated on every BeadStore.write().  The
--- rebuild_from_notes() path recreates this table from a live notes scan when
--- it drifts.  No FK constraint — anchor entries outlive the dual-write
--- transition window and must survive bead removal from the SQLite mirror.
-CREATE TABLE IF NOT EXISTS bead_anchors (
-    bead_id        TEXT PRIMARY KEY,
-    anchor_commit  TEXT NOT NULL,
-    last_seen_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-);
-CREATE INDEX IF NOT EXISTS idx_bead_anchors_commit ON bead_anchors(anchor_commit);
 """
 
 # =====================================================================
@@ -3031,47 +2960,6 @@ CREATE TABLE IF NOT EXISTS shared_context (
     PRIMARY KEY (project_id, task_id)
 );
 
--- BEADS (mirror — Inspired by Steve Yegge's Beads agent memory system, beads-ai/beads-cli)
--- task_id is nullable: NULL = project-scoped bead with no execution parent.
-CREATE TABLE IF NOT EXISTS beads (
-    project_id       TEXT NOT NULL,
-    bead_id          TEXT NOT NULL,
-    task_id          TEXT,
-    step_id          TEXT NOT NULL,
-    agent_name       TEXT NOT NULL,
-    bead_type        TEXT NOT NULL,
-    content          TEXT NOT NULL DEFAULT '',
-    confidence       TEXT NOT NULL DEFAULT 'medium',
-    scope            TEXT NOT NULL DEFAULT 'step',
-    tags             TEXT NOT NULL DEFAULT '[]',
-    affected_files   TEXT NOT NULL DEFAULT '[]',
-    status           TEXT NOT NULL DEFAULT 'open',
-    created_at       TEXT NOT NULL,
-    closed_at        TEXT NOT NULL DEFAULT '',
-    summary          TEXT NOT NULL DEFAULT '',
-    links            TEXT NOT NULL DEFAULT '[]',
-    source           TEXT NOT NULL DEFAULT 'agent-signal',
-    token_estimate   INTEGER NOT NULL DEFAULT 0,
-    quality_score    REAL    NOT NULL DEFAULT 0.0,
-    retrieval_count  INTEGER NOT NULL DEFAULT 0,
-    signed_by        TEXT    NOT NULL DEFAULT '',
-    signature        TEXT    NOT NULL DEFAULT '',
-    PRIMARY KEY (project_id, bead_id)
-);
-CREATE INDEX IF NOT EXISTS idx_central_beads_task ON beads(project_id, task_id);
-CREATE INDEX IF NOT EXISTS idx_central_beads_agent ON beads(agent_name);
-CREATE INDEX IF NOT EXISTS idx_central_beads_type ON beads(bead_type);
-CREATE INDEX IF NOT EXISTS idx_central_beads_status ON beads(status);
-
--- BEAD_TAGS (mirror — normalised for efficient tag-based retrieval)
-CREATE TABLE IF NOT EXISTS bead_tags (
-    project_id  TEXT NOT NULL,
-    bead_id     TEXT NOT NULL,
-    tag         TEXT NOT NULL,
-    PRIMARY KEY (project_id, bead_id, tag)
-);
-CREATE INDEX IF NOT EXISTS idx_central_bead_tags_tag ON bead_tags(tag);
-
 -- LEARNING_ISSUES (mirror — learning automation system)
 CREATE TABLE IF NOT EXISTS learning_issues (
     project_id        TEXT NOT NULL,
@@ -3212,28 +3100,6 @@ SELECT
     )                                                              AS failure_rate
 FROM executions e
 GROUP BY e.project_id;
-
--- Cross-project discovery analytics (F10 — Bead Central Store Analytics).
--- Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
--- Query via: baton query "SELECT * FROM v_cross_project_discoveries LIMIT 20"
-CREATE VIEW IF NOT EXISTS v_cross_project_discoveries AS
-SELECT
-    b.project_id,
-    b.bead_id,
-    b.bead_type,
-    b.agent_name,
-    b.content,
-    b.confidence,
-    b.tags,
-    b.affected_files,
-    b.created_at,
-    b.quality_score,
-    b.retrieval_count,
-    p.task_summary      AS task_summary
-FROM beads b
-LEFT JOIN plans p
-    ON p.project_id = b.project_id AND p.task_id = b.task_id
-WHERE b.bead_type IN ('discovery', 'warning');
 
 CREATE VIEW IF NOT EXISTS v_external_plan_mapping AS
 SELECT

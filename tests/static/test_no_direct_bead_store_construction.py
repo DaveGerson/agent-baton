@@ -1,20 +1,19 @@
 """AST lint — direct ``BeadStore(`` construction and ``._conn()`` bead-store access.
 
-ADR-13b WP-H static guard.
+ADR-13b WP-G static guard (updated after teardown).
 
-After the bd-backend cutover, all bead-store creation must flow through
-``make_bead_store()`` in ``agent_baton.core.engine.bead_backend`` so the
-active backend (SQLite or bd) is selected consistently.  Similarly,
-``._conn()`` calls on a variable named ``_bead_store`` or ``bead_store``
-reach into SQLite internals that do not exist on ``BdBeadStore``.
+After WP-G, ``bead_store.py`` has been deleted and ``bd`` is the only mandatory
+bead backend.  All bead-store creation must flow through ``make_bead_store()``
+in ``agent_baton.core.engine.bead_backend``.  Similarly, ``._conn()`` calls on
+a variable named ``_bead_store`` or ``bead_store`` reach into SQLite internals
+that do not exist on ``BdBeadStore``.
 
 This lint walks ``agent_baton/`` and flags:
 
-1. ``BeadStore(`` constructor calls outside the two canonical files that
-   are allowed to construct it directly (``bead_store.py`` itself and
-   ``bead_backend.py`` which is the factory).
+1. ``BeadStore(`` constructor calls outside the one canonical file that
+   is allowed to construct it (``bead_backend.py`` which is the factory).
 2. ``._conn()`` calls where the receiver is literally named ``_bead_store``
-   or ``bead_store`` (the executor coupling removed in WP-1).
+   or ``bead_store``.
 
 Escape hatches:
 
@@ -22,7 +21,7 @@ Escape hatches:
 * Add the file path to ``ALLOWED_FILES`` below for a coarser per-file
   exemption (use sparingly; prefer per-line noqa).
 
-See docs/internal/adr-13b-migration-design.md §6 (step H) / risks.
+See docs/internal/adr-13b-migration-design.md §6 (step G) / risks.
 """
 from __future__ import annotations
 
@@ -39,37 +38,23 @@ import pytest
 _SRC_ROOT = Path(__file__).resolve().parents[2] / "agent_baton"
 
 # Files that are canonically allowed to instantiate BeadStore directly.
+# bead_store.py was deleted in ADR-13b WP-G; only the factory remains.
 ALLOWED_BEAD_STORE_CONSTRUCTION: set[Path] = {
-    _SRC_ROOT / "core" / "engine" / "bead_store.py",
     _SRC_ROOT / "core" / "engine" / "bead_backend.py",
 }
 
 # Files that have not yet been migrated off direct BeadStore construction.
-# Each entry must carry a TODO referencing the ADR-13b migration step that
-# will remove it.  Remove entries from this set as the migration proceeds.
-LEGACY_BEAD_STORE_CALLERS: set[Path] = {
-    # WP-2 leftovers — scheduled for removal in WP-G
-    _SRC_ROOT / "api" / "deps.py",                                    # TODO: ADR-13b WP-G
-    _SRC_ROOT / "cli" / "commands" / "quickstart.py",                # TODO: ADR-13b WP-G
-    _SRC_ROOT / "cli" / "commands" / "daemon_immune_cmd.py",         # TODO: ADR-13b WP-G
-    _SRC_ROOT / "cli" / "commands" / "swarm_cmd.py",                 # TODO: ADR-13b WP-G
-    _SRC_ROOT / "cli" / "commands" / "execution" / "plan_cmd.py",    # TODO: ADR-13b WP-G
-    _SRC_ROOT / "cli" / "commands" / "improve" / "scores.py",        # TODO: ADR-13b WP-G
-    _SRC_ROOT / "cli" / "commands" / "improve" / "improve_cmd.py",   # TODO: ADR-13b WP-G
-    _SRC_ROOT / "cli" / "commands" / "improve" / "lookback_cmd.py",  # TODO: ADR-13b WP-G
-    _SRC_ROOT / "cli" / "commands" / "observe" / "export.py",        # TODO: ADR-13b WP-G
-    _SRC_ROOT / "cli" / "commands" / "knowledge" / "harvest_cmd.py", # TODO: ADR-13b WP-G
-}
+# WP-G completed: all callers migrated to make_bead_store().  This set is
+# intentionally empty — any new entry must go through ADR-13b review.
+LEGACY_BEAD_STORE_CALLERS: set[Path] = set()
 
 # Receiver names that look like a bead store when followed by ._conn().
 _BEAD_STORE_RECEIVER_NAMES: set[str] = {"_bead_store", "bead_store"}
 
 # File-level allowlist for ._conn() on bead store receivers.
-ALLOWED_BEAD_CONN_CALLERS: set[Path] = {
-    # executor._bead_store._conn() is the last coupling removed in WP-1.
-    # Remove once executor.py is migrated to DerivedBeadStore.
-    _SRC_ROOT / "core" / "engine" / "executor.py",  # TODO: ADR-13b WP-1
-}
+# WP-G completed: executor._bead_store._conn() coupling has been removed.
+# This set is intentionally empty — BdBeadStore has no _conn() method.
+ALLOWED_BEAD_CONN_CALLERS: set[Path] = set()
 
 
 # ---------------------------------------------------------------------------
@@ -200,11 +185,12 @@ class TestNoDirectBeadStoreConstruction:
 
         * Replace with ``make_bead_store(db_path, ...)`` from
           ``agent_baton.core.engine.bead_backend``, OR
-        * If this is a transitional site that will be migrated in WP-G, add
-          the path to ``LEGACY_BEAD_STORE_CALLERS`` with a TODO comment, OR
         * Add ``# noqa: bead-store-direct`` to the line for a one-off exemption.
 
-        See docs/internal/adr-13b-migration-design.md §6 (step H).
+        WP-G completed: LEGACY_BEAD_STORE_CALLERS is now empty.  New callers
+        are not permitted — use make_bead_store() exclusively.
+
+        See docs/internal/adr-13b-migration-design.md §6 (step G).
         """
         violations: list[_Violation] = []
         for src in _all_python_sources():
@@ -219,11 +205,11 @@ class TestNoDirectBeadStoreConstruction:
         )
 
     def test_no_bead_store_conn_outside_allowed_files(self) -> None:
-        """Walk agent_baton/ and reject _bead_store._conn() outside executor.py.
+        """Walk agent_baton/ and reject _bead_store._conn() anywhere.
 
         ``BdBeadStore`` has no ``_conn()`` method — any caller that reaches into
-        the SQLite connection breaks under the bd backend.  The executor site is
-        tracked in ALLOWED_BEAD_CONN_CALLERS pending WP-1 cleanup.
+        the SQLite connection is broken.  WP-G completed: ALLOWED_BEAD_CONN_CALLERS
+        is now empty.
         """
         violations: list[_Violation] = []
         for src in _all_python_sources():

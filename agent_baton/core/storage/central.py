@@ -463,18 +463,10 @@ def export_beads_to_central(
         Does NOT raise — logs and returns 0 on any failure so sync callers
         can continue without interruption.
 
-    .. warning::
-        **BEAD_WARNING**: This helper is implemented and tested but is NOT yet
-        wired into the :class:`~agent_baton.core.storage.sync.SyncEngine.push`
-        call path.  Doing so requires deciding whether ``export_beads_to_central``
-        runs unconditionally on every sync (expensive for large bead sets) or
-        only when ``BATON_BD_BACKEND != sqlite``.  The safe incremental step is
-        to call it from ``auto_sync_current_project()`` once the bd backend is
-        the default (step F in the cutover order).
-
-        TODO(ADR-13b-WP-E): Wire into ``SyncEngine.push`` or
-        ``auto_sync_current_project`` behind a ``BATON_BD_BACKEND != sqlite``
-        guard after step F flips the default.
+    Note:
+        Wired into :func:`~agent_baton.core.storage.sync.auto_sync_current_project`
+        (ADR-13b WP-G).  ``bd`` is now the mandatory bead backend so this runs
+        on every sync.
     """
     _log_export = _log.getChild("export_beads_to_central")
 

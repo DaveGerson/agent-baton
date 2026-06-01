@@ -143,10 +143,10 @@ def init_dependencies(
     # BeadAnalyzer can enrich plans from prior execution beads (F7).
     _bead_store_for_planner = None
     try:
-        from agent_baton.core.engine.bead_store import BeadStore
+        from agent_baton.core.engine.bead_backend import make_bead_store
         _db = team_context_root / "baton.db"
         if _db.exists():
-            _bead_store_for_planner = BeadStore(_db)
+            _bead_store_for_planner = make_bead_store(_db)
     except Exception:
         pass
     _planner = IntelligentPlanner(

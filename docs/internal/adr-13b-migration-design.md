@@ -1,9 +1,11 @@
 # ADR-13b Phases 2–3 — Implementation Design
 
-*Status: design (architect, 2026-06-01). Source of truth for the `bd`-backend
-cutover. See `docs/design-decisions.md` ADR-13b.*
+*Status: WP-G complete (2026-06-01). SQLite bead store removed, `bd` is the
+mandatory backend. Remaining work: WP-H test-engineer cleanup.*
+*See `docs/design-decisions.md` ADR-13b for the authoritative status.*
 
-`bd` becomes the bead system of record; the SQLite bead store is removed.
+`bd` is now the sole bead system of record; the SQLite bead store has been
+deleted. Schema v42 drops all bead tables on existing databases.
 
 ## Crux
 

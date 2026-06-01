@@ -130,6 +130,28 @@ class ConnectionManager:
             ).fetchone()
             current = row["version"] if row else 0
             if current < self._schema_version:
+                # ADR-13b WP-G: take a pre-migration backup whenever a
+                # destructive migration (DROP TABLE) is in the range being
+                # applied.  _DESTRUCTIVE_MIGRATIONS lists the first version
+                # number of each such group; a backup fires once per upgrade
+                # run that crosses that boundary.
+                _DESTRUCTIVE_MIGRATIONS = frozenset({42})
+                if _DESTRUCTIVE_MIGRATIONS.intersection(
+                    range(current + 1, self._schema_version + 1)
+                ):
+                    try:
+                        from agent_baton.core.storage.migration_backup import backup_db
+
+                        bak = backup_db(self._db_path)
+                        import logging as _logging
+                        _logging.getLogger(__name__).info(
+                            "Pre-migration backup written to %s", bak
+                        )
+                    except Exception as _bak_exc:
+                        import logging as _logging
+                        _logging.getLogger(__name__).warning(
+                            "Pre-migration backup failed (continuing): %s", _bak_exc
+                        )
                 self._run_migrations(conn, current, self._schema_version)
                 conn.execute(
                     "UPDATE _schema_version SET version = ?",

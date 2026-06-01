@@ -718,9 +718,6 @@ class ClaudeCodeLauncher:
             from datetime import datetime, timezone
 
             from agent_baton.core.engine.bead_backend import make_bead_store
-            from agent_baton.core.engine.bead_store import (
-                gastown_dual_write_enabled as _gastown_enabled,
-            )
             from agent_baton.models.bead import Bead, _generate_bead_id  # type: ignore[attr-defined]
 
             content = (
@@ -749,10 +746,7 @@ class ClaudeCodeLauncher:
                 source="agent-signal",
                 created_at=ts,
             )
-            store = make_bead_store(
-                self._config.bead_db_path,
-                gastown_dual_write=_gastown_enabled(),
-            )
+            store = make_bead_store(self._config.bead_db_path)
             store.write(bead)
         except Exception as exc:  # noqa: BLE001
             logger.debug(

@@ -15,7 +15,7 @@ from agent_baton.models.bead import Bead, _generate_bead_id
 from agent_baton.utils.time import utcnow_zulu as _utcnow
 
 if TYPE_CHECKING:
-    from agent_baton.core.engine.bead_store import BeadStore
+    from agent_baton.core.engine.bd_bead_store import BdBeadStore as BeadStore  # WP-G: alias for migration
     from agent_baton.models.execution import StepResult
 
 _log = logging.getLogger(__name__)

@@ -205,9 +205,9 @@ def _assemble_bundle(task_id: str) -> dict[str, Any] | None:
     # Beads
     beads: list[dict[str, Any]] = []
     try:
-        from agent_baton.core.engine.bead_store import BeadStore
+        from agent_baton.core.engine.bead_backend import make_bead_store
 
-        bead_store = BeadStore(db_path)
+        bead_store = make_bead_store(db_path)
         raw_beads = bead_store.query(task_id=task_id, limit=500)
         beads = [
             {

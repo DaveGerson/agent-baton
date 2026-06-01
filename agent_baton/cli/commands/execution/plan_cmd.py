@@ -521,10 +521,10 @@ def handler(args: argparse.Namespace) -> None:
     retro_engine = RetrospectiveEngine()
     bead_store = None
     try:
-        from agent_baton.core.engine.bead_store import BeadStore
+        from agent_baton.core.engine.bead_backend import make_bead_store
         _db = Path(".claude/team-context/baton.db")
         if _db.exists():
-            bead_store = BeadStore(_db)
+            bead_store = make_bead_store(_db)
     except Exception:
         pass
     print("  Analyzing patterns and history...", file=sys.stderr)

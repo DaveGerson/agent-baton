@@ -1,19 +1,14 @@
-"""Bead-store backend selector (ADR-13b staged migration).
+"""Bead-store backend factory (ADR-13b WP-G — bd mandatory).
 
-Returns either the legacy SQLite :class:`BeadStore` or the new ``bd``-backed
-:class:`BdBeadStore`, based on ``BATON_BD_BACKEND``:
+After the ADR-13b teardown the ``bd`` CLI is the **only** bead backend.
+:func:`make_bead_store` always returns :class:`BdBeadStore`; it raises
+:class:`~agent_baton.core.engine.bd_client.BdNotAvailable` when the ``bd``
+binary cannot be found.
 
-- ``sqlite`` (current default) — legacy SQLite store. Keeps every existing
-  consumer and test green while the remaining consumers (synthesizer, PMO UI,
-  executable beads, sync) are migrated off SQLite.
-- ``bd``    — force the ``bd`` backend (used by the new bd tests and by
-  operators who have completed the cutover).
-- ``auto``  — use ``bd`` when it is enabled (:func:`bd_enabled`) *and* the
-  binary is available, otherwise fall back to SQLite.
-
-The default will flip to ``auto`` once the consumer migration lands (the final
-phase of ADR-13b), at which point a fresh install — whose installer has placed
-``bd`` on PATH — runs entirely off beads.
+The legacy ``BATON_BD_BACKEND`` environment variable is accepted but if set
+to anything other than ``"bd"`` a deprecation warning is logged.  The
+``gastown_dual_write`` parameter has been removed — the Gastown git-notes
+infrastructure was deleted in WP-G.
 """
 from __future__ import annotations
 
@@ -24,17 +19,23 @@ from pathlib import Path
 _log = logging.getLogger(__name__)
 
 _BACKEND_ENV = "BATON_BD_BACKEND"
-# ADR-13b step F — behavioural cutover: default to ``auto``.  When ``bd`` is
-# enabled (BATON_BD_ENABLED!=0) and the binary is present (the installer puts
-# it there), the engine runs off beads; otherwise it falls back to the SQLite
-# store so environments without ``bd`` (some CI) keep working.
-_DEFAULT_BACKEND = "auto"
 
 
 def selected_backend() -> str:
-    """Return the configured backend name: ``sqlite`` | ``bd`` | ``auto``."""
+    """Return ``"bd"`` — the only supported bead backend after WP-G.
+
+    If ``BATON_BD_BACKEND`` is set to ``sqlite`` or ``auto`` a deprecation
+    warning is logged and ``"bd"`` is returned anyway.
+    """
     val = os.environ.get(_BACKEND_ENV, "").strip().lower()
-    return val if val in ("sqlite", "bd", "auto") else _DEFAULT_BACKEND
+    if val and val != "bd":
+        _log.warning(
+            "BATON_BD_BACKEND=%r is deprecated after ADR-13b WP-G; "
+            "the SQLite bead store has been removed.  "
+            "Only 'bd' is supported.  Ignoring and using 'bd'.",
+            val,
+        )
+    return "bd"
 
 
 def make_bead_store(
@@ -42,44 +43,39 @@ def make_bead_store(
     *,
     soul_router=None,
     repo_root: Path | None = None,
-    gastown_dual_write: bool = False,
 ):
-    """Construct the appropriate bead store for the current configuration.
+    """Construct a :class:`~agent_baton.core.engine.bd_bead_store.BdBeadStore`.
 
     Args:
-        db_path: Path to the project ``baton.db`` (used by the SQLite backend
-            and to locate the project root / ``.beads/`` for the bd backend).
-        soul_router: Optional SoulRouter (SQLite backend only).
-        repo_root: Project root that owns ``.beads/``; derived from ``db_path``
-            when not supplied.
-        gastown_dual_write: Forwarded to the SQLite backend (git-notes mirror).
+        db_path: Path to the project ``baton.db`` (used to locate the
+            project root / ``.beads/`` for the bd backend).
+        soul_router: Accepted but ignored (was SQLite-backend only).
+        repo_root: Project root that owns ``.beads/``; derived from
+            ``db_path`` when not supplied.
 
     Returns:
-        A bead store exposing the standard ``write``/``read``/``query``/
-        ``ready``/``close``/``annotate``/``link`` surface.
+        A :class:`~agent_baton.core.engine.bd_bead_store.BdBeadStore`.
+
+    Raises:
+        :class:`~agent_baton.core.engine.bd_client.BdNotAvailable`: When
+            the ``bd`` binary is not on PATH.
     """
-    backend = selected_backend()
+    from agent_baton.core.engine.bd_client import BdClient, BdNotAvailable
+
     root = repo_root or _derive_repo_root(db_path)
+    client = BdClient(root)
 
-    if backend in ("bd", "auto"):
-        from agent_baton.core.engine.bd_client import BdClient, bd_enabled
+    if not client.available():
+        raise BdNotAvailable(
+            "The 'bd' CLI is required after ADR-13b WP-G but was not found "
+            "on PATH.  Install it with:  npm install -g @beads/bd  "
+            "(or)  brew install beads"
+        )
 
-        client = BdClient(root)
-        if backend == "bd" or (bd_enabled() and client.available()):
-            from agent_baton.core.engine.bd_bead_store import BdBeadStore
+    from agent_baton.core.engine.bd_bead_store import BdBeadStore
 
-            _log.debug("Bead backend: bd (repo=%s)", root)
-            return BdBeadStore(client)
-        _log.debug("Bead backend: auto fell back to sqlite (bd unavailable/disabled)")
-
-    from agent_baton.core.engine.bead_store import BeadStore
-
-    return BeadStore(
-        db_path,
-        soul_router=soul_router,
-        repo_root=repo_root,
-        gastown_dual_write=gastown_dual_write,
-    )
+    _log.debug("Bead backend: bd (repo=%s)", root)
+    return BdBeadStore(client)
 
 
 def _derive_repo_root(db_path: Path) -> Path:

@@ -1,22 +1,24 @@
 """Wave 6.1 Part C — Executable Beads: ExecutableBeadRunner (bd-81b9).
 
-Glue layer that ties together the bead store, script notes, soul signing,
-and sandbox execution into a single ``run()`` / ``store()`` interface.
+Glue layer that ties together the bead store, soul signing, and sandbox
+execution into a single ``run()`` / ``store()`` interface.
+
+ADR-13b WP-G: git-notes (NotesAdapter) was removed.  Script bodies are
+persisted exclusively in the bead's ``script_body`` metadata field, which is
+stored in ``.beads/issues.jsonl`` by the bd backend.
 
 Responsibilities:
 - ``store(bead, script_body)``:
     1. Lint the script via :class:`ScriptLinter`.
     2. Compute content SHA and construct the ``script_ref``.
     3. Require a soul signature when ``BATON_SOULS_ENABLED=1``.
-    4. Write the script body to ``refs/notes/baton-bead-scripts`` via
-       :class:`NotesAdapter`.
-    5. Write the bead itself (with ``bead_type="executable"``) to the
-       :class:`BeadStore`.
-    6. Return the ``script_ref`` string.
+    4. Write the bead itself (with ``bead_type="executable"`` and inline
+       ``script_body``) to the bead store.
+    5. Return the ``script_ref`` string.
 
 - ``run(bead_id)``:
     1. Resolve the :class:`ExecutableBead` from the store.
-    2. Load the script body from notes (or raise).
+    2. Load the script body from the bead's inline ``script_body`` field.
     3. Execute via :class:`Sandbox`.
     4. Record a child ``discovery`` bead linked via ``"validates"`` or
        ``"contradicts"`` based on exit code.
@@ -34,8 +36,7 @@ from typing import TYPE_CHECKING
 from agent_baton.utils.time import utcnow_zulu as _utcnow
 
 if TYPE_CHECKING:
-    from agent_baton.core.engine.bead_store import BeadStore
-    from agent_baton.core.engine.notes_adapter import NotesAdapter
+    from agent_baton.core.engine.bd_bead_store import BdBeadStore
     from agent_baton.core.engine.soul_router import SoulRouter
     from agent_baton.core.exec.sandbox import ExecutionResult, Sandbox
     from agent_baton.models.bead import ExecutableBead
@@ -54,29 +55,21 @@ class ExecutableBeadRunner:
     """Coordinates storage and execution of executable beads.
 
     Args:
-        bead_store: The project's :class:`BeadStore` instance.
+        bead_store: The project's bead store (a :class:`BdBeadStore`).
         sandbox: A configured :class:`Sandbox` instance.
         soul_router: Optional :class:`SoulRouter`; required when
             ``BATON_SOULS_ENABLED=1``.
-        notes_adapter: Optional :class:`NotesAdapter`; constructed from the
-            current working directory when ``None``.
     """
 
     def __init__(
         self,
-        bead_store: "BeadStore",
+        bead_store: "BdBeadStore",
         sandbox: "Sandbox",
         soul_router: "SoulRouter | None" = None,
-        notes_adapter: "NotesAdapter | None" = None,
     ) -> None:
         self._store = bead_store
         self._sandbox = sandbox
         self._soul_router = soul_router
-        if notes_adapter is None:
-            from agent_baton.core.engine.notes_adapter import NotesAdapter
-            self._notes = NotesAdapter()
-        else:
-            self._notes = notes_adapter
 
     # ------------------------------------------------------------------
     # Public API
@@ -91,7 +84,7 @@ class ExecutableBeadRunner:
             script_body: The full script text.
 
         Returns:
-            The ``script_ref`` string (``refs/notes/baton-bead-scripts:<sha>``).
+            The ``script_ref`` string (content-addressed identifier).
 
         Raises:
             ValueError: When the lint check fails or soul signature is
@@ -121,9 +114,7 @@ class ExecutableBeadRunner:
         bead.script_sha = content_sha
         bead.script_ref = script_ref
         bead.exec_ref = script_ref
-        # ADR-13b WP-1 §3: store the body inline so the bd backend can serve
-        # it without a git-notes round-trip.  The notes write below is kept
-        # as a best-effort fallback for the SQLite + gastown path.
+        # ADR-13b WP-G: script body persisted exclusively in bd metadata blob.
         bead.script_body = script_body
 
         # 3. Soul signature when souls enabled.
@@ -135,21 +126,11 @@ class ExecutableBeadRunner:
                 bead.bead_id,
             )
 
-        # 4. Write script body to git notes (best-effort; store proceeds even
-        #    if notes write fails, because SQLite is the primary store for v1).
-        notes_ok = self._notes.write_script(content_sha, script_body)
-        if not notes_ok:
-            _log.warning(
-                "BEAD_WARNING: notes-write-pending for script %s — "
-                "body not in git notes, only in BeadStore.",
-                content_sha[:8],
-            )
-
-        # 5. Persist the bead.
+        # 4. Persist the bead (script_body rides in bd metadata).
         written_id = self._store.write(bead)
         if not written_id:
             raise RuntimeError(
-                f"BeadStore.write failed for executable bead {bead.bead_id}"
+                f"BdBeadStore.write failed for executable bead {bead.bead_id}"
             )
 
         _log.debug(
@@ -221,43 +202,29 @@ class ExecutableBeadRunner:
         return ExecutableBead.from_dict(raw.to_dict())
 
     def _load_script(self, bead: "ExecutableBead") -> str:
-        """Load script body from the bead itself or git notes, or raise.
+        """Load script body from the bead's inline ``script_body`` field.
 
-        ADR-13b WP-1 §3: prefer the inline ``script_body`` field that is
-        persisted in the bead's metadata blob (works with both the SQLite
-        and bd backends).  Fall back to git notes for beads created before
-        this field was added.
+        ADR-13b WP-G: script bodies are stored exclusively in bd metadata.
+        The git-notes fallback path has been removed.
         """
-        # Fast path: body was stored inline (bd backend or new SQLite beads).
-        if bead.script_body:
-            # Integrity guard: the body now travels in the bead metadata blob
-            # (and thus in .beads/issues.jsonl). Verify it against the SHA
-            # recorded at store() time so a tampered body cannot execute
-            # silently. Beads created before script_sha existed skip the check.
-            if bead.script_sha:
-                from agent_baton.core.exec.script_hash import compute_script_sha
-                actual = compute_script_sha(bead.script_body)
-                if actual != bead.script_sha:
-                    raise ValueError(
-                        f"ExecutableBead {bead.bead_id} script_body failed integrity "
-                        f"check (sha {actual[:8]} != recorded {bead.script_sha[:8]}) — "
-                        "the script may have been tampered with; refusing to run."
-                    )
-            return bead.script_body
+        if not bead.script_body:
+            raise ValueError(
+                f"ExecutableBead {bead.bead_id} has no script_body in bd metadata. "
+                "The bead may have been created before ADR-13b WP-G or the body "
+                "was lost during migration.  Re-store the bead with a body."
+            )
 
-        # Legacy path: body lives in git notes (old SQLite + gastown beads).
-        if not bead.script_sha:
-            raise ValueError(
-                f"ExecutableBead {bead.bead_id} has no script_sha — cannot load script."
-            )
-        body = self._notes.read_script(bead.script_sha)
-        if body is None:
-            raise ValueError(
-                f"Script body for bead {bead.bead_id} (sha={bead.script_sha[:8]}) "
-                "not found in refs/notes/baton-bead-scripts. "
-                "Run `baton beads sync` to rebuild notes from the SQLite mirror."
-            )
-        return body
+        # Integrity guard: verify body against the SHA recorded at store() time.
+        if bead.script_sha:
+            from agent_baton.core.exec.script_hash import compute_script_sha
+            actual = compute_script_sha(bead.script_body)
+            if actual != bead.script_sha:
+                raise ValueError(
+                    f"ExecutableBead {bead.bead_id} script_body failed integrity "
+                    f"check (sha {actual[:8]} != recorded {bead.script_sha[:8]}) — "
+                    "the script may have been tampered with; refusing to run."
+                )
+        return bead.script_body
 
     def _record_result_bead(
         self,

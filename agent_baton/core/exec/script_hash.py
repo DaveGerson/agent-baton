@@ -1,18 +1,15 @@
-"""Pure helper for executable-bead script hashing (ADR-13b, WP-1 §C).
+"""Pure helper for executable-bead script hashing (ADR-13b WP-G).
 
-Relocated from :class:`~agent_baton.core.engine.notes_adapter.NotesAdapter`
-so that exec-side code (``runner.py``, ``bead_cmd.py``) can compute script
-SHAs without importing the git-notes layer.
-
-:func:`compute_script_sha` and :func:`script_ref_for` are kept as static
-methods on ``NotesAdapter`` as re-export shims so any existing callers that
-import from ``notes_adapter`` continue to work unchanged.
+Script SHAs are content-addressed identifiers used to detect tampering.
+After ADR-13b WP-G, script bodies are stored exclusively in the bd bead
+metadata blob — the git-notes layer (NotesAdapter) has been removed.
 """
 from __future__ import annotations
 
 import hashlib
 
-# Canonical git-notes ref prefix for content-addressed script storage.
+# Canonical ref-style prefix for content-addressed script identity (used as an
+# opaque identifier string; git notes are no longer written).
 _SCRIPTS_REF_PREFIX = "refs/notes/baton-bead-scripts"
 
 

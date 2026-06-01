@@ -165,11 +165,11 @@ def _discover_storage() -> object | None:
 
 def _discover_bead_store() -> object | None:
     try:
-        from agent_baton.core.engine.bead_store import BeadStore
+        from agent_baton.core.engine.bead_backend import make_bead_store
 
         db_path = Path(".claude/team-context/baton.db")
         if db_path.exists():
-            return BeadStore(db_path)
+            return make_bead_store(db_path)
         return None
     except Exception:
         return None

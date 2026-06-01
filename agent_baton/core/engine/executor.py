@@ -614,17 +614,10 @@ class ExecutionEngine:
                             _log.debug(
                                 "SoulRouter init skipped (non-fatal): %s", _soul_init_exc
                             )
-                    # Gastown Part A (bd-971d): dual-write bead memory to
-                    # git-notes when BATON_GASTOWN_ENABLED != 0 (default ON in
-                    # Phase M1).  repo_root is derived by BeadStore from the
-                    # db path when not supplied; warn-only on any notes failure.
-                    from agent_baton.core.engine.bead_store import (
-                        gastown_dual_write_enabled as _gastown_enabled,
-                    )
+                    # ADR-13b WP-G: bd is now the mandatory bead backend.
                     self._bead_store = make_bead_store(
                         _bead_db,
                         soul_router=_soul_router,
-                        gastown_dual_write=_gastown_enabled(),
                     )
                     # ADR-13b WP-1 §2: DerivedBeadStore alongside the bead
                     # store for edges, clusters, and handoffs.  Lives at
@@ -1034,17 +1027,11 @@ class ExecutionEngine:
                 from agent_baton.core.intel.bead_synthesizer import synthesize_beads
 
                 result = synthesize_beads(self._bead_store, self._derived_store)
-            elif hasattr(self._bead_store, "_conn"):
-                # Legacy SQLite-only fallback when no derived store was built.
-                # The bd backend has no ``_conn()``; guard so we skip cleanly
-                # instead of raising into the broad except below (ADR-13b
-                # review blocker #3).
-                from agent_baton.core.intel.bead_synthesizer import BeadSynthesizer
-
-                conn = self._bead_store._conn()
-                result = BeadSynthesizer().synthesize(conn)
             else:
-                # bd backend without a derived store — nothing to synthesize.
+                # No derived store available (bd backend or no derived DB yet).
+                # ADR-13b WP-G: the legacy SQLite _conn() fallback has been
+                # removed — bd backend has no _conn() and synthesis requires
+                # a derived store (DerivedBeadStore).
                 return
             if result.edges_added or result.clusters_created or result.conflicts_flagged:
                 _log.debug(

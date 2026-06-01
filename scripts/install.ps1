@@ -5,9 +5,8 @@ param(
     [ValidateSet("user", "project", "")]
     [string]$Scope = "",
     [switch]$Upgrade,
-    # Gastown git-notes bead persistence (Phase M1): configured by default to
-    # match the runtime default (BATON_GASTOWN_ENABLED=1).  Pass -NoGastown to
-    # skip the git config.
+    # ADR-13b WP-G: -NoGastown / -Gastown kept as no-ops for backward compat.
+    # Gastown git-notes persistence has been removed.
     [switch]$NoGastown,
     # Beads (bd) CLI bead/issue backend (ADR-13b): auto-installed by default.
     # Pass -NoBeads to skip.
@@ -419,60 +418,14 @@ if (-not (Test-Path $BatonDir)) {
     }
 }
 
-# ── Step 5: Gastown Git-Notes Bead Persistence ──────────────
-# Phase M1 default: ON (matches runtime default BATON_GASTOWN_ENABLED=1).
-# Pass -NoGastown to skip, or set BATON_GASTOWN_ENABLED=0 at runtime to
-# disable dual-write without touching git config.
-if (-not $NoGastown) {
-    Write-Host ""
-    Write-Host "  STEP 5: Gastown Git-Notes Bead Persistence" -ForegroundColor Cyan
-    Write-Host "  ───────────────────────────────────────────"
-    git rev-parse --git-dir 2>$null | Out-Null
-    if ($LASTEXITCODE -eq 0) {
-        # Carry bead notes across rebases
-        git config --local notes.rewriteRef "refs/notes/baton-beads" 2>$null
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "  + git config: notes.rewriteRef set" -ForegroundColor Green
-        } else {
-            Write-Host "  ! notes.rewriteRef config failed (non-fatal)" -ForegroundColor Yellow
-        }
-
-        # Register the JSON-aware bead merge driver
-        git config --local merge.baton-notes.driver "scripts/baton-notes-merge %O %A %B" 2>$null
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "  + git config: merge.baton-notes.driver set" -ForegroundColor Green
-        } else {
-            Write-Host "  ! merge driver config failed (non-fatal)" -ForegroundColor Yellow
-        }
-
-        # Fetch bead notes from origin on git fetch/pull (idempotent)
-        $NotesFetch = "+refs/notes/baton-beads:refs/notes/baton-beads"
-        $existing = git config --local --get-all remote.origin.fetch 2>$null
-        if ($existing -and ($existing -match [regex]::Escape($NotesFetch))) {
-            Write-Host "  ~ remote.origin.fetch: notes refspec already present" -ForegroundColor Yellow
-        } else {
-            git config --local --add remote.origin.fetch $NotesFetch 2>$null
-            if ($LASTEXITCODE -eq 0) {
-                Write-Host "  + git config: remote.origin.fetch notes refspec added" -ForegroundColor Green
-            } else {
-                Write-Host "  ! notes fetch refspec config failed (non-fatal)" -ForegroundColor Yellow
-            }
-        }
-        Write-Host "  ~ bead memory now persists to refs/notes/baton-beads (BATON_GASTOWN_ENABLED=1)" -ForegroundColor White
-    } else {
-        Write-Host "  ! Not inside a git repository — Gastown git config skipped" -ForegroundColor Yellow
-        Write-Host "    Bead memory still works (SQLite); run 'git init' then re-run to enable" -ForegroundColor White
-        Write-Host "    cross-clone git-notes replication, or pass -NoGastown to silence." -ForegroundColor White
-    }
-}
-
-# ── Step 6: Beads (bd) CLI — bead/issue backend (ADR-13b) ────
-# Auto-install the real `bd` tool so beads memory "deploys as part of the
-# flow." Skippable with -NoBeads or BATON_SKIP_BEADS_INSTALL=1.
+# ── Step 5: Beads (bd) CLI — mandatory bead backend (ADR-13b WP-G) ─
+# bd is now the ONLY bead backend — SQLite fallback removed in WP-G.
+# Auto-install it so beads memory deploys as part of the flow.
+# Skippable with -NoBeads or BATON_SKIP_BEADS_INSTALL=1.
 if (-not $NoBeads -and $env:BATON_SKIP_BEADS_INSTALL -ne "1") {
     Write-Host ""
-    Write-Host "  STEP 6: Beads (bd) CLI — bead/issue backend" -ForegroundColor Cyan
-    Write-Host "  ───────────────────────────────────────────"
+    Write-Host "  STEP 5: Beads (bd) CLI — mandatory bead backend" -ForegroundColor Cyan
+    Write-Host "  ────────────────────────────────────────────────"
     if (Get-Command bd -ErrorAction SilentlyContinue) {
         Write-Host "  ~ bd already installed: $((bd version 2>$null) | Select-Object -First 1)" -ForegroundColor Yellow
     } elseif (Get-Command npm -ErrorAction SilentlyContinue) {
@@ -482,11 +435,11 @@ if (-not $NoBeads -and $env:BATON_SKIP_BEADS_INSTALL -ne "1") {
             Write-Host "  + bd installed: $((bd version 2>$null) | Select-Object -First 1)" -ForegroundColor Green
         } else {
             Write-Host "  ! Could not auto-install bd. Install manually: npm install -g @beads/bd" -ForegroundColor Yellow
-            Write-Host "    Without bd, baton falls back to the built-in SQLite bead store." -ForegroundColor White
+            Write-Host "    bd is now REQUIRED — baton will raise BdNotAvailable without it." -ForegroundColor White
         }
     } else {
         Write-Host "  ! npm not found — install bd manually: npm install -g @beads/bd" -ForegroundColor Yellow
-        Write-Host "    Then beads memory activates with BATON_BD_BACKEND=auto." -ForegroundColor White
+        Write-Host "    bd is now REQUIRED — baton will raise BdNotAvailable without it." -ForegroundColor White
     }
 }
 

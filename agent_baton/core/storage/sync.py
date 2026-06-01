@@ -618,4 +618,22 @@ def auto_sync_current_project() -> SyncResult | None:
         "auto_sync_current_project: syncing project %s from %s",
         best_project_id, db_path,
     )
-    return engine.push(best_project_id, db_path, trigger="auto")
+    result = engine.push(best_project_id, db_path, trigger="auto")
+
+    # ADR-13b WP-G: export bead projection to central.db so NOC cross-project
+    # counts stay live.  Only runs when the bd backend is active (bd is now
+    # mandatory so this always runs, but we guard defensively).
+    try:
+        from agent_baton.core.storage.central import export_beads_to_central
+        export_beads_to_central(
+            project_id=best_project_id,
+            project_root=best_path,
+            central_db_path=central_path,
+        )
+    except Exception as _bead_export_exc:
+        _log.warning(
+            "auto_sync_current_project: bead export failed (non-fatal): %s",
+            _bead_export_exc,
+        )
+
+    return result
