@@ -223,6 +223,61 @@ class BdBeadStore:
         except BdError as exc:
             _log.warning("BdBeadStore.increment_retrieval_count failed for %s: %s", bead_id, exc)
 
+    def has_unresolved_conflicts(self, task_id: str) -> bool:
+        """True if any open bead in *task_id* is tagged ``conflict:unresolved``.
+
+        Parity with ``BeadStore.has_unresolved_conflicts`` (called on the
+        executor's main flow), implemented via the store query surface.
+        """
+        return bool(
+            self.query(task_id=task_id, status="open", tags=["conflict:unresolved"])
+        )
+
+    def resolve_conflict(self, bead_id: str) -> None:
+        """Drop the ``conflict:unresolved`` tag from *bead_id* (re-writes labels)."""
+        try:
+            bead = self.read(bead_id)
+            if bead is None:
+                return
+            if "conflict:unresolved" in (bead.tags or []):
+                bead.tags = [t for t in bead.tags if t != "conflict:unresolved"]
+                self.write(bead)
+        except BdError as exc:
+            _log.warning("BdBeadStore.resolve_conflict failed for %s: %s", bead_id, exc)
+
+    def decay(self, max_age_days: int, task_id: str | None = None) -> int:
+        """No-op under the bd backend (bd owns compaction/TTL).
+
+        baton's SQLite-era decay archived old closed beads; on bd, lifecycle
+        compaction is the tool's responsibility (``bd``'s ephemeral/TTL +
+        Dolt GC).  Returns 0 explicitly so callers don't see an
+        ``AttributeError`` and the no-op is intentional rather than silent.
+        """
+        _log.debug("BdBeadStore.decay is a no-op (bd owns compaction); returning 0")
+        return 0
+
+    def find_recent_approvals(self, tag: str, max_age_minutes: int = 5) -> list[Bead]:
+        """Return open beads carrying *tag* created within *max_age_minutes*.
+
+        Parity with ``BeadStore.find_recent_approvals`` (swarm sign-off gate).
+        """
+        from datetime import datetime, timedelta, timezone
+
+        beads = self.query(status="open", tags=[tag], limit=200)
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
+        out: list[Bead] = []
+        for b in beads:
+            try:
+                created = datetime.fromisoformat((b.created_at or "").replace("Z", "+00:00"))
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+            if created >= cutoff:
+                out.append(b)
+        out.sort(key=lambda b: b.created_at, reverse=True)
+        return out
+
     def ready(self, task_id: str) -> list[Bead]:
         """Return ready (unblocked, open) beads, scoped to *task_id*."""
         try:

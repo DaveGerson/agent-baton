@@ -399,6 +399,26 @@ class TestBdIntegration:
         all_task = store.query(task_id="T-42")
         assert {b.bead_id for b in all_task} == {"bd-aaaa", "bd-bbbb"}
 
+    def test_beadstore_surface_parity_methods(self, tmp_path, monkeypatch):
+        """BdBeadStore must implement the full BeadStore surface the engine calls
+        (decay/has_unresolved_conflicts/resolve_conflict/find_recent_approvals)
+        so no call AttributeErrors under the bd backend."""
+        store = self._store(tmp_path, monkeypatch)
+        # decay is an explicit no-op (bd owns compaction).
+        assert store.decay(max_age_days=7) == 0
+        # conflict lifecycle round-trip.
+        store.write(_sample_bead(bead_id="bd-conf", tags=["conflict:unresolved"]))
+        assert store.has_unresolved_conflicts("T-42") is True
+        store.resolve_conflict("bd-conf")
+        assert store.has_unresolved_conflicts("T-42") is False
+        # recent-approvals window.
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        store.write(_sample_bead(bead_id="bd-appr", tags=["swarm-refactor"],
+                                 created_at=now))
+        assert any(b.bead_id == "bd-appr"
+                   for b in store.find_recent_approvals("swarm-refactor", 60))
+
     def test_quality_score_and_retrieval_count_persist(self, tmp_path, monkeypatch):
         """ADR-13b review blocker #2: BEAD_FEEDBACK analytics must persist on bd."""
         store = self._store(tmp_path, monkeypatch)
