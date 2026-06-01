@@ -110,6 +110,33 @@ project's `bd list --json` / `.beads/issues.jsonl` (reuse `adapters/beads.py`).
   new `tests/storage/test_derived_bead_store.py`, `tests/intel/` synth tests; add
   a static lint banning `BeadStore(`/`._conn()` outside `bead_store.py`.
 
+## Rollback runbook (migration safety, step 2.1)
+
+The destructive work is Phase 3 (step G): dropping `beads`/`bead_tags`/
+`bead_anchors` and the central mirror. Safety net:
+
+1. **Automatic pre-migration backup.** `core/storage/migrate.py` runs
+   `migration_backup.backup_db()` before applying, writing a self-contained
+   snapshot `<db>.bak-<schema_version>-<timestamp>` (WAL checkpointed first).
+   The step-G DROP migration MUST go through the normal migration path so this
+   fires — never DROP out-of-band.
+2. **Reversible migration.** The step-G migration is paired with a documented
+   down-path: restore the pre-migration backup (the SQLite bead tables are not
+   recreated by a forward migration once removed, so restore-from-backup is the
+   supported rollback rather than an inverse DDL migration).
+3. **Restore command.** `scripts/restore_baton_db.sh [--list] [--file BACKUP]`
+   lists snapshots and restores the newest (or a named one), snapshotting the
+   current DB first so the restore is itself reversible, and clearing stale
+   `-wal`/`-shm` sidecars.
+4. **`bd` data is independent.** `.beads/` (the new source of record) is not
+   touched by a `baton.db` rollback; `bd backup` covers the bead data itself.
+5. **Derived DB is disposable.** `baton-derived.db` can be deleted and rebuilt
+   via `baton beads synthesize` — it is never a rollback concern.
+
+Verification before Phase 3: dry-run a DROP migration on a copy, confirm the
+`.bak-*` is written and `restore_baton_db.sh --list` sees it, then restore and
+confirm the tables return.
+
 ## Risks
 
 - Hidden `_conn()`/`BeadStore(` callers → add static lint (WP-H).
