@@ -110,6 +110,29 @@ project's `bd list --json` / `.beads/issues.jsonl` (reuse `adapters/beads.py`).
   new `tests/storage/test_derived_bead_store.py`, `tests/intel/` synth tests; add
   a static lint banning `BeadStore(`/`._conn()` outside `bead_store.py`.
 
+## Locked API contract (API schema, step 3.1)
+
+The PMO bead endpoints' response models are **frozen** — implementers reroute
+the data source to `make_bead_store()` but MUST keep these shapes byte-stable so
+the React UI needs no change:
+
+- `GET /pmo/beads` → `BeadListResponse { beads: BeadResponse[], total: int }`.
+- `BeadResponse` mirrors `models.bead.Bead`: `bead_id, task_id, step_id,
+  agent_name, bead_type, content, confidence, scope, tags[], affected_files[],
+  status, created_at, closed_at, summary, links[BeadLinkResponse], source,
+  token_estimate, quality_score, retrieval_count`.
+- `BeadLinkResponse { target_bead_id, link_type, created_at }`.
+- `GET /pmo/arch-beads` → `ArchBeadResponse[] { bead_id, bead_type, agent_name,
+  content, affected_files[], status, created_at, tags[] }`.
+- `POST /pmo/arch-beads/{id}/review` → `ArchReviewResponse` (unchanged).
+
+`bead_type` is a free-form `str` server-side, so the new `executable` value
+needs **no** API schema change. The only client change is adding `executable`
+to the TS `BeadType` union + color/label maps (WP-3). Validation rule for
+implementers: a `BdBeadStore`-sourced `BeadResponse` must round-trip the same
+fields a SQLite-sourced one did — covered by an API test asserting field parity
+under `BATON_BD_BACKEND=bd`.
+
 ## Rollback runbook (migration safety, step 2.1)
 
 The destructive work is Phase 3 (step G): dropping `beads`/`bead_tags`/
