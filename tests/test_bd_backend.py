@@ -267,16 +267,21 @@ def test_non_executable_bead_still_reconstructed_as_base_bead():
 # ---------------------------------------------------------------------------
 
 
-def test_default_backend_is_sqlite(monkeypatch):
+def test_default_backend_is_auto(monkeypatch):
+    # ADR-13b step F: the default flipped to ``auto`` (WP-H update).
+    # ``auto`` resolves to ``bd`` when bd is installed and enabled, otherwise
+    # falls back to SQLite — tested by test_make_bead_store_auto_resolves below.
     monkeypatch.delenv("BATON_BD_BACKEND", raising=False)
-    assert selected_backend() == "sqlite"
+    assert selected_backend() == "auto"
 
 
 def test_backend_env_override(monkeypatch):
     monkeypatch.setenv("BATON_BD_BACKEND", "bd")
     assert selected_backend() == "bd"
+    monkeypatch.setenv("BATON_BD_BACKEND", "sqlite")
+    assert selected_backend() == "sqlite"
     monkeypatch.setenv("BATON_BD_BACKEND", "bogus")
-    assert selected_backend() == "sqlite"  # unknown falls back
+    assert selected_backend() == "auto"  # unknown falls back to the new default
 
 
 def test_bd_enabled_default_on(monkeypatch):
@@ -286,12 +291,31 @@ def test_bd_enabled_default_on(monkeypatch):
     assert bd_enabled() is False
 
 
-def test_make_bead_store_sqlite_default(tmp_path, monkeypatch):
-    monkeypatch.delenv("BATON_BD_BACKEND", raising=False)
+def test_make_bead_store_sqlite_when_pinned(tmp_path, monkeypatch):
+    # ADR-13b step F: default is now ``auto``.  Explicitly pin to sqlite to
+    # get a BeadStore regardless of whether bd is installed.
+    monkeypatch.setenv("BATON_BD_BACKEND", "sqlite")
     store = make_bead_store(tmp_path / "baton.db")
     from agent_baton.core.engine.bead_store import BeadStore
 
     assert isinstance(store, BeadStore)
+
+
+def test_make_bead_store_auto_uses_bd_when_available(tmp_path, monkeypatch):
+    # ADR-13b step F: ``auto`` resolves to BdBeadStore when bd is installed.
+    from agent_baton.core.engine.bd_bead_store import BdBeadStore
+    from agent_baton.core.engine.bead_store import BeadStore
+
+    monkeypatch.delenv("BATON_BD_BACKEND", raising=False)
+    store = make_bead_store(tmp_path / "baton.db")
+    if _BD_AVAILABLE:
+        assert isinstance(store, BdBeadStore), (
+            "auto+bd-present must return BdBeadStore"
+        )
+    else:
+        assert isinstance(store, BeadStore), (
+            "auto+bd-absent must fall back to BeadStore"
+        )
 
 
 # ---------------------------------------------------------------------------

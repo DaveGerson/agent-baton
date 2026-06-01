@@ -5,6 +5,12 @@ The baton.db is created in a temporary directory and pointed at via a
 monkeypatched `_DEFAULT_DB_PATH` in `bead_cmd`, so tests are fully
 isolated from any real project database.
 
+ADR-13b WP-H: This module tests SQLite BeadStore internals and CLI
+behavior seeded through the SQLite backend. All tests are pinned to
+``BATON_BD_BACKEND=sqlite`` via the module-level autouse fixture so the
+CLI reads from the same store the fixtures write to, regardless of
+whether ``bd`` is installed in the environment.
+
 Coverage:
 - baton beads --help exits 0 and lists all subcommands
 - baton beads list — no DB: prints informational message, exits 0
@@ -36,6 +42,20 @@ import pytest
 from agent_baton.cli.commands import bead_cmd
 from agent_baton.core.engine.bead_store import BeadStore
 from agent_baton.models.bead import Bead, BeadLink
+
+
+# ---------------------------------------------------------------------------
+# Backend pinning — ADR-13b WP-H
+# ---------------------------------------------------------------------------
+# All tests in this module seed data through the SQLite BeadStore and
+# exercise the CLI.  Pin BATON_BD_BACKEND=sqlite so the CLI's
+# _get_bead_store() reads from the same store, regardless of whether
+# the bd binary is installed.
+
+
+@pytest.fixture(autouse=True)
+def _pin_sqlite_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BATON_BD_BACKEND", "sqlite")
 
 
 # ---------------------------------------------------------------------------

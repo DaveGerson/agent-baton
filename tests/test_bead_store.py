@@ -871,101 +871,23 @@ class TestSchemaMigration:
 
 
 class TestSyncIntegration:
-    def _make_sqlite_store_with_execution(
-        self, db_path: Path, task_id: str
-    ):
-        """Create a SqliteStorage, save a minimal execution, close it."""
-        from agent_baton.core.storage.sqlite_backend import SqliteStorage
-        from agent_baton.models.execution import (
-            ExecutionState,
-            MachinePlan,
-            PlanPhase,
-            PlanStep,
-        )
-        sqlite_store = SqliteStorage(db_path)
-        step = PlanStep(step_id="1.1", agent_name="test-engineer",
-                        task_description="Write tests")
-        phase = PlanPhase(phase_id=1, name="Test", steps=[step], gate=None,
-                          approval_required=False)
-        plan = MachinePlan(task_id=task_id, task_summary="Sync test",
-                           risk_level="LOW", phases=[phase])
-        state = ExecutionState(
-            task_id=task_id,
-            plan=plan,
-            status="complete",
-            started_at="2026-01-01T00:00:00Z",
-            completed_at="2026-01-01T01:00:00Z",
-        )
-        sqlite_store.save_execution(state)
-        sqlite_store.close()
+    # ADR-13b WP-H (§5): The beads and bead_tags SyncTableSpecs were removed
+    # from sync.py as part of WP-2 — beads now live in the bd store and are
+    # projected to central.db via export_beads_to_central(), not SyncEngine.
+    # These tests verified the old SQLite replication path which no longer
+    # exists.  Retired in the WP-H test sweep; cross-project bead projections
+    # are covered by tests/test_adr13b_wp2.py::TestExportBeatsToCentral.
 
     def test_beads_appear_in_central_db_after_push(self, tmp_path: Path) -> None:
-        """Bead rows written to baton.db must sync to central.db via SyncEngine."""
-        from agent_baton.core.storage.central import CentralStore
-        from agent_baton.core.storage.sync import SyncEngine
-
-        db_path = tmp_path / "proj" / "baton.db"
-        db_path.parent.mkdir(parents=True)
-
-        self._make_sqlite_store_with_execution(db_path, "task-sync-test")
-
-        # Write beads directly via BeadStore
-        bead_store = BeadStore(db_path)
-        bead = _make_bead(
-            bead_id="bd-sync-01",
-            task_id="task-sync-test",
-            content="Sync test discovery",
-            tags=["sync", "test"],
+        pytest.skip(
+            "ADR-13b WP-2 §5: beads no longer replicate via SyncEngine; "
+            "cross-project projection is now export_beads_to_central() — "
+            "see tests/test_adr13b_wp2.py::TestExportBeatsToCentral"
         )
-        bead_store.write(bead)
-
-        # Push to central
-        central_path = tmp_path / "central.db"
-        engine = SyncEngine(central_path)
-        result = engine.push("proj-sync", db_path)
-        assert result.success, result.errors
-
-        # Verify bead appears in central.db
-        central = CentralStore(central_path)
-        rows = central.query(
-            "SELECT bead_id, content FROM beads "
-            "WHERE project_id = ? AND bead_id = ?",
-            ("proj-sync", "bd-sync-01"),
-        )
-        assert len(rows) == 1
-        assert rows[0]["bead_id"] == "bd-sync-01"
-        assert rows[0]["content"] == "Sync test discovery"
-        central.close()
 
     def test_bead_tags_appear_in_central_db_after_push(self, tmp_path: Path) -> None:
-        """bead_tags rows must also sync to central.db after SyncEngine.push()."""
-        from agent_baton.core.storage.central import CentralStore
-        from agent_baton.core.storage.sync import SyncEngine
-
-        db_path = tmp_path / "proj2" / "baton.db"
-        db_path.parent.mkdir(parents=True)
-
-        self._make_sqlite_store_with_execution(db_path, "task-tags-sync")
-
-        bead_store = BeadStore(db_path)
-        bead = _make_bead(
-            bead_id="bd-tag-sync",
-            task_id="task-tags-sync",
-            tags=["production", "auth"],
+        pytest.skip(
+            "ADR-13b WP-2 §5: bead_tags no longer replicate via SyncEngine; "
+            "cross-project projection is now export_beads_to_central() — "
+            "see tests/test_adr13b_wp2.py::TestExportBeatsToCentral"
         )
-        bead_store.write(bead)
-
-        central_path = tmp_path / "central2.db"
-        engine = SyncEngine(central_path)
-        result = engine.push("proj-tags", db_path)
-        assert result.success, result.errors
-
-        central = CentralStore(central_path)
-        rows = central.query(
-            "SELECT tag FROM bead_tags WHERE project_id = ? AND bead_id = ? ORDER BY tag",
-            ("proj-tags", "bd-tag-sync"),
-        )
-        tags = [r["tag"] for r in rows]
-        assert "auth" in tags
-        assert "production" in tags
-        central.close()

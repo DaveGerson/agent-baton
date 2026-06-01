@@ -12,6 +12,11 @@ Features covered:
   F12 — Quality Scoring (Tier 4)
 
 Inspired by Steve Yegge's Beads agent memory system (beads-ai/beads-cli).
+
+ADR-13b WP-H: This module tests SQLite BeadStore internals (conflict
+detection, decay, quality scoring, CLI graph output).  All tests are
+pinned to ``BATON_BD_BACKEND=sqlite`` via the module-level autouse
+fixture so CLI helpers read from the same store that fixtures write to.
 """
 from __future__ import annotations
 
@@ -28,6 +33,16 @@ import pytest
 
 from agent_baton.core.engine.bead_store import BeadStore
 from agent_baton.models.bead import Bead, BeadLink
+
+
+# ---------------------------------------------------------------------------
+# Backend pinning — ADR-13b WP-H
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _pin_sqlite_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BATON_BD_BACKEND", "sqlite")
 
 
 # ---------------------------------------------------------------------------

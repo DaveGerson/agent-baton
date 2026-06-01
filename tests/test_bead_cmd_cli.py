@@ -19,6 +19,19 @@ from agent_baton.models.bead import Bead
 
 
 # ---------------------------------------------------------------------------
+# Backend pinning — ADR-13b WP-H
+# ---------------------------------------------------------------------------
+# Tests seed data through BeadStore (SQLite) and verify CLI behavior.
+# Pin BATON_BD_BACKEND=sqlite so _get_bead_store() reads from the same
+# store the fixture writes to, regardless of bd availability.
+
+
+@pytest.fixture(autouse=True)
+def _pin_sqlite_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BATON_BD_BACKEND", "sqlite")
+
+
+# ---------------------------------------------------------------------------
 # Helpers (mirrors test_bead_cli.py style)
 # ---------------------------------------------------------------------------
 

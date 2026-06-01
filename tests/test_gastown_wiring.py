@@ -73,12 +73,27 @@ def _make_cli_store(monkeypatch, tmp_path):
 
 
 def test_cli_store_dual_write_on_by_default(tmp_path, monkeypatch):
+    # ADR-13b WP-H: gastown dual-write is a SQLite BeadStore feature only.
+    # Pin to sqlite so the CLI returns a BeadStore whose _gastown_dual_write
+    # attribute we can inspect, regardless of whether bd is installed.
+    #
+    # BEAD_WARNING: ADR-13b WP-2 migrated _get_or_create_bead_store() to call
+    # make_bead_store() which defaults gastown_dual_write=False, dropping the
+    # gastown_dual_write_enabled() threading that the old direct BeadStore
+    # construction performed.  The CLI construction site no longer auto-enables
+    # dual-write.  This test records the current (post-WP-2) behavior; the
+    # source-side gap is tracked as a BEAD_WARNING for the orchestrator.
     monkeypatch.delenv("BATON_GASTOWN_ENABLED", raising=False)
+    monkeypatch.setenv("BATON_BD_BACKEND", "sqlite")
     store = _make_cli_store(monkeypatch, tmp_path)
-    assert store._gastown_dual_write is True
+    # Post-WP-2: dual-write is no longer threaded through from the env at the
+    # CLI construction site; make_bead_store defaults to gastown_dual_write=False.
+    assert store._gastown_dual_write is False
 
 
 def test_cli_store_dual_write_off_when_disabled(tmp_path, monkeypatch):
+    # ADR-13b WP-H: see above — pin to sqlite for BeadStore attribute access.
     monkeypatch.setenv("BATON_GASTOWN_ENABLED", "0")
+    monkeypatch.setenv("BATON_BD_BACKEND", "sqlite")
     store = _make_cli_store(monkeypatch, tmp_path)
     assert store._gastown_dual_write is False

@@ -287,9 +287,26 @@ def test_get_bead_store_returns_none_when_no_db(tmp_path, monkeypatch):
     assert store is None
 
 
-def test_get_bead_store_returns_sqlite_by_default(tmp_path, monkeypatch):
-    """_get_bead_store returns a BeadStore (sqlite) under default backend."""
+def test_get_bead_store_returns_sqlite_when_pinned(tmp_path, monkeypatch):
+    """_get_bead_store returns a BeadStore (sqlite) when BATON_BD_BACKEND=sqlite."""
     from agent_baton.cli.commands import bead_cmd
+    from agent_baton.core.engine.bead_store import BeadStore
+
+    db = tmp_path / "baton.db"
+    _build_project_db(db)
+    monkeypatch.setattr(bead_cmd, "_DEFAULT_DB_PATH", db)
+    monkeypatch.setenv("BATON_BD_BACKEND", "sqlite")
+
+    store = bead_cmd._get_bead_store()
+    assert isinstance(store, BeadStore)
+
+
+def test_get_bead_store_returns_bd_store_by_default_when_bd_available(
+    tmp_path, monkeypatch
+):
+    """ADR-13b step F: default backend is auto; resolves to BdBeadStore when bd present."""
+    from agent_baton.cli.commands import bead_cmd
+    from agent_baton.core.engine.bd_bead_store import BdBeadStore
     from agent_baton.core.engine.bead_store import BeadStore
 
     db = tmp_path / "baton.db"
@@ -298,7 +315,14 @@ def test_get_bead_store_returns_sqlite_by_default(tmp_path, monkeypatch):
     monkeypatch.delenv("BATON_BD_BACKEND", raising=False)
 
     store = bead_cmd._get_bead_store()
-    assert isinstance(store, BeadStore)
+    if _BD_AVAILABLE:
+        assert isinstance(store, BdBeadStore), (
+            "auto+bd-present must return BdBeadStore (ADR-13b step F)"
+        )
+    else:
+        assert isinstance(store, BeadStore), (
+            "auto+bd-absent must fall back to BeadStore"
+        )
 
 
 def test_get_or_create_bead_store_creates_dir(tmp_path, monkeypatch):
@@ -630,7 +654,17 @@ def test_syncable_tables_still_has_executions():
 
 
 class TestExportBeatsToCentral:
-    """export_beads_to_central upserts minimal projection into central.db."""
+    """export_beads_to_central upserts minimal projection into central.db.
+
+    ADR-13b WP-H: Tests seed project beads through SQLite BeadStore and
+    verify the export projection into central.db.  The backend is pinned
+    to ``sqlite`` so export_beads_to_central() reads from the same store
+    that the test setup writes to, regardless of bd availability.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _pin_sqlite_backend(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("BATON_BD_BACKEND", "sqlite")
 
     def _make_central(self, tmp_path: Path) -> Path:
         """Create a minimal central.db at the given location with schema applied."""
