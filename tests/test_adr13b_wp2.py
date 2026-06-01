@@ -685,16 +685,6 @@ class TestExportBeatsToCentral:
         )
         assert count == 0
 
-    @pytest.mark.xfail(
-        reason=(
-            "BEAD_WARNING: export_beads_to_central inserts into a 'beads' table in "
-            "central.db, but CENTRAL_SCHEMA_DDL does not include a 'beads' table and "
-            "migration v42 (WP-G) drops it from existing central DBs. The export "
-            "function silently returns 0 due to exception handling. Source fix needed: "
-            "add a 'central_beads' projection table to CENTRAL_SCHEMA_DDL."
-        ),
-        strict=False,
-    )
     def test_export_upserts_minimal_projection(self, tmp_path: Path) -> None:
         """Beads written to the project store appear in central.db after export."""
         central_path = self._make_central(tmp_path)
@@ -732,14 +722,6 @@ class TestExportBeatsToCentral:
         assert warn_row[1] == "warning"
         assert warn_row[2] == "open"
 
-    @pytest.mark.xfail(
-        reason=(
-            "BEAD_WARNING: 'beads' table missing from CENTRAL_SCHEMA_DDL (dropped by "
-            "v42/WP-G). export_beads_to_central silently returns 0; direct SQL query "
-            "fails with 'no such table: beads'. Source fix needed."
-        ),
-        strict=False,
-    )
     def test_export_is_idempotent(self, tmp_path: Path) -> None:
         """Calling export twice doesn't duplicate rows."""
         central_path = self._make_central(tmp_path)
@@ -762,16 +744,6 @@ class TestExportBeatsToCentral:
         conn.close()
         assert count == 1  # not 2
 
-    @pytest.mark.xfail(
-        reason=(
-            "BEAD_WARNING: BdBeadStore.query(status=None) returns only open beads "
-            "because 'bd list' without --status omits closed issues. "
-            "Re-exporting a closed bead therefore cannot update central.db. "
-            "Source fix needed in BdBeadStore.query() to call 'bd list --status closed' "
-            "when status='closed' or 'all'."
-        ),
-        strict=False,
-    )
     def test_export_updates_existing_row(self, tmp_path: Path) -> None:
         """A re-export updates the status in central.db if the bead was closed."""
         central_path = self._make_central(tmp_path)
@@ -802,14 +774,6 @@ class TestExportBeatsToCentral:
         assert row is not None
         assert row[0] == "closed"
 
-    @pytest.mark.xfail(
-        reason=(
-            "BEAD_WARNING: 'beads' table missing from CENTRAL_SCHEMA_DDL (dropped by "
-            "v42/WP-G). export_beads_to_central silently returns 0; CentralStore.query "
-            "on 'beads' fails with 'no such table: beads'. Source fix needed."
-        ),
-        strict=False,
-    )
     def test_noc_incidents_query_works_after_export(self, tmp_path: Path) -> None:
         """NOC aggregate/incidents query returns correct counts from export projection."""
         central_path = self._make_central(tmp_path)

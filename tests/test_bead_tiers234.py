@@ -708,14 +708,6 @@ class TestCentralAnalyticsViewF10:
     needed to replace the view with a bd-backed equivalent.
     """
 
-    @pytest.mark.xfail(
-        reason=(
-            "BEAD_WARNING: v_cross_project_discoveries view was removed from "
-            "CENTRAL_SCHEMA_DDL when the beads table was dropped in v42 (WP-G). "
-            "Source fix needed: add a central beads projection table and view."
-        ),
-        strict=False,
-    )
     def test_v_cross_project_discoveries_view_exists_in_central_schema_ddl(
         self,
     ) -> None:
@@ -723,13 +715,6 @@ class TestCentralAnalyticsViewF10:
 
         assert "v_cross_project_discoveries" in CENTRAL_SCHEMA_DDL
 
-    @pytest.mark.xfail(
-        reason=(
-            "BEAD_WARNING: v_cross_project_discoveries removed from CENTRAL_SCHEMA_DDL "
-            "in WP-G. Source fix needed."
-        ),
-        strict=False,
-    )
     def test_v_cross_project_discoveries_view_selects_discovery_and_warning(
         self,
     ) -> None:
@@ -740,13 +725,6 @@ class TestCentralAnalyticsViewF10:
         assert "discovery" in CENTRAL_SCHEMA_DDL
         assert "warning" in CENTRAL_SCHEMA_DDL
 
-    @pytest.mark.xfail(
-        reason=(
-            "BEAD_WARNING: v_cross_project_discoveries view removed from "
-            "CENTRAL_SCHEMA_DDL in WP-G (beads table dropped). Source fix needed."
-        ),
-        strict=False,
-    )
     def test_v_cross_project_discoveries_view_is_queryable(
         self, tmp_path: Path
     ) -> None:
@@ -987,37 +965,6 @@ class TestQualityScoringF12:
         migration_sql = MIGRATIONS[6]
         assert "quality_score" in migration_sql
         assert "retrieval_count" in migration_sql
-
-    @pytest.mark.xfail(
-        reason=(
-            "BEAD_WARNING: PROJECT_SCHEMA_DDL no longer includes a 'beads' table "
-            "after migration v42 (WP-G) dropped it. PRAGMA table_info(beads) returns "
-            "empty. The v6 migration contract (quality_score, retrieval_count) is "
-            "documented in MIGRATIONS[6] — see "
-            "test_schema_v6_migration_adds_quality_score_and_retrieval_count_columns "
-            "for the surviving regression."
-        ),
-        strict=False,
-    )
-    def test_v5_database_upgraded_to_v6_has_quality_columns(
-        self, tmp_path: Path
-    ) -> None:
-        """A database migrated from v5 can read/write quality_score and retrieval_count."""
-        from agent_baton.core.storage.schema import PROJECT_SCHEMA_DDL
-
-        db_path = tmp_path / "v5_upgrade.db"
-
-        # Build a v5 database manually (apply DDL through v5, stop before v6)
-        conn = sqlite3.connect(str(db_path))
-        conn.row_factory = sqlite3.Row
-        conn.executescript(PROJECT_SCHEMA_DDL)  # Fresh install already at v6
-
-        # Verify both columns exist in a fresh install
-        cursor = conn.execute("PRAGMA table_info(beads)")
-        columns = {row["name"] for row in cursor.fetchall()}
-        assert "quality_score" in columns
-        assert "retrieval_count" in columns
-        conn.close()
 
     # -- Dispatcher _BEAD_SIGNALS_LINE tests ---------------------------------
 

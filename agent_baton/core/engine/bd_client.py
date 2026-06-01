@@ -261,11 +261,19 @@ class BdClient:
         status: str = "",
         labels: list[str] | None = None,
         limit: int = 0,
+        include_closed: bool = False,
     ) -> list[dict]:
-        """List issues (optionally filtered by status/labels)."""
+        """List issues (optionally filtered by status/labels).
+
+        ``bd list`` defaults to OPEN issues only; pass ``include_closed=True``
+        (→ ``--all``) to include closed/done issues, or an explicit ``status``
+        (e.g. ``closed``) to filter to one stored status.
+        """
         args = ["list"]
         if status:
             args += ["--status", status]
+        elif include_closed:
+            args += ["--all"]
         if labels:
             for lbl in labels:
                 args += ["--label", lbl]

@@ -156,21 +156,42 @@ def test_beads_status_all_returns_all_open(populated_client: TestClient) -> None
     assert ids == ["bd-ccc3", "bd-aaa1", "bd-bbb2"]
 
 
-@pytest.mark.xfail(
-    reason=(
-        "BEAD_WARNING: BdBeadStore.query(status='closed') returns empty because "
-        "'bd list' without --status only returns open issues. Closed-bead retrieval "
-        "requires a source fix in BdBeadStore.query() to call 'bd list --status closed'."
-    ),
-    strict=False,
-)
-def test_beads_status_closed_filter(populated_client: TestClient) -> None:
-    res = populated_client.get("/api/v1/pmo/beads", params={"status": "closed"})
+def test_beads_status_closed_filter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """status=closed returns closed beads (bd list --status closed).
+
+    Self-contained: seeds one open + one closed bead through the bd backend so
+    the closed-retrieval path is exercised directly (ADR-13b: BdBeadStore.query
+    routes closed/all to `bd list --status closed` / `--all`).
+    """
+    monkeypatch.chdir(tmp_path)
+    db_dir = tmp_path / ".claude" / "team-context"
+    db_dir.mkdir(parents=True)
+    db_path = db_dir / "baton.db"
+    db_path.touch()
+
+    from agent_baton.core.engine.bead_backend import make_bead_store
+    from agent_baton.models.bead import Bead
+
+    store = make_bead_store(db_path, repo_root=tmp_path)
+    store.write(Bead(bead_id="bd-open1", task_id="t", step_id="s", agent_name="a",
+                     bead_type="warning", content="still open", status="open",
+                     created_at="2026-04-24T09:00:00Z", source="agent-signal"))
+    store.write(Bead(bead_id="bd-done1", task_id="t", step_id="s", agent_name="a",
+                     bead_type="warning", content="resolved", status="open",
+                     created_at="2026-04-25T09:00:00Z", source="agent-signal"))
+    store.close("bd-done1", summary="resolved")
+
+    app = create_app(team_context_root=db_dir)
+    client = TestClient(app)
+    res = client.get("/api/v1/pmo/beads", params={"status": "closed"})
     assert res.status_code == 200
     data = res.json()
-    assert data["total"] == 1
-    assert data["beads"][0]["bead_id"] == "bd-bbb2"
-    assert data["beads"][0]["status"] == "closed"
+    ids = {b["bead_id"] for b in data["beads"]}
+    assert "bd-done1" in ids
+    assert "bd-open1" not in ids
+    assert all(b["status"] == "closed" for b in data["beads"])
 
 
 def test_beads_bead_type_filter(populated_client: TestClient) -> None:

@@ -93,10 +93,6 @@ class TestAckMessage:
     # xfail until BdBeadStore.query() is updated to pass --status=all when no
     # status is given.
 
-    @pytest.mark.xfail(
-        reason="BdBeadStore cannot query closed beads with label filter (bd list omits closed)",
-        strict=False,
-    )
     def test_ack_suppresses_re_delivery(self, board: TeamBoard) -> None:
         msg_id = board.send_message(
             task_id="task-board",
@@ -118,10 +114,6 @@ class TestAckMessage:
         )
         assert unread2 == []
 
-    @pytest.mark.xfail(
-        reason="BdBeadStore cannot query closed beads with label filter (bd list omits closed)",
-        strict=False,
-    )
     def test_ack_by_one_member_does_not_suppress_broadcast_for_another(
         self, board: TeamBoard
     ) -> None:
@@ -262,10 +254,6 @@ class TestSelectForTeamMember:
         assert "message" in types
         assert "task" in types
 
-    @pytest.mark.xfail(
-        reason="BdBeadStore cannot query closed beads with label filter (bd list omits closed)",
-        strict=False,
-    )
     def test_acked_message_suppressed_in_selection(
         self, board: TeamBoard, bead_store,
     ) -> None:

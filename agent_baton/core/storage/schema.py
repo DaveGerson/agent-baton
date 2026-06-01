@@ -3323,4 +3323,53 @@ CREATE TABLE IF NOT EXISTS soul_revocations (
 );
 CREATE INDEX IF NOT EXISTS idx_soul_revocations_revoked_at
     ON soul_revocations(revoked_at);
+
+-- ================================================================
+-- Central bead projection (ADR-13b WP-G follow-up)
+-- ================================================================
+-- bd is the bead system of record per project (.beads/).  central.db keeps a
+-- read-only PROJECTION of beads, refreshed by
+-- core.storage.central.export_beads_to_central on every sync push, so
+-- cross-project analytics (NOC incident counts, the discoveries view below)
+-- keep working without per-project row replication.  Rebuilt from bd; not a
+-- source of record.
+CREATE TABLE IF NOT EXISTS beads (
+    project_id       TEXT NOT NULL,
+    bead_id          TEXT NOT NULL,
+    task_id          TEXT,
+    step_id          TEXT NOT NULL DEFAULT '',
+    agent_name       TEXT NOT NULL DEFAULT '',
+    bead_type        TEXT NOT NULL,
+    content          TEXT NOT NULL DEFAULT '',
+    confidence       TEXT NOT NULL DEFAULT 'medium',
+    scope            TEXT NOT NULL DEFAULT 'step',
+    tags             TEXT NOT NULL DEFAULT '[]',
+    affected_files   TEXT NOT NULL DEFAULT '[]',
+    status           TEXT NOT NULL DEFAULT 'open',
+    created_at       TEXT NOT NULL DEFAULT '',
+    closed_at        TEXT NOT NULL DEFAULT '',
+    summary          TEXT NOT NULL DEFAULT '',
+    links            TEXT NOT NULL DEFAULT '[]',
+    source           TEXT NOT NULL DEFAULT 'agent-signal',
+    token_estimate   INTEGER NOT NULL DEFAULT 0,
+    quality_score    REAL    NOT NULL DEFAULT 0.0,
+    retrieval_count  INTEGER NOT NULL DEFAULT 0,
+    signed_by        TEXT    NOT NULL DEFAULT '',
+    signature        TEXT    NOT NULL DEFAULT '',
+    PRIMARY KEY (project_id, bead_id)
+);
+CREATE INDEX IF NOT EXISTS idx_central_beads_task ON beads(project_id, task_id);
+CREATE INDEX IF NOT EXISTS idx_central_beads_agent ON beads(agent_name);
+CREATE INDEX IF NOT EXISTS idx_central_beads_type ON beads(bead_type);
+CREATE INDEX IF NOT EXISTS idx_central_beads_status ON beads(status);
+
+-- Cross-project discovery analytics (F10).
+CREATE VIEW IF NOT EXISTS v_cross_project_discoveries AS
+SELECT
+    b.project_id, b.bead_id, b.bead_type, b.agent_name, b.content,
+    b.confidence, b.tags, b.affected_files, b.created_at,
+    b.quality_score, b.retrieval_count, p.task_summary AS task_summary
+FROM beads b
+LEFT JOIN plans p ON p.project_id = b.project_id AND p.task_id = b.task_id
+WHERE b.bead_type IN ('discovery', 'warning');
 """

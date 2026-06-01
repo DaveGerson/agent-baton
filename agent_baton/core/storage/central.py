@@ -500,6 +500,31 @@ def export_beads_to_central(
     central = CentralStore(resolved_central)
     conn = central._conn()
 
+    # Self-heal: central DBs that already ran the v42 drop (ADR-13b WP-G) no
+    # longer have the bead projection table.  Recreate it (and the discoveries
+    # view) idempotently so the projection + NOC counts work regardless of when
+    # the central DB was migrated.  Fresh central DBs already have it from
+    # CENTRAL_SCHEMA_DDL; CREATE ... IF NOT EXISTS makes this a no-op there.
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS beads (
+            project_id TEXT NOT NULL, bead_id TEXT NOT NULL, task_id TEXT,
+            step_id TEXT NOT NULL DEFAULT '', agent_name TEXT NOT NULL DEFAULT '',
+            bead_type TEXT NOT NULL, content TEXT NOT NULL DEFAULT '',
+            confidence TEXT NOT NULL DEFAULT 'medium', scope TEXT NOT NULL DEFAULT 'step',
+            tags TEXT NOT NULL DEFAULT '[]', affected_files TEXT NOT NULL DEFAULT '[]',
+            status TEXT NOT NULL DEFAULT 'open', created_at TEXT NOT NULL DEFAULT '',
+            closed_at TEXT NOT NULL DEFAULT '', summary TEXT NOT NULL DEFAULT '',
+            links TEXT NOT NULL DEFAULT '[]', source TEXT NOT NULL DEFAULT 'agent-signal',
+            token_estimate INTEGER NOT NULL DEFAULT 0, quality_score REAL NOT NULL DEFAULT 0.0,
+            retrieval_count INTEGER NOT NULL DEFAULT 0, signed_by TEXT NOT NULL DEFAULT '',
+            signature TEXT NOT NULL DEFAULT '', PRIMARY KEY (project_id, bead_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_central_beads_type ON beads(bead_type);
+        CREATE INDEX IF NOT EXISTS idx_central_beads_status ON beads(status);
+        """
+    )
+
     upserted = 0
     for b in beads:
         try:

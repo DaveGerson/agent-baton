@@ -164,12 +164,22 @@ class BdBeadStore:
             label_filters.append(f"task:{task_id}")
         if bead_type is not None:
             label_filters.append(f"bead-type:{bead_type}")
-        # Push the common ``open`` filter down to bd to avoid fetching every
-        # issue on hot paths (synthesize/export). archived/quarantine have no
-        # native bd status, so those stay Python-side below.
-        bd_status = "open" if status == "open" else ""
+        # `bd list` defaults to OPEN-only. Route by the requested status so
+        # closed/all queries actually see closed beads:
+        #   open            -> --status open   (cheap hot path)
+        #   closed          -> --status closed
+        #   None (all)      -> --all           (open + closed)
+        #   archived/quarantine (no native bd status) -> --all, filter in Python
+        list_kwargs: dict = {"labels": label_filters or None}
+        if status == "open":
+            list_kwargs["status"] = "open"
+        elif status == "closed":
+            list_kwargs["status"] = "closed"
+        else:
+            # None ("all") or a baton-only status mapped onto bd via labels.
+            list_kwargs["include_closed"] = True
         try:
-            issues = self._bd.list(status=bd_status, labels=label_filters or None)
+            issues = self._bd.list(**list_kwargs)
         except BdError as exc:
             _log.warning("BdBeadStore.query failed: %s", exc)
             return []
