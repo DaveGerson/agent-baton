@@ -336,6 +336,46 @@ class TestBdIntegration:
         assert client.available()
         assert "bd version" in client.version().lower() or client.version()
 
+    def test_init_is_non_invasive(self, tmp_path):
+        """Regression: `bd init` must NOT onboard/auto-commit the host repo.
+
+        Earlier, BdClient.init ran a bare `bd init` whose onboarding appended a
+        BEADS block to CLAUDE.md, wrote AGENTS.md/.agents/.codex, installed git
+        hooks via core.hooksPath (which then auto-committed), and edited the
+        tracked .gitignore. init() now passes --skip-agents/--skip-hooks/
+        --setup-exclude so none of that happens.
+        """
+        import subprocess
+
+        repo = tmp_path
+        subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.email", "t@t"],
+                       check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.name", "t"],
+                       check=True, capture_output=True)
+        # Seed a CLAUDE.md so we can assert bd never touches it.
+        claude_md = repo / "CLAUDE.md"
+        claude_md.write_text("# project rules\n", encoding="utf-8")
+        original = claude_md.read_text(encoding="utf-8")
+
+        BdClient(repo).init()
+
+        # No onboarding artifacts.
+        assert not (repo / "AGENTS.md").exists()
+        assert not (repo / ".agents").exists()
+        assert not (repo / ".codex").exists()
+        # CLAUDE.md untouched.
+        assert claude_md.read_text(encoding="utf-8") == original
+        # No hooksPath hijack.
+        hp = subprocess.run(
+            ["git", "-C", str(repo), "config", "--local", "--get", "core.hooksPath"],
+            capture_output=True, text=True,
+        )
+        assert hp.returncode != 0 or not hp.stdout.strip()
+        # .beads kept local via .git/info/exclude (not the tracked .gitignore).
+        exclude = (repo / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+        assert ".beads" in exclude
+
     def test_write_read_roundtrip(self, tmp_path, monkeypatch):
         store = self._store(tmp_path, monkeypatch)
         bead = _sample_bead()

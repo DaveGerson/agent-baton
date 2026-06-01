@@ -114,16 +114,37 @@ class BdClient:
     # ------------------------------------------------------------------
 
     def init(self, prefix: str | None = None) -> None:
-        """Initialise a ``.beads/`` database in cwd (idempotent).
+        """Initialise a ``.beads/`` database in cwd (idempotent, non-invasive).
 
         No-op when a database already exists.  Uses ``BATON_BD_PREFIX`` (default
         ``bd``) so generated IDs match baton's ``bd-<hash>`` convention.
+
+        The flags below keep ``bd init`` from touching the host project — by
+        default ``bd init`` runs an onboarding flow that *appends to
+        ``CLAUDE.md``*, writes ``AGENTS.md`` / ``.agents`` / ``.codex``, installs
+        git hooks via ``core.hooksPath`` (which then auto-commit), and edits the
+        tracked ``.gitignore``.  baton owns those surfaces, so we suppress all of
+        it:
+
+        - ``--skip-agents``  — no CLAUDE.md/AGENTS.md/Codex onboarding edits.
+        - ``--skip-hooks``   — no git-hook install / ``core.hooksPath`` hijack.
+        - ``--setup-exclude``— keep ``.beads/`` local via ``.git/info/exclude``
+          (untracked) instead of editing the project's ``.gitignore``.
+        - ``--quiet --non-interactive`` — no prompts, no chatter.
         """
         if self.db_exists():
             return
         self._cwd.mkdir(parents=True, exist_ok=True)
         self._run(
-            ["init", "--prefix", prefix or bd_prefix()],
+            [
+                "init",
+                "--prefix", prefix or bd_prefix(),
+                "--skip-agents",
+                "--skip-hooks",
+                "--setup-exclude",
+                "--quiet",
+                "--non-interactive",
+            ],
             json_output=False,
         )
 
