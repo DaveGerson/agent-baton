@@ -423,3 +423,131 @@ class CentralStore:
 
     def _conn(self) -> sqlite3.Connection:
         return self._conn_mgr.get_connection()
+
+
+# ---------------------------------------------------------------------------
+# ADR-13b WP-2 §5 — Export-based central bead projection
+# ---------------------------------------------------------------------------
+
+
+def export_beads_to_central(
+    project_id: str,
+    project_root: Path,
+    central_db_path: Path | None = None,
+) -> int:
+    """Upsert a minimal bead projection from a project's bead store into central.db.
+
+    Reads open beads from the project's bead store (via
+    :func:`~agent_baton.core.engine.bead_backend.make_bead_store`) and
+    upserts a minimal projection into the ``beads`` table in ``central.db``.
+
+    The projection contains: ``project_id, bead_id, bead_type, status,
+    agent_name, created_at``.  All other columns use their DDL defaults.
+
+    This replaces the old ``SyncTableSpec("beads", ...)`` row-replication
+    path removed in ADR-13b WP-2.  The NOC ``/noc/aggregate/incidents``
+    endpoint that counts ``beads WHERE bead_type = 'warning'`` continues to
+    work unchanged because this function keeps the central projection current.
+
+    Args:
+        project_id: Stable project identifier (used as PK prefix in central.db).
+        project_root: Project root directory — passed to ``make_bead_store``
+            as ``repo_root`` so the bd backend locates ``.beads/``.
+        central_db_path: Path to ``central.db``.  Defaults to
+            ``~/.baton/central.db``.
+
+    Returns:
+        Number of rows upserted.
+
+    Raises:
+        Does NOT raise — logs and returns 0 on any failure so sync callers
+        can continue without interruption.
+
+    .. warning::
+        **BEAD_WARNING**: This helper is implemented and tested but is NOT yet
+        wired into the :class:`~agent_baton.core.storage.sync.SyncEngine.push`
+        call path.  Doing so requires deciding whether ``export_beads_to_central``
+        runs unconditionally on every sync (expensive for large bead sets) or
+        only when ``BATON_BD_BACKEND != sqlite``.  The safe incremental step is
+        to call it from ``auto_sync_current_project()`` once the bd backend is
+        the default (step F in the cutover order).
+
+        TODO(ADR-13b-WP-E): Wire into ``SyncEngine.push`` or
+        ``auto_sync_current_project`` behind a ``BATON_BD_BACKEND != sqlite``
+        guard after step F flips the default.
+    """
+    _log_export = _log.getChild("export_beads_to_central")
+
+    resolved_central = central_db_path or _CENTRAL_DB_DEFAULT
+    if not resolved_central.exists():
+        _log_export.debug(
+            "export_beads_to_central: central.db not found at %s — skipping",
+            resolved_central,
+        )
+        return 0
+
+    # Locate the project baton.db.
+    project_root_path = Path(project_root)
+    db_path = project_root_path / ".claude" / "team-context" / "baton.db"
+
+    try:
+        from agent_baton.core.engine.bead_backend import make_bead_store
+
+        store = make_bead_store(db_path, repo_root=project_root_path)
+        beads = store.query(limit=50000)
+    except Exception as exc:  # noqa: BLE001
+        _log_export.warning(
+            "export_beads_to_central: failed to read beads from project %s: %s",
+            project_id, exc,
+        )
+        return 0
+
+    if not beads:
+        return 0
+
+    central = CentralStore(resolved_central)
+    conn = central._conn()
+
+    upserted = 0
+    for b in beads:
+        try:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO beads
+                    (project_id, bead_id, bead_type, status, agent_name,
+                     created_at, task_id, step_id, content)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    project_id,
+                    b.bead_id,
+                    b.bead_type or "",
+                    b.status or "open",
+                    b.agent_name or "",
+                    b.created_at or "",
+                    b.task_id or None,
+                    b.step_id or "",
+                    b.content or "",
+                ),
+            )
+            upserted += 1
+        except Exception as exc:  # noqa: BLE001
+            _log_export.debug(
+                "export_beads_to_central: skipping bead %s: %s",
+                b.bead_id, exc,
+            )
+
+    try:
+        conn.commit()
+    except Exception as exc:  # noqa: BLE001
+        _log_export.warning(
+            "export_beads_to_central: commit failed for project %s: %s",
+            project_id, exc,
+        )
+        return 0
+
+    _log_export.debug(
+        "export_beads_to_central: upserted %d beads for project %s",
+        upserted, project_id,
+    )
+    return upserted

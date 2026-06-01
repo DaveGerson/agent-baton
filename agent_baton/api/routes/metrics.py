@@ -244,29 +244,59 @@ def _collect_active_executions(conn: sqlite3.Connection) -> list[MetricSample]:
 
 
 def _collect_open_beads(conn: sqlite3.Connection) -> list[MetricSample]:
-    """``baton_open_beads{type,severity}`` from beads table.
+    """``baton_open_beads{type,severity}`` from the bead store.
 
     The beads schema has no dedicated severity column; we use the
     ``confidence`` value as a proxy (low/medium/high).  This is a
     coarse signal but consistent with how operators already reason
     about bead urgency in the dashboard.
+
+    ADR-13b WP-2: reads beads via ``make_bead_store(...)`` so the bd backend
+    is used when ``BATON_BD_BACKEND=bd``.  Group-by is done in Python to
+    stay compatible with both backends.  Falls back to empty on any error
+    (unchanged degrade-to-empty behaviour).
+
+    The *conn* parameter is kept for signature compatibility — it is only
+    used to locate ``db_path`` (already resolved by the caller).
     """
-    if not _table_exists(conn, "beads"):
+    # Resolve the DB path from the connection's database file.
+    # sqlite3.Connection.execute("PRAGMA database_list") returns the path;
+    # row 0 is the main database.
+    try:
+        row = conn.execute("PRAGMA database_list").fetchone()
+        db_path_str: str = row[2] if row else ""
+    except Exception:
+        db_path_str = ""
+
+    if not db_path_str:
         return []
-    cur = conn.execute(
-        """
-        SELECT bead_type, confidence, COUNT(*) AS n
-        FROM beads
-        WHERE status = 'open'
-        GROUP BY bead_type, confidence
-        """
-    )
+
+    from pathlib import Path as _Path
+
+    db_path = _Path(db_path_str)
+    if not db_path.exists():
+        return []
+
+    try:
+        from agent_baton.core.engine.bead_backend import make_bead_store
+
+        store = make_bead_store(db_path)
+        open_beads = store.query(status="open", limit=10000)
+    except Exception:
+        return []
+
+    # Group by (bead_type, confidence) in Python.
+    counts: dict[tuple[str, str], int] = {}
+    for b in open_beads:
+        key = (b.bead_type or "", b.confidence or "")
+        counts[key] = counts.get(key, 0) + 1
+
     return [
         MetricSample(
-            labels={"type": str(t or ""), "severity": str(sev or "")},
-            value=int(n),
+            labels={"type": btype, "severity": sev},
+            value=n,
         )
-        for t, sev, n in cur.fetchall()
+        for (btype, sev), n in counts.items()
     ]
 
 

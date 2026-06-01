@@ -313,45 +313,42 @@ async def list_arch_beads(
 
     The bead store may not exist on a fresh project; in that case the
     endpoint returns an empty list so the UI can render its empty state.
+
+    ADR-13b WP-2: reads via ``make_bead_store(...)`` so the bd backend is used
+    when ``BATON_BD_BACKEND=bd``.  Tags are filtered in Python rather than
+    via a JOIN so the same code works for both backends.
     """
     db_path = _project_db_path()
-    rows = _safe_query(
-        db_path,
-        "SELECT bead_id, bead_type, agent_name, content, affected_files, "
-        "status, created_at FROM beads "
-        "WHERE bead_type IN ('architecture', 'decision') AND status = ? "
-        "ORDER BY created_at DESC LIMIT 100",
-        (status,),
-    )
+
+    try:
+        from agent_baton.core.engine.bead_backend import make_bead_store
+
+        store = make_bead_store(db_path)
+        # Query without a bead_type filter and filter in Python so we can
+        # match two types in one pass, compatible with both backends.
+        status_filter: str | None = status if status not in ("", "all") else None
+        raw_beads = store.query(
+            bead_type=None,
+            status=status_filter,
+            limit=100,
+        )
+    except Exception:
+        return []
 
     results: list[ArchBeadResponse] = []
-    for r in rows:
-        # affected_files is stored as JSON text in the beads table.
-        files_raw = r["affected_files"] or "[]"
-        try:
-            import json
-            files = json.loads(files_raw) if isinstance(files_raw, str) else []
-        except Exception:
-            files = []
-
-        # Tags live in a separate bead_tags table; load them lazily.
-        tag_rows = _safe_query(
-            db_path,
-            "SELECT tag FROM bead_tags WHERE bead_id = ?",
-            (r["bead_id"],),
-        )
-        tags = [t["tag"] for t in tag_rows]
-
+    for b in raw_beads:
+        if b.bead_type not in ("architecture", "decision"):
+            continue
         results.append(
             ArchBeadResponse(
-                bead_id=r["bead_id"],
-                bead_type=r["bead_type"],
-                agent_name=r["agent_name"] or "",
-                content=r["content"] or "",
-                affected_files=files,
-                status=r["status"] or "open",
-                created_at=r["created_at"] or "",
-                tags=tags,
+                bead_id=b.bead_id,
+                bead_type=b.bead_type,
+                agent_name=b.agent_name or "",
+                content=b.content or "",
+                affected_files=list(b.affected_files or []),
+                status=b.status or "open",
+                created_at=b.created_at or "",
+                tags=list(b.tags or []),
             )
         )
     return results
@@ -379,10 +376,10 @@ async def review_arch_bead(
 
     if db_path.exists():
         try:
-            from agent_baton.core.engine.bead_store import BeadStore
+            from agent_baton.core.engine.bead_backend import make_bead_store
             from agent_baton.models.bead import Bead, BeadLink
 
-            store = BeadStore(db_path)
+            store = make_bead_store(db_path)
             now = datetime.now(timezone.utc).isoformat()
             review_bead = Bead(
                 bead_id=follow_up_id,
@@ -549,9 +546,9 @@ async def list_beads(
         return BeadListResponse(beads=[], total=0)
 
     try:
-        from agent_baton.core.engine.bead_store import BeadStore
+        from agent_baton.core.engine.bead_backend import make_bead_store
 
-        store = BeadStore(db_path)
+        store = make_bead_store(db_path)
         beads = store.query(
             task_id=task_id,
             bead_type=bead_type,
