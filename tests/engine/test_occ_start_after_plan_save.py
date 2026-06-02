@@ -211,14 +211,14 @@ class TestOccStartAfterPlanSaveHighRisk:
         storage = _storage_with_plan(tmp_path / "baton.db", plan)
         engine = _engine(tmp_path, storage, plan)
 
-        # For HIGH-risk, start() returns an APPROVAL action (not DISPATCH).
-        # The important thing is that it does not raise ConcurrentModificationError.
+        # For HIGH-risk, start() flips initial_status to approval_pending and
+        # returns an APPROVAL action — the fix must fire on that branch too
+        # (and must not raise ConcurrentModificationError).
         action = engine.start(plan)
 
         assert action.action_type in (
             ActionType.APPROVAL, ActionType.APPROVAL.value,
-            ActionType.DISPATCH, ActionType.DISPATCH.value,
-        ), f"Expected APPROVAL or DISPATCH for high-risk plan, got {action.action_type!r}"
+        ), f"Expected APPROVAL for high-risk plan, got {action.action_type!r}"
 
         # Row must have advanced beyond version=1.
         version = storage.get_execution_version(plan.task_id)

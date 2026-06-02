@@ -96,11 +96,11 @@ baton beads close bd-a1b2 --summary "Fixed in commit abc1234; added IF NOT EXIST
 the commit is linked to the step. Beads created during that step are
 transitively traceable: bead -> step -> commit -> diff.
 
-**Git-bead hygiene:**
+**Bead hygiene:**
 - Include commit hashes in close summaries so beads stay traceable after branch merges
 - Use `--file` flags on creation so `baton beads list` can filter by affected path
 - Run `baton beads cleanup --dry-run` before major merges to identify stale beads
-- After rebases, bead git-notes survive if `notes.rewriteRef` is configured (the installer sets this by default; opt out with `install.sh --no-gastown` / `install.ps1 -NoGastown`, or `BATON_GASTOWN_ENABLED=0`)
+- Beads are stored by the `bd` tool in the project's `.beads/` workspace (ADR-13b); `bd` must be on `PATH` (override with `BATON_BD_BIN`). Use `bd export` to produce the `.beads/issues.jsonl` interchange file for review/migration.
 
 ## Post-Interaction Context
 
