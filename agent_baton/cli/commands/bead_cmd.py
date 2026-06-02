@@ -86,21 +86,31 @@ def _resolve_db_path() -> Path:
 def _get_bead_store():
     """Resolve the bead store for the current project.
 
-    Returns a bead store (SQLite or bd backend, per ``BATON_BD_BACKEND``) or
-    ``None`` when the database is not found.  See :func:`_resolve_db_path`
-    for the discovery order (bd-ce64: walks upward so worktree subagents
-    find the project-root baton.db).
+    Returns a :class:`~agent_baton.core.engine.bd_bead_store.BdBeadStore`
+    backed by the bd workspace, or ``None`` when the store cannot be
+    constructed (e.g. ``bd`` binary missing).
 
-    ADR-13b WP-2: delegates to :func:`~agent_baton.core.engine.bead_backend.make_bead_store`
-    instead of instantiating ``BeadStore`` directly so that the bd backend is
-    available when ``BATON_BD_BACKEND=bd``.
+    ADR-13b WP-G: ``baton.db`` existence is NOT required.  Beads now live
+    in the ``.beads/`` workspace managed by ``bd``, not in ``baton.db``.
+    We always attempt to construct the store so that read commands (list,
+    show, close, …) find beads created by ``baton beads create`` or by the
+    engine even when no ``baton execute start`` has been run in the current
+    directory (i.e. ``baton.db`` is absent).  An empty/absent ``.beads/``
+    workspace returns empty results gracefully; it does NOT return ``None``.
+
+    ``None`` is returned only on hard failures (``bd`` binary not on PATH,
+    unexpected exception) so that callers can degrade gracefully.
     """
     from agent_baton.core.engine.bead_backend import make_bead_store
+    from agent_baton.core.engine.bd_client import BdNotAvailable
 
     db = _resolve_db_path()
-    if not db.exists():
+    try:
+        return make_bead_store(db, repo_root=_derive_project_root(db))
+    except BdNotAvailable:
         return None
-    return make_bead_store(db, repo_root=_derive_project_root(db))
+    except Exception:
+        return None
 
 
 def _get_or_create_bead_store():

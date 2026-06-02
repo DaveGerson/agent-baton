@@ -281,13 +281,47 @@ class TestCliDerivedStoreReads:
 # ---------------------------------------------------------------------------
 
 
-def test_get_bead_store_returns_none_when_no_db(tmp_path, monkeypatch):
-    """_get_bead_store returns None when baton.db does not exist."""
+def test_get_bead_store_returns_none_when_bd_unavailable(tmp_path, monkeypatch):
+    """_get_bead_store returns None only when the bd binary is unavailable.
+
+    ADR-13b WP-G fix: baton.db absence must NOT cause None to be returned —
+    beads now live in .beads/ (managed by bd), not in baton.db.  The store
+    should be constructable even when baton.db does not exist, returning
+    empty results for read operations.  None is reserved for BdNotAvailable.
+    """
+    from unittest.mock import patch
     from agent_baton.cli.commands import bead_cmd
+    from agent_baton.core.engine.bd_client import BdNotAvailable
 
     monkeypatch.setattr(bead_cmd, "_DEFAULT_DB_PATH", tmp_path / "no-db.db")
+
+    # Simulate bd binary missing — _get_bead_store must return None gracefully.
+    with patch(
+        "agent_baton.core.engine.bead_backend.make_bead_store",
+        side_effect=BdNotAvailable("bd not on PATH (test stub)"),
+    ):
+        store = bead_cmd._get_bead_store()
+    assert store is None, "_get_bead_store must return None when BdNotAvailable"
+
+
+def test_get_bead_store_returns_bd_store_without_baton_db(tmp_path, monkeypatch):
+    """_get_bead_store returns a BdBeadStore even when baton.db does not exist.
+
+    ADR-13b WP-G fix: the bd backend uses .beads/, not baton.db.  Missing
+    baton.db is not an error; read commands should still work (returning
+    empty results from an uninitialised workspace).
+    """
+    from agent_baton.cli.commands import bead_cmd
+    from agent_baton.core.engine.bd_bead_store import BdBeadStore
+
+    # Deliberately do NOT create baton.db — only tmp_path exists.
+    monkeypatch.setattr(bead_cmd, "_DEFAULT_DB_PATH", tmp_path / "no-db.db")
+    monkeypatch.delenv("BATON_BD_BACKEND", raising=False)
+
     store = bead_cmd._get_bead_store()
-    assert store is None
+    assert isinstance(store, BdBeadStore), (
+        "_get_bead_store must return BdBeadStore even when baton.db is absent"
+    )
 
 
 def test_get_bead_store_returns_bd_store_always(
