@@ -1850,6 +1850,35 @@ class ExecutionEngine:
                 step_count=len(first_phase.steps),
             ))
 
+        # ── OCC bootstrap fix (bd-74d7) ─────────────────────────────────────
+        # ``baton plan --save`` persists the execution row at version=1
+        # (status=queued) via the planner's pre-flight save.  The fresh
+        # ``ExecutionState`` constructed above carries ``_loaded_version=0``
+        # (the Pydantic PrivateAttr default).  When _save_execution() does its
+        # CAS UPDATE ``WHERE task_id=? AND version=0``, it hits rowcount==0
+        # (the row is already at version 1), detects an existing row, and
+        # raises ConcurrentModificationError — a false conflict on the very
+        # first start.
+        #
+        # Fix: read the persisted row's version and stamp it onto the new state
+        # so the CAS UPDATE uses the correct baseline.  This is the same
+        # pattern used in ``_load_execution`` for the file-fallback path (see
+        # the ``get_execution_version`` call around line 899).  Guard it
+        # defensively: errors must never break start() — the save itself will
+        # detect a genuine conflict if one exists.
+        if self._storage is not None:
+            _ver_getter = getattr(self._storage, "get_execution_version", None)
+            if _ver_getter is not None:
+                try:
+                    _persisted_ver = _ver_getter(plan.task_id)
+                    if _persisted_ver is not None:
+                        state._loaded_version = _persisted_ver
+                except Exception as _ver_exc:  # pragma: no cover
+                    _log.debug(
+                        "get_execution_version failed in start() (non-fatal): %s",
+                        _ver_exc,
+                    )
+
         self._save_execution(state)
         # Track the new task_id so _load_execution() can find it by ID.
         self._task_id = state.task_id
