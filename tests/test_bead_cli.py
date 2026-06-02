@@ -83,9 +83,16 @@ def _make_bd_store(tmp_path: Path):
 def _run_handler(store_or_none, argv: list[str]) -> tuple[int, str]:
     """Invoke bead_cmd.handler() with make_bead_store patched to return *store_or_none*.
 
-    When *store_or_none* is None, patches _DEFAULT_DB_PATH to a non-existent
-    path so the CLI handles the missing-db case.
+    When *store_or_none* is None, patches make_bead_store to raise
+    BdNotAvailable so the CLI exercises its graceful-degradation path
+    (store unavailable).  This is independent of whether baton.db exists
+    in the current working directory, making tests hermetic in a clean cwd.
+
+    When *store_or_none* is a real store, patches make_bead_store to return
+    that store directly (bypassing bd workspace discovery).
     """
+    from agent_baton.core.engine.bd_client import BdNotAvailable
+
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command")
     bead_cmd.register(sub)
@@ -95,10 +102,12 @@ def _run_handler(store_or_none, argv: list[str]) -> tuple[int, str]:
     exit_code = 0
 
     if store_or_none is None:
-        # No store — let the CLI hit the missing-db guard.
+        # No store — simulate bd unavailable so the CLI hits its None guard.
+        def _make_unavailable(*a, **kw):
+            raise BdNotAvailable("bd not available (test stub)")
         ctx = patch(
-            "agent_baton.cli.commands.bead_cmd._DEFAULT_DB_PATH",
-            Path("/tmp/__baton_no_such_db__.db"),
+            "agent_baton.core.engine.bead_backend.make_bead_store",
+            side_effect=_make_unavailable,
         )
     else:
         def _make_store(*a, **kw):
