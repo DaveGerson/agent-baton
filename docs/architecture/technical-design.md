@@ -294,9 +294,12 @@ argument. When set:
 When `storage` is None, only the legacy file-based persistence is used.
 
 The dual-write covers `executions`, `step_results`, `gate_results`,
-`approval_results`, `feedback_results`, `amendments`. The bead store
-([`BeadStore`](../../agent_baton/core/engine/bead_store.py)) and event
-persistence write directly to SQLite without a JSON mirror.
+`approval_results`, `feedback_results`, `amendments`. Event persistence writes
+directly to SQLite without a JSON mirror. The bead store
+([`BdBeadStore`](../../agent_baton/core/engine/bd_bead_store.py), obtained via
+[`make_bead_store()`](../../agent_baton/core/engine/bead_backend.py)) persists
+beads to the external `bd` tool's per-project `.beads/` workspace (ADR-13b),
+not to SQLite.
 
 ### 3.4 Step recording side-effects
 
@@ -307,7 +310,7 @@ parses agent output for several signal types in this order:
    `state.pending_gaps`; `determine_escalation()` produces an action of
    `auto-resolve` / `best-effort` / `queue-for-gate`.
 2. `parse_bead_signals()` — `BEAD_DISCOVERY/DECISION/WARNING` → creates
-   beads in `BeadStore`; publishes `bead.created` events.
+   beads via `BdBeadStore` (the `bd` tool); publishes `bead.created` events.
 3. `parse_bead_feedback()` — `BEAD_USEFUL/STALE` → updates
    `Bead.quality_score`.
 4. **OTel span emission** (env-gated): `step.dispatch` span with
@@ -662,9 +665,10 @@ CLI surfaces:
 agent emits BEAD_DISCOVERY/DECISION/WARNING in stdout
         │
         v
-parse_bead_signals() → BeadStore.create()  (bead_signal.py, bead_store.py)
+parse_bead_signals() → BdBeadStore.write()  (bead_signal.py, bd_bead_store.py)
         │                          │
-        │                          ├─> SQLite beads + bead_tags
+        │                          ├─> bd tool .beads/ workspace (Dolt-backed)
+        │                          │     via bd_client.py + bd_mapping.py
         │                          └─> EventBus.publish("bead.created")
         v
 on next dispatch:
@@ -689,6 +693,7 @@ parse_bead_feedback() updates Bead.quality_score
         v
 periodically: decay_beads() archives old open beads
               BeadSynthesizer (intel/) rebuilds bead_edges + bead_clusters
+                            in baton-derived.db (DerivedBeadStore)
               BeadAnalyzer (learn/) mines historical beads → PlanStructureHint
 ```
 

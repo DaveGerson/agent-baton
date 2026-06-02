@@ -184,7 +184,7 @@ through to the caller (graceful degradation, rule 5).
 | `start()` | `ExecutionState` (full) | SQLite `executions` + JSON `execution-state.json` |
 | `mark_dispatched()` | `step_results` row, status=`dispatched` | SQLite `step_results` + JSON |
 | `record_step_result()` | `step_results` row, status=final | SQLite `step_results` + JSON |
-| `record_step_result()` (side) | parsed beads → `BeadStore.create()` | SQLite `beads` + `bead_tags` |
+| `record_step_result()` (side) | parsed beads → `BdBeadStore.write()` | external `bd` workspace (`.beads/`) |
 | `record_step_result()` (side) | parsed knowledge gap → `pending_gaps` | JSON state |
 | `record_step_result()` (side) | event publish | EventBus subscribers (incl. `EventPersistence` JSONL) |
 | `record_gate_result()` | `gate_results` row | SQLite `gate_results` + JSON |

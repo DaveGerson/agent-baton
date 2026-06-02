@@ -99,11 +99,13 @@ The heart of Agent Baton. Owns plan state and the action loop.
 | [`knowledge_resolver.py`](../../agent_baton/core/engine/knowledge_resolver.py) | `KnowledgeResolver` | 4-layer knowledge resolution with per-step token budget. |
 | [`knowledge_gap.py`](../../agent_baton/core/engine/knowledge_gap.py) | `parse_knowledge_gap()`, `determine_escalation()` | Parses `KNOWLEDGE_GAP/CONFIDENCE/TYPE` signals. |
 | [`knowledge_telemetry.py`](../../agent_baton/core/engine/knowledge_telemetry.py) | `KnowledgeTelemetry` | Knowledge-usage events. |
-| [`bead_store.py`](../../agent_baton/core/engine/bead_store.py) | `BeadStore` | SQLite CRUD for `beads` + `bead_tags`; dependency-aware `ready()`. |
+| [`bd_bead_store.py`](../../agent_baton/core/engine/bd_bead_store.py) | `BdBeadStore` (line 49) | Bead-store surface (`write`/`read`/`query`/`ready`/`close`/`annotate`/`link`) backed by the external `bd` tool. Replaces the removed SQLite `BeadStore` (ADR-13b). |
+| [`bd_client.py`](../../agent_baton/core/engine/bd_client.py) | `BdClient` (line 74), `BdError`, `BdNotAvailable` | The single subprocess seam to the `bd` CLI; all invocations use `--json`. |
+| [`bd_mapping.py`](../../agent_baton/core/engine/bd_mapping.py) | (mapping helpers) | Lossless `Bead` ⇄ `bd` issue mapping via `metadata.baton` blob + synthetic labels (`bead-type:`, `scope:`, `source:`, `task:`). |
+| [`bead_backend.py`](../../agent_baton/core/engine/bead_backend.py) | `make_bead_store()` (line 41) | Backend selector; always returns `BdBeadStore` or raises `BdNotAvailable`. Default backend `bd`. |
 | [`bead_signal.py`](../../agent_baton/core/engine/bead_signal.py) | `parse_bead_signals()`, `parse_bead_feedback()` | Parses `BEAD_DISCOVERY/DECISION/WARNING/USEFUL/STALE`. |
 | [`bead_selector.py`](../../agent_baton/core/engine/bead_selector.py) | `BeadSelector` | Three-tier prompt-injection selection. |
 | [`bead_decay.py`](../../agent_baton/core/engine/bead_decay.py) | `decay_beads()` | Retention-based archival. |
-| [`bead_anchors.py`](../../agent_baton/core/engine/bead_anchors.py) | (anchor utilities) | Bead-anchor management. |
 | [`plan_reviewer.py`](../../agent_baton/core/engine/plan_reviewer.py) | `PlanReviewer` | Plan-quality static checks. |
 | [`worktree_manager.py`](../../agent_baton/core/engine/worktree_manager.py) | `WorktreeManager` | Wave 1.3 git-worktree per-step isolation. |
 | [`takeover.py`](../../agent_baton/core/engine/takeover.py) | (takeover support) | Wave 5.1 human-takeover. |
@@ -116,7 +118,6 @@ The heart of Agent Baton. Owns plan state and the action loop.
 | [`team_tools.py`](../../agent_baton/core/engine/team_tools.py) | (helpers) | Team-step utilities. |
 | [`soul_registry.py`](../../agent_baton/core/engine/soul_registry.py) | `SoulRegistry` | Agent persona / soul records. |
 | [`soul_router.py`](../../agent_baton/core/engine/soul_router.py) | `SoulRouter` | Soul-aware routing. |
-| [`notes_adapter.py`](../../agent_baton/core/engine/notes_adapter.py) | (adapter) | Notes-to-bead bridge. |
 | [`dry_run_launcher.py`](../../agent_baton/core/engine/dry_run_launcher.py) | (launcher) | Engine-internal dry-run helper. |
 | [`flags.py`](../../agent_baton/core/engine/flags.py) | feature-flag helpers | Reads `BATON_*_ENABLED` env vars. |
 | [`errors.py`](../../agent_baton/core/engine/errors.py) | engine-specific exceptions | |
@@ -164,6 +165,7 @@ Wraps the synchronous engine in an async loop. Implements daemon mode.
 | [`migration_backup.py`](../../agent_baton/core/storage/migration_backup.py) | (backup helpers) | Pre-migration snapshots. |
 | [`sync.py`](../../agent_baton/core/storage/sync.py) | `SyncEngine`, `SyncTableSpec`, `SyncResult`, `auto_sync_current_project()` | Incremental one-way sync project → central. |
 | [`central.py`](../../agent_baton/core/storage/central.py) | `CentralStore` | Read-only `central.db` query interface. |
+| [`derived_bead_store.py`](../../agent_baton/core/storage/derived_bead_store.py) | `DerivedBeadStore` (line 71) | Rebuildable bead analytics (edges/clusters/handoffs) in `baton-derived.db`, derived from the `bd` system of record. |
 | [`pmo_sqlite.py`](../../agent_baton/core/storage/pmo_sqlite.py) | `PmoSqliteStore` | PMO data store (lives in `central.db`). |
 | [`user_store.py`](../../agent_baton/core/storage/user_store.py) | (user store) | `users` + `approval_log` (in `central.db`). |
 | [`conflict_store.py`](../../agent_baton/core/storage/conflict_store.py) | (conflict store) | Bead-conflict persistence. |
