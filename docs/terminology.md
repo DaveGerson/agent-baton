@@ -15,7 +15,7 @@ Canonical terms used across the codebase, CLI, and docs. Alphabetical.
 | **Action** | A unit emitted by the engine to drive the orchestration loop. One of: DISPATCH, GATE, APPROVAL, COMPLETE, FAILED, WAIT, FEEDBACK, INTERACT, SWARM_DISPATCH. See `ActionType` in `agent_baton/models/execution.py`. |
 | **Agent** | A distributable specialist defined in `agents/<name>.md` (frontmatter + prompt body). Dispatched by the orchestrator or invoked directly via Claude Code's `Agent` tool. |
 | **Approval** | Explicit human (or designated reviewer) sign-off required for HIGH-risk plans and certain phase transitions. Driven by the APPROVAL action and `baton execute approve`. |
-| **Bead** | A persistent incident or follow-up record in `baton.db`. Created with `baton beads create`. Used for autonomous bug filing, regression beads, audit trails. |
+| **Bead** | A persistent incident or follow-up record stored by the external `bd` tool ([gastownhall/beads](https://github.com/gastownhall/beads)) in a per-project `.beads/` workspace. Created with `baton beads create`. Used for autonomous bug filing, regression beads, audit trails. |
 | **Baton** | The project name (capitalized in prose). |
 | **`baton`** | The CLI binary (lowercase, monospace). |
 | **`agent_baton`** | The Python package (snake_case, importable). |

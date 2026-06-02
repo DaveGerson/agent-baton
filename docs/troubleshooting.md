@@ -365,16 +365,19 @@ For team mode, switch reviewers or temporarily relax with
 
 ---
 
-### Symptom: `baton beads create` fails with `UNIQUE constraint` or "no such table"
+### Symptom: `baton beads create` fails (`bd` not found or duplicate)
 
-**Cause**: `BeadStore.write()` requires a `bead_id` and a discoverable
-`baton.db`. Either the table doesn't exist (migration needed) or a
-duplicate bead is being created.
+**Cause**: Beads are stored by the external `bd` tool
+([gastownhall/beads](https://github.com/gastownhall/beads)) in a per-project
+`.beads/` workspace via `BdBeadStore.write()`. Either the `bd` binary is not
+on `PATH` (the engine raises `BdNotAvailable`) or a duplicate bead is being
+created.
 
-**Fix**: Run `baton storage migrate`. If the bead exists, view with
-`baton beads list --limit 50` and `baton beads show <bead-id>`.
-Subagents in worktrees rely on upward-walk discovery for `baton.db`;
-if it fails, set `BATON_DB_PATH` explicitly.
+**Fix**: Confirm `bd` is installed and on `PATH` (the installer provides it);
+override with `BATON_BD_BIN` if it lives elsewhere. If the bead already
+exists, view with `baton beads list --limit 50` and
+`baton beads show <bead-id>`. Subagents in worktrees rely on upward-walk
+discovery for the project root (and its `.beads/`).
 
 ---
 

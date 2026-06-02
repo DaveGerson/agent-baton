@@ -304,7 +304,7 @@ and treated as public protocol — see `docs/invariants.md`.
 
 3. Inspect the dependency graph: `baton beads graph --task $BATON_TASK_ID`.
 
-**Note**: BeadStore writes need a project `baton.db`. `UNIQUE constraint failed: beads.bead_id` means the bead exists already — use `baton beads show <id>`.
+**Note**: Bead writes go through `BdBeadStore` to the external `bd` tool's per-project `.beads/` workspace; `bd` must be on `PATH` (override with `BATON_BD_BIN`). A duplicate-id error means the bead exists already — use `baton beads show <id>`.
 
 **See also**: [Troubleshooting](troubleshooting.md), [`baton beads`](cli-reference.md#baton-beads).
 

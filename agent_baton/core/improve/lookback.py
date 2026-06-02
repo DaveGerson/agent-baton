@@ -44,8 +44,9 @@ class LookbackAnalyzer:
         Any object that satisfies the ``StorageBackend`` protocol from
         ``agent_baton.core.storage.protocol``.
     bead_store:
-        Optional :class:`~agent_baton.core.engine.bead_store.BeadStore`
-        instance.  When provided, beads are included in classification.
+        Optional :class:`~agent_baton.core.engine.bd_bead_store.BdBeadStore`
+        instance (via ``bead_backend.make_bead_store``).  When provided, beads
+        are included in classification.
     team_context_root:
         Root directory that holds ``learned-overrides.json`` and
         other project-level files.  Defaults to

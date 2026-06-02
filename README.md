@@ -334,9 +334,10 @@ revocation-aware verification path is `SoulRouter.verify_signature()`.
 
 ### Executable Beads (EXPERIMENTAL — Wave 6.1 Part C)
 
-`bead_type="executable"` beads carry a script body anchored in
-`refs/notes/baton-bead-scripts`. Pipeline: `ScriptLinter` (denylist of
-dangerous patterns) -> optional soul signature -> `BeadStore.write()`
+`bead_type="executable"` beads carry their script body inline in the bead's
+`bd` metadata (`script_body`, verified against `script_sha` on load). Pipeline:
+`ScriptLinter` (denylist of dangerous patterns) -> optional soul signature ->
+`BdBeadStore.write()` (via `bead_backend.make_bead_store()`)
 with `status="quarantine"` -> `AuditorGate.approve(bead_id)` flips
 status to `open` -> `ExecutableBeadRunner.run()` executes the script
 through `Sandbox` (wall-clock timeout + memory limit + captured I/O) and
@@ -351,14 +352,18 @@ Gated behind `BATON_EXEC_BEADS_ENABLED=1`.
 > exec`. Single source of truth: [`references/baton-patterns.md`](references/baton-patterns.md)
 > -> *"Pattern: Executable Beads — Trust Boundary"*.
 
-### Git-Native Bead Persistence (Wave 6.1 Part A)
+### Bead Persistence — `bd` backend (ADR-13b)
 
-Beads are anchored to git via `refs/notes/baton-beads` (and
-`refs/notes/baton-bead-scripts` for executable bead bodies). The
-installer (`scripts/install.sh` Step 5) auto-configures the wildcard
-notes refspec so beads round-trip across clones; the runtime warns once
-per session if the refspec is missing. Opt out with
-`BATON_SKIP_GIT_NOTES_SETUP=1`. (PR #66.)
+Beads are stored by the external [beads](https://github.com/gastownhall/beads)
+tool (`bd`) in a per-project `.beads/` workspace (Dolt-backed). `baton` talks to
+it through `BdBeadStore` (via `bead_backend.make_bead_store()`); all
+baton-specific bead fields round-trip losslessly through `bd`'s `metadata`
+(under a `baton` key) plus queryable labels. `bd` is a mandatory runtime
+dependency that the installer (`scripts/install.sh` / `install.ps1`)
+auto-installs. Derived analytics (inferred edges/clusters/handoffs) live in a
+rebuildable `baton-derived.db`; `central.db` keeps a read-only `beads`
+projection for cross-project analytics. (The earlier SQLite bead store and
+git-notes mirror were removed in ADR-13b — see `docs/design-decisions.md`.)
 
 ### Cross-Project Intelligence
 
@@ -807,8 +812,8 @@ pmo-ui/            <- React/Vite PMO frontend
 | `BATON_EXPERIMENTAL` | CSV opt-in flag for experimental features. Required for `baton swarm` (`BATON_EXPERIMENTAL=swarm`). | unset |
 | `BATON_SWARM_ENABLED` | Required (in addition to `BATON_EXPERIMENTAL=swarm`) to actually dispatch a swarm refactor. | unset |
 | `BATON_SOULS_ENABLED` / `BATON_EXEC_BEADS_ENABLED` | Feature flags for persistent agent souls (Wave 6.1B) and executable beads (Wave 6.1C). | unset |
-| `BATON_GASTOWN_ENABLED` | Gastown git-notes bead persistence (Wave 6.1A). When on, bead writes are mirrored to `refs/notes/baton-beads` (warn-only; SQLite remains the source of truth) so memory survives across clones and worktrees. On by default; set `0` for SQLite-only. | `1` |
-| `BATON_BD_BACKEND` | Bead-store backend (ADR-13b): `sqlite`, `bd` (use the external [beads](https://github.com/gastownhall/beads) `bd` CLI as system of record), or `auto` (bd when present, else SQLite). The installer auto-installs `bd`, so `auto` runs off beads by default. | `auto` |
+| `BATON_BD_BACKEND` | Bead-store backend (ADR-13b). `bd` (the external [beads](https://github.com/gastownhall/beads) CLI) is now the only supported value and the system of record; `sqlite`/`auto` are removed and log a deprecation warning. | `bd` |
+| `BATON_BD_BIN` / `BATON_BD_PREFIX` | Path/name of the `bd` binary and the `bd init` issue prefix (matches baton's `bd-<hash>` IDs). | `bd` / `bd` |
 | `BATON_BD_ENABLED` / `BATON_BD_BIN` / `BATON_BD_PREFIX` | Beads backend master switch (`1`), `bd` binary path (`bd`), and `bd init` issue prefix (`bd`). | — |
 | `BATON_SKIP_GIT_NOTES_SETUP` | Set to `1` to silence the install-time git-notes replication setup and the runtime warning emitted by `NotesAdapter.write()` when the wildcard refspec is missing. | unset |
 | `ANTHROPIC_API_KEY` | Required for AI classification (`pip install agent-baton[classify]`) and the Haiku planner classifier | none |

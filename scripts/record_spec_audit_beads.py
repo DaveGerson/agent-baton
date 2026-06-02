@@ -5,6 +5,10 @@ Creates:
 - 12 CLOSED outcome beads for completed specs
 - 5 OPEN planning beads for partially-complete specs with remaining items
 - Links between related beads
+
+Bead backend: bd (mandatory after ADR-13b WP-G).  Beads now live in
+``.beads/`` and are managed by the ``bd`` CLI via ``make_bead_store()``.
+The SQLite BeadStore class was removed in WP-G; do not reference it here.
 """
 import sys
 from datetime import datetime, timezone
@@ -14,7 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agent_baton.models.bead import Bead, BeadLink, _generate_bead_id
-from agent_baton.core.engine.bead_store import BeadStore
+from agent_baton.core.engine.bead_backend import make_bead_store
 
 DB_PATH = Path(".claude/team-context/baton.db").resolve()
 TASK_ID = "spec-audit-2026-04-14"
@@ -58,7 +62,9 @@ def make_bead(
 
 
 def main() -> None:
-    store = BeadStore(DB_PATH)
+    # Derive repo root from the db path (.claude/team-context/baton.db → project root)
+    repo_root = DB_PATH.parent.parent.parent
+    store = make_bead_store(DB_PATH, repo_root=repo_root)
 
     beads: list[Bead] = []
     n = 0
@@ -166,12 +172,13 @@ def main() -> None:
 
     beads.append(make_bead(
         "audit.9", "outcome",
-        "Bead Memory spec COMPLETE. Bead model, BeadStore (SQLite), BeadSignal parsing, BeadDecay, "
-        "BeadSelector with tier-based ranking, full CLI (list/show/ready/close/link/cleanup/promote/graph).",
+        "Bead Memory spec COMPLETE. Bead model, bd-backed BdBeadStore, BeadSignal parsing, BeadDecay, "
+        "BeadSelector with tier-based ranking, full CLI (list/show/ready/close/link/cleanup/promote/graph). "
+        "ADR-13b WP-G: backend migrated from SQLite to bd; beads live in .beads/.",
         ["spec-closed", "bead-memory", "beadstore", "agent-memory"],
-        status="closed", summary="Bead memory system fully implemented with SQLite persistence and CLI",
+        status="closed", summary="Bead memory system fully implemented with bd persistence and CLI",
         affected_files=["agent_baton/models/bead.py",
-                        "agent_baton/core/engine/bead_store.py",
+                        "agent_baton/core/engine/bd_bead_store.py",
                         "agent_baton/core/engine/bead_signal.py",
                         "agent_baton/core/engine/bead_decay.py",
                         "agent_baton/core/engine/bead_selector.py",
@@ -283,21 +290,6 @@ def main() -> None:
                         "pmo-ui/src/"],
         bead_count=n,
     )); n += 1
-
-    # ── Insert synthetic execution record for FK constraint ─────────
-
-    import sqlite3
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute(
-        "INSERT OR IGNORE INTO executions (task_id, status, current_phase, "
-        "current_step_index, started_at, completed_at) "
-        "VALUES (?, 'completed', 0, 0, ?, ?)",
-        (TASK_ID, NOW, NOW),
-    )
-    conn.commit()
-    conn.close()
-    print(f"  ensured execution record for {TASK_ID}")
 
     # ── Write all beads ───────────────────────────────────────────────
 
