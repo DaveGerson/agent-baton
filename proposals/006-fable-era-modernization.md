@@ -1,6 +1,6 @@
 # Proposal 006: Fable-Era Modernization — Model Catalog, 4-Tier Routing, and New API Capability Adoption
 
-**Status**: Draft
+**Status**: Largely superseded by [Proposal 007](007-pare-to-the-moat.md) — only Phase 0.2–0.4 and parts of Phase 3 survive (see 007 §Relationship to Proposal 006). Retained as the evidence inventory for the model-era review.
 **Author**: Codebase review (4 parallel review agents: model-surface inventory, architecture, distributables, docs/tests)
 **Date**: 2026-06-10
 **Risk**: MEDIUM — Phase 0/1 are additive; Phase 2 touches a persisted enum + golden states
