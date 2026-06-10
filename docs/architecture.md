@@ -164,7 +164,7 @@ In both backends, a per-team mailbox at `.claude/team-context/mailbox/team-{step
 Planning is fundamentally different work from execution. The planner reasons about scope, risk, and resource allocation; the executor runs a fixed sequence. Separating them lets us:
 
 - Replan without re-executing. `baton execute amend-plan` can adjust phases mid-execution without losing state.
-- Use different models for each. Planner uses opus by default; executor steps default to sonnet for backend/frontend work and haiku for triage.
+- Use different models for each. The planner is a deterministic governance-enrichment pass (classification → preset → reviewers → gates → budget) with no LLM calls by default; `BATON_PLAN_REVIEW=haiku|sonnet|opus` enables an optional post-pipeline quality review. Executor steps default to sonnet for backend/frontend work and haiku for triage; decomposition quality is owned by Claude Code plan mode.
 - Inspect the plan before paying for execution. `baton plan ... --explain` shows the reasoning; `--save` persists it for later.
 
 The Smart Forge subsystem can dispatch the planner's reasoning to a headless Claude Code subprocess when richer plan synthesis is needed; see [`storage-sync-and-pmo.md`](storage-sync-and-pmo.md).

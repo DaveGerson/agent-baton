@@ -1,6 +1,6 @@
 # Agent Baton
 
-> Multi-agent orchestration for Claude Code. Plans tasks, routes phases to specialist agents, runs gates between phases, persists traces locally, and recovers from crashes.
+> Governance and assurance harness for Claude Code. Enforces domain-specific policy on AI-authored changes — data-classification risk, required expert reviewers, compliance gates, segregation-of-duties approval — and produces verifiable evidence bundles. Includes an opt-in managed-mode execution loop (plan → DISPATCH → GATE → APPROVAL) for regulated work.
 
 ## Docs
 

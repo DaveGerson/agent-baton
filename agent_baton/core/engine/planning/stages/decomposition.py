@@ -320,7 +320,6 @@ class DecompositionStage:
             step_id="1.1",
             agent_name=implement_agent,
             task_description=draft.task_summary,
-            model=draft.default_model or "sonnet",
             step_type="developing",
         )
 
@@ -336,7 +335,6 @@ class DecompositionStage:
             step_id="2.1",
             agent_name="code-reviewer",
             task_description=f"Review the implementation of: {draft.task_summary}",
-            model="sonnet",
             step_type="reviewing",
             depends_on=["1.1"],
         )
@@ -377,7 +375,6 @@ class DecompositionStage:
                         "5. Document: symptoms, timeline, affected paths, reproduction steps\n\n"
                         "Output a structured investigation report with evidence."
                     ),
-                    model="opus",
                     step_type="consulting",
                 )],
                 gate=PlanGate(
@@ -399,7 +396,6 @@ class DecompositionStage:
                         "4. If hypothesis is falsified, include 'RETRY_PHASE' in output to loop back\n\n"
                         "Output: ranked hypotheses with evidence, test design, and prediction."
                     ),
-                    model="opus",
                     step_type="consulting",
                     depends_on=["1.1"],
                 )],
@@ -416,7 +412,6 @@ class DecompositionStage:
                             "The test must fail with the current bug and pass after the fix. "
                             "This is the RED phase of TDD."
                         ),
-                        model="sonnet",
                         step_type="testing",
                         depends_on=["2.1"],
                     ),
@@ -428,7 +423,6 @@ class DecompositionStage:
                             "Fix the root cause identified in the hypothesis phase. "
                             "The regression test from step 3.1 must pass after your fix."
                         ),
-                        model="sonnet",
                         step_type="developing",
                         depends_on=["3.1"],
                     ),
@@ -452,7 +446,6 @@ class DecompositionStage:
                         "3. Verify regression test covers the actual failure mode\n"
                         "4. Assess if fix introduces new risks"
                     ),
-                    model="sonnet",
                     step_type="reviewing",
                     depends_on=["3.2"],
                 )],

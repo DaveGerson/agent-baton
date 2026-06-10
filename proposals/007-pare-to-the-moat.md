@@ -1,6 +1,6 @@
 # Proposal 007: Pare to the Moat — Refocus Agent Baton as a Governance & Assurance Harness
 
-**Status**: Draft, revised after independent verification pass (supersedes most of Proposal 006; see §Relationship to 006). Second-pass review verified flag defaults, pricing tables, gate-failure behavior, and forecaster mechanics against source; corrected A1/A3/A5, added A8 and dispositions for five previously unreviewed subsystems.
+**Status**: Shipped on branch (Phases B–J): deletions (predict/speculation, swarm, self-heal→gate-retry), pricing config, hook enforcement, assurance packs, evidence bundle, spec federation MVP, deterministic planner with opt-in review. Deferred: GSD repo split (A8) and follow-ons noted inline.
 **Author**: Codebase review (5 review agents: model surface, architecture, distributables, docs/tests, governance-layer recon)
 **Date**: 2026-06-10
 **Risk**: MEDIUM — large deletions, but of flag-gated/experimental subsystems; the kept core is already production-tested

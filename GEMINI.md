@@ -16,8 +16,8 @@ This file is read by every Claude Code agent dispatched inside this repo. It is 
 
 ```
 agent_baton/       Python package (the orchestration engine)
-agents/            Distributable agent definitions (33 .md)
-references/        Distributable reference procedures (18 .md)
+agents/            Distributable agent definitions (30 .md)
+references/        Distributable reference procedures (19 .md)
 templates/         CLAUDE.md + settings.json + skills/ — installed to targets
 scripts/           install.sh, install.ps1, record_spec_audit_beads.py
 tests/             pytest suite
@@ -50,7 +50,7 @@ When the `orchestrator` agent is invoked:
 
 ## Agent roster
 
-See [docs/agent-roster.md](docs/agent-roster.md) (33 agents). Recipes for common tasks: [docs/orchestrator-usage.md](docs/orchestrator-usage.md). For Baton's protocol contract from the agent side: [references/baton-engine.md](references/baton-engine.md).
+See [docs/agent-roster.md](docs/agent-roster.md) (30 agents). Recipes for common tasks: [docs/orchestrator-usage.md](docs/orchestrator-usage.md). For Baton's protocol contract from the agent side: [references/baton-engine.md](references/baton-engine.md).
 
 ## Code navigation
 
@@ -79,12 +79,21 @@ cymbal impact <symbol>          # blast radius before edits
 | `ANTHROPIC_API_KEY` | Required for AI risk classification and Haiku classifier | unset |
 | `BATON_WORKTREE_ENABLED` | Enable/disable git worktree isolation for concurrent agents | `1` |
 | `BATON_TAKEOVER_ENABLED` | Enable/disable developer takeover capability | `1` |
-| `BATON_GATE_RETRY` | Enable single gate-retry: on first gate failure, re-dispatch the failing step once with gate output appended to the prompt. Second failure is terminal. | `0` |
+| `BATON_GATE_RETRY` | Enable single gate-retry: on first gate failure, re-dispatch the failing step once with gate output appended to the prompt. Second failure is terminal. Default off. | `0` |
 | `BATON_SOULS_ENABLED` | Enable/disable soul registry for agent identity | `0` |
-| `BATON_BD_BACKEND` | Bead-store backend (ADR-13b WP-G). `bd` is the only supported value — SQLite fallback removed. Other values log a deprecation warning. | `bd` |
-| `BATON_BD_ENABLED` / `BATON_BD_BIN` / `BATON_BD_PREFIX` | `BATON_BD_ENABLED` kept for backward compat but has no effect after WP-G. Binary path (`bd`) and `bd init` prefix (`bd`). | — |
-| `BATON_PLANNER_HARD_GATE` | Enable hard validation gate that blocks bad plans | unset |
+| `BATON_BD_BACKEND` | Bead-store backend (ADR-13b WP-G). `bd` is now the only supported value — SQLite fallback and `auto` mode removed. Any other value logs a deprecation warning and raises `BdNotAvailable` if `bd` binary is missing. | `bd` |
+| `BATON_BD_ENABLED` | Kept for backward compatibility. Has no effect after WP-G — `bd` is always required. | `1` |
+| `BATON_BD_BIN` | Path/name of the `bd` binary used by `BdClient`. | `bd` |
+| `BATON_BD_PREFIX` | Issue prefix passed to `bd init` so generated IDs match baton's `bd-<hash>` scheme. | `bd` |
+| `BATON_PLANNER_HARD_GATE` | Enable hard validation gate that blocks structurally defective plans (deterministic checks — empty plans/phases, agent mismatches) | unset |
+| `BATON_ARTIFACT_VALIDATION` | Derive extra gate commands from agent-created runnable artifacts (CI workflows, npm scripts, Playwright config, Makefile targets, pre-commit). Set to `0` to suppress derivation and run only the planned `gate.command`. | `1` |
 | `BATON_OTEL_ENABLED` | Enable OpenTelemetry JSONL export | unset |
+| `BATON_COMPLIANCE_FAIL_CLOSED` | Halt execution + raise on compliance audit write failure (regulated-domain). When unset/`0`, failures are logged + a bead warning is emitted, execution continues. Can be overridden per-plan via `MachinePlan.compliance_fail_closed` (plan value takes precedence). Also governs `baton comply-record` hook: `1` → exit 1 on write errors. | `0` |
+| `BATON_POLICY_FAIL_CLOSED` | Controls `baton policy-check` hook error handling: `0` → fail-open (bad stdin or unreadable policy → stderr warning, exit 0); `1` → exit 2 (blocks the tool call, shows stderr to the model). | `0` |
+| `BATON_GOAL_EVALUATOR` | Selects the goal evaluator strategy for `/goal` (G1): `stub` (deterministic, no LLM), `haiku` (Claude Haiku 4.5), or `opus` (Claude Opus 4.8). `haiku`/`opus` require `ANTHROPIC_API_KEY`; otherwise falls back to `stub`. | `haiku` |
+| `BATON_TEAMS_BACKEND` | Selects the execution backend for `TEAM_DISPATCH` (A1): `worktree` (default, parallel worktree-isolated dispatch with `baton execute resume` support) or `claude-teams` (experimental — writes a spawn prompt for an outer Claude Code session to create an Agent Team; not resumable, one team at a time, no nested teams). Unknown values warn and fall back to `worktree`. | `worktree` |
+| `BATON_TEAMS_STRICT_RESUMABILITY` | When `1` AND `BATON_TEAMS_BACKEND=claude-teams` AND the plan has team phases the claude-teams backend cannot resume mid-flight under `long-running` budget, `baton plan`/`baton goal` refuses to save and exits 2. Default (`0`) downgrades the refusal to a warning. | `0` |
+| `BATON_PLAN_REVIEW` | Optional LLM plan-quality review after the deterministic pipeline: `off` (default) \| `haiku` \| `sonnet` \| `opus`. The deterministic pipeline has known limits in complexity assessment; default compensating controls are the structural hard gate and pre-flight human review in the spec queue — enable this for unattended/managed-mode planning. `sonnet` recommended. | off |
 
 ## Regulated-domain rules
 

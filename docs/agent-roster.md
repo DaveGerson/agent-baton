@@ -9,7 +9,7 @@ see-also:
 
 # Agent roster
 
-This page mirrors `agents/*.md` — the distributable agent definitions installed by `scripts/install.sh`. There are **33** agents. The orchestrator picks among them based on task domain, risk tier, and budget. To dispatch one directly inside Claude Code, name it in the `Agent` tool with `subagent_type`.
+This page mirrors `agents/*.md` — the distributable agent definitions installed by `scripts/install.sh`. There are **30** agents. The orchestrator picks among them based on task domain, risk tier, and budget. To dispatch one directly inside Claude Code, name it in the `Agent` tool with `subagent_type`.
 
 To inspect runtime registration: `baton agents`.
 
@@ -71,6 +71,12 @@ Each agent file in `agents/` contains a YAML frontmatter block (`name`, `descrip
 | `learning-analyst` | sonnet | Reads execution history + scorecards; proposes evidence-backed agent/config improvements. |
 | `system-maintainer` | sonnet | Post-cycle config tuning. Mutates `learned-overrides.json` only — never source code. |
 | `talent-builder` | opus | Researches a domain, creates a new specialist agent + knowledge pack + skills. |
+
+## Archetypes
+
+| Agent | Model | Use when |
+|-------|-------|----------|
+| `archetype-james-engineering-manager` | opus | Evaluating Agent Baton features from a management perspective: PMO dashboard UX, governance/approval workflows, cost visibility, reporting, and analytics. Use to answer "would an engineering manager actually use this to sponsor and oversee an agent program?" |
 
 ## Resilience subsystem (immune)
 

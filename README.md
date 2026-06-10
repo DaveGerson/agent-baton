@@ -2,20 +2,15 @@
 
 📖 **Docs:** <https://davegerson.github.io/agent-baton/>
 
-**Turn one prompt into a coordinated team of AI specialists.**
+**Governance and assurance for Claude Code.**
 
-Agent Baton is a multi-agent orchestration system for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Describe a complex task in plain language -- Baton plans it, routes it to the right specialist agents, enforces QA gates between phases, and delivers tested, reviewed code. No external services. No API keys beyond Claude. Everything runs locally.
+Agent Baton is a **governance and assurance harness** for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). It enforces domain-specific policy on every AI-authored change — data-classification risk, required expert reviewers, compliance gates, segregation-of-duties approval — and makes the outcome auditable through a verifiable evidence bundle. Claude Code owns the work; Baton owns the accountability.
 
-```
-You:  "Use the orchestrator to add input validation to the API
-       with tests and security review"
+**Harness mode** (zero loop overhead): install the hooks (`policy-check`, `comply-record`, `classify --activate`), activate an assurance pack, and every tool call Claude Code makes is evaluated against your policy. Evidence bundles are generated automatically. No plan. No execution loop. No API keys beyond Claude.
 
-Baton: Plans 3 phases (implement, test, review)
-       Dispatches backend-engineer, test-engineer, security-reviewer
-       Runs pytest gate between phases
-       Commits each agent's work separately
-       Writes trace, usage log, and retrospective
-```
+**Managed mode** (for regulated work): set `BATON_PLAN_REVIEW` or use the spec queue — Baton runs the full plan→DISPATCH→GATE→APPROVAL loop, activated automatically when the data classifier flags a task as HIGH or CRITICAL risk.
+
+**Spec federation**: submit or import specs from Azure DevOps / GitHub Issues → AI-derived risk + cost forecast → senior review before firing. The cheapest control point for org AI spend.
 
 ---
 
@@ -119,7 +114,7 @@ end-to-end example with command output.
 
 ## Features
 
-### 19 Specialist Agents
+### 30 Specialist Agents
 
 Stack-aware agents that the orchestrator selects and routes automatically.
 First time on a Go project? The `talent-builder` creates
@@ -298,11 +293,11 @@ and raises `RunTokenCeilingExceeded` before any record_* call would push
 the total over the limit. The immune-system daemon checks the ceiling before
 each sweep and suspends with `'ceiling-abort'` rather than overspending.
 
-> **Known gap (bd-3f80).** Selfheal/immune respect the ceiling, but the
-> main `Executor.dispatch()` path does not yet block individual agent
-> dispatches when the projected spend would breach the cap; it only emits
-> a warning at HIGH/CRITICAL run start. Full executor wiring is tracked
-> in bd-3f80.
+> **Known gap (bd-3f80).** The main `Executor.dispatch()` path does not
+> yet block individual agent dispatches when the projected spend would
+> breach the cap; it only emits a warning at HIGH/CRITICAL run start.
+> Enforcement is handled by the policy hooks. Full executor wiring is
+> tracked in bd-3f80.
 
 ### Persistent Agent Souls (EXPERIMENTAL — Wave 6.1 Part B)
 
@@ -508,7 +503,7 @@ contract between Claude and the engine.
 ```
                     +----------------------------------------------------+
                     |                    ORCHESTRATOR                     |
-                    |  Reads 16 reference procedures inline               |
+                    |  Reads 19 reference procedures inline               |
                     +------------------------+---------------------------+
                                              |
                           baton plan --------+-------- baton execute
@@ -766,8 +761,8 @@ every invocation.
 ## Project Structure
 
 ```
-agents/            <- 22 agent definitions (markdown + YAML frontmatter)
-references/        <- 16 reference procedures (shared knowledge)
+agents/            <- 30 agent definitions (markdown + YAML frontmatter)
+references/        <- 19 reference procedures (shared knowledge)
 templates/         <- CLAUDE.md + settings.json + skills for target projects
 scripts/           <- Install scripts (Linux + Windows)
 docs/              <- Architecture docs, ADRs, invariants, troubleshooting
@@ -834,14 +829,14 @@ pmo-ui/            <- React/Vite PMO frontend
 | `--knowledge PATH` | Attach a knowledge document (repeatable) |
 | `--knowledge-pack NAME` | Attach a knowledge pack (repeatable) |
 | `--intervention LEVEL` | Escalation threshold: low, medium, high |
-| `--model MODEL` | Default model for dispatched agents (opus, sonnet) |
+| `--model MODEL` | Default model for dispatched agents (haiku, sonnet, opus) |
 | `--complexity LEVEL` | Override complexity: light, medium, heavy |
 
 ### Files Installed to Target Projects
 
 | File | Purpose |
 |------|---------|
-| `.claude/agents/*.md` | Agent definitions (19 files) |
+| `.claude/agents/*.md` | Agent definitions (30 files) |
 | `.claude/references/*.md` | Reference procedures (15 files) |
 | `.claude/CLAUDE.md` | Project development guide (from template) |
 | `.claude/settings.json` | Hook configuration |
@@ -889,7 +884,7 @@ Requires Python 3.10+. The only runtime dependency is PyYAML.
 ## Project Status
 
 Agent Baton is in active development (v0.1.0). The orchestration engine,
-all 22 agents, 16 references, knowledge delivery, bead memory system,
+all 30 agents, 19 references, knowledge delivery, bead memory system,
 PMO subsystem with end-to-end workflow (plan, edit, execute, review,
 merge), REST API with webhooks, federated sync, event system, learning
 automation, and the improvement pipeline are implemented and tested.
@@ -911,7 +906,7 @@ Three integration gaps remain:
 
 | Gap | Bead | Surface |
 |-----|------|---------|
-| Executor wiring of `BATON_RUN_TOKEN_CEILING` | bd-3f80 | Selfheal/speculator/immune respect the cap; main `Executor.dispatch()` only warns |
+| Executor wiring of `BATON_RUN_TOKEN_CEILING` | bd-3f80 | Main `Executor.dispatch()` only warns at HIGH/CRITICAL risk; enforcement by policy hooks |
 | Soul callers not migrated | bd-1ca2 | Existing `soul.verify` callers not yet routed through revocation-aware `SoulRouter.verify_signature()` |
 | Wave 6.1 Part A integration | bd-971d | Git-notes bead persistence + executor BeadStore handoff |
 

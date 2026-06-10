@@ -2336,3 +2336,4 @@ The full list of Baton environment variables. Mirrored in
 | `BATON_GATE_RETRY` | Enable single gate-retry: on first gate failure, re-dispatch the failing step once with gate output appended to the prompt. Second failure is terminal. Writes `gate_retry_dispatched` or `gate_failed_terminal` to `compliance-audit.jsonl`. | `0` |
 | `BATON_API_TOKEN` | Bearer token for the FastAPI server (`baton serve`). CLI `--token` flag takes precedence. | unset |
 | `ANTHROPIC_API_KEY` | Required for AI risk classification and the Haiku planner classifier. | unset |
+| `BATON_PLAN_REVIEW` | Optional LLM plan-quality review after the deterministic pipeline: `off` (default) \| `haiku` \| `sonnet` \| `opus`. The deterministic pipeline has known limits in complexity assessment; default compensating controls are the structural hard gate and pre-flight human review in the spec queue — enable this for unattended/managed-mode planning. `sonnet` recommended. | off |

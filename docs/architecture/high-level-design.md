@@ -64,8 +64,8 @@ distributable assets:
 | Artifact | Location | Purpose |
 |----------|----------|---------|
 | `agent_baton/` Python package | `pyproject.toml` editable install | The engine, CLI, API, and bundled agents |
-| `agents/` markdown | Installed to `~/.claude/agents/` by `scripts/install.sh` | 47 agent definitions |
-| `references/` markdown | Installed to `~/.claude/references/` | 16 procedure references |
+| `agents/` markdown | Installed to `~/.claude/agents/` by `scripts/install.sh` | 30 agent definitions |
+| `references/` markdown | Installed to `~/.claude/references/` | 19 procedure references |
 | `templates/` | Installed to project's `.claude/` | `CLAUDE.md` + `settings.json` + skills |
 | `pmo-ui/dist/` | Built and served at `/pmo/` by FastAPI | React PMO frontend |
 
