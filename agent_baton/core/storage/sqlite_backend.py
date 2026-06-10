@@ -769,20 +769,6 @@ class SqliteStorage:
                 except json.JSONDecodeError:
                     pass
 
-        selfheal_attempts_v: list[dict] = []
-        if _table_exists(conn, "selfheal_attempts"):
-            for r in conn.execute(
-                "SELECT payload_json FROM selfheal_attempts "
-                "WHERE task_id = ? ORDER BY rowid",
-                (task_id,),
-            ).fetchall():
-                try:
-                    selfheal_attempts_v.append(
-                        json.loads(r["payload_json"] or "{}")
-                    )
-                except json.JSONDecodeError:
-                    pass
-
         state_obj = ExecutionState(
             task_id=row["task_id"],
             plan=plan,
@@ -818,7 +804,6 @@ class SqliteStorage:
             step_worktrees=step_worktrees_v,
             steps_ran_in_place=steps_ran_in_place_v,
             takeover_records=takeover_records_v,
-            selfheal_attempts=selfheal_attempts_v,
         )
         # v41 (SQLite Phase C): stash the OCC version on the in-memory
         # state so the next save_execution can issue a CAS update.
@@ -2093,8 +2078,8 @@ def _replace_collection_rows(
     """DELETE+INSERT all v38-v40 (Phase B) child-table rows for the execution.
 
     Mirrors the ``state.delivered_knowledge``, ``state.step_worktrees``,
-    ``state.steps_ran_in_place``, ``state.takeover_records``, and
-    ``state.selfheal_attempts`` collections into their normalised tables.
+    ``state.steps_ran_in_place``, and ``state.takeover_records``
+    collections into their normalised tables.
     The DELETE-then-INSERT pattern keeps
     removed entries from sticking around — same approach used for
     ``step_results`` in the main ``save_execution`` body.
@@ -2193,32 +2178,7 @@ def _replace_collection_rows(
                 ),
             )
 
-    if _table_exists(conn, "selfheal_attempts"):
-        conn.execute(
-            "DELETE FROM selfheal_attempts WHERE task_id = ?", (task_id,),
-        )
-        for i, record in enumerate(
-            getattr(state, "selfheal_attempts", []) or []
-        ):
-            r = record if isinstance(record, dict) else {}
-            attempt_id = str(r.get("attempt_id") or f"sh-{i}")
-            conn.execute(
-                """
-                INSERT INTO selfheal_attempts
-                    (task_id, attempt_id, step_id, started_at, status,
-                     cost_usd, payload_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    task_id,
-                    attempt_id,
-                    str(r.get("step_id", "")),
-                    str(r.get("started_at", "")),
-                    str(r.get("status", "")),
-                    float(r.get("cost_usd", 0.0)),
-                    json.dumps(r),
-                ),
-            )
+    # selfheal_attempts table removed in Phase D (007) — migration 44 drops it.
 
 
 

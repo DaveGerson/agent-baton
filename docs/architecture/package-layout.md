@@ -109,7 +109,7 @@ The heart of Agent Baton. Owns plan state and the action loop.
 | [`plan_reviewer.py`](../../agent_baton/core/engine/plan_reviewer.py) | `PlanReviewer` | Plan-quality static checks. |
 | [`worktree_manager.py`](../../agent_baton/core/engine/worktree_manager.py) | `WorktreeManager` | Wave 1.3 git-worktree per-step isolation. |
 | [`takeover.py`](../../agent_baton/core/engine/takeover.py) | (takeover support) | Wave 5.1 human-takeover. |
-| [`selfheal.py`](../../agent_baton/core/engine/selfheal.py) | (self-heal escalation) | Wave 5.2 model-tier escalation on gate failure. |
+| (gate-retry) | built into `executor.py` | Phase D single gate-retry on first gate failure (`BATON_GATE_RETRY`). |
 | [`foresight.py`](../../agent_baton/core/engine/foresight.py) | `Foresight` | Predictive next-step hinting. |
 | [`cost_estimator.py`](../../agent_baton/core/engine/cost_estimator.py) | (estimator) | Token cost estimation per step. |
 | [`team_board.py`](../../agent_baton/core/engine/team_board.py) | `TeamBoard` | Team-step coordination state. |

@@ -723,16 +723,6 @@ class TestExecutionStateSqliteRoundtrip:
                 "reason": "investigate gate failure",
             },
         ]
-        state.selfheal_attempts = [
-            {
-                "attempt_id": "sh-1",
-                "step_id": "1.1",
-                "started_at": "2026-01-15T11:10:00+00:00",
-                "status": "complete",
-                "cost_usd": 0.42,
-            },
-        ]
-
         store.save_execution(state)
         loaded = store.load_execution("task-exec-rt-phase-b2")
         assert loaded is not None
@@ -744,8 +734,6 @@ class TestExecutionStateSqliteRoundtrip:
         assert loaded.steps_ran_in_place == {"1.2": "worktree create failed: ENOSPC"}
         assert len(loaded.takeover_records) == 1
         assert loaded.takeover_records[0]["takeover_id"] == "to-1"
-        assert len(loaded.selfheal_attempts) == 1
-        assert loaded.selfheal_attempts[0]["attempt_id"] == "sh-1"
 
 
 # ---------------------------------------------------------------------------

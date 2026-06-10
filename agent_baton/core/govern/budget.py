@@ -1,11 +1,7 @@
-"""Wave 5 — BudgetEnforcer: self-heal cost gating.
+"""BudgetEnforcer: immune system cost gating and run-level token ceiling.
 
-Provides in-memory ledger for Wave 5 self-heal cost caps.
-Persistence will be wired when full Wave 2.2 BudgetEngine lands.
-
-Caps (from wave-5-design.md):
-    Self-heal per-step:  $0.50  (selfheal.per_step_cap_usd)
-    Self-heal per-task:  $5.00  (selfheal.per_task_cap_usd)
+Provides in-memory ledger for immune system daily caps and the run-level
+token ceiling (BATON_RUN_TOKEN_CEILING).
 
 Wave 6.2 Part B additions (immune system):
     Immune daily cap:    $5.00  (immune.daily_cap_usd)
@@ -13,14 +9,13 @@ Wave 6.2 Part B additions (immune system):
 
 End-user readiness #7 — Run-level token ceiling (BATON_RUN_TOKEN_CEILING):
     A single run-level kill-switch that caps the total USD spend across all
-    subsystems (self-heal escalations, immune sweeps).
+    subsystems (immune sweeps).
     Set via the ``BATON_RUN_TOKEN_CEILING`` environment variable (USD float).
     When unset on a HIGH-risk run, a warning is logged at engine start.
     Raises :class:`RunTokenCeilingExceeded` before any LLM call that would
     push cumulative spend past the ceiling.
 
-Note: Swarm budget methods (preflight_swarm, record_swarm_spend) removed in
-Phase C pare-back (007). The selfheal ledger remains.
+Note: Self-heal escalation ladder removed in Phase D pare-back (007).
     The cumulative counter is persisted in ``ExecutionState.run_cumulative_spend_usd``
     so resumed runs continue counting correctly.
 
@@ -28,9 +23,6 @@ Pricing baseline (April 2026 per design):
     Haiku:   $0.25 / $1.25 per M input/output tokens
     Sonnet:  $3.00 / $15.00 per M input/output tokens
     Opus:    $15.00 / $75.00 per M input/output tokens
-
-When a cap is exceeded mid-escalation, the CURRENT attempt is NOT killed.
-The NEXT dispatch call is refused and a BEAD_WARNING is filed.
 """
 from __future__ import annotations
 
@@ -58,7 +50,7 @@ class RunTokenCeilingExceeded(Exception):
         current_spend_usd: Total USD spent so far in this run.
         ceiling_usd: The configured ceiling from ``BATON_RUN_TOKEN_CEILING``.
         estimated_call_usd: Cost of the refused call.
-        intent: Short description of the refused call (e.g. "selfheal haiku-1").
+        intent: Short description of the refused call (e.g. "immune-sweep haiku").
     """
 
     def __init__(
@@ -85,23 +77,15 @@ class RunTokenCeilingExceeded(Exception):
 # ---------------------------------------------------------------------------
 
 _PRICING_INPUT: dict[str, float] = {
-    "haiku-1": 0.25 / 1_000_000,
-    "haiku-2": 0.25 / 1_000_000,
-    "sonnet-1": 3.00 / 1_000_000,
-    "sonnet-2": 3.00 / 1_000_000,
-    "opus": 15.00 / 1_000_000,
     "haiku": 0.25 / 1_000_000,
     "sonnet": 3.00 / 1_000_000,
+    "opus": 15.00 / 1_000_000,
 }
 
 _PRICING_OUTPUT: dict[str, float] = {
-    "haiku-1": 1.25 / 1_000_000,
-    "haiku-2": 1.25 / 1_000_000,
-    "sonnet-1": 15.00 / 1_000_000,
-    "sonnet-2": 15.00 / 1_000_000,
-    "opus": 75.00 / 1_000_000,
     "haiku": 1.25 / 1_000_000,
     "sonnet": 15.00 / 1_000_000,
+    "opus": 75.00 / 1_000_000,
 }
 
 
@@ -144,22 +128,19 @@ def _read_run_token_ceiling() -> float | None:
 
 
 class BudgetEnforcer:
-    """In-memory cost enforcer for Wave 5 self-heal.
+    """In-memory cost enforcer for immune system daily caps and the run-level
+    token ceiling.
 
     All state is held in-memory for v1.  Full Wave 2.2 will add SQLite
     persistence, daily-reset logic, and cross-execution aggregation.
 
     Args:
-        per_step_cap_usd: Maximum USD spend on self-heal per step.
-        per_task_cap_usd: Maximum USD spend on self-heal for the whole task.
+        immune_daily_cap_usd: Maximum USD spend on immune sweeps per day.
         bead_warning_fn: Optional callable to file a BEAD_WARNING.  Signature:
             ``(task_id: str, step_id: str, content: str) -> None``.
         task_id: Active execution task_id (used for bead filing).
+        initial_run_spend_usd: Prior run spend to restore on resume.
     """
-
-    # Public defaults matching wave-5-design.md
-    DEFAULT_PER_STEP_CAP_USD: float = 0.50
-    DEFAULT_PER_TASK_CAP_USD: float = 5.00
 
     # ── Immune system defaults (Wave 6.2 Part B) ─────────────────────────────
     DEFAULT_IMMUNE_DAILY_CAP_USD: float = 5.00
@@ -172,24 +153,16 @@ class BudgetEnforcer:
 
     def __init__(
         self,
-        per_step_cap_usd: float = DEFAULT_PER_STEP_CAP_USD,
-        per_task_cap_usd: float = DEFAULT_PER_TASK_CAP_USD,
         immune_daily_cap_usd: float = DEFAULT_IMMUNE_DAILY_CAP_USD,
         bead_warning_fn: Callable[[str, str, str], None] | None = None,
         task_id: str = "",
         initial_run_spend_usd: float = 0.0,
     ) -> None:
-        self._per_step_cap = per_step_cap_usd
-        self._per_task_cap = per_task_cap_usd
         self._immune_daily_cap = immune_daily_cap_usd
         self._bead_warning = bead_warning_fn
         self._task_id = task_id
 
         # Ledgers (in-memory).
-        # self-heal: step_id → total USD spent
-        self._selfheal_step_spend: dict[str, float] = defaultdict(float)
-        # self-heal: task-level total
-        self._selfheal_task_spend: float = 0.0
         # immune: day-string (YYYY-MM-DD) → total USD spent
         self._immune_daily_spend: dict[str, float] = defaultdict(float)
         # immune anomaly detector: deque of (utc_datetime, cost_usd) tuples
@@ -202,69 +175,6 @@ class BudgetEnforcer:
         # Restored from ExecutionState when resuming a crashed run so the
         # counter is never reset mid-execution.
         self._run_cumulative_spend_usd: float = initial_run_spend_usd
-
-    # ── Self-heal API ─────────────────────────────────────────────────────────
-
-    def allow_self_heal(self, step_id: str, tier: str) -> bool:
-        """Return True when a self-heal dispatch is within budget.
-
-        Checks both per-step and per-task caps.  Logs a warning and files
-        a BEAD_WARNING when either cap would be exceeded.
-        """
-        step_spent = self._selfheal_step_spend[step_id]
-        if step_spent >= self._per_step_cap:
-            msg = (
-                f"BEAD_WARNING: selfheal-budget-exhausted "
-                f"step={step_id} cap_usd={self._per_step_cap:.2f} "
-                f"spent_usd={step_spent:.4f} refused_tier={tier}"
-            )
-            _log.warning(msg)
-            self._file_bead_warning(step_id, msg)
-            return False
-
-        if self._selfheal_task_spend >= self._per_task_cap:
-            msg = (
-                f"BEAD_WARNING: selfheal-budget-exhausted "
-                f"step={step_id} task-level cap_usd={self._per_task_cap:.2f} "
-                f"spent_usd={self._selfheal_task_spend:.4f} refused_tier={tier}"
-            )
-            _log.warning(msg)
-            self._file_bead_warning(step_id, msg)
-            return False
-
-        return True
-
-    def record_self_heal_spend(
-        self,
-        step_id: str,
-        tier: str,
-        tokens_in: int,
-        tokens_out: int,
-    ) -> float:
-        """Record self-heal spend for *step_id* and return the cost.
-
-        Updates both per-step and per-task ledgers, and the run-level
-        cumulative counter.
-        """
-        cost = _cost_usd(tier, tokens_in, tokens_out)
-        self._selfheal_step_spend[step_id] += cost
-        self._selfheal_task_spend += cost
-        self.add_run_spend(cost)
-        _log.debug(
-            "BudgetEnforcer: self-heal spend step=%s tier=%s tokens_in=%d "
-            "tokens_out=%d cost_usd=%.4f (step_total=%.4f task_total=%.4f)",
-            step_id, tier, tokens_in, tokens_out, cost,
-            self._selfheal_step_spend[step_id], self._selfheal_task_spend,
-        )
-        return cost
-
-    def self_heal_step_spend(self, step_id: str) -> float:
-        """Return total USD spent on self-heal for *step_id*."""
-        return self._selfheal_step_spend[step_id]
-
-    def self_heal_task_spend(self) -> float:
-        """Return total USD spent on self-heal for the whole task."""
-        return self._selfheal_task_spend
 
     # ── Immune system API (Wave 6.2 Part B) ──────────────────────────────────
 
@@ -419,7 +329,7 @@ class BudgetEnforcer:
         Args:
             estimated_call_usd: Estimated USD cost of the pending LLM call.
             intent: Human-readable description of the call (for the exception
-                message and logs), e.g. ``"selfheal haiku-1"``.
+                message and logs), e.g. ``"immune-sweep haiku"``.
 
         Raises:
             RunTokenCeilingExceeded: When cumulative spend + estimated cost
@@ -449,9 +359,8 @@ class BudgetEnforcer:
     def add_run_spend(self, cost_usd: float) -> None:
         """Add *cost_usd* to the run-level cumulative counter.
 
-        Called automatically by the per-subsystem record methods
-        (``record_self_heal_spend``, ``record_immune_spend``).  May also be called directly by callers
-        that track cost outside the standard subsystem methods.
+        Called automatically by ``record_immune_spend``.  May also be called
+        directly by callers that track cost outside the standard subsystem methods.
 
         Args:
             cost_usd: USD amount to add to the cumulative counter.
@@ -484,7 +393,7 @@ class BudgetEnforcer:
         if _read_run_token_ceiling() is None:
             _log.warning(
                 "BATON_RUN_TOKEN_CEILING is unset for a %s-risk run. "
-                "Self-heal escalation and immune sweeps have no run-level kill-switch. "
+                "Immune sweeps have no run-level kill-switch. "
                 "Set BATON_RUN_TOKEN_CEILING=<usd> to cap total spend for this run.",
                 risk_level.upper(),
             )

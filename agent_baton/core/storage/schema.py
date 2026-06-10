@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 43
+SCHEMA_VERSION = 44
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -1253,7 +1253,6 @@ CREATE TABLE IF NOT EXISTS steps_ran_in_place (
 -- v40: SQLite Phase B step 4 — Human-Agent Loop tables (Wave 5).
 --
 -- takeover_records: I9 invariant relies on rows-with-empty-resumed_at.
--- selfheal_attempts and speculations: stable shapes per Wave 5.
 CREATE TABLE IF NOT EXISTS takeover_records (
     task_id      TEXT NOT NULL,
     takeover_id  TEXT NOT NULL,
@@ -1267,17 +1266,6 @@ CREATE TABLE IF NOT EXISTS takeover_records (
     PRIMARY KEY (task_id, takeover_id)
 );
 CREATE INDEX IF NOT EXISTS idx_takeover_active ON takeover_records(task_id) WHERE resumed_at IS NULL;
-
-CREATE TABLE IF NOT EXISTS selfheal_attempts (
-    task_id     TEXT NOT NULL,
-    attempt_id  TEXT NOT NULL,
-    step_id     TEXT NOT NULL DEFAULT '',
-    started_at  TEXT NOT NULL DEFAULT '',
-    status      TEXT NOT NULL DEFAULT '',
-    cost_usd    REAL NOT NULL DEFAULT 0.0,
-    payload_json TEXT NOT NULL DEFAULT '{}',
-    PRIMARY KEY (task_id, attempt_id)
-);
 
 CREATE TABLE IF NOT EXISTS speculations (
     task_id         TEXT NOT NULL,
@@ -1338,6 +1326,21 @@ DROP TABLE IF EXISTS beads;
 --
 -- Note: SQLite DROP TABLE IF EXISTS is idempotent — safe to re-apply.
 DROP TABLE IF EXISTS speculations;
+""",
+    44: """
+-- v44: 007 Phase D — remove self-heal escalation ladder.
+--
+-- The self-heal escalation subsystem (Wave 5.2, bd-1483) has been deleted
+-- and replaced with a single optional gate-retry (BATON_GATE_RETRY).
+-- The ``selfheal_attempts`` table is no longer written by baton and is
+-- dropped here.
+--
+-- ROLLBACK: restore the pre-migration backup created by
+-- migration_backup.backup_db() before this migration runs.  The backup
+-- is named ``baton.db.bak-43-<timestamp>``.
+--
+-- Note: SQLite DROP TABLE IF EXISTS is idempotent — safe to re-apply.
+DROP TABLE IF EXISTS selfheal_attempts;
 """,
 }
 
@@ -1424,17 +1427,6 @@ CREATE TABLE IF NOT EXISTS takeover_records (
     PRIMARY KEY (task_id, takeover_id)
 );
 CREATE INDEX IF NOT EXISTS idx_takeover_active ON takeover_records(task_id) WHERE resumed_at IS NULL;
-
-CREATE TABLE IF NOT EXISTS selfheal_attempts (
-    task_id     TEXT NOT NULL,
-    attempt_id  TEXT NOT NULL,
-    step_id     TEXT NOT NULL DEFAULT '',
-    started_at  TEXT NOT NULL DEFAULT '',
-    status      TEXT NOT NULL DEFAULT '',
-    cost_usd    REAL NOT NULL DEFAULT 0.0,
-    payload_json TEXT NOT NULL DEFAULT '{}',
-    PRIMARY KEY (task_id, attempt_id)
-);
 
 -- RELEASES (R3.1: named delivery targets that plans/specs can be tagged
 -- against; R3.8 adds deployment_profile_id soft-FK).

@@ -4,8 +4,8 @@ Design decisions (from wave-6-2-design.md Part B):
 
 - **Bead always.** Every finding is filed as a ``discovery`` bead regardless
   of confidence level.
-- **Auto-fix gated.** An auto-fix self-heal micro-agent is dispatched only
-  when:
+- **Auto-fix gated.** An auto-fix micro-agent (``immune-autofix``) is
+  dispatched only when:
 
   1. ``finding.confidence >= config.auto_fix_threshold`` (default 0.85).
   2. ``finding.kind`` is in :attr:`FindingTriage.AUTO_FIX_KINDS`.
@@ -15,9 +15,9 @@ Design decisions (from wave-6-2-design.md Part B):
   compliance and auto-fix are automated; human review is surfaced via
   beads only.
 
-Auto-fix dispatch reuses Wave 5.2 :class:`~agent_baton.core.engine.selfheal.SelfHealEscalator`
-infrastructure: a synthetic ``step_id`` is minted and the Haiku micro-agent
-receives the finding's ``auto_fix_directive`` as its prompt.
+Auto-fix dispatch uses the ``immune-autofix`` Haiku micro-agent: a synthetic
+``step_id`` is minted and the agent receives the finding's
+``auto_fix_directive`` as its prompt.
 """
 from __future__ import annotations
 
@@ -87,7 +87,7 @@ class FindingTriage:
             and self._config.auto_fix
             and finding.auto_fix_directive
         ):
-            self._dispatch_self_heal_micro_agent(finding, bead_id)
+            self._dispatch_autofix_micro_agent(finding, bead_id)
 
         return bead_id
 
@@ -139,13 +139,12 @@ class FindingTriage:
         )
         return written_id or bead_id
 
-    def _dispatch_self_heal_micro_agent(
+    def _dispatch_autofix_micro_agent(
         self, finding: "SweepFinding", bead_id: str
     ) -> None:
-        """Launch a Haiku self-heal micro-agent to apply the auto-fix.
+        """Launch the immune-autofix micro-agent to apply the auto-fix.
 
-        Reuses Wave 5.2 SelfHealEscalator infrastructure: we build a
-        synthetic step-like dispatch using ClaudeCodeLauncher directly at
+        Builds a synthetic step-like dispatch using ClaudeCodeLauncher at
         the Haiku tier.  The finding's ``auto_fix_directive`` becomes the
         primary prompt.
         """
@@ -166,7 +165,7 @@ class FindingTriage:
                 step_id, bead_id,
             )
             self._launcher.launch(  # type: ignore[union-attr]
-                agent_name="self-heal-haiku",
+                agent_name="immune-autofix",
                 prompt=prompt,
                 cwd_override=str(finding.target.path.parent)
                 if finding.target.path.is_file()

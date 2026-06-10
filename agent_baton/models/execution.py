@@ -1408,7 +1408,6 @@ class ExecutionState(BaseModel):
     working_branch: str = ""
     working_branch_head: str = ""
     takeover_records: list[dict] = Field(default_factory=list)
-    selfheal_attempts: list[dict] = Field(default_factory=list)
     run_cumulative_spend_usd: float = 0.0
     pending_scope_expansions: list[dict] = Field(default_factory=list)
     scope_expansions_applied: int = 0
@@ -1770,9 +1769,8 @@ class ExecutionState(BaseModel):
             # steps that degraded to in-place execution after worktree failure
             "steps_ran_in_place": dict(getattr(self, "steps_ran_in_place", {})),
             "working_branch": getattr(self, "working_branch", ""),
-            # Wave 5 (bd-e208, bd-1483): Human-Agent Loop state
+            # Wave 5 (bd-e208): Human-Agent Loop state
             "takeover_records": list(getattr(self, "takeover_records", [])),
-            "selfheal_attempts": list(getattr(self, "selfheal_attempts", [])),
             # SQLite Phase B: investigative-archetype phase retry counts.
             "phase_retries": dict(getattr(self, "phase_retries", {})),
             # bd-def9: rebased tip SHA after most-recent fold_back()
@@ -1831,9 +1829,8 @@ class ExecutionState(BaseModel):
             step_worktrees=dict(data.get("step_worktrees", {})),
             steps_ran_in_place=dict(data.get("steps_ran_in_place", {})),
             working_branch=data.get("working_branch", ""),
-            # Wave 5 (bd-e208, bd-1483): default to empty for legacy files
+            # Wave 5 (bd-e208): default to empty for legacy files
             takeover_records=list(data.get("takeover_records", [])),
-            selfheal_attempts=list(data.get("selfheal_attempts", [])),
             phase_retries=phase_retries,
             # bd-def9: getattr guard for legacy state files that predate this field
             working_branch_head=data.get("working_branch_head", ""),

@@ -229,7 +229,7 @@ is the agent's responsibility, enforced by the worktree-isolation
 contract in [`core/engine/worktree_manager.py`](../../agent_baton/core/engine/worktree_manager.py))
 or recorded as terminal (engine moves on).
 
-For human-in-the-loop recovery (`takeover`, `self-heal`),
+For human-in-the-loop recovery (`takeover`) and automated gate-retry,
 see [../engine-and-runtime.md §5](../engine-and-runtime.md).
 
 ---

@@ -411,7 +411,7 @@ set of env-var overrides for ops needs.
 | `BATON_OTEL_PATH` | Destination JSONL for OTel spans | `.claude/team-context/otel-spans.jsonl` |
 | `BATON_WORKTREE_ENABLED` | Set to `0` to disable Wave 1.3 worktree isolation | `1` |
 | `BATON_TAKEOVER_ENABLED` | Wave 5.1 takeover | `1` |
-| `BATON_SELFHEAL_ENABLED` | Wave 5.2 model-tier escalation | `0` |
+| `BATON_GATE_RETRY` | Phase D single gate-retry on first gate failure | `0` |
 | `ANTHROPIC_API_KEY` | Required for `claude` CLI and Haiku classifier | unset |
 | `BATON_ORG_ID`, `BATON_TEAM_ID`, `BATON_USER_ID`, `BATON_COST_CENTER` | F0.2 tenancy attribution overrides | from `identity.yaml` |
 

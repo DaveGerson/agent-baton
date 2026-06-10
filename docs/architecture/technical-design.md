@@ -640,17 +640,14 @@ opt-in until production data justifies enablement:
 | Wave | Module | Env flag | Default |
 |------|--------|----------|---------|
 | 5.1 Takeover | [`engine/takeover.py`](../../agent_baton/core/engine/takeover.py) | `BATON_TAKEOVER_ENABLED` | `1` (on) |
-| 5.2 Self-heal | [`engine/selfheal.py`](../../agent_baton/core/engine/selfheal.py) | `BATON_SELFHEAL_ENABLED` | `0` (off) |
+| 5.D Gate-retry | [`engine/executor.py`](../../agent_baton/core/engine/executor.py) | `BATON_GATE_RETRY` | `0` (off) |
 
-Both reuse the worktree contract from §8. Each emits its own
-trace events (`takeover.started`, `selfheal_attempt`) so the closed-loop
-learning pipeline can score effectiveness.
+Takeover reuses the worktree contract from §8. Gate-retry is engine-internal: on first gate failure the engine re-dispatches the failing step once with the gate output appended to the prompt; second failure is terminal. Each emits its own compliance rows (`gate_retry_dispatched`, `gate_failed_terminal`, `takeover.started`) so the closed-loop learning pipeline can score effectiveness.
 
 CLI surfaces:
 
 - `baton execute takeover STEP_ID [--editor ...] [--shell] [--reason ...] [--no-rerun-gate]`
 - `baton execute resume [--abort]` (post-takeover)
-- `baton execute self-heal STEP_ID [--max-tier opus]` (manual escalation)
 
 ---
 

@@ -32,7 +32,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agent_baton.core.govern.budget import BudgetEnforcer, RunTokenCeilingExceeded
-from agent_baton.core.engine.selfheal import SelfHealEscalator, EscalationTier
 from agent_baton.core.immune.daemon import ImmuneConfig, ImmuneDaemon
 from agent_baton.core.immune.scheduler import SweepScheduler, SweepTarget
 from agent_baton.core.immune.sweeper import SweepFinding, Sweeper
@@ -114,14 +113,14 @@ class TestRunTokenCeilingBlocksExcessCall:
 
         # A $0.002 call would push us to $0.011 — over the $0.01 ceiling.
         with pytest.raises(RunTokenCeilingExceeded) as exc_info:
-            enforcer.check_run_ceiling(0.002, "selfheal haiku-1")
+            enforcer.check_run_ceiling(0.002, "test-preflight-call")
 
         exc = exc_info.value
         assert exc.ceiling_usd == pytest.approx(0.01)
         assert exc.current_spend_usd == pytest.approx(0.009)
         assert exc.estimated_call_usd == pytest.approx(0.002)
-        assert exc.intent == "selfheal haiku-1"
-        assert "selfheal haiku-1" in str(exc)
+        assert exc.intent == "test-preflight-call"
+        assert "test-preflight-call" in str(exc)
         assert "ceiling" in str(exc).lower()
 
     def test_ceiling_exactly_at_limit_allows_call(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -131,7 +130,7 @@ class TestRunTokenCeilingBlocksExcessCall:
         enforcer = BudgetEnforcer()
         enforcer.add_run_spend(0.008)
         # $0.008 + $0.002 = $0.010 which is NOT > $0.010 — should not raise.
-        enforcer.check_run_ceiling(0.002, "selfheal haiku-1")  # must not raise
+        enforcer.check_run_ceiling(0.002, "test-preflight-call")  # must not raise
 
     def test_no_ceiling_never_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """When BATON_RUN_TOKEN_CEILING is unset, check_run_ceiling never raises."""
@@ -139,32 +138,6 @@ class TestRunTokenCeilingBlocksExcessCall:
         enforcer = BudgetEnforcer()
         enforcer.add_run_spend(9_999_999.0)
         enforcer.check_run_ceiling(9_999_999.0, "anything")  # must not raise
-
-    def test_selfheal_escalator_ceiling_abort(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """SelfHealEscalator.next_tier_with_ceiling_check() returns None and
-        records a ceiling-abort attempt when the ceiling trips."""
-        monkeypatch.setenv("BATON_RUN_TOKEN_CEILING", "0.001")
-
-        enforcer = BudgetEnforcer()
-        # Pre-fill spend so even the cheapest Haiku tier (4K in + 1K out) would exceed.
-        enforcer.add_run_spend(0.0009)
-
-        escalator = SelfHealEscalator(
-            step_id="step-1.1",
-            gate_command="pytest tests/",
-            worktree_path=tmp_path,
-            budget_enforcer=enforcer,
-        )
-        result = escalator.next_tier_with_ceiling_check()
-        assert result is None
-
-        # A ceiling-abort attempt should have been recorded.
-        attempts = escalator.attempts
-        assert len(attempts) == 1
-        assert attempts[0].status == "ceiling-abort"
-        assert attempts[0].tier == EscalationTier.HAIKU_1.value
 
 
 # ---------------------------------------------------------------------------
@@ -207,7 +180,7 @@ class TestRunTokenCeilingPersistsAcrossResume:
 
         # $0.03 + $0.025 = $0.055 > $0.05 ceiling — must raise.
         with pytest.raises(RunTokenCeilingExceeded) as exc_info:
-            enforcer_resumed.check_run_ceiling(0.025, "selfheal sonnet-1")
+            enforcer_resumed.check_run_ceiling(0.025, "test-preflight-call")
 
         exc = exc_info.value
         assert exc.current_spend_usd == pytest.approx(0.03)
@@ -245,7 +218,7 @@ class TestRunTokenCeilingUnsetDefaultsUnlimited:
         enforcer = BudgetEnforcer()
         # Enormous spend — still no raise when ceiling is unset.
         enforcer.add_run_spend(1_000_000.0)
-        enforcer.check_run_ceiling(1_000_000.0, "selfheal opus")  # must not raise
+        enforcer.check_run_ceiling(1_000_000.0, "test-preflight-call")  # must not raise
 
         with caplog.at_level(logging.WARNING, logger="agent_baton.core.govern.budget"):
             enforcer.warn_if_ceiling_unset_for_high_risk("HIGH")

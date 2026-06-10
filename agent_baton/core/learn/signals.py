@@ -28,14 +28,14 @@ def _utcnow_str() -> str:
 
 @dataclass
 class LearningSignal:
-    """A learning signal emitted by immune, self-heal, or other subsystems.
+    """A learning signal emitted by immune, gate-retry, or other subsystems.
 
     Consumed by the closed-loop learning pipeline to update agent context
     profiles and performance scorer ratings.
 
     Attributes:
         source: Origin of this signal, e.g. ``"immune-sweep"``,
-            ``"self-heal-success"``.
+            ``"gate-retry-success"``.
         target_agent: Name of the agent to update (e.g. ``"backend-engineer"``).
             May be empty when the signal is not agent-specific.
         finding_kind: Sweep kind that produced this signal (e.g.

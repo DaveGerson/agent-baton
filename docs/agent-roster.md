@@ -72,18 +72,11 @@ Each agent file in `agents/` contains a YAML frontmatter block (`name`, `descrip
 | `system-maintainer` | sonnet | Post-cycle config tuning. Mutates `learned-overrides.json` only — never source code. |
 | `talent-builder` | opus | Researches a domain, creates a new specialist agent + knowledge pack + skills. |
 
-## Resilience subsystem (self-heal)
-
-| Agent | Model | Use when |
-|-------|-------|----------|
-| `self-heal-haiku` | haiku | Fast triage of trivial test failures, lint errors, formatting drift. |
-| `self-heal-sonnet` | sonnet | Mid-tier auto-fix when haiku declines. |
-| `self-heal-opus` | opus | Deepest fix tier; invoked only when sonnet escalates. |
-
 ## Resilience subsystem (immune)
 
 | Agent | Model | Use when |
 |-------|-------|----------|
+| `immune-autofix` | haiku | Applies high-confidence hygiene fixes found by the immune sweep (stale comments, formatting, trivial lint). Invoked automatically by `FindingTriage` when `auto_fix=True`. |
 | `immune-deprecated-api` | sonnet | Sweeps for usage of deprecated APIs flagged by upstream. |
 | `immune-doc-drift` | sonnet | Detects when docs disagree with source. |
 | `immune-stale-comment` | haiku | Finds stale comments and TODOs that no longer match the code. |

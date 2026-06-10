@@ -2092,7 +2092,7 @@ in [references/baton-engine.md](../references/baton-engine.md#environment-variab
 | `BATON_BD_PREFIX` | Issue prefix for `bd init` (matches baton's `bd-<hash>` IDs). | `bd` |
 | `BATON_IMMUNE_ENABLED` | Immune-system monitoring loop. | `0` |
 | `BATON_EXEC_BEADS_ENABLED` | Wave 6.1 Part C executable beads. Sandbox is process-level only — see `references/baton-patterns.md` trust-boundary section before extending to external-origin input. | `0` |
-| `BATON_SELFHEAL_ENABLED` | Enable selfheal escalation on gate failure. Falsy values (`0`, `false`, `no`) are honoured and emit a `selfheal_suppressed` row to `compliance-audit.jsonl`. | `0` |
+| `BATON_GATE_RETRY` | Enable single gate-retry: on first gate failure, re-dispatch the failing step once with gate output appended to the prompt. Second failure is terminal. Writes `gate_retry_dispatched` or `gate_failed_terminal` to `compliance-audit.jsonl`. | `0` |
 | `BATON_WORKTREE_STALE_HOURS` | Worktree GC stale threshold in hours; legacy alias `BATON_WORKTREE_GC_HOURS`. GC runs on every `baton execute complete`. | `4` |
 | `BATON_API_TOKEN` | Bearer token for the FastAPI server (`baton serve`). CLI `--token` flag takes precedence. | unset |
 | `ANTHROPIC_API_KEY` | Required for AI risk classification and the Haiku planner classifier. | unset |

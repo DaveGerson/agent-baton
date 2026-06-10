@@ -38,7 +38,7 @@ Canonical terms used across the codebase, CLI, and docs. Alphabetical.
 | **PMO** | The optional REST API + React UI (served at `/pmo/`) that visualizes plans, executions, traces, retrospectives, and learning data across projects. |
 | **Reference procedure** | A reusable, agent-readable doc in `references/<name>.md` that codifies a workflow contract (engine protocol, routing logic, guardrails, patterns). |
 | **Retrospective** | The post-execution analysis written by the engine (and optionally augmented by `learning-analyst`). Stored in `.claude/team-context/retros/`. |
-| **Self-heal** | The auto-fix subsystem with three tiers (`self-heal-haiku`, `self-heal-sonnet`, `self-heal-opus`) invoked when gates fail. |
+| **Gate retry** | A single automated retry triggered when `BATON_GATE_RETRY=1` and a gate fails for the first time. The engine re-dispatches the failing step once with the gate output appended to the prompt. Second failure is terminal. |
 | **Step** | A unit of work within a phase. Either a DISPATCH (agent), a GATE (check), or an INTERACT (dialogue). |
 | **Subagent** | An agent dispatched by another agent (e.g., the orchestrator dispatches `backend-engineer`). |
 | **Trace** | The full event log of an execution. Generated automatically; inspected via `baton trace`. |

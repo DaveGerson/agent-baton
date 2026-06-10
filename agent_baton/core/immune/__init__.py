@@ -1,7 +1,7 @@
 """Wave 6.2 Part B — Immune System (bd-be76).
 
 Long-lived daemon that sweeps the project on a strict daily token budget,
-auto-files beads for findings, and dispatches self-healing micro-agents for
+auto-files beads for findings, and dispatches the immune-autofix micro-agent for
 high-confidence simple fixes.
 
 Disabled by default; set ``BATON_IMMUNE_ENABLED=1`` or ``immune.enabled: true``

@@ -295,9 +295,8 @@ Set `BATON_RUN_TOKEN_CEILING=<USD>` to cap total cumulative spend per
 execution. `BudgetEnforcer` reads the env var fresh on every check
 (never cached), tracks a run-level counter that survives crash recovery,
 and raises `RunTokenCeilingExceeded` before any record_* call would push
-the total over the limit. The selfheal and immune-system daemons all check
-the ceiling before kicking off an escalation cycle and abort with
-`'ceiling-abort'` rather than overspending.
+the total over the limit. The immune-system daemon checks the ceiling before
+each sweep and suspends with `'ceiling-abort'` rather than overspending.
 
 > **Known gap (bd-3f80).** Selfheal/immune respect the ceiling, but the
 > main `Executor.dispatch()` path does not yet block individual agent
@@ -806,8 +805,8 @@ pmo-ui/            <- React/Vite PMO frontend
 | `BATON_DB_PATH` | Override the project `baton.db` location (subagents in worktrees can rely on the upward-walk discovery) | discovered |
 | `BATON_API_TOKEN` | Bearer token for API authentication | none |
 | `BATON_APPROVAL_MODE` | Approval policy: `local` (self-approve) or `team` (different reviewer required). | `local` |
-| `BATON_SELFHEAL_ENABLED` | Enable selfheal escalation on gate failure. Falsy values (`0`, `false`, `no`) are honoured and write a `selfheal_suppressed` event to `compliance-audit.jsonl`. | `0` |
-| `BATON_RUN_TOKEN_CEILING` | Per-run cumulative spend cap (USD float). When set, `BudgetEnforcer.check_run_ceiling()` raises `RunTokenCeilingExceeded` before exceeding the cap and selfheal/immune all abort. Counter is restored on `baton execute resume`. (See PR #67/#73, bd-3f80.) | unset |
+| `BATON_GATE_RETRY` | Enable single gate-retry: on first gate failure, re-dispatch the failing step once with gate output appended to the prompt. Second failure is terminal. | `0` |
+| `BATON_RUN_TOKEN_CEILING` | Per-run cumulative spend cap (USD float). When set, `BudgetEnforcer.check_run_ceiling()` raises `RunTokenCeilingExceeded` before exceeding the cap; the immune daemon aborts. Counter is restored on `baton execute resume`. (See PR #67/#73, bd-3f80.) | unset |
 | `BATON_WORKTREE_STALE_HOURS` | Max age (hours) for the worktree GC to reclaim a stale linked worktree. New canonical name; `BATON_WORKTREE_GC_HOURS` is kept as a legacy alias. | `4` |
 | `BATON_SOULS_ENABLED` / `BATON_EXEC_BEADS_ENABLED` | Feature flags for persistent agent souls (Wave 6.1B) and executable beads (Wave 6.1C). | unset |
 | `BATON_BD_BACKEND` | Bead-store backend (ADR-13b). `bd` (the external [beads](https://github.com/gastownhall/beads) CLI) is now the only supported value and the system of record; `sqlite`/`auto` are removed and log a deprecation warning. | `bd` |

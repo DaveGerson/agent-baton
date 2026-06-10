@@ -1129,117 +1129,42 @@ class PromptDispatcher:
         )
 
     # ------------------------------------------------------------------
-    # Wave 5 prompt builders (bd-1483, bd-9839)
-    # These bypass the standard "Worktree Discipline" block because the
-    # agent is already placed in the worktree via cwd_override.
+    # Gate-retry prompt builder (Phase D, 007)
     # ------------------------------------------------------------------
 
     @staticmethod
-    def build_self_heal_prompt(
-        tier: str,
-        failure_ctx: dict,
-        *,
-        prior_failed_patch: str = "",
+    def build_gate_retry_prompt(
+        original_prompt: str,
+        gate_output: str,
+        gate_command: str = "",
     ) -> str:
-        """Build a tier-specific self-heal prompt for a micro-agent (bd-1483).
+        """Append gate failure output to an original step prompt for retry dispatch.
+
+        Called when BATON_GATE_RETRY=1 and the first gate failure triggers a
+        re-dispatch of the failing step.  The gate output is appended so the
+        agent understands what to fix.
 
         Args:
-            tier: EscalationTier.value string — 'haiku-1', 'haiku-2',
-                'sonnet-1', 'sonnet-2', or 'opus'.
-            failure_ctx: Context dict with keys:
-                gate_command (str), stderr_tail (str), diff (str),
-                file_windows (dict[str, str]), bead_summaries (list[str]),
-                full_file_contents (dict[str, str]), project_summary (str).
-            prior_failed_patch: Diff from the previous failed attempt.
-                Included on Haiku-2 and Sonnet-2 as "DO NOT REPEAT" reference.
+            original_prompt: The original delegation prompt for the step.
+            gate_output: stdout/stderr from the failing gate run.
+            gate_command: The gate command that failed (for context).
 
         Returns:
-            A formatted prompt ready for the self-heal micro-agent.
+            The original prompt with a ``--- GATE OUTPUT (retry 1/1) ---``
+            section appended.
         """
-        gate_command = failure_ctx.get("gate_command", "(unknown)")
-        stderr_tail = failure_ctx.get("stderr_tail", "")
-        diff = failure_ctx.get("diff", "")
-        file_windows: dict = failure_ctx.get("file_windows", {})
-        bead_summaries: list = failure_ctx.get("bead_summaries", [])
-        full_file_contents: dict = failure_ctx.get("full_file_contents", {})
-        project_summary: str = failure_ctx.get("project_summary", "")
-
-        # Base block shared by all tiers.
-        lines: list[str] = [
-            f"ROLE: self-heal-{tier.split('-')[0]}",
+        separator = "--- GATE OUTPUT (retry 1/1) ---"
+        header_lines = [
             "",
-            f"The gate '{gate_command}' failed. "
-            "Apply the smallest possible patch to make it pass.",
+            separator,
+        ]
+        if gate_command:
+            header_lines.append(f"Gate command: {gate_command}")
+        header_lines += [
+            "The gate above failed after your previous work.  Review the output "
+            "below and apply the minimal fix to make the gate pass.",
             "",
+            gate_output or "(no output captured)",
         ]
-
-        if diff:
-            lines += [
-                "DIFF (HEAD~1..HEAD):",
-                diff,
-                "",
-            ]
-
-        if stderr_tail:
-            lines += [
-                "GATE OUTPUT (last 50 lines of stderr):",
-                stderr_tail,
-                "",
-            ]
-
-        # Variation on attempt-2 for Haiku and Sonnet.
-        if tier in ("haiku-2", "sonnet-2") and prior_failed_patch:
-            lines += [
-                "NOTE: Your previous attempt did not fix the gate. "
-                "Try a DIFFERENT approach.",
-                "",
-                "DO NOT REPEAT this patch:",
-                prior_failed_patch[:2000],
-                "",
-            ]
-
-        # Sonnet and Opus: add file context windows.
-        if tier in ("sonnet-1", "sonnet-2", "opus") and file_windows:
-            for fpath, snippet in list(file_windows.items())[:10]:
-                lines += [
-                    f"FILE CONTEXT ({fpath}, 10-line window):",
-                    snippet,
-                    "",
-                ]
-
-        # Sonnet and Opus: add linked beads.
-        if tier in ("sonnet-1", "sonnet-2", "opus") and bead_summaries:
-            for bead in bead_summaries[:5]:
-                lines.append(f"BEAD: {bead}")
-            lines.append("")
-
-        # Opus only: full file contents + project summary + framing.
-        if tier == "opus":
-            if full_file_contents:
-                for fpath, content in list(full_file_contents.items()):
-                    lines += [
-                        f"FULL FILE ({fpath}):",
-                        content,
-                        "",
-                    ]
-            if project_summary:
-                lines += [
-                    "PROJECT SUMMARY:",
-                    project_summary,
-                    "",
-                ]
-            lines += [
-                "NOTE: Two cheaper models have already failed to fix this gate. "
-                "The bug is likely structural. Diagnose the ROOT CAUSE before patching.",
-                "",
-            ]
-
-        lines += [
-            "INSTRUCTIONS:",
-            "Apply your fix as a single git commit in this worktree.",
-            "Do not modify unrelated files.",
-            "After committing, the gate will be re-run automatically.",
-        ]
-
-        return "\n".join(lines)
+        return original_prompt + "\n" + "\n".join(header_lines)
 

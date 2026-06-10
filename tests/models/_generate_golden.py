@@ -849,7 +849,6 @@ def gen_execution_state() -> None:
         working_branch="feature/add-api-v2",
         working_branch_head="11223344aabbccdd",
         takeover_records=[],
-        selfheal_attempts=[],
         run_cumulative_spend_usd=0.042,
         pending_scope_expansions=[],
         scope_expansions_applied=0,

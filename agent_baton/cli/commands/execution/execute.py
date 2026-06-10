@@ -445,22 +445,6 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     # bd-5d4f: --abort and --no-rerun-gate are now declared on the resume
     # parser at registration time (see p_resume above).
 
-    # ── Wave 5.2 (bd-1483): Manual Self-Heal Trigger ─────────────────────────
-    # baton execute self-heal STEP_ID [--max-tier opus] [--task-id ID]
-    p_selfheal = sub.add_parser(
-        "self-heal", parents=[_task_id_parent],
-        help="Manually trigger self-heal escalation for a failed step (Wave 5.2)",
-    )
-    p_selfheal.add_argument(
-        "selfheal_step_id", metavar="STEP_ID",
-        help="Step ID to attempt self-heal on",
-    )
-    p_selfheal.add_argument(
-        "--max-tier", dest="selfheal_max_tier", default="opus",
-        choices=["haiku", "sonnet", "opus"],
-        help="Maximum escalation tier (default: opus)",
-    )
-
     return p
 
 
@@ -828,7 +812,7 @@ def handler(args: argparse.Namespace) -> None:
             "approve, feedback, amend, team-record, interact, complete, status, "
             "resume, list, switch, cancel, export, run, retry-gate, fail, "
             "resume-budget, verify-dispatch, audit-isolation, handoff, "
-            "worktree-gc, takeover, self-heal"
+            "worktree-gc, takeover"
         )
 
     if args.subcommand == "list":
@@ -1602,9 +1586,6 @@ def handler(args: argparse.Namespace) -> None:
     elif args.subcommand == "takeover":
         _handle_takeover(args, engine, context_root)
 
-    elif args.subcommand == "self-heal":
-        _handle_self_heal(args, engine, context_root)
-
     elif args.subcommand == "verify-dispatch":
         _handle_verify_dispatch(args, engine, context_root)
 
@@ -1723,91 +1704,6 @@ def _handle_takeover(args: argparse.Namespace, engine, context_root: Path) -> No
     print("  1. Commit them inside the worktree (git commit ...)")
     print(f"  2. Run: baton execute resume")
     print(f"  Or abort: baton execute resume --abort")
-
-
-# ---------------------------------------------------------------------------
-# Wave 5.2 — Manual Self-Heal Trigger (bd-1483)
-# ---------------------------------------------------------------------------
-
-
-def _handle_self_heal(args: argparse.Namespace, engine, context_root: Path) -> None:
-    """Handle ``baton execute self-heal STEP_ID``.
-
-    Manually triggers a self-heal escalation cycle for a failed step.
-    Requires ``selfheal.enabled`` (or BATON_SELFHEAL_ENABLED=1).
-
-    For v1 this surfaces the SelfHealEscalator status and the next tier
-    that would be attempted.  Full automated dispatch fires in a future step.
-    """
-    import os as _os
-    from agent_baton.core.engine.selfheal import EscalationTier, SelfHealEscalator
-
-    step_id = args.selfheal_step_id
-    max_tier_str = getattr(args, "selfheal_max_tier", "opus")
-
-    _tier_map = {
-        "haiku": EscalationTier.HAIKU_2,  # cap escalation at the last haiku tier
-        "sonnet": EscalationTier.SONNET_2,
-        "opus": EscalationTier.OPUS,
-    }
-    max_tier = _tier_map.get(max_tier_str, EscalationTier.OPUS)
-
-    if _os.environ.get("BATON_SELFHEAL_ENABLED", "0") in ("0", "false", "False", "no"):
-        user_error(
-            "Self-heal is disabled. Set BATON_SELFHEAL_ENABLED=1 to enable.",
-            hint="Or set selfheal.enabled: true in baton.yaml.",
-        )
-        return
-
-    state = engine._load_execution()
-    if state is None:
-        user_error("no active execution found")
-
-    wt_mgr = getattr(engine, "_worktree_mgr", None)
-    if wt_mgr is None:
-        user_error(
-            "WorktreeManager is unavailable; self-heal requires worktree isolation.",
-            hint="Ensure BATON_WORKTREE_ENABLED=1 and the project is a git repo.",
-        )
-        return
-
-    handle = wt_mgr.handle_for(state.task_id, step_id)
-    if handle is None:
-        user_error(
-            f"No retained worktree for step '{step_id}'. "
-            "Self-heal requires a retained failed worktree.",
-        )
-        return
-
-    phase_obj = state.current_phase_obj
-    gate_cmd = (phase_obj.gate.command if (phase_obj and phase_obj.gate) else "") or ""
-
-    escalator = SelfHealEscalator(
-        step_id=step_id,
-        gate_command=gate_cmd,
-        worktree_path=handle.path,
-        max_tier=max_tier,
-    )
-
-    next_tier = escalator.next_tier()
-    if next_tier is None:
-        print(f"Self-heal ladder exhausted for step '{step_id}' — no more tiers to try.")
-        return
-
-    agent_name = SelfHealEscalator.TIER_AGENTS[next_tier]
-    model = SelfHealEscalator.TIER_MODELS[next_tier]
-    input_cap = SelfHealEscalator.INPUT_CAPS[next_tier]
-
-    print(f"Self-heal next tier: {next_tier.value}")
-    print(f"  Agent:      {agent_name}")
-    print(f"  Model:      {model}")
-    print(f"  Input cap:  {input_cap:,} tokens")
-    print(f"  Worktree:   {handle.path}")
-    print()
-    print("To dispatch manually:")
-    print(f"  baton execute dispatch --step {step_id} --agent {agent_name} --model {model}")
-    print()
-    print("(Automated dispatch will fire on next gate failure when selfheal is enabled.)")
 
 
 # ---------------------------------------------------------------------------
