@@ -14,6 +14,7 @@ Decides whether a step is allowed to run, with what guardrails, and who has to a
 | `budget.py` | Token / cost budget enforcement |
 | `escalation.py` | Escalation chain — who to ask when self-approval isn't allowed |
 | `aibom.py` | AI bill-of-materials emission |
+| `evidence_bundle.py` | `EvidenceBundleBuilder` + `verify_bundle()` — per-task assurance artifacts (007 Phase H) |
 | `override_log.py` | Auditable record of every guardrail override |
 | `_redaction.py` | PII / secrets redaction helpers — internal only |
 

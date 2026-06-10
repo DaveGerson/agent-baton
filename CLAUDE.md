@@ -51,6 +51,7 @@ All Python imports use canonical paths: `from agent_baton.core.govern.classifier
 - `agent_baton/core/engine/protocols.py` — `ExecutionDriver` 15-method interface.
 - `agent_baton/models/execution.py` — `ActionType` enum (9 values: DISPATCH, GATE, APPROVAL, COMPLETE, FAILED, WAIT, FEEDBACK, INTERACT, SWARM_DISPATCH) and `ExecutionState`.
 - `agent_baton/core/govern/packs.py` — Assurance Pack loader, validator, registry, and classifier factory. Entry point for `baton packs` and pack-aware `DataClassifier` construction.
+- `agent_baton/core/govern/evidence_bundle.py` — `EvidenceBundleBuilder.build()` + `verify_bundle()`. Produces and verifies per-task assurance artifacts. Entry point for `baton evidence bundle|verify`.
 - `agent_baton/api/` — FastAPI routers for the REST API + PMO UI backend.
 
 ## Orchestrator behavior (mandatory)

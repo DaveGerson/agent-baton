@@ -1323,6 +1323,105 @@ Signals:   pyproject.toml, requirements.txt
 
 ---
 
+### `baton evidence`
+
+Build and verify per-task evidence bundles (007 Phase H).  A bundle is a
+self-contained directory (or `.tar.gz`) of verifiable artifacts that prove
+what ran, what was approved, and that nothing was tampered with after the
+fact.
+
+#### `baton evidence bundle`
+
+```
+baton evidence bundle <task_id>
+                      [--output DIR]
+                      [--sign]
+                      [--tar]
+                      [--db PATH]
+                      [--compliance-log PATH]
+                      [--packs-dir PATH]
+                      [--soul-db PATH]
+```
+
+| Argument | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `<task_id>` | Yes | -- | Task ID to bundle evidence for |
+| `--output DIR` | No | `.claude/team-context/` | Root directory; bundle lands at `<DIR>/evidence/<task-id>/` |
+| `--sign` | No | false | Sign the manifest with a soul key (requires `BATON_SOULS_ENABLED=1`) |
+| `--tar` | No | false | Package bundle as `.tar.gz` and remove the directory |
+| `--db PATH` | No | `.claude/team-context/baton.db` | Override baton.db location |
+| `--compliance-log PATH` | No | auto | Override compliance-audit.jsonl path |
+| `--packs-dir PATH` | No | `.claude/packs/` | Override assurance packs directory |
+| `--soul-db PATH` | No | `~/.baton/central.db` | Override central.db for soul signing |
+
+**Output:** `Evidence bundle written to: <path>`
+
+**Bundle contents:**
+
+| File | What it proves |
+|------|---------------|
+| `manifest.json` | Inventory of all files with SHA-256 hashes; optional soul signature |
+| `aibom.json` | AI Bill of Materials — models, agents, gates, knowledge |
+| `aibom.md` | Human-readable AIBOM |
+| `compliance-segment.jsonl` | Task-scoped compliance-audit entries (omitted if no log exists) |
+| `gates.json` | Full gate_results dump for this task |
+| `verdicts.json` | Auditor/reviewer step verdicts with extracted `AuditorVerdict` |
+| `approvals.json` | approval_results + pending approval request if present |
+| `packs.json` | Assurance packs + active-policy snapshot (omitted if none found) |
+
+**Example:**
+
+```bash
+baton evidence bundle task-abc123 --output /tmp/bundles --tar
+# → /tmp/bundles/evidence/task-abc123.tar.gz
+
+baton evidence bundle task-abc123 --sign
+# → .claude/team-context/evidence/task-abc123/ (signed manifest)
+```
+
+---
+
+#### `baton evidence verify`
+
+```
+baton evidence verify <path> [--strict]
+```
+
+| Argument | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `<path>` | Yes | -- | Path to bundle directory or `.tar.gz` |
+| `--strict` | No | false | Exit on the first failure (default: report all) |
+
+**Exit codes:**
+
+| Code | Meaning |
+|------|---------|
+| 0 | All checks passed (warnings are OK) |
+| 1 | One or more integrity failures |
+| 2 | Bundle is unusable (manifest missing or unparseable) |
+
+**Checks performed:**
+- `manifest.json` present and valid JSON
+- Per-file SHA-256 matches manifest
+- `compliance-segment.jsonl` internal chain consistency
+- AIBOM `chain_anchor` vs segment tail (WARNING on mismatch, not failure)
+- Soul signature verification when `soul_signature` is present
+
+**Example:**
+
+```bash
+# CI-runnable, no network or database needed
+baton evidence verify .claude/team-context/evidence/task-abc123/
+# → Bundle OK — all checks passed.
+
+baton evidence verify /tmp/bundles/task-abc123.tar.gz
+# → Bundle OK — all checks passed.
+```
+
+**Related:** `baton govern aibom`, `baton compliance`
+
+---
+
 ## Improve Commands
 
 ### `baton scores`
