@@ -32,6 +32,7 @@ Apply these to every change before declaring it done:
 | `agent_baton/api/` | FastAPI routers, middleware, webhooks (REST + PMO backend) | [agent_baton/api/CLAUDE.md](agent_baton/api/CLAUDE.md) |
 | `agent_baton/cli/` | Click/Typer CLI surface — `baton <command>` entry points | [agent_baton/cli/CLAUDE.md](agent_baton/cli/CLAUDE.md) |
 | `agent_baton/core/` | Engine internals: state machine, planner, dispatcher, governance, storage | [agent_baton/core/CLAUDE.md](agent_baton/core/CLAUDE.md) (deeper: [engine](agent_baton/core/engine/CLAUDE.md), [orchestration](agent_baton/core/orchestration/CLAUDE.md), [govern](agent_baton/core/govern/CLAUDE.md), [storage](agent_baton/core/storage/CLAUDE.md)) |
+| `agent_baton/core/federate/` | Spec Federation subsystem: `SpecDraftStore` (SQLite), `enrich.py` (DataClassifier + cost forecast), `importers.py` (GitHub/ADO importers) | — |
 | `agent_baton/models/` | Pydantic data models — execution, beads, plans, decisions | [agent_baton/models/CLAUDE.md](agent_baton/models/CLAUDE.md) |
 | `agents/` | 33 distributable agent definitions (Markdown with frontmatter) | [agents/CLAUDE.md](agents/CLAUDE.md) |
 | `references/` | 18 distributable reference procedures | [references/CLAUDE.md](references/CLAUDE.md) |
@@ -52,6 +53,7 @@ All Python imports use canonical paths: `from agent_baton.core.govern.classifier
 - `agent_baton/models/execution.py` — `ActionType` enum (9 values: DISPATCH, GATE, APPROVAL, COMPLETE, FAILED, WAIT, FEEDBACK, INTERACT, SWARM_DISPATCH) and `ExecutionState`.
 - `agent_baton/core/govern/packs.py` — Assurance Pack loader, validator, registry, and classifier factory. Entry point for `baton packs` and pack-aware `DataClassifier` construction.
 - `agent_baton/core/govern/evidence_bundle.py` — `EvidenceBundleBuilder.build()` + `verify_bundle()`. Produces and verifies per-task assurance artifacts. Entry point for `baton evidence bundle|verify`.
+- `agent_baton/api/routes/spec_queue.py` — Spec Queue routes (`/api/v1/pmo/specs/*`): submit, list, get, enrich, approve, bounce, fire, import. `_get_store()` honours `BATON_SPEC_DRAFT_DB` env var for test DB isolation.
 - `agent_baton/api/` — FastAPI routers for the REST API + PMO UI backend.
 
 ## Orchestrator behavior (mandatory)

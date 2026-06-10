@@ -22,6 +22,8 @@ import type {
   AdoSearchResponse,
   ExecuteCardResponse,
   ForgeApproveResponse,
+  SpecDraft,
+  FireSpecDraftResponse,
 } from '../../src/api/types.js';
 
 // ---------------------------------------------------------------------------
@@ -502,6 +504,167 @@ export const MOCK_APPROVE_RESPONSE: ForgeApproveResponse = {
 // ---------------------------------------------------------------------------
 // Helper: build a BoardResponse with only specific columns populated
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Spec Queue mock data (007 Phase I)
+// ---------------------------------------------------------------------------
+
+export const MOCK_SPEC_SUBMITTED: SpecDraft = {
+  id: 'spec-001',
+  title: 'Add OAuth2 login flow',
+  body: 'We need OAuth2 support for third-party sign-in via Google and GitHub.',
+  source: 'manual',
+  source_ref: '',
+  submitted_by: 'alice',
+  submitted_at: '2026-06-01T10:00:00Z',
+  status: 'submitted',
+  enrichment: null,
+  review: null,
+  task_id: null,
+  updated_at: '2026-06-01T10:00:00Z',
+};
+
+export const MOCK_SPEC_ENRICHED: SpecDraft = {
+  id: 'spec-002',
+  title: 'Migrate auth tokens to Redis',
+  body: 'Session tokens are stored in SQLite; Redis would improve scalability.',
+  source: 'github',
+  source_ref: '42',
+  submitted_by: 'bob',
+  submitted_at: '2026-06-02T08:00:00Z',
+  status: 'enriched',
+  enrichment: {
+    risk_level: 'MEDIUM',
+    guardrail_preset: 'Standard Development',
+    required_reviewers: ['security-team'],
+    signals_found: ['auth', 'redis', 'migration'],
+    confidence: 'high',
+    est_usd_low: 0.12,
+    est_usd_mid: 0.18,
+    est_usd_high: 0.25,
+    cost_confidence: 'default',
+    breakdown: [
+      { agent_name: 'backend-engineer', model: 'sonnet', est_steps: 3, est_tokens: 4500, est_usd: 0.09 },
+      { agent_name: 'test-engineer',    model: 'haiku',  est_steps: 2, est_tokens: 2800, est_usd: 0.03 },
+    ],
+    enriched_at: '2026-06-02T08:05:00Z',
+  },
+  review: null,
+  task_id: null,
+  updated_at: '2026-06-02T08:05:00Z',
+};
+
+export const MOCK_SPEC_APPROVED: SpecDraft = {
+  id: 'spec-003',
+  title: 'Add rate limiting middleware',
+  body: 'Throttle API endpoints at 100 req/min per user.',
+  source: 'manual',
+  source_ref: '',
+  submitted_by: 'carol',
+  submitted_at: '2026-05-30T14:00:00Z',
+  status: 'approved',
+  enrichment: {
+    risk_level: 'LOW',
+    guardrail_preset: 'Standard Development',
+    required_reviewers: [],
+    signals_found: ['middleware', 'rate-limit'],
+    confidence: 'high',
+    est_usd_low: 0.05,
+    est_usd_mid: 0.08,
+    est_usd_high: 0.10,
+    cost_confidence: 'default',
+    breakdown: [
+      { agent_name: 'backend-engineer', model: 'haiku', est_steps: 2, est_tokens: 2200, est_usd: 0.04 },
+    ],
+    enriched_at: '2026-05-30T14:03:00Z',
+  },
+  review: {
+    action: 'approved',
+    actor: 'architect',
+    feedback: '',
+    reviewed_at: '2026-05-30T15:00:00Z',
+  },
+  task_id: null,
+  updated_at: '2026-05-30T15:00:00Z',
+};
+
+export const MOCK_SPEC_BOUNCED: SpecDraft = {
+  id: 'spec-004',
+  title: 'Rewrite DB layer in Rust',
+  body: 'For fun and performance.',
+  source: 'manual',
+  source_ref: '',
+  submitted_by: 'dave',
+  submitted_at: '2026-05-28T09:00:00Z',
+  status: 'bounced',
+  enrichment: {
+    risk_level: 'HIGH',
+    guardrail_preset: 'Regulated Data',
+    required_reviewers: ['senior-engineer', 'security-team'],
+    signals_found: ['database', 'rewrite', 'rust'],
+    confidence: 'low',
+    est_usd_low: 0.50,
+    est_usd_mid: 1.20,
+    est_usd_high: 3.00,
+    cost_confidence: 'rough',
+    breakdown: [],
+    enriched_at: '2026-05-28T09:04:00Z',
+  },
+  review: {
+    action: 'bounced',
+    actor: 'architect',
+    feedback: 'Too risky without a proper migration plan. Please add rollback strategy.',
+    reviewed_at: '2026-05-28T11:00:00Z',
+  },
+  task_id: null,
+  updated_at: '2026-05-28T11:00:00Z',
+};
+
+export const MOCK_SPEC_FIRED: SpecDraft = {
+  id: 'spec-005',
+  title: 'Add dark mode to PMO UI',
+  body: 'Implement dark mode toggle for better night-time usability.',
+  source: 'github',
+  source_ref: '99',
+  submitted_by: 'eve',
+  submitted_at: '2026-05-25T12:00:00Z',
+  status: 'fired',
+  enrichment: {
+    risk_level: 'LOW',
+    guardrail_preset: 'Standard Development',
+    required_reviewers: [],
+    signals_found: ['ui', 'frontend'],
+    confidence: 'high',
+    est_usd_low: 0.03,
+    est_usd_mid: 0.05,
+    est_usd_high: 0.07,
+    cost_confidence: 'default',
+    breakdown: [],
+    enriched_at: '2026-05-25T12:02:00Z',
+  },
+  review: {
+    action: 'approved',
+    actor: 'architect',
+    feedback: '',
+    reviewed_at: '2026-05-25T13:00:00Z',
+  },
+  task_id: 'task-fire-001',
+  updated_at: '2026-05-25T14:00:00Z',
+};
+
+export const MOCK_SPEC_DRAFTS: SpecDraft[] = [
+  MOCK_SPEC_SUBMITTED,
+  MOCK_SPEC_ENRICHED,
+  MOCK_SPEC_APPROVED,
+  MOCK_SPEC_BOUNCED,
+  MOCK_SPEC_FIRED,
+];
+
+export const MOCK_FIRE_RESPONSE: FireSpecDraftResponse = {
+  spec_id: 'spec-003',
+  task_id: 'task-fire-new',
+  status: 'fired',
+};
 
 export function boardWithCards(cards: PmoCard[]): BoardResponse {
   const programs = Array.from(new Set(cards.map(c => c.program)));

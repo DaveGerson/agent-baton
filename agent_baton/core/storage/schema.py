@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 44
+SCHEMA_VERSION = 45
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -1342,6 +1342,48 @@ DROP TABLE IF EXISTS speculations;
 -- Note: SQLite DROP TABLE IF EXISTS is idempotent — safe to re-apply.
 DROP TABLE IF EXISTS selfheal_attempts;
 """,
+    45: """
+-- v45: 007 Phase I — spec_drafts table (Spec Federation MVP).
+--
+-- Stores team-submitted spec drafts through their lifecycle:
+-- submitted → enriched → approved|bounced → (bounced→submitted) | fired.
+--
+-- Columns:
+--   id             UUID primary key.
+--   title          Short human-readable title.
+--   body           Full markdown spec body.
+--   source         Origin: "manual", "github", or "ado".
+--   source_ref     External reference (issue URL, ADO work item ID, etc.).
+--   submitted_by   User ID of the submitter.
+--   submitted_at   ISO-8601 submission timestamp.
+--   status         Lifecycle state (see above).
+--   enrichment_json JSON blob of EnrichmentData; NULL before enrichment.
+--   review_json    JSON blob of ReviewData; NULL before review.
+--   task_id        Fired execution task ID; NULL until fired.
+--   updated_at     ISO-8601 last-updated timestamp.
+--
+-- Applied to BOTH project and central databases via
+-- ConnectionManager._run_migrations().  Additive only — no FK constraints.
+-- Fresh databases get the canonical shape from PROJECT_SCHEMA_DDL /
+-- CENTRAL_SCHEMA_DDL directly.
+CREATE TABLE IF NOT EXISTS spec_drafts (
+    id              TEXT PRIMARY KEY,
+    title           TEXT NOT NULL DEFAULT '',
+    body            TEXT NOT NULL DEFAULT '',
+    source          TEXT NOT NULL DEFAULT 'manual',
+    source_ref      TEXT NOT NULL DEFAULT '',
+    submitted_by    TEXT NOT NULL DEFAULT 'local-user',
+    submitted_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    status          TEXT NOT NULL DEFAULT 'submitted',
+    enrichment_json TEXT,
+    review_json     TEXT,
+    task_id         TEXT,
+    updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_spec_drafts_status       ON spec_drafts(status);
+CREATE INDEX IF NOT EXISTS idx_spec_drafts_submitted_by ON spec_drafts(submitted_by);
+CREATE INDEX IF NOT EXISTS idx_spec_drafts_submitted_at ON spec_drafts(submitted_at);
+""",
 }
 
 # =====================================================================
@@ -2262,6 +2304,25 @@ CREATE TABLE IF NOT EXISTS agent_context (
 );
 CREATE INDEX IF NOT EXISTS idx_agent_context_agent ON agent_context(agent_name);
 
+-- v45: 007 Phase I — spec_drafts table (Spec Federation MVP).
+CREATE TABLE IF NOT EXISTS spec_drafts (
+    id              TEXT PRIMARY KEY,
+    title           TEXT NOT NULL DEFAULT '',
+    body            TEXT NOT NULL DEFAULT '',
+    source          TEXT NOT NULL DEFAULT 'manual',
+    source_ref      TEXT NOT NULL DEFAULT '',
+    submitted_by    TEXT NOT NULL DEFAULT 'local-user',
+    submitted_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    status          TEXT NOT NULL DEFAULT 'submitted',
+    enrichment_json TEXT,
+    review_json     TEXT,
+    task_id         TEXT,
+    updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_spec_drafts_status       ON spec_drafts(status);
+CREATE INDEX IF NOT EXISTS idx_spec_drafts_submitted_by ON spec_drafts(submitted_by);
+CREATE INDEX IF NOT EXISTS idx_spec_drafts_submitted_at ON spec_drafts(submitted_at);
+
 """
 
 # =====================================================================
@@ -3147,6 +3208,25 @@ CREATE TABLE IF NOT EXISTS spec_plan_links (
     PRIMARY KEY (spec_id, task_id)
 );
 CREATE INDEX IF NOT EXISTS idx_central_spec_plan_links_task ON spec_plan_links(task_id);
+
+-- v45: 007 Phase I — spec_drafts table (Spec Federation MVP).
+CREATE TABLE IF NOT EXISTS spec_drafts (
+    id              TEXT PRIMARY KEY,
+    title           TEXT NOT NULL DEFAULT '',
+    body            TEXT NOT NULL DEFAULT '',
+    source          TEXT NOT NULL DEFAULT 'manual',
+    source_ref      TEXT NOT NULL DEFAULT '',
+    submitted_by    TEXT NOT NULL DEFAULT 'local-user',
+    submitted_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    status          TEXT NOT NULL DEFAULT 'submitted',
+    enrichment_json TEXT,
+    review_json     TEXT,
+    task_id         TEXT,
+    updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_spec_drafts_status       ON spec_drafts(status);
+CREATE INDEX IF NOT EXISTS idx_spec_drafts_submitted_by ON spec_drafts(submitted_by);
+CREATE INDEX IF NOT EXISTS idx_spec_drafts_submitted_at ON spec_drafts(submitted_at);
 
 -- TENANCY (F0.2)
 CREATE TABLE IF NOT EXISTS tenancy_orgs (

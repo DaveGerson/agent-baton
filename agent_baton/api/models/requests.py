@@ -648,3 +648,86 @@ class SkipStepRequest(BaseModel):
         default="",
         description="Human-readable explanation for why this step is being skipped.",
     )
+
+
+# ---------------------------------------------------------------------------
+# Spec Queue requests (007 Phase I)
+# ---------------------------------------------------------------------------
+
+
+class SubmitSpecDraftRequest(BaseModel):
+    """Request body for ``POST /api/v1/pmo/specs``.
+
+    Submits a new spec draft for enrichment and architect review.
+    """
+
+    title: str = Field(
+        ...,
+        min_length=1,
+        description="Short human-readable title for the spec.",
+    )
+    body: str = Field(
+        default="",
+        description="Full markdown spec body.",
+    )
+    source: str = Field(
+        default="manual",
+        description="Origin of the draft: 'manual', 'github', or 'ado'.",
+    )
+    source_ref: str = Field(
+        default="",
+        description="External reference URL or ID (issue URL, ADO work item ID).",
+    )
+
+
+class BounceSpecDraftRequest(BaseModel):
+    """Request body for ``POST /api/v1/pmo/specs/{id}/bounce``.
+
+    Returns an enriched spec draft to the submitter with feedback.
+    The ``feedback`` field must be non-empty.
+    """
+
+    feedback: str = Field(
+        ...,
+        min_length=1,
+        description="Mandatory feedback explaining why the spec was bounced.",
+    )
+
+
+class FireSpecDraftRequest(BaseModel):
+    """Request body for ``POST /api/v1/pmo/specs/{id}/fire``.
+
+    Fires an approved spec draft into plan generation.
+    Requires a registered project ID.
+    """
+
+    project_id: str = Field(
+        ...,
+        min_length=1,
+        description="ID of the registered project to generate the plan for.",
+    )
+
+
+class ImportSpecDraftRequest(BaseModel):
+    """Request body for ``POST /api/v1/pmo/specs/import``.
+
+    Imports a spec draft from an external source (GitHub Issue or ADO work item).
+    """
+
+    source: str = Field(
+        ...,
+        description="Source type: 'github' or 'ado'.",
+    )
+    ref: str = Field(
+        ...,
+        min_length=1,
+        description="Source-specific reference: issue number, URL, or ADO work item ID.",
+    )
+    owner: str = Field(
+        default="",
+        description="GitHub repository owner (required for source='github').",
+    )
+    repo: str = Field(
+        default="",
+        description="GitHub repository name (required for source='github').",
+    )

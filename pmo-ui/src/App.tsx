@@ -3,6 +3,7 @@ import { KanbanBoard } from './components/KanbanBoard';
 import { ForgePanel } from './components/ForgePanel';
 import { BackOfHousePanel } from './components/BackOfHousePanel';
 import { SpecsPanel } from './components/SpecsPanel';
+import { SpecQueuePanel } from './components/SpecQueuePanel';
 import { AgentWorkforceView } from './views/AgentWorkforceView';
 import { BeadGraphView } from './views/BeadGraphView';
 import { BeadTimelineView } from './views/BeadTimelineView';
@@ -23,6 +24,7 @@ type View =
   | 'forge'
   | 'boh'
   | 'specs'
+  | 'spec-queue'
   | 'workforce'
   | 'beads'
   | 'role'
@@ -94,6 +96,7 @@ export default function App() {
     { id: 'kanban'      as const, label: 'The Rail',       emoji: '🥟' },
     { id: 'forge'       as const, label: 'The Forge',      emoji: '🍳' },
     { id: 'specs'       as const, label: 'Specs',          emoji: '📋' },
+    { id: 'spec-queue'  as const, label: 'Spec Queue',     emoji: '📬' },
     { id: 'workforce'   as const, label: 'Workforce',      emoji: '📡' },
     { id: 'boh'         as const, label: 'Back of House',  emoji: '🚪' },
     { id: 'role'        as const, label: 'Role View',      emoji: '👤' },
@@ -252,6 +255,15 @@ export default function App() {
           style={{ display: view === 'specs' ? 'block' : 'none', height: '100%' }}
         >
           <SpecsPanel onBack={backToBoard} />
+        </div>
+        <div
+          id="panel-spec-queue"
+          role="tabpanel"
+          aria-labelledby="tab-spec-queue"
+          aria-hidden={view !== 'spec-queue'}
+          style={{ display: view === 'spec-queue' ? 'block' : 'none', height: '100%' }}
+        >
+          <SpecQueuePanel onBack={backToBoard} />
         </div>
         <div
           id="panel-workforce"

@@ -38,6 +38,12 @@ npm test             # Vitest
 npm run e2e          # Playwright (requires the FastAPI app running)
 ```
 
+## Key components
+
+| Component | Backend route | Types |
+|-----------|---------------|-------|
+| `src/components/SpecQueuePanel.tsx` | `agent_baton/api/routes/spec_queue.py` | `SpecDraft`, `SpecDraftEnrichment`, `SpecDraftReview`, `SpecQueueStatus`, `FireSpecDraftResponse` (all in `src/api/types.ts`) |
+
 ## Backend coupling
 
 When you change a backend route in `agent_baton/api/routes/`:

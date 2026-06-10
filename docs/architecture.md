@@ -169,6 +169,37 @@ Planning is fundamentally different work from execution. The planner reasons abo
 
 The Smart Forge subsystem can dispatch the planner's reasoning to a headless Claude Code subprocess when richer plan synthesis is needed; see [`storage-sync-and-pmo.md`](storage-sync-and-pmo.md).
 
+## Spec Federation pipeline (007 Phase I)
+
+The Spec Federation subsystem (`agent_baton/core/federate/`) introduces a
+structured pipeline for converting natural-language specifications into agent
+plans without requiring the submitter to understand the planner internals.
+
+**Pipeline:** submit → enrich → review → fire
+
+1. **Submit** — a team member posts a `title` + `body` (or imports from GitHub
+   Issues / Azure DevOps via `POST /api/v1/pmo/specs/import`). The spec lands in
+   `submitted` status and background enrichment is dispatched.
+
+2. **Enrich** (`agent_baton/core/federate/enrich.py`) — `DataClassifier` (with
+   pack-aware overrides) assigns a risk level and guardrail preset. `PolicyEngine`
+   derives required reviewers from `require_agent` rules. `cost_estimator` or
+   history-calibrated `CostForecaster` produces a USD estimate range and
+   per-agent breakdown. The spec transitions to `enriched`.
+
+3. **Review** — an architect calls `POST .../approve` or `POST .../bounce`.
+   In `BATON_APPROVAL_MODE=team` mode a reviewer may not approve their own spec.
+   Bounced specs carry required feedback and return to `submitted` for revision.
+
+4. **Fire** (`POST .../fire`) — an approved spec is dispatched via `ForgeSession`
+   with the target `project_id`. The resulting `task_id` is stored on the spec
+   and status becomes `fired`.
+
+All spec drafts are persisted in `spec_drafts` table (schema migration 45,
+`agent_baton/core/federate/spec_draft_store.py`). The table lives in the central
+DB; `BATON_SPEC_DRAFT_DB` overrides the path for test isolation. The PMO UI
+exposes the full pipeline via the **Spec Queue** tab (`SpecQueuePanel.tsx`).
+
 ## Why federated SQLite?
 
 Each project owns its `baton.db`. A central database (`~/.config/agent-baton/central.db`) federates project data for cross-project views in the PMO UI. The split exists because:

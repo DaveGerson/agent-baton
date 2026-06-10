@@ -560,3 +560,84 @@ export type HumanRole =
   | 'architect'
   | 'eng_manager'
   | 'qa';
+
+// ---------------------------------------------------------------------------
+// Spec Queue types (007 Phase I — Spec Federation MVP)
+// ---------------------------------------------------------------------------
+
+export type SpecQueueStatus =
+  | 'submitted'
+  | 'enriched'
+  | 'approved'
+  | 'bounced'
+  | 'fired';
+
+export interface SpecDraftEnrichment {
+  risk_level: string;
+  guardrail_preset: string;
+  required_reviewers: string[];
+  signals_found: string[];
+  confidence: string;
+  est_usd_low: number;
+  est_usd_mid: number;
+  est_usd_high: number;
+  cost_confidence: string;
+  breakdown: Array<{
+    agent_name: string;
+    model: string;
+    est_steps: number;
+    est_tokens: number;
+    est_usd: number;
+  }>;
+  enriched_at: string;
+}
+
+export interface SpecDraftReview {
+  action: 'approved' | 'bounced';
+  actor: string;
+  feedback: string;
+  reviewed_at: string;
+}
+
+export interface SpecDraft {
+  id: string;
+  title: string;
+  body: string;
+  source: 'manual' | 'github' | 'ado';
+  source_ref: string;
+  submitted_by: string;
+  submitted_at: string;
+  status: SpecQueueStatus;
+  enrichment: SpecDraftEnrichment | null;
+  review: SpecDraftReview | null;
+  task_id: string | null;
+  updated_at: string;
+}
+
+export interface SubmitSpecDraftBody {
+  title: string;
+  body?: string;
+  source?: 'manual' | 'github' | 'ado';
+  source_ref?: string;
+}
+
+export interface BounceSpecDraftBody {
+  feedback: string;
+}
+
+export interface FireSpecDraftBody {
+  project_id: string;
+}
+
+export interface ImportSpecDraftBody {
+  source: 'github' | 'ado';
+  ref: string;
+  owner?: string;
+  repo?: string;
+}
+
+export interface FireSpecDraftResponse {
+  spec_id: string;
+  task_id: string;
+  status: 'fired';
+}

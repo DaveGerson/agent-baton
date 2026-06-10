@@ -1414,3 +1414,107 @@ class ExecutionControlResponse(BaseModel):
         default="",
         description="Optional human-readable detail about the action taken.",
     )
+
+
+# ---------------------------------------------------------------------------
+# Spec Queue responses (007 Phase I)
+# ---------------------------------------------------------------------------
+
+
+class EnrichmentDataResponse(BaseModel):
+    """Auto-enrichment results for a spec draft."""
+
+    risk_level: str = Field(default="LOW", description="Classified risk tier.")
+    guardrail_preset: str = Field(default="Standard Development", description="Active guardrail preset.")
+    required_reviewers: list[str] = Field(default_factory=list, description="Required agent reviewers.")
+    signals_found: list[str] = Field(default_factory=list, description="Signal keywords found.")
+    confidence: str = Field(default="high", description="Classification confidence.")
+    est_usd_low: float = Field(default=0.0, description="Low-band cost estimate (USD).")
+    est_usd_mid: float = Field(default=0.0, description="Mid-point cost estimate (USD).")
+    est_usd_high: float = Field(default=0.0, description="High-band cost estimate (USD).")
+    cost_confidence: str = Field(default="default", description="Cost confidence: 'high' or 'default'.")
+    breakdown: list[dict] = Field(default_factory=list, description="Per-agent cost breakdown.")
+    enriched_at: str = Field(default="", description="ISO-8601 timestamp of enrichment.")
+
+
+class ReviewDataResponse(BaseModel):
+    """Architect review outcome for a spec draft."""
+
+    action: str = Field(..., description="'approved' or 'bounced'.")
+    actor: str = Field(..., description="User ID of the reviewer.")
+    feedback: str = Field(default="", description="Bounce feedback (non-empty when bounced).")
+    reviewed_at: str = Field(default="", description="ISO-8601 timestamp of the review decision.")
+
+
+class SpecDraftResponse(BaseModel):
+    """A spec draft record returned by the spec queue API.
+
+    Returned by all ``/pmo/specs`` endpoints.
+    """
+
+    id: str = Field(..., description="UUID primary key.")
+    title: str = Field(..., description="Short human-readable title.")
+    body: str = Field(default="", description="Full markdown spec body.")
+    source: str = Field(default="manual", description="Origin: 'manual', 'github', or 'ado'.")
+    source_ref: str = Field(default="", description="External reference URL or ID.")
+    submitted_by: str = Field(default="local-user", description="User ID of the submitter.")
+    submitted_at: str = Field(default="", description="ISO-8601 submission timestamp.")
+    status: str = Field(..., description="Lifecycle status.")
+    enrichment: Optional[EnrichmentDataResponse] = Field(default=None, description="Enrichment data.")
+    review: Optional[ReviewDataResponse] = Field(default=None, description="Review outcome.")
+    task_id: Optional[str] = Field(default=None, description="Fired execution task ID.")
+    updated_at: str = Field(default="", description="ISO-8601 last-updated timestamp.")
+
+    @classmethod
+    def from_draft(cls, draft: Any) -> "SpecDraftResponse":
+        """Convert from a ``SpecDraft`` domain model."""
+        enrichment = None
+        if draft.enrichment is not None:
+            e = draft.enrichment
+            enrichment = EnrichmentDataResponse(
+                risk_level=e.risk_level,
+                guardrail_preset=e.guardrail_preset,
+                required_reviewers=list(e.required_reviewers),
+                signals_found=list(e.signals_found),
+                confidence=e.confidence,
+                est_usd_low=e.est_usd_low,
+                est_usd_mid=e.est_usd_mid,
+                est_usd_high=e.est_usd_high,
+                cost_confidence=e.cost_confidence,
+                breakdown=list(e.breakdown),
+                enriched_at=e.enriched_at,
+            )
+        review = None
+        if draft.review is not None:
+            r = draft.review
+            review = ReviewDataResponse(
+                action=r.action,
+                actor=r.actor,
+                feedback=r.feedback,
+                reviewed_at=r.reviewed_at,
+            )
+        return cls(
+            id=draft.id,
+            title=draft.title,
+            body=draft.body,
+            source=draft.source,
+            source_ref=draft.source_ref,
+            submitted_by=draft.submitted_by,
+            submitted_at=draft.submitted_at,
+            status=draft.status,
+            enrichment=enrichment,
+            review=review,
+            task_id=draft.task_id,
+            updated_at=draft.updated_at,
+        )
+
+
+class FireSpecDraftResponse(BaseModel):
+    """Response from ``POST /api/v1/pmo/specs/{id}/fire``.
+
+    Returned when an approved spec draft has been fired into plan generation.
+    """
+
+    spec_id: str = Field(..., description="ID of the spec draft that was fired.")
+    task_id: str = Field(..., description="Execution task ID of the generated plan.")
+    status: str = Field(default="fired", description="Always 'fired' on success.")

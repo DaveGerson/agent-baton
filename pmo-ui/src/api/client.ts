@@ -50,6 +50,13 @@ import type {
   Playbook,
   CRPRequestBody,
   CRPResponse,
+  SpecDraft,
+  SpecQueueStatus,
+  SubmitSpecDraftBody,
+  BounceSpecDraftBody,
+  FireSpecDraftBody,
+  ImportSpecDraftBody,
+  FireSpecDraftResponse,
 } from './types';
 import { beadsApi, type BeadListParams, type BeadListResponse, type Bead } from './beads';
 
@@ -402,6 +409,62 @@ export const api = {
   /** Fetch a single bead by ID. */
   getBead(beadId: string): Promise<Bead | null> {
     return beadsApi.get(beadId);
+  },
+
+  // ---------------------------------------------------------------------------
+  // Spec Queue (007 Phase I — Spec Federation MVP)
+  // All endpoints under /api/v1/pmo/specs
+  // ---------------------------------------------------------------------------
+
+  /** Submit a new spec draft. Returns 201 on success. */
+  submitSpecDraft(body: SubmitSpecDraftBody): Promise<SpecDraft> {
+    return request('/specs', { method: 'POST', body: JSON.stringify(body) });
+  },
+
+  /** List spec drafts with optional status/submitter filter. */
+  listSpecDrafts(params?: { status?: SpecQueueStatus; submitted_by?: string }): Promise<SpecDraft[]> {
+    const qs = params
+      ? '?' + new URLSearchParams(
+          Object.entries(params).filter(([, v]) => v !== undefined) as [string, string][]
+        ).toString()
+      : '';
+    return request(`/specs${qs}`);
+  },
+
+  /** Get a single spec draft by ID. Throws on 404. */
+  getSpecDraft(id: string): Promise<SpecDraft> {
+    return request(`/specs/${encodeURIComponent(id)}`);
+  },
+
+  /** Synchronously re-enrich a spec draft. */
+  enrichSpecDraft(id: string): Promise<SpecDraft> {
+    return request(`/specs/${encodeURIComponent(id)}/enrich`, { method: 'POST' });
+  },
+
+  /** Approve an enriched spec draft. */
+  approveSpecDraft(id: string): Promise<SpecDraft> {
+    return request(`/specs/${encodeURIComponent(id)}/approve`, { method: 'POST' });
+  },
+
+  /** Bounce an enriched spec draft back with feedback. */
+  bounceSpecDraft(id: string, body: BounceSpecDraftBody): Promise<SpecDraft> {
+    return request(`/specs/${encodeURIComponent(id)}/bounce`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  },
+
+  /** Fire an approved spec draft into plan generation. Returns 202 on success. */
+  fireSpecDraft(id: string, body: FireSpecDraftBody): Promise<FireSpecDraftResponse> {
+    return request(`/specs/${encodeURIComponent(id)}/fire`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  },
+
+  /** Import a spec draft from GitHub Issues or Azure DevOps. */
+  importSpecDraft(body: ImportSpecDraftBody): Promise<SpecDraft> {
+    return request('/specs/import', { method: 'POST', body: JSON.stringify(body) });
   },
 
   /**
