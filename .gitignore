@@ -50,3 +50,4 @@ pmo-ui/.claude/
 *.db
 .beads-credential-key
 .beads/proxieddb/
+site/
