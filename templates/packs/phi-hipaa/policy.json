@@ -1,0 +1,71 @@
+{
+  "_comment": "ILLUSTRATIVE TEMPLATE ONLY — not maintained compliance content.",
+  "name": "pack:phi-hipaa",
+  "description": "HIPAA PHI handling policy — HIGH risk. SME + auditor required; PHI scan + audit trail gates enforced.",
+  "rules": [
+    {
+      "name": "require_subject_matter_expert",
+      "description": "Subject-matter-expert must validate before any write to PHI data.",
+      "scope": "all",
+      "rule_type": "require_agent",
+      "pattern": "subject-matter-expert",
+      "severity": "block"
+    },
+    {
+      "name": "require_auditor",
+      "description": "Auditor pre-execution and post-execution review required for HIPAA tasks.",
+      "scope": "all",
+      "rule_type": "require_agent",
+      "pattern": "auditor",
+      "severity": "block"
+    },
+    {
+      "name": "require_phi_scan_gate",
+      "description": "PHI scan gate must run before any PHI data is committed.",
+      "scope": "all",
+      "rule_type": "require_gate",
+      "pattern": "phi_scan",
+      "severity": "block"
+    },
+    {
+      "name": "require_audit_trail_gate",
+      "description": "Audit trail gate must run — every write must log who, when, what, why.",
+      "scope": "all",
+      "rule_type": "require_gate",
+      "pattern": "audit_trail",
+      "severity": "block"
+    },
+    {
+      "name": "block_phi_writes_non_implementing",
+      "description": "Block writes to PHI data directories except from the designated implementing agent.",
+      "scope": "all",
+      "rule_type": "path_block",
+      "pattern": "**/phi/**",
+      "severity": "block"
+    },
+    {
+      "name": "block_patient_data_writes",
+      "description": "Block writes to patient data directories.",
+      "scope": "all",
+      "rule_type": "path_block",
+      "pattern": "**/patient-data/**",
+      "severity": "block"
+    },
+    {
+      "name": "no_bash_on_phi",
+      "description": "Implementation agents may not use Bash on PHI data paths.",
+      "scope": "all",
+      "rule_type": "tool_restrict",
+      "pattern": "Bash",
+      "severity": "warn"
+    },
+    {
+      "name": "append_only_health_records",
+      "description": "Health records are append-only — no updates, no deletes.",
+      "scope": "all",
+      "rule_type": "require_gate",
+      "pattern": "append_only",
+      "severity": "block"
+    }
+  ]
+}

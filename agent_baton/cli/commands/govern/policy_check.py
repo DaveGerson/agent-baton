@@ -167,6 +167,18 @@ def handler(args: argparse.Namespace) -> None:
     try:
         from agent_baton.core.govern.policy import PolicyEngine
 
+        # If the active preset is a pack preset, ensure pack policies are
+        # registered before calling load_preset so the registry resolves it.
+        if preset_key.startswith("pack:"):
+            try:
+                from agent_baton.core.govern.packs import (
+                    load_packs,
+                    register_pack_policies,
+                )
+                register_pack_policies(load_packs(cwd))
+            except Exception:
+                pass
+
         engine = PolicyEngine(policies_dir=cwd / ".claude" / "policies")
         policy_set = engine.load_preset(preset_key)
         if policy_set is None:

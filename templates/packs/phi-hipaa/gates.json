@@ -1,0 +1,22 @@
+{
+  "_comment": "ILLUSTRATIVE TEMPLATE ONLY — not maintained compliance content.",
+  "pack": "phi-hipaa",
+  "gates": [
+    {
+      "id": "phi_scan",
+      "description": "Scan staged files for unencrypted PHI patterns before committing.",
+      "command": "grep -rE '\\b(SSN|DOB|MRN|[0-9]{3}-[0-9]{2}-[0-9]{4})\\b' --include='*.json' --include='*.csv' --include='*.log' . && echo 'PHI patterns found — review required' && exit 1 || echo 'phi_scan: no raw PHI patterns detected'",
+      "on_match": "fail",
+      "gate_type": "pre_commit",
+      "pattern_ref": "phi_patterns"
+    },
+    {
+      "id": "audit_trail",
+      "description": "Verify that audit trail entries exist for all PHI writes in this change.",
+      "command": "echo 'audit_trail: ILLUSTRATIVE — replace with real audit-log verification command'",
+      "on_match": "pass",
+      "gate_type": "post_execute",
+      "pattern_ref": "audit_log_entries"
+    }
+  ]
+}

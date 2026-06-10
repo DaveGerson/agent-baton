@@ -1014,6 +1014,111 @@ baton policy-check [--agent NAME] [--cwd DIR]
 
 ---
 
+### `baton packs`
+
+Manage Assurance Packs — org-authored domain governance units stored under
+`.claude/packs/<name>/`.
+
+#### `baton packs init`
+
+Scaffold a new pack directory with all required files from a minimal valid
+template.
+
+```
+baton packs init NAME [--dir DIR]
+```
+
+| Argument | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `NAME` | Yes | -- | Pack name (becomes the directory name under `.claude/packs/`) |
+| `--dir DIR` | No | cwd | Project root containing `.claude/` |
+
+**Behaviour:**
+- Creates `.claude/packs/<NAME>/` with `pack.json`, `policy.json`,
+  `signals.json`, `rubric.md`, `gates.json`, `evidence.json`, and
+  `knowledge/overview.md`.
+- Substitutes all `[YOUR_PACK_NAME]` placeholders with `NAME`.
+- Refuses if the directory already exists (exit 1).
+- Prints a next-steps hint on success.
+
+**Example:**
+
+```bash
+baton packs init phi-hipaa
+# → Scaffolded pack 'phi-hipaa' at .claude/packs/phi-hipaa/
+# Next steps: ...
+```
+
+---
+
+#### `baton packs validate`
+
+Validate one or all packs against all 7 spec checks. Exits 2 if any error is
+found.
+
+```
+baton packs validate [NAME] [--dir DIR]
+```
+
+| Argument | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `NAME` | No | all packs | Pack name to validate |
+| `--dir DIR` | No | cwd | Project root containing `.claude/` |
+
+**Exit codes:**
+
+| Code | Meaning |
+|------|---------|
+| 0 | All packs valid |
+| 2 | One or more validation errors found |
+
+**Validation checks:**
+1. Required files exist (`pack.json`, `policy.json`, `signals.json`, `rubric.md`).
+2. `pack.json` has `name`, `version`, `description`; `name` matches directory.
+3. `policy.json` parses as `PolicySet` with `name == "pack:<dirname>"`.
+4. `signals.json` categories ⊆ `{regulated, pii, security, infrastructure, database}`; `path_patterns` is a list; `preset_name` present.
+5. `rubric.md` has ≥1 `## ` heading and ≥1 `- [ ]` checkbox.
+6. `gates.json` entries each have `id`, `description`, `command`.
+7. `evidence.json` `required_artifacts` each have `id`, `description`.
+
+**Output:**
+
+```
+[OK] phi-hipaa
+[OK] secure-coding-owasp
+All packs valid.
+
+# On error:
+[ERROR] my-pack/policy.json: PolicySet name 'pack:wrong' must be 'pack:my-pack'
+```
+
+---
+
+#### `baton packs list`
+
+List all packs with key metadata. Invalid packs are shown with `[INVALID]` prefix.
+
+```
+baton packs list [--dir DIR]
+```
+
+| Argument | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `--dir DIR` | No | cwd | Project root containing `.claude/` |
+
+**Output:**
+
+```
+NAME                      VERSION    DOMAIN               RISK       DESCRIPTION
+------------------------------------------------------------------------------------------
+phi-hipaa                 1.0.0      healthcare           HIGH       HIPAA PHI handling guardrails...
+secure-coding-owasp       1.0.0      security             HIGH       OWASP Top-10 secure coding guardrails...
+```
+
+**Related:** `baton classify --activate`, `baton policy-check`
+
+---
+
 ### `baton comply-record`
 
 Claude Code **PostToolUse** and **Stop** hook: append a hash-chained entry to

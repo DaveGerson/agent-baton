@@ -44,7 +44,22 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
 
 
 def handler(args: argparse.Namespace) -> None:
-    classifier = DataClassifier()
+    from pathlib import Path
+
+    # Build a pack-aware classifier and register pack policies so that
+    # classify_to_preset_key / load_preset resolves pack presets.
+    try:
+        from agent_baton.core.govern.packs import (
+            load_packs,
+            make_classifier_for_packs,
+            register_pack_policies,
+        )
+        _packs = load_packs(Path.cwd())
+        register_pack_policies(_packs)
+        classifier = make_classifier_for_packs(_packs)
+    except Exception:
+        classifier = DataClassifier()
+
     file_paths: list[str] | None = args.files if args.files else None
     result = classifier.classify(args.description, file_paths)
 

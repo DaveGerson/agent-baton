@@ -1,0 +1,26 @@
+{
+  "_comment": "ILLUSTRATIVE TEMPLATE ONLY — not maintained compliance content.",
+  "pack": "phi-hipaa",
+  "required_artifacts": [
+    {
+      "id": "sme_review",
+      "description": "Written sign-off from the subject-matter-expert agent confirming PHI scope and minimum-necessary access."
+    },
+    {
+      "id": "auditor_pre_review",
+      "description": "Auditor pre-execution review report — plan reviewed, risks documented."
+    },
+    {
+      "id": "auditor_post_review",
+      "description": "Auditor post-execution review report — changes verified, compliance confirmed."
+    },
+    {
+      "id": "phi_scan_log",
+      "description": "Output log from the phi_scan gate showing no unencrypted PHI in committed files."
+    },
+    {
+      "id": "audit_trail_log",
+      "description": "Audit trail entries for all PHI writes: timestamp, actor, record IDs affected, reason."
+    }
+  ]
+}

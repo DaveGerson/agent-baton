@@ -8,6 +8,7 @@ Decides whether a step is allowed to run, with what guardrails, and who has to a
 |------|------|
 | `classifier.py` | `DataClassifier` — risk classification (uses Haiku via `ANTHROPIC_API_KEY` when set) |
 | `policy.py` | Policy lookup: which guardrail preset applies to a given task |
+| `packs.py` | Assurance Packs — loader, validator, registry, and `DataClassifier` factory for org-authored domain governance packs |
 | `validator.py`, `spec_validator.py` | Plan and spec validation |
 | `compliance.py` | Compliance evaluators (regulated-data, audit chain) |
 | `budget.py` | Token / cost budget enforcement |

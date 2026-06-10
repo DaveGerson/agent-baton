@@ -1,0 +1,22 @@
+{
+  "_comment": "ILLUSTRATIVE TEMPLATE ONLY — not maintained compliance content.",
+  "pack": "secure-coding-owasp",
+  "gates": [
+    {
+      "id": "secret_scan",
+      "description": "Scan for hardcoded credentials patterns in staged files.",
+      "command": "grep -rEn '(password|passwd|secret|api_key|apikey|token|private_key)\\s*[:=]\\s*[\"\\x27][^\"\\x27]{8,}[\"\\x27]' --include='*.py' --include='*.js' --include='*.ts' --include='*.json' --include='*.yaml' --include='*.yml' . && echo 'Potential hardcoded credentials found — review required' && exit 1 || echo 'secret_scan: no hardcoded credential patterns detected'",
+      "on_match": "fail",
+      "gate_type": "pre_commit",
+      "pattern_ref": "credential_patterns"
+    },
+    {
+      "id": "no_hardcoded_credentials",
+      "description": "Verify no credentials committed via git-secrets or equivalent.",
+      "command": "echo 'no_hardcoded_credentials: ILLUSTRATIVE — replace with git-secrets or truffleHog command'",
+      "on_match": "pass",
+      "gate_type": "pre_push",
+      "pattern_ref": "secret_patterns"
+    }
+  ]
+}

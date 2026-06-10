@@ -122,6 +122,22 @@ The following pages explain individual subsystems in depth:
 - [`design-decisions.md`](design-decisions.md) — ADR log: every decision and what it superseded
 - [`daemon-mode-evaluation.md`](daemon-mode-evaluation.md) — historical evaluation of the daemon-mode design
 
+## Assurance Packs
+
+Assurance Packs are org-authored domain governance units stored under
+`.claude/packs/<name>/`.  A pack bundles a `PolicySet`, classification signals,
+a review rubric, gate commands, and evidence requirements into a single
+distributable directory.  Organisations author packs for each regulated domain
+they operate in (HIPAA, OWASP, SOC 2, GDPR, …) and the pack format ships with
+baton.  At startup, `load_packs()` scans `.claude/packs/`, validates each entry,
+and `register_pack_policies()` installs the pack's `PolicySet` into the in-process
+registry under the key `"pack:<name>"`.  The risk classifier is extended via
+`make_classifier_for_packs()` so that pack-specific keywords and path patterns
+elevate risk and set the guardrail preset to `"pack:<name>"` — which
+`baton policy-check` then enforces as a PreToolUse hook.  Use `baton packs init`,
+`baton packs validate`, and `baton packs list` to author and manage packs.
+Template packs for HIPAA PHI and OWASP secure coding ship under `templates/packs/`.
+
 ## Why "phases"?
 
 A phase is a named, gated segment of a plan. The phase shape is load-bearing because:

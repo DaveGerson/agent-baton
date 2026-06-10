@@ -49,7 +49,8 @@ All Python imports use canonical paths: `from agent_baton.core.govern.classifier
 - `agent_baton/cli/commands/execution/execute.py` — `_print_action()` is the protocol surface between the engine and the orchestrator agent. Don't break its output shape.
 - `agent_baton/core/engine/states.py` — execution state machine.
 - `agent_baton/core/engine/protocols.py` — `ExecutionDriver` 15-method interface.
-- `agent_baton/models/execution.py` — `ActionType` enum (8 values: DISPATCH, GATE, APPROVAL, COMPLETE, FAILED, WAIT, FEEDBACK, INTERACT) and `ExecutionState`.
+- `agent_baton/models/execution.py` — `ActionType` enum (9 values: DISPATCH, GATE, APPROVAL, COMPLETE, FAILED, WAIT, FEEDBACK, INTERACT, SWARM_DISPATCH) and `ExecutionState`.
+- `agent_baton/core/govern/packs.py` — Assurance Pack loader, validator, registry, and classifier factory. Entry point for `baton packs` and pack-aware `DataClassifier` construction.
 - `agent_baton/api/` — FastAPI routers for the REST API + PMO UI backend.
 
 ## Orchestrator behavior (mandatory)

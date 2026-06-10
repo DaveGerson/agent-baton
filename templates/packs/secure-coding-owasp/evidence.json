@@ -1,0 +1,26 @@
+{
+  "_comment": "ILLUSTRATIVE TEMPLATE ONLY — not maintained compliance content.",
+  "pack": "secure-coding-owasp",
+  "required_artifacts": [
+    {
+      "id": "security_reviewer_report",
+      "description": "Security reviewer post-execution review report covering OWASP Top-10 findings."
+    },
+    {
+      "id": "code_reviewer_report",
+      "description": "Code reviewer implementation review report — secure coding patterns verified."
+    },
+    {
+      "id": "secret_scan_log",
+      "description": "Output log from the secret_scan gate showing no hardcoded credentials found."
+    },
+    {
+      "id": "threat_model",
+      "description": "Threat model or security design review for significant new features."
+    },
+    {
+      "id": "dependency_scan_log",
+      "description": "Dependency vulnerability scan output (e.g. npm audit, pip-audit, OWASP Dependency-Check)."
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "_comment": "ILLUSTRATIVE TEMPLATE ONLY — not maintained compliance content.",
+  "name": "secure-coding-owasp",
+  "version": "1.0.0",
+  "description": "OWASP Top-10 secure coding guardrails — blocks .env/secrets paths, requires security-reviewer + code-reviewer, enforces secret-scan gate.",
+  "domain": "security",
+  "risk_level": "HIGH",
+  "author": "agent-baton",
+  "baton_min_version": ""
+}
