@@ -1,6 +1,6 @@
 # Proposal 007: Pare to the Moat — Refocus Agent Baton as a Governance & Assurance Harness
 
-**Status**: Draft (supersedes most of Proposal 006; see §Relationship to 006)
+**Status**: Draft, revised after independent verification pass (supersedes most of Proposal 006; see §Relationship to 006). Second-pass review verified flag defaults, pricing tables, gate-failure behavior, and forecaster mechanics against source; corrected A1/A3/A5, added A8 and dispositions for five previously unreviewed subsystems.
 **Author**: Codebase review (5 review agents: model surface, architecture, distributables, docs/tests, governance-layer recon)
 **Date**: 2026-06-10
 **Risk**: MEDIUM — large deletions, but of flag-gated/experimental subsystems; the kept core is already production-tested
@@ -41,13 +41,26 @@ it and make its value explicit.
 
 | # | Delete / shrink | Native mitigation | Scope |
 |---|---|---|---|
-| A1 | **`core/predict/`** (speculator, intent classifier, accept, watcher — 1,750 LOC) + `BATON_PREDICT_ENABLED` / `BATON_SPECULATE_ENABLED` + speculation budget caps in `govern/budget.py` | Speculative dispatch was a latency hack for slower models. Current models at appropriate effort are fast enough; nothing to pre-warm. | Delete module, `tests/test_predict*.py`, `tests/test_speculat*.py`, env rows in CLAUDE.md/GEMINI.md, speculation pricing keys in budget tables |
+| A1 | **`core/predict/`** (speculator, intent classifier, accept, watcher — 1,750 LOC) **+ `core/engine/speculator.py` (618 LOC — a second, separate speculation implementation found on re-review)** + `BATON_PREDICT_ENABLED` / `BATON_SPECULATE_ENABLED` + speculation budget caps in `govern/budget.py` + the speculate surface in `cli/commands/execution/execute.py` | Speculative dispatch was a latency hack for slower models. Current models at appropriate effort are fast enough; nothing to pre-warm. | Delete both modules, `tests/test_predict*.py`, `tests/test_speculat*.py`, env rows in CLAUDE.md/GEMINI.md, speculation pricing keys in budget tables |
 | A2 | **`core/swarm/`** (dispatcher, partitioner, coalescer, reconciler — 2,046 LOC) + `cli/commands/swarm_cmd.py` + `BATON_EXPERIMENTAL=swarm` | The native Agent tool with `model: haiku` + `isolation: "worktree"` + parallel tool calls *is* swarm, with none of the bespoke pricing/reconciliation code (which carries retired Haiku 3.5 pricing today). Distribute the pattern as a short recipe in `docs/orchestrator-usage.md` instead. | Delete module + ~8 swarm test files (~3,500 LOC), `swarm-reconciler` agent, swarm sections in `references/baton-engine.md:1449`, `docs/cli-reference.md:2006`, SWARM_DISPATCH `ActionType` (deprecate first — see §Migration) |
-| A3 | **Self-heal escalation ladder** (`core/engine/selfheal.py` 492 LOC, `EscalationTier`, per-tier budget pricing, `self-heal-haiku/-sonnet/-opus` agents) | The haiku→sonnet→opus retry ladder is a weak-model-era pattern — paying for the failure three times. Current guidance: run the capable model at high effort first; on gate failure, redispatch *once* with the failure context (the engine's existing FEEDBACK path). Already `BATON_SELFHEAL_ENABLED=0` by default. Keep the *incident discipline* (bead it, fix in parallel, regression test) — that's convention in CLAUDE.md, not engine code. | Delete module, 3 agents, `--max-tier` CLI flag, `selfheal_attempts` state field (schema migration), tier-keyed pricing in `budget.py`, `tests/test_wave5_integration.py` terminal-tier assertions |
+| A3 | **Self-heal escalation ladder** (`core/engine/selfheal.py` 492 LOC, `EscalationTier`, per-tier budget pricing, `self-heal-haiku/-sonnet/-opus` agents) | The haiku→sonnet→opus retry ladder is a weak-model-era pattern — paying for the failure three times. **Corrected premise (verified on re-review):** with selfheal disabled — the default — a gate failure is already *terminal*: `executor.py:3449-3481` writes a `selfheal_suppressed` compliance entry, sets `gate_failed`, and stops; there is **no** FEEDBACK retry path on gate failure. Deleting the ladder therefore doesn't regress default behavior. Replacement: (a) document **developer takeover** (`BATON_TAKEOVER_ENABLED` + `baton execute resume-from-takeover`) as the human recovery path — it already exists and pairs naturally with gate failure; (b) add an optional *single* redispatch-with-gate-context (same tier, one attempt, ~50 LOC) for unattended runs — one contextful retry beats a tier ladder on current models. Keep the *incident discipline* (bead it, fix in parallel, regression test) — convention in CLAUDE.md, not engine code. | Delete module, 3 agents, `--max-tier` CLI flag, `selfheal_attempts` state field (schema migration), tier-keyed pricing in `budget.py`, `tests/test_wave5_integration.py` terminal-tier assertions; add the single-retry option + takeover docs in the same PR |
 | A4 | **Planner model-routing and heavy decomposition stages** (`planning/stages/decomposition.py` hardcoded `"opus"`/`"sonnet"`, `research.py` headless research, per-stage model literals) | Plan mode / `/goal` / Fable-era models plan and re-plan natively. Keep the planner as a **thin governance-enrichment pass** over a task: DataClassifier risk → guardrail preset → required reviewers → gates → budget. Stop deciding which model writes the code; that's frontmatter + Claude Code's job. | Shrink `planning/stages/`, remove model-assignment plumbing, keep `enrichment.py`'s policy/gate attachment |
-| A5 | **Estimation-based cost tables** (`cost_estimator.py` blended `MODEL_PRICING`, `cost_forecaster.py` `_DEFAULT_TOKENS`, role-baseline token guesses, wall-clock guesses) | Real usage is free: `observe/jsonl_scanner.py` already parses actual tokens from Claude Code session JSONL, and OTel export exists. Replace pre-run estimation with post-run actuals + a rolling forecast from history. Keep **one** pricing config (single small table or user-editable JSON) used only to convert actual tokens → dollars for chargeback and the ceiling. This dissolves the four-inconsistent-tables problem from Proposal 006 by deleting three of them. | `cost_estimator.py` shrinks to a price-config loader; `--dry-run` cost output becomes "forecast from history" with honest confidence |
+| A5 | **Static estimation in `cost_estimator.py`** (blended `MODEL_PRICING`, role-baseline token guesses, wall-clock guesses) — **but explicitly KEEP `cost_forecaster.py`** | Real usage is free: `observe/jsonl_scanner.py` parses actual tokens from session JSONL, and — verified on re-review — `cost_forecaster.py` already forecasts from **14-day median actuals** (`_load_history` joins `agent_usage`/`usage_records`), using its `_DEFAULT_TOKENS` only as a cold-start fallback. That forecaster is exactly the pre-flight cost forecast B4's spec-review queue needs — it is the *replacement*, not a deletion target. Delete only `cost_estimator.py`'s static guess tables; keep **one** pricing config (small table or user-editable JSON, current prices) consumed by the forecaster, chargeback, and the ceiling. Still dissolves 006's four-tables problem: two die with their subsystems (A1/A2), one is deleted here, one survives as the single config. | `cost_estimator.py` shrinks to a price-config loader; `--dry-run` cost output becomes "forecast from history" with honest cold-start confidence |
 | A6 | **`claude-teams` backend write-a-spawn-prompt path** (`BATON_TEAMS_BACKEND=claude-teams`, `BATON_TEAMS_STRICT_RESUMABILITY`) | Agent Teams are now a first-class Claude Code feature; baton generating spawn prompts for an outer session is scaffolding around an experiment that ended. Re-verify current Agent Teams capabilities, then keep only the worktree backend. | Delete backend branch + 2 env vars + `docs/internal/agent-teams-and-goal-design.md` claims re-verification |
 | A7 | **pmo-ui surfaces for deleted features** (speculation/swarm panels, 3-tier `ModelTier` enums in `BohWalkIn.tsx`, `PlanEditor.tsx` `MODEL_LIST`) | — | Remove with their backends; model pickers read from the pricing config rather than hardcoded enums. The UI itself is **not** pared — it's repurposed as the spec-federation/review surface (B4) |
+| A8 | **Split `framework/gsd/` out of the repo** (found on re-review: a standalone "Get Shit Done" project-management framework — 90+ workflow docs, 25+ agent definitions, its own JS hooks and `gsd-tools` CLI — with **zero** integration into the baton engine) | It's a separate product sharing a repo, not a baton subsystem. Its workflows are user-facing prompts that Claude Code skills/`/loop` cover independently. | Move to its own repository (it has its own manifest/versioning); if it stays temporarily, document the non-integration seam so nobody builds on a coupling that doesn't exist |
+
+### Dispositions for subsystems the original review skipped
+
+Re-review covered five subsystems Proposal 007 originally didn't disposition:
+
+| Subsystem | Disposition | Reasoning |
+|---|---|---|
+| **Immune system** (`core/immune/` daemon + 5 `immune-*` haiku agents, $5/day cap, confidence-triaged auto-fix) | **Keep, reposition** | No native equivalent for a budget-governed, compliance-recorded background-hygiene daemon. Not core to the assurance moat, but a working *showcase* of it: governed autonomy under budget caps + auditor gate. Low priority; reframe in docs as "governed background maintenance". |
+| **Souls registry** (Ed25519 agent identity, signed beads, revocation/rotation, `BATON_SOULS_ENABLED`) | **Keep, integrate with B2/B3** | Cryptographic attribution *is* assurance: reviewer verdicts and evidence-bundle entries signed by souls give the bundle chain-of-custody no native feature provides. Promote from orphan flag to evidence-bundle component (see B2/B3). |
+| **Developer takeover** (`BATON_TAKEOVER_ENABLED`, `resume-from-takeover`) | **Keep — now load-bearing** | Becomes the documented gate-failure recovery path once the selfheal ladder is gone (A3). |
+| **Improve/learning loop** (`core/improve/`, recommender, rollback circuit-breaker, learning-analyst) | **Keep, prune domains** | Closed-loop anomaly→recommendation→guarded-auto-apply has no native equivalent. But its recommenders tune things being deleted (budget *tiers*, escalation behavior) — prune those recommendation domains in the A3 PR so the loop doesn't propose changes to deleted machinery. |
+| **Goal evaluator** (`goal_evaluator.py`, phase-boundary completion check + plan amendment) | **Keep** | Completion-condition grading against engine state (phases, gates, amend budget) isn't something the platform sees. Gets its model repoint in the quick-wins PR; verdict should also land in the evidence bundle. |
 
 **Not deleted, explicitly:** the execution state machine + `baton execute resume`
 (it's the spine the gates/approvals/compliance entries hang off — but see
@@ -134,6 +147,11 @@ Expand:
   worktrees; the engine records each verdict separately and blocks on any
   `block`-severity finding. (This is the one place baton-driven dispatch is
   load-bearing: the platform won't *force* a review; baton does.)
+- **Soul-signed verdicts** (re-review addition): when `BATON_SOULS_ENABLED=1`,
+  review verdicts are signed with the reviewer soul's Ed25519 key — the
+  existing souls machinery (mint/rotate/revoke, signed beads) promoted from
+  orphan flag to evidence chain-of-custody. The bundle can then prove not
+  just *that* a verdict exists but *which identity* issued it.
 - **Runtime guardrails, not just plan-time** — see B5.
 
 ### B3. Evidence Bundle — make the audit trail a deliverable
@@ -270,9 +288,12 @@ cases that need it, not the headline.
 ## Sequencing (decided: deletions first, then quick wins)
 
 1. **PR 1–3 — deletions**, one subsystem each, no deprecation cycle:
-   predict → swarm → selfheal (selfheal last; it touches persisted state +
-   golden regen). Banks the LOC reduction immediately and clears the ground
-   the rest builds on.
+   predict (incl. `engine/speculator.py`) → swarm → selfheal (selfheal last;
+   it touches persisted state + golden regen, and its PR also adds the
+   single-retry option, takeover docs, and the improve/learning recommender
+   pruning). Banks the LOC reduction immediately and clears the ground the
+   rest builds on. **PR 3.5 — GSD split** (A8): move `framework/gsd/` to its
+   own repo; independent of everything else, can land any time.
 2. **PR 4 — quick wins** (006 survivors): goal-evaluator repoint,
    settings.json thinking cap, guardrail-preset wording, single pricing
    config with current prices (simpler now — two of the four tables died
