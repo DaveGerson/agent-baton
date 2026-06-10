@@ -18,7 +18,7 @@ Every state mutation is persisted by the Python engine before the next action is
 
 ## 2. Every action is replayable
 
-Crashing in the middle of a phase is a normal event. `baton execute resume` picks up from the last persisted action and proceeds without re-doing completed steps. This requires that every action — DISPATCH, GATE, APPROVAL, COMPLETE, FAILED, WAIT, FEEDBACK, INTERACT, SWARM_DISPATCH — is durable, idempotent, and ordered.
+Crashing in the middle of a phase is a normal event. `baton execute resume` picks up from the last persisted action and proceeds without re-doing completed steps. This requires that every action — DISPATCH, GATE, APPROVAL, COMPLETE, FAILED, WAIT, FEEDBACK, INTERACT — is durable, idempotent, and ordered.
 
 **Where it lives:** `agent_baton/models/execution.py` (`ActionType` enum, `ExecutionState`), `agent_baton/core/engine/state.py` transitions.
 
@@ -92,11 +92,6 @@ ACTION: FAILED
 
 ```
 ACTION: CHECKPOINT
-  Message: <description>
-```
-
-```
-ACTION: SWARM_DISPATCH       # only emitted when BATON_SWARM_ENABLED=1
   Message: <description>
 ```
 

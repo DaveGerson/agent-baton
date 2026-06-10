@@ -27,7 +27,6 @@ the wire.
 | `WAIT` | `"wait"` | Parallel steps still in flight; caller should poll `next_action()` again. |
 | `COMPLETE` | `"complete"` | Execution finished successfully. Carries `summary`. |
 | `FAILED` | `"failed"` | Execution cannot continue. Carries `summary`. |
-| `SWARM_DISPATCH` | `"swarm.dispatch"` | Wave 6.2 (bd-2b9f): trigger a `SwarmDispatcher` reconciliation run. |
 
 The enum is consumed by `_print_action()` in
 [`cli/commands/execution/execute.py:568`](../../agent_baton/cli/commands/execution/execute.py)

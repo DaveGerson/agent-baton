@@ -287,17 +287,6 @@ Wraps the synchronous engine in an async loop. Implements daemon mode.
 | [`experimental/incident.py`](../../agent_baton/core/distribute/experimental/incident.py) | `IncidentManager`, `IncidentPhase`, `IncidentTemplate` | Experimental P1-P4 incident templates. |
 | [`experimental/transfer.py`](../../agent_baton/core/distribute/experimental/transfer.py) | `ProjectTransfer`, `TransferManifest` | Experimental cross-project transfer. |
 
-### `core/swarm/` — swarm dispatcher (Wave 6.2)
-
-Triggered by the `SWARM_DISPATCH` action.
-
-| Module | Class | Purpose |
-|--------|-------|---------|
-| [`dispatcher.py`](../../agent_baton/core/swarm/dispatcher.py) | `SwarmDispatcher` (line 94), `SwarmResult`, `SwarmBudgetError` | Reconciler-driven swarm execution. |
-| [`reconciler.py`](../../agent_baton/core/swarm/reconciler.py) | `Reconciler` | Decides what to dispatch. |
-| [`coalescer.py`](../../agent_baton/core/swarm/coalescer.py) | `Coalescer` | Merges overlapping work items. |
-| [`partitioner.py`](../../agent_baton/core/swarm/partitioner.py) | `Partitioner` | Splits work into parallelisable chunks. |
-
 ### `core/gates/` — CI gate runners
 
 | Module | Class | Purpose |

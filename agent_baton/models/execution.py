@@ -69,7 +69,6 @@ class ActionType(Enum):
     APPROVAL = "approval"               # pause for human review / approval
     FEEDBACK = "feedback"               # present multiple-choice questions, dispatch based on answers
     INTERACT = "interact"               # multi-turn interaction: agent responded, awaiting human input
-    SWARM_DISPATCH = "swarm.dispatch"   # Wave 6.2 (bd-2b9f): trigger a SwarmDispatcher run
     CHECKPOINT = "checkpoint"            # save state + suggest fresh session to prevent context rot
 
 

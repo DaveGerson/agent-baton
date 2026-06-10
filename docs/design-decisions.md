@@ -1262,10 +1262,9 @@ patterns from Agent Teams without inheriting those constraints.
 
 **Deferred**: A first-class `ActionType.GOAL` (G2 in the design doc)
 is deferred until regulated-domain auditor work needs discrete,
-observable goal-check events. The cleanup of `SWARM_DISPATCH` flagged
-in the initial design was withdrawn after closer inspection — the
-swarm subsystem is wired through `core/swarm/` and gated by
-`BATON_SWARM_ENABLED`.
+observable goal-check events. `SWARM_DISPATCH` was removed from
+`ActionType` in 007 Phase C (pare-back) — the swarm subsystem was
+never wired end-to-end and has been fully deleted.
 
 **Status**: Implemented (2026-05-12). Design doc:
 `docs/internal/agent-teams-and-goal-design.md`.

@@ -242,7 +242,7 @@ state-handler singletons matched to `state.status` clusters:
 Engine maintains a `_state_handlers: dict[str, ExecutionPhaseStateProtocol]`
 map and resolves it via `_state_handler_for(status)`.  Unknown
 statuses fall back to `ExecutingPhaseState` with a `_log.warning` —
-deliberate forward-compat for daemon/swarm/future status keys
+deliberate forward-compat for daemon/future status keys
 (see `_state_handler_for` docstring, bd-7eac).
 
 State classes import only from `agent_baton.models.*` and
@@ -268,12 +268,12 @@ resolver dispatch table calls into:
   `BeadSelector`, populates worktree fields, applies path-enforcement.
 - `_approval_action()` builds approval actions, including
   policy-violation approvals.
-- `_feedback_action()`, `_build_gate_action()`, `_build_complete_action()`,
-  `_build_swarm_dispatch_action()` cover the remaining builders.
+- `_feedback_action()`, `_build_gate_action()`, `_build_complete_action()`
+  cover the remaining builders.
 
 These are single-responsibility-coherent slices that remain on the
 engine because they own real essential complexity (governance,
-prompt composition, knowledge resolution, swarm fan-out).  Further
+prompt composition, knowledge resolution).  Further
 extraction (`DispatchBuilder`, `StepResultRecorder`, `KnowledgeResolver`)
 is tracked as 005b-phase5-future discoveries — the post-005b engine
 size of ~6,900 LOC is the realistic shape, not the proposal's

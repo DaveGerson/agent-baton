@@ -142,21 +142,21 @@ user/Claude: baton execute start
                          v
               loop: next_action() → ActionType
                          |
-              +----------+-----------+-------------+----------+
-              |          |           |             |          |
-              v          v           v             v          v
-         DISPATCH      GATE      APPROVAL    SWARM_DISP.  FEEDBACK
-         (Claude       (Claude   (human       (Reconciler  (multiple-
-          spawns        runs      decides      runs)       choice)
+              +----------+-----------+----------+
+              |          |           |          |
+              v          v           v          v
+         DISPATCH      GATE      APPROVAL   FEEDBACK
+         (Claude       (Claude   (human     (multiple-
+          spawns        runs      decides    choice)
           agent via     check)
           Agent tool)
-              |          |           |             |          |
-              +----+-----+-----+-----+------+------+--+-------+
-                   |           |            |         |
-                   v           v            v         v
-                record_step record_gate record_appr.  record_fdbk
-                   |           |            |         |
-                   +-----------+------------+---------+
+              |          |           |          |
+              +----+-----+-----+-----+-----+----+
+                   |           |          |
+                   v           v          v
+                record_step record_gate record_appr.
+                   |           |          |
+                   +-----------+----------+
                                |
                                v
                        ExecutionState saved

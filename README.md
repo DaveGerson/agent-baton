@@ -805,12 +805,10 @@ pmo-ui/            <- React/Vite PMO frontend
 | `BATON_TASK_ID` | Target a specific execution in multi-task scenarios | auto-detected |
 | `BATON_DB_PATH` | Override the project `baton.db` location (subagents in worktrees can rely on the upward-walk discovery) | discovered |
 | `BATON_API_TOKEN` | Bearer token for API authentication | none |
-| `BATON_APPROVAL_MODE` | Approval policy: `local` (self-approve) or `team` (different reviewer required). In `team` mode, `baton swarm` defaults `--require-approval-bead` ON. | `local` |
+| `BATON_APPROVAL_MODE` | Approval policy: `local` (self-approve) or `team` (different reviewer required). | `local` |
 | `BATON_SELFHEAL_ENABLED` | Enable selfheal escalation on gate failure. Falsy values (`0`, `false`, `no`) are honoured and write a `selfheal_suppressed` event to `compliance-audit.jsonl`. | `0` |
 | `BATON_RUN_TOKEN_CEILING` | Per-run cumulative spend cap (USD float). When set, `BudgetEnforcer.check_run_ceiling()` raises `RunTokenCeilingExceeded` before exceeding the cap and selfheal/immune all abort. Counter is restored on `baton execute resume`. (See PR #67/#73, bd-3f80.) | unset |
 | `BATON_WORKTREE_STALE_HOURS` | Max age (hours) for the worktree GC to reclaim a stale linked worktree. New canonical name; `BATON_WORKTREE_GC_HOURS` is kept as a legacy alias. | `4` |
-| `BATON_EXPERIMENTAL` | CSV opt-in flag for experimental features. Required for `baton swarm` (`BATON_EXPERIMENTAL=swarm`). | unset |
-| `BATON_SWARM_ENABLED` | Required (in addition to `BATON_EXPERIMENTAL=swarm`) to actually dispatch a swarm refactor. | unset |
 | `BATON_SOULS_ENABLED` / `BATON_EXEC_BEADS_ENABLED` | Feature flags for persistent agent souls (Wave 6.1B) and executable beads (Wave 6.1C). | unset |
 | `BATON_BD_BACKEND` | Bead-store backend (ADR-13b). `bd` (the external [beads](https://github.com/gastownhall/beads) CLI) is now the only supported value and the system of record; `sqlite`/`auto` are removed and log a deprecation warning. | `bd` |
 | `BATON_BD_BIN` / `BATON_BD_PREFIX` | Path/name of the `bd` binary and the `bd init` issue prefix (matches baton's `bd-<hash>` IDs). | `bd` / `bd` |
@@ -818,8 +816,8 @@ pmo-ui/            <- React/Vite PMO frontend
 | `BATON_SKIP_GIT_NOTES_SETUP` | Set to `1` to silence the install-time git-notes replication setup and the runtime warning emitted by `NotesAdapter.write()` when the wildcard refspec is missing. | unset |
 | `ANTHROPIC_API_KEY` | Required for AI classification (`pip install agent-baton[classify]`) and the Haiku planner classifier | none |
 
-> **Note on experimental features.** `baton swarm`, the Wave 6.2 immune-system
-> daemon, and the predictive watcher (Wave 6.2 Part C) are explicitly marked
+> **Note on experimental features.** The Wave 6.2 immune-system
+> daemon and the predictive watcher (Wave 6.2 Part C) are explicitly marked
 > EXPERIMENTAL and gated behind feature flags. They emit stub warnings to
 > stderr on every invocation and must not be relied on for production work.
 > See [Known Integration Gaps](docs/architecture.md#13-known-integration-gaps-as-of-2026-04-28)
@@ -928,7 +926,6 @@ on them for production work.
 
 | Feature | Flag | Status |
 |---------|------|--------|
-| `baton swarm` (massive refactor dispatcher) | `BATON_EXPERIMENTAL=swarm` + `BATON_SWARM_ENABLED=1` | v1 stub — partition plans real, agent dispatch not wired (bd-18f6) |
 | Immune-system daemon | feature flag in `core/intel/immune.py` | Wave 6.2 Part B stub (bd-dd52) |
 | Predictive watcher | feature flag in `core/intel/predictive.py` | Wave 6.2 Part C stub (bd-708a) |
 | Executable beads | `BATON_EXEC_BEADS_ENABLED=1` | Process-level sandbox only; not safe for external-origin beads (bd-fe40) |

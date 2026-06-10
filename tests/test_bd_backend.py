@@ -400,10 +400,10 @@ class TestBdIntegration:
         # recent-approvals window.
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        store.write(_sample_bead(bead_id="bd-appr", tags=["swarm-refactor"],
+        store.write(_sample_bead(bead_id="bd-appr", tags=["approval-gate"],
                                  created_at=now))
         assert any(b.bead_id == "bd-appr"
-                   for b in store.find_recent_approvals("swarm-refactor", 60))
+                   for b in store.find_recent_approvals("approval-gate", 60))
 
     def test_quality_score_and_retrieval_count_persist(self, tmp_path, monkeypatch):
         """ADR-13b review blocker #2: BEAD_FEEDBACK analytics must persist on bd."""

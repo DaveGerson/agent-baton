@@ -4,7 +4,7 @@ Wire types and persisted shapes. Cross-cutting rules: [../../CLAUDE.md](../../CL
 
 ## Critical models
 
-- `execution.py` — `ActionType` enum (9 values: `DISPATCH`, `GATE`, `APPROVAL`, `COMPLETE`, `FAILED`, `WAIT`, `FEEDBACK`, `INTERACT`, `SWARM_DISPATCH`) and `ExecutionState`. **Adding a new `ActionType` is a protocol change** — coordinate with `agents/orchestrator.md`, `references/baton-engine.md`, and `cli/commands/execution/execute.py::_print_action`.
+- `execution.py` — `ActionType` enum (8 values: `DISPATCH`, `GATE`, `APPROVAL`, `COMPLETE`, `FAILED`, `WAIT`, `FEEDBACK`, `INTERACT`) and `ExecutionState`. **Adding a new `ActionType` is a protocol change** — coordinate with `agents/orchestrator.md`, `references/baton-engine.md`, and `cli/commands/execution/execute.py::_print_action`.
 - `plan.py` — `Plan`, `Phase`, `Step` produced by the planner.
 - `bead.py` — bead (signal) shape persisted by the bead store.
 - `agent.py`, `team.py`, `registry.py` — agent and team identities.

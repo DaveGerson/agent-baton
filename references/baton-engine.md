@@ -1426,38 +1426,6 @@ baton anomalies [--watch]
 
 ---
 
-### `baton swarm`
-
-Experimental Wave 6.2 Part A swarm dispatcher. Partition a codebase into
-AST-independent chunks and (eventually) dispatch one Haiku agent per
-chunk to apply a refactor directive.
-
-```
-baton swarm refactor DIRECTIVE_JSON [options]
-```
-
-**Gates** (both required, otherwise the command exits with code 2):
-
-- `BATON_EXPERIMENTAL=swarm`
-- `BATON_SWARM_ENABLED=1`
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `DIRECTIVE_JSON` | (required) | JSON directive: `kind` + directive fields (e.g. `replace-import`, `rename-symbol`) |
-| `--max-agents N` | 100 | Max parallel chunk agents (cap: 100) |
-| `--language` | `python` | AST language (v1: python only) |
-| `--model` | `claude-haiku` | LLM tier for chunk agents |
-| `--codebase-root PATH` | cwd | Root of the project to refactor |
-| `--dry-run` | false | Print preview and exit, no dispatch |
-| `-y / --yes` | false | Skip interactive confirmation prompt |
-| `--require-approval-bead [BEAD_ID]` | -- | Require a pre-filed approval bead. Defaults ON when `BATON_APPROVAL_MODE=team`. |
-
-**Exit codes:** `2` = experimental flag not set; `1` = swarm disabled or
-gate failure. See [docs/cli-reference.md#swarm-commands](../docs/cli-reference.md#swarm-commands)
-for examples.
-
----
-
 ### `baton daemon`
 
 Background execution management -- run the engine as a persistent daemon
@@ -2323,10 +2291,8 @@ The full list of Baton environment variables. Mirrored in
 |----------|---------|---------|
 | `BATON_TASK_ID` | Bind a shell session to a specific execution. Set after `baton execute start` to scope all subsequent commands. | auto-detected |
 | `BATON_DB_PATH` | Override the project `baton.db` location. CLI walks upward from cwd if unset. | discovered |
-| `BATON_APPROVAL_MODE` | PMO approval policy: `local` (self-approve) or `team` (different reviewer required). In `team` mode, `baton swarm` defaults `--require-approval-bead` ON. | `local` |
+| `BATON_APPROVAL_MODE` | PMO approval policy: `local` (self-approve) or `team` (different reviewer required). | `local` |
 | `BATON_RUN_TOKEN_CEILING` | Per-run cumulative spend cap (USD float). Read fresh on every check; restored on `baton execute resume`. Selfheal/immune respect it; main `Executor.dispatch()` only warns at HIGH/CRITICAL run start (bd-3f80). | unset |
-| `BATON_EXPERIMENTAL` | CSV opt-in for experimental subsystems. Required for `baton swarm` (`BATON_EXPERIMENTAL=swarm`). Exits with code 2 if unset. | unset |
-| `BATON_SWARM_ENABLED` | Required in addition to `BATON_EXPERIMENTAL=swarm` to dispatch a swarm refactor. | unset |
 | `BATON_SOULS_ENABLED` | Wave 6.1 Part B persistent agent souls (signing + revocation). | `0` |
 | `BATON_IMMUNE_ENABLED` | Immune-system monitoring loop. | `0` |
 | `BATON_EXEC_BEADS_ENABLED` | Wave 6.1 Part C executable beads. Sandbox is process-level only — see `references/baton-patterns.md` trust-boundary section before extending to external-origin input. | `0` |

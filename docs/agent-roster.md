@@ -90,12 +90,6 @@ Each agent file in `agents/` contains a YAML frontmatter block (`name`, `descrip
 | `immune-todo-rot` | haiku | TODO/FIXME age detection and triage. |
 | `immune-untested-edges` | sonnet | Identifies code paths missing test coverage. |
 
-## Swarm
-
-| Agent | Model | Use when |
-|-------|-------|----------|
-| `swarm-reconciler` | sonnet | Merges parallel work from independent swarm agents into a coherent change. |
-
 ---
 
 For the routing logic that picks among these agents, see [`references/agent-routing.md`](../references/agent-routing.md). For risk-tier guardrails, see [`references/guardrail-presets.md`](../references/guardrail-presets.md). For each agent's full prompt, read the matching file in `agents/<name>.md`.

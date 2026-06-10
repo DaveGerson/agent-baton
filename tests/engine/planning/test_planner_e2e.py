@@ -6,7 +6,7 @@ descriptions.  Covers 7 functional criteria:
 1. Complexity classification (light / medium / heavy)
 2. Dependency and phase-ordering detection
 3. Stage gates (quality, code review, compliance checks)
-4. Swarm / team dispatch detection
+4. Team dispatch detection
 5. Model selection (haiku / sonnet / opus)
 6. Agent roster validation and specialist routing
 7. Bead-documented planning failures (bd-be4f, bd-0e36, bd-5a7c,
@@ -71,7 +71,7 @@ TASK_DESTRUCTIVE_COMPLIANCE = (
     "to the new schema with GDPR-compliant data masking"
 )
 
-# Criterion 4: Teams / swarms
+# Criterion 4: Teams / multi-domain
 TASK_MULTI_DOMAIN = (
     "Build a real-time dashboard: the backend engineer creates WebSocket "
     "endpoints, the frontend engineer builds React components with charts, "
@@ -359,7 +359,7 @@ class TestGatesOnCodePhases:
 
 
 # ===========================================================================
-# CRITERION 4 — Swarm / Team Dispatch
+# CRITERION 4 — Team Dispatch
 # ===========================================================================
 
 class TestTeamDispatch:

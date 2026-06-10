@@ -49,7 +49,7 @@ All Python imports use canonical paths: `from agent_baton.core.govern.classifier
 - `agent_baton/cli/commands/execution/execute.py` — `_print_action()` is the protocol surface between the engine and the orchestrator agent. Don't break its output shape.
 - `agent_baton/core/engine/states.py` — execution state machine.
 - `agent_baton/core/engine/protocols.py` — `ExecutionDriver` 15-method interface.
-- `agent_baton/models/execution.py` — `ActionType` enum (9 values: DISPATCH, GATE, APPROVAL, COMPLETE, FAILED, WAIT, FEEDBACK, INTERACT, SWARM_DISPATCH) and `ExecutionState`.
+- `agent_baton/models/execution.py` — `ActionType` enum (8 values: DISPATCH, GATE, APPROVAL, COMPLETE, FAILED, WAIT, FEEDBACK, INTERACT) and `ExecutionState`.
 - `agent_baton/api/` — FastAPI routers for the REST API + PMO UI backend.
 
 ## Orchestrator behavior (mandatory)
@@ -128,7 +128,6 @@ cymbal impact <symbol>          # blast radius before edits
 | `BATON_APPROVAL_MODE` | `local` (self-approve) or `team` (different reviewer required) | `local` |
 | `BATON_DB_PATH` | Override per-project `baton.db` location | discovered |
 | `BATON_RUN_TOKEN_CEILING` | Hard kill the loop above N tokens | unset |
-| `BATON_EXPERIMENTAL` | Comma list to enable experimental subsystems (e.g., `swarm`) | unset |
 | `ANTHROPIC_API_KEY` | Required for AI risk classification and Haiku classifier | unset |
 | `BATON_WORKTREE_ENABLED` | Enable/disable git worktree isolation for concurrent agents | `1` |
 | `BATON_TAKEOVER_ENABLED` | Enable/disable developer takeover capability | `1` |

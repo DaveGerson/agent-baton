@@ -261,15 +261,6 @@ def _souls_enabled() -> bool:
     return _env_flag("BATON_SOULS_ENABLED", "0")
 
 
-def _swarm_enabled() -> bool:
-    """Return True when the swarm feature flag is explicitly set (Wave 6.2, bd-2b9f).
-
-    Default: disabled (off by default so existing flows don't require swarm infra).
-    Override via env: ``BATON_SWARM_ENABLED=1``.
-    """
-    return os.environ.get("BATON_SWARM_ENABLED", "0").strip().lower() in ("1", "true", "yes")
-
-
 # bd-fcntl-win: process-wide flag for the one-time Windows fail-closed warning.
 # Tracks whether ``_compliance_fail_closed_enabled()`` has already emitted the
 # "fcntl unavailable" warning so operators don't get spammed once per call.
@@ -672,46 +663,6 @@ class ExecutionEngine:
                 daemon=True,
             )
             _gc_thread.start()
-
-        # ── Wave 6.2 (bd-2b9f): SwarmDispatcher ─────────────────────────────
-        # Constructed only when BATON_SWARM_ENABLED=1 AND the worktree manager
-        # is available (Wave 1.3 semaphore ships with it).  Silently None when
-        # either guard fails — all call sites check ``is not None``.
-        self._swarm = None
-        if _swarm_enabled() and self._worktree_mgr is not None:
-            try:
-                from agent_baton.core.swarm.dispatcher import SwarmDispatcher
-                from agent_baton.core.swarm.partitioner import ASTPartitioner
-                from agent_baton.core.govern.budget import BudgetEnforcer
-                _project_root_for_swarm = self._root.parent.parent
-                self._swarm = SwarmDispatcher(
-                    engine=self,
-                    worktree_mgr=self._worktree_mgr,
-                    partitioner=ASTPartitioner(_project_root_for_swarm),
-                    budget=BudgetEnforcer(),
-                    # launcher is injected later via engine.set_swarm_launcher()
-                    # once the CLI constructs ClaudeCodeLauncher.
-                    launcher=None,
-                )
-                _log.debug("SwarmDispatcher initialised (BATON_SWARM_ENABLED=1)")
-            except Exception as _swarm_init_exc:
-                _log.debug(
-                    "SwarmDispatcher init skipped (non-fatal): %s", _swarm_init_exc
-                )
-
-    def set_swarm_launcher(self, launcher: object) -> None:
-        """Inject a launcher into the SwarmDispatcher after engine construction.
-
-        Called by the CLI execute loop after it constructs ``ClaudeCodeLauncher``
-        so that swarm chunk agents use the same launcher as normal DISPATCH steps.
-        When ``self._swarm`` is ``None`` (swarm disabled) this is a no-op.
-
-        Args:
-            launcher: Any object satisfying the ``AgentLauncher`` protocol.
-        """
-        if self._swarm is not None:
-            self._swarm._launcher = launcher  # type: ignore[attr-defined]
-            _log.debug("SwarmDispatcher launcher injected")
 
     # ── Storage routing helpers ──────────────────────────────────────────────
 
@@ -6069,7 +6020,7 @@ class ExecutionEngine:
             When *status* is not in ``self._state_handlers``, this method
             emits a ``_log.warning`` and returns the ``ExecutingPhaseState``
             singleton.  The fallback is **deliberate forward-compatibility**:
-            other subsystems (daemon, swarm, future gate types) may
+            other subsystems (daemon, future gate types) may
             introduce new ``state.status`` values before the dispatch map
             is updated.  Routing the unknown status through
             ``ExecutingPhaseState`` keeps the engine running while the

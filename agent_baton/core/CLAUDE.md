@@ -24,7 +24,6 @@ The brain of `baton`. Cross-cutting rules: [../../CLAUDE.md](../../CLAUDE.md). P
 | `release/` | Release readiness scoring | — |
 | `runtime/` | Process / subprocess runtime helpers | — |
 | `specs/` | Spec parsing and lifecycle | — |
-| `swarm/` | Experimental swarm coordination (gated by `BATON_EXPERIMENTAL=swarm`) | — |
 | `distribute/` | Install/uninstall and distribution helpers | — |
 | `events/` | Internal event bus | — |
 | `config/` | Settings loading and overrides | — |

@@ -114,7 +114,7 @@ The engine itself is the same Python package behind all three; the surfaces are 
 
 The following pages explain individual subsystems in depth:
 
-- [`engine-and-runtime.md`](engine-and-runtime.md) — planner, executor, dispatcher, gate enforcement, INTERACT primitive, swarm dispatch
+- [`engine-and-runtime.md`](engine-and-runtime.md) — planner, executor, dispatcher, gate enforcement, INTERACT primitive
 - [`governance-knowledge-and-events.md`](governance-knowledge-and-events.md) — risk classifier, policy engine, knowledge resolver, event bus
 - [`observe-learn-and-improve.md`](observe-learn-and-improve.md) — tracing, telemetry, scoring, evolution proposals, learning automation
 - [`storage-sync-and-pmo.md`](storage-sync-and-pmo.md) — SQLite layout, federated sync, PMO store, Smart Forge
@@ -132,7 +132,7 @@ A phase is a named, gated segment of a plan. The phase shape is load-bearing bec
 - It bounds rollback. If a phase fails, only that phase's commits need to be reverted — earlier phases remain.
 - It composes. Phases can run sequentially or in parallel (when their concerns are disjoint).
 
-Steps within a phase are smaller units: a DISPATCH (one agent), a GATE (one check), an INTERACT (one dialogue), or a SWARM_DISPATCH (parallel agents whose output is reconciled).
+Steps within a phase are smaller units: a DISPATCH (one agent), a GATE (one check), or an INTERACT (one dialogue).
 
 ## Team execution: pluggable backend
 

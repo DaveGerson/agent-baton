@@ -1965,54 +1965,6 @@ baton serve --port 9000 --host 0.0.0.0 --token my-secret-token
 
 ---
 
-## Swarm Commands
-
-> **EXPERIMENTAL** — `baton swarm` requires `BATON_EXPERIMENTAL=swarm` to run.
-> The Wave 6.2 Part A dispatcher is a v1 stub: partition plans are real but
-> agent dispatch is **not yet wired** end-to-end. See bd-c925 / bd-2b9f for the
-> integration roadmap.
-
-### `baton swarm refactor DIRECTIVE_JSON`
-
-Partition a codebase into AST-independent chunks and (eventually) dispatch one
-Haiku agent per chunk to apply a refactor directive.
-
-**Requires:**
-- `BATON_EXPERIMENTAL=swarm` (stub gate, bd-18f6)
-- `BATON_SWARM_ENABLED=1` (feature gate)
-
-```bash
-# Opt in to the experimental stub
-export BATON_EXPERIMENTAL=swarm
-export BATON_SWARM_ENABLED=1
-
-# Preview without dispatching
-baton swarm refactor --dry-run '{"kind":"replace-import","old":"requests","new":"httpx"}'
-
-# Rename a symbol (interactive sign-off prompt)
-baton swarm refactor '{"kind":"rename-symbol","old":"mymod.OldName","new":"mymod.NewName"}'
-
-# CI mode (skip interactive prompt, preview still printed)
-baton swarm refactor --yes '{"kind":"replace-import","old":"requests","new":"httpx"}'
-```
-
-**Options:**
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `DIRECTIVE_JSON` | (required) | JSON directive: `kind` + directive fields |
-| `--max-agents N` | 100 | Max parallel chunk agents (cap: 100) |
-| `--language` | `python` | AST language (v1: python only) |
-| `--model` | `claude-haiku` | LLM tier for chunk agents |
-| `--codebase-root PATH` | `cwd` | Root of the project to refactor |
-| `--dry-run` | false | Print preview and exit, no dispatch |
-| `-y / --yes` | false | Skip interactive confirmation prompt |
-| `--require-approval-bead [BEAD_ID]` | — | Require a pre-filed approval bead |
-
-**Exit codes:** `2` = experimental flag not set; `1` = swarm disabled or gate failure.
-
----
-
 ## Common Workflows
 
 ### Full Orchestrated Task (Sequential)
@@ -2131,10 +2083,8 @@ in [references/baton-engine.md](../references/baton-engine.md#environment-variab
 |----------|---------|---------|
 | `BATON_TASK_ID` | Bind a shell session to a specific execution. Set after `baton execute start` to scope all subsequent commands. | auto-detected |
 | `BATON_DB_PATH` | Override the project `baton.db` location. CLI walks upward from cwd if unset. | discovered |
-| `BATON_APPROVAL_MODE` | PMO approval policy: `local` (self-approve) or `team` (different reviewer required). In `team` mode, `baton swarm` defaults `--require-approval-bead` ON. | `local` |
+| `BATON_APPROVAL_MODE` | PMO approval policy: `local` (self-approve) or `team` (different reviewer required). | `local` |
 | `BATON_RUN_TOKEN_CEILING` | Per-run cumulative spend cap (USD float). Read fresh on every check; restored on `baton execute resume`. Selfheal/immune respect it; main `Executor.dispatch()` only warns at HIGH/CRITICAL run start (bd-3f80). | unset |
-| `BATON_EXPERIMENTAL` | CSV opt-in for experimental subsystems. Required for `baton swarm` (`BATON_EXPERIMENTAL=swarm`). Exits with code 2 if unset. | unset |
-| `BATON_SWARM_ENABLED` | Required in addition to `BATON_EXPERIMENTAL=swarm` to dispatch a swarm refactor. | unset |
 | `BATON_SOULS_ENABLED` | Wave 6.1 Part B persistent agent souls (signing + revocation). | `0` |
 | `BATON_BD_BACKEND` | ADR-13b WP-G bead backend. `bd` is the only supported value — SQLite fallback removed. Other values log a deprecation warning and `BdNotAvailable` is raised if `bd` is missing. | `bd` |
 | `BATON_BD_ENABLED` | Kept for backward compatibility; has no effect after WP-G — `bd` is always required. | `1` |
@@ -2174,7 +2124,7 @@ on every CLI call when driving concurrent executions from an agent context.
 |------|---------|
 | `0` | Success |
 | `1` | Error: missing prerequisites, validation failure, failed gate, or invalid arguments |
-| `2` | Experimental feature not opted in (e.g. `baton swarm` without `BATON_EXPERIMENTAL=swarm`) |
+| `2` | Experimental feature not opted in (feature flag required but not set) |
 
 Commands that exit with code 1:
 - `baton execute start` -- plan file not found
