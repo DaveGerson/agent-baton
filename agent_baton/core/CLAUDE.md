@@ -21,7 +21,6 @@ The brain of `baton`. Cross-cutting rules: [../../CLAUDE.md](../../CLAUDE.md). P
 | `observability/` | **Emit side** — OTEL exporter, Prometheus, attribution, chargeback | — |
 | `observe/` | **Consumption side** — dashboard, telemetry, retrospectives, scanners, incidents | — |
 | `pmo/` | PMO data layer powering the UI | — |
-| `predict/` | Predictive dispatch | — |
 | `release/` | Release readiness scoring | — |
 | `runtime/` | Process / subprocess runtime helpers | — |
 | `specs/` | Spec parsing and lifecycle | — |

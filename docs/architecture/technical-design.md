@@ -641,19 +641,16 @@ opt-in until production data justifies enablement:
 |------|--------|----------|---------|
 | 5.1 Takeover | [`engine/takeover.py`](../../agent_baton/core/engine/takeover.py) | `BATON_TAKEOVER_ENABLED` | `1` (on) |
 | 5.2 Self-heal | [`engine/selfheal.py`](../../agent_baton/core/engine/selfheal.py) | `BATON_SELFHEAL_ENABLED` | `0` (off) |
-| 5.3 Speculate | [`engine/speculator.py`](../../agent_baton/core/engine/speculator.py) | `BATON_SPECULATE_ENABLED` | `0` (off) |
 
-All three reuse the worktree contract from §8. Each emits its own
-trace events (`takeover.started`, `selfheal_attempt`,
-`speculate.accepted/rejected`) so the closed-loop learning pipeline can
-score effectiveness.
+Both reuse the worktree contract from §8. Each emits its own
+trace events (`takeover.started`, `selfheal_attempt`) so the closed-loop
+learning pipeline can score effectiveness.
 
 CLI surfaces:
 
 - `baton execute takeover STEP_ID [--editor ...] [--shell] [--reason ...] [--no-rerun-gate]`
 - `baton execute resume [--abort]` (post-takeover)
 - `baton execute self-heal STEP_ID [--max-tier opus]` (manual escalation)
-- `baton execute speculate status|accept|reject|show [SPEC_ID]`
 
 ---
 

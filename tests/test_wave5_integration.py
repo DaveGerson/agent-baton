@@ -1,7 +1,7 @@
-"""Wave 5 — Integration + dogfood-isolation tests (bd-e208, bd-1483, bd-9839).
+"""Wave 5 — Integration + dogfood-isolation tests (bd-e208, bd-1483).
 
-Fills 6 documented gaps from the implementer's BEAD_DISCOVERY, plus 2
-contamination/safety tests analogous to the Wave 1.3 dogfood suite.
+Fills documented gaps from the implementer's BEAD_DISCOVERY, plus
+safety tests analogous to the Wave 1.3 dogfood suite.
 
 All tests that touch git operations use a real git repository (tmp_git_repo
 fixture) to catch actual integration bugs rather than mocking git.
@@ -12,10 +12,8 @@ Coverage:
   Gap 3: append_coauthored_trailer writes Co-Authored-By to last commit
   Gap 4: reset_dirty_index calls git reset --hard HEAD via subprocess
   Gap 5: _enqueue_selfheal guard conditions (preconditions / eligibility)
-  Gap 6: start_speculation creates worktree and records SpeculationRecord
 
 Safety:
-  Safety 7: takeover does not corrupt active speculations
   Safety 8: selfheal escalation respects per-step budget cap
 """
 from __future__ import annotations
@@ -552,168 +550,6 @@ class TestEnqueueSelfhealRecordsIntentAndValidatesPreconditions:
         assert any("queuing self-heal" in msg for msg in logged_messages), (
             f"Expected 'queuing self-heal' log message; got: {logged_messages}"
         )
-
-
-# ---------------------------------------------------------------------------
-# Gap 6 — start_speculation creates worktree and records SpeculationRecord
-# ---------------------------------------------------------------------------
-
-
-class TestStartSpeculationCreatesWorktreeAndRecords:
-    """SpeculativePipeliner.start_speculation() must materialise a worktree,
-    populate speculations[spec_id], and make handle_for() return the handle."""
-
-    def test_speculation_creates_worktree_and_records_entry(
-        self, tmp_git_repo: Path
-    ) -> None:
-        from agent_baton.core.engine.speculator import SpeculationTrigger, SpeculativePipeliner
-        from agent_baton.core.engine.worktree_manager import WorktreeManager
-
-        mgr = WorktreeManager(project_root=tmp_git_repo)
-        assert mgr._enabled, (
-            "WorktreeManager must be enabled for a real git repo (bd-c071)"
-        )
-
-        pipeliner = SpeculativePipeliner(
-            worktree_mgr=mgr,
-            task_id="task-spec-test",
-            enabled=True,
-        )
-
-        spec = pipeliner.start_speculation(
-            target_step_id="2.1",
-            trigger=SpeculationTrigger.HUMAN_APPROVAL_WAIT,
-        )
-
-        assert spec is not None, "start_speculation must return a SpeculationRecord"
-        assert spec.target_step_id == "2.1"
-        assert spec.status == "running"
-        assert spec.worktree_path != ""
-
-        # Worktree path must exist on disk.
-        wt_path = Path(spec.worktree_path)
-        assert wt_path.is_dir(), (
-            f"Speculation worktree must exist at {wt_path}"
-        )
-
-        # The record must be in pipeliner._speculations.
-        assert spec.spec_id in pipeliner._speculations
-
-        # WorktreeManager must be able to produce a handle for the synthetic task.
-        synthetic_task_id = f"speculate-{spec.spec_id[:8]}"
-        handle = mgr.handle_for(synthetic_task_id, "draft")
-        assert handle is not None, (
-            "WorktreeManager.handle_for() must return a handle for the speculation worktree"
-        )
-        assert handle.path == wt_path
-
-        # Cleanup the worktree so we don't leak filesystem state.
-        mgr.cleanup(handle, on_failure=False)
-
-    def test_speculation_disabled_returns_none(self, tmp_git_repo: Path) -> None:
-        from agent_baton.core.engine.speculator import SpeculationTrigger, SpeculativePipeliner
-        from agent_baton.core.engine.worktree_manager import WorktreeManager
-
-        mgr = WorktreeManager(project_root=tmp_git_repo)
-        pipeliner = SpeculativePipeliner(
-            worktree_mgr=mgr,
-            task_id="task-spec-disabled",
-            enabled=False,
-        )
-
-        spec = pipeliner.start_speculation(
-            target_step_id="2.1",
-            trigger=SpeculationTrigger.CI_RUNNING,
-        )
-        assert spec is None
-
-    def test_speculation_no_worktree_mgr_returns_none(self) -> None:
-        from agent_baton.core.engine.speculator import SpeculationTrigger, SpeculativePipeliner
-
-        pipeliner = SpeculativePipeliner(
-            worktree_mgr=None,
-            task_id="task-spec-no-mgr",
-            enabled=True,
-        )
-
-        spec = pipeliner.start_speculation(
-            target_step_id="3.1",
-            trigger=SpeculationTrigger.HUMAN_APPROVAL_WAIT,
-        )
-        assert spec is None
-
-
-# ---------------------------------------------------------------------------
-# Safety 7 — takeover does not corrupt active speculations
-# ---------------------------------------------------------------------------
-
-
-class TestTakeoverDoesNotCorruptActiveSpeculations:
-    """Contamination guard: starting a takeover on one step must not alter
-    the SpeculationRecord or worktree of a speculation targeting a DIFFERENT
-    step that's already running in the background."""
-
-    def test_takeover_leaves_speculation_intact(
-        self, tmp_git_repo: Path, team_context: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("BATON_WORKTREE_ENABLED", "1")
-        monkeypatch.setenv("BATON_TAKEOVER_ENABLED", "1")
-        from agent_baton.core.engine.executor import ExecutionEngine
-        from agent_baton.core.engine.speculator import SpeculationTrigger, SpeculativePipeliner
-        from agent_baton.core.engine.worktree_manager import WorktreeManager
-
-        # Set up a running speculation for step 2.1 in a separate worktree.
-        mgr = WorktreeManager(project_root=tmp_git_repo)
-        pipeliner = SpeculativePipeliner(
-            worktree_mgr=mgr,
-            task_id="task-contamination",
-            enabled=True,
-        )
-        spec = pipeliner.start_speculation(
-            target_step_id="2.1",
-            trigger=SpeculationTrigger.CI_RUNNING,
-        )
-        assert spec is not None, "Precondition: speculation must be created"
-        spec_id = spec.spec_id
-        spec_path_before = spec.worktree_path
-        spec_status_before = spec.status
-
-        # Start a takeover on step 1.1 in a different engine.
-        eng = ExecutionEngine(team_context_root=team_context)
-        plan = _minimal_plan("task-contamination")
-        eng.start(plan)
-        eng.mark_dispatched("1.1", "backend-engineer")
-
-        state = eng._load_execution()
-        assert state is not None
-        state.status = "gate_failed"
-        eng._save_execution(state)
-
-        takeover_record = eng.start_takeover("1.1", reason="contamination-test", pid=0)
-        assert takeover_record is not None
-
-        # Verify the speculation record is UNCHANGED.
-        spec_after = pipeliner._speculations.get(spec_id)
-        assert spec_after is not None, (
-            "Speculation record must still exist after takeover on a different step"
-        )
-        assert spec_after.worktree_path == spec_path_before, (
-            "Takeover must not alter the speculation's worktree path"
-        )
-        assert spec_after.status == spec_status_before, (
-            "Takeover on step 1.1 must not change speculation status for step 2.1"
-        )
-
-        # The worktree directory itself must still exist on disk.
-        assert Path(spec_path_before).is_dir(), (
-            "Speculation worktree must not be deleted by an unrelated takeover"
-        )
-
-        # Cleanup speculation worktree.
-        synthetic_task_id = f"speculate-{spec_id[:8]}"
-        handle = mgr.handle_for(synthetic_task_id, "draft")
-        if handle is not None:
-            mgr.cleanup(handle, on_failure=False)
 
 
 # ---------------------------------------------------------------------------

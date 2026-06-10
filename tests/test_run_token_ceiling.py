@@ -33,7 +33,6 @@ import pytest
 
 from agent_baton.core.govern.budget import BudgetEnforcer, RunTokenCeilingExceeded
 from agent_baton.core.engine.selfheal import SelfHealEscalator, EscalationTier
-from agent_baton.core.engine.speculator import SpeculativePipeliner, SpeculationTrigger
 from agent_baton.core.immune.daemon import ImmuneConfig, ImmuneDaemon
 from agent_baton.core.immune.scheduler import SweepScheduler, SweepTarget
 from agent_baton.core.immune.sweeper import SweepFinding, Sweeper
@@ -166,25 +165,6 @@ class TestRunTokenCeilingBlocksExcessCall:
         assert len(attempts) == 1
         assert attempts[0].status == "ceiling-abort"
         assert attempts[0].tier == EscalationTier.HAIKU_1.value
-
-    def test_speculator_should_speculate_false_on_ceiling(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """SpeculativePipeliner.should_speculate() returns False when ceiling trips."""
-        monkeypatch.setenv("BATON_RUN_TOKEN_CEILING", "0.001")
-
-        enforcer = BudgetEnforcer()
-        enforcer.add_run_spend(0.0009)  # near ceiling
-
-        pipeliner = SpeculativePipeliner(
-            budget_enforcer=enforcer,
-            enabled=True,
-        )
-        result = pipeliner.should_speculate(
-            block_reason="awaiting_human_approval",
-            next_step_id="step-2.1",
-        )
-        assert result is False
 
 
 # ---------------------------------------------------------------------------

@@ -90,11 +90,10 @@ Each agent file in `agents/` contains a YAML frontmatter block (`name`, `descrip
 | `immune-todo-rot` | haiku | TODO/FIXME age detection and triage. |
 | `immune-untested-edges` | sonnet | Identifies code paths missing test coverage. |
 
-## Speculation & swarm
+## Swarm
 
 | Agent | Model | Use when |
 |-------|-------|----------|
-| `speculative-drafter` | haiku | Pre-computes likely next-step drafts in the background while the user is reading. |
 | `swarm-reconciler` | sonnet | Merges parallel work from independent swarm agents into a coherent change. |
 
 ---

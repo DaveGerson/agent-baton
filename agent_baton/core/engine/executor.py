@@ -252,15 +252,6 @@ def _selfheal_enabled() -> bool:
     return _env_flag("BATON_SELFHEAL_ENABLED", "0")
 
 
-def _speculate_enabled() -> bool:
-    """Return True when speculative pipelining is enabled (Wave 5.3, bd-9839).
-
-    Default: disabled (cost-incurring, requires explicit opt-in).
-    Override via env: ``BATON_SPECULATE_ENABLED=1`` or baton.yaml ``speculate.enabled: true``.
-    """
-    return _env_flag("BATON_SPECULATE_ENABLED", "0")
-
-
 def _souls_enabled() -> bool:
     """Return True when persistent agent souls are enabled (Wave 6.1 Part B, bd-d975).
 
@@ -3966,33 +3957,6 @@ class ExecutionEngine:
         # into next_action.  For v1 this hook records the intent; the CLI
         # `baton execute self-heal` command triggers the actual escalation.
         # This keeps the gate-failure path non-blocking.
-
-    # ── Wave 5.3 — Speculative Pipelining (bd-9839) ───────────────────────────
-
-    def get_speculator(self) -> "SpeculativePipeliner | None":
-        """Return the SpeculativePipeliner instance, or None when disabled.
-
-        Constructed lazily on first access; cached on the engine instance.
-        """
-        if not _speculate_enabled():
-            return None
-        if not hasattr(self, "_speculator"):
-            try:
-                from agent_baton.core.engine.speculator import SpeculativePipeliner
-                state = self._load_execution()
-                self._speculator = SpeculativePipeliner(
-                    worktree_mgr=self._worktree_mgr,
-                    task_id=state.task_id if state else "",
-                    enabled=True,
-                )
-                if state:
-                    self._speculator.load_from_state(
-                        getattr(state, "speculations", {})
-                    )
-            except Exception as exc:
-                _log.debug("SpeculativePipeliner init failed (non-fatal): %s", exc)
-                self._speculator = None
-        return getattr(self, "_speculator", None)
 
     # ── Compliance report helpers ────────────────────────────────────────────
 

@@ -15,7 +15,7 @@ The CLI is the agent's primary interface to the engine. Cross-cutting rules: [..
 
 ## Command groups under `commands/`
 
-Top-level `*_cmd.py` files are single-command entry points (`bead_cmd`, `config_cmd`, `daemon_immune_cmd`, `debate_cmd`, `merge_cmd`, `pmo_cmd`, `predict_cmd`, `query_cmd`, `release_cmd`, `souls_cmd`, `source_cmd`, `spec_cmd`, `swarm_cmd`, `sync_cmd`, `tenancy_cmd`, `webhook_cmd`, `maintenance_cmd`, `assess_cmd`).
+Top-level `*_cmd.py` files are single-command entry points (`bead_cmd`, `config_cmd`, `daemon_immune_cmd`, `debate_cmd`, `merge_cmd`, `pmo_cmd`, `query_cmd`, `release_cmd`, `souls_cmd`, `source_cmd`, `spec_cmd`, `swarm_cmd`, `sync_cmd`, `tenancy_cmd`, `webhook_cmd`, `maintenance_cmd`, `assess_cmd`).
 
 Subpackages (`agents/`, `distribute/`, `execution/`, `finops/`, `govern/`, `improve/`, `knowledge/`, `observe/`, `release/`, `specs/`, `tenancy/`) group multi-command surfaces.
 

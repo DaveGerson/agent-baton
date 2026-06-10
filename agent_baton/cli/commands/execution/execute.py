@@ -461,26 +461,6 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         help="Maximum escalation tier (default: opus)",
     )
 
-    # ── Wave 5.3 (bd-9839): Speculation Management ───────────────────────────
-    # baton execute speculate status|accept|reject|show [SPEC_ID]
-    p_speculate = sub.add_parser(
-        "speculate", parents=[_task_id_parent],
-        help="Manage speculative pipeline worktrees (Wave 5.3)",
-    )
-    p_speculate.add_argument(
-        "speculate_action", metavar="ACTION",
-        choices=["status", "accept", "reject", "show"],
-        help="Action: status | accept [spec_id] | reject <spec_id> | show <spec_id>",
-    )
-    p_speculate.add_argument(
-        "speculate_id", metavar="SPEC_ID", nargs="?", default=None,
-        help="Speculation ID (required for accept/reject/show)",
-    )
-    p_speculate.add_argument(
-        "--reason", dest="speculate_reason", default="",
-        help="Rejection reason (for reject action)",
-    )
-
     return p
 
 
@@ -848,7 +828,7 @@ def handler(args: argparse.Namespace) -> None:
             "approve, feedback, amend, team-record, interact, complete, status, "
             "resume, list, switch, cancel, export, run, retry-gate, fail, "
             "resume-budget, verify-dispatch, audit-isolation, handoff, "
-            "worktree-gc, takeover, self-heal, speculate"
+            "worktree-gc, takeover, self-heal"
         )
 
     if args.subcommand == "list":
@@ -1625,9 +1605,6 @@ def handler(args: argparse.Namespace) -> None:
     elif args.subcommand == "self-heal":
         _handle_self_heal(args, engine, context_root)
 
-    elif args.subcommand == "speculate":
-        _handle_speculate(args, engine, context_root)
-
     elif args.subcommand == "verify-dispatch":
         _handle_verify_dispatch(args, engine, context_root)
 
@@ -1831,90 +1808,6 @@ def _handle_self_heal(args: argparse.Namespace, engine, context_root: Path) -> N
     print(f"  baton execute dispatch --step {step_id} --agent {agent_name} --model {model}")
     print()
     print("(Automated dispatch will fire on next gate failure when selfheal is enabled.)")
-
-
-# ---------------------------------------------------------------------------
-# Wave 5.3 — Speculation Management (bd-9839)
-# ---------------------------------------------------------------------------
-
-
-def _handle_speculate(args: argparse.Namespace, engine, context_root: Path) -> None:
-    """Handle ``baton execute speculate status|accept|reject|show [SPEC_ID]``."""
-    action = args.speculate_action
-    spec_id = getattr(args, "speculate_id", None)
-    reason = getattr(args, "speculate_reason", "") or ""
-    output_fmt = getattr(args, "output", "text")
-
-    speculator = engine.get_speculator()
-    if speculator is None:
-        if output_fmt == "json":
-            print(json.dumps({"enabled": False, "message": "Speculation is disabled."}))
-        else:
-            user_error(
-                "Speculation is disabled. Set BATON_SPECULATE_ENABLED=1 to enable.",
-                hint="Or set speculate.enabled: true in baton.yaml.",
-            )
-        return
-
-    state = engine._load_execution()
-    if state is not None:
-        speculator.load_from_state(getattr(state, "speculations", {}))
-
-    if action == "status":
-        active = speculator.list_active()
-        if output_fmt == "json":
-            print(json.dumps({"speculations": [s.to_dict() for s in active]}, indent=2))
-        else:
-            if not active:
-                print("No active speculations.")
-            else:
-                print(f"Active speculations ({len(active)}):")
-                for s in active:
-                    print(f"  {s.spec_id[:8]}  target={s.target_step_id}  "
-                          f"trigger={s.trigger}  status={s.status}")
-
-    elif action == "accept":
-        if not spec_id:
-            user_error("'accept' requires a SPEC_ID argument")
-        spec = speculator.accept(spec_id)
-        if spec is None:
-            user_error(f"Speculation '{spec_id}' not found.")
-        # Persist updated speculation state.
-        if state is not None:
-            state.speculations = speculator.to_dict()
-            engine._save_execution(state)
-        if output_fmt == "json":
-            print(json.dumps({"accepted": True, "spec_id": spec_id}))
-        else:
-            print(f"Speculation {spec_id} accepted.")
-            print("Dispatch the heavy-model agent into the speculative worktree to complete the step.")
-
-    elif action == "reject":
-        if not spec_id:
-            user_error("'reject' requires a SPEC_ID argument")
-        spec = speculator.reject(spec_id, reason=reason)
-        if spec is None:
-            user_error(f"Speculation '{spec_id}' not found.")
-        if state is not None:
-            state.speculations = speculator.to_dict()
-            engine._save_execution(state)
-        if output_fmt == "json":
-            print(json.dumps({"rejected": True, "spec_id": spec_id, "reason": reason}))
-        else:
-            print(f"Speculation {spec_id} rejected. Worktree cleaned up.")
-
-    elif action == "show":
-        if not spec_id:
-            user_error("'show' requires a SPEC_ID argument")
-        spec = speculator.get(spec_id)
-        if spec is None:
-            user_error(f"Speculation '{spec_id}' not found.")
-        if output_fmt == "json":
-            print(json.dumps(spec.to_dict(), indent=2))
-        else:
-            d = spec.to_dict()
-            for k, v in d.items():
-                print(f"  {k}: {v}")
 
 
 # ---------------------------------------------------------------------------

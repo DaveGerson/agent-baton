@@ -850,10 +850,14 @@ def gen_execution_state() -> None:
         working_branch_head="11223344aabbccdd",
         takeover_records=[],
         selfheal_attempts=[],
-        speculations={},
         run_cumulative_spend_usd=0.042,
         pending_scope_expansions=[],
         scope_expansions_applied=0,
+        pending_approval_request=PendingApprovalRequest(
+            phase_id=2,
+            requester="jdoe@workstation.local",
+            requested_at="2026-01-15T10:55:00+00:00",
+        ),
     )
     _write("ExecutionState", obj.to_dict())
 

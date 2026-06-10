@@ -44,7 +44,7 @@ If you cannot update all four in the same change, stop and split the work.
 | Knowledge | `knowledge_resolver.py`, `knowledge_gap.py`, `knowledge_telemetry.py` |
 | Self-heal | `selfheal.py`, `takeover.py` |
 | Souls (identity) | `soul_registry.py`, `soul_router.py` |
-| Speculation | `speculator.py`, `foresight.py` |
+| Foresight | `foresight.py` |
 | Cost / classification | `cost_estimator.py`, `classifier.py` |
 | Team coordination | `team_board.py`, `team_registry.py`, `team_tools.py` |
 

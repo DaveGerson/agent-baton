@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 42
+SCHEMA_VERSION = 43
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -1325,6 +1325,20 @@ DROP TABLE IF EXISTS handoff_beads;
 DROP TABLE IF EXISTS bead_anchors;
 DROP TABLE IF EXISTS beads;
 """,
+    43: """
+-- v43: 007 Phase B — remove predict/speculation subsystem.
+--
+-- The speculative pipelining subsystem (Wave 5.3, bd-9839) and the Wave 6.2
+-- Part C predictive computation subsystem have been deleted.  The
+-- ``speculations`` table is no longer written by baton and is dropped here.
+--
+-- ROLLBACK: restore the pre-migration backup created by
+-- migration_backup.backup_db() before this migration runs.  The backup
+-- is named ``baton.db.bak-42-<timestamp>``.
+--
+-- Note: SQLite DROP TABLE IF EXISTS is idempotent — safe to re-apply.
+DROP TABLE IF EXISTS speculations;
+""",
 }
 
 # =====================================================================
@@ -1420,16 +1434,6 @@ CREATE TABLE IF NOT EXISTS selfheal_attempts (
     cost_usd    REAL NOT NULL DEFAULT 0.0,
     payload_json TEXT NOT NULL DEFAULT '{}',
     PRIMARY KEY (task_id, attempt_id)
-);
-
-CREATE TABLE IF NOT EXISTS speculations (
-    task_id         TEXT NOT NULL,
-    spec_id         TEXT NOT NULL,
-    started_at      TEXT NOT NULL DEFAULT '',
-    target_step_id  TEXT NOT NULL DEFAULT '',
-    status          TEXT NOT NULL DEFAULT '',
-    payload_json    TEXT NOT NULL DEFAULT '{}',
-    PRIMARY KEY (task_id, spec_id)
 );
 
 -- RELEASES (R3.1: named delivery targets that plans/specs can be tagged

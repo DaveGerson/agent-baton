@@ -81,12 +81,10 @@ cymbal impact <symbol>          # blast radius before edits
 | `BATON_WORKTREE_ENABLED` | Enable/disable git worktree isolation for concurrent agents | `1` |
 | `BATON_TAKEOVER_ENABLED` | Enable/disable developer takeover capability | `1` |
 | `BATON_SELFHEAL_ENABLED` | Enable/disable self-heal escalation on failures | `0` |
-| `BATON_SPECULATE_ENABLED` | Enable/disable speculative pipelining | `0` |
 | `BATON_SOULS_ENABLED` | Enable/disable soul registry for agent identity | `0` |
 | `BATON_BD_BACKEND` | Bead-store backend (ADR-13b WP-G). `bd` is the only supported value — SQLite fallback removed. Other values log a deprecation warning. | `bd` |
 | `BATON_BD_ENABLED` / `BATON_BD_BIN` / `BATON_BD_PREFIX` | `BATON_BD_ENABLED` kept for backward compat but has no effect after WP-G. Binary path (`bd`) and `bd init` prefix (`bd`). | — |
 | `BATON_PLANNER_HARD_GATE` | Enable hard validation gate that blocks bad plans | unset |
-| `BATON_PREDICT_ENABLED` | Enable predictive dispatch system | `0` |
 | `BATON_OTEL_ENABLED` | Enable OpenTelemetry JSONL export | unset |
 
 ## Regulated-domain rules

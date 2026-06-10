@@ -383,215 +383,6 @@ class TestSelfHealEscalator:
 
 
 # ---------------------------------------------------------------------------
-# Part C — Speculation
-# ---------------------------------------------------------------------------
-
-
-class TestSpeculationRecord:
-    def test_to_dict_roundtrip(self):
-        from agent_baton.core.engine.speculator import SpeculationRecord
-
-        r = SpeculationRecord(
-            spec_id="abc-123",
-            target_step_id="2.1",
-            trigger="awaiting_human_approval",
-            worktree_path="/tmp/spec/2.1",
-            worktree_branch="worktree/spec/2.1",
-            started_at="2026-04-28T10:00:00+00:00",
-            status="running",
-        )
-        d = r.to_dict()
-        r2 = SpeculationRecord.from_dict(d)
-        assert r2.spec_id == "abc-123"
-        assert r2.target_step_id == "2.1"
-        assert r2.is_active()
-
-    def test_accepted_not_active(self):
-        from agent_baton.core.engine.speculator import SpeculationRecord
-
-        r = SpeculationRecord(
-            spec_id="abc-123",
-            target_step_id="2.1",
-            trigger="ci_running",
-            worktree_path="",
-            worktree_branch="",
-            started_at="2026-04-28T10:00:00+00:00",
-            status="accepted",
-        )
-        assert not r.is_active()
-
-
-class TestSpeculationTrigger:
-    def test_trigger_values(self):
-        from agent_baton.core.engine.speculator import SpeculationTrigger
-
-        assert SpeculationTrigger.HUMAN_APPROVAL_WAIT.value == "awaiting_human_approval"
-        assert SpeculationTrigger.CI_RUNNING.value == "ci_running"
-
-
-class TestSpeculativePipeliner:
-    def _make_pipeliner(self, enabled=True):
-        from agent_baton.core.engine.speculator import SpeculativePipeliner
-
-        return SpeculativePipeliner(
-            worktree_mgr=None,
-            task_id="test-task",
-            enabled=enabled,
-        )
-
-    def test_should_not_speculate_when_disabled(self):
-        p = self._make_pipeliner(enabled=False)
-        assert not p.should_speculate("awaiting_human_approval", "2.1")
-
-    def test_should_speculate_on_human_approval_wait(self):
-        p = self._make_pipeliner(enabled=True)
-        assert p.should_speculate("awaiting_human_approval", "2.1")
-
-    def test_should_speculate_on_ci_running(self):
-        p = self._make_pipeliner(enabled=True)
-        assert p.should_speculate("ci_running", "2.1")
-
-    def test_should_not_speculate_on_interact(self):
-        p = self._make_pipeliner(enabled=True)
-        assert not p.should_speculate("interacting", "2.1")
-
-    def test_should_not_speculate_when_next_step_is_none(self):
-        p = self._make_pipeliner(enabled=True)
-        assert not p.should_speculate("awaiting_human_approval", None)
-
-    def test_should_not_speculate_when_duplicate_active(self):
-        from agent_baton.core.engine.speculator import SpeculationRecord
-
-        p = self._make_pipeliner(enabled=True)
-        p._speculations["spec-1"] = SpeculationRecord(
-            spec_id="spec-1",
-            target_step_id="2.1",
-            trigger="awaiting_human_approval",
-            worktree_path="",
-            worktree_branch="",
-            started_at="2026-04-28T10:00:00+00:00",
-            status="running",
-        )
-        p._creation_order.append("spec-1")
-        # Should not start a second speculation for the same step.
-        assert not p.should_speculate("awaiting_human_approval", "2.1")
-
-    def test_accept_marks_accepted(self):
-        from agent_baton.core.engine.speculator import SpeculationRecord
-
-        p = self._make_pipeliner(enabled=True)
-        p._speculations["spec-1"] = SpeculationRecord(
-            spec_id="spec-1",
-            target_step_id="2.1",
-            trigger="awaiting_human_approval",
-            worktree_path="",
-            worktree_branch="",
-            started_at="2026-04-28T10:00:00+00:00",
-            status="running",
-        )
-        result = p.accept("spec-1")
-        assert result is not None
-        assert result.status == "accepted"
-        assert result.accepted_at != ""
-
-    def test_accept_unknown_spec_returns_none(self):
-        p = self._make_pipeliner(enabled=True)
-        assert p.accept("nonexistent") is None
-
-    def test_reject_marks_rejected(self):
-        from agent_baton.core.engine.speculator import SpeculationRecord
-
-        p = self._make_pipeliner(enabled=True)
-        p._speculations["spec-2"] = SpeculationRecord(
-            spec_id="spec-2",
-            target_step_id="2.2",
-            trigger="ci_running",
-            worktree_path="",
-            worktree_branch="",
-            started_at="2026-04-28T10:00:00+00:00",
-            status="running",
-        )
-        result = p.reject("spec-2", reason="stale")
-        assert result is not None
-        assert result.status == "rejected"
-        assert result.reject_reason == "stale"
-
-    def test_list_active_filters_terminal(self):
-        from agent_baton.core.engine.speculator import SpeculationRecord
-
-        p = self._make_pipeliner(enabled=True)
-        for sid, status in [("s1", "running"), ("s2", "accepted"), ("s3", "rejected")]:
-            p._speculations[sid] = SpeculationRecord(
-                spec_id=sid,
-                target_step_id="x.1",
-                trigger="ci_running",
-                worktree_path="",
-                worktree_branch="",
-                started_at="2026-04-28T10:00:00+00:00",
-                status=status,
-            )
-        active = p.list_active()
-        assert len(active) == 1
-        assert active[0].spec_id == "s1"
-
-    def test_gc_stale_expires_by_ttl(self):
-        from agent_baton.core.engine.speculator import SpeculationRecord
-
-        p = self._make_pipeliner(enabled=True)
-        p._spec_ttl = 0  # immediate expiry
-        p._speculations["s1"] = SpeculationRecord(
-            spec_id="s1",
-            target_step_id="2.1",
-            trigger="ci_running",
-            worktree_path="",
-            worktree_branch="",
-            started_at="2000-01-01T00:00:00+00:00",  # ancient
-            status="running",
-        )
-        reaped = p.gc_stale()
-        assert "s1" in reaped
-        assert p._speculations["s1"].status == "expired"
-
-    def test_gc_stale_expires_by_dispatched_step(self):
-        from agent_baton.core.engine.speculator import SpeculationRecord
-
-        p = self._make_pipeliner(enabled=True)
-        p._spec_ttl = 9999  # do not expire by TTL
-        from datetime import datetime, timezone
-        p._speculations["s2"] = SpeculationRecord(
-            spec_id="s2",
-            target_step_id="2.1",
-            trigger="awaiting_human_approval",
-            worktree_path="",
-            worktree_branch="",
-            started_at=datetime.now(tz=timezone.utc).isoformat(),
-            status="running",
-        )
-        # Target step dispatched without handoff.
-        reaped = p.gc_stale(dispatched_step_ids={"2.1"})
-        assert "s2" in reaped
-
-    def test_to_dict_from_state_roundtrip(self):
-        from agent_baton.core.engine.speculator import SpeculationRecord, SpeculativePipeliner
-
-        p = SpeculativePipeliner(task_id="t1", enabled=True)
-        p._speculations["spec-x"] = SpeculationRecord(
-            spec_id="spec-x",
-            target_step_id="1.1",
-            trigger="ci_running",
-            worktree_path="",
-            worktree_branch="",
-            started_at="2026-04-28T10:00:00+00:00",
-            status="pending",
-        )
-        d = p.to_dict()
-        p2 = SpeculativePipeliner(task_id="t1", enabled=True)
-        p2.load_from_state(d)
-        assert "spec-x" in p2._speculations
-        assert p2._speculations["spec-x"].target_step_id == "1.1"
-
-
-# ---------------------------------------------------------------------------
 # BudgetEnforcer
 # ---------------------------------------------------------------------------
 
@@ -623,19 +414,6 @@ class TestBudgetEnforcer:
         b = BudgetEnforcer()
         cost = b.record_self_heal_spend("step-1", "haiku-1", tokens_in=1_000_000, tokens_out=0)
         assert cost == pytest.approx(0.25, rel=0.01)  # Haiku input: $0.25/M
-
-    def test_allow_speculation_within_daily_cap(self):
-        from agent_baton.core.govern.budget import BudgetEnforcer
-
-        b = BudgetEnforcer(speculation_daily_cap_usd=10.0)
-        assert b.allow_speculation()
-
-    def test_deny_speculation_when_daily_cap_exceeded(self):
-        from agent_baton.core.govern.budget import BudgetEnforcer
-
-        b = BudgetEnforcer(speculation_daily_cap_usd=0.0001)
-        b.record_speculation_spend("spec-1", tokens_in=10000, tokens_out=2000)
-        assert not b.allow_speculation()
 
     def test_self_heal_step_spend_accumulates(self):
         from agent_baton.core.govern.budget import BudgetEnforcer
@@ -680,7 +458,6 @@ class TestExecutionStateWave5Fields:
         state = ExecutionState.from_dict(self._make_minimal_state_dict())
         assert state.takeover_records == []
         assert state.selfheal_attempts == []
-        assert state.speculations == {}
 
     def test_wave5_fields_survive_to_dict_roundtrip(self):
         from agent_baton.models.execution import ExecutionState
@@ -693,34 +470,24 @@ class TestExecutionStateWave5Fields:
                                     "started_at": "2026-04-28T10:00:00+00:00", "ended_at": "2026-04-28T10:01:00+00:00",
                                     "status": "gate-still-failing", "tokens_in": 100, "tokens_out": 20,
                                     "cost_usd": 0.0, "commit_hash": "", "gate_stderr_tail": ""}]
-        d["speculations"] = {"spec-1": {"spec_id": "spec-1", "target_step_id": "2.1",
-                                         "trigger": "awaiting_human_approval",
-                                         "worktree_path": "", "worktree_branch": "",
-                                         "started_at": "2026-04-28T10:00:00+00:00",
-                                         "status": "running", "accepted_at": "", "rejected_at": "",
-                                         "reject_reason": "", "cost_usd": 0.0, "scaffold_files": []}}
-
         state = ExecutionState.from_dict(d)
         assert len(state.takeover_records) == 1
         assert len(state.selfheal_attempts) == 1
-        assert "spec-1" in state.speculations
 
         # Round-trip via to_dict.
         out = state.to_dict()
         assert len(out["takeover_records"]) == 1
         assert len(out["selfheal_attempts"]) == 1
-        assert "spec-1" in out["speculations"]
 
     def test_legacy_state_without_wave5_fields_loads_cleanly(self):
         from agent_baton.models.execution import ExecutionState
 
         # Legacy state has no Wave 5 keys — should default gracefully.
         d = self._make_minimal_state_dict()
-        # Explicitly no takeover_records, selfheal_attempts, speculations keys.
+        # Explicitly no takeover_records, selfheal_attempts keys.
         state = ExecutionState.from_dict(d)
         assert state.takeover_records == []
         assert state.selfheal_attempts == []
-        assert state.speculations == {}
 
 
 # ---------------------------------------------------------------------------

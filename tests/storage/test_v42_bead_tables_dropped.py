@@ -253,7 +253,8 @@ def test_v42_migration_is_idempotent_when_tables_absent(
 def test_schema_version_is_42() -> None:
     from agent_baton.core.storage.schema import SCHEMA_VERSION
 
-    assert SCHEMA_VERSION == 42
+    # v43 added in 007 Phase B (predict/speculation removal); v42 was the bead-drop.
+    assert SCHEMA_VERSION >= 42
 
 
 def test_migrations_dict_has_v42_entry() -> None:

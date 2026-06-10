@@ -295,15 +295,15 @@ Set `BATON_RUN_TOKEN_CEILING=<USD>` to cap total cumulative spend per
 execution. `BudgetEnforcer` reads the env var fresh on every check
 (never cached), tracks a run-level counter that survives crash recovery,
 and raises `RunTokenCeilingExceeded` before any record_* call would push
-the total over the limit. The selfheal, speculator, and immune-system
-daemons all check the ceiling before kicking off an escalation cycle and
-abort with `'ceiling-abort'` rather than overspending.
+the total over the limit. The selfheal and immune-system daemons all check
+the ceiling before kicking off an escalation cycle and abort with
+`'ceiling-abort'` rather than overspending.
 
-> **Known gap (bd-3f80).** Selfheal/speculator/immune respect the ceiling,
-> but the main `Executor.dispatch()` path does not yet block individual
-> agent dispatches when the projected spend would breach the cap; it only
-> emits a warning at HIGH/CRITICAL run start. Full executor wiring is
-> tracked in bd-3f80.
+> **Known gap (bd-3f80).** Selfheal/immune respect the ceiling, but the
+> main `Executor.dispatch()` path does not yet block individual agent
+> dispatches when the projected spend would breach the cap; it only emits
+> a warning at HIGH/CRITICAL run start. Full executor wiring is tracked
+> in bd-3f80.
 
 ### Persistent Agent Souls (EXPERIMENTAL — Wave 6.1 Part B)
 
@@ -806,8 +806,8 @@ pmo-ui/            <- React/Vite PMO frontend
 | `BATON_DB_PATH` | Override the project `baton.db` location (subagents in worktrees can rely on the upward-walk discovery) | discovered |
 | `BATON_API_TOKEN` | Bearer token for API authentication | none |
 | `BATON_APPROVAL_MODE` | Approval policy: `local` (self-approve) or `team` (different reviewer required). In `team` mode, `baton swarm` defaults `--require-approval-bead` ON. | `local` |
-| `BATON_SELFHEAL_ENABLED` | Enable speculator/selfheal escalation on gate failure. Falsy values (`0`, `false`, `no`) are honoured and write a `selfheal_suppressed` event to `compliance-audit.jsonl`. | `0` |
-| `BATON_RUN_TOKEN_CEILING` | Per-run cumulative spend cap (USD float). When set, `BudgetEnforcer.check_run_ceiling()` raises `RunTokenCeilingExceeded` before exceeding the cap and selfheal/speculator/immune all abort. Counter is restored on `baton execute resume`. (See PR #67/#73, bd-3f80.) | unset |
+| `BATON_SELFHEAL_ENABLED` | Enable selfheal escalation on gate failure. Falsy values (`0`, `false`, `no`) are honoured and write a `selfheal_suppressed` event to `compliance-audit.jsonl`. | `0` |
+| `BATON_RUN_TOKEN_CEILING` | Per-run cumulative spend cap (USD float). When set, `BudgetEnforcer.check_run_ceiling()` raises `RunTokenCeilingExceeded` before exceeding the cap and selfheal/immune all abort. Counter is restored on `baton execute resume`. (See PR #67/#73, bd-3f80.) | unset |
 | `BATON_WORKTREE_STALE_HOURS` | Max age (hours) for the worktree GC to reclaim a stale linked worktree. New canonical name; `BATON_WORKTREE_GC_HOURS` is kept as a legacy alias. | `4` |
 | `BATON_EXPERIMENTAL` | CSV opt-in flag for experimental features. Required for `baton swarm` (`BATON_EXPERIMENTAL=swarm`). | unset |
 | `BATON_SWARM_ENABLED` | Required (in addition to `BATON_EXPERIMENTAL=swarm`) to actually dispatch a swarm refactor. | unset |

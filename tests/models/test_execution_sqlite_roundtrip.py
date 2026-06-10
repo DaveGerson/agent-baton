@@ -732,15 +732,6 @@ class TestExecutionStateSqliteRoundtrip:
                 "cost_usd": 0.42,
             },
         ]
-        state.speculations = {
-            "spec-1": {
-                "spec_id": "spec-1",
-                "target_step_id": "1.2",
-                "started_at": "2026-01-15T11:12:00+00:00",
-                "status": "pending",
-                "trigger": "phase-1-completion",
-            },
-        }
 
         store.save_execution(state)
         loaded = store.load_execution("task-exec-rt-phase-b2")
@@ -755,89 +746,6 @@ class TestExecutionStateSqliteRoundtrip:
         assert loaded.takeover_records[0]["takeover_id"] == "to-1"
         assert len(loaded.selfheal_attempts) == 1
         assert loaded.selfheal_attempts[0]["attempt_id"] == "sh-1"
-        assert "spec-1" in loaded.speculations
-        # Speculations no longer carries _phase_retries (slice 6 split).
-        assert "_phase_retries" not in loaded.speculations
-
-    def test_phase_retries_legacy_lift_from_speculations(self) -> None:
-        """Legacy state files with _phase_retries inside speculations migrate cleanly.
-
-        Slice 6 split phase_retries out of the speculations bimodal dict.
-        Older state files keyed retry counts under
-        ``speculations["_phase_retries"]``; ``ExecutionState.from_dict``
-        lifts those into the new top-level ``phase_retries`` field on load.
-        """
-        from agent_baton.models.execution import ExecutionState
-
-        legacy = {
-            "task_id": "legacy",
-            "plan": {
-                "task_id": "legacy",
-                "task_summary": "",
-                "risk_level": "LOW",
-                "budget_tier": "lean",
-                "execution_mode": "phased",
-                "git_strategy": "commit-per-agent",
-                "phases": [],
-                "shared_context": "",
-                "pattern_source": "",
-                "created_at": "2026-01-15T09:00:00+00:00",
-                "task_type": "feature",
-                "explicit_knowledge_packs": [],
-                "explicit_knowledge_docs": [],
-                "intervention_level": "low",
-                "complexity": "",
-                "classification_source": "",
-                "detected_stack": "",
-                "foresight_insights": [],
-                "depends_on_task": "",
-                "classification_signals": "",
-                "classification_confidence": 0.0,
-                "archetype": "phased",
-                "max_retry_phases": 0,
-                "compliance_fail_closed": None,
-            },
-            "current_phase": 0,
-            "current_step_index": 0,
-            "status": "running",
-            "step_results": [],
-            "gate_results": [],
-            "approval_results": [],
-            "feedback_results": [],
-            "amendments": [],
-            "started_at": "2026-01-15T09:00:00+00:00",
-            "completed_at": "",
-            "pending_gaps": [],
-            "resolved_decisions": [],
-            "delivered_knowledge": {},
-            "consolidation_result": None,
-            "force_override": False,
-            "override_justification": "",
-            "step_worktrees": {},
-            "steps_ran_in_place": {},
-            "working_branch": "",
-            "takeover_records": [],
-            "selfheal_attempts": [],
-            "speculations": {
-                "_phase_retries": {"phase_1": 2},
-                "spec-1": {
-                    "spec_id": "spec-1",
-                    "target_step_id": "1.2",
-                    "started_at": "2026-01-15T11:12:00+00:00",
-                    "status": "pending",
-                },
-            },
-            "working_branch_head": "",
-            "run_cumulative_spend_usd": 0.0,
-            "pending_scope_expansions": [],
-            "scope_expansions_applied": 0,
-            "pending_approval_request": None,
-        }
-
-        loaded = ExecutionState.from_dict(legacy)
-        assert loaded.phase_retries == {"phase_1": 2}
-        assert "_phase_retries" not in loaded.speculations
-        assert "spec-1" in loaded.speculations
 
 
 # ---------------------------------------------------------------------------
