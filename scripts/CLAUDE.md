@@ -10,7 +10,6 @@ Standalone scripts. Cross-cutting rules: [../CLAUDE.md](../CLAUDE.md).
 | `build_dist.sh` | Build the distributable wheel | Update when packaging changes |
 | `sync_bundled_agents.sh` | Mirror `/agents/` → `agent_baton/_bundled_agents/` | Run after editing any `agents/*.md` |
 | `record_spec_audit_beads.py` | One-shot — record spec-audit findings as beads via `make_bead_store()` (bd backend) | Maintenance only |
-| `file_extreme_scale_beads.py` | One-shot — file beads for extreme-scale findings | Maintenance only |
 | `file_strategic_gaps.py` | One-shot — file beads for strategic gaps | Maintenance only |
 | `update_velocity_beads.py` | One-shot — refresh velocity beads | Maintenance only |
 

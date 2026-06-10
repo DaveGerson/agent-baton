@@ -43,7 +43,14 @@ RESUME_*.md
 
 # PMO UI local config
 pmo-ui/.claude/
-/pmo-ui/e2e/reports/*
+/pmo-ui/e2e/reports/
+/pmo-ui/e2e/screenshots/
+
+# Claude Code active policy snapshot (regenerated per session)
+.claude/active-policy.json
+
+# Evidence bundles (baton evidence bundle output)
+evidence/
 
 # Beads / Dolt files (added by bd init)
 .dolt/
