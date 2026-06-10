@@ -910,6 +910,154 @@ baton classify "Update user payment processing logic" \
 
 ---
 
+### `baton classify --activate`
+
+Write `.claude/active-policy.json` after classifying a task, so that the
+`baton policy-check` hook uses the correct guardrail preset for the session.
+
+```
+baton classify DESCRIPTION [--files FILE...] --activate
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `DESCRIPTION` | Yes | Task description to classify |
+| `--files FILE...` | No | File paths affected (elevates risk from path patterns) |
+| `--activate` | No | Write `.claude/active-policy.json` with the resolved preset key |
+
+**Written file (`.claude/active-policy.json`):**
+
+```json
+{
+  "preset": "standard_dev",
+  "preset_display_name": "Standard Development",
+  "risk_level": "LOW",
+  "confidence": "high",
+  "signals": [],
+  "activated_at": "2026-01-15T12:00:00+00:00",
+  "activated_by": "baton classify --activate",
+  "task_hint": "first 120 chars of the description"
+}
+```
+
+**Preset keys:** `standard_dev`, `data_analysis`, `infrastructure`,
+`regulated`, `security`.
+
+**Example:**
+
+```bash
+baton classify "Add JWT auth middleware" --activate
+# → Active policy written to .claude/active-policy.json (preset: security)
+```
+
+**Related:** `baton policy-check`, `baton comply-record`
+
+---
+
+### `baton policy-check`
+
+Claude Code **PreToolUse** hook: evaluate a tool call against the active
+guardrail policy and emit a deny decision when a blocking rule is triggered.
+
+Reads a PreToolUse JSON payload from **stdin** and prints a deny JSON to
+stdout when a `path_block` or `tool_restrict` rule with `severity=="block"`
+matches. Exits 0 in all cases (fail-open); set `BATON_POLICY_FAIL_CLOSED=1`
+to exit 2 on errors.
+
+```
+baton policy-check [--agent NAME] [--cwd DIR]
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--agent NAME` | No | Agent name (overrides `$CLAUDE_AGENT_NAME`) |
+| `--cwd DIR` | No | Project root for policy resolution (default: cwd) |
+
+**Stdin format** (Claude Code PreToolUse payload):
+
+```json
+{"tool_name": "Write", "tool_input": {"file_path": "/project/.env"}, "session_id": "..."}
+```
+
+**Deny output** (stdout, exit 0):
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "permissionDecision": "deny",
+    "permissionDecisionReason": "standard_dev rule block_env_files (path_block): Block writes to .env files. Matched: /project/.env against pattern '**/.env'."
+  }
+}
+```
+
+**Policy resolution order:**
+1. `.claude/active-policy.json` → `preset` key
+2. `.claude/team-context/plan.json` → `risk_level` (LOW/MEDIUM → `standard_dev`; HIGH/CRITICAL → `regulated`)
+3. Fallback: `standard_dev`
+
+**Environment variables:**
+
+| Variable | Effect |
+|----------|--------|
+| `BATON_POLICY_FAIL_CLOSED` | `1` → exit 2 on errors (stdin errors, unreadable policy) |
+| `CLAUDE_AGENT_NAME` | Agent name used for scope-based rule matching |
+
+**Example (hook configuration in settings.json):**
+
+```json
+{"matcher": "Bash|Write|Edit|MultiEdit",
+ "hooks": [{"type": "command", "command": "baton policy-check", "timeout": 10}]}
+```
+
+**Related:** `baton classify --activate`, `baton comply-record`
+
+---
+
+### `baton comply-record`
+
+Claude Code **PostToolUse** and **Stop** hook: append a hash-chained entry to
+the compliance audit log.
+
+Reads a PostToolUse or Stop JSON payload from **stdin** and appends an entry
+via `ComplianceChainWriter` to `.claude/team-context/compliance-audit.jsonl`.
+Always exits 0 (fail-open); `BATON_COMPLIANCE_FAIL_CLOSED=1` exits 1 on
+write errors. Malformed stdin is silently ignored.
+
+```
+baton comply-record [--event-type TYPE] [--log PATH] [--cwd DIR]
+```
+
+| Argument | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `--event-type TYPE` | No | `hook_tool_use` | Event type label in the audit entry |
+| `--log PATH` | No | `.claude/team-context/compliance-audit.jsonl` | Audit log path |
+| `--cwd DIR` | No | cwd | Project root for log path resolution |
+
+**Event types:** `hook_tool_use` (PostToolUse), `session_stop` (Stop hooks).
+
+**Log entry fields:** `event_type`, `tool_name`, `file_paths`, `session_id`,
+`agent_name`, `timestamp`, `prev_hash`, `entry_hash`.
+
+**Environment variables:**
+
+| Variable | Effect |
+|----------|--------|
+| `BATON_COMPLIANCE_FAIL_CLOSED` | `1` → exit 1 on write errors |
+| `CLAUDE_AGENT_NAME` | Agent name recorded in the log entry |
+
+**Example (Stop hook configuration):**
+
+```json
+{"hooks": [{"type": "command",
+            "command": "baton comply-record --event-type session_stop",
+            "timeout": 5}]}
+```
+
+**Related:** `baton compliance verify`, `baton compliance rechain`, `baton policy-check`
+
+---
+
 ### `baton compliance`
 
 Show compliance reports generated during task execution.

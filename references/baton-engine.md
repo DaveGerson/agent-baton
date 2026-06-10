@@ -2282,6 +2282,40 @@ call to `baton execute next`.
 
 ---
 
+## Harness Mode (hooks-driven enforcement without the execute loop)
+
+For sessions where `baton execute` is not running — direct Claude Code
+sessions, ad-hoc agent use, or projects that haven't planned a task yet —
+the Phase F hook commands provide policy enforcement and compliance recording
+without the full engine loop.
+
+**Setup (once per task or session):**
+
+```bash
+baton classify "your task description" --activate
+# Writes .claude/active-policy.json with the resolved preset key.
+# PreToolUse hooks will enforce that preset for this session.
+```
+
+**What the hooks do automatically** (via `templates/settings.json`):
+
+- **PreToolUse** → `baton policy-check`: evaluates every `Bash`, `Write`,
+  `Edit`, or `MultiEdit` call against the active policy. Denies the tool call
+  (via Claude Code's `permissionDecision: "deny"` protocol) when a
+  `path_block` or `tool_restrict` rule with `severity="block"` matches.
+- **PostToolUse** → `baton comply-record`: appends a hash-chained entry to
+  `.claude/team-context/compliance-audit.jsonl` for every matching tool call.
+- **Stop** → `baton comply-record --event-type session_stop`: records the
+  session end in the audit log.
+
+**For managed / regulated executions** use the full engine loop
+(`baton execute`): the planner selects the right preset, the executor
+enforces policy violations and writes the compliance chain, and the gate
+system runs formal QA checks. Harness mode is a lightweight complement for
+the spaces between managed executions.
+
+---
+
 ## Environment Variables
 
 The full list of Baton environment variables. Mirrored in
@@ -2289,6 +2323,8 @@ The full list of Baton environment variables. Mirrored in
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
+| `BATON_POLICY_FAIL_CLOSED` | `1` → `baton policy-check` exits 2 on errors (bad stdin / unreadable policy), blocking the tool call. Default: fail-open (exit 0). | `0` |
+| `BATON_COMPLIANCE_FAIL_CLOSED` | `1` → `baton comply-record` exits 1 on write errors; also governs the execute-loop compliance writer. Default: fail-open (exit 0). | `0` |
 | `BATON_TASK_ID` | Bind a shell session to a specific execution. Set after `baton execute start` to scope all subsequent commands. | auto-detected |
 | `BATON_DB_PATH` | Override the project `baton.db` location. CLI walks upward from cwd if unset. | discovered |
 | `BATON_APPROVAL_MODE` | PMO approval policy: `local` (self-approve) or `team` (different reviewer required). | `local` |
