@@ -47,7 +47,7 @@ it and make its value explicit.
 | A4 | **Planner model-routing and heavy decomposition stages** (`planning/stages/decomposition.py` hardcoded `"opus"`/`"sonnet"`, `research.py` headless research, per-stage model literals) | Plan mode / `/goal` / Fable-era models plan and re-plan natively. Keep the planner as a **thin governance-enrichment pass** over a task: DataClassifier risk → guardrail preset → required reviewers → gates → budget. Stop deciding which model writes the code; that's frontmatter + Claude Code's job. | Shrink `planning/stages/`, remove model-assignment plumbing, keep `enrichment.py`'s policy/gate attachment |
 | A5 | **Estimation-based cost tables** (`cost_estimator.py` blended `MODEL_PRICING`, `cost_forecaster.py` `_DEFAULT_TOKENS`, role-baseline token guesses, wall-clock guesses) | Real usage is free: `observe/jsonl_scanner.py` already parses actual tokens from Claude Code session JSONL, and OTel export exists. Replace pre-run estimation with post-run actuals + a rolling forecast from history. Keep **one** pricing config (single small table or user-editable JSON) used only to convert actual tokens → dollars for chargeback and the ceiling. This dissolves the four-inconsistent-tables problem from Proposal 006 by deleting three of them. | `cost_estimator.py` shrinks to a price-config loader; `--dry-run` cost output becomes "forecast from history" with honest confidence |
 | A6 | **`claude-teams` backend write-a-spawn-prompt path** (`BATON_TEAMS_BACKEND=claude-teams`, `BATON_TEAMS_STRICT_RESUMABILITY`) | Agent Teams are now a first-class Claude Code feature; baton generating spawn prompts for an outer session is scaffolding around an experiment that ended. Re-verify current Agent Teams capabilities, then keep only the worktree backend. | Delete backend branch + 2 env vars + `docs/internal/agent-teams-and-goal-design.md` claims re-verification |
-| A7 | **pmo-ui surfaces for deleted features** (speculation/swarm panels, 3-tier `ModelTier` enums in `BohWalkIn.tsx`, `PlanEditor.tsx` `MODEL_LIST`) | — | Remove with their backends; model pickers read from the pricing config rather than hardcoded enums |
+| A7 | **pmo-ui surfaces for deleted features** (speculation/swarm panels, 3-tier `ModelTier` enums in `BohWalkIn.tsx`, `PlanEditor.tsx` `MODEL_LIST`) | — | Remove with their backends; model pickers read from the pricing config rather than hardcoded enums. The UI itself is **not** pared — it's repurposed as the spec-federation/review surface (B4) |
 
 **Not deleted, explicitly:** the execution state machine + `baton execute resume`
 (it's the spine the gates/approvals/compliance entries hang off — but see
@@ -56,10 +56,11 @@ it and make its value explicit.
 
 ### Migration discipline
 
-- Each deletion lands as its own PR: module + tests + CLI + docs + env vars together.
-- `ActionType.SWARM_DISPATCH` and removed CLI commands go through one
-  deprecation release (warn + no-op) before removal, since `ActionType` is a
-  documented public API (root CLAUDE.md "Key files").
+- **Direct deletion — no deprecation release.** Confirmed: these subsystems
+  have no users. Each deletion lands as its own PR: module + tests + CLI +
+  docs + env vars together. `ActionType.SWARM_DISPATCH` is removed in the
+  swarm PR with a CHANGELOG note (it is a documented public enum, but with
+  no consumers a warn+no-op cycle buys nothing).
 - Golden states (`tests/models/golden_states/`) regenerate via
   `python tests/models/_generate_golden.py` whenever `ExecutionState` loses
   fields (A3) — never hand-edited.
@@ -93,15 +94,26 @@ packs/hipaa-phi/
   evidence.json        # what the evidence bundle must contain for this domain
 ```
 
-- Ship 4–6 reference packs: **PHI/HIPAA**, **GDPR/data-residency**,
-  **SOX/financial-controls**, **PCI**, **secure-coding (OWASP)**,
-  **licensing/IP**. These are the "specific use cases" — today the
-  `regulated` preset is one undifferentiated bucket.
+**Distribution model (decided): packs are authored by organizations inside
+their own projects** — baton ships the *format*, not a content registry:
+
+- Packs live in the user's repo at `.claude/packs/<name>/` (extending the
+  existing `.claude/policies/<name>.json` override mechanism into the full
+  directory contract above). They version with the org's code and never
+  leave the org's repo — which matters, since rubrics and knowledge docs
+  encode internal policy.
+- Baton provides: the pack **schema + loader + validator**
+  (`baton packs validate`), scaffolding (`baton packs init <name>`), and
+  the `talent-builder` flow — *"turn this regulation / internal policy doc
+  into an assurance pack"* (it already builds agents + knowledge packs;
+  this is packaging).
+- The repo ships only 1–2 **example packs as templates** (e.g. PHI/HIPAA
+  and secure-coding/OWASP) under `templates/packs/` so orgs have a worked
+  reference for the format — illustrative starting points, not maintained
+  compliance content. The 5 built-in presets remain as the zero-config
+  fallback.
 - `baton classify` consumes per-pack `signals.json` so triage says *which*
   regime applies, not just "regulated".
-- `talent-builder` gains a documented flow: *"turn this regulation /
-  internal policy doc into an assurance pack"* (it already builds agents +
-  knowledge packs; this is packaging).
 
 ### B2. Expert review with verifiable verdicts
 
@@ -140,15 +152,55 @@ review verdicts (B2) + approval record (who requested, who approved, when)
 - this becomes **the** demo of baton's value: "every AI-written change in a
   regulated repo ships with a verifiable evidence bundle".
 
-### B4. Segregation-of-duties approval, made visible
+### B4. Spec federation + pre-flight review — the PMO UI's primary purpose
 
 Today: `BATON_APPROVAL_MODE=team` enforces requester ≠ reviewer with state
-preconditions; REST route `POST /pmo/gates/{task_id}/approve` exists.
+preconditions; REST route `POST /pmo/gates/{task_id}/approve` exists; the
+PMO UI is a general execution dashboard.
 
-Expand: webhook/Slack notification on `approval_pending`, an approval queue
-view in the PMO UI, and approval entries written into the evidence bundle.
-(Identity is currently a header-derived actor string — document that real
-identity assurance comes from deploying the API behind SSO; don't build auth.)
+**Decided direction:** the UI becomes a primary interface, reoriented around
+one workflow — **federating specs from multiple team members into a queue
+that an architect or senior engineer reviews *before* execution fires**.
+The economic rationale: the expensive thing in agentic development is no
+longer the typing, it's the tokens — an under-specified task burns a long
+autonomous run producing the wrong thing. Pre-flight review is the
+cheapest point of control for organizational token spend.
+
+The pipeline (mostly existing machinery, re-sequenced):
+
+```
+team member submits spec ──► baton classify + policy attach + cost forecast (cheap)
+   (UI form, or imported           │
+    from Azure DevOps work         ▼
+    item / GitHub issue)    spec-review queue (PMO UI)
+                                   │  architect/senior approves, edits, or bounces
+                                   ▼  with feedback (requester ≠ reviewer enforced)
+                            fire: dispatch to Claude Code (expensive)
+                                   │
+                                   ▼
+                            evidence bundle + actual-cost attribution (B3, B6)
+```
+
+Components:
+- **Spec intake**: submit in the UI, or import from **Azure DevOps work
+  items** (primary integration) and **GitHub Issues** (the GitHub plumbing
+  partially exists via the AIBOM `--pr` path). Slack/webhooks are
+  secondary — nice-to-have notifications, not a core surface.
+- **Pre-flight enrichment**: each queued spec automatically gets the
+  classifier's risk/pack determination, required reviewers, derived gates,
+  and a cost forecast from historical actuals (B6) — so the reviewer sees
+  *what this will cost and what assurance it triggers* before approving.
+- **Review queue**: the existing team-approval state machine
+  (requester ≠ reviewer) moved to the *front* of the pipeline. Approve /
+  edit-spec-then-approve / bounce-with-feedback. Approval recorded into the
+  evidence bundle.
+- **Spec quality assist**: the gap analysis already noted the new models
+  reward a full task spec up front — an optional "rubric check" on
+  submission (does the spec state verification criteria, scope boundaries,
+  constraints?) raises spec quality before a human ever reviews it.
+
+(Identity is currently a header-derived actor string — real identity
+assurance comes from deploying the API behind SSO; don't build auth.)
 
 ### B5. Hook-based runtime enforcement (the key integration shift)
 
@@ -215,23 +267,30 @@ cases that need it, not the headline.
 | Phase 3.2 task budgets | **Kept, demoted** to optional ceiling passthrough (B6) |
 | Phase 4–5 distributables/doc sweep | **Folded in**, reduced by the deletions |
 
-## Sequencing
+## Sequencing (decided: deletions first, then quick wins)
 
-1. **PR 1 — quick wins** (006 survivors): goal-evaluator repoint, settings.json
-   thinking cap, guardrail-preset wording, single pricing config with current prices.
-2. **PR 2–4 — deletions**, one subsystem each: predict → swarm → selfheal
-   (selfheal last; it touches persisted state + golden regen). Deprecation
-   release for `SWARM_DISPATCH`/CLI first.
-3. **PR 5 — hooks integration** (B5) + harness mode docs: `baton policy check`,
-   `baton comply record`, template hook wiring. This is the highest-value
-   *new* code and is independent of the deletions.
-4. **PR 6 — assurance packs** (B1): pack format + migrate the 5 presets +
-   2 reference packs (PHI, secure-coding) to prove the shape.
+1. **PR 1–3 — deletions**, one subsystem each, no deprecation cycle:
+   predict → swarm → selfheal (selfheal last; it touches persisted state +
+   golden regen). Banks the LOC reduction immediately and clears the ground
+   the rest builds on.
+2. **PR 4 — quick wins** (006 survivors): goal-evaluator repoint,
+   settings.json thinking cap, guardrail-preset wording, single pricing
+   config with current prices (simpler now — two of the four tables died
+   with their subsystems in PR 2–3).
+3. **PR 5 — hooks integration** (B5) + harness mode docs: `baton policy
+   check`, `baton comply record`, template hook wiring. Highest-value *new*
+   code, independent of everything above.
+4. **PR 6 — assurance pack format** (B1): schema + loader + validator +
+   `baton packs init|validate`, migrate the 5 presets onto the loader,
+   2 example packs under `templates/packs/`, talent-builder flow.
 5. **PR 7 — verdict schema + evidence bundle** (B2, B3): structured review
    verdicts, `baton evidence bundle|verify`.
-6. **PR 8 — planner slimming** (A4) + repositioned docs/README.
-7. Later: approval notifications (B4), multi-expert fan-out (B2), remaining
-   reference packs.
+6. **PR 8 — spec federation** (B4): spec intake + pre-flight enrichment +
+   review queue in the PMO UI; Azure DevOps work-item import first,
+   GitHub Issues second.
+7. **PR 9 — planner slimming** (A4) + repositioned docs/README.
+8. Later: multi-expert fan-out (B2), spec-quality rubric check (B4),
+   notifications.
 
 ## Success criteria
 
@@ -239,18 +298,25 @@ cases that need it, not the headline.
 - A regulated-repo demo: classification → pack activation → hook-blocked
   tool call with rule citation → SME+auditor structured verdicts → team
   approval → one-command evidence bundle that `baton evidence verify` passes.
+- **The spec-federation loop works end-to-end**: a team member submits a
+  spec (or imports an Azure DevOps work item), the queue shows risk + cost
+  forecast + required assurance, a senior engineer approves, execution
+  fires, and the actual cost lands in chargeback attributed to the spec.
 - An unregulated repo gets value from baton with **zero** loop overhead
   (hooks + chargeback + beads only).
 - No estimation-vs-actual cost discrepancy remains (single pricing config,
   actuals-based reporting).
 
-## Open questions
+## Decisions (resolved 2026-06-10)
 
-1. **Deprecation window**: is anyone (you, or downstream users) running
-   `baton swarm` / speculation / self-heal in anger? If provably unused,
-   skip the deprecation release and delete directly.
-2. **Pack distribution**: ship reference packs in-repo (`packs/`) like
-   `agents/`, or as a separate fetchable registry? In-repo recommended to start.
-3. **PMO UI investment**: approval queue + evidence viewer (B3/B4) are the
-   UI's clearest post-refocus purpose — worth confirming the UI has users
-   before building.
+1. **Deprecation window** — none. No users of swarm/predict/self-heal;
+   delete directly, one PR per subsystem.
+2. **Pack distribution** — packs are authored by organizations within their
+   own projects (`.claude/packs/`). Baton ships the format, loader,
+   validator, scaffolding, and example templates — not a content registry.
+3. **PMO UI** — becomes a primary interface, purpose-built for spec
+   federation + pre-flight senior review to control organizational token
+   spend. Azure DevOps and GitHub Issues are the integration targets;
+   Slack/webhooks are secondary.
+4. **Implementation order** — deletions first, then quick wins, then the
+   build-out (hooks → packs → evidence → spec federation).
