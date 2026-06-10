@@ -2436,7 +2436,7 @@ in [references/baton-engine.md](../references/baton-engine.md#environment-variab
 | `BATON_TASK_ID` | Bind a shell session to a specific execution. Set after `baton execute start` to scope all subsequent commands. | auto-detected |
 | `BATON_DB_PATH` | Override the project `baton.db` location. CLI walks upward from cwd if unset. | discovered |
 | `BATON_APPROVAL_MODE` | PMO approval policy: `local` (self-approve) or `team` (different reviewer required). | `local` |
-| `BATON_RUN_TOKEN_CEILING` | Per-run cumulative spend cap (USD float). Read fresh on every check; restored on `baton execute resume`. Selfheal/immune respect it; main `Executor.dispatch()` only warns at HIGH/CRITICAL run start (bd-3f80). | unset |
+| `BATON_RUN_TOKEN_CEILING` | Per-run cumulative spend cap (USD float). Read fresh on every check; restored on `baton execute resume`. The immune system respects it; main `Executor.dispatch()` only warns at HIGH/CRITICAL run start (bd-3f80). | unset |
 | `BATON_SOULS_ENABLED` | Wave 6.1 Part B persistent agent souls (signing + revocation). | `0` |
 | `BATON_BD_BACKEND` | ADR-13b WP-G bead backend. `bd` is the only supported value — SQLite fallback removed. Other values log a deprecation warning and `BdNotAvailable` is raised if `bd` is missing. | `bd` |
 | `BATON_BD_ENABLED` | Kept for backward compatibility; has no effect after WP-G — `bd` is always required. | `1` |

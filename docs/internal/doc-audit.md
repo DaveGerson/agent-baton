@@ -1,5 +1,7 @@
 # Agent Baton Documentation Audit
 
+> **Note (2026-06-10):** this audit predates Proposal 007 (Phases B–J). Agent-count findings, GSD-roster claims, and clusters touching swarm/self-heal/speculation are superseded — those subsystems and `framework/gsd/` were removed.
+
 > Internal working document. Last updated: 2026-04-28.
 > Companion to `docs/internal/doc-guiding-principles.md`. This audit
 > classifies every Markdown file under `docs/`, plus `README.md` and

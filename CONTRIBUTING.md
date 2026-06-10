@@ -9,7 +9,7 @@ the project, make changes, and submit them for review.
 git clone https://github.com/DaveGerson/agent-baton.git
 cd agent-baton
 pip install -e ".[dev]"
-pytest                     # Confirm tests pass (~3900 tests)
+pytest                     # Confirm tests pass (~9,400 tests)
 ```
 
 Python 3.10+ is required.

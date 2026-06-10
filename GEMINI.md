@@ -30,7 +30,7 @@ docs/internal/     Maintainer-only docs (audit, reviews, working drafts)
 ## Key files (treat as public APIs)
 
 - `agent_baton/cli/commands/execution/execute.py` — `_print_action()` is the protocol surface between the engine and the orchestrator agent. Don't break its output shape.
-- `agent_baton/core/engine/state.py` — execution state machine.
+- `agent_baton/core/engine/states.py` — execution state machine.
 - `agent_baton/core/engine/protocols.py` — `ExecutionDriver` 15-method interface.
 - `agent_baton/models/execution.py` — `ActionType` enum (8 values: DISPATCH, GATE, APPROVAL, COMPLETE, FAILED, WAIT, FEEDBACK, INTERACT) and `ExecutionState`.
 - `agent_baton/api/` — FastAPI routers for the REST API + PMO UI backend.

@@ -74,7 +74,7 @@ pip install -e ".[dev]"          # Core engine + CLI + test deps
 
 ```bash
 # In Claude Code
-/agents                     # Should list ~22 agents
+/agents                     # Should list ~30 agents
 
 # In terminal
 baton agents                # List agents from Python registry
