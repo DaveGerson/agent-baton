@@ -227,8 +227,8 @@ class TestBudgetGating:
         """has_headroom_for_auto_fix() returns False when < 5% remains."""
         # Use a tiny cap ($0.01) and spend just over 95% of it.
         budget = BudgetEnforcer(immune_daily_cap_usd=0.01)
-        # Each call: 10K input * 0.25/1M + 1K output * 1.25/1M = $0.0025 + $0.00000125 ≈ $0.0025
-        # 5 calls ≈ $0.0126, exceeds 95% of $0.01 ($0.0095) reliably.
+        # Each call: 10K input * 1.00/1M + 1K output * 5.00/1M = $0.01 + $0.005 = $0.015
+        # 1 call = $0.015, already exceeds 95% of $0.01 ($0.0095) reliably.
         for _ in range(5):
             budget.record_immune_spend("/f.py", "stale-comment", tokens_in=10_000, tokens_out=1_000)
         assert budget.has_headroom_for_auto_fix() is False
@@ -239,9 +239,9 @@ class TestAnomalyBurst:
         """Spending > 30% of daily cap in 60 min triggers 1-h suspension."""
         budget = BudgetEnforcer(immune_daily_cap_usd=5.0)
         # 30% of $5.00 = $1.50 → need to spend > $1.50 in one window.
-        # 2M input + 100K output Haiku = 2M * 0.25/1M + 100K * 1.25/1M
-        #   = $0.50 + $0.125 = $0.625 each call.
-        # Three calls = $1.875 > $1.50 → burst.
+        # 2M input + 100K output Haiku = 2M * 1.00/1M + 100K * 5.00/1M
+        #   = $2.00 + $0.50 = $2.50 each call.
+        # One call = $2.50 > $1.50 → burst.
         for _ in range(3):
             budget.record_immune_spend("/f.py", "deprecated-api", 2_000_000, 100_000)
 

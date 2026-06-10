@@ -128,7 +128,7 @@ baton goal CONDITION [options]
 **Evaluator selection** (via `BATON_GOAL_EVALUATOR` env var):
 - `stub` — deterministic, no LLM (default fallback)
 - `haiku` (default when `ANTHROPIC_API_KEY` is set) — Claude Haiku 4.5
-- `opus` — Claude Opus 4.7
+- `opus` — Claude Opus 4.8
 
 **Safety rail:** any evaluator that returns `met=True` is overridden to `met=False` unless the most-recent gate passed. This prevents premature claims.
 

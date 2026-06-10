@@ -8,5 +8,19 @@ The config is **always optional and additive** — when no ``baton.yaml``
 is present, behavior is unchanged from prior versions.
 """
 from agent_baton.core.config.project_config import ProjectConfig
+from agent_baton.core.config.pricing import (
+    ModelPrice,
+    PRICING,
+    get_pricing,
+    blended,
+    normalise_family,
+)
 
-__all__ = ["ProjectConfig"]
+__all__ = [
+    "ProjectConfig",
+    "ModelPrice",
+    "PRICING",
+    "get_pricing",
+    "blended",
+    "normalise_family",
+]

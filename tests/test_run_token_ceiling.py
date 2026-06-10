@@ -302,10 +302,10 @@ class TestRunTokenCeilingImmuneDaemonSuspends:
           (c) daemon shuts down cleanly.
         """
         # Each Haiku sweep: 12K in + 1K out.
-        # _cost_usd("haiku", 12_000, 1_000) = 12_000*0.25/1M + 1_000*1.25/1M
-        #   = 0.003 + 0.00000125 ≈ $0.003001
-        # Set ceiling to $0.005 and pre-fill to $0.003 so the second sweep
-        # would cost ~$0.003 putting us at ~$0.006 > $0.005.
+        # _cost_usd("haiku", 12_000, 1_000) = 12_000*1.00/1M + 1_000*5.00/1M
+        #   = 0.012 + 0.005 = $0.017
+        # Set ceiling to $0.005 and pre-fill to $0.003 so the first sweep
+        # would cost ~$0.017 putting us at ~$0.020 > $0.005.
         monkeypatch.setenv("BATON_RUN_TOKEN_CEILING", "0.005")
 
         enforcer = BudgetEnforcer(initial_run_spend_usd=0.003)

@@ -26,8 +26,7 @@ auditor subagent. If MEDIUM or above, invoke the auditor.
 | Regulatory-reportable data, audit trail systems | CRITICAL |
 | Schema migrations on production databases | CRITICAL |
 
-**When in doubt, err toward the auditor.** A false escalation costs time.
-A missed risk causes real harm.
+**Invoke the auditor when the task touches regulated data, authentication/authorization, payments, or irreversible operations (data deletion, schema migrations, external API writes).** A false escalation costs time. A missed risk causes real harm.
 
 ---
 

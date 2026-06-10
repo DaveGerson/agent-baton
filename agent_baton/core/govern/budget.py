@@ -19,10 +19,8 @@ Note: Self-heal escalation ladder removed in Phase D pare-back (007).
     The cumulative counter is persisted in ``ExecutionState.run_cumulative_spend_usd``
     so resumed runs continue counting correctly.
 
-Pricing baseline (April 2026 per design):
-    Haiku:   $0.25 / $1.25 per M input/output tokens
-    Sonnet:  $3.00 / $15.00 per M input/output tokens
-    Opus:    $15.00 / $75.00 per M input/output tokens
+Pricing derives from :mod:`agent_baton.core.config.pricing` (single source of
+truth; overridable via ``.claude/pricing.json``).
 """
 from __future__ import annotations
 
@@ -31,6 +29,8 @@ import os
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 from typing import Callable
+
+from agent_baton.core.config.pricing import get_pricing
 
 _log = logging.getLogger(__name__)
 
@@ -72,21 +72,20 @@ class RunTokenCeilingExceeded(Exception):
             f"(would reach ${current_spend_usd + estimated_call_usd:.4f})"
         )
 
+
 # ---------------------------------------------------------------------------
-# Per-tier pricing (USD per 1M tokens)
+# Per-tier pricing (USD *per token*, derived from core.config.pricing)
 # ---------------------------------------------------------------------------
 
-_PRICING_INPUT: dict[str, float] = {
-    "haiku": 0.25 / 1_000_000,
-    "sonnet": 3.00 / 1_000_000,
-    "opus": 15.00 / 1_000_000,
-}
+def _build_pricing_dicts() -> tuple[dict[str, float], dict[str, float]]:
+    """Return (_PRICING_INPUT, _PRICING_OUTPUT) as per-token dicts."""
+    pricing = get_pricing()
+    inp = {family: mp.input_per_mtok / 1_000_000 for family, mp in pricing.items()}
+    out = {family: mp.output_per_mtok / 1_000_000 for family, mp in pricing.items()}
+    return inp, out
 
-_PRICING_OUTPUT: dict[str, float] = {
-    "haiku": 1.25 / 1_000_000,
-    "sonnet": 15.00 / 1_000_000,
-    "opus": 75.00 / 1_000_000,
-}
+
+_PRICING_INPUT, _PRICING_OUTPUT = _build_pricing_dicts()
 
 
 def _cost_usd(tier: str, tokens_in: int, tokens_out: int) -> float:

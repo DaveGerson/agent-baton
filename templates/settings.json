@@ -64,8 +64,5 @@
       }
     ]
   },
-  "env": {
-    "CLAUDE_CODE_MAX_THINKING_TOKENS": "10000",
-    "_comment_thinking_cap": "Cap thinking budget for routine agents; lift for architect/planner via agent frontmatter if needed."
-  }
+  "env": {}
 }
