@@ -1602,3 +1602,39 @@ an external `TaskCompleted` hook calls back into.
 | `DecisionRequest` | Human decision request (pending/resolved/expired) |
 | `DecisionResolution` | Resolution of a decision (option + rationale) |
 | `ContributionRequest` | Multi-party async input with contributor tracking |
+
+---
+
+## 20. Pricing configuration
+
+Model pricing (USD per million tokens) lives in a single source of truth at
+`agent_baton/core/config/pricing.py`.  All three cost subsystems
+(`cost_estimator`, `cost_forecaster`, `budget`) derive their values from
+there.
+
+### Built-in defaults (current as of June 2026)
+
+| Family | Input / 1M | Output / 1M | Blended (75/25) |
+|--------|-----------|------------|-----------------|
+| haiku  | $1.00     | $5.00      | $2.00           |
+| sonnet | $3.00     | $15.00     | $6.00           |
+| opus   | $5.00     | $25.00     | $10.00          |
+| fable  | $10.00    | $50.00     | $20.00          |
+
+The *blended* rate is `0.75 * input_per_mtok + 0.25 * output_per_mtok` — the
+same formula used historically for dry-run cost estimates.
+
+### Per-project override
+
+Create `.claude/pricing.json` in your project root to override any family:
+
+```json
+{
+    "opus":  {"input_per_mtok": 5.0, "output_per_mtok": 25.0},
+    "haiku": {"input_per_mtok": 1.0, "output_per_mtok": 5.0}
+}
+```
+
+Missing / invalid files are tolerated with a logged warning; execution is
+never blocked.  The file is resolved relative to `cwd` at call time — it is
+not walked up the directory tree.

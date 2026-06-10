@@ -9,7 +9,7 @@ see-also:
 
 # Agent roster
 
-This page mirrors `agents/*.md` — the distributable agent definitions installed by `scripts/install.sh`. There are **33** agents. The orchestrator picks among them based on task domain, risk tier, and budget. To dispatch one directly inside Claude Code, name it in the `Agent` tool with `subagent_type`.
+This page mirrors `agents/*.md` — the distributable agent definitions installed by `scripts/install.sh`. There are **30** agents. The orchestrator picks among them based on task domain, risk tier, and budget. To dispatch one directly inside Claude Code, name it in the `Agent` tool with `subagent_type`.
 
 To inspect runtime registration: `baton agents`.
 
@@ -72,30 +72,22 @@ Each agent file in `agents/` contains a YAML frontmatter block (`name`, `descrip
 | `system-maintainer` | sonnet | Post-cycle config tuning. Mutates `learned-overrides.json` only — never source code. |
 | `talent-builder` | opus | Researches a domain, creates a new specialist agent + knowledge pack + skills. |
 
-## Resilience subsystem (self-heal)
+## Archetypes
 
 | Agent | Model | Use when |
 |-------|-------|----------|
-| `self-heal-haiku` | haiku | Fast triage of trivial test failures, lint errors, formatting drift. |
-| `self-heal-sonnet` | sonnet | Mid-tier auto-fix when haiku declines. |
-| `self-heal-opus` | opus | Deepest fix tier; invoked only when sonnet escalates. |
+| `archetype-james-engineering-manager` | opus | Evaluating Agent Baton features from a management perspective: PMO dashboard UX, governance/approval workflows, cost visibility, reporting, and analytics. Use to answer "would an engineering manager actually use this to sponsor and oversee an agent program?" |
 
 ## Resilience subsystem (immune)
 
 | Agent | Model | Use when |
 |-------|-------|----------|
+| `immune-autofix` | haiku | Applies high-confidence hygiene fixes found by the immune sweep (stale comments, formatting, trivial lint). Invoked automatically by `FindingTriage` when `auto_fix=True`. |
 | `immune-deprecated-api` | sonnet | Sweeps for usage of deprecated APIs flagged by upstream. |
 | `immune-doc-drift` | sonnet | Detects when docs disagree with source. |
 | `immune-stale-comment` | haiku | Finds stale comments and TODOs that no longer match the code. |
 | `immune-todo-rot` | haiku | TODO/FIXME age detection and triage. |
 | `immune-untested-edges` | sonnet | Identifies code paths missing test coverage. |
-
-## Speculation & swarm
-
-| Agent | Model | Use when |
-|-------|-------|----------|
-| `speculative-drafter` | haiku | Pre-computes likely next-step drafts in the background while the user is reading. |
-| `swarm-reconciler` | sonnet | Merges parallel work from independent swarm agents into a coherent change. |
 
 ---
 

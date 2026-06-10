@@ -139,7 +139,7 @@ class TestAutoFixGating:
         triage.handle(_make_finding(confidence=0.92, kind="stale-comment"))
         launcher.launch.assert_called_once()
         call_kwargs = launcher.launch.call_args[1]
-        assert call_kwargs.get("agent_name") == "self-heal-haiku"
+        assert call_kwargs.get("agent_name") == "immune-autofix"
 
     def test_low_confidence_no_autofix(self, tmp_path: Path) -> None:
         """confidence < threshold → auto-fix NOT dispatched."""

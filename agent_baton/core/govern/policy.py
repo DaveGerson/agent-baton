@@ -419,9 +419,25 @@ class PolicyEngine:
     def load_preset(self, name: str) -> PolicySet | None:
         """Load a named policy set from disk.
 
-        First checks the on-disk policies directory, then falls back to the
-        built-in standard presets.
+        Resolution order:
+        1. Pack presets (``"pack:<name>"``) — resolved via the in-process
+           pack policy registry populated by
+           :func:`~agent_baton.core.govern.packs.register_pack_policies`.
+        2. On-disk ``.claude/policies/<name>.json`` file.
+        3. Built-in standard presets.
+
+        Args:
+            name: Preset key, e.g. ``"regulated"``, ``"security"``,
+                  or ``"pack:phi-hipaa"``.
+
+        Returns:
+            The :class:`PolicySet` if found; ``None`` otherwise.
         """
+        if name.startswith("pack:"):
+            from agent_baton.core.govern.packs import get_pack_policy
+            result = get_pack_policy(name)
+            return result  # may be None if not registered
+
         path = self._dir / f"{name}.json"
         if path.exists():
             try:

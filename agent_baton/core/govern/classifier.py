@@ -38,8 +38,8 @@ class ClassificationResult:
         risk_level: The assessed risk tier (LOW, MEDIUM, HIGH, or CRITICAL).
         guardrail_preset: Name of the guardrail preset that should be applied.
             One of "Standard Development", "Data Analysis",
-            "Infrastructure Changes", "Regulated Data", or
-            "Security-Sensitive".
+            "Infrastructure Changes", "Regulated Data", "Security-Sensitive",
+            or a pack preset name like "pack:<name>".
         signals_found: List of keyword matches that contributed to the
             classification, formatted as ``"category:keyword"``
             (e.g. ``"regulated:hipaa"``, ``"path:.env"``).
@@ -47,13 +47,17 @@ class ClassificationResult:
             no signals were found (default is safe); ``"low"`` when exactly
             one signal was found.
         explanation: Human-readable summary of the classification reasoning.
+        matched_packs: Names of assurance packs whose path-patterns or
+            keyword signals matched.  Empty list when no packs are loaded
+            or no pack signals fired.
     """
 
     risk_level: RiskLevel
-    guardrail_preset: str  # "Standard Development", "Data Analysis", "Infrastructure Changes", "Regulated Data", "Security-Sensitive"
+    guardrail_preset: str  # "Standard Development", "Data Analysis", "Infrastructure Changes", "Regulated Data", "Security-Sensitive", or "pack:<name>"
     signals_found: list[str] = field(default_factory=list)  # which keywords/patterns triggered
     confidence: str = "high"  # "high" (multiple signals) or "low" (single signal)
     explanation: str = ""
+    matched_packs: list[str] = field(default_factory=list)  # pack preset names that matched
 
     def to_markdown(self) -> str:
         """Render the classification result as a human-readable markdown block.
@@ -145,8 +149,37 @@ class DataClassifier:
                     when no higher signals are present.
         LOW      -- No signals detected; standard development guardrails.
 
-    The classifier is stateless and safe to reuse across multiple calls.
+    Pack path-pattern matches emit the pack preset + risk (highest risk wins;
+    ties → first alphabetically by pack preset name).
+
+    When constructed via
+    :func:`~agent_baton.core.govern.packs.make_classifier_for_packs`, the
+    *extra_signals*, *extra_path_patterns*, and *pack_preset_overrides*
+    parameters extend the built-in signals with pack-specific ones.
+
+    Args:
+        extra_signals: Optional dict mapping signal category names to
+            additional keyword lists (merged with the built-in lists).
+        extra_path_patterns: Optional list of
+            ``(pattern, preset_name, risk_level_str)`` tuples from pack
+            signals.json definitions.
+        pack_preset_overrides: Optional dict mapping pack preset names
+            (``"pack:<name>"``) to their declared risk level strings.
+
+    The classifier is stateless per-call and safe to reuse across multiple
+    calls.
     """
+
+    def __init__(
+        self,
+        extra_signals: dict[str, list[str]] | None = None,
+        extra_path_patterns: list[tuple[str, str, str]] | None = None,
+        pack_preset_overrides: dict[str, str] | None = None,
+    ) -> None:
+        self._extra_signals: dict[str, list[str]] = extra_signals or {}
+        # list of (path_pattern, preset_name, risk_level_str)
+        self._extra_path_patterns: list[tuple[str, str, str]] = extra_path_patterns or []
+        self._pack_preset_overrides: dict[str, str] = pack_preset_overrides or {}
 
     def classify(
         self,
@@ -180,8 +213,15 @@ class DataClassifier:
         max_risk = RiskLevel.LOW
         preset = "Standard Development"
 
+        # Merge built-in signal lists with any extra pack signals.
+        regulated_signals = REGULATED_SIGNALS + self._extra_signals.get("regulated", [])
+        pii_signals = PII_SIGNALS + self._extra_signals.get("pii", [])
+        security_signals = SECURITY_SIGNALS + self._extra_signals.get("security", [])
+        infra_signals = INFRASTRUCTURE_SIGNALS + self._extra_signals.get("infrastructure", [])
+        db_signals = DATABASE_SIGNALS + self._extra_signals.get("database", [])
+
         # Check regulated signals → HIGH
-        for signal in REGULATED_SIGNALS:
+        for signal in regulated_signals:
             if signal in description_lower:
                 signals.append(f"regulated:{signal}")
                 if _RISK_ORDINAL[max_risk] < _RISK_ORDINAL[RiskLevel.HIGH]:
@@ -189,7 +229,7 @@ class DataClassifier:
                     preset = "Regulated Data"
 
         # Check PII signals → HIGH
-        for signal in PII_SIGNALS:
+        for signal in pii_signals:
             if signal in description_lower:
                 signals.append(f"pii:{signal}")
                 if _RISK_ORDINAL[max_risk] < _RISK_ORDINAL[RiskLevel.HIGH]:
@@ -197,7 +237,7 @@ class DataClassifier:
                     preset = "Regulated Data"
 
         # Check security signals → HIGH (only if not already classified as regulated)
-        for signal in SECURITY_SIGNALS:
+        for signal in security_signals:
             if signal in description_lower:
                 signals.append(f"security:{signal}")
                 if max_risk == RiskLevel.LOW:
@@ -205,7 +245,7 @@ class DataClassifier:
                     preset = "Security-Sensitive"
 
         # Check infrastructure signals → HIGH (only if still LOW)
-        for signal in INFRASTRUCTURE_SIGNALS:
+        for signal in infra_signals:
             if signal in description_lower:
                 signals.append(f"infra:{signal}")
                 if max_risk == RiskLevel.LOW:
@@ -213,7 +253,7 @@ class DataClassifier:
                     preset = "Infrastructure Changes"
 
         # Check database signals → MEDIUM (only if still LOW)
-        for signal in DATABASE_SIGNALS:
+        for signal in db_signals:
             if signal in description_lower:
                 signals.append(f"database:{signal}")
                 if max_risk == RiskLevel.LOW:
@@ -245,6 +285,47 @@ class DataClassifier:
                                 else:
                                     max_risk = RiskLevel.MEDIUM
                                     preset = "Standard Development"
+
+        # ── Pack path-pattern matching ──────────────────────────────────────
+        # Pack patterns run after base patterns so they can override.
+        # Highest risk wins; ties resolved alphabetically by preset name.
+        matched_packs: list[str] = []
+        _RISK_STR_ORDINAL = {"LOW": 0, "MEDIUM": 1, "HIGH": 2, "CRITICAL": 3}
+        _pack_best_preset: str | None = None
+        _pack_best_risk_str: str = "LOW"
+
+        if file_paths and self._extra_path_patterns:
+            for fpath in file_paths:
+                fpath_lower = fpath.lower()
+                for pat, pack_preset, pack_risk_str in self._extra_path_patterns:
+                    if pat.lower() in fpath_lower:
+                        signals.append(f"path:{pat}")
+                        if pack_preset not in matched_packs:
+                            matched_packs.append(pack_preset)
+                        cur_ord = _RISK_STR_ORDINAL.get(pack_risk_str.upper(), 2)
+                        best_ord = _RISK_STR_ORDINAL.get(_pack_best_risk_str.upper(), 0)
+                        if cur_ord > best_ord or (
+                            cur_ord == best_ord
+                            and (
+                                _pack_best_preset is None
+                                or pack_preset < _pack_best_preset
+                            )
+                        ):
+                            _pack_best_preset = pack_preset
+                            _pack_best_risk_str = pack_risk_str
+
+        if _pack_best_preset is not None:
+            # Map risk string to RiskLevel.
+            _risk_map = {
+                "LOW": RiskLevel.LOW,
+                "MEDIUM": RiskLevel.MEDIUM,
+                "HIGH": RiskLevel.HIGH,
+                "CRITICAL": RiskLevel.CRITICAL,
+            }
+            pack_risk_level = _risk_map.get(_pack_best_risk_str.upper(), RiskLevel.HIGH)
+            if _RISK_ORDINAL[pack_risk_level] >= _RISK_ORDINAL[max_risk]:
+                max_risk = pack_risk_level
+                preset = _pack_best_preset
 
         # Multiple regulated + PII signals → escalate to CRITICAL.
         regulated_count = sum(
@@ -279,6 +360,7 @@ class DataClassifier:
             signals_found=signals,
             confidence=confidence,
             explanation=explanation,
+            matched_packs=matched_packs,
         )
 
     def classify_from_files(

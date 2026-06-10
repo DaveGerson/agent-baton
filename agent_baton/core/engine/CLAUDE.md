@@ -42,9 +42,9 @@ If you cannot update all four in the same change, stop and split the work.
 | Beads (signals) | `bead_signal.py`, `bead_selector.py`, `bead_decay.py` |
 | Beads backend (ADR-13b WP-G) | `bd_client.py` (subprocess seam to the external `bd` CLI), `bd_mapping.py` (lossless Bead⇄bd issue mapping), `bd_bead_store.py` (`BdBeadStore` — the only bead store implementation), `bead_backend.py` (`make_bead_store()` — always returns `BdBeadStore`) |
 | Knowledge | `knowledge_resolver.py`, `knowledge_gap.py`, `knowledge_telemetry.py` |
-| Self-heal | `selfheal.py`, `takeover.py` |
+| Takeover / gate-retry | `takeover.py` (human takeover), gate-retry logic built into `executor.py` (`_gate_retry_enabled`, `_gate_retry_prompts`) |
 | Souls (identity) | `soul_registry.py`, `soul_router.py` |
-| Speculation | `speculator.py`, `foresight.py` |
+| Foresight | `foresight.py` |
 | Cost / classification | `cost_estimator.py`, `classifier.py` |
 | Team coordination | `team_board.py`, `team_registry.py`, `team_tools.py` |
 

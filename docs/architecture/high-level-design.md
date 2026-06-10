@@ -64,8 +64,8 @@ distributable assets:
 | Artifact | Location | Purpose |
 |----------|----------|---------|
 | `agent_baton/` Python package | `pyproject.toml` editable install | The engine, CLI, API, and bundled agents |
-| `agents/` markdown | Installed to `~/.claude/agents/` by `scripts/install.sh` | 47 agent definitions |
-| `references/` markdown | Installed to `~/.claude/references/` | 16 procedure references |
+| `agents/` markdown | Installed to `~/.claude/agents/` by `scripts/install.sh` | 30 agent definitions |
+| `references/` markdown | Installed to `~/.claude/references/` | 19 procedure references |
 | `templates/` | Installed to project's `.claude/` | `CLAUDE.md` + `settings.json` + skills |
 | `pmo-ui/dist/` | Built and served at `/pmo/` by FastAPI | React PMO frontend |
 
@@ -142,21 +142,21 @@ user/Claude: baton execute start
                          v
               loop: next_action() → ActionType
                          |
-              +----------+-----------+-------------+----------+
-              |          |           |             |          |
-              v          v           v             v          v
-         DISPATCH      GATE      APPROVAL    SWARM_DISP.  FEEDBACK
-         (Claude       (Claude   (human       (Reconciler  (multiple-
-          spawns        runs      decides      runs)       choice)
+              +----------+-----------+----------+
+              |          |           |          |
+              v          v           v          v
+         DISPATCH      GATE      APPROVAL   FEEDBACK
+         (Claude       (Claude   (human     (multiple-
+          spawns        runs      decides    choice)
           agent via     check)
           Agent tool)
-              |          |           |             |          |
-              +----+-----+-----+-----+------+------+--+-------+
-                   |           |            |         |
-                   v           v            v         v
-                record_step record_gate record_appr.  record_fdbk
-                   |           |            |         |
-                   +-----------+------------+---------+
+              |          |           |          |
+              +----+-----+-----+-----+-----+----+
+                   |           |          |
+                   v           v          v
+                record_step record_gate record_appr.
+                   |           |          |
+                   +-----------+----------+
                                |
                                v
                        ExecutionState saved
@@ -411,8 +411,7 @@ set of env-var overrides for ops needs.
 | `BATON_OTEL_PATH` | Destination JSONL for OTel spans | `.claude/team-context/otel-spans.jsonl` |
 | `BATON_WORKTREE_ENABLED` | Set to `0` to disable Wave 1.3 worktree isolation | `1` |
 | `BATON_TAKEOVER_ENABLED` | Wave 5.1 takeover | `1` |
-| `BATON_SELFHEAL_ENABLED` | Wave 5.2 model-tier escalation | `0` |
-| `BATON_SPECULATE_ENABLED` | Wave 5.3 speculative execution | `0` |
+| `BATON_GATE_RETRY` | Phase D single gate-retry on first gate failure | `0` |
 | `ANTHROPIC_API_KEY` | Required for `claude` CLI and Haiku classifier | unset |
 | `BATON_ORG_ID`, `BATON_TEAM_ID`, `BATON_USER_ID`, `BATON_COST_CENTER` | F0.2 tenancy attribution overrides | from `identity.yaml` |
 

@@ -527,10 +527,25 @@ def handler(args: argparse.Namespace) -> None:
             bead_store = make_bead_store(_db)
     except Exception:
         pass
+
+    # Build a pack-aware classifier and register pack policies so that
+    # load_preset("pack:…") resolves correctly during planning.
+    try:
+        from agent_baton.core.govern.packs import (
+            load_packs,
+            make_classifier_for_packs,
+            register_pack_policies,
+        )
+        _packs = load_packs(project_root)
+        register_pack_policies(_packs)
+        _classifier: DataClassifier = make_classifier_for_packs(_packs)
+    except Exception:
+        _classifier = DataClassifier()
+
     print("  Analyzing patterns and history...", file=sys.stderr)
     planner = IntelligentPlanner(
         retro_engine=retro_engine,
-        classifier=DataClassifier(),
+        classifier=_classifier,
         policy_engine=PolicyEngine(),
         knowledge_registry=knowledge_registry,
         bead_store=bead_store,

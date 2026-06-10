@@ -25,10 +25,10 @@ class TestActionTypeCheckpoint:
     def test_checkpoint_is_enum_member(self):
         assert ActionType.CHECKPOINT in ActionType
 
-    def test_all_original_nine_types_still_present(self):
+    def test_all_original_eight_types_still_present(self):
         original = {
             "dispatch", "gate", "complete", "failed", "wait",
-            "approval", "feedback", "interact", "swarm.dispatch",
+            "approval", "feedback", "interact",
         }
         current = {at.value for at in ActionType}
         assert original.issubset(current)

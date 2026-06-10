@@ -40,6 +40,10 @@ import {
   MOCK_APPROVE_RESPONSE,
   MOCK_EXECUTE_RESPONSE,
   MOCK_ADO_ITEMS,
+  MOCK_SPEC_DRAFTS,
+  MOCK_SPEC_SUBMITTED,
+  MOCK_SPEC_ENRICHED,
+  MOCK_FIRE_RESPONSE,
 } from './mock-data.js';
 
 // ---------------------------------------------------------------------------
@@ -58,6 +62,13 @@ export type MockForgeOptions = {
   forgePlan?: typeof MOCK_FORGE_PLAN;
   /** Simulate forge plan generation failure. */
   failForgePlan?: boolean;
+};
+
+export type MockSpecQueueOptions = {
+  /** Override the spec draft list returned by GET /pmo/specs. */
+  drafts?: typeof MOCK_SPEC_DRAFTS;
+  /** Simulate a failed list fetch. */
+  failList?: boolean;
 };
 
 export type MyFixtures = {
@@ -81,6 +92,10 @@ export type MyFixtures = {
    * Convenience for tests that exercise the full app.
    */
   mockAll: () => Promise<void>;
+  /**
+   * Install API mocks for the Spec Queue routes (/api/v1/pmo/specs).
+   */
+  mockSpecQueue: (options?: MockSpecQueueOptions) => Promise<void>;
 };
 
 // ---------------------------------------------------------------------------
@@ -299,6 +314,157 @@ export const test = base.extend<MyFixtures>({
           status: 200,
           contentType: 'application/json',
           body: JSON.stringify(MOCK_ADO_ITEMS),
+        });
+      });
+    };
+
+    await use(setup);
+  },
+
+  // -------------------------------------------------------------------------
+  // mockSpecQueue — intercepts /api/v1/pmo/specs routes
+  // -------------------------------------------------------------------------
+  mockSpecQueue: async ({ page }, use) => {
+    const setup = async (options: MockSpecQueueOptions = {}) => {
+      const drafts = options.drafts ?? MOCK_SPEC_DRAFTS;
+      const failList = options.failList ?? false;
+
+      // GET /api/v1/pmo/specs  (list — must be registered before the wildcard below)
+      await page.route('**/api/v1/pmo/specs', async (route) => {
+        if (route.request().method() === 'GET') {
+          if (failList) {
+            await route.fulfill({ status: 503, body: 'Service unavailable' });
+          } else {
+            // Honour ?status= filter
+            const url = new URL(route.request().url());
+            const statusFilter = url.searchParams.get('status');
+            const filtered = statusFilter
+              ? drafts.filter(d => d.status === statusFilter)
+              : drafts;
+            await route.fulfill({
+              status: 200,
+              contentType: 'application/json',
+              body: JSON.stringify(filtered),
+            });
+          }
+        } else if (route.request().method() === 'POST') {
+          // POST /pmo/specs — submit
+          const body = JSON.parse(route.request().postData() ?? '{}');
+          const newDraft = {
+            ...MOCK_SPEC_SUBMITTED,
+            id: `spec-new-${Date.now()}`,
+            title: body.title ?? 'New spec',
+            body: body.body ?? '',
+            submitted_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          };
+          await route.fulfill({
+            status: 201,
+            contentType: 'application/json',
+            body: JSON.stringify(newDraft),
+          });
+        } else {
+          await route.continue();
+        }
+      });
+
+      // POST /api/v1/pmo/specs/import
+      await page.route('**/api/v1/pmo/specs/import', async (route) => {
+        const body = JSON.parse(route.request().postData() ?? '{}');
+        if (body.source === 'ado') {
+          await route.fulfill({ status: 501, body: JSON.stringify({ detail: 'ADO not configured' }) });
+        } else {
+          const imported = {
+            ...MOCK_SPEC_SUBMITTED,
+            id: `spec-imported-${Date.now()}`,
+            title: `GitHub issue #${body.ref}`,
+            source: 'github',
+            source_ref: body.ref,
+            submitted_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          };
+          await route.fulfill({
+            status: 201,
+            contentType: 'application/json',
+            body: JSON.stringify(imported),
+          });
+        }
+      });
+
+      // GET /api/v1/pmo/specs/:id — individual draft fetch
+      await page.route('**/api/v1/pmo/specs/**', async (route) => {
+        if (route.request().method() !== 'GET') {
+          await route.continue();
+          return;
+        }
+        const url = route.request().url();
+        const match = url.match(/\/specs\/([^/?]+)(?:[/?]|$)/);
+        const id = match?.[1];
+        const found = id ? drafts.find(d => d.id === id) : null;
+        if (!found) {
+          await route.fulfill({ status: 404, body: JSON.stringify({ detail: 'Not found' }) });
+        } else {
+          await route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify(found),
+          });
+        }
+      });
+
+      // POST /api/v1/pmo/specs/:id/enrich
+      await page.route('**/api/v1/pmo/specs/*/enrich', async (route) => {
+        const url = route.request().url();
+        const match = url.match(/\/specs\/([^/]+)\/enrich/);
+        const id = match?.[1];
+        const found = drafts.find(d => d.id === id);
+        const enriched = { ...(found ?? MOCK_SPEC_ENRICHED), status: 'enriched', enrichment: MOCK_SPEC_ENRICHED.enrichment };
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify(enriched),
+        });
+      });
+
+      // POST /api/v1/pmo/specs/:id/approve
+      await page.route('**/api/v1/pmo/specs/*/approve', async (route) => {
+        const url = route.request().url();
+        const match = url.match(/\/specs\/([^/]+)\/approve/);
+        const id = match?.[1];
+        const found = drafts.find(d => d.id === id);
+        if (found?.status !== 'enriched') {
+          await route.fulfill({ status: 409, body: JSON.stringify({ detail: 'Not enriched' }) });
+          return;
+        }
+        const approved = { ...found, status: 'approved', review: { action: 'approved', actor: 'local-user', feedback: '', reviewed_at: new Date().toISOString() } };
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify(approved),
+        });
+      });
+
+      // POST /api/v1/pmo/specs/:id/bounce
+      await page.route('**/api/v1/pmo/specs/*/bounce', async (route) => {
+        const url = route.request().url();
+        const match = url.match(/\/specs\/([^/]+)\/bounce/);
+        const id = match?.[1];
+        const found = drafts.find(d => d.id === id);
+        const body = JSON.parse(route.request().postData() ?? '{}');
+        const bounced = { ...(found ?? MOCK_SPEC_ENRICHED), status: 'bounced', review: { action: 'bounced', actor: 'local-user', feedback: body.feedback, reviewed_at: new Date().toISOString() } };
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify(bounced),
+        });
+      });
+
+      // POST /api/v1/pmo/specs/:id/fire
+      await page.route('**/api/v1/pmo/specs/*/fire', async (route) => {
+        await route.fulfill({
+          status: 202,
+          contentType: 'application/json',
+          body: JSON.stringify(MOCK_FIRE_RESPONSE),
         });
       });
     };

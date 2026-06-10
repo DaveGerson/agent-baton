@@ -13,8 +13,7 @@ Tests are organised in five groups matching design §1.1–§1.5:
      with matching parameter names and return annotations
   4. ``record_step_result`` extra kwargs (3 added beyond the Protocol,
      BEAD_DISCOVERY from design §1.4)
-  5. ``set_swarm_launcher`` callable (CLI post-construction hook)
-  6. Engine instance attributes present after minimal construction
+  5. Engine instance attributes present after minimal construction
 
 Run this test to establish the green baseline before Phase 2 editing begins::
 
@@ -372,42 +371,7 @@ class TestRecordStepResultSignature:
 
 
 # ---------------------------------------------------------------------------
-# 5. set_swarm_launcher — post-construction CLI hook (executor.py:588)
-# ---------------------------------------------------------------------------
-
-class TestSetSwarmLauncher:
-    """Pin the ``set_swarm_launcher`` method used by the CLI execute loop."""
-
-    def test_method_exists(self) -> None:
-        from agent_baton.core.engine.executor import ExecutionEngine
-        assert hasattr(ExecutionEngine, "set_swarm_launcher")
-        assert callable(getattr(ExecutionEngine, "set_swarm_launcher"))
-
-    def test_signature(self) -> None:
-        from agent_baton.core.engine.executor import ExecutionEngine
-        sig = inspect.signature(ExecutionEngine.set_swarm_launcher)
-        params = [p for p in sig.parameters if p != "self"]
-        assert params == ["launcher"], (
-            f"set_swarm_launcher expected ['launcher'], got {params}"
-        )
-
-    def test_launcher_param_has_no_default(self) -> None:
-        from agent_baton.core.engine.executor import ExecutionEngine
-        sig = inspect.signature(ExecutionEngine.set_swarm_launcher)
-        param = sig.parameters["launcher"]
-        assert param.default is inspect.Parameter.empty
-
-    def test_return_annotation_is_none(self) -> None:
-        from agent_baton.core.engine.executor import ExecutionEngine
-        sig = inspect.signature(ExecutionEngine.set_swarm_launcher)
-        assert sig.return_annotation in (None, type(None), "None"), (
-            f"set_swarm_launcher return annotation should be None, "
-            f"got {sig.return_annotation!r}"
-        )
-
-
-# ---------------------------------------------------------------------------
-# 6. Engine instance attributes (design §1.5)
+# 5. Engine instance attributes (design §1.5)
 # ---------------------------------------------------------------------------
 
 class TestEngineInstanceAttributes:
@@ -416,7 +380,7 @@ class TestEngineInstanceAttributes:
     Uses a minimal construction (tmp dir, no storage backend) so that the
     test remains fast and avoids database I/O.  Attributes that are
     unconditionally set in ``__init__`` are asserted; attributes gated behind
-    feature flags (``_swarm``, ``_team_registry``, etc.) are skipped.
+    feature flags (``_team_registry``, etc.) are skipped.
     """
 
     @pytest.fixture(scope="class")

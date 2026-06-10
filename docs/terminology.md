@@ -12,7 +12,7 @@ Canonical terms used across the codebase, CLI, and docs. Alphabetical.
 
 | Term | Meaning |
 |------|---------|
-| **Action** | A unit emitted by the engine to drive the orchestration loop. One of: DISPATCH, GATE, APPROVAL, COMPLETE, FAILED, WAIT, FEEDBACK, INTERACT, SWARM_DISPATCH. See `ActionType` in `agent_baton/models/execution.py`. |
+| **Action** | A unit emitted by the engine to drive the orchestration loop. One of: DISPATCH, GATE, APPROVAL, COMPLETE, FAILED, WAIT, FEEDBACK, INTERACT. See `ActionType` in `agent_baton/models/execution.py`. |
 | **Agent** | A distributable specialist defined in `agents/<name>.md` (frontmatter + prompt body). Dispatched by the orchestrator or invoked directly via Claude Code's `Agent` tool. |
 | **Approval** | Explicit human (or designated reviewer) sign-off required for HIGH-risk plans and certain phase transitions. Driven by the APPROVAL action and `baton execute approve`. |
 | **Bead** | A persistent incident or follow-up record stored by the external `bd` tool ([gastownhall/beads](https://github.com/gastownhall/beads)) in a per-project `.beads/` workspace. Created with `baton beads create`. Used for autonomous bug filing, regression beads, audit trails. |
@@ -38,10 +38,9 @@ Canonical terms used across the codebase, CLI, and docs. Alphabetical.
 | **PMO** | The optional REST API + React UI (served at `/pmo/`) that visualizes plans, executions, traces, retrospectives, and learning data across projects. |
 | **Reference procedure** | A reusable, agent-readable doc in `references/<name>.md` that codifies a workflow contract (engine protocol, routing logic, guardrails, patterns). |
 | **Retrospective** | The post-execution analysis written by the engine (and optionally augmented by `learning-analyst`). Stored in `.claude/team-context/retros/`. |
-| **Self-heal** | The auto-fix subsystem with three tiers (`self-heal-haiku`, `self-heal-sonnet`, `self-heal-opus`) invoked when gates fail. |
+| **Gate retry** | A single automated retry triggered when `BATON_GATE_RETRY=1` and a gate fails for the first time. The engine re-dispatches the failing step once with the gate output appended to the prompt. Second failure is terminal. |
 | **Step** | A unit of work within a phase. Either a DISPATCH (agent), a GATE (check), or an INTERACT (dialogue). |
 | **Subagent** | An agent dispatched by another agent (e.g., the orchestrator dispatches `backend-engineer`). |
-| **Swarm** | The experimental parallel-dispatch subsystem. Gated behind `BATON_EXPERIMENTAL=swarm`. |
 | **Trace** | The full event log of an execution. Generated automatically; inspected via `baton trace`. |
 
 For the architectural concepts and how they relate, see [`architecture.md`](architecture.md).

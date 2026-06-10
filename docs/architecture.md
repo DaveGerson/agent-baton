@@ -114,13 +114,29 @@ The engine itself is the same Python package behind all three; the surfaces are 
 
 The following pages explain individual subsystems in depth:
 
-- [`engine-and-runtime.md`](engine-and-runtime.md) — planner, executor, dispatcher, gate enforcement, INTERACT primitive, swarm dispatch
+- [`engine-and-runtime.md`](engine-and-runtime.md) — planner, executor, dispatcher, gate enforcement, INTERACT primitive
 - [`governance-knowledge-and-events.md`](governance-knowledge-and-events.md) — risk classifier, policy engine, knowledge resolver, event bus
 - [`observe-learn-and-improve.md`](observe-learn-and-improve.md) — tracing, telemetry, scoring, evolution proposals, learning automation
 - [`storage-sync-and-pmo.md`](storage-sync-and-pmo.md) — SQLite layout, federated sync, PMO store, Smart Forge
 - [`finops-chargeback.md`](finops-chargeback.md) — token/cost attribution model
 - [`design-decisions.md`](design-decisions.md) — ADR log: every decision and what it superseded
 - [`daemon-mode-evaluation.md`](daemon-mode-evaluation.md) — historical evaluation of the daemon-mode design
+
+## Assurance Packs
+
+Assurance Packs are org-authored domain governance units stored under
+`.claude/packs/<name>/`.  A pack bundles a `PolicySet`, classification signals,
+a review rubric, gate commands, and evidence requirements into a single
+distributable directory.  Organisations author packs for each regulated domain
+they operate in (HIPAA, OWASP, SOC 2, GDPR, …) and the pack format ships with
+baton.  At startup, `load_packs()` scans `.claude/packs/`, validates each entry,
+and `register_pack_policies()` installs the pack's `PolicySet` into the in-process
+registry under the key `"pack:<name>"`.  The risk classifier is extended via
+`make_classifier_for_packs()` so that pack-specific keywords and path patterns
+elevate risk and set the guardrail preset to `"pack:<name>"` — which
+`baton policy-check` then enforces as a PreToolUse hook.  Use `baton packs init`,
+`baton packs validate`, and `baton packs list` to author and manage packs.
+Template packs for HIPAA PHI and OWASP secure coding ship under `templates/packs/`.
 
 ## Why "phases"?
 
@@ -132,7 +148,7 @@ A phase is a named, gated segment of a plan. The phase shape is load-bearing bec
 - It bounds rollback. If a phase fails, only that phase's commits need to be reverted — earlier phases remain.
 - It composes. Phases can run sequentially or in parallel (when their concerns are disjoint).
 
-Steps within a phase are smaller units: a DISPATCH (one agent), a GATE (one check), an INTERACT (one dialogue), or a SWARM_DISPATCH (parallel agents whose output is reconciled).
+Steps within a phase are smaller units: a DISPATCH (one agent), a GATE (one check), or an INTERACT (one dialogue).
 
 ## Team execution: pluggable backend
 
@@ -148,10 +164,41 @@ In both backends, a per-team mailbox at `.claude/team-context/mailbox/team-{step
 Planning is fundamentally different work from execution. The planner reasons about scope, risk, and resource allocation; the executor runs a fixed sequence. Separating them lets us:
 
 - Replan without re-executing. `baton execute amend-plan` can adjust phases mid-execution without losing state.
-- Use different models for each. Planner uses opus by default; executor steps default to sonnet for backend/frontend work and haiku for triage.
+- Use different models for each. The planner is a deterministic governance-enrichment pass (classification → preset → reviewers → gates → budget) with no LLM calls by default; `BATON_PLAN_REVIEW=haiku|sonnet|opus` enables an optional post-pipeline quality review. Executor steps default to sonnet for backend/frontend work and haiku for triage; decomposition quality is owned by Claude Code plan mode.
 - Inspect the plan before paying for execution. `baton plan ... --explain` shows the reasoning; `--save` persists it for later.
 
 The Smart Forge subsystem can dispatch the planner's reasoning to a headless Claude Code subprocess when richer plan synthesis is needed; see [`storage-sync-and-pmo.md`](storage-sync-and-pmo.md).
+
+## Spec Federation pipeline (007 Phase I)
+
+The Spec Federation subsystem (`agent_baton/core/federate/`) introduces a
+structured pipeline for converting natural-language specifications into agent
+plans without requiring the submitter to understand the planner internals.
+
+**Pipeline:** submit → enrich → review → fire
+
+1. **Submit** — a team member posts a `title` + `body` (or imports from GitHub
+   Issues / Azure DevOps via `POST /api/v1/pmo/specs/import`). The spec lands in
+   `submitted` status and background enrichment is dispatched.
+
+2. **Enrich** (`agent_baton/core/federate/enrich.py`) — `DataClassifier` (with
+   pack-aware overrides) assigns a risk level and guardrail preset. `PolicyEngine`
+   derives required reviewers from `require_agent` rules. `cost_estimator` or
+   history-calibrated `CostForecaster` produces a USD estimate range and
+   per-agent breakdown. The spec transitions to `enriched`.
+
+3. **Review** — an architect calls `POST .../approve` or `POST .../bounce`.
+   In `BATON_APPROVAL_MODE=team` mode a reviewer may not approve their own spec.
+   Bounced specs carry required feedback and return to `submitted` for revision.
+
+4. **Fire** (`POST .../fire`) — an approved spec is dispatched via `ForgeSession`
+   with the target `project_id`. The resulting `task_id` is stored on the spec
+   and status becomes `fired`.
+
+All spec drafts are persisted in `spec_drafts` table (schema migration 45,
+`agent_baton/core/federate/spec_draft_store.py`). The table lives in the central
+DB; `BATON_SPEC_DRAFT_DB` overrides the path for test isolation. The PMO UI
+exposes the full pipeline via the **Spec Queue** tab (`SpecQueuePanel.tsx`).
 
 ## Why federated SQLite?
 

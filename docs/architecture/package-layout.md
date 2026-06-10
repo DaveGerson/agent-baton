@@ -109,8 +109,7 @@ The heart of Agent Baton. Owns plan state and the action loop.
 | [`plan_reviewer.py`](../../agent_baton/core/engine/plan_reviewer.py) | `PlanReviewer` | Plan-quality static checks. |
 | [`worktree_manager.py`](../../agent_baton/core/engine/worktree_manager.py) | `WorktreeManager` | Wave 1.3 git-worktree per-step isolation. |
 | [`takeover.py`](../../agent_baton/core/engine/takeover.py) | (takeover support) | Wave 5.1 human-takeover. |
-| [`selfheal.py`](../../agent_baton/core/engine/selfheal.py) | (self-heal escalation) | Wave 5.2 model-tier escalation on gate failure. |
-| [`speculator.py`](../../agent_baton/core/engine/speculator.py) | (speculative execution) | Wave 5.3 sibling-worktree speculation. |
+| (gate-retry) | built into `executor.py` | Phase D single gate-retry on first gate failure (`BATON_GATE_RETRY`). |
 | [`foresight.py`](../../agent_baton/core/engine/foresight.py) | `Foresight` | Predictive next-step hinting. |
 | [`cost_estimator.py`](../../agent_baton/core/engine/cost_estimator.py) | (estimator) | Token cost estimation per step. |
 | [`team_board.py`](../../agent_baton/core/engine/team_board.py) | `TeamBoard` | Team-step coordination state. |
@@ -287,26 +286,6 @@ Wraps the synchronous engine in an async loop. Implements daemon mode.
 | [`experimental/async_dispatch.py`](../../agent_baton/core/distribute/experimental/async_dispatch.py) | `AsyncDispatcher`, `AsyncTask` | Experimental — not exercised in production. |
 | [`experimental/incident.py`](../../agent_baton/core/distribute/experimental/incident.py) | `IncidentManager`, `IncidentPhase`, `IncidentTemplate` | Experimental P1-P4 incident templates. |
 | [`experimental/transfer.py`](../../agent_baton/core/distribute/experimental/transfer.py) | `ProjectTransfer`, `TransferManifest` | Experimental cross-project transfer. |
-
-### `core/swarm/` — swarm dispatcher (Wave 6.2)
-
-Triggered by the `SWARM_DISPATCH` action.
-
-| Module | Class | Purpose |
-|--------|-------|---------|
-| [`dispatcher.py`](../../agent_baton/core/swarm/dispatcher.py) | `SwarmDispatcher` (line 94), `SwarmResult`, `SwarmBudgetError` | Reconciler-driven swarm execution. |
-| [`reconciler.py`](../../agent_baton/core/swarm/reconciler.py) | `Reconciler` | Decides what to dispatch. |
-| [`coalescer.py`](../../agent_baton/core/swarm/coalescer.py) | `Coalescer` | Merges overlapping work items. |
-| [`partitioner.py`](../../agent_baton/core/swarm/partitioner.py) | `Partitioner` | Splits work into parallelisable chunks. |
-
-### `core/predict/` — Wave 6.2 predictive computation
-
-| Module | Purpose |
-|--------|---------|
-| [`watcher.py`](../../agent_baton/core/predict/watcher.py) | Filesystem/SCM watcher feeding the classifier. |
-| [`classifier.py`](../../agent_baton/core/predict/classifier.py) | Predictive intent classifier. |
-| [`speculator.py`](../../agent_baton/core/predict/speculator.py) | Launches speculative computation. |
-| [`accept.py`](../../agent_baton/core/predict/accept.py) | Accept/reject heuristics for speculative work. |
 
 ### `core/gates/` — CI gate runners
 

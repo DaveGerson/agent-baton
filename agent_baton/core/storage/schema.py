@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 42
+SCHEMA_VERSION = 45
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -1253,7 +1253,6 @@ CREATE TABLE IF NOT EXISTS steps_ran_in_place (
 -- v40: SQLite Phase B step 4 — Human-Agent Loop tables (Wave 5).
 --
 -- takeover_records: I9 invariant relies on rows-with-empty-resumed_at.
--- selfheal_attempts and speculations: stable shapes per Wave 5.
 CREATE TABLE IF NOT EXISTS takeover_records (
     task_id      TEXT NOT NULL,
     takeover_id  TEXT NOT NULL,
@@ -1267,17 +1266,6 @@ CREATE TABLE IF NOT EXISTS takeover_records (
     PRIMARY KEY (task_id, takeover_id)
 );
 CREATE INDEX IF NOT EXISTS idx_takeover_active ON takeover_records(task_id) WHERE resumed_at IS NULL;
-
-CREATE TABLE IF NOT EXISTS selfheal_attempts (
-    task_id     TEXT NOT NULL,
-    attempt_id  TEXT NOT NULL,
-    step_id     TEXT NOT NULL DEFAULT '',
-    started_at  TEXT NOT NULL DEFAULT '',
-    status      TEXT NOT NULL DEFAULT '',
-    cost_usd    REAL NOT NULL DEFAULT 0.0,
-    payload_json TEXT NOT NULL DEFAULT '{}',
-    PRIMARY KEY (task_id, attempt_id)
-);
 
 CREATE TABLE IF NOT EXISTS speculations (
     task_id         TEXT NOT NULL,
@@ -1324,6 +1312,77 @@ DROP TABLE IF EXISTS bead_clusters;
 DROP TABLE IF EXISTS handoff_beads;
 DROP TABLE IF EXISTS bead_anchors;
 DROP TABLE IF EXISTS beads;
+""",
+    43: """
+-- v43: 007 Phase B — remove predict/speculation subsystem.
+--
+-- The speculative pipelining subsystem (Wave 5.3, bd-9839) and the Wave 6.2
+-- Part C predictive computation subsystem have been deleted.  The
+-- ``speculations`` table is no longer written by baton and is dropped here.
+--
+-- ROLLBACK: restore the pre-migration backup created by
+-- migration_backup.backup_db() before this migration runs.  The backup
+-- is named ``baton.db.bak-42-<timestamp>``.
+--
+-- Note: SQLite DROP TABLE IF EXISTS is idempotent — safe to re-apply.
+DROP TABLE IF EXISTS speculations;
+""",
+    44: """
+-- v44: 007 Phase D — remove self-heal escalation ladder.
+--
+-- The self-heal escalation subsystem (Wave 5.2, bd-1483) has been deleted
+-- and replaced with a single optional gate-retry (BATON_GATE_RETRY).
+-- The ``selfheal_attempts`` table is no longer written by baton and is
+-- dropped here.
+--
+-- ROLLBACK: restore the pre-migration backup created by
+-- migration_backup.backup_db() before this migration runs.  The backup
+-- is named ``baton.db.bak-43-<timestamp>``.
+--
+-- Note: SQLite DROP TABLE IF EXISTS is idempotent — safe to re-apply.
+DROP TABLE IF EXISTS selfheal_attempts;
+""",
+    45: """
+-- v45: 007 Phase I — spec_drafts table (Spec Federation MVP).
+--
+-- Stores team-submitted spec drafts through their lifecycle:
+-- submitted → enriched → approved|bounced → (bounced→submitted) | fired.
+--
+-- Columns:
+--   id             UUID primary key.
+--   title          Short human-readable title.
+--   body           Full markdown spec body.
+--   source         Origin: "manual", "github", or "ado".
+--   source_ref     External reference (issue URL, ADO work item ID, etc.).
+--   submitted_by   User ID of the submitter.
+--   submitted_at   ISO-8601 submission timestamp.
+--   status         Lifecycle state (see above).
+--   enrichment_json JSON blob of EnrichmentData; NULL before enrichment.
+--   review_json    JSON blob of ReviewData; NULL before review.
+--   task_id        Fired execution task ID; NULL until fired.
+--   updated_at     ISO-8601 last-updated timestamp.
+--
+-- Applied to BOTH project and central databases via
+-- ConnectionManager._run_migrations().  Additive only — no FK constraints.
+-- Fresh databases get the canonical shape from PROJECT_SCHEMA_DDL /
+-- CENTRAL_SCHEMA_DDL directly.
+CREATE TABLE IF NOT EXISTS spec_drafts (
+    id              TEXT PRIMARY KEY,
+    title           TEXT NOT NULL DEFAULT '',
+    body            TEXT NOT NULL DEFAULT '',
+    source          TEXT NOT NULL DEFAULT 'manual',
+    source_ref      TEXT NOT NULL DEFAULT '',
+    submitted_by    TEXT NOT NULL DEFAULT 'local-user',
+    submitted_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    status          TEXT NOT NULL DEFAULT 'submitted',
+    enrichment_json TEXT,
+    review_json     TEXT,
+    task_id         TEXT,
+    updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_spec_drafts_status       ON spec_drafts(status);
+CREATE INDEX IF NOT EXISTS idx_spec_drafts_submitted_by ON spec_drafts(submitted_by);
+CREATE INDEX IF NOT EXISTS idx_spec_drafts_submitted_at ON spec_drafts(submitted_at);
 """,
 }
 
@@ -1410,27 +1469,6 @@ CREATE TABLE IF NOT EXISTS takeover_records (
     PRIMARY KEY (task_id, takeover_id)
 );
 CREATE INDEX IF NOT EXISTS idx_takeover_active ON takeover_records(task_id) WHERE resumed_at IS NULL;
-
-CREATE TABLE IF NOT EXISTS selfheal_attempts (
-    task_id     TEXT NOT NULL,
-    attempt_id  TEXT NOT NULL,
-    step_id     TEXT NOT NULL DEFAULT '',
-    started_at  TEXT NOT NULL DEFAULT '',
-    status      TEXT NOT NULL DEFAULT '',
-    cost_usd    REAL NOT NULL DEFAULT 0.0,
-    payload_json TEXT NOT NULL DEFAULT '{}',
-    PRIMARY KEY (task_id, attempt_id)
-);
-
-CREATE TABLE IF NOT EXISTS speculations (
-    task_id         TEXT NOT NULL,
-    spec_id         TEXT NOT NULL,
-    started_at      TEXT NOT NULL DEFAULT '',
-    target_step_id  TEXT NOT NULL DEFAULT '',
-    status          TEXT NOT NULL DEFAULT '',
-    payload_json    TEXT NOT NULL DEFAULT '{}',
-    PRIMARY KEY (task_id, spec_id)
-);
 
 -- RELEASES (R3.1: named delivery targets that plans/specs can be tagged
 -- against; R3.8 adds deployment_profile_id soft-FK).
@@ -2265,6 +2303,25 @@ CREATE TABLE IF NOT EXISTS agent_context (
     PRIMARY KEY (agent_name, domain)
 );
 CREATE INDEX IF NOT EXISTS idx_agent_context_agent ON agent_context(agent_name);
+
+-- v45: 007 Phase I — spec_drafts table (Spec Federation MVP).
+CREATE TABLE IF NOT EXISTS spec_drafts (
+    id              TEXT PRIMARY KEY,
+    title           TEXT NOT NULL DEFAULT '',
+    body            TEXT NOT NULL DEFAULT '',
+    source          TEXT NOT NULL DEFAULT 'manual',
+    source_ref      TEXT NOT NULL DEFAULT '',
+    submitted_by    TEXT NOT NULL DEFAULT 'local-user',
+    submitted_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    status          TEXT NOT NULL DEFAULT 'submitted',
+    enrichment_json TEXT,
+    review_json     TEXT,
+    task_id         TEXT,
+    updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_spec_drafts_status       ON spec_drafts(status);
+CREATE INDEX IF NOT EXISTS idx_spec_drafts_submitted_by ON spec_drafts(submitted_by);
+CREATE INDEX IF NOT EXISTS idx_spec_drafts_submitted_at ON spec_drafts(submitted_at);
 
 """
 
@@ -3151,6 +3208,25 @@ CREATE TABLE IF NOT EXISTS spec_plan_links (
     PRIMARY KEY (spec_id, task_id)
 );
 CREATE INDEX IF NOT EXISTS idx_central_spec_plan_links_task ON spec_plan_links(task_id);
+
+-- v45: 007 Phase I — spec_drafts table (Spec Federation MVP).
+CREATE TABLE IF NOT EXISTS spec_drafts (
+    id              TEXT PRIMARY KEY,
+    title           TEXT NOT NULL DEFAULT '',
+    body            TEXT NOT NULL DEFAULT '',
+    source          TEXT NOT NULL DEFAULT 'manual',
+    source_ref      TEXT NOT NULL DEFAULT '',
+    submitted_by    TEXT NOT NULL DEFAULT 'local-user',
+    submitted_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    status          TEXT NOT NULL DEFAULT 'submitted',
+    enrichment_json TEXT,
+    review_json     TEXT,
+    task_id         TEXT,
+    updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_spec_drafts_status       ON spec_drafts(status);
+CREATE INDEX IF NOT EXISTS idx_spec_drafts_submitted_by ON spec_drafts(submitted_by);
+CREATE INDEX IF NOT EXISTS idx_spec_drafts_submitted_at ON spec_drafts(submitted_at);
 
 -- TENANCY (F0.2)
 CREATE TABLE IF NOT EXISTS tenancy_orgs (

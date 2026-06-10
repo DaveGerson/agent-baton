@@ -1,7 +1,12 @@
 """IntelligentPlanner — standalone pipeline-based plan construction.
 
-Runs a seven-stage pipeline.  Each stage owns its slice of the
-plan-construction work; all helpers live in utils/ submodules.
+Runs a seven-stage deterministic governance-enrichment pipeline.  Each
+stage owns its slice of the plan-construction work; all helpers live in
+utils/ submodules.  No LLM calls are made during planning by default —
+classification, risk, roster selection, gate derivation, and budget
+assignment are all deterministic rule-based passes.  An optional
+post-pipeline quality review is available via
+BATON_PLAN_REVIEW=haiku|sonnet|opus.
 
 Stage order (see ``planning.stages``):
 
@@ -30,7 +35,6 @@ from agent_baton.core.engine.planning.stages import (
     ClassificationStage,
     DecompositionStage,
     EnrichmentStage,
-    ResearchStage,
     RiskStage,
     RosterStage,
     ValidationStage,
@@ -41,10 +45,9 @@ if TYPE_CHECKING:
 
 
 def _build_default_pipeline() -> Pipeline:
-    """Construct the canonical eight-stage planning pipeline."""
+    """Construct the canonical seven-stage planning pipeline."""
     return Pipeline([
         ClassificationStage(),
-        ResearchStage(),
         RosterStage(),
         RiskStage(),
         DecompositionStage(),
@@ -187,8 +190,8 @@ class IntelligentPlanner:
         # Run the pipeline.
         draft = self._pipeline.run(draft, services)
 
-        # Post-pipeline plan review (Option 3).
-        draft = self._review_plan_with_cli(draft)
+        # Optional LLM plan-quality review (BATON_PLAN_REVIEW=haiku|sonnet|opus).
+        draft = self._review_plan_with_llm(draft)
 
         # Sync _last_* attributes from the draft so tests and explain_plan work.
         self._sync_last_state(draft)
@@ -349,17 +352,52 @@ class IntelligentPlanner:
         self._last_retro_feedback = None
         self._last_team_cost_estimates = {}
 
-    def _review_plan_with_cli(self, draft: PlanDraft) -> PlanDraft:
-        """Post-pipeline plan review via CLI (Option 3).
+    def isolation_for_step(self, step_id: str) -> str:
+        """Return the configured isolation mode for *step_id*, or ``""``."""
+        if not hasattr(self, "_isolation_overrides_map"):
+            self._isolation_overrides_map = {}
+        return self._isolation_overrides_map.get(step_id, "")
 
-        Sends the assembled plan to Opus for a holistic quality check.
-        Applies structured corrections.  No-ops gracefully if CLI is
-        unavailable or the review call fails.
+    def _sync_last_state(self, draft: PlanDraft) -> None:
+        """Copy pipeline outputs from draft to _last_* introspection attrs."""
+        self._last_task_classification = draft.task_classification
+        self._last_classification = draft.classification
+        self._last_foresight_insights = list(draft.foresight_insights)
+        self._last_review_result = draft.review_result
+        self._last_score_warnings = list(draft.score_warnings)
+        self._last_policy_violations = list(draft.policy_violations)
+        self._last_routing_notes = list(draft.routing_notes)
+        self._last_pattern_used = draft.pattern
+        self._last_retro_feedback = draft.retro_feedback
+        self._last_team_cost_estimates = dict(draft.team_cost_estimates)
+
+    def _review_plan_with_llm(self, draft: PlanDraft) -> PlanDraft:
+        """Post-pipeline LLM plan-quality review (opt-in via BATON_PLAN_REVIEW).
+
+        Reads ``BATON_PLAN_REVIEW`` from the environment.  Recognised values:
+        ``haiku``, ``sonnet``, ``opus``.  Empty string, ``"0"``, or ``"off"``
+        skip the review entirely without constructing HeadlessClaude.  Any
+        other value logs a warning and returns the draft unchanged.
         """
         import json as _json
         import logging as _logging
+        import os as _os
 
         _log = _logging.getLogger(__name__)
+
+        raw = _os.environ.get("BATON_PLAN_REVIEW", "")
+        model_alias = raw.strip().lower()
+
+        if model_alias in ("", "0", "off"):
+            return draft
+
+        if model_alias not in ("haiku", "sonnet", "opus"):
+            _log.warning(
+                "BATON_PLAN_REVIEW=%r is not a recognized value "
+                "(haiku|sonnet|opus) — plan review skipped",
+                model_alias,
+            )
+            return draft
 
         try:
             from agent_baton.core.runtime.headless import (
@@ -369,7 +407,7 @@ class IntelligentPlanner:
         except Exception:
             return draft
 
-        hc = HeadlessClaude(HeadlessConfig(model="opus", timeout_seconds=120.0))
+        hc = HeadlessClaude(HeadlessConfig(model=model_alias, timeout_seconds=120.0))
         if not hc.is_available:
             return draft
 
@@ -454,11 +492,11 @@ class IntelligentPlanner:
         try:
             result = hc.run_sync(
                 prompt,
-                model="opus",
+                model=model_alias,
                 system_prompt="You are a plan quality reviewer. Return JSON only.",
             )
         except Exception as exc:
-            _log.debug("Plan review CLI call failed: %s", exc)
+            _log.debug("Plan review LLM call failed: %s", exc)
             return draft
 
         if not result.success:
@@ -484,15 +522,13 @@ class IntelligentPlanner:
                 return draft
 
         if data.get("verdict") == "PASS":
-            draft.routing_notes.append("[plan-review] CLI review: PASS")
+            draft.routing_notes.append("[plan-review] LLM review: PASS")
             return draft
 
         from agent_baton.models.enums import RiskLevel
-        from agent_baton.core.engine.planning.rules.risk_signals import RISK_ORDINAL
         from agent_baton.core.engine.planning.utils.risk_and_policy import select_git_strategy
 
-        # Apply risk override (can escalate OR de-escalate — Opus has
-        # the judgment to know when "deployment docs" isn't really HIGH).
+        # Apply risk override (can escalate OR de-escalate).
         risk_override = data.get("risk_override")
         if risk_override and risk_override in ("LOW", "MEDIUM", "HIGH"):
             override_enum = RiskLevel(risk_override)
@@ -552,25 +588,6 @@ class IntelligentPlanner:
             draft.routing_notes.append(f"[plan-review] {notes}")
 
         return draft
-
-    def isolation_for_step(self, step_id: str) -> str:
-        """Return the configured isolation mode for *step_id*, or ``""``."""
-        if not hasattr(self, "_isolation_overrides_map"):
-            self._isolation_overrides_map = {}
-        return self._isolation_overrides_map.get(step_id, "")
-
-    def _sync_last_state(self, draft: PlanDraft) -> None:
-        """Copy pipeline outputs from draft to _last_* introspection attrs."""
-        self._last_task_classification = draft.task_classification
-        self._last_classification = draft.classification
-        self._last_foresight_insights = list(draft.foresight_insights)
-        self._last_review_result = draft.review_result
-        self._last_score_warnings = list(draft.score_warnings)
-        self._last_policy_violations = list(draft.policy_violations)
-        self._last_routing_notes = list(draft.routing_notes)
-        self._last_pattern_used = draft.pattern
-        self._last_retro_feedback = draft.retro_feedback
-        self._last_team_cost_estimates = dict(draft.team_cost_estimates)
 
     def _build_services(self) -> PlannerServices:
         """Build the services container from this planner's collaborators."""

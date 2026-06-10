@@ -27,7 +27,6 @@ the wire.
 | `WAIT` | `"wait"` | Parallel steps still in flight; caller should poll `next_action()` again. |
 | `COMPLETE` | `"complete"` | Execution finished successfully. Carries `summary`. |
 | `FAILED` | `"failed"` | Execution cannot continue. Carries `summary`. |
-| `SWARM_DISPATCH` | `"swarm.dispatch"` | Wave 6.2 (bd-2b9f): trigger a `SwarmDispatcher` reconciliation run. |
 
 The enum is consumed by `_print_action()` in
 [`cli/commands/execution/execute.py:568`](../../agent_baton/cli/commands/execution/execute.py)
@@ -230,7 +229,7 @@ is the agent's responsibility, enforced by the worktree-isolation
 contract in [`core/engine/worktree_manager.py`](../../agent_baton/core/engine/worktree_manager.py))
 or recorded as terminal (engine moves on).
 
-For human-in-the-loop recovery (`takeover`, `self-heal`, `speculate`),
+For human-in-the-loop recovery (`takeover`) and automated gate-retry,
 see [../engine-and-runtime.md §5](../engine-and-runtime.md).
 
 ---

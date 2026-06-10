@@ -1,0 +1,63 @@
+{
+  "_comment": "ILLUSTRATIVE TEMPLATE ONLY — not maintained compliance content.",
+  "name": "pack:secure-coding-owasp",
+  "description": "OWASP Top-10 secure coding policy — HIGH risk. Security-reviewer + code-reviewer required; secret-scan gate enforced.",
+  "rules": [
+    {
+      "name": "require_security_reviewer",
+      "description": "Security reviewer post-execution review is required for OWASP-scoped tasks.",
+      "scope": "all",
+      "rule_type": "require_agent",
+      "pattern": "security-reviewer",
+      "severity": "block"
+    },
+    {
+      "name": "require_code_reviewer",
+      "description": "Code reviewer must review implementation for OWASP compliance.",
+      "scope": "all",
+      "rule_type": "require_agent",
+      "pattern": "code-reviewer",
+      "severity": "block"
+    },
+    {
+      "name": "require_secret_scan_gate",
+      "description": "Secret scan gate must pass before any authentication or credential code is committed.",
+      "scope": "all",
+      "rule_type": "require_gate",
+      "pattern": "secret_scan",
+      "severity": "block"
+    },
+    {
+      "name": "block_env_files",
+      "description": "Block writes to .env files — credentials must go through a secret manager.",
+      "scope": "all",
+      "rule_type": "path_block",
+      "pattern": "**/.env",
+      "severity": "block"
+    },
+    {
+      "name": "block_secrets_dir",
+      "description": "Block writes to secrets/ directories.",
+      "scope": "all",
+      "rule_type": "path_block",
+      "pattern": "**/secrets/**",
+      "severity": "block"
+    },
+    {
+      "name": "block_credential_files",
+      "description": "Block writes to known credential file patterns.",
+      "scope": "all",
+      "rule_type": "path_block",
+      "pattern": "**/credentials*",
+      "severity": "block"
+    },
+    {
+      "name": "require_no_hardcoded_credentials",
+      "description": "No hardcoded credentials — enforce environment variables or a secret manager.",
+      "scope": "all",
+      "rule_type": "require_gate",
+      "pattern": "no_hardcoded_credentials",
+      "severity": "block"
+    }
+  ]
+}

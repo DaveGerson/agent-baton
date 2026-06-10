@@ -289,8 +289,10 @@ class TestCostMath:
             8_000 * MODEL_PRICING["opus"]
             + 5_000 * MODEL_PRICING["sonnet"]
         ) / 1_000_000.0
-        # 0.24 + 0.03 = 0.27
-        assert expected_cost == pytest.approx(0.27, abs=1e-6)
+        # opus blended 10/M: 8000 * 10 / 1M = 0.08
+        # sonnet blended 6/M: 5000 * 6 / 1M = 0.03
+        # total = 0.11
+        assert expected_cost == pytest.approx(0.11, abs=1e-6)
         assert f"~${expected_cost:.2f}" in out
 
     def test_breakdown_includes_each_model_used(
@@ -331,7 +333,7 @@ class TestTeamAugmentedForecast:
                         step_id="1.1",
                         agent_name="architect",                # 8_000 baseline
                         task_description="lead",
-                        model="opus",                          # 30/M
+                        model="opus",                          # 10/M blended
                         team=[
                             TeamMember(
                                 member_id="1.1.a",
@@ -343,7 +345,7 @@ class TestTeamAugmentedForecast:
                                 member_id="1.1.b",
                                 agent_name="test-engineer",    # 5_000 baseline
                                 role="reviewer",
-                                model="haiku",                 # 1.25/M
+                                model="haiku",                 # 2.0/M blended
                             ),
                         ],
                     )],
@@ -359,8 +361,8 @@ class TestTeamAugmentedForecast:
         out = _run_handler(_make_args(dry_run=True), plan, capsys)
         # Lead 8_000 + members 5_000 + 5_000 = 18_000 tokens.
         assert "~18,000 tokens" in out
-        # Cost: opus 0.24 + sonnet 0.03 + haiku 0.00625 = 0.27625 -> "~$0.28"
-        assert "~$0.28" in out
+        # Cost: opus 0.08 + sonnet 0.03 + haiku 0.01 = 0.12 -> "~$0.12"
+        assert "~$0.12" in out
         # Breakdown shows each model family's tokens.
         assert "opus 8000" in out
         assert "sonnet 5000" in out
@@ -378,17 +380,17 @@ class TestTeamAugmentedForecast:
         import json as _json
         payload = _json.loads(out)
         assert payload["cost_forecast"]["total_tokens"] == 18_000
-        # 0.24 + 0.03 + 0.00625 = 0.27625
+        # opus 0.08 + sonnet 0.03 + haiku 0.01 = 0.12
         assert payload["cost_forecast"]["total_cost_usd"] == pytest.approx(
-            0.27625, abs=1e-4
+            0.12, abs=1e-4
         )
         breakdown = payload["cost_forecast"]["model_breakdown_tokens"]
         assert breakdown == {"opus": 8_000, "sonnet": 5_000, "haiku": 5_000}
         # bd-47b4: ±50% band exposed alongside the central estimate.
         band = payload["cost_forecast"]["estimate_band"]
         assert band["confidence"] == "±50%"
-        assert band["low_usd"] == pytest.approx(0.27625 * 0.5, abs=1e-4)
-        assert band["high_usd"] == pytest.approx(0.27625 * 1.5, abs=1e-4)
+        assert band["low_usd"] == pytest.approx(0.12 * 0.5, abs=1e-4)
+        assert band["high_usd"] == pytest.approx(0.12 * 1.5, abs=1e-4)
 
 
 # ---------------------------------------------------------------------------
@@ -482,6 +484,6 @@ class TestPerStepModelHonoured:
 
         # Output reflects opus pricing for the single 5_000-token step.
         out = capsys.readouterr().out
-        # 5_000 * 30 / 1_000_000 = 0.15
-        assert "~$0.15" in out
+        # 5_000 * 10 / 1_000_000 = 0.05 (opus blended rate 10/M)
+        assert "~$0.05" in out
         assert "opus" in out

@@ -199,12 +199,12 @@
   "archetype": "phased",
   "max_retry_phases": 2,
   "compliance_fail_closed": null,
+  "completion_condition": null,
+  "max_amend_cycles": 3,
   "resource_limits": {
     "max_concurrent_executions": 2,
     "max_concurrent_agents": 4,
     "max_tokens_per_minute": 0,
     "max_concurrent_per_project": 1
-  },
-  "completion_condition": null,
-  "max_amend_cycles": 3
+  }
 }

@@ -4,11 +4,8 @@ Uses historical ``agent_usage`` rows from a SQLite ``BatonStore`` to derive
 per-(agent, model) median token counts.  Falls back to hardcoded defaults
 when no history exists for a given pair.
 
-Pricing constants reflect Anthropic's public API pricing (2026):
-
-    haiku:  $1 / 1M input,  $5 / 1M output
-    sonnet: $3 / 1M input,  $15 / 1M output
-    opus:   $15 / 1M input, $75 / 1M output
+Pricing derives from :mod:`agent_baton.core.config.pricing` (single source
+of truth).  Override per-project via ``.claude/pricing.json``.
 
 Confidence bands:
     low  = 0.75 * mid
@@ -22,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from agent_baton.models.cost_forecast import CostForecast
+from agent_baton.core.config.pricing import get_pricing
 
 if TYPE_CHECKING:
     from agent_baton.models.execution import MachinePlan
@@ -29,20 +27,27 @@ if TYPE_CHECKING:
 # ── Defaults when no historical data is available ─────────────────────────────
 _DEFAULT_TOKENS: dict[str, tuple[int, int]] = {
     # model → (input_tokens, output_tokens)
-    "haiku": (2_000, 500),
-    "sonnet": (8_000, 2_000),
-    "opus": (20_000, 5_000),
+    "haiku":  (2_000,  500),
+    "sonnet": (8_000,  2_000),
+    "opus":   (20_000, 5_000),
+    "fable":  (24_000, 6_000),
 }
 _FALLBACK_TOKENS: tuple[int, int] = _DEFAULT_TOKENS["sonnet"]
 
+
+def _build_price_table() -> dict[str, tuple[float, float]]:
+    """Build (input_price, output_price) tuples from the canonical pricing config."""
+    pricing = get_pricing()
+    return {
+        family: (mp.input_per_mtok, mp.output_per_mtok)
+        for family, mp in pricing.items()
+    }
+
+
 # ── Pricing: USD per 1M tokens ────────────────────────────────────────────────
-_PRICE_PER_1M: dict[str, tuple[float, float]] = {
-    # model → (input_price, output_price)
-    "haiku":  (1.0,  5.0),
-    "sonnet": (3.0,  15.0),
-    "opus":   (15.0, 75.0),
-}
-_FALLBACK_PRICE: tuple[float, float] = _PRICE_PER_1M["sonnet"]
+# Derived from core.config.pricing so there is a single source of truth.
+_PRICE_PER_1M: dict[str, tuple[float, float]] = _build_price_table()
+_FALLBACK_PRICE: tuple[float, float] = _PRICE_PER_1M.get("sonnet", (3.0, 15.0))
 
 
 def _model_key(model: str) -> str:

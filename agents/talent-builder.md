@@ -348,6 +348,73 @@ When creating agents for compliance/regulatory domains:
    safety boundaries
 4. **Update the SME agent** to reference this regulatory knowledge
 
+### Pattern: Turn a Regulation or Policy Doc into an Assurance Pack
+
+When the user provides a regulation, policy document, or compliance framework
+and asks you to turn it into a governance pack that baton can enforce:
+
+1. **Read the document** thoroughly and identify the enforcement-relevant content:
+   - Required agents or roles (e.g. "legal review before deployment")
+   - Blocked operations or paths (e.g. "no direct writes to production tables")
+   - Required gates or checks (e.g. "vulnerability scan before release")
+   - Keywords and file paths that signal this domain is in play
+   - Audit/evidence requirements
+
+2. **Name the pack** using kebab-case matching the regulation or standard
+   (e.g. `phi-hipaa`, `secure-coding-owasp`, `gdpr-data-subject`, `sox-itgc`).
+
+3. **Scaffold** the pack structure:
+   ```
+   baton packs init <name>
+   ```
+   This creates `.claude/packs/<name>/` with all required files.
+
+4. **Edit `pack.json`** — set `name`, `version`, `description`, `domain`,
+   `risk_level` (usually `HIGH` for regulated domains), and `author`.
+
+5. **Edit `policy.json`** — translate enforcement requirements into
+   `PolicyRule` objects with the correct `rule_type`:
+   - `require_agent` for mandatory roles (auditor, SME, security-reviewer)
+   - `require_gate` for mandatory checks (phi_scan, audit_trail, secret_scan)
+   - `path_block` for forbidden write paths
+   - `tool_restrict` for forbidden tools in this domain
+
+6. **Edit `signals.json`** — add keyword signals that identify tasks in this
+   domain.  Use only valid categories: `regulated`, `pii`, `security`,
+   `infrastructure`, `database`.  Add `path_patterns` for file paths that
+   should trigger the pack preset.  Set `preset_name` to `"pack:<name>"`.
+
+7. **Edit `rubric.md`** — write a domain-specific review checklist with at
+   least one `## ` heading section and one `- [ ]` checkbox per criterion.
+   Cite the specific regulation sections that each criterion satisfies.
+
+8. **Edit `gates.json`** — define concrete gate commands that enforce the
+   key requirements.  Each gate needs `id`, `description`, and `command`.
+   Use real executable commands where possible; comment ILLUSTRATIVE where
+   not yet wired up.
+
+9. **Edit `evidence.json`** — list the artifacts that must be collected
+   before the work can be considered compliant.  Each artifact needs `id`
+   and `description`.
+
+10. **Validate and iterate**:
+    ```
+    baton packs validate <name>
+    ```
+    Fix any errors.  Then activate the pack by classifying a sample task:
+    ```
+    baton classify "task description matching your domain" --activate
+    ```
+    Confirm the output shows `Preset: pack:<name>`.
+
+**Quality checks before finishing:**
+- [ ] `baton packs validate <name>` exits 0 with no errors.
+- [ ] All `[YOUR_PACK_NAME]` placeholders replaced with real content.
+- [ ] Policy rules cover the regulation's actual enforcement requirements.
+- [ ] Rubric cites specific regulation sections (e.g. HIPAA 45 CFR § 164.312).
+- [ ] Gate commands are executable (or clearly marked ILLUSTRATIVE).
+- [ ] Knowledge/overview.md contains a quick-reference table for the domain.
+
 ### Pattern: Documentation Ingestion
 
 When the user provides a document and says "turn this into agent knowledge":

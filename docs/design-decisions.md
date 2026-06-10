@@ -1047,13 +1047,19 @@ a typo" task should not generate a 5-phase plan with 4 agents.
   matching inside "prefix" or "test" inside "latest". Multi-word keywords
   use substring matching since they are specific enough.
 
-- **Haiku model choice**: Claude Haiku was chosen for classification because
-  it is fast (~1-2s), cheap, and sufficient for structured classification
-  tasks. Using Sonnet or Opus for classification would add unnecessary
-  latency and cost. The `--model` flag on `HaikuClassifier` allows
-  overriding if needed.
+- **Haiku model choice**: Claude Haiku 4.5 was chosen for classification because
+  it is fast (~1-2s), cheap (currently $1/$5 per 1M input/output tokens), and
+  sufficient for structured classification tasks. Using Sonnet or Opus for
+  classification would add unnecessary latency and cost. The `--model` flag on
+  `HaikuClassifier` allows overriding if needed.
 
-**Status**: Implemented (2026-03-26)
+- **Pricing configuration**: As of Phase E (007), model pricing lives in a
+  single source of truth at `agent_baton/core/config/pricing.py`. All three
+  pricing consumers (``cost_estimator``, ``cost_forecaster``, ``budget``) derive
+  their values from there. Per-project overrides are supported via
+  ``.claude/pricing.json`` (see module docstring for format).
+
+**Status**: Implemented (2026-03-26); pricing config centralised 2026-06-10
 
 ---
 
@@ -1262,10 +1268,9 @@ patterns from Agent Teams without inheriting those constraints.
 
 **Deferred**: A first-class `ActionType.GOAL` (G2 in the design doc)
 is deferred until regulated-domain auditor work needs discrete,
-observable goal-check events. The cleanup of `SWARM_DISPATCH` flagged
-in the initial design was withdrawn after closer inspection — the
-swarm subsystem is wired through `core/swarm/` and gated by
-`BATON_SWARM_ENABLED`.
+observable goal-check events. `SWARM_DISPATCH` was removed from
+`ActionType` in 007 Phase C (pare-back) — the swarm subsystem was
+never wired end-to-end and has been fully deleted.
 
 **Status**: Implemented (2026-05-12). Design doc:
 `docs/internal/agent-teams-and-goal-design.md`.

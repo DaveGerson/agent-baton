@@ -1,0 +1,24 @@
+{
+  "_comment": "ILLUSTRATIVE TEMPLATE ONLY — not maintained compliance content.",
+  "pack": "phi-hipaa",
+  "keywords": {
+    "regulated": [
+      "hipaa", "phi", "protected health information", "covered entity",
+      "business associate", "ehr", "electronic health record",
+      "medical record", "health data", "hl7", "fhir"
+    ],
+    "pii": [
+      "patient", "diagnosis", "treatment", "prescription", "insurance",
+      "medical history", "date of birth", "health plan", "beneficiary"
+    ]
+  },
+  "path_patterns": [
+    "phi/",
+    "patient-data/",
+    "health-records/",
+    "ehr/",
+    "hipaa/"
+  ],
+  "preset_name": "pack:phi-hipaa",
+  "risk_level": "HIGH"
+}

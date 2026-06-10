@@ -1426,38 +1426,6 @@ baton anomalies [--watch]
 
 ---
 
-### `baton swarm`
-
-Experimental Wave 6.2 Part A swarm dispatcher. Partition a codebase into
-AST-independent chunks and (eventually) dispatch one Haiku agent per
-chunk to apply a refactor directive.
-
-```
-baton swarm refactor DIRECTIVE_JSON [options]
-```
-
-**Gates** (both required, otherwise the command exits with code 2):
-
-- `BATON_EXPERIMENTAL=swarm`
-- `BATON_SWARM_ENABLED=1`
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `DIRECTIVE_JSON` | (required) | JSON directive: `kind` + directive fields (e.g. `replace-import`, `rename-symbol`) |
-| `--max-agents N` | 100 | Max parallel chunk agents (cap: 100) |
-| `--language` | `python` | AST language (v1: python only) |
-| `--model` | `claude-haiku` | LLM tier for chunk agents |
-| `--codebase-root PATH` | cwd | Root of the project to refactor |
-| `--dry-run` | false | Print preview and exit, no dispatch |
-| `-y / --yes` | false | Skip interactive confirmation prompt |
-| `--require-approval-bead [BEAD_ID]` | -- | Require a pre-filed approval bead. Defaults ON when `BATON_APPROVAL_MODE=team`. |
-
-**Exit codes:** `2` = experimental flag not set; `1` = swarm disabled or
-gate failure. See [docs/cli-reference.md#swarm-commands](../docs/cli-reference.md#swarm-commands)
-for examples.
-
----
-
 ### `baton daemon`
 
 Background execution management -- run the engine as a persistent daemon
@@ -2314,6 +2282,40 @@ call to `baton execute next`.
 
 ---
 
+## Harness Mode (hooks-driven enforcement without the execute loop)
+
+For sessions where `baton execute` is not running — direct Claude Code
+sessions, ad-hoc agent use, or projects that haven't planned a task yet —
+the Phase F hook commands provide policy enforcement and compliance recording
+without the full engine loop.
+
+**Setup (once per task or session):**
+
+```bash
+baton classify "your task description" --activate
+# Writes .claude/active-policy.json with the resolved preset key.
+# PreToolUse hooks will enforce that preset for this session.
+```
+
+**What the hooks do automatically** (via `templates/settings.json`):
+
+- **PreToolUse** → `baton policy-check`: evaluates every `Bash`, `Write`,
+  `Edit`, or `MultiEdit` call against the active policy. Denies the tool call
+  (via Claude Code's `permissionDecision: "deny"` protocol) when a
+  `path_block` or `tool_restrict` rule with `severity="block"` matches.
+- **PostToolUse** → `baton comply-record`: appends a hash-chained entry to
+  `.claude/team-context/compliance-audit.jsonl` for every matching tool call.
+- **Stop** → `baton comply-record --event-type session_stop`: records the
+  session end in the audit log.
+
+**For managed / regulated executions** use the full engine loop
+(`baton execute`): the planner selects the right preset, the executor
+enforces policy violations and writes the compliance chain, and the gate
+system runs formal QA checks. Harness mode is a lightweight complement for
+the spaces between managed executions.
+
+---
+
 ## Environment Variables
 
 The full list of Baton environment variables. Mirrored in
@@ -2321,17 +2323,17 @@ The full list of Baton environment variables. Mirrored in
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
+| `BATON_POLICY_FAIL_CLOSED` | `1` → `baton policy-check` exits 2 on errors (bad stdin / unreadable policy), blocking the tool call. Default: fail-open (exit 0). | `0` |
+| `BATON_COMPLIANCE_FAIL_CLOSED` | `1` → `baton comply-record` exits 1 on write errors; also governs the execute-loop compliance writer. Default: fail-open (exit 0). | `0` |
 | `BATON_TASK_ID` | Bind a shell session to a specific execution. Set after `baton execute start` to scope all subsequent commands. | auto-detected |
 | `BATON_DB_PATH` | Override the project `baton.db` location. CLI walks upward from cwd if unset. | discovered |
-| `BATON_APPROVAL_MODE` | PMO approval policy: `local` (self-approve) or `team` (different reviewer required). In `team` mode, `baton swarm` defaults `--require-approval-bead` ON. | `local` |
-| `BATON_RUN_TOKEN_CEILING` | Per-run cumulative spend cap (USD float). Read fresh on every check; restored on `baton execute resume`. Selfheal/speculator/immune respect it; main `Executor.dispatch()` only warns at HIGH/CRITICAL run start (bd-3f80). | unset |
-| `BATON_EXPERIMENTAL` | CSV opt-in for experimental subsystems. Required for `baton swarm` (`BATON_EXPERIMENTAL=swarm`). Exits with code 2 if unset. | unset |
-| `BATON_SWARM_ENABLED` | Required in addition to `BATON_EXPERIMENTAL=swarm` to dispatch a swarm refactor. | unset |
+| `BATON_APPROVAL_MODE` | PMO approval policy: `local` (self-approve) or `team` (different reviewer required). | `local` |
+| `BATON_RUN_TOKEN_CEILING` | Per-run cumulative spend cap (USD float). Read fresh on every check; restored on `baton execute resume`. Selfheal/immune respect it; main `Executor.dispatch()` only warns at HIGH/CRITICAL run start (bd-3f80). | unset |
 | `BATON_SOULS_ENABLED` | Wave 6.1 Part B persistent agent souls (signing + revocation). | `0` |
-| `BATON_PREDICT_ENABLED` | Wave 6.2 Part C predictive computation watcher / classifier / dispatcher. | `0` |
 | `BATON_IMMUNE_ENABLED` | Immune-system monitoring loop. | `0` |
 | `BATON_EXEC_BEADS_ENABLED` | Wave 6.1 Part C executable beads. Sandbox is process-level only — see `references/baton-patterns.md` trust-boundary section before extending to external-origin input. | `0` |
 | `BATON_SKIP_GIT_NOTES_SETUP` | Silence install-time git-notes refspec setup and the runtime warning emitted by `NotesAdapter.write()` when the wildcard refspec is missing. | unset |
-| `BATON_SELFHEAL_ENABLED` | Enable speculator/selfheal escalation on gate failure. Falsy values (`0`, `false`, `no`) are honoured and emit a `selfheal_suppressed` row to `compliance-audit.jsonl`. | `0` |
+| `BATON_GATE_RETRY` | Enable single gate-retry: on first gate failure, re-dispatch the failing step once with gate output appended to the prompt. Second failure is terminal. Writes `gate_retry_dispatched` or `gate_failed_terminal` to `compliance-audit.jsonl`. | `0` |
 | `BATON_API_TOKEN` | Bearer token for the FastAPI server (`baton serve`). CLI `--token` flag takes precedence. | unset |
 | `ANTHROPIC_API_KEY` | Required for AI risk classification and the Haiku planner classifier. | unset |
+| `BATON_PLAN_REVIEW` | Optional LLM plan-quality review after the deterministic pipeline: `off` (default) \| `haiku` \| `sonnet` \| `opus`. The deterministic pipeline has known limits in complexity assessment; default compensating controls are the structural hard gate and pre-flight human review in the spec queue — enable this for unattended/managed-mode planning. `sonnet` recommended. | off |

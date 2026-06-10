@@ -86,7 +86,10 @@ class TestNormaliseModel:
             ("opus", "opus"),
             ("sonnet", "sonnet"),
             ("haiku", "haiku"),
+            ("fable", "fable"),
             ("claude-opus-4-7", "opus"),
+            ("claude-opus-4-8", "opus"),
+            ("claude-fable-5", "fable"),
             ("claude-3-5-sonnet", "sonnet"),
             ("claude-haiku-3.5", "haiku"),
             ("", "sonnet"),
@@ -197,10 +200,10 @@ class TestForecastPlan:
         # Per-model breakdown
         assert forecast.model_breakdown == {"opus": 16_000, "sonnet": 10_000}
 
-        # Cost = 16_000 * 30 / 1M + 10_000 * 6 / 1M = 0.48 + 0.06 = 0.54
+        # Cost = 16_000 * 10 / 1M + 10_000 * 6 / 1M = 0.16 + 0.06 = 0.22
         expected_cost = (16_000 * MODEL_PRICING["opus"] + 10_000 * MODEL_PRICING["sonnet"]) / 1_000_000.0
         assert forecast.total_cost_usd == pytest.approx(expected_cost, abs=1e-6)
-        assert forecast.total_cost_usd == pytest.approx(0.54, abs=1e-6)
+        assert forecast.total_cost_usd == pytest.approx(0.22, abs=1e-6)
 
     def test_per_step_sum_matches_total_with_knowledge(self) -> None:
         plan = _plan([
@@ -214,11 +217,11 @@ class TestForecastPlan:
         assert sum(t for _, t in forecast.per_step_tokens) == forecast.total_tokens
 
     def test_haiku_pricing(self) -> None:
-        # auditor baseline 6_000, haiku rate 1.25/M = $0.0075
+        # auditor baseline 6_000, haiku blended rate 2.0/M = $0.012
         plan = _plan([[_step("1.1", "auditor", model="haiku")]])
         forecast = forecast_plan(plan)
         assert forecast.total_tokens == 6_000
-        assert forecast.total_cost_usd == pytest.approx(0.0075, abs=1e-9)
+        assert forecast.total_cost_usd == pytest.approx(0.012, abs=1e-9)
         assert forecast.model_breakdown == {"haiku": 6_000}
 
 
@@ -295,6 +298,9 @@ class TestNormaliseModelComposite:
             # Additional vendor-style composites.
             ("claude-opus-4-7-via-router", "opus"),
             ("claude-sonnet-4-6-thinking", "sonnet"),
+            # Fable family
+            ("claude-fable-5", "fable"),
+            ("fable-via-sonnet-cache", "fable"),
         ],
     )
     def test_composite_id_uses_leading_family(
@@ -343,7 +349,7 @@ class TestForecastPlanTeamAugmented:
                     member_id="1.1.b",
                     agent_name="test-engineer",           # baseline 5_000
                     role="implementer",
-                    model="haiku",                        # 1.25 / 1M
+                    model="haiku",                        # 2.0 / 1M (blended)
                 ),
             ],
         )
@@ -358,17 +364,17 @@ class TestForecastPlanTeamAugmented:
     def test_team_member_cost_aggregated(self) -> None:
         plan = self._team_plan()
         forecast = forecast_plan(plan)
-        # opus: 8000 * 30 / 1M = 0.24
+        # opus: 8000 * 10 / 1M = 0.08
         # sonnet: 5000 * 6 / 1M = 0.03
-        # haiku: 5000 * 1.25 / 1M = 0.00625
-        # total: 0.27625
+        # haiku: 5000 * 2 / 1M = 0.01
+        # total: 0.12
         expected = (
             8_000 * MODEL_PRICING["opus"]
             + 5_000 * MODEL_PRICING["sonnet"]
             + 5_000 * MODEL_PRICING["haiku"]
         ) / 1_000_000.0
         assert forecast.total_cost_usd == pytest.approx(expected, abs=1e-6)
-        assert forecast.total_cost_usd == pytest.approx(0.27625, abs=1e-6)
+        assert forecast.total_cost_usd == pytest.approx(0.12, abs=1e-6)
 
     def test_team_per_step_records_each_member(self) -> None:
         plan = self._team_plan()

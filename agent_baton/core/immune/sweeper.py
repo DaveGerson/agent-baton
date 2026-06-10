@@ -67,7 +67,7 @@ class SweepFinding:
         affected_lines: List of line numbers flagged in the target file.
         auto_fix_directive: Populated when *confidence* ≥ 0.85 and the kind
             is in the auto-fix allowlist; contains a directive string for the
-            self-heal micro-agent.
+            immune-autofix micro-agent.
         kind: Sweep kind (mirrors ``target.kind`` but may be more specific,
             e.g. ``"deprecated-api-trivial"``).
     """

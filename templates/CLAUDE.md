@@ -227,6 +227,26 @@ cymbal refs <symbol>            # find references
 
 Falls back to lsp or grep if cymbal is not available.
 
+## Runtime Policy Hooks
+
+The `settings.json` hooks enforce guardrail policy on every tool call via
+`baton policy-check` (PreToolUse) and record compliance events via
+`baton comply-record` (PostToolUse/Stop). To make hook enforcement match
+the actual work being done, run this once after planning:
+
+```bash
+baton classify "your task description" --activate
+```
+
+This writes `.claude/active-policy.json` with the resolved preset key
+(`standard_dev`, `regulated`, etc.). The PreToolUse hook reads this file
+on every call — no restart required. For managed executions driven by
+`baton execute`, the engine sets the active policy automatically from the
+plan's risk level.
+
+See `.claude/references/hooks-enforcement.md` for the full hook inventory
+and validation steps.
+
 ## Agent Invocation
 
 For complex tasks involving 3+ files across different domains, use the

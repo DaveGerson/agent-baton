@@ -1,0 +1,29 @@
+{
+  "_comment": "ILLUSTRATIVE TEMPLATE ONLY — not maintained compliance content.",
+  "pack": "secure-coding-owasp",
+  "keywords": {
+    "security": [
+      "injection", "sql injection", "xss", "cross-site scripting",
+      "deserialization", "broken access control", "cryptographic failure",
+      "insecure design", "security misconfiguration", "vulnerable component",
+      "authentication failure", "software integrity failure",
+      "logging failure", "server-side request forgery", "ssrf",
+      "owasp", "cve", "vulnerability", "exploit", "penetration test"
+    ],
+    "regulated": [
+      "security audit", "pen test", "vulnerability scan", "cve remediation"
+    ]
+  },
+  "path_patterns": [
+    ".env",
+    "secrets/",
+    "credentials",
+    "auth/",
+    ".aws/",
+    ".ssh/",
+    "private_key",
+    "api_key"
+  ],
+  "preset_name": "pack:secure-coding-owasp",
+  "risk_level": "HIGH"
+}

@@ -5,7 +5,7 @@ Validates the full planning pipeline across 7 functional dimensions:
 1. Complexity classification (light / medium / heavy)
 2. Task dependency detection
 3. Stage-gate / quality / compliance checks
-4. Team dispatch and swarm identification
+4. Team dispatch identification
 5. Agent model selection (haiku / sonnet / opus)
 6. Agent roster validation and routing
 7. Bead-documented planning behaviors
@@ -325,11 +325,11 @@ class TestGateScoping:
 
 
 # ===================================================================
-# 4. TEAM DISPATCH AND SWARM IDENTIFICATION
+# 4. TEAM DISPATCH IDENTIFICATION
 # ===================================================================
 
-class TestTeamDispatchAndSwarm:
-    """Verify team consolidation and swarm detection logic."""
+class TestTeamDispatch:
+    """Verify team consolidation logic."""
 
     def test_implement_phase_with_two_agents_becomes_team(self):
         from agent_baton.core.engine.planning.utils.phase_builder import is_team_phase
@@ -389,11 +389,6 @@ class TestTeamDispatchAndSwarm:
         assert team_step.team[0].role == "lead"
         assert team_step.team[1].role == "implementer"
 
-    def test_swarm_dispatch_action_type_exists(self):
-        """SWARM_DISPATCH is a valid ActionType (requires BATON_EXPERIMENTAL=swarm)."""
-        from agent_baton.models.execution import ActionType
-        assert hasattr(ActionType, "SWARM_DISPATCH")
-        assert ActionType.SWARM_DISPATCH.value == "swarm.dispatch"
 
 
 # ===================================================================

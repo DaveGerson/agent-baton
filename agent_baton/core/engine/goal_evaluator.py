@@ -217,7 +217,7 @@ class LLMGoalEvaluator:
 
     source = "haiku"
 
-    def __init__(self, *, model: str = "claude-haiku-4-5-20251001") -> None:
+    def __init__(self, *, model: str = "claude-haiku-4-5") -> None:
         self.model = model
         self._stub_fallback = StubGoalEvaluator()
 
@@ -342,9 +342,9 @@ def select_evaluator() -> GoalEvaluator:
         return StubGoalEvaluator()
     if mode in ("haiku", "llm", "opus") and os.environ.get("ANTHROPIC_API_KEY"):
         model = {
-            "haiku": "claude-haiku-4-5-20251001",
-            "llm": "claude-haiku-4-5-20251001",
-            "opus": "claude-opus-4-7",
+            "haiku": "claude-haiku-4-5",
+            "llm": "claude-haiku-4-5",
+            "opus": "claude-opus-4-8",
         }[mode]
         return LLMGoalEvaluator(model=model)
     return StubGoalEvaluator()

@@ -2,20 +2,15 @@
 
 📖 **Docs:** <https://davegerson.github.io/agent-baton/>
 
-**Turn one prompt into a coordinated team of AI specialists.**
+**Governance and assurance for Claude Code.**
 
-Agent Baton is a multi-agent orchestration system for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Describe a complex task in plain language -- Baton plans it, routes it to the right specialist agents, enforces QA gates between phases, and delivers tested, reviewed code. No external services. No API keys beyond Claude. Everything runs locally.
+Agent Baton is a **governance and assurance harness** for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). It enforces domain-specific policy on every AI-authored change — data-classification risk, required expert reviewers, compliance gates, segregation-of-duties approval — and makes the outcome auditable through a verifiable evidence bundle. Claude Code owns the work; Baton owns the accountability.
 
-```
-You:  "Use the orchestrator to add input validation to the API
-       with tests and security review"
+**Harness mode** (zero loop overhead): install the hooks (`policy-check`, `comply-record`, `classify --activate`), activate an assurance pack, and every tool call Claude Code makes is evaluated against your policy. Evidence bundles are generated automatically. No plan. No execution loop. No API keys beyond Claude.
 
-Baton: Plans 3 phases (implement, test, review)
-       Dispatches backend-engineer, test-engineer, security-reviewer
-       Runs pytest gate between phases
-       Commits each agent's work separately
-       Writes trace, usage log, and retrospective
-```
+**Managed mode** (for regulated work): set `BATON_PLAN_REVIEW` or use the spec queue — Baton runs the full plan→DISPATCH→GATE→APPROVAL loop, activated automatically when the data classifier flags a task as HIGH or CRITICAL risk.
+
+**Spec federation**: submit or import specs from Azure DevOps / GitHub Issues → AI-derived risk + cost forecast → senior review before firing. The cheapest control point for org AI spend.
 
 ---
 
@@ -119,7 +114,7 @@ end-to-end example with command output.
 
 ## Features
 
-### 19 Specialist Agents
+### 30 Specialist Agents
 
 Stack-aware agents that the orchestrator selects and routes automatically.
 First time on a Go project? The `talent-builder` creates
@@ -295,14 +290,13 @@ Set `BATON_RUN_TOKEN_CEILING=<USD>` to cap total cumulative spend per
 execution. `BudgetEnforcer` reads the env var fresh on every check
 (never cached), tracks a run-level counter that survives crash recovery,
 and raises `RunTokenCeilingExceeded` before any record_* call would push
-the total over the limit. The selfheal, speculator, and immune-system
-daemons all check the ceiling before kicking off an escalation cycle and
-abort with `'ceiling-abort'` rather than overspending.
+the total over the limit. The immune-system daemon checks the ceiling before
+each sweep and suspends with `'ceiling-abort'` rather than overspending.
 
-> **Known gap (bd-3f80).** Selfheal/speculator/immune respect the ceiling,
-> but the main `Executor.dispatch()` path does not yet block individual
-> agent dispatches when the projected spend would breach the cap; it only
-> emits a warning at HIGH/CRITICAL run start. Full executor wiring is
+> **Known gap (bd-3f80).** The main `Executor.dispatch()` path does not
+> yet block individual agent dispatches when the projected spend would
+> breach the cap; it only emits a warning at HIGH/CRITICAL run start.
+> Enforcement is handled by the policy hooks. Full executor wiring is
 > tracked in bd-3f80.
 
 ### Persistent Agent Souls (EXPERIMENTAL — Wave 6.1 Part B)
@@ -509,7 +503,7 @@ contract between Claude and the engine.
 ```
                     +----------------------------------------------------+
                     |                    ORCHESTRATOR                     |
-                    |  Reads 16 reference procedures inline               |
+                    |  Reads 19 reference procedures inline               |
                     +------------------------+---------------------------+
                                              |
                           baton plan --------+-------- baton execute
@@ -767,8 +761,8 @@ every invocation.
 ## Project Structure
 
 ```
-agents/            <- 22 agent definitions (markdown + YAML frontmatter)
-references/        <- 16 reference procedures (shared knowledge)
+agents/            <- 30 agent definitions (markdown + YAML frontmatter)
+references/        <- 19 reference procedures (shared knowledge)
 templates/         <- CLAUDE.md + settings.json + skills for target projects
 scripts/           <- Install scripts (Linux + Windows)
 docs/              <- Architecture docs, ADRs, invariants, troubleshooting
@@ -805,12 +799,10 @@ pmo-ui/            <- React/Vite PMO frontend
 | `BATON_TASK_ID` | Target a specific execution in multi-task scenarios | auto-detected |
 | `BATON_DB_PATH` | Override the project `baton.db` location (subagents in worktrees can rely on the upward-walk discovery) | discovered |
 | `BATON_API_TOKEN` | Bearer token for API authentication | none |
-| `BATON_APPROVAL_MODE` | Approval policy: `local` (self-approve) or `team` (different reviewer required). In `team` mode, `baton swarm` defaults `--require-approval-bead` ON. | `local` |
-| `BATON_SELFHEAL_ENABLED` | Enable speculator/selfheal escalation on gate failure. Falsy values (`0`, `false`, `no`) are honoured and write a `selfheal_suppressed` event to `compliance-audit.jsonl`. | `0` |
-| `BATON_RUN_TOKEN_CEILING` | Per-run cumulative spend cap (USD float). When set, `BudgetEnforcer.check_run_ceiling()` raises `RunTokenCeilingExceeded` before exceeding the cap and selfheal/speculator/immune all abort. Counter is restored on `baton execute resume`. (See PR #67/#73, bd-3f80.) | unset |
+| `BATON_APPROVAL_MODE` | Approval policy: `local` (self-approve) or `team` (different reviewer required). | `local` |
+| `BATON_GATE_RETRY` | Enable single gate-retry: on first gate failure, re-dispatch the failing step once with gate output appended to the prompt. Second failure is terminal. | `0` |
+| `BATON_RUN_TOKEN_CEILING` | Per-run cumulative spend cap (USD float). When set, `BudgetEnforcer.check_run_ceiling()` raises `RunTokenCeilingExceeded` before exceeding the cap; the immune daemon aborts. Counter is restored on `baton execute resume`. (See PR #67/#73, bd-3f80.) | unset |
 | `BATON_WORKTREE_STALE_HOURS` | Max age (hours) for the worktree GC to reclaim a stale linked worktree. New canonical name; `BATON_WORKTREE_GC_HOURS` is kept as a legacy alias. | `4` |
-| `BATON_EXPERIMENTAL` | CSV opt-in flag for experimental features. Required for `baton swarm` (`BATON_EXPERIMENTAL=swarm`). | unset |
-| `BATON_SWARM_ENABLED` | Required (in addition to `BATON_EXPERIMENTAL=swarm`) to actually dispatch a swarm refactor. | unset |
 | `BATON_SOULS_ENABLED` / `BATON_EXEC_BEADS_ENABLED` | Feature flags for persistent agent souls (Wave 6.1B) and executable beads (Wave 6.1C). | unset |
 | `BATON_BD_BACKEND` | Bead-store backend (ADR-13b). `bd` (the external [beads](https://github.com/gastownhall/beads) CLI) is now the only supported value and the system of record; `sqlite`/`auto` are removed and log a deprecation warning. | `bd` |
 | `BATON_BD_BIN` / `BATON_BD_PREFIX` | Path/name of the `bd` binary and the `bd init` issue prefix (matches baton's `bd-<hash>` IDs). | `bd` / `bd` |
@@ -818,8 +810,8 @@ pmo-ui/            <- React/Vite PMO frontend
 | `BATON_SKIP_GIT_NOTES_SETUP` | Set to `1` to silence the install-time git-notes replication setup and the runtime warning emitted by `NotesAdapter.write()` when the wildcard refspec is missing. | unset |
 | `ANTHROPIC_API_KEY` | Required for AI classification (`pip install agent-baton[classify]`) and the Haiku planner classifier | none |
 
-> **Note on experimental features.** `baton swarm`, the Wave 6.2 immune-system
-> daemon, and the predictive watcher (Wave 6.2 Part C) are explicitly marked
+> **Note on experimental features.** The Wave 6.2 immune-system
+> daemon and the predictive watcher (Wave 6.2 Part C) are explicitly marked
 > EXPERIMENTAL and gated behind feature flags. They emit stub warnings to
 > stderr on every invocation and must not be relied on for production work.
 > See [Known Integration Gaps](docs/architecture.md#13-known-integration-gaps-as-of-2026-04-28)
@@ -837,14 +829,14 @@ pmo-ui/            <- React/Vite PMO frontend
 | `--knowledge PATH` | Attach a knowledge document (repeatable) |
 | `--knowledge-pack NAME` | Attach a knowledge pack (repeatable) |
 | `--intervention LEVEL` | Escalation threshold: low, medium, high |
-| `--model MODEL` | Default model for dispatched agents (opus, sonnet) |
+| `--model MODEL` | Default model for dispatched agents (haiku, sonnet, opus) |
 | `--complexity LEVEL` | Override complexity: light, medium, heavy |
 
 ### Files Installed to Target Projects
 
 | File | Purpose |
 |------|---------|
-| `.claude/agents/*.md` | Agent definitions (19 files) |
+| `.claude/agents/*.md` | Agent definitions (30 files) |
 | `.claude/references/*.md` | Reference procedures (15 files) |
 | `.claude/CLAUDE.md` | Project development guide (from template) |
 | `.claude/settings.json` | Hook configuration |
@@ -892,7 +884,7 @@ Requires Python 3.10+. The only runtime dependency is PyYAML.
 ## Project Status
 
 Agent Baton is in active development (v0.1.0). The orchestration engine,
-all 22 agents, 16 references, knowledge delivery, bead memory system,
+all 30 agents, 19 references, knowledge delivery, bead memory system,
 PMO subsystem with end-to-end workflow (plan, edit, execute, review,
 merge), REST API with webhooks, federated sync, event system, learning
 automation, and the improvement pipeline are implemented and tested.
@@ -914,7 +906,7 @@ Three integration gaps remain:
 
 | Gap | Bead | Surface |
 |-----|------|---------|
-| Executor wiring of `BATON_RUN_TOKEN_CEILING` | bd-3f80 | Selfheal/speculator/immune respect the cap; main `Executor.dispatch()` only warns |
+| Executor wiring of `BATON_RUN_TOKEN_CEILING` | bd-3f80 | Main `Executor.dispatch()` only warns at HIGH/CRITICAL risk; enforcement by policy hooks |
 | Soul callers not migrated | bd-1ca2 | Existing `soul.verify` callers not yet routed through revocation-aware `SoulRouter.verify_signature()` |
 | Wave 6.1 Part A integration | bd-971d | Git-notes bead persistence + executor BeadStore handoff |
 
@@ -928,7 +920,6 @@ on them for production work.
 
 | Feature | Flag | Status |
 |---------|------|--------|
-| `baton swarm` (massive refactor dispatcher) | `BATON_EXPERIMENTAL=swarm` + `BATON_SWARM_ENABLED=1` | v1 stub — partition plans real, agent dispatch not wired (bd-18f6) |
 | Immune-system daemon | feature flag in `core/intel/immune.py` | Wave 6.2 Part B stub (bd-dd52) |
 | Predictive watcher | feature flag in `core/intel/predictive.py` | Wave 6.2 Part C stub (bd-708a) |
 | Executable beads | `BATON_EXEC_BEADS_ENABLED=1` | Process-level sandbox only; not safe for external-origin beads (bd-fe40) |

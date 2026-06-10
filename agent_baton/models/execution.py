@@ -69,7 +69,6 @@ class ActionType(Enum):
     APPROVAL = "approval"               # pause for human review / approval
     FEEDBACK = "feedback"               # present multiple-choice questions, dispatch based on answers
     INTERACT = "interact"               # multi-turn interaction: agent responded, awaiting human input
-    SWARM_DISPATCH = "swarm.dispatch"   # Wave 6.2 (bd-2b9f): trigger a SwarmDispatcher run
     CHECKPOINT = "checkpoint"            # save state + suggest fresh session to prevent context rot
 
 
@@ -1409,8 +1408,6 @@ class ExecutionState(BaseModel):
     working_branch: str = ""
     working_branch_head: str = ""
     takeover_records: list[dict] = Field(default_factory=list)
-    selfheal_attempts: list[dict] = Field(default_factory=list)
-    speculations: dict[str, dict] = Field(default_factory=dict)
     run_cumulative_spend_usd: float = 0.0
     pending_scope_expansions: list[dict] = Field(default_factory=list)
     scope_expansions_applied: int = 0
@@ -1772,12 +1769,9 @@ class ExecutionState(BaseModel):
             # steps that degraded to in-place execution after worktree failure
             "steps_ran_in_place": dict(getattr(self, "steps_ran_in_place", {})),
             "working_branch": getattr(self, "working_branch", ""),
-            # Wave 5 (bd-e208, bd-1483, bd-9839): Human-Agent Loop state
+            # Wave 5 (bd-e208): Human-Agent Loop state
             "takeover_records": list(getattr(self, "takeover_records", [])),
-            "selfheal_attempts": list(getattr(self, "selfheal_attempts", [])),
-            "speculations": dict(getattr(self, "speculations", {})),
             # SQLite Phase B: investigative-archetype phase retry counts.
-            # Pulled out of the speculations bimodal scratchpad.
             "phase_retries": dict(getattr(self, "phase_retries", {})),
             # bd-def9: rebased tip SHA after most-recent fold_back()
             "working_branch_head": getattr(self, "working_branch_head", ""),
@@ -1797,12 +1791,13 @@ class ExecutionState(BaseModel):
     def from_dict(cls, data: dict) -> ExecutionState:
         cr_data = data.get("consolidation_result")
 
-        # SQLite Phase B: lift _phase_retries out of speculations.  Older
-        # state files keyed phase retries inside the speculations dict
+        # SQLite Phase B: lift _phase_retries out of legacy speculations dict.
+        # Older state files keyed phase retries inside the speculations dict
         # under the magic ``_phase_retries`` slot — the dict was bimodal.
-        # Slice 6 separates the two; this shim makes legacy files load.
-        speculations_in = dict(data.get("speculations", {}))
-        legacy_retries = speculations_in.pop("_phase_retries", None)
+        # Slice 6 separated the two; this shim makes legacy files load.
+        # speculations field is removed in Phase B pare-back (007 Phase B).
+        legacy_spec_dict = dict(data.get("speculations", {}))
+        legacy_retries = legacy_spec_dict.get("_phase_retries", None)
         explicit_retries = data.get("phase_retries")
         if explicit_retries is not None:
             phase_retries = {str(k): int(v) for k, v in explicit_retries.items()}
@@ -1834,12 +1829,8 @@ class ExecutionState(BaseModel):
             step_worktrees=dict(data.get("step_worktrees", {})),
             steps_ran_in_place=dict(data.get("steps_ran_in_place", {})),
             working_branch=data.get("working_branch", ""),
-            # Wave 5 (bd-e208, bd-1483, bd-9839): default to empty for legacy files
+            # Wave 5 (bd-e208): default to empty for legacy files
             takeover_records=list(data.get("takeover_records", [])),
-            selfheal_attempts=list(data.get("selfheal_attempts", [])),
-            # speculations no longer carries _phase_retries (split above);
-            # use the post-shim copy that has it removed.
-            speculations=speculations_in,
             phase_retries=phase_retries,
             # bd-def9: getattr guard for legacy state files that predate this field
             working_branch_head=data.get("working_branch_head", ""),

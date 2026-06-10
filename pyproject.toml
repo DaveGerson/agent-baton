@@ -67,12 +67,6 @@ daemon = [
 classify = [
     "anthropic>=0.40",
 ]
-swarm = [
-    "libcst>=1.0",
-]
-predict = [
-    "watchdog>=3.0",
-]
 viz = [
     "rich>=13.0,<14",
 ]
@@ -84,8 +78,6 @@ all = [
     "pydantic>=2.0",
     "python-json-logger>=3.0",
     "anthropic>=0.40",
-    "libcst>=1.0",
-    "watchdog>=3.0",
     "rich>=13.0,<14",
 ]
 

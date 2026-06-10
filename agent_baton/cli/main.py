@@ -26,7 +26,7 @@ _COMMAND_GROUPS: dict[str, list[str]] = {
     "Agents & Routing": ["agents", "route", "events", "incident", "agent-context"],
     "Observability": ["viz", "dashboard", "trace", "usage", "telemetry", "context-profile", "retro", "context", "export", "test-plan"],
     "Integrations": ["webhook"],
-    "Governance": ["classify", "compliance", "policy", "escalations", "validate", "spec-check", "detect"],
+    "Governance": ["classify", "compliance", "policy", "escalations", "validate", "spec-check", "detect", "evidence"],
     "Improvement": ["scores", "patterns", "budget", "changelog", "anomalies", "learn"],
     "Distribution": ["install", "uninstall", "package", "publish", "pull", "transfer"],
     "Storage & Sync": ["sync", "source", "cquery", "storage", "cleanup", "maintenance"],

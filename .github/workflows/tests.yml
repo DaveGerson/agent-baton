@@ -66,7 +66,6 @@ jobs:
             tests/test_synthesize_beads.py \
             tests/test_learning_regressions.py \
             tests/test_soul_verify_revocation_through_callers.py \
-            tests/test_swarm_signoff.py \
             tests/test_team_board.py \
             tests/test_api_pmo_beads.py \
             tests/storage/ \

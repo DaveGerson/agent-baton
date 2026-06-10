@@ -243,22 +243,14 @@ def _takeover_enabled() -> bool:
     return _env_flag("BATON_TAKEOVER_ENABLED", "1")
 
 
-def _selfheal_enabled() -> bool:
-    """Return True when self-heal escalation is enabled (Wave 5.2, bd-1483).
+def _gate_retry_enabled() -> bool:
+    """Return True when single gate-retry is enabled (Phase D, 007).
 
-    Default: disabled (cost-incurring, requires explicit opt-in).
-    Override via env: ``BATON_SELFHEAL_ENABLED=1`` or baton.yaml ``selfheal.enabled: true``.
+    When enabled: on first gate failure, re-dispatch the failing step once
+    with the gate output appended to the prompt.  Second failure is terminal.
+    Default: disabled.  Override via env: ``BATON_GATE_RETRY=1``.
     """
-    return _env_flag("BATON_SELFHEAL_ENABLED", "0")
-
-
-def _speculate_enabled() -> bool:
-    """Return True when speculative pipelining is enabled (Wave 5.3, bd-9839).
-
-    Default: disabled (cost-incurring, requires explicit opt-in).
-    Override via env: ``BATON_SPECULATE_ENABLED=1`` or baton.yaml ``speculate.enabled: true``.
-    """
-    return _env_flag("BATON_SPECULATE_ENABLED", "0")
+    return _env_flag("BATON_GATE_RETRY", "0")
 
 
 def _souls_enabled() -> bool:
@@ -268,15 +260,6 @@ def _souls_enabled() -> bool:
     When disabled, BeadStore signing is a no-op and SoulRouter is never constructed.
     """
     return _env_flag("BATON_SOULS_ENABLED", "0")
-
-
-def _swarm_enabled() -> bool:
-    """Return True when the swarm feature flag is explicitly set (Wave 6.2, bd-2b9f).
-
-    Default: disabled (off by default so existing flows don't require swarm infra).
-    Override via env: ``BATON_SWARM_ENABLED=1``.
-    """
-    return os.environ.get("BATON_SWARM_ENABLED", "0").strip().lower() in ("1", "true", "yes")
 
 
 # bd-fcntl-win: process-wide flag for the one-time Windows fail-closed warning.
@@ -638,6 +621,12 @@ class ExecutionEngine:
                     "BeadStore init skipped (non-fatal): %s", _bead_init_exc
                 )
 
+        # ── Gate-retry transient prompt annotations (Phase D, 007) ──────────
+        # Maps step_id → gate output string for the single retry dispatch.
+        # Transient (in-memory only) — does not survive restart, which is
+        # acceptable because second failure is terminal anyway.
+        self._gate_retry_prompts: dict[str, str] = {}
+
         # ── Team registry (schema v15, multi-team orchestration) ────────────
         # Same lifecycle and graceful-degradation semantics as _bead_store.
         self._team_registry = None
@@ -681,46 +670,6 @@ class ExecutionEngine:
                 daemon=True,
             )
             _gc_thread.start()
-
-        # ── Wave 6.2 (bd-2b9f): SwarmDispatcher ─────────────────────────────
-        # Constructed only when BATON_SWARM_ENABLED=1 AND the worktree manager
-        # is available (Wave 1.3 semaphore ships with it).  Silently None when
-        # either guard fails — all call sites check ``is not None``.
-        self._swarm = None
-        if _swarm_enabled() and self._worktree_mgr is not None:
-            try:
-                from agent_baton.core.swarm.dispatcher import SwarmDispatcher
-                from agent_baton.core.swarm.partitioner import ASTPartitioner
-                from agent_baton.core.govern.budget import BudgetEnforcer
-                _project_root_for_swarm = self._root.parent.parent
-                self._swarm = SwarmDispatcher(
-                    engine=self,
-                    worktree_mgr=self._worktree_mgr,
-                    partitioner=ASTPartitioner(_project_root_for_swarm),
-                    budget=BudgetEnforcer(),
-                    # launcher is injected later via engine.set_swarm_launcher()
-                    # once the CLI constructs ClaudeCodeLauncher.
-                    launcher=None,
-                )
-                _log.debug("SwarmDispatcher initialised (BATON_SWARM_ENABLED=1)")
-            except Exception as _swarm_init_exc:
-                _log.debug(
-                    "SwarmDispatcher init skipped (non-fatal): %s", _swarm_init_exc
-                )
-
-    def set_swarm_launcher(self, launcher: object) -> None:
-        """Inject a launcher into the SwarmDispatcher after engine construction.
-
-        Called by the CLI execute loop after it constructs ``ClaudeCodeLauncher``
-        so that swarm chunk agents use the same launcher as normal DISPATCH steps.
-        When ``self._swarm`` is ``None`` (swarm disabled) this is a no-op.
-
-        Args:
-            launcher: Any object satisfying the ``AgentLauncher`` protocol.
-        """
-        if self._swarm is not None:
-            self._swarm._launcher = launcher  # type: ignore[attr-defined]
-            _log.debug("SwarmDispatcher launcher injected")
 
     # ── Storage routing helpers ──────────────────────────────────────────────
 
@@ -3439,33 +3388,85 @@ class ExecutionEngine:
                 gate_type=gate_type,
                 output=output,
             ))
-            # Wave 5.2 (bd-1483): auto-enqueue self-heal cycle when enabled and
-            # we can resolve the failing step's retained worktree handle.
-            # Wired here per design line 408 ("record_gate_result failure branch
-            # short-circuits before transitioning state to failed when
-            # selfheal.enabled"). The _enqueue_selfheal method's own guards
-            # cover BATON_SELFHEAL_ENABLED check, active-takeover collision,
-            # and missing-worktree fallback.
-            if _selfheal_enabled():
+            # Phase D (007): single gate-retry — when BATON_GATE_RETRY=1 and
+            # this phase has not already been retried, re-dispatch the failing
+            # step once with the gate output appended to the prompt.
+            phase_key = str(phase_id)
+            already_retried = (state.phase_retries or {}).get(phase_key, 0) > 0
+            if _gate_retry_enabled() and not already_retried:
                 failing_step_id = self._failing_step_for_phase(phase_id)
                 if failing_step_id:
-                    handle = None
-                    if self._worktree_mgr is not None:
-                        handle = self._worktree_mgr.handle_for(
-                            state.task_id, failing_step_id,
-                        )
-                    self._enqueue_selfheal(
-                        failing_step_id, phase_id, handle,
+                    # Increment retry counter (persisted so restart knows).
+                    if state.phase_retries is None:
+                        state.phase_retries = {}
+                    state.phase_retries[phase_key] = (
+                        state.phase_retries.get(phase_key, 0) + 1
                     )
+                    # Store gate output for prompt annotation (transient).
+                    self._gate_retry_prompts[failing_step_id] = output or ""
+                    # Remove the failed gate result so the gate is treated as
+                    # pending after the retry dispatch completes.
+                    state.gate_results = [
+                        r for r in state.gate_results
+                        if not (r.phase_id == phase_id and not r.passed)
+                    ]
+                    # Remove the step result so the resolver treats this step
+                    # as un-dispatched and issues a fresh DISPATCH action.
+                    state.step_results = [
+                        r for r in state.step_results
+                        if r.step_id != failing_step_id
+                    ]
+                    self._write_compliance_entry(
+                        {
+                            "timestamp": _utcnow(),
+                            "event_type": "gate_retry_dispatched",
+                            "task_id": state.task_id,
+                            "plan_id": state.plan.task_id,
+                            "step_id": failing_step_id,
+                            "agent_name": "engine",
+                            "risk_level": state.plan.risk_level,
+                            "phase_id": phase_id,
+                            "gate_type": gate_type,
+                            "reason": "BATON_GATE_RETRY=1; re-dispatching failing step (retry 1/1)",
+                        },
+                        plan=state.plan,
+                    )
+                    _log.info(
+                        "record_gate_result: gate-retry triggered for step=%s "
+                        "phase=%d gate=%s",
+                        failing_step_id, phase_id, gate_type,
+                    )
+                    # Set status back to running so next_action dispatches the step.
+                    state.status = "running"  # noqa: state-mutation
+                else:
+                    # No failing step found — fall through to terminal failure.
+                    self._write_compliance_entry(
+                        {
+                            "timestamp": _utcnow(),
+                            "event_type": "gate_failed_terminal",
+                            "task_id": state.task_id,
+                            "plan_id": state.plan.task_id,
+                            "step_id": "",
+                            "agent_name": "engine",
+                            "risk_level": state.plan.risk_level,
+                            "phase_id": phase_id,
+                            "gate_type": gate_type,
+                            "reason": "BATON_GATE_RETRY=1 but no failing step found; gate failure is terminal",
+                        },
+                        plan=state.plan,
+                    )
+                    state.status = "gate_failed"  # noqa: state-mutation
             else:
-                # bd-878e: when self-heal is explicitly suppressed, write a
-                # compliance audit entry so regulated environments can prove
-                # the disable was honoured.  Read each time (not cached) so
-                # a runtime toggle is respected immediately.
+                # Gate retry disabled or already retried once — terminal failure.
+                reason = (
+                    "BATON_GATE_RETRY=1 but phase already retried once; second failure is terminal"
+                    if _gate_retry_enabled()
+                    else "BATON_GATE_RETRY not set; gate failure is terminal"
+                )
                 self._write_compliance_entry(
                     {
                         "timestamp": _utcnow(),
-                        "event_type": "selfheal_suppressed",
+                        "event_type": "gate_failed_terminal",
                         "task_id": state.task_id,
                         "plan_id": state.plan.task_id,
                         "step_id": "",
@@ -3473,12 +3474,12 @@ class ExecutionEngine:
                         "risk_level": state.plan.risk_level,
                         "phase_id": phase_id,
                         "gate_type": gate_type,
-                        "reason": "BATON_SELFHEAL_ENABLED not set; self-heal disabled",
+                        "reason": reason,
                     },
                     plan=state.plan,
                 )
-            # Non-coupled status flip; no sibling field paired with gate_failed.
-            state.status = "gate_failed"  # noqa: state-mutation
+                # Non-coupled status flip; no sibling field paired with gate_failed.
+                state.status = "gate_failed"  # noqa: state-mutation
         else:
             self._publish(evt.gate_passed(
                 task_id=state.task_id,
@@ -3894,11 +3895,11 @@ class ExecutionEngine:
     def _failing_step_for_phase(self, phase_id: int) -> str:
         """Return the step_id of the failing step in the given phase, or "".
 
-        Used by ``record_gate_result`` to wire self-heal (bd-1483).  The
-        failing step is the most-recently-dispatched step whose phase_id
-        matches and whose status is ``failed``, ``dispatched``, or
-        ``interrupted``.  Returns ``""`` if none found (caller skips
-        self-heal).
+        Used by ``record_gate_result`` to determine which step to re-dispatch
+        on gate-retry.  The failing step is the most-recently-dispatched step
+        whose phase_id matches and whose status is ``failed``, ``dispatched``,
+        ``complete``, or ``interrupted``.  Returns ``""`` if none found
+        (caller treats gate failure as terminal).
         """
         try:
             state = self._require_execution("_failing_step_for_phase")
@@ -3915,84 +3916,8 @@ class ExecutionEngine:
                     return sr.step_id
         return ""
 
-    def _enqueue_selfheal(
-        self,
-        step_id: str,
-        phase_id: int,
-        handle: object,   # WorktreeHandle
-    ) -> None:
-        """Internal: enqueue a self-heal cycle after a gate failure (bd-1483).
-
-        Called from ``record_gate_result`` failure branch when selfheal.enabled.
-        Records a pending self-heal attempt on the state so ``next_action``
-        can emit a synthetic DISPATCH for the appropriate tier.
-
-        This method is a placeholder hook — full dispatch logic fires in
-        ``next_action`` when it detects a selfheal-pending status.  Storing
-        the pending spec on state allows crash recovery.
-        """
-        if not _selfheal_enabled():
-            return
-
-        state = self._require_execution("_enqueue_selfheal")
-
-        # Guard: no concurrent takeover on same step.
-        takeover_records = getattr(state, "takeover_records", [])
-        for tr in takeover_records:
-            if tr.get("step_id") == step_id and not tr.get("resumed_at"):
-                _log.info(
-                    "_enqueue_selfheal: skipping step=%s — active takeover in progress",
-                    step_id,
-                )
-                return
-
-        # Guard: worktree must exist.
-        if handle is None or str(getattr(handle, "path", "/dev/null")) == "/dev/null":
-            _log.info(
-                "_enqueue_selfheal: skipping step=%s — no retained worktree", step_id
-            )
-            return
-
-        # Mark pending in state for next_action pickup.
-        # We store a minimal signal; the full SelfHealEscalator is constructed
-        # in next_action when the status is read.
-        # NOTE: dead-store removed (review follow-up); full pending-state
-        # persistence lands in Wave 5.2 full-dispatch.  v1 only logs intent.
-        _log.info(
-            "_enqueue_selfheal: queuing self-heal for step=%s phase=%d worktree=%s",
-            step_id, phase_id, handle.path,  # type: ignore[attr-defined]
-        )
-        # TODO(Wave 5.2 full dispatch): wire the SelfHealEscalator dispatch
-        # into next_action.  For v1 this hook records the intent; the CLI
-        # `baton execute self-heal` command triggers the actual escalation.
-        # This keeps the gate-failure path non-blocking.
-
-    # ── Wave 5.3 — Speculative Pipelining (bd-9839) ───────────────────────────
-
-    def get_speculator(self) -> "SpeculativePipeliner | None":
-        """Return the SpeculativePipeliner instance, or None when disabled.
-
-        Constructed lazily on first access; cached on the engine instance.
-        """
-        if not _speculate_enabled():
-            return None
-        if not hasattr(self, "_speculator"):
-            try:
-                from agent_baton.core.engine.speculator import SpeculativePipeliner
-                state = self._load_execution()
-                self._speculator = SpeculativePipeliner(
-                    worktree_mgr=self._worktree_mgr,
-                    task_id=state.task_id if state else "",
-                    enabled=True,
-                )
-                if state:
-                    self._speculator.load_from_state(
-                        getattr(state, "speculations", {})
-                    )
-            except Exception as exc:
-                _log.debug("SpeculativePipeliner init failed (non-fatal): %s", exc)
-                self._speculator = None
-        return getattr(self, "_speculator", None)
+    # _enqueue_selfheal removed in Phase D (007) — replaced by single gate-retry.
+    # See _gate_retry_enabled() and the gate-failure branch in record_gate_result.
 
     # ── Compliance report helpers ────────────────────────────────────────────
 
@@ -6105,7 +6030,7 @@ class ExecutionEngine:
             When *status* is not in ``self._state_handlers``, this method
             emits a ``_log.warning`` and returns the ``ExecutingPhaseState``
             singleton.  The fallback is **deliberate forward-compatibility**:
-            other subsystems (daemon, swarm, future gate types) may
+            other subsystems (daemon, future gate types) may
             introduce new ``state.status`` values before the dispatch map
             is updated.  Routing the unknown status through
             ``ExecutingPhaseState`` keeps the engine running while the
@@ -6821,6 +6746,29 @@ class ExecutionEngine:
             if self._persistence is not None:
                 self._persistence.save(state)
         enforcement = PromptDispatcher.build_path_enforcement(step)
+
+        # ── Gate-retry prompt annotation (Phase D, 007) ──────────────────────
+        # When this step is being re-dispatched after a gate failure, append
+        # the gate output to the prompt so the agent knows what to fix.
+        # The annotation is consumed and removed from the transient map so
+        # a third dispatch (after a separate unrelated retry) gets a clean prompt.
+        if step.step_id in self._gate_retry_prompts:
+            gate_out = self._gate_retry_prompts.pop(step.step_id)
+            phase_obj_for_retry = state.current_phase_obj
+            gate_cmd_for_retry = (
+                phase_obj_for_retry.gate.command
+                if (phase_obj_for_retry and phase_obj_for_retry.gate)
+                else ""
+            )
+            prompt = PromptDispatcher.build_gate_retry_prompt(
+                original_prompt=prompt,
+                gate_output=gate_out,
+                gate_command=gate_cmd_for_retry,
+            )
+            _log.info(
+                "_dispatch_action: injected gate-retry annotation for step=%s",
+                step.step_id,
+            )
 
         # bd-a313 — emit F0.4 KnowledgeUsed telemetry for every attachment on
         # this step.  The resolver was likely invoked at plan time (without a

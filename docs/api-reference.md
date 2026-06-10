@@ -21,6 +21,7 @@ and observability stack behind a versioned REST interface served by FastAPI.
    - [Observe](#47-observe)
    - [Webhooks](#48-webhooks)
    - [PMO](#49-pmo)
+   - [Spec Queue](#410-spec-queue-007-phase-i--spec-federation-mvp)
 5. [Webhook System](#5-webhook-system)
 6. [Request and Response Models](#6-request-and-response-models)
 7. [CORS Configuration](#7-cors-configuration)
@@ -1971,6 +1972,169 @@ frontend should branch on for localised UI copy.
 | `self_approval_rejected` | 403 | Actor is the requester; team-mode policy forbids self-approval |
 | `ComplianceWriteError` | 503 | Compliance audit subsystem write failure (retry later) |
 | `ExecutionStateInconsistency` | 500 | State reload failed after amendment (server bug) |
+
+---
+
+### 4.10 Spec Queue (007 Phase I — Spec Federation MVP)
+
+The Spec Queue provides a structured pipeline for submitting, enriching,
+reviewing, and firing agent-baton plans from natural-language specifications.
+
+**Pipeline stages:** `submitted` → `enriched` → `approved | bounced` → `fired`
+
+**Base path:** `/api/v1/pmo/specs`
+
+All requests that identify an acting user may include the `X-Baton-User` header.
+In `BATON_APPROVAL_MODE=team` mode the header is required for approve/bounce
+operations, and a user may not approve their own spec (returns 403).
+
+#### `POST /api/v1/pmo/specs`
+
+Submit a new spec draft. Background enrichment is dispatched automatically.
+Returns **201** on success.
+
+**Request body (`SubmitSpecDraftRequest`):**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `title` | string | yes | Short descriptive title |
+| `body` | string | no | Full markdown description, acceptance criteria, context |
+| `source` | string | no | `manual` (default), `github`, or `ado` |
+| `source_ref` | string | no | External reference ID (issue number, work-item ID) |
+
+**Response:** `SpecDraftResponse` — see model table below.
+
+#### `GET /api/v1/pmo/specs`
+
+List spec drafts. Results are ordered newest-first.
+
+**Query parameters:**
+
+| Parameter | Type | Description |
+|---|---|---|
+| `status` | string | Filter by status: `submitted`, `enriched`, `approved`, `bounced`, `fired` |
+| `submitted_by` | string | Filter by submitter identity |
+
+**Response:** `list[SpecDraftResponse]`
+
+#### `GET /api/v1/pmo/specs/{id}`
+
+Get a single spec draft by ID. Returns **404** if not found.
+
+**Response:** `SpecDraftResponse`
+
+#### `POST /api/v1/pmo/specs/{id}/enrich`
+
+Synchronously re-run enrichment (DataClassifier + cost forecast + required
+reviewers) on a spec in `submitted` or `bounced` status.
+
+**Response:** `SpecDraftResponse` with `status=enriched`.
+
+#### `POST /api/v1/pmo/specs/{id}/approve`
+
+Approve an enriched spec. Requires `status=enriched`; returns **409** otherwise.
+In `BATON_APPROVAL_MODE=team` mode the `X-Baton-User` header must differ from
+the spec's `submitted_by` field; otherwise returns **403**.
+
+**Response:** `SpecDraftResponse` with `status=approved`.
+
+#### `POST /api/v1/pmo/specs/{id}/bounce`
+
+Bounce an enriched spec back to the submitter with mandatory feedback.
+Requires `status=enriched`; returns **409** otherwise.
+
+**Request body (`BounceSpecDraftRequest`):**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `feedback` | string | yes | Non-empty explanation of what must change (min length 1) |
+
+Returns **422** if `feedback` is empty.
+
+**Response:** `SpecDraftResponse` with `status=bounced`.
+
+#### `POST /api/v1/pmo/specs/{id}/fire`
+
+Fire an approved spec into plan generation. Requires `status=approved`; returns
+**409** otherwise. Returns **202 Accepted** on success.
+
+**Request body (`FireSpecDraftRequest`):**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `project_id` | string | yes | Target project ID for plan registration |
+
+**Response:**
+
+| Field | Type | Description |
+|---|---|---|
+| `spec_id` | string | The spec draft ID |
+| `task_id` | string | The plan task ID created by ForgeSession |
+| `status` | string | Always `fired` |
+
+#### `POST /api/v1/pmo/specs/import`
+
+Import a spec draft from an external source (GitHub Issues or Azure DevOps).
+Returns **501** if the required environment variables are not configured.
+Returns **502** if the upstream API call fails.
+
+**Request body (`ImportSpecDraftRequest`):**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `source` | string | yes | `github` or `ado` |
+| `ref` | string | yes | Issue number (GitHub) or work-item ID (ADO) |
+| `owner` | string | no | GitHub organisation/owner |
+| `repo` | string | no | GitHub repository name |
+
+**ADO configuration:** Set `AZURE_DEVOPS_ORG`, `AZURE_DEVOPS_PROJECT`, and
+`AZURE_DEVOPS_PAT` environment variables. The PAT requires the `Work Items (Read)`
+OAuth scope.
+
+**Response:** `SpecDraftResponse` with `status=submitted`.
+
+#### `SpecDraftResponse` model
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | string | UUID |
+| `title` | string | Spec title |
+| `body` | string | Full description |
+| `source` | string | `manual`, `github`, or `ado` |
+| `source_ref` | string | External reference ID |
+| `submitted_by` | string | Submitter identity |
+| `submitted_at` | string (ISO 8601) | Submission timestamp |
+| `status` | string | Current pipeline status |
+| `enrichment` | `EnrichmentDataResponse \| null` | Enrichment output; null until first enrich run |
+| `review` | `ReviewDataResponse \| null` | Approve/bounce decision; null until reviewed |
+| `task_id` | string \| null | Plan task ID after firing |
+| `updated_at` | string (ISO 8601) | Last modification timestamp |
+
+**`EnrichmentDataResponse`:**
+
+| Field | Type | Description |
+|---|---|---|
+| `risk_level` | string | `LOW`, `MEDIUM`, `HIGH`, or `CRITICAL` |
+| `guardrail_preset` | string | Policy preset name (e.g. `Standard Development`) |
+| `required_reviewers` | list[string] | Agent roles required to review |
+| `signals_found` | list[string] | Risk signals identified by the classifier |
+| `confidence` | string | Classifier confidence: `high`, `medium`, or `low` |
+| `est_usd_low` | number | Low-end cost estimate (USD) |
+| `est_usd_mid` | number | Mid-point cost estimate (USD) |
+| `est_usd_high` | number | High-end cost estimate (USD) |
+| `cost_confidence` | string | `default` or `calibrated` |
+| `breakdown` | list[CostBreakdownItem] | Per-agent cost breakdown |
+| `enriched_at` | string (ISO 8601) | Enrichment timestamp |
+
+Each `CostBreakdownItem`:
+
+| Field | Type | Description |
+|---|---|---|
+| `agent_name` | string | Agent name |
+| `model` | string | Model identifier |
+| `est_steps` | int | Estimated step count |
+| `est_tokens` | int | Estimated token count |
+| `est_usd` | number | Estimated USD cost |
 
 ---
 

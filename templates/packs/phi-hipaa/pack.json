@@ -1,0 +1,10 @@
+{
+  "_comment": "ILLUSTRATIVE TEMPLATE ONLY — not maintained compliance content.",
+  "name": "phi-hipaa",
+  "version": "1.0.0",
+  "description": "HIPAA PHI handling guardrails — requires SME + auditor agents, PHI scan and audit trail gates.",
+  "domain": "healthcare",
+  "risk_level": "HIGH",
+  "author": "agent-baton",
+  "baton_min_version": ""
+}

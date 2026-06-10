@@ -38,6 +38,16 @@
             "command": "bash -c 'FILE=\"$CLAUDE_TOOL_INPUT_FILE_PATH\"; if echo \"$FILE\" | grep -qE \"(/(\\\\.|^)\\.env($|/)|/secrets/|/node_modules/|\\\\.(pem|key)$|/\\.credentials)\"; then echo \"BLOCKED: Write to protected path: $FILE\" >&2; exit 2; fi; exit 0'"
           }
         ]
+      },
+      {
+        "matcher": "Bash|Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "baton policy-check",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "Stop": [
@@ -46,6 +56,15 @@
           {
             "type": "command",
             "command": "bash -c 'if [ -f .claude/team-context/mission-log.md ]; then echo \"📋 Mission log: .claude/team-context/mission-log.md\"; fi'"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "baton comply-record --event-type session_stop",
+            "timeout": 5
           }
         ]
       }
@@ -61,11 +80,18 @@
             "_comment": "Filters Pyright diagnostics to high-signal errors; strips cache-stale false positives. Silently no-ops if hook script is absent."
           }
         ]
+      },
+      {
+        "matcher": "Bash|Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "baton comply-record",
+            "timeout": 5
+          }
+        ]
       }
     ]
   },
-  "env": {
-    "CLAUDE_CODE_MAX_THINKING_TOKENS": "10000",
-    "_comment_thinking_cap": "Cap thinking budget for routine agents; lift for architect/planner via agent frontmatter if needed."
-  }
+  "env": {}
 }

@@ -88,10 +88,17 @@ def assess_risk(task_summary: str, agents: list[str]) -> str:
 
 
 def classify_to_preset_key(classification: "ClassificationResult | None") -> str:
-    """Map a ClassificationResult's guardrail_preset to a PolicyEngine key."""
+    """Map a ClassificationResult's guardrail_preset to a PolicyEngine key.
+
+    Pack preset names (``"pack:<name>"``) pass through unchanged so that
+    :meth:`~agent_baton.core.govern.policy.PolicyEngine.load_preset` can
+    resolve them via the pack registry.
+    """
     if classification is None:
         return "standard_dev"
     name = classification.guardrail_preset
+    if name.startswith("pack:"):
+        return name
     mapping = {
         "Standard Development": "standard_dev",
         "Data Analysis": "data_analysis",

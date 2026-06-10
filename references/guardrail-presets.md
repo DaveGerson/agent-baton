@@ -26,8 +26,7 @@ auditor subagent. If MEDIUM or above, invoke the auditor.
 | Regulatory-reportable data, audit trail systems | CRITICAL |
 | Schema migrations on production databases | CRITICAL |
 
-**When in doubt, err toward the auditor.** A false escalation costs time.
-A missed risk causes real harm.
+**Invoke the auditor when the task touches regulated data, authentication/authorization, payments, or irreversible operations (data deletion, schema migrations, external API writes).** A false escalation costs time. A missed risk causes real harm.
 
 ---
 
@@ -120,6 +119,40 @@ For tasks involving authentication, authorization, or secrets management.
 - Security reviewer post-execution review REQUIRED
 - No hardcoded credentials (enforce env vars or secret manager)
 - No credentials in logs, error messages, or API responses
+
+---
+
+## Pack Presets
+
+Organisations author per-domain governance packs under `.claude/packs/<name>/`.
+When baton loads a pack it registers a preset named `pack:<name>` (e.g.
+`pack:phi-hipaa`, `pack:secure-coding-owasp`).
+
+### Naming
+
+Pack preset names use the form `pack:<dirname>` where `<dirname>` is the pack
+directory name under `.claude/packs/`.
+
+### Resolution order
+
+When resolving a preset key the engine checks in this order:
+
+1. **Pack registry** — `pack:*` names are resolved from the in-process registry
+   populated at startup by `load_packs()` + `register_pack_policies()`.
+2. **On-disk policy** — `.claude/policies/<name>.json` (custom / legacy presets).
+3. **Built-in presets** — `standard_dev`, `data_analysis`, `infrastructure`,
+   `regulated`, `security`.
+
+### Authoring packs
+
+Use `baton packs init <name>` to scaffold a new pack, edit the required files,
+and run `baton packs validate <name>` to confirm validity.
+
+Template packs shipped with baton live under `templates/packs/`:
+- `phi-hipaa` — HIPAA PHI handling (8 policy rules, PHI scan + audit trail gates).
+- `secure-coding-owasp` — OWASP Top-10 secure coding (7 policy rules, secret scan gate).
+
+See `docs/cli-reference.md#baton-packs` for the full authoring workflow.
 
 ---
 

@@ -269,7 +269,7 @@ class BdBeadStore:
     def find_recent_approvals(self, tag: str, max_age_minutes: int = 5) -> list[Bead]:
         """Return open beads carrying *tag* created within *max_age_minutes*.
 
-        Parity with ``BeadStore.find_recent_approvals`` (swarm sign-off gate).
+        Parity with ``BeadStore.find_recent_approvals``.
         """
         from datetime import datetime, timedelta, timezone
 

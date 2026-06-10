@@ -128,7 +128,7 @@ baton goal CONDITION [options]
 **Evaluator selection** (via `BATON_GOAL_EVALUATOR` env var):
 - `stub` — deterministic, no LLM (default fallback)
 - `haiku` (default when `ANTHROPIC_API_KEY` is set) — Claude Haiku 4.5
-- `opus` — Claude Opus 4.7
+- `opus` — Claude Opus 4.8
 
 **Safety rail:** any evaluator that returns `met=True` is overridden to `met=False` unless the most-recent gate passed. This prevents premature claims.
 
@@ -910,6 +910,259 @@ baton classify "Update user payment processing logic" \
 
 ---
 
+### `baton classify --activate`
+
+Write `.claude/active-policy.json` after classifying a task, so that the
+`baton policy-check` hook uses the correct guardrail preset for the session.
+
+```
+baton classify DESCRIPTION [--files FILE...] --activate
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `DESCRIPTION` | Yes | Task description to classify |
+| `--files FILE...` | No | File paths affected (elevates risk from path patterns) |
+| `--activate` | No | Write `.claude/active-policy.json` with the resolved preset key |
+
+**Written file (`.claude/active-policy.json`):**
+
+```json
+{
+  "preset": "standard_dev",
+  "preset_display_name": "Standard Development",
+  "risk_level": "LOW",
+  "confidence": "high",
+  "signals": [],
+  "activated_at": "2026-01-15T12:00:00+00:00",
+  "activated_by": "baton classify --activate",
+  "task_hint": "first 120 chars of the description"
+}
+```
+
+**Preset keys:** `standard_dev`, `data_analysis`, `infrastructure`,
+`regulated`, `security`.
+
+**Example:**
+
+```bash
+baton classify "Add JWT auth middleware" --activate
+# → Active policy written to .claude/active-policy.json (preset: security)
+```
+
+**Related:** `baton policy-check`, `baton comply-record`
+
+---
+
+### `baton policy-check`
+
+Claude Code **PreToolUse** hook: evaluate a tool call against the active
+guardrail policy and emit a deny decision when a blocking rule is triggered.
+
+Reads a PreToolUse JSON payload from **stdin** and prints a deny JSON to
+stdout when a `path_block` or `tool_restrict` rule with `severity=="block"`
+matches. Exits 0 in all cases (fail-open); set `BATON_POLICY_FAIL_CLOSED=1`
+to exit 2 on errors.
+
+```
+baton policy-check [--agent NAME] [--cwd DIR]
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--agent NAME` | No | Agent name (overrides `$CLAUDE_AGENT_NAME`) |
+| `--cwd DIR` | No | Project root for policy resolution (default: cwd) |
+
+**Stdin format** (Claude Code PreToolUse payload):
+
+```json
+{"tool_name": "Write", "tool_input": {"file_path": "/project/.env"}, "session_id": "..."}
+```
+
+**Deny output** (stdout, exit 0):
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "permissionDecision": "deny",
+    "permissionDecisionReason": "standard_dev rule block_env_files (path_block): Block writes to .env files. Matched: /project/.env against pattern '**/.env'."
+  }
+}
+```
+
+**Policy resolution order:**
+1. `.claude/active-policy.json` → `preset` key
+2. `.claude/team-context/plan.json` → `risk_level` (LOW/MEDIUM → `standard_dev`; HIGH/CRITICAL → `regulated`)
+3. Fallback: `standard_dev`
+
+**Environment variables:**
+
+| Variable | Effect |
+|----------|--------|
+| `BATON_POLICY_FAIL_CLOSED` | `1` → exit 2 on errors (stdin errors, unreadable policy) |
+| `CLAUDE_AGENT_NAME` | Agent name used for scope-based rule matching |
+
+**Example (hook configuration in settings.json):**
+
+```json
+{"matcher": "Bash|Write|Edit|MultiEdit",
+ "hooks": [{"type": "command", "command": "baton policy-check", "timeout": 10}]}
+```
+
+**Related:** `baton classify --activate`, `baton comply-record`
+
+---
+
+### `baton packs`
+
+Manage Assurance Packs — org-authored domain governance units stored under
+`.claude/packs/<name>/`.
+
+#### `baton packs init`
+
+Scaffold a new pack directory with all required files from a minimal valid
+template.
+
+```
+baton packs init NAME [--dir DIR]
+```
+
+| Argument | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `NAME` | Yes | -- | Pack name (becomes the directory name under `.claude/packs/`) |
+| `--dir DIR` | No | cwd | Project root containing `.claude/` |
+
+**Behaviour:**
+- Creates `.claude/packs/<NAME>/` with `pack.json`, `policy.json`,
+  `signals.json`, `rubric.md`, `gates.json`, `evidence.json`, and
+  `knowledge/overview.md`.
+- Substitutes all `[YOUR_PACK_NAME]` placeholders with `NAME`.
+- Refuses if the directory already exists (exit 1).
+- Prints a next-steps hint on success.
+
+**Example:**
+
+```bash
+baton packs init phi-hipaa
+# → Scaffolded pack 'phi-hipaa' at .claude/packs/phi-hipaa/
+# Next steps: ...
+```
+
+---
+
+#### `baton packs validate`
+
+Validate one or all packs against all 7 spec checks. Exits 2 if any error is
+found.
+
+```
+baton packs validate [NAME] [--dir DIR]
+```
+
+| Argument | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `NAME` | No | all packs | Pack name to validate |
+| `--dir DIR` | No | cwd | Project root containing `.claude/` |
+
+**Exit codes:**
+
+| Code | Meaning |
+|------|---------|
+| 0 | All packs valid |
+| 2 | One or more validation errors found |
+
+**Validation checks:**
+1. Required files exist (`pack.json`, `policy.json`, `signals.json`, `rubric.md`).
+2. `pack.json` has `name`, `version`, `description`; `name` matches directory.
+3. `policy.json` parses as `PolicySet` with `name == "pack:<dirname>"`.
+4. `signals.json` categories ⊆ `{regulated, pii, security, infrastructure, database}`; `path_patterns` is a list; `preset_name` present.
+5. `rubric.md` has ≥1 `## ` heading and ≥1 `- [ ]` checkbox.
+6. `gates.json` entries each have `id`, `description`, `command`.
+7. `evidence.json` `required_artifacts` each have `id`, `description`.
+
+**Output:**
+
+```
+[OK] phi-hipaa
+[OK] secure-coding-owasp
+All packs valid.
+
+# On error:
+[ERROR] my-pack/policy.json: PolicySet name 'pack:wrong' must be 'pack:my-pack'
+```
+
+---
+
+#### `baton packs list`
+
+List all packs with key metadata. Invalid packs are shown with `[INVALID]` prefix.
+
+```
+baton packs list [--dir DIR]
+```
+
+| Argument | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `--dir DIR` | No | cwd | Project root containing `.claude/` |
+
+**Output:**
+
+```
+NAME                      VERSION    DOMAIN               RISK       DESCRIPTION
+------------------------------------------------------------------------------------------
+phi-hipaa                 1.0.0      healthcare           HIGH       HIPAA PHI handling guardrails...
+secure-coding-owasp       1.0.0      security             HIGH       OWASP Top-10 secure coding guardrails...
+```
+
+**Related:** `baton classify --activate`, `baton policy-check`
+
+---
+
+### `baton comply-record`
+
+Claude Code **PostToolUse** and **Stop** hook: append a hash-chained entry to
+the compliance audit log.
+
+Reads a PostToolUse or Stop JSON payload from **stdin** and appends an entry
+via `ComplianceChainWriter` to `.claude/team-context/compliance-audit.jsonl`.
+Always exits 0 (fail-open); `BATON_COMPLIANCE_FAIL_CLOSED=1` exits 1 on
+write errors. Malformed stdin is silently ignored.
+
+```
+baton comply-record [--event-type TYPE] [--log PATH] [--cwd DIR]
+```
+
+| Argument | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `--event-type TYPE` | No | `hook_tool_use` | Event type label in the audit entry |
+| `--log PATH` | No | `.claude/team-context/compliance-audit.jsonl` | Audit log path |
+| `--cwd DIR` | No | cwd | Project root for log path resolution |
+
+**Event types:** `hook_tool_use` (PostToolUse), `session_stop` (Stop hooks).
+
+**Log entry fields:** `event_type`, `tool_name`, `file_paths`, `session_id`,
+`agent_name`, `timestamp`, `prev_hash`, `entry_hash`.
+
+**Environment variables:**
+
+| Variable | Effect |
+|----------|--------|
+| `BATON_COMPLIANCE_FAIL_CLOSED` | `1` → exit 1 on write errors |
+| `CLAUDE_AGENT_NAME` | Agent name recorded in the log entry |
+
+**Example (Stop hook configuration):**
+
+```json
+{"hooks": [{"type": "command",
+            "command": "baton comply-record --event-type session_stop",
+            "timeout": 5}]}
+```
+
+**Related:** `baton compliance verify`, `baton compliance rechain`, `baton policy-check`
+
+---
+
 ### `baton compliance`
 
 Show compliance reports generated during task execution.
@@ -1067,6 +1320,105 @@ Language:  python
 Framework: fastapi
 Signals:   pyproject.toml, requirements.txt
 ```
+
+---
+
+### `baton evidence`
+
+Build and verify per-task evidence bundles (007 Phase H).  A bundle is a
+self-contained directory (or `.tar.gz`) of verifiable artifacts that prove
+what ran, what was approved, and that nothing was tampered with after the
+fact.
+
+#### `baton evidence bundle`
+
+```
+baton evidence bundle <task_id>
+                      [--output DIR]
+                      [--sign]
+                      [--tar]
+                      [--db PATH]
+                      [--compliance-log PATH]
+                      [--packs-dir PATH]
+                      [--soul-db PATH]
+```
+
+| Argument | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `<task_id>` | Yes | -- | Task ID to bundle evidence for |
+| `--output DIR` | No | `.claude/team-context/` | Root directory; bundle lands at `<DIR>/evidence/<task-id>/` |
+| `--sign` | No | false | Sign the manifest with a soul key (requires `BATON_SOULS_ENABLED=1`) |
+| `--tar` | No | false | Package bundle as `.tar.gz` and remove the directory |
+| `--db PATH` | No | `.claude/team-context/baton.db` | Override baton.db location |
+| `--compliance-log PATH` | No | auto | Override compliance-audit.jsonl path |
+| `--packs-dir PATH` | No | `.claude/packs/` | Override assurance packs directory |
+| `--soul-db PATH` | No | `~/.baton/central.db` | Override central.db for soul signing |
+
+**Output:** `Evidence bundle written to: <path>`
+
+**Bundle contents:**
+
+| File | What it proves |
+|------|---------------|
+| `manifest.json` | Inventory of all files with SHA-256 hashes; optional soul signature |
+| `aibom.json` | AI Bill of Materials — models, agents, gates, knowledge |
+| `aibom.md` | Human-readable AIBOM |
+| `compliance-segment.jsonl` | Task-scoped compliance-audit entries (omitted if no log exists) |
+| `gates.json` | Full gate_results dump for this task |
+| `verdicts.json` | Auditor/reviewer step verdicts with extracted `AuditorVerdict` |
+| `approvals.json` | approval_results + pending approval request if present |
+| `packs.json` | Assurance packs + active-policy snapshot (omitted if none found) |
+
+**Example:**
+
+```bash
+baton evidence bundle task-abc123 --output /tmp/bundles --tar
+# → /tmp/bundles/evidence/task-abc123.tar.gz
+
+baton evidence bundle task-abc123 --sign
+# → .claude/team-context/evidence/task-abc123/ (signed manifest)
+```
+
+---
+
+#### `baton evidence verify`
+
+```
+baton evidence verify <path> [--strict]
+```
+
+| Argument | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `<path>` | Yes | -- | Path to bundle directory or `.tar.gz` |
+| `--strict` | No | false | Exit on the first failure (default: report all) |
+
+**Exit codes:**
+
+| Code | Meaning |
+|------|---------|
+| 0 | All checks passed (warnings are OK) |
+| 1 | One or more integrity failures |
+| 2 | Bundle is unusable (manifest missing or unparseable) |
+
+**Checks performed:**
+- `manifest.json` present and valid JSON
+- Per-file SHA-256 matches manifest
+- `compliance-segment.jsonl` internal chain consistency
+- AIBOM `chain_anchor` vs segment tail (WARNING on mismatch, not failure)
+- Soul signature verification when `soul_signature` is present
+
+**Example:**
+
+```bash
+# CI-runnable, no network or database needed
+baton evidence verify .claude/team-context/evidence/task-abc123/
+# → Bundle OK — all checks passed.
+
+baton evidence verify /tmp/bundles/task-abc123.tar.gz
+# → Bundle OK — all checks passed.
+```
+
+**Related:** `baton govern aibom`, `baton compliance`
 
 ---
 
@@ -1965,54 +2317,6 @@ baton serve --port 9000 --host 0.0.0.0 --token my-secret-token
 
 ---
 
-## Swarm Commands
-
-> **EXPERIMENTAL** — `baton swarm` requires `BATON_EXPERIMENTAL=swarm` to run.
-> The Wave 6.2 Part A dispatcher is a v1 stub: partition plans are real but
-> agent dispatch is **not yet wired** end-to-end. See bd-c925 / bd-2b9f for the
-> integration roadmap.
-
-### `baton swarm refactor DIRECTIVE_JSON`
-
-Partition a codebase into AST-independent chunks and (eventually) dispatch one
-Haiku agent per chunk to apply a refactor directive.
-
-**Requires:**
-- `BATON_EXPERIMENTAL=swarm` (stub gate, bd-18f6)
-- `BATON_SWARM_ENABLED=1` (feature gate)
-
-```bash
-# Opt in to the experimental stub
-export BATON_EXPERIMENTAL=swarm
-export BATON_SWARM_ENABLED=1
-
-# Preview without dispatching
-baton swarm refactor --dry-run '{"kind":"replace-import","old":"requests","new":"httpx"}'
-
-# Rename a symbol (interactive sign-off prompt)
-baton swarm refactor '{"kind":"rename-symbol","old":"mymod.OldName","new":"mymod.NewName"}'
-
-# CI mode (skip interactive prompt, preview still printed)
-baton swarm refactor --yes '{"kind":"replace-import","old":"requests","new":"httpx"}'
-```
-
-**Options:**
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `DIRECTIVE_JSON` | (required) | JSON directive: `kind` + directive fields |
-| `--max-agents N` | 100 | Max parallel chunk agents (cap: 100) |
-| `--language` | `python` | AST language (v1: python only) |
-| `--model` | `claude-haiku` | LLM tier for chunk agents |
-| `--codebase-root PATH` | `cwd` | Root of the project to refactor |
-| `--dry-run` | false | Print preview and exit, no dispatch |
-| `-y / --yes` | false | Skip interactive confirmation prompt |
-| `--require-approval-bead [BEAD_ID]` | — | Require a pre-filed approval bead |
-
-**Exit codes:** `2` = experimental flag not set; `1` = swarm disabled or gate failure.
-
----
-
 ## Common Workflows
 
 ### Full Orchestrated Task (Sequential)
@@ -2131,19 +2435,16 @@ in [references/baton-engine.md](../references/baton-engine.md#environment-variab
 |----------|---------|---------|
 | `BATON_TASK_ID` | Bind a shell session to a specific execution. Set after `baton execute start` to scope all subsequent commands. | auto-detected |
 | `BATON_DB_PATH` | Override the project `baton.db` location. CLI walks upward from cwd if unset. | discovered |
-| `BATON_APPROVAL_MODE` | PMO approval policy: `local` (self-approve) or `team` (different reviewer required). In `team` mode, `baton swarm` defaults `--require-approval-bead` ON. | `local` |
-| `BATON_RUN_TOKEN_CEILING` | Per-run cumulative spend cap (USD float). Read fresh on every check; restored on `baton execute resume`. Selfheal/speculator/immune respect it; main `Executor.dispatch()` only warns at HIGH/CRITICAL run start (bd-3f80). | unset |
-| `BATON_EXPERIMENTAL` | CSV opt-in for experimental subsystems. Required for `baton swarm` (`BATON_EXPERIMENTAL=swarm`). Exits with code 2 if unset. | unset |
-| `BATON_SWARM_ENABLED` | Required in addition to `BATON_EXPERIMENTAL=swarm` to dispatch a swarm refactor. | unset |
+| `BATON_APPROVAL_MODE` | PMO approval policy: `local` (self-approve) or `team` (different reviewer required). | `local` |
+| `BATON_RUN_TOKEN_CEILING` | Per-run cumulative spend cap (USD float). Read fresh on every check; restored on `baton execute resume`. Selfheal/immune respect it; main `Executor.dispatch()` only warns at HIGH/CRITICAL run start (bd-3f80). | unset |
 | `BATON_SOULS_ENABLED` | Wave 6.1 Part B persistent agent souls (signing + revocation). | `0` |
 | `BATON_BD_BACKEND` | ADR-13b WP-G bead backend. `bd` is the only supported value — SQLite fallback removed. Other values log a deprecation warning and `BdNotAvailable` is raised if `bd` is missing. | `bd` |
 | `BATON_BD_ENABLED` | Kept for backward compatibility; has no effect after WP-G — `bd` is always required. | `1` |
 | `BATON_BD_BIN` | `bd` binary path/name. | `bd` |
 | `BATON_BD_PREFIX` | Issue prefix for `bd init` (matches baton's `bd-<hash>` IDs). | `bd` |
-| `BATON_PREDICT_ENABLED` | Wave 6.2 Part C predictive computation watcher / classifier / dispatcher. | `0` |
 | `BATON_IMMUNE_ENABLED` | Immune-system monitoring loop. | `0` |
 | `BATON_EXEC_BEADS_ENABLED` | Wave 6.1 Part C executable beads. Sandbox is process-level only — see `references/baton-patterns.md` trust-boundary section before extending to external-origin input. | `0` |
-| `BATON_SELFHEAL_ENABLED` | Enable speculator/selfheal escalation on gate failure. Falsy values (`0`, `false`, `no`) are honoured and emit a `selfheal_suppressed` row to `compliance-audit.jsonl`. | `0` |
+| `BATON_GATE_RETRY` | Enable single gate-retry: on first gate failure, re-dispatch the failing step once with gate output appended to the prompt. Second failure is terminal. Writes `gate_retry_dispatched` or `gate_failed_terminal` to `compliance-audit.jsonl`. | `0` |
 | `BATON_WORKTREE_STALE_HOURS` | Worktree GC stale threshold in hours; legacy alias `BATON_WORKTREE_GC_HOURS`. GC runs on every `baton execute complete`. | `4` |
 | `BATON_API_TOKEN` | Bearer token for the FastAPI server (`baton serve`). CLI `--token` flag takes precedence. | unset |
 | `ANTHROPIC_API_KEY` | Required for AI risk classification and the Haiku planner classifier. | unset |
@@ -2175,7 +2476,7 @@ on every CLI call when driving concurrent executions from an agent context.
 |------|---------|
 | `0` | Success |
 | `1` | Error: missing prerequisites, validation failure, failed gate, or invalid arguments |
-| `2` | Experimental feature not opted in (e.g. `baton swarm` without `BATON_EXPERIMENTAL=swarm`) |
+| `2` | Experimental feature not opted in (feature flag required but not set) |
 
 Commands that exit with code 1:
 - `baton execute start` -- plan file not found

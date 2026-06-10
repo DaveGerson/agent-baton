@@ -242,7 +242,7 @@ state-handler singletons matched to `state.status` clusters:
 Engine maintains a `_state_handlers: dict[str, ExecutionPhaseStateProtocol]`
 map and resolves it via `_state_handler_for(status)`.  Unknown
 statuses fall back to `ExecutingPhaseState` with a `_log.warning` —
-deliberate forward-compat for daemon/swarm/future status keys
+deliberate forward-compat for daemon/future status keys
 (see `_state_handler_for` docstring, bd-7eac).
 
 State classes import only from `agent_baton.models.*` and
@@ -268,12 +268,12 @@ resolver dispatch table calls into:
   `BeadSelector`, populates worktree fields, applies path-enforcement.
 - `_approval_action()` builds approval actions, including
   policy-violation approvals.
-- `_feedback_action()`, `_build_gate_action()`, `_build_complete_action()`,
-  `_build_swarm_dispatch_action()` cover the remaining builders.
+- `_feedback_action()`, `_build_gate_action()`, `_build_complete_action()`
+  cover the remaining builders.
 
 These are single-responsibility-coherent slices that remain on the
 engine because they own real essential complexity (governance,
-prompt composition, knowledge resolution, swarm fan-out).  Further
+prompt composition, knowledge resolution).  Further
 extraction (`DispatchBuilder`, `StepResultRecorder`, `KnowledgeResolver`)
 is tracked as 005b-phase5-future discoveries — the post-005b engine
 size of ~6,900 LOC is the realistic shape, not the proposal's
@@ -640,20 +640,14 @@ opt-in until production data justifies enablement:
 | Wave | Module | Env flag | Default |
 |------|--------|----------|---------|
 | 5.1 Takeover | [`engine/takeover.py`](../../agent_baton/core/engine/takeover.py) | `BATON_TAKEOVER_ENABLED` | `1` (on) |
-| 5.2 Self-heal | [`engine/selfheal.py`](../../agent_baton/core/engine/selfheal.py) | `BATON_SELFHEAL_ENABLED` | `0` (off) |
-| 5.3 Speculate | [`engine/speculator.py`](../../agent_baton/core/engine/speculator.py) | `BATON_SPECULATE_ENABLED` | `0` (off) |
+| 5.D Gate-retry | [`engine/executor.py`](../../agent_baton/core/engine/executor.py) | `BATON_GATE_RETRY` | `0` (off) |
 
-All three reuse the worktree contract from §8. Each emits its own
-trace events (`takeover.started`, `selfheal_attempt`,
-`speculate.accepted/rejected`) so the closed-loop learning pipeline can
-score effectiveness.
+Takeover reuses the worktree contract from §8. Gate-retry is engine-internal: on first gate failure the engine re-dispatches the failing step once with the gate output appended to the prompt; second failure is terminal. Each emits its own compliance rows (`gate_retry_dispatched`, `gate_failed_terminal`, `takeover.started`) so the closed-loop learning pipeline can score effectiveness.
 
 CLI surfaces:
 
 - `baton execute takeover STEP_ID [--editor ...] [--shell] [--reason ...] [--no-rerun-gate]`
 - `baton execute resume [--abort]` (post-takeover)
-- `baton execute self-heal STEP_ID [--max-tier opus]` (manual escalation)
-- `baton execute speculate status|accept|reject|show [SPEC_ID]`
 
 ---
 
