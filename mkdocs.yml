@@ -118,6 +118,11 @@ nav:
       - Invariants: invariants.md
       - Terminology: terminology.md
       - Design Decisions: design-decisions.md
+      - Architecture (deep dives):
+          - High-Level Design: architecture/high-level-design.md
+          - Technical Design: architecture/technical-design.md
+          - Package Layout: architecture/package-layout.md
+          - State Machine: architecture/state-machine.md
   - Reference:
       - API Reference: api-reference.md
       - CLI Reference: cli-reference.md
@@ -127,6 +132,7 @@ nav:
       - Daemon Mode Evaluation: daemon-mode-evaluation.md
       - Pyright Diagnostics Triage: pyright-diagnostics-triage.md
       - Engine Bugs: baton-engine-bugs.md
+      - FinOps & Chargeback: finops-chargeback.md
   - Specifications:
       - Velocity Engine Spec: specs/velocity-engine-spec.md
       - Strategic Remediation Roadmap: specs/strategic-remediation-roadmap.md
