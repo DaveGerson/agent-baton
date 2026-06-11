@@ -172,6 +172,164 @@ class TestAgentAudit:
         assert flagged == {}
 
 
+class TestSpawnPromptFidelity:
+    """A1.a/A1.b/A1.c: spawn.md flattening, safety guards, size + approval."""
+
+    def _nested_plan(self) -> MachinePlan:
+        """A team whose lead carries a sub_team (flattened in spawn.md)."""
+        return MachinePlan(
+            task_id="t-nest", task_summary="nested team",
+            risk_level="MEDIUM",
+            phases=[PlanPhase(
+                phase_id=1, name="Build",
+                steps=[PlanStep(
+                    step_id="1.1", agent_name="team",
+                    task_description="lead + sub-team",
+                    team=[
+                        TeamMember(
+                            member_id="1.1.a", agent_name="architect",
+                            role="lead", task_description="coordinate",
+                            model="opus",
+                            sub_team=[
+                                TeamMember(
+                                    member_id="1.1.a.a",
+                                    agent_name="backend-engineer",
+                                    role="implementer",
+                                    task_description="impl sub", model="sonnet",
+                                ),
+                            ],
+                        ),
+                    ],
+                )],
+            )],
+        )
+
+    def test_sub_team_flattened_with_annotation_and_warning(
+        self, tmp_path: Path,
+    ) -> None:
+        plan = self._nested_plan()
+        ClaudeTeamsBackend().on_team_dispatched(
+            plan=plan, step=plan.phases[0].steps[0],
+            team_context_root=tmp_path,
+        )
+        text = (tmp_path / "teams" / "team-1.1" / "spawn.md").read_text(
+            encoding="utf-8",
+        )
+        # The nested member appears flat, annotated with its coordinating lead.
+        assert "1.1.a.a" in text
+        assert "sub-team of 1.1.a" in text
+        # Explicit flattening warning is present.
+        assert "Agent Teams cannot nest" in text
+
+    def test_safety_guard_warning_for_flagged_agent(
+        self, tmp_path: Path,
+    ) -> None:
+        # Lay down an agents/ dir next to the team-context root with a
+        # skills-declaring agent that appears in the team.
+        ctx = tmp_path / "team-context"
+        ctx.mkdir()
+        agents = tmp_path / "agents"
+        agents.mkdir()
+        (agents / "backend-engineer.md").write_text(
+            "---\nname: backend-engineer\nmodel: sonnet\nskills: db,migrate\n---\nbody\n",
+            encoding="utf-8",
+        )
+        plan = _plan_with_team()
+        ClaudeTeamsBackend().on_team_dispatched(
+            plan=plan, step=plan.phases[0].steps[0],
+            team_context_root=ctx,
+        )
+        text = (ctx / "teams" / "team-1.1" / "spawn.md").read_text(
+            encoding="utf-8",
+        )
+        assert "backend-engineer" in text
+        assert "NOT honored as a teammate" in text
+        assert "skills" in text
+
+    def test_oversize_team_emits_size_warning(self, tmp_path: Path) -> None:
+        members = [
+            TeamMember(
+                member_id=f"1.1.{chr(ord('a') + i)}",
+                agent_name="backend-engineer", role="implementer",
+                task_description=f"part {i}", model="sonnet",
+            )
+            for i in range(6)
+        ]
+        plan = MachinePlan(
+            task_id="t-big", task_summary="big team",
+            phases=[PlanPhase(
+                phase_id=1, name="Build",
+                steps=[PlanStep(step_id="1.1", agent_name="team",
+                                task_description="lots", team=members)],
+            )],
+        )
+        ClaudeTeamsBackend().on_team_dispatched(
+            plan=plan, step=plan.phases[0].steps[0],
+            team_context_root=tmp_path,
+        )
+        text = (tmp_path / "teams" / "team-1.1" / "spawn.md").read_text(
+            encoding="utf-8",
+        )
+        assert "6 members" in text
+        assert "≤5" in text or "<=5" in text or "5 teammates" in text
+
+    def test_plan_approval_instruction_when_reviewer_present(
+        self, tmp_path: Path,
+    ) -> None:
+        # _plan_with_team includes a code-reviewer (role="reviewer").
+        plan = _plan_with_team()
+        ClaudeTeamsBackend().on_team_dispatched(
+            plan=plan, step=plan.phases[0].steps[0],
+            team_context_root=tmp_path,
+        )
+        text = (tmp_path / "teams" / "team-1.1" / "spawn.md").read_text(
+            encoding="utf-8",
+        )
+        assert "plan approval" in text.lower()
+        assert "before" in text.lower()
+
+    def test_plan_approval_instruction_when_high_risk(
+        self, tmp_path: Path,
+    ) -> None:
+        plan = MachinePlan(
+            task_id="t-hr", task_summary="high risk team",
+            risk_level="HIGH",
+            phases=[PlanPhase(
+                phase_id=1, name="Build",
+                steps=[PlanStep(
+                    step_id="1.1", agent_name="team",
+                    task_description="impl",
+                    team=[TeamMember(
+                        member_id="1.1.a", agent_name="backend-engineer",
+                        role="implementer", task_description="impl",
+                        model="sonnet",
+                    )],
+                )],
+            )],
+        )
+        ClaudeTeamsBackend().on_team_dispatched(
+            plan=plan, step=plan.phases[0].steps[0],
+            team_context_root=tmp_path,
+        )
+        text = (tmp_path / "teams" / "team-1.1" / "spawn.md").read_text(
+            encoding="utf-8",
+        )
+        assert "plan approval" in text.lower()
+
+    def test_spawn_installs_taskcompleted_hook(self, tmp_path: Path) -> None:
+        plan = _plan_with_team()
+        ClaudeTeamsBackend().on_team_dispatched(
+            plan=plan, step=plan.phases[0].steps[0],
+            team_context_root=tmp_path,
+        )
+        text = (tmp_path / "teams" / "team-1.1" / "spawn.md").read_text(
+            encoding="utf-8",
+        )
+        assert "TaskCompleted" in text
+        assert "baton execute team-record" in text
+        assert "TeammateIdle" in text
+
+
 class TestProtocolConformance:
     """Both backends implement the runtime-checkable protocol."""
 

@@ -1724,6 +1724,11 @@ loop:
         action = baton execute next
 
     elif action.type == TEAM_DISPATCH:
+        # NOTE: TEAM_DISPATCH is a *conceptual* label used in this pseudocode.
+        # On the wire the engine emits `ACTION: DISPATCH` annotated with
+        # `Team-Step: yes`, a `Parent-Step:` id, a `Record-With:` hint
+        # (team-record vs record), and a `parallel_actions` list carrying the
+        # per-member assignments. There is no literal `ACTION: TEAM_DISPATCH`.
         # Engine returned multiple coordinated members under one step
         for member in action.members:
             baton execute dispatched --step-id {step_id} --agent {member.agent}
@@ -2254,9 +2259,19 @@ or into phases not yet started.
 ## Team Steps
 
 A team step is a plan step that coordinates multiple agents under one
-logical step ID.  The engine emits a TEAM_DISPATCH action (instead of
-DISPATCH) when a step has two or more sub-members, each with their own
-agent assignment.
+logical step ID.
+
+> **Wire-protocol note.** `TEAM_DISPATCH` is a *conceptual* label used
+> throughout this document. The wire protocol does **not** emit a literal
+> `ACTION: TEAM_DISPATCH`. Instead the engine emits `ACTION: DISPATCH`
+> annotated with `Team-Step: yes`, a `Parent-Step:` id, a `Record-With:`
+> hint (`team-record` rather than `record`), and a `parallel_actions` list
+> carrying the per-member assignments. Orchestrators key off the
+> `Team-Step` / `parallel_actions` annotations, not a distinct action type.
+
+The engine surfaces the team-step annotations (instead of a plain DISPATCH)
+when a step has two or more sub-members, each with their own agent
+assignment.
 
 **Member IDs** follow the pattern `{step_id}.{letter}`, e.g. `2.1.a`,
 `2.1.b`.  The parent step ID is `2.1`.

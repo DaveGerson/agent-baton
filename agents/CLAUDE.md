@@ -46,25 +46,36 @@ See [../docs/agent-roster.md](../docs/agent-roster.md) for the human-readable ro
 
 ## Teammate-safety: `skills` and `mcpServers` frontmatter (A1.e)
 
-Claude Code's experimental Agent Teams feature does **NOT** honor the
-`skills:` or `mcpServers:` frontmatter fields when a subagent definition is
-used as a teammate. From the [Agent Teams docs](https://code.claude.com/docs/en/agent-teams):
+Claude Code's Agent Teams feature does **NOT** honor the `skills:` or
+`mcpServers:` frontmatter fields when a subagent definition is used as a
+teammate. From the [Agent Teams docs](https://code.claude.com/docs/en/agent-teams):
 
 > The `skills` and `mcpServers` frontmatter fields in a subagent definition
 > are not applied when that definition runs as a teammate. Teammates load
 > skills and MCP servers from your project and user settings, the same as a
 > regular session.
 
-If `BATON_TEAMS_BACKEND=claude-teams` is in use and an agent here depends on
-`skills` or `mcpServers` frontmatter for correctness, it CANNOT be used as a
-Claude-Teams teammate without a wrapper that re-injects the missing context
-via the spawn prompt.
+This is **enforced at dispatch time**, not just documented. When
+`BATON_TEAMS_BACKEND=claude-teams` is active, `ClaudeTeamsBackend` audits
+every agent in the team step (and any flattened sub-team members) and renders
+a per-agent warning block into the generated `spawn.md`:
 
-A linter helper lives in `agent_baton/core/engine/team_backends.py`:
+> WARNING: agent `X` declares skills/mcpServers — NOT honored as a teammate;
+> capabilities will be missing.
+
+The backend **degrades loudly, never blocks**: the team still dispatches, but
+the lead is told to re-inject the missing context into that teammate's prompt,
+or to run the team under the `worktree` backend (which honors full
+frontmatter). The same audit warns when sub-teams are flattened (Agent Teams
+cannot nest) and when a team exceeds the recommended ≤5 members.
+
+The audit helper that powers this lives in
+`agent_baton/core/engine/team_backends.py`:
 
 ```python
 from agent_baton.core.engine.team_backends import audit_agents_for_teammate_safety
 audit_agents_for_teammate_safety(Path("agents/"))  # → {agent_name: ["skills", "mcpServers"]}
 ```
 
-Run this when adding a new agent that you intend to be usable as a teammate.
+Run it when adding a new agent you intend to use as a teammate, so you know
+up front whether it needs context re-injection under `claude-teams`.

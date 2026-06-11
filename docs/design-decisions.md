@@ -1259,10 +1259,21 @@ completion-condition primitive and the experimental Agent Teams feature
 autonomous work. baton already has the substrate for parallel team
 dispatch (`TEAM_DISPATCH` is wired end-to-end) and for plan amendment
 (`amend_plan`); G1 reuses both rather than inventing a new
-`ActionType.GOAL`. A1 is held behind a flag because Claude Code's
-Agent Teams feature has hard limitations that conflict with baton's
-invariants — no in-process resume, one team at a time, no nested
-teams, `skills`/`mcpServers` frontmatter not honored on teammates.
+`ActionType.GOAL`. A1 ships **two supported backends** selected by
+`BATON_TEAMS_BACKEND`: `worktree` (default) and `claude-teams`
+(opt-in). `claude-teams` is opt-in rather than experimental — its
+limitations were re-verified against the live Agent Teams docs
+(June 2026) and are real but bounded, so baton supports the backend
+with those constraints documented rather than hiding it behind an
+"experimental" label. The constraints — no in-process resume, one
+team at a time, no nested teams, `skills`/`mcpServers` frontmatter not
+honored on teammates — are surfaced as loud, degrade-don't-block
+warnings in the generated spawn prompt (sub-teams flattened with an
+annotation, per-agent capability warnings, team-size guidance) and as
+a planner resumability warning for `long-running` plans. The
+`worktree` backend remains the default precisely because it preserves
+the invariants `claude-teams` cannot: isolation, resumability,
+nesting, and full agent frontmatter.
 A2's mailbox model (precedent: gastown) captures the coordination
 patterns from Agent Teams without inheriting those constraints.
 

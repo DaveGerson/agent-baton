@@ -1,8 +1,20 @@
 # Agent Teams + `/goal` integration — design
 
-**Status:** Draft
+**Status:** Accepted
 **Branch:** `claude/add-teamcreate-goal-support-YDQZ8`
 **Drives changes in:** `agent_baton/core/engine/`, `agent_baton/core/orchestration/`, `agent_baton/models/`, `agent_baton/cli/commands/`, `agent_baton/api/`, `pmo-ui/`, `agents/`
+
+> **Status update (verified 2026-06-11).** The Agent Teams limitations below
+> were re-checked against the live Claude Code Agent Teams docs and confirmed
+> still accurate: no in-process resume, one team at a time, no nested teams,
+> permissions fixed at spawn, `skills`/`mcpServers` subagent frontmatter not
+> honored on teammates. With those constraints surfaced as loud,
+> degrade-don't-block warnings in the generated `spawn.md` (sub-team
+> flattening annotation, per-agent capability warnings, ≤5-member size
+> guidance) and a planner resumability warning, the `claude-teams` backend is
+> **promoted from experimental to supported (opt-in)**. `worktree` remains the
+> default. Public framing lives in `docs/engine-and-runtime.md` §18 and
+> `docs/design-decisions.md` (A1).
 
 ## Context
 

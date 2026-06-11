@@ -412,6 +412,56 @@ In a Claude Code session, ask the `orchestrator` agent to take over. It uses the
 
 ---
 
+## 14. Teams of specialists
+
+**Goal**: Run several specialists on one step as a coordinated team, instead of
+sequential single-agent steps.
+
+**When to use a team step**
+
+- The work splits cleanly into **disjoint file scopes** that can proceed in
+  parallel (e.g. backend + frontend + tests for one feature).
+- A step needs **multiple independent review lenses** at once (correctness +
+  security + spec fidelity).
+- A lead must **coordinate** sub-workers and merge their outputs.
+
+A team step is a single plan step with `step.team` populated (`TeamMember`
+entries). The engine surfaces it as `ACTION: DISPATCH` annotated with
+`Team-Step: yes`, a `Parent-Step:` id, a `Record-With: team-record` hint, and
+a `parallel_actions` list — there is no separate `TEAM_DISPATCH` action on the
+wire. Spawn each member concurrently, then record each with
+`baton execute team-record` (not `record`); the parent step auto-completes
+when all members are recorded.
+
+**Review fan-out (automatic)**
+
+For HIGH/CRITICAL tasks whose roster carries **two or more distinct
+reviewer-class agents** (e.g. `code-reviewer` + `security-reviewer`), the
+planner builds the terminal Review phase as a team step: one reviewer per
+concern, in parallel, merged with a `concatenate` synthesis. A single reviewer
+keeps the ordinary single-agent Review step. `auditor` is never folded into the
+review fan-out — it owns its own Audit phase.
+
+**Backend selection** (`BATON_TEAMS_BACKEND`)
+
+- **`worktree`** (default) — parallel worktree-isolated dispatch. Choose this
+  when you need resumability, nested teams, or agents whose `skills`/
+  `mcpServers` frontmatter is load-bearing. Concurrent `Agent` calls touching
+  tracked files MUST use `isolation: "worktree"`.
+- **`claude-teams`** (opt-in, needs `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`) —
+  native Agent Teams UX: inter-teammate messaging, a shared task list, and
+  lead plan-approval before teammates write code. The engine writes a
+  `spawn.md` the lead consumes. Constraints (no resume, one team at a time, no
+  nesting, frontmatter not honored on teammates) are surfaced as loud warnings
+  in that `spawn.md`; keep teams to 3–5 members. Prefer this when the native
+  team coordination UX is worth ~7× the token cost.
+
+Full comparison: [`engine-and-runtime.md`](engine-and-runtime.md) §18.
+
+**See also**: [Recipe 4](#4-cross-domain-refactors), [Recipe 3](#3-run-a-high-risk-task-with-auditor-gates), [`baton-engine.md`](../references/baton-engine.md).
+
+---
+
 ## Token Reduction SOPs
 
 These rules cut per-session token spend by 60-90%. Apply by default.

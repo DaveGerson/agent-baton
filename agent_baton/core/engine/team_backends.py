@@ -17,6 +17,12 @@ Two implementations:
   call back into baton via ``baton execute team-record`` to keep the
   baton mailbox + executor state in sync.
 
+Both backends are **supported**. They trade off different properties —
+worktree wins on isolation, resumability, nesting, and frontmatter
+fidelity; claude-teams wins on native Agent Teams UX (inter-teammate
+messaging, shared task list, lead plan-approval). Pick per task; the
+comparison table lives in ``docs/engine-and-runtime.md`` §18.
+
 Known limitations of the claude-teams backend (Anthropic-side, not
 baton-side):
 
@@ -129,8 +135,30 @@ class WorktreeTeamBackend:
 
 
 # ---------------------------------------------------------------------------
-# Claude-teams backend (experimental, opt-in)
+# Claude-teams backend (supported, opt-in)
 # ---------------------------------------------------------------------------
+
+# Official Agent Teams guidance: keep teams small (≤5 members) so the lead
+# can coordinate effectively. Larger teams should be split.
+_MAX_TEAM_MEMBERS = 5
+
+
+def _flatten_members(team: list["TeamMember"]) -> list["TeamMember"]:
+    """Depth-first flatten of a team roster, descending into ``sub_team``.
+
+    Returns every member — top-level and nested — in a single flat list.
+    Agent Teams cannot nest, so the claude-teams backend flattens sub-teams
+    into the flat roster (annotating each with its coordinating lead in the
+    spawn prompt).  Used by the frontmatter safety audit so nested teammates
+    are flagged too.
+    """
+    flat: list["TeamMember"] = []
+    for member in team:
+        flat.append(member)
+        if member.sub_team:
+            flat.extend(_flatten_members(member.sub_team))
+    return flat
+
 
 class ClaudeTeamsBackend:
     """Delegate to Claude Code's experimental Agent Teams feature.
@@ -156,11 +184,42 @@ class ClaudeTeamsBackend:
         team_context_root: Path,
     ) -> None:
         try:
+            # --- Degrade-loudly warnings emitted at dispatch time ---------
+            # 1b. Frontmatter safety audit: agents declaring skills/mcpServers
+            #     are not honored as teammates. Log + render per-agent blocks.
+            safety_flags = self._audit_step_agents(step, team_context_root)
+            for agent_name, fields in safety_flags.items():
+                _log.warning(
+                    "ClaudeTeamsBackend: agent %r in team-%s declares %s "
+                    "frontmatter — NOT honored when used as a teammate; "
+                    "those capabilities will be missing.",
+                    agent_name, step.step_id, "+".join(fields),
+                )
+
+            # 1a. Nested-team degradation: Agent Teams cannot nest. Warn when
+            #     any member carries a sub_team (flattened in the spawn.md).
+            nested_leads = [m.member_id for m in step.team if m.sub_team]
+            if nested_leads:
+                _log.warning(
+                    "ClaudeTeamsBackend: team-%s has nested sub-teams under "
+                    "lead(s) %s — Agent Teams cannot nest; sub-team structure "
+                    "is FLATTENED in spawn.md. Use the worktree backend to "
+                    "preserve nesting.",
+                    step.step_id, nested_leads,
+                )
+
+            if len(step.team) > _MAX_TEAM_MEMBERS:
+                _log.warning(
+                    "ClaudeTeamsBackend: team-%s has %d members (> %d "
+                    "recommended) — consider splitting into smaller teams.",
+                    step.step_id, len(step.team), _MAX_TEAM_MEMBERS,
+                )
+
             team_dir = team_context_root / "teams" / f"team-{step.step_id}"
             team_dir.mkdir(parents=True, exist_ok=True)
             spawn = team_dir / "spawn.md"
             spawn.write_text(
-                self._render_spawn_prompt(plan, step),
+                self._render_spawn_prompt(plan, step, safety_flags),
                 encoding="utf-8",
             )
             _log.info(
@@ -173,6 +232,35 @@ class ClaudeTeamsBackend:
                 "step %s (non-fatal): %s",
                 step.step_id, exc,
             )
+
+    @staticmethod
+    def _audit_step_agents(
+        step: PlanStep, team_context_root: Path,
+    ) -> dict[str, list[str]]:
+        """Return ``{agent_name: [fields]}`` for team agents whose frontmatter
+        declares ``skills``/``mcpServers`` (not honored as teammates).
+
+        Resolves the agents directory relative to the team-context root
+        (``.claude/team-context`` → ``.claude/agents``). Falls back to a
+        repo-level ``agents/`` dir. Best-effort: returns ``{}`` on any error,
+        and only flags agents that actually appear in this step's team.
+        """
+        team_agents = {m.agent_name for m in _flatten_members(step.team)}
+        if not team_agents:
+            return {}
+        candidate_dirs = [
+            team_context_root.parent / "agents",   # .claude/agents
+            team_context_root.parent.parent / "agents",  # repo agents/
+        ]
+        for agents_dir in candidate_dirs:
+            try:
+                flagged = audit_agents_for_teammate_safety(agents_dir)
+            except Exception:  # noqa: BLE001 — degrade loudly, never throw
+                continue
+            scoped = {a: f for a, f in flagged.items() if a in team_agents}
+            if scoped:
+                return scoped
+        return {}
 
     def hook_record_command(
         self,
@@ -189,30 +277,148 @@ class ClaudeTeamsBackend:
             f"--hook-source claude-teams"
         )
 
-    def _render_spawn_prompt(self, plan: MachinePlan, step: PlanStep) -> str:
-        member_lines = "\n".join(
-            f"- {m.member_id}: {m.agent_name} ({m.role}) — "
-            f"{m.task_description[:200]}"
-            for m in step.team
-        ) or "- (no team members)"
+    def _render_spawn_prompt(
+        self,
+        plan: MachinePlan,
+        step: PlanStep,
+        safety_flags: dict[str, list[str]] | None = None,
+    ) -> str:
+        safety_flags = safety_flags or {}
+        risk = (plan.risk_level or "").upper()
+        high_risk = risk in ("HIGH", "CRITICAL")
+
+        # --- Member roster (flattened) -----------------------------------
+        # Agent Teams cannot nest, so any sub_team a lead carries is
+        # flattened into the flat member list with an annotation pointing
+        # back at the coordinating lead.
+        member_lines: list[str] = []
+        has_nested = False
+        for m in step.team:
+            member_lines.append(
+                f"- **{m.member_id}** — spawn subagent `{m.agent_name}` "
+                f"(model: `{m.model}`, role: {m.role})\n"
+                f"  - File-scope contract / task: {m.task_description[:300]}"
+            )
+            for sub in m.sub_team:
+                has_nested = True
+                member_lines.append(
+                    f"- **{sub.member_id}** — spawn subagent `{sub.agent_name}` "
+                    f"(model: `{sub.model}`, role: {sub.role}) "
+                    f"_(sub-team of {m.member_id}, coordinated by that lead)_\n"
+                    f"  - File-scope contract / task: {sub.task_description[:300]}"
+                )
+        members_block = "\n".join(member_lines) or "- (no team members)"
+
+        # --- Per-agent safety warning blocks -----------------------------
+        safety_block = ""
+        if safety_flags:
+            lines = [
+                f"- WARNING: agent `{agent}` declares "
+                f"{'/'.join(fields)} — NOT honored as a teammate; "
+                f"those capabilities will be missing. Re-inject the needed "
+                f"context into that teammate's prompt, or run this team under "
+                f"the worktree backend instead."
+                for agent, fields in sorted(safety_flags.items())
+            ]
+            safety_block = (
+                "\n## ⚠ Teammate capability warnings\n\n"
+                + "\n".join(lines)
+                + "\n"
+            )
+
+        # --- Nested-team flattening warning ------------------------------
+        nested_block = ""
+        if has_nested:
+            nested_block = (
+                "\n> WARNING: Native Agent Teams cannot nest — sub-team "
+                "structure is flattened here; the worktree backend preserves "
+                "nesting. Each sub-team member is listed flat above with its "
+                "coordinating lead noted in parentheses.\n"
+            )
+
+        # --- Team-size guidance ------------------------------------------
+        size_block = ""
+        if len(step.team) > _MAX_TEAM_MEMBERS:
+            size_block = (
+                f"\n> NOTE: this team has {len(step.team)} members. Official "
+                f"guidance is ≤{_MAX_TEAM_MEMBERS} teammates per lead so "
+                f"coordination stays manageable. Consider splitting this into "
+                f"smaller sub-steps.\n"
+            )
+
+        # --- Plan-approval requirement -----------------------------------
+        has_reviewer = any(m.role == "reviewer" for m in step.team)
+        approval_block = ""
+        if has_reviewer or high_risk:
+            why = "a reviewer-role member is present" if has_reviewer else (
+                f"plan risk is {risk}"
+            )
+            approval_block = (
+                "\n## Teammate plan approval (REQUIRED)\n\n"
+                f"Because {why}, the lead MUST require each implementing "
+                "teammate to submit its plan and obtain lead approval BEFORE "
+                "writing any code (baton's mailbox plan-approval flow / Agent "
+                "Teams shared task list). Record each approval decision as a "
+                "note via:\n\n"
+                "```bash\n"
+                "baton execute team-record --task-id "
+                f"{plan.task_id} --step-id {step.step_id} "
+                "--member-id <MEMBER_ID> --status complete "
+                "--outcome \"plan approved by lead: <summary>\"\n"
+                "```\n"
+            )
+
+        hook_cmd = self.hook_record_command(
+            task_id=plan.task_id, step_id=step.step_id, member_id="<MEMBER_ID>",
+        )
+
         return (
             "# Claude Code Agent Team spawn prompt\n\n"
             f"Task: {plan.task_summary}\n"
-            f"Team step: {step.step_id} — {step.task_description}\n\n"
-            "Create an agent team with the following members. Use the "
-            "subagent definitions in `.claude/agents/` by name for each "
-            "teammate.\n\n"
-            f"{member_lines}\n\n"
-            "## After spawn\n\n"
-            "Wire Claude Code's `TaskCompleted` hook for this team to run:\n\n"
-            "```bash\n"
-            f"{self.hook_record_command(task_id=plan.task_id, step_id=step.step_id, member_id='<MEMBER_ID>')}\n"
+            f"Team step: {step.step_id} — {step.task_description}\n"
+            f"Plan risk: {risk or 'UNSET'}\n\n"
+            "Requires `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`.\n\n"
+            "## Spawn instructions\n\n"
+            "Create an agent team. Spawn **each member by its subagent "
+            "definition name** (from `.claude/agents/`) with the model shown "
+            "— Agent Teams honors each teammate's tools and model from its "
+            "frontmatter. Partition files explicitly: each member's task "
+            "below is its file-scope contract; do not let two teammates write "
+            "the same files.\n\n"
+            f"{members_block}\n"
+            f"{nested_block}"
+            f"{size_block}"
+            f"{safety_block}"
+            f"{approval_block}"
+            "\n## After spawn — wire result callbacks\n\n"
+            "Install this `TaskCompleted` hook in `.claude/settings.json` so "
+            "teammate results flow back into baton automatically (substitute "
+            "the finishing teammate's `<MEMBER_ID>`):\n\n"
+            "```json\n"
+            "{\n"
+            '  "hooks": {\n'
+            '    "TaskCompleted": [\n'
+            "      {\n"
+            '        "hooks": [\n'
+            "          {\n"
+            '            "type": "command",\n'
+            f'            "command": "{hook_cmd}"\n'
+            "          }\n"
+            "        ]\n"
+            "      }\n"
+            "    ]\n"
+            "  }\n"
+            "}\n"
             "```\n\n"
+            "Hint: a `TeammateIdle` hook can nudge idle teammates to pick up "
+            "the next shared-task-list item or report blockers to the lead.\n\n"
             "## Known limitations of this backend\n\n"
-            "- No in-process resumption — `/resume` cannot revive teammates.\n"
+            "- No in-process resumption — `/resume` cannot revive teammates "
+            "(`baton execute resume` cannot revive an in-flight team).\n"
             "- One team at a time; clean up before another team step.\n"
-            "- No nested teams.\n"
-            "- Subagent `skills` / `mcpServers` frontmatter is NOT honored.\n"
+            "- No nested teams (sub-teams are flattened above).\n"
+            "- Subagent `skills` / `mcpServers` frontmatter is NOT honored on "
+            "teammates.\n"
         )
 
 

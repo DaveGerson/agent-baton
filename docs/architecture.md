@@ -152,10 +152,10 @@ Steps within a phase are smaller units: a DISPATCH (one agent), a GATE (one chec
 
 ## Team execution: pluggable backend
 
-A team step (`step.team` non-empty) is dispatched through a `TeamBackend` strategy selected by `BATON_TEAMS_BACKEND`:
+A team step (`step.team` non-empty) is dispatched through a `TeamBackend` strategy selected by `BATON_TEAMS_BACKEND`. Both backends are **supported**; they trade off different properties, so pick per task:
 
-- **`worktree`** (default) — the existing parallel dispatch under git worktree isolation. Fully resumable via `baton execute resume`.
-- **`claude-teams`** (experimental, opt-in) — writes a spawn-prompt artifact directing an outer Claude Code session to create an Agent Team via `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`. Carries Anthropic-side limitations (no in-process resume, one team at a time, no nested teams, `skills`/`mcpServers` frontmatter not honored on teammates); the planner emits a warning when these constraints conflict with the chosen plan shape.
+- **`worktree`** (default) — parallel dispatch under git worktree isolation. Fully resumable via `baton execute resume`, preserves nested teams, and honors full agent frontmatter (`skills`/`mcpServers`).
+- **`claude-teams`** (opt-in) — writes a spawn-prompt artifact directing an outer Claude Code session to create a native Agent Team via `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`. Wins on native Agent Teams UX (inter-teammate messaging, shared task list, lead plan-approval). Carries Anthropic-side constraints (no in-process resume, one team at a time, no nested teams, `skills`/`mcpServers` frontmatter not honored on teammates); the spawn prompt degrades loudly on each, and the planner emits a warning when these constraints conflict with the chosen plan shape.
 
 In both backends, a per-team mailbox at `.claude/team-context/mailbox/team-{step_id}.jsonl` captures Agent Teams' hook taxonomy (`task_created`, `task_completed`, `task_failed`, `teammate_idle`, `plan_approval_*`). The mailbox is JSONL, append-only, retained past team teardown for audit. See [`engine-and-runtime.md`](engine-and-runtime.md) §18 and ADR-24 in [`design-decisions.md`](design-decisions.md).
 
