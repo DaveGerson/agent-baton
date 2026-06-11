@@ -128,6 +128,41 @@ in a spillover file not captured in the bundle.
 
 ---
 
+## Signed verdicts
+
+When `BATON_SOULS_ENABLED=1` and the reviewer agent produced a bead that
+carries a soul signature (see `models/bead.py` — `signed_by`/`signature`
+fields), the corresponding verdict row in `verdicts.json` is augmented with:
+
+```json
+{
+  "soul_signed_by": "auditor_test_domain_abc",
+  "soul_signature": "ed25519:BASE64...",
+  "signature_scheme": "ed25519-bead"
+}
+```
+
+`soul_signed_by` is the `soul_id` from the `SoulRegistry`.
+`soul_signature` is the raw bead signature (same value written into the
+bead's `signature` field).  `signature_scheme: "ed25519-bead"` marks this
+as a bead-carried ed25519 signature rather than a direct manifest signature.
+
+The signature is **best-effort**: if the `bd` bead store is unavailable or
+returns no signed bead for that step, the soul fields are simply omitted.
+The manifest SHA-256 check independently covers file-level tamper detection.
+
+`verify_bundle` checks these fields when present:
+
+- Looks up the signer soul in the local `SoulRegistry`.
+- Confirms the soul is active and not revoked.
+- Emits a `WARNING:` (non-fatal) if the registry is unavailable.
+- Reports a failure if the soul is revoked or not found.
+
+To enable signed verdicts, ensure `BATON_SOULS_ENABLED=1` and that agents
+are dispatched via the soul-aware runner.
+
+---
+
 ## Reading approvals.json
 
 ```json

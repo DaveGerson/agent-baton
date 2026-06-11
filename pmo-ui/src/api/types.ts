@@ -572,6 +572,12 @@ export type SpecQueueStatus =
   | 'bounced'
   | 'fired';
 
+export interface SpecQualityReport {
+  score: number;
+  missing: string[];
+  notes: string[];
+}
+
 export interface SpecDraftEnrichment {
   risk_level: string;
   guardrail_preset: string;
@@ -590,6 +596,7 @@ export interface SpecDraftEnrichment {
     est_usd: number;
   }>;
   enriched_at: string;
+  spec_quality: SpecQualityReport | null;
 }
 
 export interface SpecDraftReview {

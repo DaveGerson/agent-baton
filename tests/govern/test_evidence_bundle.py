@@ -1,6 +1,6 @@
 """Tests for 007 Phase H -- Evidence Bundle (agent-baton-evidence/1.0).
 
-8 spec cases:
+11 spec cases:
   1. happy_path    -- all files, hashes, verdict APPROVE, 2 approvals
   2. missing_task  -- raises ValueError
   3. absent_packs  -- no packs.json key
@@ -9,6 +9,9 @@
   6. verify_tamper_chain -- catches tampered chain line
   7. verify_missing_manifest -- exit 2
   8. signed_roundtrip -- mint auditor soul; verify passes; corrupt -> fails
+  9. soul_verdict_fields_present -- BATON_SOULS_ENABLED=1 + signed bead → verdicts carry soul fields
+ 10. soul_verdict_verify_passes  -- verify_bundle passes when soul field valid
+ 11. soul_verdict_flag_off       -- BATON_SOULS_ENABLED=0 → no soul fields, verify passes
 """
 from __future__ import annotations
 
@@ -492,3 +495,166 @@ def test_signed_roundtrip(
     assert not ok2
     assert exit_code2 == 1
     assert any("signature" in e.lower() or "FAILED" in e for e in errors2)
+
+
+# ---------------------------------------------------------------------------
+# 9. Soul-signed verdicts — soul fields flow into verdicts.json
+# ---------------------------------------------------------------------------
+
+
+class _MockBeadStore:
+    """Minimal fake bead store that returns a pre-built signed bead."""
+
+    def __init__(self, bead) -> None:  # type: ignore[type-arg]
+        self._bead = bead
+
+    def query(self, *, task_id=None, agent_name=None, limit=100, **_kw):
+        from agent_baton.models.bead import Bead
+        b: Bead = self._bead
+        if task_id and b.task_id != task_id:
+            return []
+        if agent_name and b.agent_name != agent_name:
+            return []
+        return [b]
+
+
+def _make_signed_bead(soul, task_id: str, step_id: str, agent_name: str):
+    """Build a Bead signed with *soul*."""
+    from agent_baton.models.bead import Bead
+
+    content = f"Review complete for {task_id}/{step_id}"
+    signature = soul.sign(content.encode("utf-8"))
+    return Bead(
+        bead_id="bd-test01",
+        task_id=task_id,
+        step_id=step_id,
+        agent_name=agent_name,
+        bead_type="decision",
+        content=content,
+        signed_by=soul.soul_id,
+        signature=signature,
+    )
+
+
+def test_soul_verdict_fields_present(
+    tmp_path: Path, db_path: Path, compliance_log_3entries: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When BATON_SOULS_ENABLED=1 and a signed bead exists, verdicts.json carries soul fields."""
+    monkeypatch.setenv("BATON_SOULS_ENABLED", "1")
+
+    # Mint a soul using a local tmp registry.
+    central_db = tmp_path / "central.db"
+    souls_dir = tmp_path / "souls"
+    souls_dir.mkdir()
+    from agent_baton.core.engine.soul_registry import SoulRegistry
+    registry = SoulRegistry(central_db_path=central_db, souls_dir=souls_dir)
+    soul = registry.mint("auditor", "test-domain")
+
+    # Build a signed bead for the auditor step (step_id "1.2", agent "auditor").
+    signed_bead = _make_signed_bead(soul, task_id=TASK_ID, step_id="1.2", agent_name="auditor")
+    mock_store = _MockBeadStore(signed_bead)
+
+    # Patch make_bead_store so _collect_verdicts gets our mock.
+    import agent_baton.core.govern.evidence_bundle as eb_mod
+    monkeypatch.setattr(
+        "agent_baton.core.engine.bead_backend.make_bead_store",
+        lambda *_a, **_kw: mock_store,
+    )
+
+    builder = EvidenceBundleBuilder(
+        db_path=db_path,
+        compliance_log=compliance_log_3entries,
+    )
+    bundle_dir = builder.build(TASK_ID, output_dir=tmp_path / "out")
+
+    verdicts = json.loads((bundle_dir / "verdicts.json").read_text())
+    auditor_rows = [v for v in verdicts if "auditor" in v.get("agent_name", "")]
+    assert auditor_rows, "auditor verdict row missing"
+    row = auditor_rows[0]
+    assert "soul_signed_by" in row, f"soul_signed_by missing; row={row}"
+    assert "soul_signature" in row, f"soul_signature missing; row={row}"
+    assert row["signature_scheme"] == "ed25519-bead"
+    assert row["soul_signed_by"] == soul.soul_id
+
+
+# ---------------------------------------------------------------------------
+# 10. verify_bundle passes when soul verdict fields are valid
+# ---------------------------------------------------------------------------
+
+
+def test_soul_verdict_verify_passes(
+    tmp_path: Path, db_path: Path, compliance_log_3entries: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """verify_bundle returns ok=True even when verdicts.json carries soul fields."""
+    monkeypatch.setenv("BATON_SOULS_ENABLED", "1")
+
+    central_db = tmp_path / "central.db"
+    souls_dir = tmp_path / "souls"
+    souls_dir.mkdir()
+    from agent_baton.core.engine.soul_registry import SoulRegistry
+    registry = SoulRegistry(central_db_path=central_db, souls_dir=souls_dir)
+    soul = registry.mint("auditor", "test-domain")
+
+    signed_bead = _make_signed_bead(soul, task_id=TASK_ID, step_id="1.2", agent_name="auditor")
+    mock_store = _MockBeadStore(signed_bead)
+
+    monkeypatch.setattr(
+        "agent_baton.core.engine.bead_backend.make_bead_store",
+        lambda *_a, **_kw: mock_store,
+    )
+    # Also patch SoulRegistry so verify_bundle uses our registry.
+    monkeypatch.setattr(
+        "agent_baton.core.engine.soul_registry.SoulRegistry",
+        type(
+            "PatchedSoulRegistry",
+            (SoulRegistry,),
+            {
+                "__init__": lambda self, **_kw: SoulRegistry.__init__(
+                    self,
+                    central_db_path=central_db,
+                    souls_dir=souls_dir,
+                )
+            },
+        ),
+    )
+
+    builder = EvidenceBundleBuilder(
+        db_path=db_path,
+        compliance_log=compliance_log_3entries,
+    )
+    bundle_dir = builder.build(TASK_ID, output_dir=tmp_path / "out")
+
+    ok, errors, exit_code = verify_bundle(bundle_dir)
+    # Failures would be things like "soul not found" — warnings are OK.
+    hard_errors = [e for e in errors if not e.startswith("WARNING")]
+    assert ok or not hard_errors, f"unexpected failures: {hard_errors}"
+    assert exit_code in (0, 1)  # 0 = clean, 1 = has warnings only from registry not found
+
+
+# ---------------------------------------------------------------------------
+# 11. Flag-off case: no soul fields when BATON_SOULS_ENABLED=0
+# ---------------------------------------------------------------------------
+
+
+def test_soul_verdict_flag_off(
+    tmp_path: Path, db_path: Path, compliance_log_3entries: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When BATON_SOULS_ENABLED=0 (default), verdicts.json has no soul fields and verify passes."""
+    monkeypatch.setenv("BATON_SOULS_ENABLED", "0")
+
+    builder = EvidenceBundleBuilder(
+        db_path=db_path,
+        compliance_log=compliance_log_3entries,
+    )
+    bundle_dir = builder.build(TASK_ID, output_dir=tmp_path / "out")
+
+    verdicts = json.loads((bundle_dir / "verdicts.json").read_text())
+    for v in verdicts:
+        assert "soul_signed_by" not in v, "soul fields should not be present when souls disabled"
+
+    ok, errors, exit_code = verify_bundle(bundle_dir)
+    assert ok, f"verify should pass when no soul fields; errors={errors}"
+    assert exit_code == 0

@@ -49,6 +49,9 @@ class EnrichmentData(BaseModel):
         cost_confidence: Either ``"high"`` (history-calibrated) or ``"default"``.
         breakdown: Per-agent cost breakdown rows.
         enriched_at: ISO-8601 timestamp of enrichment.
+        spec_quality: Deterministic spec-quality rubric report (score, missing,
+            notes).  ``None`` for enrichments produced before this field was
+            added (backward-compatible default).
     """
 
     risk_level: str = "LOW"
@@ -62,6 +65,7 @@ class EnrichmentData(BaseModel):
     cost_confidence: str = "default"
     breakdown: list[dict[str, Any]] = Field(default_factory=list)
     enriched_at: str = Field(default_factory=_now_iso)
+    spec_quality: dict[str, Any] | None = None
 
 
 class ReviewData(BaseModel):

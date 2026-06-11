@@ -165,6 +165,14 @@ def enrich(title: str, body: str) -> EnrichmentData:
     except Exception:  # noqa: BLE001
         logger.debug("Cost forecast failed; returning zeros", exc_info=True)
 
+    # --- Step 4: spec-quality rubric (deterministic, no LLM) ----------------
+    spec_quality: dict | None = None
+    try:
+        from agent_baton.core.federate.rubric import check_spec_quality
+        spec_quality = check_spec_quality(title, body).to_dict()
+    except Exception:  # noqa: BLE001
+        logger.debug("spec-quality rubric failed; skipping", exc_info=True)
+
     return EnrichmentData(
         risk_level=risk_level,
         guardrail_preset=guardrail_preset,
@@ -176,6 +184,7 @@ def enrich(title: str, body: str) -> EnrichmentData:
         est_usd_high=est_usd_high,
         cost_confidence=cost_confidence,
         breakdown=breakdown,
+        spec_quality=spec_quality,
     )
 
 

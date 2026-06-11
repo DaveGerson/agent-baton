@@ -136,7 +136,7 @@ cymbal impact <symbol>          # blast radius before edits
 | `BATON_WORKTREE_ENABLED` | Enable/disable git worktree isolation for concurrent agents | `1` |
 | `BATON_TAKEOVER_ENABLED` | Enable/disable developer takeover capability | `1` |
 | `BATON_GATE_RETRY` | Enable single gate-retry: on first gate failure, re-dispatch the failing step once with gate output appended to the prompt. Second failure is terminal. Default off. | `0` |
-| `BATON_SOULS_ENABLED` | Enable/disable soul registry for agent identity | `0` |
+| `BATON_SOULS_ENABLED` | Enable/disable soul registry for agent identity; reviewer verdict signatures flow into evidence bundles | `0` |
 | `BATON_BD_BACKEND` | Bead-store backend (ADR-13b WP-G). `bd` is now the only supported value — SQLite fallback and `auto` mode removed. Any other value logs a deprecation warning and raises `BdNotAvailable` if `bd` binary is missing. | `bd` |
 | `BATON_BD_ENABLED` | Kept for backward compatibility. Has no effect after WP-G — `bd` is always required. | `1` |
 | `BATON_BD_BIN` | Path/name of the `bd` binary used by `BdClient`. | `bd` |
