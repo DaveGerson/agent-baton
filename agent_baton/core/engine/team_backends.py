@@ -364,7 +364,8 @@ class ClaudeTeamsBackend:
                 "baton execute team-record --task-id "
                 f"{plan.task_id} --step-id {step.step_id} "
                 "--member-id <MEMBER_ID> --status complete "
-                "--outcome \"plan approved by lead: <summary>\"\n"
+                "--outcome \"plan approved by lead: <summary>\" "
+                "--hook-source claude-teams\n"
                 "```\n"
             )
 
