@@ -3,6 +3,7 @@ import { T, FONTS, SHADOWS } from '../styles/tokens';
 import { api } from '../api/client';
 import type {
   SpecDraft,
+  SpecQualityReport,
   SpecQueueStatus,
   SubmitSpecDraftBody,
   ImportSpecDraftBody,
@@ -201,6 +202,64 @@ function SectionHeader({ children }: { children: React.ReactNode }) {
       marginBottom: 6,
     }}>
       {children}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// SpecQualityRow — spec quality score badge + missing-element list
+// ---------------------------------------------------------------------------
+
+function SpecQualityRow({ quality }: { quality: SpecQualityReport }) {
+  const score = quality.score ?? 0;
+  // Badge colour: ≥80 mint / 50-79 butter / <50 cherry
+  const badgeBg   = score >= 80 ? T.mint   : score >= 50 ? T.butter : T.cherry;
+  const badgeText = score >= 50 ? T.ink : T.cream;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      {/* Label + score badge on one row */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span style={{
+          fontFamily: FONTS.body, fontSize: 10, fontWeight: 700, color: T.text3,
+          whiteSpace: 'nowrap',
+        }}>
+          Spec quality
+        </span>
+        <span style={{
+          display: 'inline-block',
+          background: badgeBg,
+          color: badgeText,
+          fontFamily: FONTS.mono,
+          fontWeight: 800,
+          fontSize: 11,
+          padding: '2px 10px',
+          borderRadius: 999,
+          border: `1.5px solid ${T.border}`,
+          boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.15)',
+          minWidth: 36,
+          textAlign: 'center',
+        }}>
+          {score}/100
+        </span>
+      </div>
+
+      {/* Missing elements */}
+      {quality.missing.length > 0 && (
+        <ul style={{
+          margin: 0, paddingLeft: 16,
+          display: 'flex', flexDirection: 'column', gap: 3,
+        }}>
+          {quality.missing.map((item, i) => (
+            <li key={i} style={{
+              fontFamily: FONTS.body, fontSize: 10, color: T.text2,
+              lineHeight: 1.4,
+            }}>
+              {item}
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }
@@ -794,6 +853,11 @@ function SpecDraftDetail({ draft, onClose, onUpdated, onFired }: SpecDraftDetail
                     </tbody>
                   </table>
                 </div>
+              )}
+
+              {/* Spec quality */}
+              {draft.enrichment.spec_quality != null && (
+                <SpecQualityRow quality={draft.enrichment.spec_quality} />
               )}
             </div>
           </section>

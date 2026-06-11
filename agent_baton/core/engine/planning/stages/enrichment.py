@@ -49,6 +49,28 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# Per-reviewer concern framing used when fanning a Review phase out into a
+# team step.  Keyed on the base agent name (``--flavor`` suffix stripped).
+_REVIEWER_CONCERNS: dict[str, str] = {
+    "code-reviewer": (
+        "Review for correctness, readability, error handling, and adherence "
+        "to project conventions."
+    ),
+    "security-reviewer": (
+        "Review for security: injection, authn/authz, secret handling, unsafe "
+        "deserialization, and data-exposure risks."
+    ),
+    "spec-document-reviewer": (
+        "Review the change against the spec: completeness, internal "
+        "consistency, and implementation feasibility."
+    ),
+    "plan-reviewer": (
+        "Review for plan fidelity: does the implementation match the intended "
+        "plan and scope?"
+    ),
+}
+
+
 class EnrichmentStage:
     """Stage 5: attach gates, approvals, bead hints, context, prior-task beads."""
 
@@ -400,6 +422,13 @@ class EnrichmentStage:
         phase construction runs, which silently drops the Review phase.  This
         post-enrichment check is the safety net: if the risk level warrants a
         review checkpoint but none exists, one is appended unconditionally.
+
+        Multi-expert fan-out: when the resolved roster carries two or more
+        distinct reviewer-class agents (e.g. ``code-reviewer`` +
+        ``security-reviewer``), the Review phase is built as a *team step* so
+        each reviewer examines the change in parallel under its own concern,
+        with a concatenate ``SynthesisSpec`` merging their findings.  A single
+        reviewer keeps the existing single-agent step.
         """
         if draft.risk_level_enum not in (RiskLevel.HIGH, RiskLevel.CRITICAL):
             return
@@ -407,10 +436,36 @@ class EnrichmentStage:
         if any(_normalize_phase_name(p.name) == "review" for p in draft.plan_phases):
             return
 
+        reviewers = self._distinct_review_agents(draft.resolved_agents)
+        # Always guarantee at least one reviewer for the safety-net phase.
+        if not reviewers:
+            reviewers = ["code-reviewer"]
+
         max_id = max((p.phase_id for p in draft.plan_phases), default=0)
+
+        if len(reviewers) >= 2:
+            review_phase = self._build_review_team_phase(
+                phase_id=max_id + 1,
+                phase_name="Review",
+                reviewers=reviewers,
+                task_summary=draft.task_summary,
+                services=services,
+            )
+            draft.plan_phases.append(review_phase)
+            note = (
+                f"[enrichment] Injected multi-expert Review phase "
+                f"(phase_id={max_id + 1}) for {draft.risk_level_enum.value}-risk "
+                f"task — fanned out to {len(reviewers)} reviewers "
+                f"({', '.join(reviewers)}) as a team step with concatenate "
+                "synthesis."
+            )
+            logger.info(note)
+            draft.routing_notes.append(note)
+            return
+
         injected = build_phases_for_names(
             ["Review"],
-            ["code-reviewer"],
+            [reviewers[0]],
             draft.task_summary,
             services.registry,
             start_phase_id=max_id + 1,
@@ -424,6 +479,87 @@ class EnrichmentStage:
         )
         logger.info(note)
         draft.routing_notes.append(note)
+
+    @staticmethod
+    def _distinct_review_agents(resolved_agents: list[str]) -> list[str]:
+        """Return the ordered, de-duplicated reviewer-class agents in the roster.
+
+        Reviewer membership is decided by ``is_reviewer_agent`` (handles the
+        ``--flavor`` suffix).  ``auditor`` is excluded — it owns its own
+        dedicated Audit phase via :meth:`_ensure_audit_phase` and must not be
+        folded into the code-review fan-out.
+        """
+        from agent_baton.core.orchestration.router import is_reviewer_agent
+
+        seen: set[str] = set()
+        reviewers: list[str] = []
+        for agent in resolved_agents:
+            base = agent.split("--")[0]
+            if base == "auditor":
+                continue
+            if is_reviewer_agent(agent) and base not in seen:
+                seen.add(base)
+                reviewers.append(agent)
+        return reviewers
+
+    @staticmethod
+    def _build_review_team_phase(
+        *,
+        phase_id: int,
+        phase_name: str,
+        reviewers: list[str],
+        task_summary: str,
+        services: PlannerServices,
+    ) -> "PlanPhase":
+        """Build a single-step Review/Audit phase whose step is a team of reviewers.
+
+        Each reviewer becomes a ``TeamMember`` with ``role="reviewer"`` and a
+        concern-scoped ``task_description``.  Member IDs follow the
+        ``N.M.a`` convention (``a``, ``b``, ...).  Outputs are merged with a
+        ``concatenate`` :class:`SynthesisSpec`.
+        """
+        from agent_baton.models.execution import (
+            PlanPhase,
+            PlanStep,
+            SynthesisSpec,
+            TeamMember,
+        )
+
+        registry = services.registry
+        step_id = f"{phase_id}.1"
+        letters = "abcdefghijklmnopqrstuvwxyz"
+
+        members: list[TeamMember] = []
+        for idx, agent in enumerate(reviewers):
+            base = agent.split("--")[0]
+            concern = _REVIEWER_CONCERNS.get(
+                base, f"Review the change from the {base} perspective."
+            )
+            agent_def = registry.get(agent)
+            model = agent_def.model if (agent_def and agent_def.model) else "sonnet"
+            members.append(
+                TeamMember(
+                    member_id=f"{step_id}.{letters[idx]}",
+                    agent_name=agent,
+                    role="reviewer",
+                    task_description=(
+                        f"{concern} Scope: {task_summary}".strip()
+                    ),
+                    model=model,
+                )
+            )
+
+        step = PlanStep(
+            step_id=step_id,
+            agent_name=reviewers[0],
+            task_description=(
+                f"Multi-expert review of: {task_summary}".strip()
+            ),
+            step_type="reviewing",
+            team=members,
+            synthesis=SynthesisSpec(strategy="concatenate"),
+        )
+        return PlanPhase(phase_id=phase_id, name=phase_name, steps=[step])
 
     def _apply_archetype_gates(
         self,

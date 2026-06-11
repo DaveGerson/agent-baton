@@ -1435,6 +1435,13 @@ class EnrichmentDataResponse(BaseModel):
     cost_confidence: str = Field(default="default", description="Cost confidence: 'high' or 'default'.")
     breakdown: list[dict] = Field(default_factory=list, description="Per-agent cost breakdown.")
     enriched_at: str = Field(default="", description="ISO-8601 timestamp of enrichment.")
+    spec_quality: Optional[dict] = Field(
+        default=None,
+        description=(
+            "Deterministic spec-quality rubric report: "
+            "score (0-100), missing (list[str]), notes (list[str])."
+        ),
+    )
 
 
 class ReviewDataResponse(BaseModel):
@@ -1483,6 +1490,7 @@ class SpecDraftResponse(BaseModel):
                 cost_confidence=e.cost_confidence,
                 breakdown=list(e.breakdown),
                 enriched_at=e.enriched_at,
+                spec_quality=e.spec_quality,
             )
         review = None
         if draft.review is not None:

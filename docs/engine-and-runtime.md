@@ -1532,12 +1532,25 @@ flow then proceeds to `COMPLETE` / `FAILED` as usual. See
 
 ## 18. Team backend selection (A1)
 
-`BATON_TEAMS_BACKEND` selects how team steps are realised:
+`BATON_TEAMS_BACKEND` selects how team steps are realised. Both backends are
+**supported** — they make different trade-offs, so pick per task:
 
-| Value | Behavior |
-|-------|----------|
-| `worktree` (default) | Existing parallel-dispatch path under git worktree isolation. Fully resumable. |
-| `claude-teams` | Experimental: writes a spawn-prompt artifact to `.claude/team-context/teams/team-{step_id}/spawn.md` directing an outer Claude Code session to create an Agent Team via `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`. Not resumable; one team at a time; no nested teams; `skills`/`mcpServers` frontmatter NOT honored on teammates. |
+| Property | `worktree` (default) | `claude-teams` (opt-in) |
+|----------|----------------------|--------------------------|
+| Dispatch model | Parallel `Agent` calls under git worktree isolation | Native Agent Teams (lead + teammates) via spawn-prompt artifact at `.claude/team-context/teams/team-{step_id}/spawn.md` |
+| Isolation | Per-member git worktree | Lead-coordinated, shared workspace |
+| Resumable (`baton execute resume`) | Yes | No (in-flight teammates cannot be revived) |
+| Nested teams | Yes (sub-teams preserved) | No (sub-teams flattened in spawn.md, degraded loudly) |
+| Agent frontmatter | Full (`skills`/`mcpServers` honored) | `skills`/`mcpServers` NOT honored on teammates (per-agent spawn.md warning) |
+| Native UX | — | Inter-teammate messaging, shared task list, lead plan-approval |
+| Concurrency | Multiple team steps | One team at a time |
+| Team size | Practical limits only | 3–5 members recommended (spawn.md warns above 5) |
+| Requires | — | `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` |
+| Relative token cost | Baseline | ~7× (native team coordination overhead) |
+
+When `claude-teams` constraints (no resume, nesting, frontmatter) conflict
+with the plan shape, the spawn prompt degrades loudly (explicit warnings) and
+the planner emits a resumability warning for `long-running` plans.
 
 In both backends, baton's TeamMailbox (`.claude/team-context/mailbox/team-{step_id}.jsonl`)
 captures the Agent Teams hook taxonomy (`task_created`,

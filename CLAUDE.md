@@ -50,7 +50,7 @@ All Python imports use canonical paths: `from agent_baton.core.govern.classifier
 - `agent_baton/cli/commands/execution/execute.py` — `_print_action()` is the protocol surface between the engine and the orchestrator agent. Don't break its output shape.
 - `agent_baton/core/engine/states.py` — execution state machine.
 - `agent_baton/core/engine/protocols.py` — `ExecutionDriver` 15-method interface.
-- `agent_baton/models/execution.py` — `ActionType` enum (8 values: DISPATCH, GATE, APPROVAL, COMPLETE, FAILED, WAIT, FEEDBACK, INTERACT) and `ExecutionState`.
+- `agent_baton/models/execution.py` — `ActionType` enum (9 values: DISPATCH, GATE, APPROVAL, COMPLETE, FAILED, WAIT, FEEDBACK, INTERACT, CHECKPOINT) and `ExecutionState`.
 - `agent_baton/core/govern/packs.py` — Assurance Pack loader, validator, registry, and classifier factory. Entry point for `baton packs` and pack-aware `DataClassifier` construction.
 - `agent_baton/core/govern/evidence_bundle.py` — `EvidenceBundleBuilder.build()` + `verify_bundle()`. Produces and verifies per-task assurance artifacts. Entry point for `baton evidence bundle|verify`.
 - `agent_baton/api/routes/spec_queue.py` — Spec Queue routes (`/api/v1/pmo/specs/*`): submit, list, get, enrich, approve, bounce, fire, import. `_get_store()` honours `BATON_SPEC_DRAFT_DB` env var for test DB isolation.
@@ -136,7 +136,7 @@ cymbal impact <symbol>          # blast radius before edits
 | `BATON_WORKTREE_ENABLED` | Enable/disable git worktree isolation for concurrent agents | `1` |
 | `BATON_TAKEOVER_ENABLED` | Enable/disable developer takeover capability | `1` |
 | `BATON_GATE_RETRY` | Enable single gate-retry: on first gate failure, re-dispatch the failing step once with gate output appended to the prompt. Second failure is terminal. Default off. | `0` |
-| `BATON_SOULS_ENABLED` | Enable/disable soul registry for agent identity | `0` |
+| `BATON_SOULS_ENABLED` | Enable/disable soul registry for agent identity; reviewer verdict signatures flow into evidence bundles | `0` |
 | `BATON_BD_BACKEND` | Bead-store backend (ADR-13b WP-G). `bd` is now the only supported value — SQLite fallback and `auto` mode removed. Any other value logs a deprecation warning and raises `BdNotAvailable` if `bd` binary is missing. | `bd` |
 | `BATON_BD_ENABLED` | Kept for backward compatibility. Has no effect after WP-G — `bd` is always required. | `1` |
 | `BATON_BD_BIN` | Path/name of the `bd` binary used by `BdClient`. | `bd` |
@@ -147,7 +147,7 @@ cymbal impact <symbol>          # blast radius before edits
 | `BATON_COMPLIANCE_FAIL_CLOSED` | Halt execution + raise on compliance audit write failure (regulated-domain). When unset/`0`, failures are logged + a bead warning is emitted, execution continues. Can be overridden per-plan via `MachinePlan.compliance_fail_closed` (plan value takes precedence). Also governs `baton comply-record` hook: `1` → exit 1 on write errors. | `0` |
 | `BATON_POLICY_FAIL_CLOSED` | Controls `baton policy-check` hook error handling: `0` → fail-open (bad stdin or unreadable policy → stderr warning, exit 0); `1` → exit 2 (blocks the tool call, shows stderr to the model). | `0` |
 | `BATON_GOAL_EVALUATOR` | Selects the goal evaluator strategy for `/goal` (G1): `stub` (deterministic, no LLM), `haiku` (Claude Haiku 4.5), or `opus` (Claude Opus 4.8). `haiku`/`opus` require `ANTHROPIC_API_KEY`; otherwise falls back to `stub`. | `haiku` |
-| `BATON_TEAMS_BACKEND` | Selects the execution backend for `TEAM_DISPATCH` (A1): `worktree` (default, parallel worktree-isolated dispatch with `baton execute resume` support) or `claude-teams` (experimental — writes a spawn prompt for an outer Claude Code session to create an Agent Team; not resumable, one team at a time, no nested teams). Unknown values warn and fall back to `worktree`. | `worktree` |
+| `BATON_TEAMS_BACKEND` | Selects the execution backend for team steps (A1). Two supported backends: `worktree` (default — parallel worktree-isolated dispatch, resumable via `baton execute resume`, nesting + full agent frontmatter honored) or `claude-teams` (native Agent Teams UX — inter-teammate messaging, shared task list, lead plan-approval; requires `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`; constraints: no resume, one team at a time, no nested teams, `skills`/`mcpServers` frontmatter not honored on teammates). Unknown values warn and fall back to `worktree`. | `worktree` |
 | `BATON_TEAMS_STRICT_RESUMABILITY` | When `1` AND `BATON_TEAMS_BACKEND=claude-teams` AND the plan has team phases the claude-teams backend cannot resume mid-flight under `long-running` budget, `baton plan`/`baton goal` refuses to save and exits 2. Default (`0`) downgrades the refusal to a warning. | `0` |
 | `BATON_PLAN_REVIEW` | Optional LLM plan-quality review after the deterministic pipeline: `off` (default) \| `haiku` \| `sonnet` \| `opus`. The deterministic pipeline has known limits in complexity assessment; default compensating controls are the structural hard gate and pre-flight human review in the spec queue — enable this for unattended/managed-mode planning. `sonnet` recommended. | off |
 

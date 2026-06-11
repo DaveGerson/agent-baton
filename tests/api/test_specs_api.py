@@ -154,6 +154,22 @@ class TestEnrichSpec:
         assert data["status"] == "enriched"
         assert data["enrichment"] is not None
 
+    def test_enrich_includes_spec_quality(self, client):
+        """submit → enrich returns enrichment.spec_quality with score/missing/notes."""
+        r = _submit(client, title="Add rate-limiting middleware", body="body text here")
+        spec_id = r.json()["id"]
+        r2 = client.post(f"/api/v1/pmo/specs/{spec_id}/enrich")
+        assert r2.status_code == 200, r2.text
+        enrichment = r2.json().get("enrichment", {})
+        assert enrichment is not None
+        sq = enrichment.get("spec_quality")
+        assert sq is not None, "enrichment.spec_quality should be present after enrich"
+        assert "score" in sq
+        assert "missing" in sq
+        assert "notes" in sq
+        assert isinstance(sq["score"], int)
+        assert 0 <= sq["score"] <= 100
+
 
 # ---------------------------------------------------------------------------
 # Test 6: POST /pmo/specs/{id}/approve → approved status
