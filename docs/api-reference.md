@@ -22,6 +22,10 @@ and observability stack behind a versioned REST interface served by FastAPI.
    - [Webhooks](#48-webhooks)
    - [PMO](#49-pmo)
    - [Spec Queue](#410-spec-queue-007-phase-i--spec-federation-mvp)
+   - [Learn](#411-learn-learning-automation)
+   - [NOC](#412-noc-network-operations-centre)
+   - [PMO H3](#413-pmo-h3-role-based-dashboards-scorecard-arch-review-crp)
+   - [Spec Documents](#414-spec-documents-f01)
 5. [Webhook System](#5-webhook-system)
 6. [Request and Response Models](#6-request-and-response-models)
 7. [CORS Configuration](#7-cors-configuration)
@@ -2135,6 +2139,264 @@ Each `CostBreakdownItem`:
 | `est_steps` | int | Estimated step count |
 | `est_tokens` | int | Estimated token count |
 | `est_usd` | number | Estimated USD cost |
+
+---
+
+### 4.11 Learn (Learning Automation)
+
+The Learn endpoints expose the Learning Engine's issue ledger and analysis
+cycle. Issues are observations (routing mismatches, gate mismatches, agent
+degradation) recorded during execution runs; analysis promotes high-confidence
+issues to `proposed` and applies type-specific fixes.
+
+**Base path:** `/api/v1/learn`
+
+#### Route table
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/learn/issues` | List learning issues with optional filters |
+| `GET` | `/learn/issues/{issue_id}` | Get issue detail including full evidence list |
+| `POST` | `/learn/analyze` | Trigger analysis cycle over open issues |
+| `POST` | `/learn/issues/{issue_id}/apply` | Apply the type-specific fix for an issue |
+| `PATCH` | `/learn/issues/{issue_id}` | Update the lifecycle status of an issue |
+
+#### `GET /api/v1/learn/issues`
+
+Returns all issues matching optional query parameters. All supplied filters are
+ANDed.
+
+| Query param | Values | Description |
+|-------------|--------|-------------|
+| `status` | `open`, `investigating`, `proposed`, `applied`, `resolved`, `wontfix` | Filter by lifecycle status |
+| `issue_type` | `routing_mismatch`, `agent_degradation`, `knowledge_gap`, `roster_bloat`, `gate_mismatch`, `pattern_drift`, `prompt_evolution` | Filter by issue category |
+| `severity` | `low`, `medium`, `high`, `critical` | Filter by severity |
+
+**Response:** `{"count": int, "issues": [LearningIssueResponse, ...]}`
+
+#### `GET /api/v1/learn/issues/{issue_id}`
+
+Returns a single issue including its complete evidence list. **404** if not found.
+
+#### `POST /api/v1/learn/analyze`
+
+Reads all open issues, computes confidence against per-type thresholds, and
+promotes eligible issues to `proposed`. Returns:
+
+```json
+{"candidates": [LearningIssueResponse], "proposed_count": int}
+```
+
+#### `POST /api/v1/learn/issues/{issue_id}/apply`
+
+Dispatches to the type-specific resolver and marks the issue as `applied`. Request body:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `resolution_type` | `auto`, `human`, or `interview` | How the fix should be applied |
+
+**404** if issue not found. **400** if the issue type does not support auto-apply.
+
+#### `PATCH /api/v1/learn/issues/{issue_id}`
+
+Updates lifecycle status. Request body fields: `status` (required), plus optional
+`resolution`, `resolution_type`, `proposed_fix`. **400** if status value is not valid.
+
+---
+
+### 4.12 NOC (Network Operations Centre)
+
+The NOC endpoints aggregate cross-project data from `central.db`
+(`~/.baton/central.db`). All endpoints degrade gracefully — returning empty /
+zero-filled results — when `central.db` does not exist, so the NOC dashboard
+loads cleanly on a fresh install.
+
+**Base path:** `/api/v1/noc`
+
+#### Route table
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/noc/projects` | List all known projects with summary stats |
+| `GET` | `/noc/aggregate/usage` | Cross-project token usage rollup |
+| `GET` | `/noc/aggregate/incidents` | Cross-project warning-bead count per project |
+| `GET` | `/noc/aggregate/throughput` | Tasks completed per project per day (last 7 days) |
+
+#### `GET /api/v1/noc/projects`
+
+Returns all projects registered in `central.db` with derived stats:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `project_id` | string | Unique project identifier |
+| `project_name` | string | Human-readable name |
+| `path` | string | Filesystem path |
+| `program` | string | Program/portfolio grouping |
+| `registered_at` | string | ISO 8601 registration timestamp |
+| `task_count` | int | Total execution count |
+| `last_active` | string \| null | Most recent execution `started_at` |
+
+#### `GET /api/v1/noc/aggregate/usage`
+
+Returns `{"by_project": [{"project_id": str, "total_tokens": int}], "total_tokens": int}`.
+Sums `estimated_tokens` from `agent_usage` grouped by project.
+
+#### `GET /api/v1/noc/aggregate/incidents`
+
+Returns `{"by_project": [{"project_id": str, "warning_count": int}], "total_warnings": int}`.
+Counts `warning`-type beads per project.
+
+#### `GET /api/v1/noc/aggregate/throughput`
+
+Returns `{"window_days": 7, "by_project_day": [{"project_id": str, "day": str, "tasks_completed": int}]}`.
+Counts `complete` executions per project per day for the last 7 days.
+
+---
+
+### 4.13 PMO H3 (Role-Based Dashboards, Scorecard, Arch Review, CRP)
+
+H3 endpoints extend the PMO surface with role-based dashboards, developer
+scorecards, architectural bead review, workflow playbooks, and a Change Request
+Process (CRP) wizard. They are companion routes to `pmo.py` and live in
+`pmo_h3.py` to avoid disturbing the 2900-line main PMO module.
+
+**Base path:** `/api/v1/pmo`
+
+#### Route table
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/pmo/scorecard/{user_id}` | 30-day developer scorecard |
+| `GET` | `/pmo/arch-beads` | List open architecture/decision beads |
+| `POST` | `/pmo/arch-beads/{bead_id}/review` | File an approve/reject review bead |
+| `GET` | `/pmo/playbooks` | List curated workflow playbooks |
+| `POST` | `/pmo/crp` | Submit a Change Request (returns plan summary) |
+| `GET` | `/pmo/beads` | List beads for the PMO graph and timeline views |
+
+#### `GET /api/v1/pmo/scorecard/{user_id}`
+
+Returns aggregated 30-day metrics for a developer. Queries `agent_usage`,
+`step_results`, and `beads` tables; missing tables contribute zeros.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `user_id` | string | Developer identifier |
+| `window_days` | int | Always 30 |
+| `tasks_completed` | int | Executions attributed to user |
+| `avg_cycle_time_minutes` | float | Average step duration in minutes |
+| `gate_pass_rate` | float | Fraction of gate steps that passed (0–1) |
+| `incidents_authored` | int | Warning/incident/bug beads created by user |
+| `incidents_resolved` | int | Warning/incident/bug beads closed by user |
+| `knowledge_contributions` | int | Knowledge/decision/pattern beads created |
+
+#### `GET /api/v1/pmo/arch-beads`
+
+Lists beads of type `architecture` or `decision`. Query param `status` (default `open`).
+Returns an empty list when the bead store is unavailable.
+
+#### `POST /api/v1/pmo/arch-beads/{bead_id}/review`
+
+Files a follow-up `review` bead recording an approve/reject decision. The original
+bead is preserved as the audit trail. Request body:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `action` | `approve` or `reject` | Review decision |
+| `reason` | string | Reviewer notes |
+| `reviewer` | string | Reviewer identity (default `anonymous`) |
+
+Returns `{"bead_id": str, "follow_up_bead_id": str, "action": str}` (201).
+
+#### `GET /api/v1/pmo/playbooks`
+
+Returns curated playbooks from `templates/playbooks/*.md`. Each file becomes
+one entry: `{"slug": str, "title": str, "body": str}`. Empty list when directory
+is absent.
+
+#### `POST /api/v1/pmo/crp`
+
+Submits a structured Change Request. Returns a deterministic plan summary (full
+`baton plan` integration is a TODO). Request body:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `title` | string | required | Change description |
+| `scope` | list[string] | `[]` | Affected areas |
+| `rationale` | string | `""` | Justification |
+| `risk_level` | `low`\|`medium`\|`high`\|`critical` | `medium` | Risk assessment |
+| `suggested_agent` | string | `architect` | Lead agent recommendation |
+
+Returns `{"crp_id": str, "plan_summary": str, "suggested_phases": list[str], "risk_level": str, "submitted_at": str}` (201).
+
+#### `GET /api/v1/pmo/beads`
+
+Lists beads from the project's `baton.db` for the PMO Beads graph and timeline
+views. Degrades gracefully when the store is unavailable.
+
+| Query param | Default | Description |
+|-------------|---------|-------------|
+| `status` | `open` | `open`, `closed`, `archived`, or empty/`all` to skip filtering |
+| `bead_type` | — | Filter to a specific bead type |
+| `tags` | — | Comma-separated AND filter |
+| `task_id` | — | Filter to a specific execution |
+| `limit` | `200` | Maximum results (1–1000) |
+
+---
+
+### 4.14 Spec Documents (F0.1)
+
+**Important distinction:** `specs.py` (this section) is the **Spec Documents
+CRUD** — a simple create/read/approve API for spec entities in `central.db`
+via `SpecStore`. It is _not_ the Spec Federation queue. For the federation
+pipeline (submit → enrich → approve → fire → import), see section
+[4.10 Spec Queue](#410-spec-queue-007-phase-i--spec-federation-mvp), which
+is backed by `spec_queue.py` and `SpecDraftStore`.
+
+**Base path:** `/api/v1`
+
+#### Route table
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/specs` | List specs with optional filters |
+| `POST` | `/specs` | Create a new spec in draft state |
+| `GET` | `/specs/{spec_id}` | Get a single spec by ID |
+| `POST` | `/specs/{spec_id}/approve` | Approve a spec (transition to `approved`) |
+
+#### `GET /api/v1/specs`
+
+| Query param | Description |
+|-------------|-------------|
+| `project_id` | Filter by project |
+| `state` | Filter by state (e.g. `draft`, `approved`) |
+| `author_id` | Filter by author |
+| `limit` | Max results, 1–500, default 50 |
+
+Returns a list of spec dicts.
+
+#### `POST /api/v1/specs`
+
+Creates a new spec in `draft` state. Request body:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `title` | string | required | Spec title |
+| `content` | string | `""` | Spec body |
+| `task_type` | string | `""` | Categorisation |
+| `template_id` | string | `feature` | Template to apply |
+| `author_id` | string | `local-user` | Author identity |
+| `project_id` | string | `default` | Project scope |
+
+Returns the created spec dict (201).
+
+#### `GET /api/v1/specs/{spec_id}`
+
+Returns the spec dict. **404** if not found.
+
+#### `POST /api/v1/specs/{spec_id}/approve`
+
+Transitions spec state to `approved`. Request body: `{"actor": str}` (default
+`local-user`). **400** if the transition is not valid from the current state.
 
 ---
 

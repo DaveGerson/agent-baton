@@ -256,3 +256,32 @@ specialist agents.
 
 For simple, single-domain tasks (bug fixes, small features, utility
 functions), work directly without the orchestrator.
+
+## Assurance Surface
+
+Org-level assurance packs are stored in `.claude/packs/`. Validate the active
+pack configuration with:
+
+```bash
+baton packs validate        # check schema + required fields
+baton packs list            # show registered packs and their status
+```
+
+Per-task evidence bundles record task inputs, execution trace, compliance log,
+and soul signatures for post-execution audits. Build and verify with:
+
+```bash
+baton evidence bundle <task_id>   # write <output_dir>/evidence/<task_id>/
+baton evidence verify <path>      # verify a bundle dir or .tar.gz
+```
+
+## Key Environment Variables
+
+| Variable | Values / Default | Purpose |
+|----------|-----------------|---------|
+| `BATON_APPROVAL_MODE` | `local` / `team` | Self-approve or require a different reviewer |
+| `BATON_RUN_TOKEN_CEILING` | float USD / unset | Hard kill above N USD cumulative spend |
+| `BATON_GATE_RETRY` | `0` / `1` | Enable single gate-retry on first failure |
+| `BATON_PLAN_REVIEW` | `off` / `haiku` / `sonnet` / `opus` (default `off`) | Optional LLM plan-quality review after deterministic planning pipeline. `sonnet` recommended for unattended or managed-mode planning. Requires `ANTHROPIC_API_KEY`. |
+| `BATON_BD_BACKEND` | `bd` | Bead-store backend (`bd` is the only supported value) |
+| `ANTHROPIC_API_KEY` | — | Required for AI risk classification and Haiku classifier |

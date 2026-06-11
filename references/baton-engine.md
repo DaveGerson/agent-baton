@@ -2328,7 +2328,7 @@ The full list of Baton environment variables. Mirrored in
 | `BATON_TASK_ID` | Bind a shell session to a specific execution. Set after `baton execute start` to scope all subsequent commands. | auto-detected |
 | `BATON_DB_PATH` | Override the project `baton.db` location. CLI walks upward from cwd if unset. | discovered |
 | `BATON_APPROVAL_MODE` | PMO approval policy: `local` (self-approve) or `team` (different reviewer required). | `local` |
-| `BATON_RUN_TOKEN_CEILING` | Per-run cumulative spend cap (USD float). Read fresh on every check; restored on `baton execute resume`. Selfheal/immune respect it; main `Executor.dispatch()` only warns at HIGH/CRITICAL run start (bd-3f80). | unset |
+| `BATON_RUN_TOKEN_CEILING` | Per-run cumulative spend cap (USD float). Read fresh on every check; restored on `baton execute resume`. The immune system respects it; main `Executor.dispatch()` only warns at HIGH/CRITICAL run start (bd-3f80). | unset |
 | `BATON_SOULS_ENABLED` | Wave 6.1 Part B persistent agent souls (signing + revocation). | `0` |
 | `BATON_IMMUNE_ENABLED` | Immune-system monitoring loop. | `0` |
 | `BATON_EXEC_BEADS_ENABLED` | Wave 6.1 Part C executable beads. Sandbox is process-level only — see `references/baton-patterns.md` trust-boundary section before extending to external-origin input. | `0` |
