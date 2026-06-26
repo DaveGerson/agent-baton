@@ -238,6 +238,12 @@ with the PMO UI.
 
 ### Headless Execution
 
+> **Status: planned functionality.** Headless execution dispatches agents
+> through `claude --print`, which requires an `ANTHROPIC_API_KEY`. Under the
+> current pricing model this is **not** the active execution path — the present
+> primary path is the **local inline CLI subagent** orchestrator. Headless
+> execution is expected to be promoted once token-based pricing is in place.
+
 Run the full loop without a Claude Code session:
 
 ```bash
@@ -249,6 +255,12 @@ until complete. Supports `--model`, `--max-steps`, and `--dry-run` flags.
 The PMO UI can also launch executions from its Kanban board.
 
 ### Daemon Mode
+
+> **Status: planned functionality.** Daemon mode is the intended *future*
+> primary execution path (with a remote-execution preference), but it depends
+> on headless Claude execution (`ANTHROPIC_API_KEY`) and is not active under the
+> current pricing model. For now, execution runs through the **local inline CLI
+> subagent**; the commands below are documented for the planned rollout.
 
 Background execution with parallel agent dispatch:
 

@@ -27,7 +27,7 @@ the wire.
 | `WAIT` | `"wait"` | Parallel steps still in flight; caller should poll `next_action()` again. |
 | `COMPLETE` | `"complete"` | Execution finished successfully. Carries `summary`. |
 | `FAILED` | `"failed"` | Execution cannot continue. Carries `summary`. |
-| `CHECKPOINT` | `"checkpoint"` | Save state and suggest a fresh session to prevent context rot. |
+| `CHECKPOINT` | `"checkpoint"` | Save state and suggest a fresh session to prevent context rot. **Not yet emitted by the engine** — the enum value and wire-format contract are reserved; context-rot detection is not implemented. |
 
 The enum is consumed by `_print_action()` in
 [`cli/commands/execution/execute.py:568`](../../agent_baton/cli/commands/execution/execute.py)

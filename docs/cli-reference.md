@@ -1405,7 +1405,7 @@ baton evidence verify <path> [--strict]
 - Per-file SHA-256 matches manifest
 - `compliance-segment.jsonl` internal chain consistency
 - AIBOM `chain_anchor` vs segment tail (WARNING on mismatch, not failure)
-- Soul signature verification when `soul_signature` is present
+- Soul-existence and non-revocation check when `soul_signature` is present (byte-level ed25519 signature-over-content is not verified at bundle-verify time — bead content is not stored in `verdicts.json`; file-level integrity is covered by the SHA-256 manifest checks)
 
 **Example:**
 

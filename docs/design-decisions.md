@@ -1113,8 +1113,9 @@ when human input is required.
 
 - **Team synthesis strategies**: `PlanStep.synthesis_spec` supports three
   strategies: `concatenate` (append outputs), `merge_files` (git-merge
-  file changes), and `agent_synthesis` (dispatch a synthesis agent to
-  combine outputs). The strategy is selected at plan time based on step
+  file changes), and `agent_synthesis` (planned: dispatch a synthesis agent to
+  combine outputs — currently records a marker in `deviations` only; dispatch
+  is deferred to Phase 3.3). The strategy is selected at plan time based on step
   type and team size.
 
 - **Conflict escalation**: When team members modify overlapping files,

@@ -1012,61 +1012,17 @@ Reports are written to:
 
 ### 3.2 Prompt Evolution Engine
 
-**Module:** `agent_baton/core/improve/evolution.py`
-**Classes:** `PromptEvolutionEngine`, `EvolutionProposal`
+**Status:** **DEPRECATED — module deleted.**
 
-**Status:** Experimental -- built and tested but not yet validated with
-real usage data.
+`PromptEvolutionEngine` (`agent_baton/core/improve/evolution.py`) was a
+template-based rule engine that matched scorecard thresholds to canned
+suggestion strings. The source file has been removed. The `baton evolve`
+command redirects to `baton learn run-cycle`. Do not add new callers.
 
-The prompt evolution engine analyses agent performance and generates
-structured proposals for prompt improvements. It identifies
-underperforming agents and suggests specific changes based on their
-failure patterns.
-
-#### EvolutionProposal
-
-```python
-@dataclass
-class EvolutionProposal:
-    agent_name: str
-    scorecard: AgentScorecard
-    issues: list[str]        # problems identified
-    suggestions: list[str]   # proposed changes
-    priority: str            # "high" (needs-improvement) or "normal" (adequate)
-    timestamp: str
-```
-
-#### Issue Detection Rules
-
-| Condition | Issue | Suggestion |
-|-----------|-------|------------|
-| `first_pass_rate < 0.5` | Low first-pass rate | Add specific failure mode instructions; include negative examples |
-| `first_pass_rate < 0.8` | Moderate first-pass rate | Review retry patterns in retrospectives |
-| `retry_rate > 1.0` | High retry rate | Tighten acceptance criteria |
-| `gate_pass_rate < 0.7` | Low gate pass rate | Add quality checklist to prompt |
-| `negative_mentions > 0` | Negative retrospective mentions | Address specific failures from "What Didn't Work" |
-| `knowledge_gaps_cited > 0` | Knowledge gaps | Create/update knowledge packs; add "Before Starting" section |
-
-#### Workflow
-
-1. **`analyze()`** -- Score all agents, identify underperformers, generate
-   proposals sorted by priority (high first, then by first-pass rate
-   ascending).
-2. **`propose_for_agent(name)`** -- Generate a proposal for a specific agent.
-3. **`save_proposals(proposals)`** -- Write proposals as markdown files.
-4. **`generate_report()`** / **`write_report()`** -- Summary report.
-
-#### Storage
-
-Proposals are written to:
-```
-.claude/team-context/evolution-proposals/<agent_name>.md
-```
-
-Reports are written to:
-```
-.claude/team-context/evolution-report.md
-```
+The replacement is the `learning-analyst` agent (D2), which produces
+agent-specific recommendations derived from actual retrospective content
+rather than generic threshold rules. See the Learning Cycle Pipeline in
+section 2.3.
 
 ---
 
@@ -1282,69 +1238,17 @@ of the last analysis) to:
 
 ### 3.6 Experiment Manager
 
-**Module:** `agent_baton/core/improve/experiments.py`
-**Class:** `ExperimentManager`
-**Model:** `agent_baton/models/improvement.py` -- `Experiment`
+**Status:** **DEPRECATED — module deleted.**
 
-The experiment manager tracks the impact of applied recommendations by
-creating experiments that compare post-change performance against a
-baseline.
+`ExperimentManager` (`agent_baton/core/improve/experiments.py`) recorded
+before/after metrics but never ran concurrent A/B groups. The source file
+has been removed. The `baton experiment` command redirects to
+`baton learn run-cycle`. Do not add new callers.
 
-#### Experiment Constraints
-
-- Maximum 2 active experiments per agent.
-- Minimum 5 samples before evaluation.
-- Default maximum duration: 14 days.
-
-#### Experiment Model
-
-```python
-@dataclass
-class Experiment:
-    experiment_id: str
-    recommendation_id: str
-    hypothesis: str          # what we expect to happen
-    metric: str              # "first_pass_rate", "gate_pass_rate", etc.
-    baseline_value: float    # pre-change metric value
-    target_value: float      # expected improvement (baseline * 1.05)
-    agent_name: str
-    started_at: str
-    min_samples: int = 5
-    max_duration_days: int = 14
-    status: str = "running"  # running -> concluded | rolled_back
-    samples: list[float]     # observed metric values
-    result: str = ""         # "improved", "degraded", "inconclusive"
-```
-
-#### Evaluation Thresholds
-
-| Condition | Result |
-|-----------|--------|
-| Average sample > baseline + 5% | `"improved"` |
-| Average sample < baseline - 5% | `"degraded"` |
-| Otherwise | `"inconclusive"` |
-
-Experiments that degrade are automatically rolled back by the improvement
-loop without human approval.
-
-#### Storage
-
-Experiments are stored as individual JSON files at:
-```
-.claude/team-context/improvements/experiments/<experiment_id>.json
-```
-
-#### Key Methods
-
-| Method | Purpose |
-|--------|---------|
-| `create_experiment(recommendation, metric, ...)` | Create a new experiment |
-| `record_sample(experiment_id, value)` | Add a new observation |
-| `evaluate(experiment_id)` | Evaluate against baseline |
-| `conclude(experiment_id, result)` | Manually conclude |
-| `mark_rolled_back(experiment_id)` | Mark as rolled back |
-| `active()` | List all running experiments |
-| `active_for_agent(agent_name)` | Running experiments for a specific agent |
+The replacement is before/after scorecard comparison across learning
+cycles. The `ImprovementLoop` (section 3.4) uses `AgentScorecard` diffs
+between cycles to assess whether an applied recommendation improved or
+degraded the target metric.
 
 ---
 

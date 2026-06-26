@@ -2246,6 +2246,8 @@ Sums `estimated_tokens` from `agent_usage` grouped by project.
 Returns `{"by_project": [{"project_id": str, "warning_count": int}], "total_warnings": int}`.
 Counts `warning`-type beads per project.
 
+**Dependency:** Bead counts are populated in `central.db` by `export_beads_to_central()`, which requires the `bd` binary. If `bd` is not installed, the `beads` table in `central.db` will not be populated and this endpoint will return `{"by_project": [], "total_warnings": 0}` without an error.
+
 #### `GET /api/v1/noc/aggregate/throughput`
 
 Returns `{"window_days": 7, "by_project_day": [{"project_id": str, "day": str, "tasks_completed": int}]}`.

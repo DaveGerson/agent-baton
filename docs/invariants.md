@@ -95,6 +95,8 @@ ACTION: CHECKPOINT
   Message: <description>
 ```
 
+> **Note:** `CHECKPOINT` is defined in the `ActionType` enum and the wire format above is reserved, but the engine does not yet emit it. Context-rot detection that would trigger this action has not been implemented. `_print_action()` will fall through to the generic `ACTION: checkpoint` branch if it is ever received.
+
 ### Adding a new ActionType
 
 Adding a new `ActionType` is a protocol change. It must coordinate with:

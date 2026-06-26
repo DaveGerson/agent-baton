@@ -75,7 +75,7 @@ cymbal impact <symbol>          # blast radius before edits
 | `BATON_TASK_ID` | Target a specific execution in multi-task scenarios | auto-detected |
 | `BATON_APPROVAL_MODE` | `local` (self-approve) or `team` (different reviewer required) | `local` |
 | `BATON_DB_PATH` | Override per-project `baton.db` location | discovered |
-| `BATON_RUN_TOKEN_CEILING` | Hard kill the loop above N tokens | unset |
+| `BATON_RUN_TOKEN_CEILING` | Hard kill the loop when cumulative USD spend exceeds this value (float, e.g. `5.0` for $5.00). Raises `RunTokenCeilingExceeded` before any LLM call that would push past the ceiling. | unset |
 | `ANTHROPIC_API_KEY` | Required for AI risk classification and Haiku classifier | unset |
 | `BATON_WORKTREE_ENABLED` | Enable/disable git worktree isolation for concurrent agents | `1` |
 | `BATON_TAKEOVER_ENABLED` | Enable/disable developer takeover capability | `1` |
