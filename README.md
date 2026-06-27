@@ -2,36 +2,62 @@
 
 📖 **Docs:** <https://davegerson.github.io/agent-baton/>
 
-**Governance and assurance for Claude Code.**
+**A project manager for Claude Code.**
 
-Agent Baton is a **governance and assurance harness** for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). It enforces domain-specific policy on every AI-authored change — data-classification risk, required expert reviewers, compliance gates, segregation-of-duties approval — and makes the outcome auditable through a verifiable evidence bundle. Claude Code owns the work; Baton owns the accountability.
+Agent Baton project-manages an effort from plan to merge. It breaks the work
+down so you have **foresight** into how it will go and where it might break,
+composes a **bespoke team** of specialist subagents tuned to *this* problem,
+dispatches the **right agent onto the right problem at the right time**, and
+keeps the work from diverging with **checks and balances** — domain-expert
+verification, not just code review. Claude Code owns the work; Baton owns the
+plan, the team, and the guardrails.
 
-**Harness mode** (zero loop overhead): install the hooks (`policy-check`, `comply-record`, `classify --activate`), activate an assurance pack, and every tool call Claude Code makes is evaluated against your policy. Evidence bundles are generated automatically. No plan. No execution loop. No API keys beyond Claude.
+**The four jobs Baton does for every effort:**
 
-**Managed mode** (for regulated work): set `BATON_PLAN_REVIEW` or use the spec queue — Baton runs the full plan→DISPATCH→GATE→APPROVAL loop, activated automatically when the data classifier flags a task as HIGH or CRITICAL risk.
+- **Plan with foresight** — decompose the task, sequence the phases with
+  dependency awareness, classify risk, and forecast cost *before* execution.
+  You see the shape of the work — and where it's likely to go wrong — up front.
+- **Compose the right team** — a single generalist agent carrying context for
+  the whole codebase suffers context rot and is never sharply tuned to the
+  problem in front of it. The `talent-builder` narrows in on the exact
+  specialists an effort needs and creates them, so you assemble an ad-hoc fleet
+  purpose-built for *this* problem instead of overloading a few generalists.
+- **Right agent, right problem, right time** — a deterministic engine dispatches
+  each phase to the specialist that fits it, runs automated QA gates between
+  phases, and organizes the whole effort through a plan-to-merge PMO flow.
+- **Checks & balances** — every change is risk-classified; medium/high-risk work
+  pulls in an independent `auditor` (with veto power) and, in regulated domains,
+  a `subject-matter-expert`. The question is whether the work is *functionally
+  right*, not just whether it lints. Humans are one kind of check; the engine
+  enforces the rest through policy gates and an auditable trail.
 
-**Spec federation**: submit or import specs from Azure DevOps / GitHub Issues → AI-derived risk + cost forecast → senior review before firing. The cheapest control point for org AI spend.
+For regulated work, Baton can also run as a **governance harness** (policy hooks
+evaluate every tool call and evidence bundles are generated automatically) or a
+**managed loop** (full plan→dispatch→gate→approval), and can import specs from
+GitHub Issues / Azure DevOps for senior review before any agent fires.
 
 ---
 
 ## Why Agent Baton?
 
-**The problem:** Claude Code is powerful, but complex tasks -- the ones that
-touch multiple files, need testing, and require different expertise -- benefit
-from structure. Without it, you get context bloat, missed test coverage, and
-no audit trail.
+**The problem:** Claude Code is powerful, but a complex effort — one that spans
+many files, needs different kinds of expertise, and has to actually be
+*correct* — is hard to run as one long conversation. You get context rot, missed
+coverage, no foresight into what's coming, and no record of what happened.
 
-**The solution:** Agent Baton gives Claude Code a project management layer.
-It breaks work into phases, assigns each phase to a specialist agent, runs
-automated QA gates between them, and tracks everything. You stay in control
-while the agents do the heavy lifting.
+**The solution:** Agent Baton gives Claude Code a project-management layer. It
+plans the effort, composes a bespoke team of specialists, dispatches the right
+agent to each phase, runs checks that catch divergence, and tracks everything —
+so you keep control and oversight while the agents do the heavy lifting.
 
 | Without Baton | With Baton |
 |---------------|------------|
-| One long conversation doing everything | Phases with specialist agents |
-| Manual "did you run the tests?" | Automated pytest/lint gates between phases |
+| One long conversation doing everything | A planned effort, phased and sequenced |
+| One generalist drowning in whole-codebase context | Bespoke specialists tuned to each problem |
+| No idea what's coming or what might break | Up-front plan, risk classification, cost forecast |
+| Manual "did you run the tests?" | Automated gates + domain-expert checks between phases |
+| Hope the AI got it *right* | Independent auditor / SME verification on risky work |
 | No record of what happened | Full traces, usage logs, retrospectives |
-| Hope the AI remembers context | Scoped delegation prompts per agent |
 | Single point of failure | Crash recovery via `baton execute resume` |
 
 ---
