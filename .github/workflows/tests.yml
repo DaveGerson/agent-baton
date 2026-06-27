@@ -30,7 +30,7 @@ jobs:
         env:
           # The @beads/bd npm postinstall download is flaky on CI runners, so
           # fetch the pinned release binary directly (deterministic + auditable).
-          BD_VERSION: "1.0.5"
+          BD_VERSION: "1.0.4"
         run: |
           set -euo pipefail
           url="https://github.com/gastownhall/beads/releases/download/v${BD_VERSION}/beads_${BD_VERSION}_linux_amd64.tar.gz"

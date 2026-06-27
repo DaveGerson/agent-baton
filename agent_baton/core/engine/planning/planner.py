@@ -24,6 +24,7 @@ kwargs, same ``create_plan`` signature, same ``explain_plan``, same
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -42,6 +43,8 @@ from agent_baton.core.engine.planning.stages import (
 
 if TYPE_CHECKING:
     from agent_baton.models.execution import GateScope, MachinePlan
+
+logger = logging.getLogger(__name__)
 
 
 def _build_default_pipeline() -> Pipeline:
@@ -110,9 +113,15 @@ class IntelligentPlanner:
             self._task_classifier = task_classifier
         else:
             try:
-                from agent_baton.core.engine.classifier import CLIValidatedClassifier
-                self._task_classifier = CLIValidatedClassifier()
+                from agent_baton.core.engine.classifier import FallbackClassifier
+                self._task_classifier = FallbackClassifier()
             except Exception:
+                logger.warning(
+                    "FallbackClassifier could not be constructed — "
+                    "degrading to KeywordClassifier (keyword heuristics only). "
+                    "Install the 'claude' CLI and ensure agent_baton is properly "
+                    "installed to restore LLM-backed classification."
+                )
                 self._task_classifier = KeywordClassifier()
 
         self._foresight_engine = ForesightEngine()

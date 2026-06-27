@@ -806,5 +806,9 @@ class FallbackClassifier:
         if talent_result is not None:
             return talent_result
 
-        logger.info("TalentAgent unavailable — using keyword fallback")
+        logger.warning(
+            "TalentAgent unavailable — degrading to keyword-heuristic fallback. "
+            "Ensure the 'claude' CLI is installed and accessible for LLM-backed "
+            "task classification."
+        )
         return self._keyword.classify(summary, registry, project_root)
