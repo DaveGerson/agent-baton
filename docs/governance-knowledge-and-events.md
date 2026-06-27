@@ -1,22 +1,23 @@
-# Governance, Knowledge, and Events
+# Knowledge, Events, and Governance
 
-How safety, knowledge delivery, and event-driven traceability work
-together to make multi-agent orchestration reliable.
+How knowledge delivery, event-driven traceability, and risk guardrails
+support reliable multi-agent orchestration.
 
 ---
 
 ## Overview
 
-Agent Baton enforces safety through three cooperating subsystems:
+These three subsystems support Agent Baton's execution pipeline:
 
-1. **Governance** classifies risk, applies policy rules, validates agent
-   definitions and output specs, manages escalations, and generates
-   audit-ready compliance reports.
-2. **Knowledge** resolves domain-specific documents at plan time, delivers
+1. **Knowledge** resolves domain-specific documents at plan time, delivers
    them into delegation prompts, and handles runtime knowledge gaps when
    agents self-interrupt.
-3. **Events** record every state change as an append-only stream that
+2. **Events** record every state change as an append-only stream that
    powers projections, dashboards, and crash recovery.
+3. **Governance** classifies risk, applies policy rules, validates agent
+   definitions and output specs, manages escalations, and generates
+   audit-ready compliance reports — the trust mechanism (Pillar 4) that keeps
+   high-risk work from diverging.
 
 These systems compose inside the execution pipeline. The planner calls
 the classifier to set the risk level, which selects a guardrail preset

@@ -63,6 +63,12 @@ Each agent file in `agents/` contains a YAML frontmatter block (`name`, `descrip
 | `data-scientist` | sonnet | Statistical analysis, ML modeling, experiment design, model evaluation. |
 | `visualization-expert` | sonnet | Chart design, dashboard layout, visual storytelling. |
 
+## Team composition
+
+| Agent | Model | Use when |
+|-------|-------|----------|
+| `talent-builder` | opus | **Pillar 2 — compose the right team.** Researches a domain and creates a bespoke specialist agent + knowledge pack + skills, so no generalist drowns in whole-codebase context. |
+
 ## Domain & governance
 
 | Agent | Model | Use when |
@@ -70,7 +76,6 @@ Each agent file in `agents/` contains a YAML frontmatter block (`name`, `descrip
 | `subject-matter-expert` | opus | Industry-specific business rules, regulatory compliance (SOX, GDPR, HIPAA), business processes. |
 | `learning-analyst` | sonnet | Reads execution history + scorecards; proposes evidence-backed agent/config improvements. |
 | `system-maintainer` | sonnet | Post-cycle config tuning. Mutates `learned-overrides.json` only — never source code. |
-| `talent-builder` | opus | Researches a domain, creates a new specialist agent + knowledge pack + skills. |
 
 ## Archetypes
 

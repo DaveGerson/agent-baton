@@ -33,7 +33,7 @@ Agent Baton gives Claude Code a project management layer. It breaks work into ph
 
 - **[Orchestrator Usage](orchestrator-usage.md)** — how to drive a task end-to-end through the engine
 - **[Agent Roster](agent-roster.md)** — the 30 specialist agents Baton can dispatch
-- **[Architecture Overview](architecture.md)** — the engine, storage, governance, and learning subsystems
+- **[Architecture Overview](architecture.md)** — the orchestration engine, storage, and supporting subsystems
 - **[CLI Reference](cli-reference.md)** — every `baton` subcommand
 - **[Examples](examples/first-run.md)** — first-run walkthrough and knowledge-pack samples
 

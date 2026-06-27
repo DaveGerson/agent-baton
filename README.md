@@ -2,37 +2,146 @@
 
 📖 **Docs:** <https://davegerson.github.io/agent-baton/>
 
-**Governance and assurance for Claude Code.**
+**A project manager for Claude Code.**
 
-Agent Baton is a **governance and assurance harness** for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). It enforces domain-specific policy on every AI-authored change — data-classification risk, required expert reviewers, compliance gates, segregation-of-duties approval — and makes the outcome auditable through a verifiable evidence bundle. Claude Code owns the work; Baton owns the accountability.
+Agent Baton project-manages an effort from plan to merge. It breaks the work
+down so you have **foresight** into how it will go and where it might break,
+composes a **bespoke team** of specialist subagents tuned to *this* problem,
+dispatches the **right agent onto the right problem at the right time**, and
+keeps the work from diverging with **checks and balances** — domain-expert
+verification, not just code review. Claude Code owns the work; Baton owns the
+plan, the team, and the guardrails.
 
-**Harness mode** (zero loop overhead): install the hooks (`policy-check`, `comply-record`, `classify --activate`), activate an assurance pack, and every tool call Claude Code makes is evaluated against your policy. Evidence bundles are generated automatically. No plan. No execution loop. No API keys beyond Claude.
+**The four jobs Baton does for every effort:**
 
-**Managed mode** (for regulated work): set `BATON_PLAN_REVIEW` or use the spec queue — Baton runs the full plan→DISPATCH→GATE→APPROVAL loop, activated automatically when the data classifier flags a task as HIGH or CRITICAL risk.
+- **Plan with foresight** — decompose the task, sequence the phases with
+  dependency awareness, classify risk, and forecast cost *before* execution.
+  You see the shape of the work — and where it's likely to go wrong — up front.
+- **Compose the right team** — a single generalist agent carrying context for
+  the whole codebase suffers context rot and is never sharply tuned to the
+  problem in front of it. The `talent-builder` narrows in on the exact
+  specialists an effort needs and creates them, so you assemble an ad-hoc fleet
+  purpose-built for *this* problem instead of overloading a few generalists.
+- **Right agent, right problem, right time** — a deterministic engine dispatches
+  each phase to the specialist that fits it, runs automated QA gates between
+  phases, and organizes the whole effort through a plan-to-merge PMO flow.
+- **Checks & balances** — every change is risk-classified; medium/high-risk work
+  pulls in an independent `auditor` (with veto power) and, in regulated domains,
+  a `subject-matter-expert`. The question is whether the work is *functionally
+  right*, not just whether it lints. Humans are one kind of check; the engine
+  enforces the rest through policy gates and an auditable trail.
 
-**Spec federation**: submit or import specs from Azure DevOps / GitHub Issues → AI-derived risk + cost forecast → senior review before firing. The cheapest control point for org AI spend.
+For regulated work, Baton can also run as a **governance harness** (policy hooks
+evaluate every tool call and evidence bundles are generated automatically) or a
+**managed loop** (full plan→dispatch→gate→approval), and can import specs from
+GitHub Issues / Azure DevOps for senior review before any agent fires.
 
 ---
 
 ## Why Agent Baton?
 
-**The problem:** Claude Code is powerful, but complex tasks -- the ones that
-touch multiple files, need testing, and require different expertise -- benefit
-from structure. Without it, you get context bloat, missed test coverage, and
-no audit trail.
+**The problem:** Claude Code is powerful, but a complex effort — one that spans
+many files, needs different kinds of expertise, and has to actually be
+*correct* — is hard to run as one long conversation. You get context rot, missed
+coverage, no foresight into what's coming, and no record of what happened.
 
-**The solution:** Agent Baton gives Claude Code a project management layer.
-It breaks work into phases, assigns each phase to a specialist agent, runs
-automated QA gates between them, and tracks everything. You stay in control
-while the agents do the heavy lifting.
+**The solution:** Agent Baton gives Claude Code a project-management layer. It
+plans the effort, composes a bespoke team of specialists, dispatches the right
+agent to each phase, runs checks that catch divergence, and tracks everything —
+so you keep control and oversight while the agents do the heavy lifting.
 
 | Without Baton | With Baton |
 |---------------|------------|
-| One long conversation doing everything | Phases with specialist agents |
-| Manual "did you run the tests?" | Automated pytest/lint gates between phases |
+| One long conversation doing everything | A planned effort, phased and sequenced |
+| One generalist drowning in whole-codebase context | Bespoke specialists tuned to each problem |
+| No idea what's coming or what might break | Up-front plan, risk classification, cost forecast |
+| Manual "did you run the tests?" | Automated gates + domain-expert checks between phases |
+| Hope the AI got it *right* | Independent auditor / SME verification on risky work |
 | No record of what happened | Full traces, usage logs, retrospectives |
-| Hope the AI remembers context | Scoped delegation prompts per agent |
 | Single point of failure | Crash recovery via `baton execute resume` |
+
+---
+
+## How It Works
+
+Every effort moves through four phases in sequence: plan with foresight, compose
+the right team, dispatch the right agent, apply checks and balances. Here is what
+that looks like in practice.
+
+**1. Plan with foresight.** You hand the orchestrator a task. It runs
+`baton plan`, which auto-detects your stack, classifies risk, assigns budget
+tiers, sequences phases with dependency awareness, and forecasts cost — all
+before a single specialist fires. The result is a `plan.json` + `plan.md` written
+to `.claude/team-context/`. You see where the work will break before it starts.
+
+**2. Compose the right team.** If the plan calls for a role that doesn't exist
+yet, the `talent-builder` creates it: a narrowly scoped agent definition with
+baked-in knowledge for exactly this problem. This directly addresses context rot
+— a generalist agent carrying whole-codebase context is never as effective as a
+specialist whose context window is entirely focused on one domain.
+
+**3. Dispatch the right agent, right time.** `baton execute start` hands the plan
+to the execution engine. The engine returns a stream of typed actions:
+
+- `DISPATCH` — spawn the named specialist with the provided prompt
+- `GATE` — run an automated QA check (tests, lint, schema validation)
+- `APPROVAL` — wait for human or auditor sign-off
+- `INTERACT` — multi-turn dialogue with the orchestrator
+
+The orchestrator records each result (`baton execute record`, `baton execute
+gate`) and the engine advances the state machine. `baton execute complete`
+finalizes the trace, usage log, and retrospective.
+
+**4. Checks and balances.** Risk is classified at plan time. LOW-risk work gets
+guardrail presets applied inline. MEDIUM/HIGH-risk work pulls in an independent
+`auditor` subagent — operating in a separate context so it can overrule the plan
+without being influenced by the planner's reasoning. Regulated domains
+additionally require the `subject-matter-expert`. The question the auditor asks
+is whether the work is *functionally correct*, not just whether it lints. Policy
+gates enforce the rest; everything is written to an auditable trail.
+
+### Architecture contract
+
+```
+Human  <-->  Claude Code  <-->  baton CLI  <-->  Python engine
+        (natural language)  (structured text)  (state machine)
+```
+
+Claude never imports the Python package. It reads structured text output from
+`baton` commands and acts on it. The CLI output format is the only contract
+between Claude and the engine — specifically `_print_action()` in
+`agent_baton/cli/commands/execution/execute.py`, which is treated as a public API.
+
+```
+                    ┌────────────────────────────────────┐
+                    │           ORCHESTRATOR              │
+                    │  Reads 19 reference procedures      │
+                    └───────────────┬────────────────────┘
+                                    │
+                    baton plan ─────┴───── baton execute
+                                    │
+            ┌───────────────────────┼───────────────────────┐
+            │                       │                        │
+            v                       v                        v
+    ┌───────────────┐    ┌──────────────────┐    ┌──────────────────┐
+    │    AUDITOR    │    │   SPECIALIST     │    │  TALENT-BUILDER  │
+    │  (veto power) │    │    AGENTS        │    │  (agent factory) │
+    └───────────────┘    └──────────────────┘    └──────────────────┘
+
+    ┌─────────────────────────────────────────────────────────────┐
+    │                   EXECUTION ENGINE (Python)                  │
+    │  Planner → Executor → Dispatcher → Gates → Persistence       │
+    │  Events → Telemetry → Traces → Retrospectives                │
+    └─────────────────────────────────────────────────────────────┘
+```
+
+**Design principle: pay for context only when you need isolation.** Every
+subagent costs a full context window, startup latency, and information loss at
+handoff. Baton minimizes this by running research and routing inline at the
+orchestrator level; specialists get their own context only for substantial work.
+Shared knowledge lives in reference documents instead of being duplicated across
+prompts. This is pillar 2 in practice — see [Pillar 2 — Compose the Right
+Team](#pillar-2--compose-the-right-team).
 
 ---
 
@@ -47,10 +156,11 @@ scripts/install.sh          # Linux/macOS
 # or: scripts/install.ps1   # Windows (no admin required)
 ```
 
-The installer prompts for scope (user-level `~/.claude/` for all projects,
-or project-level `.claude/` for the current project only) and copies agent
-definitions, reference procedures, a template `CLAUDE.md`, and
-`settings.json` hooks.
+The installer prompts for scope: user-level (`~/.claude/`) for all projects, or
+project-level (`.claude/`) for the current project only. It copies 30 agent
+definitions, 19 reference procedures, a template `CLAUDE.md`, `settings.json`
+hooks, and skills. It also attempts to install `bd` (the bead backend) via npm or
+Homebrew.
 
 ### 2. Install the Python engine
 
@@ -65,10 +175,12 @@ pip install agent-baton[classify] # + AI risk classification
 **From source (for development):**
 
 ```bash
-git clone https://github.com/DaveGerson/agent-baton.git
-cd agent-baton
 pip install -e ".[dev]"          # Core engine + CLI + test deps
 ```
+
+Requires Python 3.10+. Runtime dependencies: PyYAML, pydantic, cryptography. The
+`pmo` extra adds FastAPI + uvicorn; `classify` adds the Anthropic SDK for
+AI-powered risk classification.
 
 ### 3. Verify
 
@@ -83,14 +195,13 @@ baton detect                # Detect your project's stack
 
 ### 4. Optional: install cymbal (recommended)
 
-[cymbal](https://github.com/1broseidon/cymbal) is a tree-sitter
-code indexer that agents use for symbol lookup and impact analysis.
-Without it, agents fall back to LSP or grep.
+[cymbal](https://github.com/1broseidon/cymbal) is a tree-sitter code indexer that
+agents use for symbol lookup (`cymbal investigate <symbol>`) and blast-radius
+analysis (`cymbal impact <symbol>`) before edits. Without it, agents fall back to
+grep — slower and less precise.
 
 ```bash
-# Check if cymbal is installed
-cymbal --help
-
+cymbal --help               # Check if already installed
 # If not, install the binary to ~/.local/bin/
 # (see cymbal docs for platform-specific instructions)
 ```
@@ -103,450 +214,20 @@ In a Claude Code session:
 Use the orchestrator to add a health check endpoint with tests
 ```
 
-That's it. The orchestrator plans, dispatches agents, runs gates, and
-delivers tested code.
+The orchestrator plans the work (pillar 1), creates or selects the right
+specialists (pillar 2), dispatches each to its phase and runs QA gates between
+them (pillar 3), and invokes the auditor if risk warrants it (pillar 4). It
+delivers tested, committed code.
 
-See [QUICKSTART.md](QUICKSTART.md) for a detailed walkthrough, or
-[docs/examples/first-run.md](docs/examples/first-run.md) for a complete
-end-to-end example with command output.
+### Usage examples
 
----
-
-## Features
-
-### 30 Specialist Agents
-
-Stack-aware agents that the orchestrator selects and routes automatically.
-First time on a Go project? The `talent-builder` creates
-`backend-engineer--go`. Next time, the routing table finds it.
-
-| Category | Agents |
-|----------|--------|
-| Orchestration | `orchestrator` |
-| Backend | `backend-engineer`, `--python`, `--node` |
-| Frontend | `frontend-engineer`, `--react`, `--dotnet` |
-| Architecture | `architect` |
-| Quality | `test-engineer`, `code-reviewer`, `security-reviewer` |
-| Governance | `auditor` (independent veto power) |
-| Data | `data-engineer`, `data-analyst`, `data-scientist` |
-| Visualization | `visualization-expert` |
-| Operations | `devops-engineer` |
-| Domain | `subject-matter-expert` |
-| Meta | `talent-builder` (creates new agent definitions) |
-
-### Orchestration Engine
-
-A deterministic state machine that plans, sequences, and tracks multi-agent
-tasks:
-
-- **Intelligent planning** -- auto-detects your stack, classifies risk,
-  assigns budget tiers, sequences phases with dependency awareness. Supports
-  complexity override (`--complexity light|medium|heavy`) and AI-driven
-  classification.
-- **Execution loop** -- DISPATCH / GATE / APPROVAL / COMPLETE with full
-  state persistence and crash recovery
-- **Concurrent execution** -- run multiple plans in parallel, each bound
-  by `BATON_TASK_ID`
-- **Plan amendments** -- add phases or steps mid-execution
-- **Team steps** -- dispatch multiple agents to a single step with
-  configurable synthesis strategies and conflict detection/escalation
-- **Selective MCP pass-through** -- per-step MCP server declarations
-  prevent input token bloat from unused tool schemas
-- **Resource governance** -- concurrent agent caps and token budget
-  warnings across budget tiers
-- **Team intelligence** -- composition tracking, cost prediction per
-  team, and `baton scores --teams` effectiveness reporting
-- **Async sessions** -- multi-day workflow support with checkpoints,
-  participant tracking, and multi-party contribution protocol
-
-### Risk-Tiered Safety
-
-Every task is classified by risk level:
-
-- **LOW** -- guardrail presets applied inline, no subagent overhead
-- **MEDIUM** -- auditor reviews the plan before execution
-- **HIGH** -- auditor runs as independent subagent with veto authority;
-  regulated domains require subject-matter-expert involvement
-
-### 15 Reference Procedures
-
-Shared knowledge documents encoding planning strategy, guardrail rules,
-communication protocols, failure handling, cost models, design patterns,
-and more. Agents get the knowledge they need without duplicating it across
-context windows.
-
-| Reference | Topic |
-|-----------|-------|
-| `baton-engine.md` | Full CLI reference and engine protocol |
-| `task-sequencing.md` | Phase ordering and dependency logic |
-| `agent-routing.md` | How the router selects agent flavors |
-| `guardrail-presets.md` | Safety policies by risk tier |
-| `cost-budget.md` | Token budget tiers and cost models |
-| `comms-protocols.md` | Inter-agent communication contracts |
-| `failure-handling.md` | Retry, escalation, and recovery |
-| `git-strategy.md` | Branch and commit conventions |
-| `hooks-enforcement.md` | Pre-commit and CI hook rules |
-| `decision-framework.md` | Human-in-the-loop decision protocol |
-| `adaptive-execution.md` | Runtime plan adaptation |
-| `research-procedures.md` | Investigation and discovery protocols |
-| `doc-generation.md` | Documentation generation standards |
-| `baton-patterns.md` | Reusable orchestration patterns |
-| `knowledge-architecture.md` | Knowledge pack design and delivery |
-
-### Knowledge Delivery
-
-Curated knowledge packs resolved at plan time and injected into each
-agent's delegation prompt. A feedback loop learns which agents need what
-knowledge for which task types.
-
-Three knowledge packs ship with the project:
-
-| Pack | Contents |
-|------|----------|
-| `agent-baton` | Architecture, conventions, and development workflow (3 docs) |
-| `ai-orchestration` | Multi-agent patterns, evaluation, prompt engineering, context economics (4 docs) |
-| `case-studies` | Real-world failure modes, framework comparisons, scaling patterns (3 docs) |
-
-Attach knowledge at plan time with `--knowledge` (individual files) or
-`--knowledge-pack` (named packs).
-
-### Structured Agent Memory (Beads)
-
-Inspired by Steve Yegge's [Beads](https://github.com/beads-ai/beads-cli)
-agent memory system. Agents emit `BEAD_DISCOVERY`, `BEAD_DECISION`,
-`BEAD_WARNING`, `BEAD_OUTCOME`, and `BEAD_PLANNING` signals during
-execution that are automatically parsed and persisted to SQLite. Beads form
-a typed dependency graph with status tracking (`open` -> `closed` ->
-`archived`), tag-based retrieval, time-based decay, and promotion to
-persistent knowledge documents.
-
-```bash
-baton beads list --type decision --status open
-baton beads ready                               # Unblocked open beads
-baton beads graph TASK_ID                       # Dependency graph
-baton beads promote bd-a1b2 --pack my-pack      # Promote to knowledge doc
-baton beads cleanup --ttl 168 --dry-run         # Memory decay preview
-```
-
-### Smart Forge
-
-AI-driven task planning via headless Claude Code subprocess. Generates
-real LLM-quality plans (not rule-based templates). Includes interactive
-interview-based refinement, SSE progress streaming through 5 stages
-(Analyzing, Routing, Sizing, Generating, Validating), and integrates
-with the PMO UI.
-
-### Headless Execution
-
-Run the full loop without a Claude Code session:
-
-```bash
-baton execute run --plan .claude/team-context/plan.json
-```
-
-Dispatches agents via `claude --print`, runs gates as subprocesses, loops
-until complete. Supports `--model`, `--max-steps`, and `--dry-run` flags.
-The PMO UI can also launch executions from its Kanban board.
-
-### Daemon Mode
-
-Background execution with parallel agent dispatch:
-
-```bash
-baton daemon start --plan plan.json --max-parallel 3
-baton daemon status
-baton daemon stop
-```
-
-Supports `--foreground`, `--resume`, `--dry-run`, and `--serve` (co-hosts
-the HTTP API in the same process). Human decision requests raised during
-daemon execution are managed via `baton decide`.
-
-### Worktree Isolation (Wave 1.3)
-
-When the planner classifies a task as parallelizable, the engine
-provisions a linked git worktree per agent so concurrent edits never
-clobber each other. Worktrees live under `.claude/worktrees/<short-id>/`
-and are reclaimed automatically:
-
-- **Aggressive GC.** `baton execute complete` runs `WorktreeManager.gc_stale()`
-  on a daemon thread (errors emit `BEAD_WARNING` and never block completion).
-- **Stale threshold.** Default is 4 hours (was 72h pre-2026-04-28). Override
-  with `BATON_WORKTREE_STALE_HOURS=<hours>`. The legacy
-  `BATON_WORKTREE_GC_HOURS` env var is still honoured.
-- **In-flight guard.** The GC skips worktrees referenced by any
-  `status='running'` execution in `baton.db` and logs `skipping in-flight
-  worktree X (active execution Y)`.
-- **Parent-repo detection.** When `baton` is invoked from inside a linked
-  worktree, `WorktreeManager` resolves the canonical repo root via
-  `git worktree list --porcelain` so all repo-level operations
-  (worktree add/remove/prune, branch ops, rebase, merge) target the main
-  repository — fixing the dogfood failure where running baton inside an
-  agent worktree silently disabled isolation. (PR #69, bd-c071.)
-
-### Run-Level Spend Ceiling (PR #67)
-
-Set `BATON_RUN_TOKEN_CEILING=<USD>` to cap total cumulative spend per
-execution. `BudgetEnforcer` reads the env var fresh on every check
-(never cached), tracks a run-level counter that survives crash recovery,
-and raises `RunTokenCeilingExceeded` before any record_* call would push
-the total over the limit. The immune-system daemon checks the ceiling before
-each sweep and suspends with `'ceiling-abort'` rather than overspending.
-
-> **Known gap (bd-3f80).** The main `Executor.dispatch()` path does not
-> yet block individual agent dispatches when the projected spend would
-> breach the cap; it only emits a warning at HIGH/CRITICAL run start.
-> Enforcement is handled by the policy hooks. Full executor wiring is
-> tracked in bd-3f80.
-
-### Persistent Agent Souls (EXPERIMENTAL — Wave 6.1 Part B)
-
-Cross-project cryptographic identities for agents stored in
-`~/.baton/central.db`. Each soul has an Ed25519 keypair (private key in
-`~/.config/baton/souls/<soul_id>.ed25519`, mode 0600) and accumulates an
-expertise vector across runs.
-
-```bash
-baton souls mint <role> <domain>     # Mint a new operator-issued soul
-baton souls list [--role ROLE]       # List active souls
-baton souls show <soul_id>           # Show metadata + expertise
-baton souls retire <soul_id> [--successor SUCC]
-baton souls revoke <soul_id> --confirm
-```
-
-Schema v33 added the `soul_revocations` table (PR #68). The Python API
-exposes `SoulRegistry.revoke()`, `is_revoked()`, `list_revocations()`,
-and `rotate()` (mints a successor keypair atomically). The
-revocation-aware verification path is `SoulRouter.verify_signature()`.
-
-> **Known gap (bd-1ca2).** The CLI `revoke` subcommand only accepts
-> `--confirm`; the `--reason`, `list-revocations`, and `rotate`
-> subcommands are available via the Python `SoulRegistry` API but not yet
-> wired into the CLI. Existing callers of the legacy `soul.verify` are
-> not migrated to the revocation-aware `SoulRouter.verify_signature()`
-> path either; tracked in bd-1ca2.
-
-### Executable Beads (EXPERIMENTAL — Wave 6.1 Part C)
-
-`bead_type="executable"` beads carry their script body inline in the bead's
-`bd` metadata (`script_body`, verified against `script_sha` on load). Pipeline:
-`ScriptLinter` (denylist of dangerous patterns) -> optional soul signature ->
-`BdBeadStore.write()` (via `bead_backend.make_bead_store()`)
-with `status="quarantine"` -> `AuditorGate.approve(bead_id)` flips
-status to `open` -> `ExecutableBeadRunner.run()` executes the script
-through `Sandbox` (wall-clock timeout + memory limit + captured I/O) and
-writes a child `discovery` bead linked via `validates`/`contradicts`.
-Gated behind `BATON_EXEC_BEADS_ENABLED=1`.
-
-> **Trust boundary.** The sandbox is **process-level only** — no
-> filesystem namespacing, network namespacing, or syscall filter. Trust
-> model assumes locally-authored, version-controlled, team-reviewed
-> scripts. Beads from external origins (federation, downloaded packs,
-> fork PRs) emit a `[security]` warning to stderr from `baton beads
-> exec`. Single source of truth: [`references/baton-patterns.md`](references/baton-patterns.md)
-> -> *"Pattern: Executable Beads — Trust Boundary"*.
-
-### Bead Persistence — `bd` backend (ADR-13b)
-
-Beads are stored by the external [beads](https://github.com/gastownhall/beads)
-tool (`bd`) in a per-project `.beads/` workspace (Dolt-backed). `baton` talks to
-it through `BdBeadStore` (via `bead_backend.make_bead_store()`); all
-baton-specific bead fields round-trip losslessly through `bd`'s `metadata`
-(under a `baton` key) plus queryable labels. `bd` is a mandatory runtime
-dependency that the installer (`scripts/install.sh` / `install.ps1`)
-auto-installs. Derived analytics (inferred edges/clusters/handoffs) live in a
-rebuildable `baton-derived.db`; `central.db` keeps a read-only `beads`
-projection for cross-project analytics. (The earlier SQLite bead store and
-git-notes mirror were removed in ADR-13b — see `docs/design-decisions.md`.)
-
-### Cross-Project Intelligence
-
-Execution data syncs to `~/.baton/central.db`. Query agent reliability,
-token costs, and failure rates across projects:
-
-```bash
-baton sync                   # Sync current project
-baton sync --all             # Sync all registered projects
-baton sync status            # Show sync watermarks
-baton cquery agents          # Agent reliability across projects
-baton cquery costs           # Token costs by task type
-baton cquery gaps            # Recurring knowledge gaps
-baton cquery failures        # Project failure rates
-baton cquery mapping         # External item -> plan mapping
-```
-
-### Local Project Queries
-
-Query the current project's execution history with predefined views or
-ad-hoc SQL:
-
-```bash
-baton query agent-reliability       # Agent success rates
-baton query tasks                   # Recent task list
-baton query task-detail TASK_ID     # Full breakdown for one task
-baton query gate-stats              # Gate pass rates
-baton query cost-by-agent           # Token costs by agent
-baton query patterns                # Learned patterns
-baton query stalled --hours 4       # Stalled executions
-baton query --sql "SELECT ..."      # Ad-hoc SQL
-```
-
-### Pattern Learning
-
-The engine learns from past executions -- identifies recurring agent
-combinations, recommends budget adjustments, proposes prompt improvements,
-and surfaces anomalies. The learning pipeline includes:
-
-- **Pattern detection** -- `baton patterns` surfaces recurring
-  orchestration patterns with confidence scores
-- **Budget tuning** -- `baton budget` recommends tier adjustments
-  based on historical cost data
-- **Prompt evolution** -- `baton evolve` proposes prompt improvements
-  backed by performance data
-- **Anomaly detection** -- `baton anomalies` flags statistical deviations
-  in agent behavior
-- **Experiments** -- `baton experiment` manages controlled trials to
-  validate improvement recommendations
-- **Full-cycle improvement** -- `baton learn improve --run` executes the
-  complete loop: detect anomalies, generate recommendations, auto-apply
-  safe changes, escalate risky ones, start experiments
-
-### Learning Automation
-
-A closed-loop system that detects operational issues and auto-corrects them
-with confidence thresholds:
-
-- **Detection** -- after each execution, the engine scans for routing
-  mismatches, agent degradations, knowledge gaps, gate errors, roster
-  bloat, and pattern drift
-- **Issue ledger** -- structured SQLite-backed ledger with occurrence
-  tracking, severity classification, and status lifecycle
-  (`open` -> `proposed` -> `applied` -> `resolved`)
-- **Auto-correction** -- issues that recur above a confidence threshold
-  (e.g., 3 routing mismatches) are automatically proposed and can be
-  applied to `learned-overrides.json`, which the router and planner
-  consume at plan time
-- **Structured interview** -- `baton learn interview` walks through
-  open issues interactively, collecting human decisions for cases that
-  require judgment (pattern drift, prompt evolution)
-- **Rollback** -- any applied fix can be reset with `baton learn reset`,
-  reopening the issue and removing the override
-
-### REST API and PMO UI
-
-A FastAPI server exposes the full engine over HTTP with 10 route modules:
-
-| Route | Purpose |
-|-------|---------|
-| `/api/v1/health` | Liveness and readiness probes |
-| `/api/v1/plans` | Plan creation and retrieval |
-| `/api/v1/executions` | Execution lifecycle (start, record, gate, complete) |
-| `/api/v1/agents` | Agent registry queries |
-| `/api/v1/observe` | Dashboard, traces, usage records |
-| `/api/v1/decisions` | Human-in-the-loop decision management |
-| `/api/v1/events` | SSE event streaming |
-| `/api/v1/webhooks` | Outbound webhook subscription CRUD |
-| `/api/v1/pmo` | Portfolio management (board, projects, forge, execute, gates, changelist, review, signals) |
-| `/api/v1/learn` | Learning issues and auto-correction |
-
-The API supports Bearer token authentication, CORS configuration,
-user identity middleware (`BATON_APPROVAL_MODE`), and outbound webhooks
-with HMAC-SHA256 signing and Slack Block Kit payloads.
-
-A React/Vite **PMO frontend** provides a complete plan-to-merge
-lifecycle:
-
-- **Kanban board** with 6 columns (queued, executing, awaiting_human,
-  validating, review, deployed) and program health dashboards
-- **Smart Forge** with SSE progress streaming (5-stage indicator)
-- **Advanced plan editor** with model selection, dependency multi-select,
-  tag inputs, and gate editing
-- **Execution controls** -- pause/resume/cancel (SIGSTOP/SIGCONT/SIGTERM),
-  retry-step and skip-step for failed steps, bead alert flags
-- **Changelist review** -- post-execution file tree grouped by agent with
-  diff stats, merge and PR buttons
-- **Role-based approval** -- request-review workflow with audit trail
-  (`approval_log` table)
-
-```bash
-baton serve --port 8741              # API only
-baton pmo serve --port 8741          # API + PMO UI
-```
-
-### External Source Adapters
-
-Connect Azure DevOps, Jira, GitHub, or Linear as work-item sources.
-Items sync to `central.db` and link to baton plans. The Azure DevOps
-adapter is fully implemented; Jira, GitHub, and Linear adapters can be
-added by implementing the `ExternalSourceAdapter` protocol.
-
-```bash
-baton source add ado --name "My ADO" --org myorg --project myproj --pat-env ADO_PAT
-baton source list
-baton source sync --all
-baton source map EXTERNAL_ID --project PROJECT_ID --task TASK_ID
-```
-
----
-
-## How It Works
-
-```
-Human  <-->  Claude Code  <-->  baton CLI  <-->  Python engine
-        (natural language)  (structured text)  (state machine)
-```
-
-Claude never imports the Python package. It reads structured text output
-from `baton` commands and acts on it. The CLI output format is the only
-contract between Claude and the engine.
-
-```
-                    +----------------------------------------------------+
-                    |                    ORCHESTRATOR                     |
-                    |  Reads 19 reference procedures inline               |
-                    +------------------------+---------------------------+
-                                             |
-                          baton plan --------+-------- baton execute
-                                             |
-              +------------------------------+-------------------------------+
-              |                              |                               |
-              v                              v                               v
-    +------------------+          +--------------------+          +------------------+
-    |     AUDITOR      |          |    SPECIALIST      |          |   TALENT         |
-    |  (veto power)    |          |    AGENTS          |          |   BUILDER        |
-    +------------------+          +--------------------+          +------------------+
-
-    +--------------------------------------------------------------------+
-    |                     EXECUTION ENGINE (Python)                       |
-    |                                                                    |
-    |  Planner --> Executor --> Dispatcher --> Gates --> Persistence      |
-    |  Events  --> Telemetry --> Traces --> Retrospectives                |
-    |  Pattern Learner --> Budget Tuner --> Prompt Evolution              |
-    |  Federated Sync --> Central DB --> Cross-Project Queries            |
-    |  PMO Store --> Smart Forge --> REST API --> PMO UI                  |
-    |  Bead Store --> Knowledge Resolver --> Learning Automation          |
-    +--------------------------------------------------------------------+
-```
-
-### Design Principle
-
-**Pay for context only when you need isolation.** Every subagent costs a
-full context window, startup latency, and information loss. Agent Baton
-minimizes this: research and routing run inline, specialists get their own
-context only for substantial work, shared knowledge lives in reference
-documents instead of being duplicated.
-
----
-
-## Usage
-
-### Orchestrated Tasks (complex, multi-domain work)
+**Orchestrated task** — complex, multi-domain work:
 
 ```
 Use the orchestrator to build a health check API with tests and documentation
 ```
 
-### Engine-Driven Workflow (explicit control)
+**Engine-driven workflow** — explicit control over each step:
 
 ```bash
 baton plan "Add input validation to the API" --save --explain
@@ -557,7 +238,7 @@ baton execute gate --phase-id 2 --result pass
 baton execute complete
 ```
 
-### Direct Agent Invocation (simple, single-domain tasks)
+**Direct agent invocation** — single-domain tasks that don't need a full plan:
 
 ```
 Use the data-analyst to investigate our fleet utilization trends
@@ -565,7 +246,7 @@ Use the security-reviewer to audit our authentication flow
 Use the test-engineer to add unit tests for the payment module
 ```
 
-### Autonomous Execution (no Claude Code session)
+**Autonomous execution** — no Claude Code session required:
 
 ```bash
 baton execute run               # Full loop: plan -> dispatch -> gate -> complete
@@ -573,17 +254,480 @@ baton execute run               # Full loop: plan -> dispatch -> gate -> complet
 
 ---
 
+## The Four Pillars
+
+## Pillar 1 — Plan with Foresight
+
+Before a single token goes to an agent, Baton builds a complete picture of the
+work: what kind of task it is, which phases it needs, which agents fit those
+phases, where it's likely to break, and what it will cost. You commit to a plan,
+not a hope.
+
+### How planning works
+
+`baton plan "<task>"` runs a deterministic multi-stage pipeline:
+
+1. **Classification** — detects the project stack and classifies the task. By
+   default this uses an AI classifier (Sonnet via the `claude` CLI, with the full
+   agent roster as context) or falls back to a keyword heuristic when the CLI is
+   unavailable. It assigns a task type (`new-feature`, `bug-fix`, `migration`,
+   `data-analysis`, …), a complexity tier (`light`, `medium`, `heavy`), and an
+   archetype (`direct`, `investigative`, `phased`).
+2. **Roster** — assembles the agent list for that complexity tier (light → 1
+   agent, medium → up to 3, heavy → up to 5), applies retrospective feedback
+   (agents that underperformed on similar tasks are deprioritized), then routes
+   each base role to its stack-flavored variant.
+3. **Risk** — runs the `DataClassifier` (keyword signals + structural analysis).
+   Risk can only be escalated, never lowered by a secondary signal. Output:
+   `LOW`, `MEDIUM`, `HIGH`, or `CRITICAL`. Risk drives git strategy and safety
+   roster injection — HIGH plans get `code-reviewer` appended; compliance/audit
+   keywords pull in the `auditor` regardless of complexity.
+4. **Decomposition + Foresight** — builds the phase list, attaches knowledge
+   documents to each step, then runs the **Foresight Engine**. Foresight scans
+   step descriptions for capability gaps and prerequisites you didn't ask for but
+   that execution will hit — a migration step without rollback scaffolding, an
+   API step without schema validation — and *inserts a preparatory phase* before
+   the phase that triggers it. It lowers its confidence threshold for HIGH-risk
+   plans so more gaps surface.
+5. **Assembly + validation** — assembles the final `MachinePlan` with gate
+   commands, knowledge attachments, budget tier, and execution mode. The hard
+   gate (`BATON_PLANNER_HARD_GATE`) can block structurally defective plans.
+
+### Key commands
+
+```bash
+# Preview the plan, cost forecast, and gate timing without saving
+baton plan "Add OAuth2 login" --dry-run
+
+# Save the plan and see why these agents and phases were chosen
+baton plan "Add OAuth2 login" --save --explain
+
+# Override complexity when you know more than the classifier
+baton plan "Rename a constant across 2 files" --complexity light
+
+# Start execution after saving
+baton execute start
+```
+
+`--dry-run` renders a compact preview in seconds — risk, budget, phases, the
+agent assigned to each step, the gates that will block, and a cost forecast
+carrying an explicit **±50% confidence band**. The dollar figure is a planning
+signal, not a bill.
+
+Plans are not frozen: `baton execute amend` adds phases or steps while an
+execution is running, and goal-driven mode (`baton goal "<condition>"`) evaluates
+the condition at phase boundaries and proposes amendments until the goal is met
+or the amend budget is exhausted.
+
+## Pillar 2 — Compose the Right Team
+
+The fundamental problem with a single generalist agent on a complex codebase is
+not intelligence — it is **context rot**. The agent accumulates context across
+every file it has touched and every phase it has completed; by step 4 it is
+carrying the weight of steps 1–3 plus the entire codebase, and the
+signal-to-noise ratio for the work in front of it has collapsed.
+
+Baton's answer is **bespoke team composition**: assemble an ad-hoc fleet of
+specialists purpose-built for this problem, then discard them when done. Each
+specialist gets a clean context window containing only what it needs for its
+phase.
+
+### The talent-builder: specialists on demand
+
+The 30 agents that ship with Baton cover the common roles. When you hit a domain
+they don't cover — a new compliance framework, a specialized data system, a
+regulatory area — the `talent-builder` builds the specialist you need:
+
+- Researches the domain (reads existing code, schema, documentation)
+- Decides which knowledge layer to use: facts small enough to bake into the
+  prompt, reference schemas that go into a knowledge pack, or repeatable
+  workflows that become skills
+- Creates the agent file, knowledge pack, and skill scaffold
+- Reports token cost and verification criteria before writing anything
+
+The naming convention is `role--flavor` (e.g. `backend-engineer--python`,
+`frontend-engineer--react`). First time Baton encounters a Go project,
+`talent-builder` can create `backend-engineer--go`. From then on, the routing
+table finds it automatically.
+
+### The agent roster (30 agents)
+
+| Category | Agents |
+|----------|--------|
+| Orchestration | `orchestrator`, `team-lead`, `task-runner` |
+| Backend | `backend-engineer`, `--python`, `--node` |
+| Frontend | `frontend-engineer`, `--react`, `--dotnet` |
+| Architecture | `architect` |
+| Quality | `test-engineer`, `code-reviewer`, `security-reviewer` |
+| Governance | `auditor` (independent veto power) |
+| Data | `data-engineer`, `data-analyst`, `data-scientist` |
+| Visualization | `visualization-expert` |
+| Operations | `devops-engineer` |
+| Domain | `subject-matter-expert`, `learning-analyst`, `system-maintainer` |
+| Meta | `talent-builder` (creates new agents, knowledge packs, skills) |
+| Resilience | `immune-*` (autofix, deprecated-api, doc-drift, stale-comment, todo-rot, untested-edges) |
+
+### How routing picks the flavor
+
+`baton route [roles]` shows you what the planner will dispatch for your project:
+
+```bash
+baton route backend-engineer frontend-engineer
+#   backend-engineer   → backend-engineer--python  *
+#   frontend-engineer  → frontend-engineer            (no matching flavor)
+```
+
+The router scans the project root and up to two subdirectory levels for stack
+signals (`pyproject.toml` → Python, `go.mod` → Go, `package.json` → JavaScript,
+`next.config.js` → React, …). Root-level signals take priority over subdirectory
+signals. When a flavored variant exists in the registry it wins; otherwise the
+base agent runs. Learned overrides (`learned-overrides.json`), derived from past
+executions, are consulted first so a project-specific correction persists without
+touching the engine.
+
+### Context economics
+
+Every subagent costs a full context-window load, startup latency, and transfer
+overhead. Baton minimizes it: research and routing run inline; specialists get
+their own context only for substantial implementation phases; shared knowledge
+lives in reference documents, not duplicated across windows; per-step MCP server
+declarations keep unused tool schemas out of the context. Pay for isolated
+context only when isolation is worth it.
+
+## Pillar 3 — Right Agent, Right Problem, Right Time
+
+A deterministic engine dispatches each specialist to its assigned phase, gates
+the output before advancing, and recovers from crashes without losing state. You
+interact with it through the `baton execute` command group; it does the
+sequencing.
+
+### The action loop
+
+`ExecutionEngine` implements the `ExecutionDriver` 15-method protocol. Call it
+once and it returns one of nine typed `ActionType` instructions:
+
+| Action | What the caller does |
+|--------|----------------------|
+| `DISPATCH` | Spawn the named specialist with the built delegation prompt |
+| `GATE` | Run the gate command as a subprocess and record pass/fail |
+| `APPROVAL` | Pause for a human decision (`baton execute approve`) |
+| `INTERACT` | Multi-turn step: agent responded, human inputs next turn |
+| `FEEDBACK` | Present multiple-choice questions; dispatch based on answers |
+| `CHECKPOINT` | Save state and start a fresh session to prevent context rot |
+| `WAIT` | Parallel steps are still running; poll again |
+| `COMPLETE` | Execution finished; call `engine.complete()` |
+| `FAILED` | Execution cannot continue |
+
+Every transition persists state to `baton.db` (SQLite) before returning. If the
+session dies between calls, `baton execute resume` reconstructs the execution
+state from the last checkpoint and re-issues the next action. Nothing is
+re-dispatched; no step is duplicated.
+
+### Concurrent execution
+
+Multiple plans run in parallel. Each `baton execute start` prints
+`export BATON_TASK_ID=<id>`. Set that variable in each terminal and the engine's
+dispatch, gate-recording, and state reads are scoped to that task.
+
+### Team steps
+
+A step with a non-empty `team` list dispatches multiple agents to one step. Each
+member carries its own role (`lead`, `implementer`, `reviewer`), intra-step
+dependencies, and deliverables. A synthesis strategy controls how outputs merge
+(`concatenate`, `merge_files`, or `agent_synthesis` — which re-dispatches a
+synthesis agent, default `code-reviewer`, over the combined outcomes). Conflict
+handling is configurable: `auto_merge`, `escalate` (surfaces the conflict as an
+`APPROVAL` with both positions), or `fail`.
+
+### Worktree isolation
+
+When a step is parallel-safe, the engine provisions a linked git worktree at
+`.claude/worktrees/<task_id>/<step_id>/` before dispatch, so concurrent agents
+write to isolated working copies and no uncommitted change leaks between steps.
+`WorktreeManager.gc_stale()` reclaims worktrees older than 4 hours (override with
+`BATON_WORKTREE_STALE_HOURS`), skipping any referenced by a running execution.
+Disable with `BATON_WORKTREE_ENABLED=0`.
+
+### Selective MCP pass-through
+
+Each step declares which MCP servers it needs; the dispatcher passes only those
+into the agent's tool environment. Steps that need no external tools carry an
+empty list, keeping unused tool schemas out of the context window.
+
+### Resource governance
+
+Concurrent agent caps are set per phase. `BATON_RUN_TOKEN_CEILING` sets a hard
+USD spend cap per execution; `BudgetEnforcer` checks it before every record call
+and raises `RunTokenCeilingExceeded` if the next step would breach it. The cap
+survives crash recovery.
+
+> **Known gap (bd-3f80).** The main `Executor.dispatch()` path warns at
+> HIGH/CRITICAL risk but does not yet block individual dispatches when projected
+> spend would exceed the ceiling. Enforcement is currently handled by the policy
+> hooks.
+
+### Headless and daemon execution
+
+```bash
+baton execute run --plan .claude/team-context/plan.json   # full loop, no session
+baton daemon start --plan plan.json --max-parallel 3      # background, parallel
+baton daemon status
+baton daemon stop
+```
+
+`baton execute run` dispatches agents via `claude --print`, runs gates as
+subprocesses, and loops until `COMPLETE` or `FAILED` (`--model`, `--max-steps`,
+`--dry-run`). The daemon adds background execution with `--serve` (co-host the
+REST API), `--resume`, and `baton decide` for human decision requests raised
+mid-run.
+
+### PMO plan-to-merge flow
+
+`baton pmo serve` starts the FastAPI server and React/Vite frontend. The Kanban
+board (queued → executing → awaiting_human → validating → review → deployed)
+shows all active efforts. From there you create plans via Smart Forge, edit them,
+control execution (pause/resume/cancel, retry or skip a failed step), review
+changesets (file tree grouped by agent, with diff stats and PR/merge buttons),
+and approve phases through a role-based request-review workflow with a full audit
+trail. The PMO is how an effort progresses from spec to merged PR without a
+terminal session open.
+
+## Pillar 4 — Checks and Balances
+
+Governance serves the pillars above it. It makes sure the right agent was
+actually right — not just fast or syntactically correct. The checks are layered:
+most run automatically; the expensive independent ones activate in proportion to
+risk.
+
+### Risk-tiered safety
+
+Every task is classified by `DataClassifier` before the first agent fires.
+Classification reads keyword and structural signals (regulated/PII, security,
+infrastructure, database, path patterns) and produces a risk tier:
+
+| Tier | Automatic response |
+|------|--------------------|
+| LOW | Guardrail preset applied inline; no subagent overhead |
+| MEDIUM | `auditor` reviews the plan before execution starts |
+| HIGH | `auditor` runs as an independent subagent with VETO authority; regulated domains also require `subject-matter-expert` |
+| CRITICAL | Same as HIGH; multiple regulated/PII signals auto-escalate here |
+
+The classifier uses an AI model when `ANTHROPIC_API_KEY` is set, and falls back
+to deterministic keyword matching otherwise. `baton classify --activate "<task>"`
+writes `.claude/active-policy.json` so the `policy-check` hook knows which preset
+governs the current session.
+
+### What the auditor actually does
+
+The `auditor` agent is independent from the orchestrator by design. Its three
+operating modes:
+
+1. **Pre-execution plan review** — scope boundaries, write overlaps, data safety,
+   regulatory requirements, rollback paths. Returns a guardrails report with
+   per-agent permission manifests the orchestrator enforces.
+2. **Mid-execution checkpoints** — CONTINUE / PAUSE / HALT verdict at defined step
+   boundaries. A HALT stops the next dependent step from dispatching.
+3. **Post-execution audit** — diff review, compliance scan, security scan, domain
+   validation. Returns a machine-readable verdict (`APPROVE`,
+   `APPROVE_WITH_CONCERNS`, `REQUEST_CHANGES`, `VETO`). A VETO halts HIGH/CRITICAL
+   phase advancement; overriding requires `--force --justification`, which is
+   logged to the audit chain.
+
+The auditor checks whether the work is **functionally correct** — business rules
+enforced, edge cases handled, domain logic valid — not just whether it lints.
+That is what the `subject-matter-expert` enables: it supplies the domain context
+(regulatory requirements, data models, validation rules) the auditor and
+implementers need to be right.
+
+### Policy hooks: tool-call-level enforcement
+
+Two Claude Code hooks run for every tool call during execution:
+
+- **`baton policy-check`** (PreToolUse) — evaluates the tool call against the
+  active guardrail preset and denies when a blocking rule fires (`path_block`,
+  `tool_restrict`, `require_agent`, `require_gate`). Fail-open by default; set
+  `BATON_POLICY_FAIL_CLOSED=1` to make errors deny.
+- **`baton comply-record`** (PostToolUse/Stop) — appends a hash-chained entry to
+  `compliance-audit.jsonl` after each tool use. `BATON_COMPLIANCE_FAIL_CLOSED=1`
+  makes write failures halt execution rather than log-and-continue — required for
+  regulated work where losing an audit entry is itself a defect.
+
+Five guardrail presets ship (`standard_dev`, `data_analysis`, `infrastructure`,
+`regulated`, `security`); custom presets live under `.claude/policies/`.
+
+### Assurance packs
+
+Organisations author domain-specific governance units under
+`.claude/packs/<name>/`: a policy JSON, classification signals, a review rubric,
+gate definitions, and evidence requirements. Loading a pack merges its signals
+into the classifier and registers its policy set so `policy-check` resolves it
+automatically.
+
+```bash
+baton packs init <name>       # Scaffold a new pack
+baton packs validate <name>   # Validate structure and required fields
+baton packs list              # List loaded packs
+```
+
+### Verifiable evidence bundles
+
+After each task, `baton evidence bundle <task_id>` assembles a self-contained
+artifact under `evidence/<task_id>/`: a SHA-256 manifest of every artifact, an AI
+Bill of Materials, the task-scoped compliance segment, gate results, auditor and
+reviewer verdicts, approvals, and an active-pack snapshot.
+
+```bash
+baton evidence bundle <task_id>   # Build bundle (optionally --tar, --sign)
+baton evidence verify <path>      # Verify SHA-256 integrity; CI-runnable, offline
+```
+
+### Segregation-of-duties approval
+
+`BATON_APPROVAL_MODE=team` requires the approving actor to differ from whoever
+requested the approval — self-approval is blocked. The request records the
+requester identity; the result records the actor.
+
+### Spec federation: the cheapest control point
+
+Before any agent fires on externally-sourced work, a spec can be imported from
+GitHub Issues or Azure DevOps, auto-enriched with a risk classification and cost
+forecast (pack-aware when packs are loaded), and routed for senior review —
+approve or bounce — before it ever fires into plan generation. Catching
+HIGH/CRITICAL risk at the spec-review stage costs one API call instead of a full
+execution cycle.
+
+```bash
+baton spec import   # Import from GitHub Issues / Azure DevOps
+baton spec list
+baton spec approve  # Blocked on self-approval in team mode
+baton spec export
+```
+
+---
+
+## Supporting Capabilities
+
+Below the four pillars, Baton ships a deep toolkit for memory, observability,
+improvement, and integration.
+
+### Memory & knowledge
+
+**Structured agent memory (Beads).** Agents emit typed bead signals
+(`BEAD_DISCOVERY`, `BEAD_DECISION`, `BEAD_WARNING`, `BEAD_OUTCOME`,
+`BEAD_PLANNING`) during execution. Beads are stored by the external `bd` tool (a
+mandatory runtime dependency the installer auto-installs) in a per-project
+`.beads/` workspace and form a typed dependency graph with status tracking and
+tag-based retrieval.
+
+```bash
+baton beads list --type decision --status open
+baton beads ready                          # Unblocked open beads
+baton beads graph TASK_ID                  # Dependency graph
+baton beads promote bd-a1b2 --pack my-pack # Promote to knowledge doc
+baton beads cleanup --ttl 168 --dry-run    # Memory decay preview
+```
+
+**Knowledge delivery.** Curated knowledge packs resolved at plan time and
+injected into each agent's prompt. Attach with `--knowledge` (files) or
+`--knowledge-pack` (named packs); three packs ship (`agent-baton`,
+`ai-orchestration`, `case-studies`). Lifecycle is managed with
+`baton knowledge stale|deprecate|retire|sweep`.
+
+### Observability & cross-project intelligence
+
+```bash
+baton usage                          # Token usage statistics
+baton dashboard [--write]            # Usage dashboard
+baton trace                          # Execution traces
+baton retro                          # Task retrospectives
+baton query agent-reliability        # Predefined views over this project's baton.db
+baton query --sql "SELECT ..."       # Ad-hoc SQL
+```
+
+Execution data syncs to `~/.baton/central.db` for cross-project queries:
+
+```bash
+baton sync [--all]                   # Sync to central.db
+baton cquery agents                  # Agent reliability across projects
+baton cquery costs                   # Token costs by task type
+baton cquery failures                # Project failure rates
+```
+
+### Learning & improvement
+
+These commands surface **data-driven recommendations for human review** — they
+record patterns and propose changes; a human decides what to apply.
+
+```bash
+baton patterns               # Recurring orchestration patterns with success rates
+baton budget                 # Budget tier recommendations from historical cost data
+baton evolve                 # Proposed prompt improvements backed by performance data
+baton anomalies [--watch]    # Statistical deviations in agent behavior
+baton scores [--agent/--trends/--teams]   # Agent performance scorecards
+```
+
+**Learning automation.** Operational issues (routing mismatches, agent
+degradations, knowledge gaps, gate errors) are tracked in a SQLite-backed ledger.
+Issues that recur above a threshold become auto-apply *candidates*; a human
+reviews them via `baton learn apply` or `baton learn interview` before they take
+effect. `baton learn reset` rolls back any applied fix.
+
+### REST API & PMO UI
+
+A FastAPI server exposes the full engine over HTTP (`pip install
+agent-baton[pmo]`).
+
+```bash
+baton serve --port 8741       # API only
+baton pmo serve --port 8741   # API + PMO UI
+```
+
+Ten route groups (`/api/v1/health`, `/plans`, `/executions`, `/agents`,
+`/observe`, `/decisions`, `/events` (SSE), `/webhooks`, `/pmo`, `/learn`) with
+Bearer-token auth, CORS, and HMAC-SHA256 webhook signing (Slack Block Kit
+payloads). The React/Vite PMO UI provides the Kanban board, Smart Forge with SSE
+progress streaming, plan editor, execution controls, changelist review, and
+role-based approval.
+
+### Extensibility
+
+```bash
+baton source add ado --name "My ADO" --org myorg --project myproj --pat-env ADO_PAT
+baton source list|sync|remove|map     # External work-item sources
+baton release create|notes|readiness  # Tag plans against delivery targets
+baton webhook add|list|remove         # Outbound webhook subscriptions
+```
+
+The Azure DevOps work-item adapter is fully implemented; GitHub, Jira, and Linear
+can be added by implementing the `ExternalSourceAdapter` protocol.
+
+### Experimental (feature-flagged)
+
+These surfaces emit stub warnings to stderr on invocation and are **not
+production-ready**. Do not rely on them.
+
+| Feature | Flag | Status |
+|---------|------|--------|
+| Immune-system daemon | `BATON_IMMUNE_ENABLED=1` | Wave 6.2 Part B stub |
+| Predictive watcher | feature flag in `core/intel/` | Wave 6.2 Part C stub |
+| Executable beads | `BATON_EXEC_BEADS_ENABLED=1` | Process-level sandbox only; unsafe for external-origin beads |
+| Persistent agent souls | `BATON_SOULS_ENABLED=1` | Cross-project cryptographic agent identities |
+
+---
+
 ## CLI Reference
 
-The `baton` CLI provides 50+ commands organized into ten groups:
+The `baton` CLI provides 60+ commands organized into groups.
 
 <details>
-<summary><strong>Core Workflow</strong> -- plan, execute, recover</summary>
+<summary><strong>Core Workflow</strong> — plan, execute, recover</summary>
 
 | Command | Description |
 |---------|-------------|
-| `baton plan` | Create a data-driven execution plan |
-| `baton plan --dry-run` | Preview plan + token/cost forecast without saving |
+| `baton plan "<task>"` | Generate a data-driven execution plan |
+| `baton plan --dry-run` | Preview plan + cost/token forecast (±50% range) without saving |
+| `baton plan --from-template NAME` | Instantiate a saved plan template with a new task |
+| `baton goal "<condition>"` | Plan against a completion condition; engine drives amend cycles until met |
 | `baton execute start` | Start execution from a saved plan |
 | `baton execute next [--all]` | Get next action(s) to perform |
 | `baton execute record` | Record a step completion |
@@ -592,29 +736,29 @@ The `baton` CLI provides 50+ commands organized into ten groups:
 | `baton execute approve` | Record a human approval decision |
 | `baton execute amend` | Add phases or steps mid-execution |
 | `baton execute team-record` | Record team member completions |
-| `baton execute run` | Autonomous execution loop |
+| `baton execute run` | Autonomous execution loop (headless) |
 | `baton execute complete` | Finalize execution |
 | `baton execute status` | Show current execution state |
 | `baton execute resume` | Resume after crash or interruption |
-| `baton execute list` | List all executions |
-| `baton execute switch` | Switch active execution |
+| `baton execute list` / `switch` | List / switch active executions |
 | `baton status` | Show team-context file status |
 
 </details>
 
 <details>
-<summary><strong>Execution (Advanced)</strong> -- daemon, async, decisions</summary>
+<summary><strong>Execution (Advanced)</strong> — daemon, async, decisions</summary>
 
 | Command | Description |
 |---------|-------------|
 | `baton daemon start/stop/status/list` | Background execution management |
+| `baton daemon immune start/stop/status` | Immune-system daemon (EXPERIMENTAL — `BATON_IMMUNE_ENABLED=1`) |
 | `baton async --dispatch/--pending/--show` | Dispatch and track asynchronous tasks |
 | `baton decide --list/--show/--resolve` | Manage human decision requests |
 
 </details>
 
 <details>
-<summary><strong>Observability</strong> -- traces, dashboards, usage, queries</summary>
+<summary><strong>Observability</strong> — traces, dashboards, usage, queries</summary>
 
 | Command | Description |
 |---------|-------------|
@@ -623,16 +767,14 @@ The `baton` CLI provides 50+ commands organized into ten groups:
 | `baton trace` | Execution traces |
 | `baton retro` | Task retrospectives |
 | `baton telemetry` | Agent telemetry events |
-| `baton context-profile` | Context efficiency profiles |
 | `baton context current/briefing/gaps` | Situational awareness for agents |
-| `baton query <subcommand>` | SQL queries against this project's baton.db |
+| `baton query <subcommand>` | Predefined and ad-hoc SQL against this project's `baton.db` |
 | `baton cleanup` | Archive old execution artifacts |
-| `baton sync --migrate-storage` | Migrate JSON flat files to SQLite |
 
 </details>
 
 <details>
-<summary><strong>Governance</strong> -- risk, compliance, validation</summary>
+<summary><strong>Governance</strong> — risk, compliance, evidence, validation</summary>
 
 | Command | Description |
 |---------|-------------|
@@ -643,11 +785,14 @@ The `baton` CLI provides 50+ commands organized into ten groups:
 | `baton validate` | Validate agent definitions |
 | `baton spec-check` | Validate agent output against a spec |
 | `baton detect` | Detect project stack |
+| `baton evidence bundle/verify` | Build and verify evidence bundles |
+| `baton packs init/validate/list` | Assurance pack management |
+| `baton aibom` | Generate a per-task/per-PR AI Bill of Materials |
 
 </details>
 
 <details>
-<summary><strong>Improvement</strong> -- learning, evolution, tuning</summary>
+<summary><strong>Improvement</strong> — learning, evolution, tuning</summary>
 
 | Command | Description |
 |---------|-------------|
@@ -655,104 +800,71 @@ The `baton` CLI provides 50+ commands organized into ten groups:
 | `baton evolve` | Propose prompt improvements |
 | `baton patterns` | Learned orchestration patterns |
 | `baton budget` | Budget tier recommendations |
-| `baton changelog` | Agent changelog and backup management |
-| `baton anomalies [--watch]` | Detect system anomalies |
+| `baton anomalies [--watch]` | Detect statistical anomalies in agent behavior |
+| `baton lookback [TASK_ID]` | Historical failure analysis |
 | `baton experiment list/show/conclude/rollback` | Manage improvement experiments |
 | `baton learn improve --run/--force/--report` | Run the full improvement loop |
-| `baton learn status` | Dashboard of open learning issues |
-| `baton learn issues` | List issues with filters (`--type`, `--severity`, `--status`) |
-| `baton learn analyze` | Detect patterns across issues, propose fixes |
-| `baton learn apply` | Apply a specific fix or all auto-applicable fixes |
-| `baton learn interview` | Structured dialogue for human-directed decisions |
-| `baton learn history` | Resolution history with outcomes |
-| `baton learn reset` | Reopen an issue or rollback an applied fix |
+| `baton learn status/issues/analyze/apply/interview/history/reset` | Learning-issue lifecycle |
 
 </details>
 
 <details>
-<summary><strong>Distribution</strong> -- packaging, sharing, install</summary>
+<summary><strong>Memory (Beads) and Knowledge</strong></summary>
 
 | Command | Description |
 |---------|-------------|
-| `baton install` | Install agents and references to a project |
-| `baton uninstall` | Remove agent-baton files (project or user scope) |
-| `baton package` | Create or install package archives |
-| `baton publish` | Publish to a local registry |
-| `baton pull` | Pull from a registry |
-| `baton sync --verify ARCHIVE` | Verify a package archive |
-| `baton transfer` | Transfer between projects |
-
-</details>
-
-<details>
-<summary><strong>Agents and Events</strong></summary>
-
-| Command | Description |
-|---------|-------------|
-| `baton agents` | List available agents |
-| `baton route [ROLES]` | Route roles to agent flavors |
-| `baton events` | Query the event log |
-| `baton incident` | Manage incident response |
-
-</details>
-
-<details>
-<summary><strong>Memory (Beads)</strong></summary>
-
-| Command | Description |
-|---------|-------------|
+| `baton beads create` | Create a bead manually |
 | `baton beads list` | List beads with filters (`--type`, `--status`, `--task`, `--tag`) |
-| `baton beads show <id>` | Show a single bead in detail (JSON) |
-| `baton beads ready` | Show unblocked open beads |
-| `baton beads close <id>` | Close a bead with optional `--summary` |
+| `baton beads show/ready/close` | Inspect, surface, and close beads |
 | `baton beads link <src> --relates-to\|--contradicts\|--extends\|--blocks\|--validates <tgt>` | Link two beads |
 | `baton beads cleanup` | Archive old closed beads (memory decay) |
 | `baton beads promote <id> --pack NAME` | Promote a bead to a knowledge document |
-| `baton beads graph <task-id>` | Show the dependency graph for a task's beads |
+| `baton beads graph/synthesize/clusters` | Dependency graph and edge/cluster inference |
+| `baton knowledge stale/deprecate/retire/sweep` | Knowledge lifecycle |
+| `baton knowledge ab/ranking/effectiveness/harvest` | Knowledge A/B testing and effectiveness |
 
 </details>
 
 <details>
-<summary><strong>Storage and Sync</strong></summary>
+<summary><strong>Distribution, Storage, and Sync</strong></summary>
 
 | Command | Description |
 |---------|-------------|
+| `baton install` / `uninstall` | Install / remove agent-baton files |
+| `baton package` / `publish` / `pull` / `transfer` | Package archives and registry |
 | `baton sync [--all]` | Sync to `~/.baton/central.db` |
 | `baton sync status` | Show sync watermarks |
-| `baton cquery` | Cross-project SQL queries against central.db |
-| `baton source add/list/sync/remove/map` | External source connections |
+| `baton sync --verify ARCHIVE` | Verify a package archive |
+| `baton cquery` | Cross-project SQL queries against `central.db` |
+| `baton source add/list/sync/remove/map` | External source connections (ADO, GitHub, Jira) |
 
 </details>
 
 <details>
-<summary><strong>Portfolio and API</strong></summary>
+<summary><strong>Portfolio, Specs, and Releases</strong></summary>
 
 | Command | Description |
 |---------|-------------|
-| `baton pmo serve` | Start the PMO HTTP server with UI |
-| `baton pmo status` | Terminal Kanban board summary |
-| `baton pmo add` | Register a project with the PMO |
-| `baton pmo health` | Program health bar summary |
 | `baton serve` | Start the HTTP API server (API only) |
+| `baton pmo serve/status/add/health` | PMO server, board summary, project registration |
+| `baton spec create/list/show/approve/link/import/export` | Manage first-class Spec entities |
+| `baton release create/list/show/tag/notes/readiness` | Manage delivery-target releases |
+| `baton webhook add/list/remove` | Outbound webhook subscriptions |
+| `baton souls mint/list/show/retire/revoke/list-revocations/rotate` | Persistent agent souls (`BATON_SOULS_ENABLED=1`) |
 
 </details>
 
 <details>
 <summary><strong>Deprecated aliases (still work, removal in a future release)</strong></summary>
 
-These top-level commands still execute but print a deprecation warning to
-stderr on every invocation. Update scripts to use the new paths.
+These top-level commands still execute but print a deprecation warning to stderr
+on every invocation. Update scripts to use the new paths.
 
 | Old command | New canonical path | Bead |
 |-------------|-------------------|------|
 | `baton migrate-storage` | `baton sync --migrate-storage` | bd-8eef |
 | `baton verify-package ARCHIVE` | `baton sync --verify ARCHIVE` | bd-7eec |
 | `baton improve` | `baton learn improve` | bd-5049 |
-
-PR #70 (end-user-readiness #12) consolidated the three top-level
-commands into the canonical `sync` and `learn` groups. Old aliases keep
-working for the v0.1 series but emit a deprecation warning to stderr on
-every invocation.
 
 </details>
 
@@ -761,30 +873,35 @@ every invocation.
 ## Project Structure
 
 ```
-agents/            <- 30 agent definitions (markdown + YAML frontmatter)
+agents/            <- 30 agent definitions (Markdown + YAML frontmatter)
 references/        <- 19 reference procedures (shared knowledge)
-templates/         <- CLAUDE.md + settings.json + skills for target projects
-scripts/           <- Install scripts (Linux + Windows)
-docs/              <- Architecture docs, ADRs, invariants, troubleshooting
+templates/         <- CLAUDE.md, settings.json, skills, packs, and playbooks
+scripts/           <- Install scripts (Linux/macOS + Windows) and maintenance
+docs/              <- Architecture docs, ADRs, invariants, CLI/API reference,
+                      troubleshooting, and internal maintainer docs
 agent_baton/       <- Python package
-  models/          <- Data models (24 modules)
-  core/            <- Business logic (11 sub-packages)
+  models/          <- Pydantic data models (38 modules)
+  core/            <- Business logic (22 sub-packages)
     engine/        <- Planner, executor, dispatcher, gates, persistence,
-    |                 knowledge resolver, bead store, bead signals
-    orchestration/ <- Agent registry, router, context manager,
-    |                 knowledge registry
+    |                 knowledge resolver, bead store, worktree manager
+    orchestration/ <- Agent registry, router, context manager, knowledge registry
     pmo/           <- PMO store, scanner, Smart Forge
     storage/       <- Central DB, federated sync, external adapters
-    govern/        <- Classification, compliance, policy
-    observe/       <- Tracing, usage, dashboard, telemetry
-    improve/       <- Scoring, evolution, experiments, proposals, rollback
-    learn/         <- Pattern learner, budget tuner, learning automation
-    distribute/    <- Packaging, sharing, registry (+ experimental)
+    govern/        <- Classification, compliance, policy, evidence, assurance packs
+    observe/       <- Retrospectives, context profiler, cost forecaster, dashboard
+    improve/       <- Scoring, conflict detection, proposals, rollback
+    learn/         <- Pattern learner, budget tuner, learning automation, ledger
+    intel/         <- Bead synthesizer, debate, knowledge ranker
+    distribute/    <- Packaging, sharing, registry
     events/        <- Event bus, domain events, projections
-    runtime/       <- Async worker, supervisor, headless Claude, decisions
-  api/             <- FastAPI REST API (10 route modules, webhooks, middleware)
-  cli/             <- CLI interface (50+ commands)
-tests/             <- Test suite (~6202 tests, pytest)
+    runtime/       <- Async worker, supervisor, headless Claude, decisions, daemon
+    federate/      <- Spec draft store, spec enrichment, importers
+    knowledge/     <- Knowledge lifecycle, AB testing, ADR harvester
+    release/       <- Conflict predictor, release readiness, git notes
+    immune/, exec/ <- Immune-system daemon, executable beads (EXPERIMENTAL)
+  api/             <- FastAPI REST API (route modules, webhooks, middleware)
+  cli/             <- CLI interface (60+ commands)
+tests/             <- Extensive pytest suite (355 test files)
 pmo-ui/            <- React/Vite PMO frontend
 ```
 
@@ -794,28 +911,25 @@ pmo-ui/            <- React/Vite PMO frontend
 
 ### Environment Variables
 
+The variables a user is most likely to set. For the full internal list see
+[CLAUDE.md](CLAUDE.md).
+
 | Variable | Purpose | Default |
 |----------|---------|---------|
 | `BATON_TASK_ID` | Target a specific execution in multi-task scenarios | auto-detected |
-| `BATON_DB_PATH` | Override the project `baton.db` location (subagents in worktrees can rely on the upward-walk discovery) | discovered |
+| `BATON_DB_PATH` | Override the project `baton.db` location | discovered |
 | `BATON_API_TOKEN` | Bearer token for API authentication | none |
-| `BATON_APPROVAL_MODE` | Approval policy: `local` (self-approve) or `team` (different reviewer required). | `local` |
-| `BATON_GATE_RETRY` | Enable single gate-retry: on first gate failure, re-dispatch the failing step once with gate output appended to the prompt. Second failure is terminal. | `0` |
-| `BATON_RUN_TOKEN_CEILING` | Per-run cumulative spend cap (USD float). When set, `BudgetEnforcer.check_run_ceiling()` raises `RunTokenCeilingExceeded` before exceeding the cap; the immune daemon aborts. Counter is restored on `baton execute resume`. (See PR #67/#73, bd-3f80.) | unset |
-| `BATON_WORKTREE_STALE_HOURS` | Max age (hours) for the worktree GC to reclaim a stale linked worktree. New canonical name; `BATON_WORKTREE_GC_HOURS` is kept as a legacy alias. | `4` |
-| `BATON_SOULS_ENABLED` / `BATON_EXEC_BEADS_ENABLED` | Feature flags for persistent agent souls (Wave 6.1B) and executable beads (Wave 6.1C). | unset |
-| `BATON_BD_BACKEND` | Bead-store backend (ADR-13b). `bd` (the external [beads](https://github.com/gastownhall/beads) CLI) is now the only supported value and the system of record; `sqlite`/`auto` are removed and log a deprecation warning. | `bd` |
-| `BATON_BD_BIN` / `BATON_BD_PREFIX` | Path/name of the `bd` binary and the `bd init` issue prefix (matches baton's `bd-<hash>` IDs). | `bd` / `bd` |
-| `BATON_BD_ENABLED` / `BATON_BD_BIN` / `BATON_BD_PREFIX` | Beads backend master switch (`1`), `bd` binary path (`bd`), and `bd init` issue prefix (`bd`). | — |
-| `BATON_SKIP_GIT_NOTES_SETUP` | Set to `1` to silence the install-time git-notes replication setup and the runtime warning emitted by `NotesAdapter.write()` when the wildcard refspec is missing. | unset |
-| `ANTHROPIC_API_KEY` | Required for AI classification (`pip install agent-baton[classify]`) and the Haiku planner classifier | none |
-
-> **Note on experimental features.** The Wave 6.2 immune-system
-> daemon and the predictive watcher (Wave 6.2 Part C) are explicitly marked
-> EXPERIMENTAL and gated behind feature flags. They emit stub warnings to
-> stderr on every invocation and must not be relied on for production work.
-> See [Known Integration Gaps](docs/architecture.md#13-known-integration-gaps-as-of-2026-04-28)
-> for the current paper-functionality matrix.
+| `BATON_APPROVAL_MODE` | `local` (self-approve) or `team` (different reviewer required) | `local` |
+| `BATON_GATE_RETRY` | Re-dispatch a failing step once with gate output appended; second failure is terminal | `0` |
+| `BATON_RUN_TOKEN_CEILING` | Per-run cumulative spend cap (USD). Survives `baton execute resume`. | unset |
+| `BATON_WORKTREE_STALE_HOURS` | Max age before the worktree GC reclaims a stale worktree | `4` |
+| `BATON_PLANNER_HARD_GATE` | Block structurally defective plans (deterministic checks) | unset |
+| `BATON_PLAN_REVIEW` | Optional LLM plan-quality review: `off` \| `haiku` \| `sonnet` \| `opus` | `off` |
+| `BATON_POLICY_FAIL_CLOSED` | `policy-check` hook: `0` fail-open, `1` blocks the tool call | `0` |
+| `BATON_COMPLIANCE_FAIL_CLOSED` | Halt execution on compliance audit write failure | `0` |
+| `BATON_TEAMS_BACKEND` | Team-step backend: `worktree` (default, resumable) or `claude-teams` | `worktree` |
+| `BATON_SOULS_ENABLED` / `BATON_EXEC_BEADS_ENABLED` | Experimental feature flags (souls / executable beads) | unset |
+| `ANTHROPIC_API_KEY` | AI risk classification (`agent-baton[classify]`) and the planner classifier | none |
 
 ### Plan Command Flags
 
@@ -823,12 +937,10 @@ pmo-ui/            <- React/Vite PMO frontend
 |------|-------------|
 | `--save` | Write `plan.json` and `plan.md` to `.claude/team-context/` |
 | `--explain` | Show reasoning behind plan decisions |
-| `--json` | Output plan as JSON instead of markdown |
-| `--task-type TYPE` | Override task type (new-feature, bug-fix, refactor, etc.) |
+| `--dry-run` | Preview plan + token/cost forecast without saving |
+| `--task-type TYPE` | Override task type (new-feature, bug-fix, refactor, …) |
 | `--agents NAMES` | Override auto-selected agents (comma-separated) |
-| `--knowledge PATH` | Attach a knowledge document (repeatable) |
-| `--knowledge-pack NAME` | Attach a knowledge pack (repeatable) |
-| `--intervention LEVEL` | Escalation threshold: low, medium, high |
+| `--knowledge PATH` / `--knowledge-pack NAME` | Attach knowledge documents / packs (repeatable) |
 | `--model MODEL` | Default model for dispatched agents (haiku, sonnet, opus) |
 | `--complexity LEVEL` | Override complexity: light, medium, heavy |
 
@@ -837,9 +949,10 @@ pmo-ui/            <- React/Vite PMO frontend
 | File | Purpose |
 |------|---------|
 | `.claude/agents/*.md` | Agent definitions (30 files) |
-| `.claude/references/*.md` | Reference procedures (15 files) |
+| `.claude/references/*.md` | Reference procedures (19 files) |
 | `.claude/CLAUDE.md` | Project development guide (from template) |
-| `.claude/settings.json` | Hook configuration |
+| `.claude/settings.json` | Hook configuration (write-protect, policy-check, compliance logging) |
+| `.claude/skills/` | Reusable skills |
 
 ---
 
@@ -848,33 +961,35 @@ pmo-ui/            <- React/Vite PMO frontend
 ```bash
 git clone https://github.com/DaveGerson/agent-baton.git
 cd agent-baton
-pip install -e ".[dev]"        # Core + test deps
-pip install -e ".[dev,api]"    # Everything including REST API
-pytest                         # ~6202 tests
+pip install -e ".[dev]"        # Core + test dependencies
+pip install -e ".[dev,api]"    # Add REST API dependencies
+pytest                         # Run the test suite
 ```
 
-Requires Python 3.10+. The only runtime dependency is PyYAML.
+Requires Python 3.10+. Runtime dependencies: `pyyaml`, `pydantic`, `cryptography`.
 
 ### Optional Dependencies
 
 | Extra | Packages | Purpose |
 |-------|----------|---------|
 | `dev` | pytest, pytest-cov | Test suite |
-| `pmo` | FastAPI, uvicorn, httpx, sse-starlette, pydantic | REST API and PMO server |
+| `pmo` | fastapi, uvicorn, httpx, sse-starlette, pydantic | REST API and PMO server |
 | `api` | same as `pmo` | Backward-compatible alias |
 | `daemon` | uvicorn | Background daemon runner |
 | `classify` | anthropic | AI-powered risk classification |
-| `all` | pmo + classify | Everything except dev tools |
+| `viz` | rich | Terminal dashboards and rich output |
+| `all` | pmo + classify + viz | Everything except dev tools |
 
 ### Key Documentation
 
 | Document | Contents |
 |----------|----------|
-| [CLAUDE.md](CLAUDE.md) | Development guide and conventions |
-| [QUICKSTART.md](QUICKSTART.md) | Getting started for new users |
+| [CLAUDE.md](CLAUDE.md) | Development guide, conventions, cross-cutting rules |
 | [docs/architecture.md](docs/architecture.md) | Package layout and dependency graph |
 | [docs/design-decisions.md](docs/design-decisions.md) | ADR log |
-| [docs/invariants.md](docs/invariants.md) | Interface boundaries (CLI output contract) |
+| [docs/invariants.md](docs/invariants.md) | Interface boundaries and CLI output contract |
+| [docs/cli-reference.md](docs/cli-reference.md) | Full CLI reference |
+| [docs/api-reference.md](docs/api-reference.md) | REST API reference |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | Common issues and solutions |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute |
 | [SECURITY.md](SECURITY.md) | Vulnerability reporting |
@@ -883,67 +998,50 @@ Requires Python 3.10+. The only runtime dependency is PyYAML.
 
 ## Project Status
 
-Agent Baton is in active development (v0.1.0). The orchestration engine,
-all 30 agents, 19 references, knowledge delivery, bead memory system,
-PMO subsystem with end-to-end workflow (plan, edit, execute, review,
-merge), REST API with webhooks, federated sync, event system, learning
-automation, and the improvement pipeline are implemented and tested.
+Agent Baton is in active development (v0.1.0). The orchestration engine, all 30
+agents, 19 reference procedures, knowledge delivery, bead memory system, PMO
+subsystem with end-to-end plan-to-merge workflow, REST API with webhooks,
+federated sync, event system, learning automation, and the improvement pipeline
+are implemented and tested.
 
-- **Python**: 3.10+
-- **Runtime dependency**: PyYAML only
-- **Optional**: FastAPI + uvicorn (REST API), Anthropic SDK (AI classification)
-- **Test suite**: ~6202 tests (pytest)
-- **External adapters**: Azure DevOps implemented; Jira, GitHub, Linear
-  protocols defined
-
-### End-User Readiness Sweep — 2026-04-28
-
-The v0.1 series shipped a 12-concern end-user-readiness sweep
-(PRs #59 + #61–#73) that closed paper-functionality gaps, hardened
-worktree isolation, added the run-level token ceiling, gated stub
-features behind `BATON_EXPERIMENTAL`, and consolidated the CLI surface.
-Three integration gaps remain:
-
-| Gap | Bead | Surface |
-|-----|------|---------|
-| Executor wiring of `BATON_RUN_TOKEN_CEILING` | bd-3f80 | Main `Executor.dispatch()` only warns at HIGH/CRITICAL risk; enforcement by policy hooks |
-| Soul callers not migrated | bd-1ca2 | Existing `soul.verify` callers not yet routed through revocation-aware `SoulRouter.verify_signature()` |
-| Wave 6.1 Part A integration | bd-971d | Git-notes bead persistence + executor BeadStore handoff |
-
-See [Known Integration Gaps](docs/architecture.md#13-known-integration-gaps-as-of-2026-04-28) for the full matrix.
+- **Python**: 3.10+ (tested on 3.10–3.13)
+- **Runtime dependencies**: pyyaml, pydantic, cryptography
+- **Optional**: FastAPI + uvicorn (REST API), Anthropic SDK (AI classification), rich (dashboards)
+- **Test suite**: extensive pytest suite (355 test files)
+- **External adapters**: Azure DevOps fully implemented; Jira, GitHub Issues, and Linear protocols defined
 
 ### Experimental Features
 
-The following surfaces are explicitly EXPERIMENTAL and gated behind
-feature flags. Stub implementations emit warnings to stderr; do not rely
-on them for production work.
+The following surfaces are explicitly EXPERIMENTAL and gated behind feature flags.
+Stub implementations emit warnings to stderr; do not rely on them for production
+work.
 
 | Feature | Flag | Status |
 |---------|------|--------|
-| Immune-system daemon | feature flag in `core/intel/immune.py` | Wave 6.2 Part B stub (bd-dd52) |
-| Predictive watcher | feature flag in `core/intel/predictive.py` | Wave 6.2 Part C stub (bd-708a) |
-| Executable beads | `BATON_EXEC_BEADS_ENABLED=1` | Process-level sandbox only; not safe for external-origin beads (bd-fe40) |
-| Persistent agent souls | `BATON_SOULS_ENABLED=1` | CLI partial: rotate/list-revocations API-only (bd-b05e) |
+| Immune-system daemon | `BATON_IMMUNE_ENABLED=1` | Wave 6.2 Part B stub |
+| Predictive watcher | feature flag in `core/intel/` | Wave 6.2 Part C stub |
+| Executable beads | `BATON_EXEC_BEADS_ENABLED=1` | Process-level sandbox only; not safe for external-origin beads |
+| Persistent agent souls | `BATON_SOULS_ENABLED=1` | Cross-project cryptographic identities; reviewer signatures flow into evidence bundles |
 
 ---
 
 ## Tips
 
-- **Say "use the orchestrator"** explicitly for your first few runs so
-  Claude Code routes to the right agent.
-- **3-5 specialists per task.** More than that and coordination overhead
-  outweighs benefits.
+- **Say "use the orchestrator"** explicitly for your first few runs so Claude
+  Code routes to the right agent.
+- **3–5 specialists per task.** More than that and coordination overhead
+  outweighs the benefits.
 - **Crash recovery is automatic.** Session dies mid-task? New session +
   `baton execute resume`.
 - **Run tasks in parallel.** Each `baton execute start` prints
-  `export BATON_TASK_ID=...`. Run that in each terminal.
-- **Use `baton query` for local data, `baton cquery` for cross-project.**
-  They target different databases.
-- **Beads are automatic.** Agents emit bead signals during execution.
-  Use `baton beads ready` to surface unblocked work items.
+  `export BATON_TASK_ID=...`. Set it in each terminal before driving the loop.
+- **Use `baton query` for local data, `baton cquery` for cross-project.** They
+  target different databases (`baton.db` vs `~/.baton/central.db`).
+- **Policy hooks run on every tool call.** The installed `settings.json` wires
+  `baton policy-check` into PreToolUse automatically — no manual setup needed.
 
 ---
 
 ## License
 
-License pending. Contact the maintainers for terms.
+Proprietary — All Rights Reserved. Contact the maintainers for terms.

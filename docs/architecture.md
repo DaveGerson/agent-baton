@@ -124,8 +124,9 @@ The following pages explain individual subsystems in depth:
 
 ## Assurance Packs
 
-Assurance Packs are org-authored domain governance units stored under
-`.claude/packs/<name>/`.  A pack bundles a `PolicySet`, classification signals,
+Assurance Packs are how the checks-and-balances layer (the README's Pillar 4)
+is packaged for regulated domains. They are org-authored domain governance units
+stored under `.claude/packs/<name>/`.  A pack bundles a `PolicySet`, classification signals,
 a review rubric, gate commands, and evidence requirements into a single
 distributable directory.  Organisations author packs for each regulated domain
 they operate in (HIPAA, OWASP, SOC 2, GDPR, …) and the pack format ships with
@@ -214,7 +215,7 @@ Treat the per-project DB as primary. Never query `project_id` from a per-project
 
 After every execution, the engine writes a trace, usage log, and retrospective. The `learning-analyst` agent reads these and proposes config improvements. The `system-maintainer` agent reads escalated proposals and conservatively applies safe changes to `learned-overrides.json` (never source code). Over time the routing, budget, and gating defaults converge toward what works on this codebase.
 
-This loop is the closure that distinguishes Baton from a one-shot orchestrator: the engine learns from every run.
+The learning loop feeds execution outcomes back into planning defaults. It is operational for routing corrections and budget tuning; agent-driven analysis is still maturing and is not yet validated against real-world usage data. For current per-component status see [`observe-learn-and-improve.md`](observe-learn-and-improve.md) §2.5.
 
 ## Where to read next
 

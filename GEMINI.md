@@ -1,4 +1,4 @@
-# CLAUDE.md — agent runtime config
+# GEMINI.md — agent runtime config
 
 This file is read by every Claude Code agent dispatched inside this repo. It is **not** documentation for humans. Marketing pitch, install steps, comparison tables: not here. Those live in `README.md`. Pages for human readers live in `docs/`.
 
