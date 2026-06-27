@@ -18,7 +18,7 @@ Commands are organized into functional groups:
 |-------|---------|----------|
 | **Execution** | Plan, execute, and manage orchestrated tasks | `plan`, `execute`, `status`, `daemon`, `async`, `decide` |
 | **Observe** | Traces, usage, dashboards, telemetry | `dashboard`, `trace`, `usage`, `telemetry`, `context-profile`, `retro`, `context`, `cleanup` |
-| **Govern** | Risk, policy, compliance, validation | `classify`, `compliance`, `policy`, `escalations`, `validate`, `spec-check`, `detect` |
+| **Guardrails** | Risk, policy, compliance, validation | `classify`, `compliance`, `policy`, `escalations`, `validate`, `spec-check`, `detect` |
 | **Improve** | Scoring, learning, patterns, budgets | `scores`, `learn`, `patterns`, `budget`, `changelog`, `anomalies` |
 | **Distribute** | Packaging, publishing, installation | `package`, `publish`, `pull`, `install`, `transfer` |
 | **Agents** | Agent discovery, routing, events | `agents`, `route`, `events`, `incident` |
@@ -874,7 +874,7 @@ baton cleanup --retention-days 60
 
 ---
 
-## Govern Commands
+## Guardrails Commands
 
 ### `baton classify`
 
