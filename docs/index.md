@@ -24,6 +24,8 @@ Four high-level goals, in priority order:
 3. **Right agent, right problem, right time** — a deterministic engine dispatches each phase to the specialist that fits it, with QA gates between.
 4. **Checks & balances** — an independent `auditor` (and a `subject-matter-expert` for regulated work) verifies the result is *functionally* right, not just that it lints.
 
+→ See **[The Four Pillars](pillars.md)** for the full picture and a visual of how an effort flows through them.
+
 ## Why Agent Baton?
 
 Claude Code is powerful, but a complex effort — one that spans many files, needs different kinds of expertise, and has to actually be *correct* — is hard to run as one long conversation. You get context rot, missed coverage, no foresight into what's coming, and no record of what happened.
@@ -41,6 +43,7 @@ Agent Baton gives Claude Code a project-management layer. You stay in control wh
 
 ## Where to go next
 
+- **[The Four Pillars](pillars.md)** — what Baton is for, with a visual of the workflow
 - **[Orchestrator Usage](orchestrator-usage.md)** — how to drive a task end-to-end through the engine
 - **[Agent Roster](agent-roster.md)** — the 30 specialist agents Baton can dispatch
 - **[Architecture Overview](architecture.md)** — the orchestration engine, storage, and supporting subsystems

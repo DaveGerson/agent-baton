@@ -9,6 +9,9 @@ see-also:
 
 # Agent roster
 
+!!! abstract "Pillar context"
+    This page details **Pillar 2 — Compose the right team**. For the high-level map of all four pillars, see [The Four Pillars](pillars.md).
+
 This page mirrors `agents/*.md` — the distributable agent definitions installed by `scripts/install.sh`. There are **30** agents. The orchestrator picks among them based on task domain, risk tier, and budget. To dispatch one directly inside Claude Code, name it in the `Agent` tool with `subagent_type`.
 
 To inspect runtime registration: `baton agents`.
