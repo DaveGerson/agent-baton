@@ -3,8 +3,11 @@
 Agent Baton includes a closed-loop learning pipeline that automatically
 collects execution data, discovers patterns in that data, and proposes
 (or auto-applies) improvements to future plans. The three subsystems --
-Observe, Learn, and Improve -- form a feedback cycle that makes the
-orchestration system better with every task it runs.
+Observe, Learn, and Improve -- form a feedback cycle that supports better
+execution across every task.
+
+!!! abstract "Pillar context"
+    This page covers the observability and learning toolkit that supports all four pillars: traces and retrospectives feed Pillar 1 (plan with foresight), agent scorecards and roster recommendations inform Pillar 2 (compose the right team), event-driven dashboards support Pillar 3 (right agent, right problem, right time), and compliance artifacts underpin Pillar 4 (checks & balances). For the high-level map of all four pillars, see [The Four Pillars](pillars.md).
 
 ```
                          THE LEARNING LOOP
