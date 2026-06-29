@@ -109,7 +109,12 @@ extra:
 
 nav:
   - Home: index.md
-  - The Four Pillars: pillars.md
+  - The Four Pillars:
+      - pillars.md
+      - Plan with Foresight: pillars/plan-with-foresight.md
+      - Compose the Right Team: pillars/compose-the-right-team.md
+      - Right Agent, Right Time: pillars/right-agent-right-time.md
+      - Checks & Balances: pillars/checks-and-balances.md
   - Getting Started:
       - Orchestrator Usage: orchestrator-usage.md
       - Agent Roster: agent-roster.md

@@ -33,6 +33,8 @@ hope. `baton plan --dry-run` previews the phases, the agent assigned to each
 step, the gates that will block, and a cost forecast (with an explicit ±50%
 band) — all before execution.
 
+**→ [Read the full pillar page](pillars/plan-with-foresight.md)** — the vision, what ships today, and the gap.
+
 **Dive deeper:** [Orchestrator Usage](orchestrator-usage.md) ·
 [Engine & Runtime](engine-and-runtime.md) ·
 [State Machine](architecture/state-machine.md)
@@ -46,6 +48,8 @@ the whole codebase. Baton's answer is bespoke team composition: the
 agent gets a clean context window focused on one domain. Routing then picks the
 right stack-flavored variant for your project.
 
+**→ [Read the full pillar page](pillars/compose-the-right-team.md)** — the vision, what ships today, and the gap.
+
 **Dive deeper:** [Agent Roster](agent-roster.md)
 
 ## Pillar 3 — Right agent, right problem, right time
@@ -54,6 +58,8 @@ A deterministic engine dispatches each specialist to its assigned phase, gates
 the output before advancing, and recovers from crashes without losing state. The
 PMO flow organizes the whole effort from spec to merged PR. You drive it through
 the `baton execute` command group; the engine does the sequencing.
+
+**→ [Read the full pillar page](pillars/right-agent-right-time.md)** — the vision, what ships today, and the gap.
 
 **Dive deeper:** [Engine & Runtime](engine-and-runtime.md) ·
 [Storage, Sync, & PMO](storage-sync-and-pmo.md)
@@ -66,6 +72,8 @@ before the first agent fires; medium/high-risk work pulls in an independent
 `auditor` (with veto authority) and, for regulated domains, a
 `subject-matter-expert`. Policy hooks enforce guardrails on every tool call, and
 verifiable evidence bundles make the outcome auditable.
+
+**→ [Read the full pillar page](pillars/checks-and-balances.md)** — the vision, what ships today, and the gap.
 
 **Dive deeper:** [Knowledge, Events, & Governance](governance-knowledge-and-events.md)
 
@@ -86,12 +94,12 @@ work and the people who run Baton:
 
 ## How the docs map to the pillars
 
-| Pillar | What it does | Dive deeper |
-|--------|--------------|-------------|
-| **1 · Plan with foresight** | Decompose, sequence, classify risk, forecast cost before execution | [orchestrator-usage](orchestrator-usage.md), [engine-and-runtime](engine-and-runtime.md), [state-machine](architecture/state-machine.md) |
-| **2 · Compose the right team** | Create bespoke specialists; route to the right flavor | [agent-roster](agent-roster.md) |
-| **3 · Right agent, right time** | Deterministic dispatch, gates, crash recovery, PMO flow | [engine-and-runtime](engine-and-runtime.md), [storage-sync-and-pmo](storage-sync-and-pmo.md) |
-| **4 · Checks & balances** | Risk classification, auditor/SME verification, policy hooks, evidence | [governance-knowledge-and-events](governance-knowledge-and-events.md) |
+| Pillar | What it does | Full page |
+|--------|--------------|-----------|
+| **1 · Plan with foresight** | Decompose, sequence, classify risk, forecast cost before execution | [Plan with Foresight](pillars/plan-with-foresight.md) |
+| **2 · Compose the right team** | Create bespoke specialists; route to the right flavor | [Compose the Right Team](pillars/compose-the-right-team.md) |
+| **3 · Right agent, right time** | Deterministic dispatch, gates, crash recovery, PMO flow | [Right Agent, Right Time](pillars/right-agent-right-time.md) |
+| **4 · Checks & balances** | Risk classification, auditor/SME verification, policy hooks, evidence | [Checks & Balances](pillars/checks-and-balances.md) |
 
 For the full conceptual background, start with the
 [Architecture Overview](architecture.md).
