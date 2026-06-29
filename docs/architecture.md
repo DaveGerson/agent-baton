@@ -11,6 +11,25 @@ see-also:
 
 This page explains *why* Agent Baton is built the way it is. For component-level structure see [`architecture/high-level-design.md`](architecture/high-level-design.md). For internals (state machine, planner, executor, dispatcher, gates, persistence) see [`architecture/technical-design.md`](architecture/technical-design.md). For the package map with `path:line` cites see [`architecture/package-layout.md`](architecture/package-layout.md). For the action enum and transitions see [`architecture/state-machine.md`](architecture/state-machine.md).
 
+!!! abstract "Pillar context"
+    This overview covers the engine behind all four pillars. For the high-level map of what Baton is *for*, see [The Four Pillars](pillars.md).
+
+## How this maps to the four pillars
+
+Baton is a project manager for Claude Code. Every architectural decision below serves one of four pillars:
+
+- **Pillar 1 — Plan with foresight.** The planner, risk classifier, and spec federation pipeline turn a natural-language task into a structured, risk-tiered, budget-aware plan before a single agent runs.
+- **Pillar 2 — Compose the right team.** The agent registry, talent-builder, and dispatcher match each phase to the specialist best suited for it, keeping context scoped and fresh.
+- **Pillar 3 — Right agent, right problem, right time.** The execution engine, PMO UI, and orchestration loop sequence agents, manage state, and recover from crashes without losing progress.
+- **Pillar 4 — Checks & balances.** Gates, assurance packs, the auditor agent, and compliance audit trails enforce correctness and auditability at every phase boundary.
+
+```mermaid
+flowchart LR
+    T(["Task"]) --> P1["1 · Plan with foresight"] --> P2["2 · Compose the right team"] --> P3["3 · Right agent, right time"] --> P4["4 · Checks & balances"] --> D(["Tested, auditable code"])
+```
+
+This overview is the engine story. For the what-and-why of each pillar, see [The Four Pillars](pillars.md).
+
 ## What problem Baton solves
 
 Long Claude Code sessions on cross-cutting tasks tend to: lose context between subtasks, miss test coverage because gating depends on the operator remembering, leave no audit trail, and have no way to recover when the session crashes. Baton adds a project management layer that breaks work into phases, scopes each phase to one specialist agent, enforces automated gates, and persists state so a crashed session resumes cleanly.

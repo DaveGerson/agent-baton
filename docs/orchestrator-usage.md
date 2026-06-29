@@ -1,5 +1,8 @@
 # Orchestrator Usage — How-to Recipes
 
+!!! abstract "Pillar context"
+    This page details **Pillar 1 — Plan with foresight** (and **Pillar 3 — Right agent, right problem, right time**). For the high-level map of all four pillars, see [The Four Pillars](pillars.md).
+
 Practical, copy-pasteable recipes for driving Agent Baton. Each section
 answers a single "how do I X?" question. Commands link to
 [cli-reference.md](cli-reference.md) for full flag detail.
