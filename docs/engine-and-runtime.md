@@ -1,5 +1,8 @@
 # Execution Engine and Runtime
 
+!!! abstract "Pillar context"
+    This page details **Pillar 1 — Plan with foresight** (and **Pillar 3 — Right agent, right problem, right time**). For the high-level map of all four pillars, see [The Four Pillars](pillars.md).
+
 This document is the authoritative reference for Agent Baton's execution
 engine (`agent_baton/core/engine/`) and runtime system
 (`agent_baton/core/runtime/`). It covers the complete lifecycle of an
