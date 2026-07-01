@@ -616,6 +616,7 @@ class MachinePlan(PlanModel):
     archetype: str = "phased"
     max_retry_phases: int = 0
     compliance_fail_closed: bool | None = None
+    plan_diagnostics: dict[str, Any] = Field(default_factory=dict)
     # Goal-driven execution (G1, see docs/internal/agent-teams-and-goal-design.md).
     # Set when the plan is created via `baton goal "<condition>"`. The engine
     # invokes a GoalEvaluator at phase boundaries and uses amend_plan() to
@@ -750,6 +751,8 @@ class MachinePlan(PlanModel):
             "completion_condition": self.completion_condition,
             "max_amend_cycles": self.max_amend_cycles,
         }
+        if self.plan_diagnostics:
+            d["plan_diagnostics"] = dict(self.plan_diagnostics)
         if self.resource_limits is not None:
             d["resource_limits"] = self.resource_limits.to_dict()
         return d

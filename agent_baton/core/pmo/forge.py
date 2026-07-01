@@ -26,6 +26,10 @@ from typing import TYPE_CHECKING
 
 from agent_baton.core.pmo.store import PmoStore
 from agent_baton.core.runtime.headless import HeadlessClaude
+from agent_baton.core.engine.planner import (
+    build_default_knowledge_registry,
+    ensure_plan_diagnostics,
+)
 from agent_baton.models.execution import MachinePlan
 from agent_baton.models.pmo import InterviewQuestion, InterviewAnswer, PmoProject
 
@@ -130,6 +134,13 @@ class ForgeSession:
                 )
             if plan is not None:
                 plan.classification_source = "headless-claude"
+                ensure_plan_diagnostics(
+                    plan,
+                    knowledge_registry=build_default_knowledge_registry(
+                        project_root=project_root
+                    ),
+                    classification_source=plan.classification_source,
+                )
                 self._plans_created += 1
                 logger.info("Forge: plan generated via headless Claude")
                 return plan
@@ -336,6 +347,13 @@ class ForgeSession:
                 )
             if plan is not None:
                 plan.classification_source = "headless-claude"
+                ensure_plan_diagnostics(
+                    plan,
+                    knowledge_registry=build_default_knowledge_registry(
+                        project_root=project_root
+                    ),
+                    classification_source=plan.classification_source,
+                )
                 logger.info("Forge: regenerated plan via headless Claude")
                 return plan
             logger.warning("Forge: headless regen failed, falling back to IntelligentPlanner")

@@ -516,7 +516,14 @@ def handler(args: argparse.Namespace) -> None:
     print("Planning...", file=sys.stderr)
 
     knowledge_registry = KnowledgeRegistry()
-    knowledge_registry.load_default_paths()
+    try:
+        knowledge_registry.load_default_paths(project_root=project_root)
+    except Exception as exc:
+        _log.warning(
+            "Default knowledge registry load failed for `baton plan`; "
+            "continuing with an empty registry. Cause: %s",
+            exc,
+        )
 
     retro_engine = RetrospectiveEngine()
     bead_store = None
@@ -698,7 +705,9 @@ def handler(args: argparse.Namespace) -> None:
             print("Next: baton execute start")
         return
 
-    if args.json:
+    if args.explain:
+        print(planner.explain_plan(plan))
+    elif args.json:
         print(json.dumps(plan.to_dict(), indent=2, ensure_ascii=False))
     else:
         print(plan.to_markdown())

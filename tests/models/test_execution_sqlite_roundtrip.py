@@ -337,6 +337,19 @@ class TestMachinePlanSqliteRoundtrip:
         assert loaded.task_type == plan.task_type
         assert loaded.intervention_level == plan.intervention_level
 
+    def test_plan_sqlite_plan_diagnostics_roundtrip(self, store: SqliteStorage) -> None:
+        """Non-empty plan diagnostics survive save_plan -> load_plan."""
+        plan = _minimal_plan("task-plan-rt-006")
+        plan.plan_diagnostics = {
+            "classification_source": "headless-claude",
+            "knowledge_packs_loaded": 2,
+            "attachments_selected": 1,
+        }
+        store.save_plan(plan)
+        loaded = store.load_plan("task-plan-rt-006")
+        assert loaded is not None
+        assert loaded.plan_diagnostics == plan.plan_diagnostics
+
     def test_plan_sqlite_phases_and_steps_preserved(self, store: SqliteStorage) -> None:
         """Phase and step hierarchy survives save_plan → load_plan."""
         plan = _minimal_plan("task-plan-rt-002")
@@ -580,6 +593,22 @@ class TestExecutionStateSqliteRoundtrip:
         assert loaded is not None
         assert loaded.plan.task_id == plan.task_id
         assert len(loaded.plan.phases) == len(plan.phases)
+
+    def test_execution_sqlite_plan_diagnostics_preserved(
+        self, store: SqliteStorage
+    ) -> None:
+        """Embedded MachinePlan diagnostics survive save_execution -> load_execution."""
+        plan = _minimal_plan("task-exec-rt-009b")
+        plan.plan_diagnostics = {
+            "classification_source": "headless-claude",
+            "knowledge_packs_loaded": 2,
+            "attachments_selected": 1,
+        }
+        state = _minimal_execution_state(plan)
+        store.save_execution(state)
+        loaded = store.load_execution("task-exec-rt-009b")
+        assert loaded is not None
+        assert loaded.plan.plan_diagnostics == plan.plan_diagnostics
 
     def test_execution_sqlite_load_returns_none_for_missing(
         self, store: SqliteStorage

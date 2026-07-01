@@ -354,18 +354,24 @@ class KnowledgeRegistry:
         self._rebuild_tfidf()
         return count
 
-    def load_default_paths(self) -> int:
+    def load_default_paths(self, project_root: Path | None = None) -> int:
         """Load packs from standard locations (global then project override).
 
         Mirrors AgentRegistry.load_default_paths():
         - Global: ``~/.claude/knowledge/``
-        - Project: ``.claude/knowledge/`` (relative to cwd, resolved)
+        - Project: ``<project_root>/.claude/knowledge/`` when *project_root*
+          is provided, otherwise ``.claude/knowledge/`` relative to cwd
 
         Returns:
             Total number of packs loaded.
         """
         global_dir = Path.home() / ".claude" / "knowledge"
-        project_dir = (Path(".claude") / "knowledge").resolve()
+        if project_root is None:
+            project_dir = (Path(".claude") / "knowledge").resolve()
+        else:
+            project_dir = (
+                Path(project_root).expanduser().resolve() / ".claude" / "knowledge"
+            )
 
         count = self.load_directory(global_dir)
         count += self.load_directory(project_dir, override=True)

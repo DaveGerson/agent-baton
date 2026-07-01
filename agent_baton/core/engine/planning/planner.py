@@ -47,6 +47,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+_DEFAULT_KNOWLEDGE_REGISTRY = object()
+
+
 def _build_default_pipeline() -> Pipeline:
     """Construct the canonical seven-stage planning pipeline."""
     return Pipeline([
@@ -58,6 +61,89 @@ def _build_default_pipeline() -> Pipeline:
         ValidationStage(),
         AssemblyStage(),
     ])
+
+
+def build_default_knowledge_registry(project_root: Path | None = None) -> Any:
+    """Construct a KnowledgeRegistry and load standard paths.
+
+    If loading fails, return an empty registry and log a clear warning
+    without surfacing a stack trace to callers.
+    """
+    from agent_baton.core.orchestration.knowledge_registry import KnowledgeRegistry
+
+    registry = KnowledgeRegistry()
+    try:
+        registry.load_default_paths(project_root=project_root)
+    except Exception as exc:
+        logger.warning(
+            "Default knowledge registry load failed; continuing with an empty "
+            "registry. Searched standard knowledge paths only. Cause: %s",
+            exc,
+        )
+    return registry
+
+
+def build_plan_diagnostics(
+    plan: "MachinePlan",
+    *,
+    knowledge_registry: Any = None,
+    classification_source: str | None = None,
+) -> dict[str, object]:
+    """Build the public diagnostics payload for an assembled MachinePlan."""
+    existing = dict(getattr(plan, "plan_diagnostics", {}) or {})
+    selected_agents = list(dict.fromkeys(step.agent_name for step in plan.all_steps))
+    knowledge_attachment_count = sum(len(step.knowledge) for step in plan.all_steps)
+
+    if knowledge_registry is not None:
+        knowledge_packs_loaded = len(knowledge_registry.all_packs)
+        degraded_packs = sorted(knowledge_registry.degraded_pack_names)
+        docs_indexed = sum(
+            len(pack.documents) for pack in knowledge_registry.all_packs.values()
+        )
+    else:
+        knowledge_packs_loaded = int(existing.get("knowledge_packs_loaded", 0))
+        degraded_packs = list(existing.get("degraded_packs", []))
+        docs_indexed = int(existing.get("docs_indexed", 0))
+
+    effective_classification_source = (
+        classification_source
+        or getattr(plan, "classification_source", None)
+        or existing.get("classification_source")
+        or "cli-override"
+    )
+
+    return {
+        "task_type": plan.task_type,
+        "complexity": plan.complexity,
+        "archetype": plan.archetype,
+        "risk": plan.risk_level,
+        "classification_source": effective_classification_source,
+        "selected_agents": selected_agents,
+        "phase_count": len(plan.phases),
+        "gate_count": sum(1 for phase in plan.phases if phase.gate is not None),
+        "approval_count": sum(1 for phase in plan.phases if phase.approval_required),
+        "validation_warning_count": int(existing.get("validation_warning_count", 0)),
+        "knowledge_attachment_count": knowledge_attachment_count,
+        "knowledge_packs_loaded": knowledge_packs_loaded,
+        "degraded_packs": degraded_packs,
+        "docs_indexed": docs_indexed,
+        "attachments_selected": knowledge_attachment_count,
+    }
+
+
+def ensure_plan_diagnostics(
+    plan: "MachinePlan",
+    *,
+    knowledge_registry: Any = None,
+    classification_source: str | None = None,
+) -> "MachinePlan":
+    """Populate ``plan.plan_diagnostics`` with the standard payload."""
+    plan.plan_diagnostics = build_plan_diagnostics(
+        plan,
+        knowledge_registry=knowledge_registry,
+        classification_source=classification_source,
+    )
+    return plan
 
 
 class IntelligentPlanner:
@@ -75,7 +161,7 @@ class IntelligentPlanner:
         classifier: Any = None,
         policy_engine: Any = None,
         retro_engine: Any = None,
-        knowledge_registry: Any = None,
+        knowledge_registry: Any = _DEFAULT_KNOWLEDGE_REGISTRY,
         task_classifier: Any = None,
         bead_store: Any = None,
         project_config: Any = None,
@@ -84,7 +170,14 @@ class IntelligentPlanner:
         self._classifier = classifier
         self._policy_engine = policy_engine
         self._retro_engine = retro_engine
-        self.knowledge_registry = knowledge_registry
+        self._knowledge_registry_is_auto_managed = (
+            knowledge_registry is _DEFAULT_KNOWLEDGE_REGISTRY
+        )
+        self.knowledge_registry = (
+            build_default_knowledge_registry()
+            if self._knowledge_registry_is_auto_managed
+            else knowledge_registry
+        )
         self._bead_store = bead_store
 
         # Build collaborators
@@ -194,7 +287,9 @@ class IntelligentPlanner:
             datetime.now(timezone.utc) if draft.otel_exporter else None
         )
 
-        services = self._build_services()
+        services = self._build_services(
+            knowledge_registry=self._resolve_knowledge_registry(project_root)
+        )
 
         # Run the pipeline.
         draft = self._pipeline.run(draft, services)
@@ -257,6 +352,14 @@ class IntelligentPlanner:
                 lines.append(f"- {w}")
         else:
             lines.append("No agent health warnings.")
+
+        lines.append("")
+        lines.append("## Plan Diagnostics")
+        if plan.plan_diagnostics:
+            for key, value in plan.plan_diagnostics.items():
+                lines.append(f"- **{key}**: {value}")
+        else:
+            lines.append("No plan diagnostics recorded.")
 
         lines.append("")
         lines.append("## Routing Notes")
@@ -598,7 +701,15 @@ class IntelligentPlanner:
 
         return draft
 
-    def _build_services(self) -> PlannerServices:
+    def _resolve_knowledge_registry(self, project_root: Path | None) -> Any:
+        """Resolve the effective registry for this planning request."""
+        if not self._knowledge_registry_is_auto_managed:
+            return self.knowledge_registry
+        if project_root is None:
+            return self.knowledge_registry
+        return build_default_knowledge_registry(project_root=project_root)
+
+    def _build_services(self, *, knowledge_registry: Any) -> PlannerServices:
         """Build the services container from this planner's collaborators."""
         return PlannerServices(
             registry=self._registry,
@@ -613,7 +724,7 @@ class IntelligentPlanner:
             data_classifier=self._classifier,
             policy_engine=self._policy_engine,
             retro_engine=self._retro_engine,
-            knowledge_registry=self.knowledge_registry,
+            knowledge_registry=knowledge_registry,
             bead_store=self._bead_store,
             team_context_root=self._team_context_root,
         )

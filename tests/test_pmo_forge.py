@@ -11,7 +11,7 @@ from agent_baton.core.pmo.forge import ForgeSession
 from agent_baton.core.pmo.store import PmoStore
 from agent_baton.core.runtime.headless import HeadlessClaude, HeadlessConfig
 from agent_baton.models.execution import MachinePlan, PlanPhase, PlanStep
-from agent_baton.models.pmo import PmoProject, PmoSignal
+from agent_baton.models.pmo import InterviewAnswer, PmoProject, PmoSignal
 
 
 # ---------------------------------------------------------------------------
@@ -81,6 +81,15 @@ def _forge(planner: object, store: PmoStore) -> ForgeSession:
     # ensuring tests always route through the injected planner mock.
     disabled_headless = HeadlessClaude(HeadlessConfig(claude_path="/nonexistent/claude"))
     return ForgeSession(planner=planner, store=store, headless=disabled_headless)
+
+
+class _AvailableHeadless:
+    def __init__(self, plan: MachinePlan) -> None:
+        self.is_available = True
+        self._plan = plan
+
+    async def generate_plan(self, **kwargs) -> MachinePlan:  # noqa: ARG002
+        return self._plan
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +193,75 @@ class TestCreatePlan:
         call_kwargs = planner.create_plan.call_args
         project_root_arg = call_kwargs.kwargs.get("project_root")
         assert project_root_arg is None
+
+    def test_headless_plan_gets_plan_diagnostics(self, tmp_path: Path):
+        store = _store(tmp_path)
+        project = _project(tmp_path)
+        store.register_project(project)
+
+        planner = _mock_planner()
+        headless_plan = _plan(task_id="headless-task", task_summary="Headless plan")
+        headless_plan.plan_diagnostics = {}
+        forge = ForgeSession(
+            planner=planner,
+            store=store,
+            headless=_AvailableHeadless(headless_plan),
+        )
+
+        result = forge.create_plan(
+            description="Design the architecture for a new feature",
+            program="NDS",
+            project_id="nds",
+        )
+
+        assert result is headless_plan
+        assert result.classification_source == "headless-claude"
+        assert result.plan_diagnostics["classification_source"] == "headless-claude"
+        assert result.plan_diagnostics["phase_count"] == len(result.phases)
+        assert result.plan_diagnostics["selected_agents"] == ["backend-engineer"]
+        assert "knowledge_packs_loaded" in result.plan_diagnostics
+        assert "attachments_selected" in result.plan_diagnostics
+        planner.create_plan.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# regenerate_plan
+# ---------------------------------------------------------------------------
+
+class TestRegeneratePlan:
+    def test_headless_regenerated_plan_gets_plan_diagnostics(self, tmp_path: Path):
+        store = _store(tmp_path)
+        project = _project(tmp_path)
+        store.register_project(project)
+
+        planner = _mock_planner()
+        headless_plan = _plan(task_id="regen-task", task_summary="Regenerated plan")
+        headless_plan.plan_diagnostics = {}
+        forge = ForgeSession(
+            planner=planner,
+            store=store,
+            headless=_AvailableHeadless(headless_plan),
+        )
+
+        result = forge.regenerate_plan(
+            description="Design the architecture for a new feature",
+            project_id="nds",
+            answers=[
+                InterviewAnswer(
+                    question_id="q-testing",
+                    answer="Add unit tests",
+                )
+            ],
+        )
+
+        assert result is headless_plan
+        assert result.classification_source == "headless-claude"
+        assert result.plan_diagnostics["classification_source"] == "headless-claude"
+        assert result.plan_diagnostics["phase_count"] == len(result.phases)
+        assert result.plan_diagnostics["selected_agents"] == ["backend-engineer"]
+        assert "knowledge_packs_loaded" in result.plan_diagnostics
+        assert "attachments_selected" in result.plan_diagnostics
+        planner.create_plan.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

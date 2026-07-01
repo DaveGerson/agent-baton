@@ -103,7 +103,11 @@ def _run_handler(
         patch.object(
             Path,
             "resolve",
-            lambda self: ctx_dir if str(self) == ".claude/team-context" else Path(str(self)),
+            lambda self: (
+                ctx_dir
+                if str(self).replace("\\", "/") == ".claude/team-context"
+                else Path(str(self))
+            ),
         ),
     ]
 
@@ -257,3 +261,61 @@ class TestNoSavePreservesMarkdown:
         stdout = _run_handler(args, plan, ctx_dir, capsys)
 
         assert plan.to_markdown() in stdout
+
+    def test_no_save_explain_emits_plan_explanation(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture
+    ) -> None:
+        plan = _make_minimal_plan()
+        ctx_dir = tmp_path / ".claude" / "team-context"
+        ctx_dir.mkdir(parents=True)
+        args = _make_args(save=False, explain=True)
+
+        stdout = _run_handler(args, plan, ctx_dir, capsys)
+
+        assert "Explanation text here." in stdout
+
+
+class TestProjectScopedKnowledgeWiring:
+    def test_project_flag_is_forwarded_to_registry_loader(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture
+    ) -> None:
+        plan = _make_minimal_plan()
+        ctx_dir = tmp_path / ".claude" / "team-context"
+        ctx_dir.mkdir(parents=True)
+        project_root = tmp_path / "project-root"
+        project_root.mkdir()
+        args = _make_args(save=False, verbose=False)
+        args.project = str(project_root)
+
+        mock_planner = MagicMock()
+        mock_planner.create_plan.return_value = plan
+        mock_registry = MagicMock()
+
+        patches = [
+            patch("agent_baton.cli.commands.execution.plan_cmd.IntelligentPlanner", return_value=mock_planner),
+            patch("agent_baton.cli.commands.execution.plan_cmd.KnowledgeRegistry", return_value=mock_registry),
+            patch("agent_baton.cli.commands.execution.plan_cmd.RetrospectiveEngine", return_value=MagicMock()),
+            patch("agent_baton.cli.commands.execution.plan_cmd.DataClassifier", return_value=MagicMock()),
+            patch("agent_baton.cli.commands.execution.plan_cmd.PolicyEngine", return_value=MagicMock()),
+            patch("agent_baton.core.orchestration.context.ContextManager", return_value=MagicMock()),
+            patch("agent_baton.cli.commands.execution.plan_cmd._persist_plan_to_db", MagicMock()),
+            patch.object(
+                Path,
+                "resolve",
+                lambda self: (
+                    ctx_dir
+                    if str(self).replace("\\", "/") == ".claude/team-context"
+                    else Path(str(self))
+                ),
+            ),
+        ]
+
+        with contextlib.ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            plan_cmd.handler(args)
+
+        capsys.readouterr()
+        mock_registry.load_default_paths.assert_called_once_with(
+            project_root=project_root
+        )

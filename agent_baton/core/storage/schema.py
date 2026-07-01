@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 45
+SCHEMA_VERSION = 46
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -1384,6 +1384,15 @@ CREATE INDEX IF NOT EXISTS idx_spec_drafts_status       ON spec_drafts(status);
 CREATE INDEX IF NOT EXISTS idx_spec_drafts_submitted_by ON spec_drafts(submitted_by);
 CREATE INDEX IF NOT EXISTS idx_spec_drafts_submitted_at ON spec_drafts(submitted_at);
 """,
+    46: """
+-- v46: persist plan diagnostics as a JSON blob on plans.
+--
+-- Applied to BOTH project and central databases. Project DBs have a single
+-- task_id primary key; central DBs have (project_id, task_id). The additive
+-- column shape works for both and keeps MachinePlan.to_dict()/from_dict()
+-- diagnostics round-trips intact after SQLite normalization.
+ALTER TABLE plans ADD COLUMN plan_diagnostics TEXT NOT NULL DEFAULT '{}';
+""",
 }
 
 # =====================================================================
@@ -1538,6 +1547,7 @@ CREATE TABLE IF NOT EXISTS plans (
     task_type                  TEXT,
     classification_signals     TEXT,
     classification_confidence  REAL,
+    plan_diagnostics           TEXT NOT NULL DEFAULT '{}',
     -- release_id: soft FK to releases.release_id (R3.1).  Not declared as a
     -- hard REFERENCES because the v16 migration (ALTER TABLE ADD COLUMN)
     -- cannot add an FK in SQLite, and migrated vs. fresh DBs must behave
@@ -2651,6 +2661,7 @@ CREATE TABLE IF NOT EXISTS plans (
     task_type                  TEXT,
     classification_signals     TEXT,
     classification_confidence  REAL,
+    plan_diagnostics           TEXT NOT NULL DEFAULT '{}',
     release_id                 TEXT,
     PRIMARY KEY (project_id, task_id)
 );
