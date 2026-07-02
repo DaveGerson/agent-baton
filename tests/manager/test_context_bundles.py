@@ -365,6 +365,122 @@ def test_overflow_drops_reference_docs_before_required(tmp_path) -> None:
     assert bundle.truncation_warnings
 
 
+def test_overflow_drops_exactly_one_reference_doc(tmp_path) -> None:
+    """F3 (Wave 2 review): budget sized so exactly ONE reference doc must
+    drop. ``doc_a`` (gap-suggested, lower priority) is dropped; ``doc_b``
+    (explicit, higher priority) survives; the first truncation warning
+    names ``doc_a``.
+
+    Explicit ``token_estimate`` values (rather than file-size-derived
+    estimates) keep the arithmetic exact: contract(10) + doc_a(100) +
+    doc_b(50) + required pack(20) = 180 total against a budget of 100 --
+    dropping doc_a alone (-100 -> 80) satisfies the budget, so doc_b must
+    never be touched.
+    """
+    contract_path = tmp_path / "contract.md"
+    contract_path.write_text("x" * 40, encoding="utf-8")  # 40 // 4 == 10 tokens
+
+    step = _step(
+        knowledge=[
+            KnowledgeAttachment(
+                source="gap-suggested",
+                pack_name=None,
+                document_name="doc_a",
+                path="doc_a.md",
+                delivery="reference",
+                token_estimate=100,
+            ),
+            KnowledgeAttachment(
+                source="explicit",
+                pack_name=None,
+                document_name="doc_b",
+                path="doc_b.md",
+                delivery="reference",
+                token_estimate=50,
+            ),
+        ]
+    )
+    role_card = _role_card(
+        required_knowledge_packs=["coding-conventions"], default_context_budget=100
+    )
+    knowledge_plan = _knowledge_plan(
+        selected_packs=[
+            KnowledgePackReference(name="coding-conventions", token_estimate=20),
+        ],
+        per_step_packs={},
+    )
+    config = ManagerConfig()
+
+    bundle = ContextBundleBuilder(config).build(
+        step, contract_path, role_card, knowledge_plan
+    )
+
+    reference_paths = [ref.path for ref in bundle.reference_only]
+    assert "doc_a.md" not in reference_paths
+    assert "doc_b.md" in reference_paths
+    assert any(p.name == "coding-conventions" for p in bundle.knowledge_packs)
+    assert bundle.truncation_warnings
+    assert bundle.truncation_warnings[0] == (
+        "Dropped reference doc to fit token budget: doc_a.md"
+    )
+
+
+def test_overflow_warns_on_residual_overrun_when_nothing_droppable(tmp_path) -> None:
+    """F4.2 (Wave 2 review): when the overflow loop exits still over
+    budget because nothing droppable remains (no reference docs, no extra
+    handoffs), a truncation warning states the residual overrun instead of
+    silently dispatching an over-budget bundle."""
+    contract_path = tmp_path / "contract.md"
+    contract_path.write_text("x" * 400, encoding="utf-8")  # ~100 tokens, never dropped
+
+    step = _step()
+    role_card = _role_card(required_knowledge_packs=[], default_context_budget=10)
+    knowledge_plan = _knowledge_plan(selected_packs=[], per_step_packs={})
+    config = ManagerConfig()
+
+    bundle = ContextBundleBuilder(config).build(
+        step, contract_path, role_card, knowledge_plan
+    )
+
+    assert bundle.estimated_tokens > bundle.token_budget
+    assert bundle.truncation_warnings
+    assert any(
+        "token budget exceeded" in w.lower() for w in bundle.truncation_warnings
+    )
+
+
+def test_knowledge_pack_cap_warns_when_required_pack_dropped(tmp_path) -> None:
+    """F4.3 (Wave 2 review): when the ``[:max_docs]`` cap cuts a pack that
+    is a member of ``config.knowledge_packs.required_for_code_steps``, a
+    truncation warning names it. ``testing-strategy`` is in the default
+    ``required_for_code_steps`` list; capping to 2 docs here keeps
+    ``repo-architecture`` and ``coding-conventions`` and cuts it."""
+    contract_path = tmp_path / "contract.md"
+    contract_path.write_text("contract", encoding="utf-8")
+
+    step = _step()
+    role_card = _role_card(
+        required_knowledge_packs=["repo-architecture", "coding-conventions", "testing-strategy"]
+    )
+    knowledge_plan = _knowledge_plan(
+        selected_packs=[
+            KnowledgePackReference(name="repo-architecture", token_estimate=10),
+            KnowledgePackReference(name="coding-conventions", token_estimate=10),
+            KnowledgePackReference(name="testing-strategy", token_estimate=10),
+        ],
+        per_step_packs={},
+    )
+    config = ManagerConfig(context={"max_knowledge_docs_per_step": 2})
+
+    bundle = ContextBundleBuilder(config).build(
+        step, contract_path, role_card, knowledge_plan
+    )
+
+    pack_names = {p.name for p in bundle.knowledge_packs}
+    assert pack_names == {"repo-architecture", "coding-conventions"}
+    assert any("testing-strategy" in w for w in bundle.truncation_warnings)
+
+
 def test_bundle_round_trip(tmp_path) -> None:
     contract_path = tmp_path / "contract.md"
     contract_path.write_text("contract", encoding="utf-8")

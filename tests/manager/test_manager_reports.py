@@ -297,6 +297,85 @@ def test_report_includes_team_and_workstream_status(tmp_path: Path) -> None:
     assert "test-engineer" in team_section
 
 
+def test_reviews_section_lists_completed_and_pending_review_steps(tmp_path: Path) -> None:
+    """F4.1 (Wave 2 review): hand-built steps ``review-1`` and
+    ``review-2-final`` -- the real id shapes ``PhasePolicyApplier`` (E)
+    injects -- one complete, one pending. Exercises reports.py:223-227."""
+    plan = MachinePlan(
+        task_id="task-report",
+        task_summary="Add a reporting endpoint with tests",
+        phases=[
+            PlanPhase(
+                phase_id=1,
+                name="Design",
+                steps=[
+                    PlanStep(
+                        step_id="1.1",
+                        agent_name="architect",
+                        task_description="Design the reporting service.",
+                        deliverables=["design doc"],
+                    ),
+                    PlanStep(
+                        step_id="review-1",
+                        agent_name="code-reviewer",
+                        task_description="Adversarial review of phase 'Design'.",
+                        deliverables=["review verdict"],
+                        depends_on=["1.1"],
+                        step_type="reviewing",
+                    ),
+                ],
+            ),
+            PlanPhase(
+                phase_id=2,
+                name="Test",
+                steps=[
+                    PlanStep(
+                        step_id="2.1",
+                        agent_name="test-engineer",
+                        task_description="Add tests for the reporting endpoint.",
+                        deliverables=["endpoint tests"],
+                        depends_on=["1.1"],
+                    ),
+                    PlanStep(
+                        step_id="review-2-final",
+                        agent_name="auditor",
+                        task_description="Final adversarial review of the project.",
+                        deliverables=["review verdict"],
+                        depends_on=["2.1"],
+                        step_type="reviewing",
+                    ),
+                ],
+            ),
+        ],
+    )
+    artifacts = _sample_artifacts()
+    builder = _builder(tmp_path)
+
+    execution_state = {
+        "status": "running",
+        "step_results": [
+            {"step_id": "1.1", "status": "complete"},
+            {"step_id": "review-1", "status": "complete"},
+            {"step_id": "2.1", "status": "complete"},
+            # review-2-final intentionally has no result recorded -> pending.
+        ],
+    }
+
+    text = builder.build_report(plan, artifacts, execution_state)
+
+    reviews_section = text.split("## Reviews")[1].split("## Gates")[0]
+    completed_line = next(
+        line for line in reviews_section.splitlines() if line.startswith("- Completed:")
+    )
+    pending_line = next(
+        line for line in reviews_section.splitlines() if line.startswith("- Pending:")
+    )
+    assert "review-1" in completed_line
+    assert "review-2-final" not in completed_line
+    assert "review-2-final" in pending_line
+    assert "review-1" not in pending_line
+
+
 def test_report_data_has_minimum_json_keys(tmp_path: Path) -> None:
     plan = _sample_plan()
     artifacts = _sample_artifacts()

@@ -13,8 +13,13 @@ one built after this change, as long as the new kwargs are omitted.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from agent_baton.core.engine.dispatcher import PromptDispatcher
 from agent_baton.models.execution import PlanStep
+
+_GOLDEN_DIR = Path(__file__).parent / "golden"
+_GOLDEN_BASELINE_PROMPT = _GOLDEN_DIR / "manager_context_prompt_baseline.txt"
 
 
 def _make_step() -> PlanStep:
@@ -125,6 +130,31 @@ def test_dispatcher_unchanged_without_kwargs() -> None:
     assert baseline == with_explicit_none
     assert "## Scope Contract" not in baseline
     assert "## Context Bundle" not in baseline
+
+
+def test_dispatcher_prompt_matches_frozen_golden_snapshot() -> None:
+    """F2 (Wave 2 review): real byte-identity snapshot.
+
+    ``test_dispatcher_unchanged_without_kwargs`` above only proves
+    omit-vs-explicit-``None`` produce the same string -- a tautology that
+    would pass even if the *baseline* prompt shape itself silently
+    regressed (e.g. a stray blank line, a reordered section). This test
+    instead pins the exact no-kwargs prompt for ``_make_step()`` +
+    ``_COMMON_KWARGS`` against a frozen fixture
+    (``tests/engine/golden/manager_context_prompt_baseline.txt``,
+    generated from the current, already-merged-and-confined dispatcher
+    change) and asserts byte-for-byte equality. Any future change to
+    ``build_delegation_prompt``'s output shape for a non-manager-mode
+    dispatch must consciously regenerate this fixture, not just satisfy
+    the omit-vs-None tautology above.
+    """
+    dispatcher = PromptDispatcher()
+    step = _make_step()
+
+    prompt = dispatcher.build_delegation_prompt(step, **_COMMON_KWARGS)
+
+    golden = _GOLDEN_BASELINE_PROMPT.read_text(encoding="utf-8")
+    assert prompt == golden
 
 
 def test_dispatcher_scope_contract_without_bundle() -> None:

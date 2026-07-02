@@ -28,6 +28,8 @@ docstring and Task 11's ``test_review_bundle_integration``.
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from pydantic import BaseModel, ConfigDict, Field
 
 from agent_baton.core.config.manager import ManagerConfig
@@ -41,11 +43,11 @@ _REVIEW_PREFIX = "review-"
 
 # `agent_baton/core/engine/planning/rules/step_types.py::AGENT_STEP_TYPE`
 # maps agent names to step_type values "planning" / "reviewing" / "testing"
-# / "task" -- there is no "review" value (the closest is "reviewing", a
-# different string). Per the M6 fallback rule, injected review steps use
-# PlanStep's own default step_type ("developing") rather than a value that
-# does not exist in that rules module.
-_REVIEW_STEP_TYPE = "developing"
+# / "task" -- "reviewing" exists in that rules module (Wave 2 review Q1
+# corrected an earlier claim that it didn't). Injected review steps use it
+# directly so `required_for_code_steps` knowledge packs (gated on
+# non-review step types, Wave 3 composition) never attach to a review step.
+_REVIEW_STEP_TYPE = "reviewing"
 
 _RISK_RANK: dict[str, int] = {"LOW": 0, "MEDIUM": 1, "HIGH": 2, "CRITICAL": 3}
 _RISK_BASED_THRESHOLD_RANK = _RISK_RANK["MEDIUM"]
@@ -67,6 +69,7 @@ class PolicyDecisions(BaseModel):
     gates_mode: str = "project_configured"
     injected_review_steps: list[str] = Field(default_factory=list)
     final_review_step: str | None = None
+    gate_scope_applied: str | None = None
 
 
 def _phase_review_step_id(phase_id: int) -> str:
@@ -110,20 +113,35 @@ def _build_review_step(
     )
 
 
-def _apply_gate_scope(plan: MachinePlan, gate_scope: str) -> None:
+def _apply_gate_scope(plan: MachinePlan, gate_scope: str) -> str | None:
     """Rescale every phase's existing gate to *gate_scope*, in place.
 
-    Reuses ``planning/utils/gates.default_gate`` -- the same function the
-    planner itself calls at plan-creation time -- so the regenerated
-    command/description/fail_on shape matches what the planner would have
-    produced for this ``gate_scope``. Stack detection and changed-path test
-    scoping are intentionally NOT replicated (this applier has neither a
-    ``StackProfile`` nor a project root, and must stay IO-free), so:
+    Returns the scope actually applied (``gate_scope`` when a rescale ran,
+    ``None`` when this was a no-op) -- see :attr:`PolicyDecisions.gate_scope_applied`.
 
-    - ``stack=None`` and ``changed_paths=None`` are passed unconditionally.
-      ``default_gate`` never touches the filesystem when ``changed_paths``
-      is falsy (the only IO path, `_test_files_for_changes`, short-circuits
-      on an empty list), so this stays a pure, deterministic rescale.
+    ``gate_scope == "focused"`` is a no-op (Wave 2 review F1): the planner
+    already produced focused gates from strictly better information than
+    this applier has (real changed-path test scoping via
+    ``_test_files_for_changes``, not just a phase name). Regenerating a
+    "focused" gate here with ``changed_paths=None`` can only ever produce
+    the smoke-fallback command, silently discarding the planner's
+    scoped-test command -- so for "focused" this function does nothing.
+
+    For "full"/"smoke", reuses ``planning/utils/gates.default_gate`` --
+    the same function the planner itself calls at plan-creation time -- so
+    the regenerated command/description/fail_on shape matches what the
+    planner would have produced for this ``gate_scope``. ``default_gate``
+    reads only ``stack.language`` (confirmed against
+    ``planning/utils/gates.py``), so a minimal ``SimpleNamespace`` shim
+    carries ``plan.detected_stack`` through without needing a real
+    ``StackProfile`` or project root (this applier must stay IO-free).
+    ``plan.detected_stack`` may be a combined ``"language/framework"``
+    string (see ``planning/stages/assembly.py``); only the language segment
+    is meaningful to ``default_gate``'s stack-command lookup, so it is
+    split off here. Changed-path test scoping is still NOT replicated
+    (``changed_paths=None`` unconditionally; ``default_gate`` never touches
+    the filesystem when ``changed_paths`` is falsy, so this stays pure).
+
     - Only ``command`` / ``description`` / ``fail_on`` are overwritten;
       ``gate_type`` (and whether a phase has a gate at all) is left as the
       planner decided it, so a phase's gate is rescoped in place instead of
@@ -134,13 +152,22 @@ def _apply_gate_scope(plan: MachinePlan, gate_scope: str) -> None:
       matches the "skip" list such as "review"/"design") is left untouched
       rather than having its gate deleted.
     """
+    if gate_scope == "focused":
+        return None
+
+    stack = (
+        SimpleNamespace(language=plan.detected_stack.split("/", 1)[0])
+        if plan.detected_stack
+        else None
+    )
+
     for phase in plan.phases:
         gate = phase.gate
         if gate is None:
             continue
         regenerated = default_gate(
             phase.name,
-            stack=None,
+            stack=stack,
             changed_paths=None,
             gate_scope=gate_scope,
             project_root=None,
@@ -150,6 +177,7 @@ def _apply_gate_scope(plan: MachinePlan, gate_scope: str) -> None:
         gate.command = regenerated.command
         gate.description = regenerated.description
         gate.fail_on = list(regenerated.fail_on)
+    return gate_scope
 
 
 class PhasePolicyApplier:
@@ -209,12 +237,14 @@ class PhasePolicyApplier:
                 final_review_step = final_id
 
         gates_mode = config.gates.mode
+        gate_scope_applied: str | None = None
         if not cli_gate_scope_explicit and gates_mode == "project_configured":
-            _apply_gate_scope(plan, config.gates.gate_scope)
+            gate_scope_applied = _apply_gate_scope(plan, config.gates.gate_scope)
 
         return PolicyDecisions(
             handoff_required=config.policies.phase_completion.handoff_required,
             gates_mode=gates_mode,
             injected_review_steps=injected,
             final_review_step=final_review_step,
+            gate_scope_applied=gate_scope_applied,
         )

@@ -18,6 +18,7 @@ def _make_plan(
     task_id: str = "task-phase-policy-1",
     task_summary: str = "Add a reporting endpoint with tests and docs",
     risk_level: str = "MEDIUM",
+    detected_stack: str | None = "python",
     phases: list[PlanPhase] | None = None,
 ) -> MachinePlan:
     if phases is None:
@@ -63,7 +64,7 @@ def _make_plan(
         task_summary=task_summary,
         risk_level=risk_level,
         task_type="feature",
-        detected_stack="python",
+        detected_stack=detected_stack,
         phases=phases,
     )
 
@@ -289,6 +290,136 @@ def test_gate_scope_respects_explicit_cli() -> None:
     assert decisions.gates_mode == "project_configured"
 
     _round_trip(implicit_plan)
+
+
+def test_gate_scope_focused_is_a_noop() -> None:
+    """F1(1): the default config (``gates.gate_scope == "focused"``, not
+    explicit on the CLI) must NOT rescope planner-built gates at all -- the
+    planner already produced focused gates with strictly better
+    information (real changed-path test scoping) than this applier has.
+    Regenerating with ``changed_paths=None`` would silently discard the
+    planner's scoped ``pytest tests/test_decisions.py``-style command in
+    favor of a smoke fallback."""
+    plan = _make_plan(
+        phases=[
+            PlanPhase(
+                phase_id=1,
+                name="Testing and docs",
+                steps=[
+                    PlanStep(
+                        step_id="1.1",
+                        agent_name="test-engineer",
+                        task_description="Write tests for the decisions module.",
+                        deliverables=["tests"],
+                        allowed_paths=["tests/test_decisions.py"],
+                    ),
+                ],
+                gate=PlanGate(
+                    gate_type="test",
+                    command="pytest tests/test_decisions.py",
+                    description="Run focused test suite (scoped to 1 file(s)) with coverage report.",
+                    fail_on=["test failure", "coverage below threshold"],
+                ),
+            ),
+        ]
+    )
+    config = ManagerConfig.from_dict(
+        {
+            "policies": {
+                "phase_completion": {"adversarial_review": "off"},
+                "project_completion": {"adversarial_review": "off"},
+            },
+            # gates.mode / gates.gate_scope both left at their defaults:
+            # "project_configured" / "focused".
+        }
+    )
+    assert config.gates.mode == "project_configured"
+    assert config.gates.gate_scope == "focused"
+
+    decisions = PhasePolicyApplier(config).apply(plan, cli_gate_scope_explicit=False)
+
+    gate = plan.phases[0].gate
+    assert gate.command == "pytest tests/test_decisions.py"
+    assert gate.description == (
+        "Run focused test suite (scoped to 1 file(s)) with coverage report."
+    )
+    assert gate.fail_on == ["test failure", "coverage below threshold"]
+    assert decisions.gate_scope_applied is None
+
+    _round_trip(plan)
+
+
+def test_gate_scope_full_threads_detected_stack_into_default_gate() -> None:
+    """F1(2): a non-focused ``gate_scope`` must thread ``plan.detected_stack``
+    into ``default_gate`` via a minimal stack shim, so a TypeScript plan
+    gets the JS/TS full-gate command (``npm test``) rather than a
+    python-flavored fallback."""
+    plan = _make_plan(
+        detected_stack="typescript",
+        phases=[
+            PlanPhase(
+                phase_id=1,
+                name="Test",
+                steps=[
+                    PlanStep(
+                        step_id="1.1",
+                        agent_name="test-engineer",
+                        task_description="Write tests for the widget.",
+                        deliverables=["tests"],
+                        allowed_paths=["src/widget.test.ts"],
+                    ),
+                ],
+                gate=PlanGate(
+                    gate_type="test",
+                    command="pytest tests/test_widget.py",
+                    description="original description",
+                    fail_on=["original failure"],
+                ),
+            ),
+        ]
+    )
+    config = ManagerConfig.from_dict(
+        {
+            "policies": {
+                "phase_completion": {"adversarial_review": "off"},
+                "project_completion": {"adversarial_review": "off"},
+            },
+            "gates": {"mode": "project_configured", "gate_scope": "full"},
+        }
+    )
+
+    decisions = PhasePolicyApplier(config).apply(plan, cli_gate_scope_explicit=False)
+
+    gate = plan.phases[0].gate
+    assert gate.command == "npm test"
+    assert "pytest" not in gate.command
+    assert decisions.gate_scope_applied == "full"
+
+    _round_trip(plan)
+
+
+def test_injected_review_steps_use_reviewing_step_type() -> None:
+    """F1b: injected review steps (both phase reviews and the final
+    project review) use ``step_type="reviewing"`` -- confirmed present in
+    ``planning/rules/step_types.py::AGENT_STEP_TYPE`` -- not
+    ``"developing"``. This keeps `required_for_code_steps` knowledge packs
+    (Wave 3 composition, gated on non-review step types) from attaching to
+    review steps."""
+    config = ManagerConfig.from_dict({})
+    plan = _make_plan()
+
+    PhasePolicyApplier(config).apply(plan, cli_gate_scope_explicit=True)
+
+    phase1, phase2 = plan.phases
+    review1 = next(s for s in phase1.steps if s.step_id == "review-1")
+    review2 = next(s for s in phase2.steps if s.step_id == "review-2")
+    final_review = next(s for s in phase2.steps if s.step_id == "review-2-final")
+
+    assert review1.step_type == "reviewing"
+    assert review2.step_type == "reviewing"
+    assert final_review.step_type == "reviewing"
+
+    _round_trip(plan)
 
 
 def test_idempotent() -> None:

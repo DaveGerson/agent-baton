@@ -316,7 +316,9 @@ class ContextBundleBuilder:
             step, contract_path_str, role_card_path, truncation_warnings
         )
         reference_only = self._build_reference_only(step)
-        knowledge_packs = self._build_knowledge_packs(step, role_card, knowledge_plan)
+        knowledge_packs = self._build_knowledge_packs(
+            step, role_card, knowledge_plan, truncation_warnings
+        )
         handoff_items = self._build_handoff_items(prior_handoff_paths or [])
 
         total_tokens = (
@@ -438,6 +440,7 @@ class ContextBundleBuilder:
         step: "PlanStep",
         role_card: RoleCard,
         knowledge_plan: "KnowledgePlan",
+        truncation_warnings: list[str],
     ) -> list[KnowledgePackReference]:
         max_docs = self.config.context.max_knowledge_docs_per_step
 
@@ -448,12 +451,28 @@ class ContextBundleBuilder:
         for name in knowledge_plan.per_step_packs.get(step.step_id, []):
             if name not in pack_names:
                 pack_names.append(name)
-        pack_names = pack_names[:max_docs]
+
+        kept_names = pack_names[:max_docs]
+        cut_names = pack_names[max_docs:]
+        if cut_names:
+            # F4.3 (Wave 2 review): the [:max_docs] cap can silently cut a
+            # pack the project config marks required for every code step
+            # (``config.knowledge_packs.required_for_code_steps``) -- that
+            # is a config-driven guarantee, distinct from a role card's own
+            # ``required_knowledge_packs``, so callers need a signal when
+            # the cap breaks it.
+            required_for_code_steps = set(self.config.knowledge_packs.required_for_code_steps)
+            for name in cut_names:
+                if name in required_for_code_steps:
+                    truncation_warnings.append(
+                        "Required knowledge pack dropped by max_knowledge_docs_per_step "
+                        f"cap: {name}"
+                    )
 
         packs_by_name = {pack.name: pack for pack in knowledge_plan.selected_packs}
         required = set(role_card.required_knowledge_packs)
         packs: list[KnowledgePackReference] = []
-        for name in pack_names:
+        for name in kept_names:
             if name in packs_by_name:
                 packs.append(packs_by_name[name])
             else:
@@ -516,5 +535,18 @@ class ContextBundleBuilder:
             total_tokens -= dropped_tokens
             truncation_warnings.append(
                 f"Dropped prior handoff to fit token budget: {dropped_path}"
+            )
+
+        if total_tokens > token_budget:
+            # F4.2 (Wave 2 review): everything droppable (reference docs,
+            # all-but-the-latest handoff) is already gone and the bundle is
+            # still over budget -- the residual overrun is the scope
+            # contract / required knowledge packs / latest handoff, none of
+            # which this method ever drops. Surface it rather than letting
+            # the caller silently dispatch an over-budget bundle.
+            overrun = total_tokens - token_budget
+            truncation_warnings.append(
+                f"Token budget exceeded by {overrun} token(s) with no further context "
+                f"droppable (budget={token_budget}, total={total_tokens})."
             )
         return total_tokens
