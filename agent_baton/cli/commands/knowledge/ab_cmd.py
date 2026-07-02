@@ -13,6 +13,11 @@ import argparse
 import sys
 from pathlib import Path
 
+from agent_baton.cli.commands.knowledge import (
+    ensure_parent_parser,
+    register_handler,
+)
+
 _DEFAULT_DB = Path(".claude/team-context/baton.db")
 
 
@@ -21,11 +26,7 @@ _DEFAULT_DB = Path(".claude/team-context/baton.db")
 # ---------------------------------------------------------------------------
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
-    p = subparsers.add_parser(
-        "knowledge",
-        help="Manage knowledge documents and A/B experiments.",
-    )
-    sub = p.add_subparsers(dest="knowledge_subcommand")
+    sub = ensure_parent_parser(subparsers)
 
     ab_p = sub.add_parser("ab", help="Knowledge A/B experiment commands.")
     ab_sub = ab_p.add_subparsers(dest="ab_subcommand")
@@ -52,11 +53,23 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     stop_p = ab_sub.add_parser("stop", help="Stop an active experiment.")
     stop_p.add_argument("experiment_id", help="Experiment ID.")
 
-    return p
+    register_handler("ab", _run_ab)
+    return subparsers.choices["knowledge"]
 
 
 def handler(args: argparse.Namespace) -> None:
-    if getattr(args, "knowledge_subcommand", None) != "ab":
+    dispatch = getattr(args, "_dispatch", None)
+    if dispatch is None:
+        _run_ab(args)
+        return
+    dispatch(args)
+
+
+def _run_ab(args: argparse.Namespace) -> None:
+    if (
+        getattr(args, "knowledge_cmd", None) not in (None, "ab")
+        and getattr(args, "knowledge_subcommand", None) != "ab"
+    ):
         print("Usage: baton knowledge ab <list|create|results|stop>")
         return
 
