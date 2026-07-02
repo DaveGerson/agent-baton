@@ -72,6 +72,20 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         help="Show explanation of why this plan was chosen",
     )
     p.add_argument(
+        "--manager-mode",
+        dest="manager_mode",
+        action="store_true",
+        help=(
+            "Post-process the plan into manager-mode PMO sidecar artifacts "
+            "(project charter, scope map, team blueprint, role cards, "
+            "knowledge plan, scope contracts, context bundles, manager "
+            "brief) under .claude/team-context/executions/<task_id>/. Also "
+            "enabled by manager_mode.enabled_by_default in "
+            ".claude/baton.yaml. See "
+            "docs/internal/manager-mode-pmo-design.md."
+        ),
+    )
+    p.add_argument(
         "--knowledge",
         dest="knowledge",
         action="append",
@@ -601,6 +615,25 @@ def handler(args: argparse.Namespace) -> None:
         plan.completion_condition = goal_text
         plan.max_amend_cycles = max(0, getattr(args, "max_amend_cycles", 3))
 
+    # Manager-mode PMO layer (M1, see docs/internal/manager-mode-pmo-design.md).
+    # ManagerConfig is always loaded (a cheap, side-effect-free YAML parse
+    # that mirrors ProjectConfig's own always-on load elsewhere) so that
+    # `manager_mode.enabled_by_default` can turn on manager mode without
+    # --manager-mode. The heavier `agent_baton.core.manager` builder
+    # package is only imported below when manager mode is actually
+    # requested, so non-manager plans have zero core.manager import
+    # side effects and `plan.to_dict()` is unchanged apart from the
+    # `manager_mode: False` field added in this milestone.
+    from agent_baton.core.config.manager import ManagerConfig
+
+    manager_config = ManagerConfig.load(project_root)
+    manager_requested = (
+        bool(getattr(args, "manager_mode", False))
+        or manager_config.manager_mode.enabled_by_default
+    )
+    if manager_requested:
+        plan.manager_mode = True
+
     # --dry-run: print compact forecast and exit without writing anything.
     if getattr(args, "dry_run", False):
         # bd-47b4: when paired with --json, emit a structured payload that
@@ -665,6 +698,16 @@ def handler(args: argparse.Namespace) -> None:
         release_id = getattr(args, "release_id", None)
         if release_id:
             _tag_plan_with_release(ctx_dir, plan.task_id, release_id)
+
+        if manager_requested:
+            # Import here (not at module top) so non-manager plans never
+            # import agent_baton.core.manager.
+            from agent_baton.core.manager.planner import ManagerModePlanner
+
+            manager_planner = ManagerModePlanner(
+                manager_config, project_root=project_root, team_context_dir=ctx_dir
+            )
+            manager_planner.build_and_write(plan, plan.task_summary)
 
         if args.explain:
             explanation_path = ctx_dir / "explanation.md"

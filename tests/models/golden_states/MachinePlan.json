@@ -201,6 +201,7 @@
   "compliance_fail_closed": null,
   "completion_condition": null,
   "max_amend_cycles": 3,
+  "manager_mode": false,
   "resource_limits": {
     "max_concurrent_executions": 2,
     "max_concurrent_agents": 4,
