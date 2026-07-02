@@ -132,6 +132,7 @@ def test_doctor_json_reports_required_checks_and_optional_warnings(
         "git",
         "claude_cli",
         "team_context",
+        "planner_validation",
         "terminology",
     } <= check_ids
     assert _check(payload, "bd")["status"] == "warning"
@@ -183,6 +184,142 @@ def test_missing_optional_features_are_warnings_not_crashes(
     assert _check(payload, "knowledge_packs")["status"] == "warning"
     assert _check(payload, "assurance_packs")["status"] == "warning"
     assert _check(payload, "team_context")["status"] == "warning"
+    assert _check(payload, "planner_validation")["status"] == "warning"
+
+
+def test_knowledge_packs_warning_when_pack_dir_lacks_manifest(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from agent_baton.cli.commands import diagnostics_cmd
+
+    home = tmp_path / "home"
+    home.mkdir()
+    pack_dir = tmp_path / ".claude" / "knowledge" / "broken-pack"
+    pack_dir.mkdir(parents=True)
+    (pack_dir / "guide.md").write_text("body\n", encoding="utf-8")
+    (tmp_path / ".claude" / "team-context").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setattr(
+        diagnostics_cmd,
+        "_load_knowledge_registry_details",
+        lambda _root: {
+            "registry_loaded_count": 0,
+            "registry_well_formed_count": 0,
+            "registry_degraded_count": 1,
+            "registry_degraded_names": ["broken-pack"],
+        },
+    )
+
+    payload = diagnostics_cmd.build_report(tmp_path)
+    check = _check(payload, "knowledge_packs")
+
+    assert check["status"] == "warning"
+    assert check["details"]["project_count"] == 1
+    assert check["details"]["project_with_manifest"] == 0
+    assert check["details"]["registry_degraded_count"] == 1
+
+
+def test_assurance_packs_warning_when_validation_finds_invalid_pack(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from agent_baton.cli.commands import diagnostics_cmd
+
+    home = tmp_path / "home"
+    home.mkdir()
+    pack_dir = tmp_path / ".claude" / "packs" / "project-assurance"
+    pack_dir.mkdir(parents=True)
+    (pack_dir / "pack.json").write_text(
+        '{"name": "project-assurance", "version": "0.1.0"}\n',
+        encoding="utf-8",
+    )
+    (tmp_path / ".claude" / "team-context").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setattr(
+        diagnostics_cmd,
+        "_validate_assurance_pack_dirs",
+        lambda *_roots: {
+            "invalid_count": 1,
+            "invalid_packs": [
+                {
+                    "pack": "project-assurance",
+                    "path": str(pack_dir),
+                    "errors": ["missing rubric"],
+                }
+            ],
+        },
+    )
+
+    payload = diagnostics_cmd.build_report(tmp_path)
+    check = _check(payload, "assurance_packs")
+
+    assert check["status"] == "warning"
+    assert check["details"]["project_count"] == 1
+    assert check["details"]["invalid_count"] == 1
+
+
+def test_project_agents_warning_when_validation_raises(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from agent_baton.cli.commands import diagnostics_cmd
+
+    home = tmp_path / "home"
+    home.mkdir()
+    agents_dir = tmp_path / ".claude" / "agents"
+    agents_dir.mkdir(parents=True)
+    _write_agent(agents_dir / "architect.md", name="architect")
+    (tmp_path / ".claude" / "team-context").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setattr(
+        diagnostics_cmd,
+        "_validate_agent_dir",
+        lambda _path: {
+            "validated_count": 0,
+            "validation_warnings": 0,
+            "validation_errors": 0,
+            "validation_error": "validator import failed",
+        },
+    )
+
+    payload = diagnostics_cmd.build_report(tmp_path)
+    check = _check(payload, "project_agents")
+
+    assert check["status"] == "warning"
+    assert check["details"]["count"] == 1
+    assert check["details"]["validation_error"] == "validator import failed"
+
+
+def test_doctor_json_includes_planner_validation_warning_without_saved_plan(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from agent_baton.cli.commands import diagnostics_cmd
+
+    home = tmp_path / "home"
+    home.mkdir()
+    (tmp_path / ".claude" / "team-context").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("PATH", "")
+
+    payload = diagnostics_cmd.build_report(tmp_path)
+    check = _check(payload, "planner_validation")
+
+    assert check["status"] == "warning"
+    assert check["details"]["plan_path"] is None
+    assert check["details"]["machine_plan_importable"] is True
 
 
 def test_doctor_text_distinguishes_pack_types_and_uses_canonical_terms(

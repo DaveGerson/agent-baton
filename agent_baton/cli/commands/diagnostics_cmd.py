@@ -78,6 +78,7 @@ def build_report(project_root: Path | None = None) -> dict[str, Any]:
         _check_git(root),
         _check_claude_cli(),
         _check_team_context(root),
+        _check_planner_validation(root),
         _check_terminology(),
     ]
     summary = _summary(checks)
@@ -221,10 +222,13 @@ def _check_project_agents(project_root: Path) -> DoctorCheck:
             },
         )
     validation_errors = validation.get("validation_errors", 0)
-    status = "warning" if validation_errors else "ok"
+    validation_error = validation.get("validation_error")
+    status = "warning" if validation_errors or validation_error else "ok"
     suffix = (
         f"; {validation_errors} validation errors"
         if validation_errors
+        else f"; validation unavailable: {validation_error}"
+        if validation_error
         else ""
     )
     return DoctorCheck(
@@ -248,6 +252,12 @@ def _check_knowledge_packs(project_root: Path) -> DoctorCheck:
     global_ = _count_pack_dirs(global_dir, manifest_name="knowledge.yaml")
     registry_details = _load_knowledge_registry_details(project_root)
     total = project["count"] + global_["count"]
+    missing_manifest_count = (
+        (project["count"] - project["with_manifest"])
+        + (global_["count"] - global_["with_manifest"])
+    )
+    registry_degraded_count = registry_details.get("registry_degraded_count", 0)
+    registry_error = registry_details.get("registry_error")
     if total == 0:
         return DoctorCheck(
             id="knowledge_packs",
@@ -262,14 +272,30 @@ def _check_knowledge_packs(project_root: Path) -> DoctorCheck:
                 **registry_details,
             },
         )
+    degraded = bool(
+        missing_manifest_count or registry_degraded_count or registry_error
+    )
+    status = "warning" if degraded else "ok"
+    message_bits = [f"{total} knowledge packs found"]
+    if missing_manifest_count:
+        message_bits.append(
+            f"{missing_manifest_count} missing knowledge.yaml"
+        )
+    else:
+        message_bits.append(
+            f"{project['with_manifest'] + global_['with_manifest']} have knowledge.yaml"
+        )
+    if registry_degraded_count:
+        message_bits.append(
+            f"{registry_degraded_count} degraded in registry"
+        )
+    if registry_error:
+        message_bits.append("registry diagnostics unavailable")
     return DoctorCheck(
         id="knowledge_packs",
         label="Knowledge packs",
-        status="ok",
-        message=(
-            f"{total} knowledge packs found; "
-            f"{project['with_manifest']} have knowledge.yaml"
-        ),
+        status=status,
+        message="; ".join(message_bits),
         details={
             **_pack_details(project_dir, global_dir, project, global_),
             **registry_details,
@@ -284,6 +310,8 @@ def _check_assurance_packs(project_root: Path) -> DoctorCheck:
     global_ = _count_pack_dirs(global_dir, manifest_name="pack.json")
     validation = _validate_assurance_pack_dirs(project_dir, global_dir)
     total = project["count"] + global_["count"]
+    invalid_count = validation.get("invalid_count", 0)
+    validation_error = validation.get("validation_error")
     if total == 0:
         return DoctorCheck(
             id="assurance_packs",
@@ -295,11 +323,19 @@ def _check_assurance_packs(project_root: Path) -> DoctorCheck:
                 **validation,
             },
         )
+    status = "warning" if invalid_count or validation_error else "ok"
+    suffix = (
+        f"; {invalid_count} invalid"
+        if invalid_count
+        else f"; validation unavailable: {validation_error}"
+        if validation_error
+        else ""
+    )
     return DoctorCheck(
         id="assurance_packs",
         label="Assurance packs",
-        status="ok",
-        message=f"{total} assurance packs found",
+        status=status,
+        message=f"{total} assurance packs found{suffix}",
         details={
             **_pack_details(project_dir, global_dir, project, global_),
             **validation,
@@ -587,6 +623,113 @@ def _check_terminology() -> DoctorCheck:
     )
 
 
+def _check_planner_validation(project_root: Path) -> DoctorCheck:
+    details: dict[str, Any] = {
+        "plan_candidates": [
+            str(project_root / ".claude" / "team-context" / "plan.json"),
+            str(project_root / "plan.json"),
+        ],
+        "plan_path": None,
+        "machine_plan_importable": False,
+        "validator_importable": False,
+        "findings_count": 0,
+        "error_count": 0,
+        "warning_count": 0,
+    }
+    try:
+        from agent_baton.models.execution import MachinePlan
+
+        details["machine_plan_importable"] = MachinePlan.__name__ == "MachinePlan"
+    except Exception as exc:
+        details["import_error"] = str(exc)
+        return DoctorCheck(
+            id="planner_validation",
+            label="Planner validation",
+            status="error",
+            message="MachinePlan import failed",
+            details=details,
+        )
+
+    try:
+        from agent_baton.cli.commands.execution.plan_validate_cmd import (
+            _validate_plan,
+        )
+
+        details["validator_importable"] = True
+    except Exception as exc:
+        details["import_error"] = str(exc)
+        return DoctorCheck(
+            id="planner_validation",
+            label="Planner validation",
+            status="error",
+            message="Plan validation import failed",
+            details=details,
+        )
+
+    plan_path = _find_saved_plan(project_root)
+    if plan_path is None:
+        return DoctorCheck(
+            id="planner_validation",
+            label="Planner validation",
+            status="warning",
+            message="No saved plan is available to validate",
+            details=details,
+        )
+
+    details["plan_path"] = str(plan_path)
+    try:
+        data = json.loads(plan_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        details["read_error"] = str(exc)
+        return DoctorCheck(
+            id="planner_validation",
+            label="Planner validation",
+            status="error",
+            message=f"Saved plan could not be parsed: {exc}",
+            details=details,
+        )
+
+    findings = _validate_plan(data)
+    error_count = sum(
+        1 for finding in findings if finding.get("severity") == "error"
+    )
+    warning_count = sum(
+        1 for finding in findings if finding.get("severity") == "warning"
+    )
+    details.update({
+        "findings_count": len(findings),
+        "error_count": error_count,
+        "warning_count": warning_count,
+        "findings": findings,
+    })
+    if error_count:
+        return DoctorCheck(
+            id="planner_validation",
+            label="Planner validation",
+            status="error",
+            message=(
+                f"Saved plan validation found {error_count} errors and "
+                f"{warning_count} warnings"
+            ),
+            details=details,
+        )
+    if warning_count:
+        return DoctorCheck(
+            id="planner_validation",
+            label="Planner validation",
+            status="warning",
+            message=f"Saved plan validation found {warning_count} warnings",
+            details=details,
+        )
+    return DoctorCheck(
+        id="planner_validation",
+        label="Planner validation",
+        status="ok",
+        message="Saved plan validation passed with no findings",
+        details=details,
+    )
+
+
 def _markdown_stems(path: Path) -> list[str]:
     if not path.is_dir():
         return []
@@ -690,3 +833,14 @@ def _validate_assurance_pack_dirs(*roots: Path) -> dict[str, Any]:
                     "errors": [str(error) for error in errors],
                 })
     return {"invalid_count": len(invalid), "invalid_packs": invalid}
+
+
+def _find_saved_plan(project_root: Path) -> Path | None:
+    candidates = [
+        project_root / ".claude" / "team-context" / "plan.json",
+        project_root / "plan.json",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
