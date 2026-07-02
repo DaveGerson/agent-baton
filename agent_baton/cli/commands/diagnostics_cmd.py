@@ -76,7 +76,9 @@ def build_report(project_root: Path | None = None) -> dict[str, Any]:
         _check_pmo_ui_assets(root),
         _check_package_resources(),
         _check_bd(),
+        _check_beads_workspace(root),
         _check_git(root),
+        _check_git_worktree(root),
         _check_claude_cli(),
         _check_team_context(root),
         _check_planner_validation(root),
@@ -462,6 +464,44 @@ def _check_bd() -> DoctorCheck:
     )
 
 
+def _check_beads_workspace(project_root: Path) -> DoctorCheck:
+    beads_dir = project_root / ".beads"
+    expected_files = [
+        "config.yaml",
+        "interactions.jsonl",
+        "metadata.json",
+    ]
+    present_files = [
+        name for name in expected_files if (beads_dir / name).is_file()
+    ]
+    missing_files = [
+        name for name in expected_files if name not in present_files
+    ]
+    exists = beads_dir.is_dir()
+    status = "ok" if exists and not missing_files else "warning"
+    if status == "ok":
+        message = "Beads workspace files are present"
+    elif not exists:
+        message = f"Beads workspace directory is missing at {beads_dir}"
+    else:
+        message = (
+            "Beads workspace is missing expected files: "
+            + ", ".join(missing_files)
+        )
+    return DoctorCheck(
+        id="beads_workspace",
+        label="Beads workspace",
+        status=status,
+        message=message,
+        details={
+            "path": str(beads_dir),
+            "exists": exists,
+            "missing_files": missing_files,
+            "present_files": present_files,
+        },
+    )
+
+
 def _check_claude_cli() -> DoctorCheck:
     return _check_optional_cli(
         check_id="claude_cli",
@@ -547,6 +587,104 @@ def _check_git(project_root: Path) -> DoctorCheck:
         status="ok",
         message="Git work tree is clean",
         details={"branch": branch["stdout"].strip(), "dirty_count": 0},
+    )
+
+
+def _check_git_worktree(project_root: Path) -> DoctorCheck:
+    if not shutil.which("git"):
+        return DoctorCheck(
+            id="git_worktree",
+            label="Git worktree topology",
+            status="warning",
+            message="git executable not found on PATH",
+            details={
+                "branch": None,
+                "git_dir": None,
+                "git_common_dir": None,
+                "is_linked_worktree": False,
+                "is_submodule": False,
+                "detached_head": None,
+                "path": None,
+            },
+        )
+
+    inside = _git(["rev-parse", "--is-inside-work-tree"], project_root)
+    if inside["returncode"] != 0 or inside["stdout"].strip() != "true":
+        return DoctorCheck(
+            id="git_worktree",
+            label="Git worktree topology",
+            status="warning",
+            message="Git metadata is not readable for this project root",
+            details={
+                "branch": None,
+                "git_dir": None,
+                "git_common_dir": None,
+                "is_linked_worktree": False,
+                "is_submodule": False,
+                "detached_head": None,
+                "inside_work_tree": inside["stdout"].strip(),
+                "inside_work_tree_probe": inside,
+            },
+        )
+
+    git_dir_probe = _git(["rev-parse", "--git-dir"], project_root)
+    git_common_dir_probe = _git(["rev-parse", "--git-common-dir"], project_root)
+    superproject_probe = _git(
+        ["rev-parse", "--show-superproject-working-tree"],
+        project_root,
+    )
+    branch_probe = _git(["branch", "--show-current"], project_root)
+    head_probe = _git(["rev-parse", "--abbrev-ref", "HEAD"], project_root)
+
+    probes = {
+        "git_dir": git_dir_probe,
+        "git_common_dir": git_common_dir_probe,
+        "superproject": superproject_probe,
+        "branch": branch_probe,
+        "head": head_probe,
+    }
+    unreadable = [
+        name for name, probe in probes.items() if probe["returncode"] != 0
+    ]
+    branch = branch_probe["stdout"].strip() or None
+    git_dir = git_dir_probe["stdout"].strip() or None
+    git_common_dir = git_common_dir_probe["stdout"].strip() or None
+    head_name = head_probe["stdout"].strip()
+    is_submodule = bool(superproject_probe["stdout"].strip())
+    is_linked_worktree = bool(
+        git_dir
+        and git_common_dir
+        and git_dir != git_common_dir
+        and not is_submodule
+    )
+    detached_head = head_name == "HEAD"
+    details = {
+        "branch": branch,
+        "git_dir": git_dir,
+        "git_common_dir": git_common_dir,
+        "is_linked_worktree": is_linked_worktree,
+        "is_submodule": is_submodule,
+        "detached_head": detached_head,
+    }
+    if unreadable:
+        details["probe_failures"] = unreadable
+        details["probes"] = probes
+        return DoctorCheck(
+            id="git_worktree",
+            label="Git worktree topology",
+            status="warning",
+            message=(
+                "Git metadata could not be fully read: "
+                + ", ".join(unreadable)
+            ),
+            details=details,
+        )
+    return DoctorCheck(
+        id="git_worktree",
+        label="Git worktree topology",
+        status="ok",
+        message="Git worktree metadata is readable",
+        details=details,
     )
 
 

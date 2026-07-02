@@ -73,6 +73,14 @@ def _write_project_layout(root: Path) -> None:
     team_context.mkdir(parents=True)
 
 
+def _write_beads_workspace(root: Path) -> Path:
+    beads_dir = root / ".beads"
+    beads_dir.mkdir(parents=True)
+    for name in ("config.yaml", "interactions.jsonl", "metadata.json"):
+        (beads_dir / name).write_text("{}\n", encoding="utf-8")
+    return beads_dir
+
+
 def _valid_saved_plan(task_summary: str) -> dict[str, object]:
     return {
         "task_summary": task_summary,
@@ -151,7 +159,9 @@ def test_doctor_json_reports_required_checks_and_optional_warnings(
         "pmo_ui_assets",
         "package_resources",
         "bd",
+        "beads_workspace",
         "git",
+        "git_worktree",
         "claude_cli",
         "team_context",
         "planner_validation",
@@ -175,6 +185,118 @@ def test_doctor_json_reports_required_checks_and_optional_warnings(
         "templates",
         "pmo_static_assets",
     } <= set(resources["details"]["resources"])
+
+
+def test_beads_workspace_reports_ok_when_expected_files_exist(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from agent_baton.cli.commands import diagnostics_cmd
+
+    home = tmp_path / "home"
+    home.mkdir()
+    _write_beads_workspace(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("PATH", "")
+
+    payload = diagnostics_cmd.build_report(tmp_path)
+    check = _check(payload, "beads_workspace")
+
+    assert check["status"] == "ok"
+    assert check["details"]["exists"] is True
+    assert check["details"]["missing_files"] == []
+    assert sorted(check["details"]["present_files"]) == [
+        "config.yaml",
+        "interactions.jsonl",
+        "metadata.json",
+    ]
+
+
+def test_beads_workspace_reports_warning_when_workspace_is_missing(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from agent_baton.cli.commands import diagnostics_cmd
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("PATH", "")
+
+    payload = diagnostics_cmd.build_report(tmp_path)
+    check = _check(payload, "beads_workspace")
+
+    assert check["status"] == "warning"
+    assert check["details"]["exists"] is False
+    assert check["details"]["missing_files"] == [
+        "config.yaml",
+        "interactions.jsonl",
+        "metadata.json",
+    ]
+    assert check["details"]["present_files"] == []
+
+
+def test_git_worktree_reports_linked_worktree_metadata_when_git_is_monkeypatched(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from agent_baton.cli.commands import diagnostics_cmd
+
+    expected = {
+        ("rev-parse", "--is-inside-work-tree"): {
+            "returncode": 0,
+            "stdout": "true\n",
+            "stderr": "",
+        },
+        ("rev-parse", "--show-superproject-working-tree"): {
+            "returncode": 0,
+            "stdout": "\n",
+            "stderr": "",
+        },
+        ("rev-parse", "--git-dir"): {
+            "returncode": 0,
+            "stdout": ".git\\worktrees\\roadmap-ux-doctor\n",
+            "stderr": "",
+        },
+        ("rev-parse", "--git-common-dir"): {
+            "returncode": 0,
+            "stdout": ".git\n",
+            "stderr": "",
+        },
+        ("branch", "--show-current"): {
+            "returncode": 0,
+            "stdout": "bd-rm-ux-p1\n",
+            "stderr": "",
+        },
+        ("rev-parse", "--abbrev-ref", "HEAD"): {
+            "returncode": 0,
+            "stdout": "bd-rm-ux-p1\n",
+            "stderr": "",
+        },
+    }
+
+    def fake_git(args: list[str], cwd: Path) -> dict[str, object]:
+        key = tuple(args)
+        if key not in expected:
+            raise AssertionError(f"unexpected git args: {args}")
+        return expected[key]
+
+    monkeypatch.setattr(diagnostics_cmd.shutil, "which", lambda _name: "git")
+    monkeypatch.setattr(diagnostics_cmd, "_git", fake_git)
+
+    check = diagnostics_cmd._check_git_worktree(tmp_path)
+
+    assert check.status == "ok"
+    assert check.details["branch"] == "bd-rm-ux-p1"
+    assert check.details["git_dir"] == ".git\\worktrees\\roadmap-ux-doctor"
+    assert check.details["git_common_dir"] == ".git"
+    assert check.details["is_linked_worktree"] is True
+    assert check.details["is_submodule"] is False
+    assert check.details["detached_head"] is False
 
 
 def test_missing_optional_features_are_warnings_not_crashes(
