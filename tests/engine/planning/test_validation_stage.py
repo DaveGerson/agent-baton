@@ -35,7 +35,7 @@ from agent_baton.models.execution import PlanPhase, PlanStep
 
 def _stub_services(planner: IntelligentPlanner) -> PlannerServices:
     """Build a minimal services container backed by *planner*."""
-    return planner._build_services()
+    return planner._build_services(knowledge_registry=planner.knowledge_registry)
 
 
 class TestPlanDefect:

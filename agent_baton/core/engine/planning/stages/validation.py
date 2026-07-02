@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -48,6 +49,8 @@ from agent_baton.core.engine.planning.utils.risk_and_policy import (
 )
 from agent_baton.core.engine.planning.utils.roster_logic import check_agent_scores
 from agent_baton.core.engine.planning.utils.text_parsers import extract_file_paths
+from agent_baton.core.orchestration.router import REVIEWER_AGENTS, is_reviewer_agent
+from agent_baton.models.enums import RiskLevel
 
 if TYPE_CHECKING:
     from agent_baton.core.govern.classifier import ClassificationResult
@@ -76,14 +79,42 @@ class ValidationStage:
     """Stage 6: score check, budget tier, plan review with defect detection.
 
     Defects are recorded on ``draft.score_warnings`` (any severity) and
-    on the new ``draft.plan_defects`` attribute (full list).  Critical
-    defects raise ``PlanQualityError`` when ``BATON_PLANNER_HARD_GATE``
-    is truthy.
+    on the new ``draft.plan_defects`` attribute (full list).
+    Critical defects raise ``PlanQualityError`` by default.  Set
+    ``BATON_DEV_MODE=1`` or ``BATON_PLANNER_WARN_ONLY=1`` to keep local
+    experimentation warn-only.  ``BATON_PLANNER_HARD_GATE`` remains a
+    supported legacy explicit opt-in flag, but no longer has to be set for
+    critical defects to block plan creation.
     """
 
     name = "validation"
     _HARD_GATE_ENV = "BATON_PLANNER_HARD_GATE"
+    _DEV_MODE_ENV = "BATON_DEV_MODE"
+    _WARN_ONLY_ENV = "BATON_PLANNER_WARN_ONLY"
     _TRUTHY = frozenset({"1", "true", "yes", "on"})
+    _IMPLEMENT_PHASE_KEYS = frozenset({
+        "implement",
+        "implementation",
+        "fix",
+        "build",
+        "develop",
+        "development",
+    })
+    _REVIEWER_BASES = REVIEWER_AGENTS - {"auditor"}
+    _COMPLIANCE_TERMS = frozenset({
+        "audit",
+        "auditable",
+        "compliant",
+        "compliance",
+        "dss",
+        "gdpr",
+        "hipaa",
+        "pci",
+        "regulated",
+        "regulation",
+        "regulatory",
+        "sox",
+    })
 
     def run(self, draft: PlanDraft, services: PlannerServices) -> PlanDraft:
         # Step 10+11+11b — score check, budget tier, policy validation.
@@ -114,7 +145,7 @@ class ValidationStage:
                 len(critical), draft.task_id,
                 "; ".join(d.code for d in critical),
             )
-            if self._hard_gate_enabled():
+            if self._quality_gate_blocks():
                 raise PlanQualityError(
                     f"Plan {draft.task_id} blocked by ValidationStage: "
                     + "; ".join(str(d) for d in critical[:5])
@@ -233,11 +264,29 @@ class ValidationStage:
     # ------------------------------------------------------------------
 
     def _hard_gate_enabled(self) -> bool:
-        return os.environ.get(self._HARD_GATE_ENV, "").lower() in self._TRUTHY
+        """Return the legacy explicit hard-gate flag state.
+
+        Plan-quality blocking now defaults on; callers should use
+        ``_quality_gate_blocks`` for the effective policy.
+        """
+        return self._env_truthy(self._HARD_GATE_ENV)
+
+    def _quality_gate_blocks(self) -> bool:
+        return not self._warn_only_enabled()
+
+    def _warn_only_enabled(self) -> bool:
+        return (
+            self._env_truthy(self._DEV_MODE_ENV)
+            or self._env_truthy(self._WARN_ONLY_ENV)
+        )
+
+    def _env_truthy(self, name: str) -> bool:
+        return os.environ.get(name, "").strip().lower() in self._TRUTHY
 
     def _detect_defects(self, draft: PlanDraft) -> list[PlanDefect]:
         """Inspect the assembled draft and return the list of defects."""
         defects: list[PlanDefect] = []
+        agent_bases = self._agent_bases(draft)
 
         # 1. review_skipped
         review = draft.review_result
@@ -248,9 +297,12 @@ class ValidationStage:
                     code="review_skipped",
                     severity="critical",
                     message=(
-                        f"PlanReviewer skipped a {draft.inferred_complexity!r} "
-                        f"plan via the light-complexity early return — "
-                        f"quality gate effectively bypassed."
+                        f"task_id={draft.task_id} source=skipped-light "
+                        f"complexity={draft.inferred_complexity}. "
+                        "PlanReviewer took the light-complexity early return on "
+                        "a non-light plan, bypassing structural review. "
+                        "Remediation: rerun review with the correct complexity "
+                        "or add an explicit Review phase before validation."
                     ),
                 ))
             # 5. reviewer_warning
@@ -267,9 +319,44 @@ class ValidationStage:
             defects.append(PlanDefect(
                 code="empty_plan",
                 severity="critical",
-                message="Plan has zero phases.",
+                message=(
+                    f"task_id={draft.task_id} phase_count=0. "
+                    "Plan has no executable phases or steps. "
+                    "Remediation: add at least one phase with at least one "
+                    "concrete step before validation."
+                ),
             ))
             return defects
+
+        if (
+            self._review_required(draft, agent_bases)
+            and not self._has_review_coverage(draft)
+        ):
+            defects.append(PlanDefect(
+                code="review_missing",
+                severity="critical",
+                message=(
+                    f"task_id={draft.task_id} risk={self._risk_value(draft)} "
+                    f"agents={sorted(agent_bases)}. "
+                    "High-risk or reviewer-routed plans require Review coverage. "
+                    "Remediation: add a terminal Review phase with code-reviewer "
+                    "or security-reviewer steps."
+                ),
+            ))
+
+        if (
+            self._audit_required(draft, agent_bases)
+            and not self._has_audit_coverage(draft)
+        ):
+            defects.append(PlanDefect(
+                code="audit_missing",
+                severity="critical",
+                message=(
+                    f"task_id={draft.task_id} agents={sorted(agent_bases)}. "
+                    "Compliance or auditor-routed plans require Audit coverage. "
+                    "Remediation: add a terminal Audit phase with an auditor step."
+                ),
+            ))
 
         for phase in draft.plan_phases:
             # 3. empty_phase
@@ -277,13 +364,18 @@ class ValidationStage:
                 defects.append(PlanDefect(
                     code="empty_phase",
                     severity="critical",
-                    message=f"Phase {phase.name!r} has zero steps.",
+                    message=(
+                        f"task_id={draft.task_id} phase_id={phase.phase_id} "
+                        f"phase={phase.name!r} step_count=0. "
+                        "Phase has no executable steps. "
+                        "Remediation: add at least one step to this phase or "
+                        "remove the empty phase."
+                    ),
                 ))
                 continue
 
             # 4. agent_phase_mismatch
-            phase_key = (phase.name or "").lower().split(":")[0].strip()
-            phase_key = phase_key.split()[-1] if phase_key else ""
+            phase_key = self._phase_key(phase.name)
             blocked = PHASE_BLOCKED_ROLES.get(phase_key, set())
             if blocked:
                 for step in phase.steps:
@@ -293,10 +385,110 @@ class ValidationStage:
                             code="agent_phase_mismatch",
                             severity="critical",
                             message=(
-                                f"Step {step.step_id} routes "
-                                f"{base!r} into the blocked-list phase "
-                                f"{phase.name!r}."
+                                f"task_id={draft.task_id} phase_id={phase.phase_id} "
+                                f"phase={phase.name!r} step_id={step.step_id} "
+                                f"agent={base!r}. Agent is blocked from this "
+                                "phase type. Remediation: route the step to an "
+                                "allowed implementer for this phase or move the "
+                                "agent to a dedicated Review/Audit phase."
                             ),
                         ))
+            if phase_key in self._IMPLEMENT_PHASE_KEYS:
+                for step in phase.steps:
+                    for base in self._step_agent_bases(step):
+                        if is_reviewer_agent(base):
+                            target_phase = (
+                                "Audit" if base == "auditor" else "Review"
+                            )
+                            defects.append(PlanDefect(
+                                code="agent_phase_mismatch",
+                                severity="critical",
+                                message=(
+                                    f"task_id={draft.task_id} phase_id={phase.phase_id} "
+                                    f"phase={phase.name!r} step_id={step.step_id} "
+                                    f"agent={base!r}. Reviewer-class agents are "
+                                    "blocked from implementation phases. "
+                                    f"Remediation: move {base!r} to a dedicated "
+                                    f"{target_phase} phase and assign implementation "
+                                    "work to an engineering agent."
+                                ),
+                            ))
 
         return defects
+
+    def _review_required(self, draft: PlanDraft, agent_bases: set[str]) -> bool:
+        return (
+            self._risk_value(draft) in {"HIGH", "CRITICAL"}
+            or bool(agent_bases & self._REVIEWER_BASES)
+        )
+
+    def _audit_required(self, draft: PlanDraft, agent_bases: set[str]) -> bool:
+        if "auditor" in agent_bases:
+            return True
+        summary = (draft.task_summary or "").lower()
+        return any(
+            re.search(rf"\b{re.escape(term)}\b", summary)
+            for term in self._COMPLIANCE_TERMS
+        )
+
+    def _has_review_coverage(self, draft: PlanDraft) -> bool:
+        for phase in draft.plan_phases:
+            if self._phase_key(phase.name) != "review":
+                continue
+            for step in phase.steps:
+                if self._step_agent_bases(step) & self._REVIEWER_BASES:
+                    return True
+        return False
+
+    def _has_audit_coverage(self, draft: PlanDraft) -> bool:
+        for phase in draft.plan_phases:
+            if self._phase_key(phase.name) != "audit":
+                continue
+            for step in phase.steps:
+                if "auditor" in self._step_agent_bases(step):
+                    return True
+        return False
+
+    def _risk_value(self, draft: PlanDraft) -> str:
+        risk = getattr(draft, "risk_level_enum", None)
+        if isinstance(risk, RiskLevel):
+            return risk.value
+        if risk:
+            return str(risk).upper()
+        return str(getattr(draft, "risk_level", "") or "").upper()
+
+    def _phase_key(self, name: str) -> str:
+        raw = (name or "").lower().split(":")[0].strip()
+        key = raw.split()[-1] if raw else ""
+        if key == "implementation":
+            return "implement"
+        if key == "development":
+            return "develop"
+        return key
+
+    def _agent_bases(self, draft: PlanDraft) -> set[str]:
+        bases = {
+            (agent or "").split("--")[0]
+            for agent in getattr(draft, "resolved_agents", []) or []
+            if agent
+        }
+        for phase in draft.plan_phases:
+            for step in phase.steps:
+                bases.update(self._step_agent_bases(step))
+        bases.discard("")
+        return bases
+
+    def _step_agent_bases(self, step: object) -> set[str]:
+        bases: set[str] = set()
+        agent_name = getattr(step, "agent_name", "")
+        if agent_name:
+            bases.add(agent_name.split("--")[0])
+        for member in getattr(step, "team", []) or []:
+            member_name = getattr(member, "agent_name", "")
+            if member_name:
+                bases.add(member_name.split("--")[0])
+            for nested in getattr(member, "sub_team", []) or []:
+                nested_name = getattr(nested, "agent_name", "")
+                if nested_name:
+                    bases.add(nested_name.split("--")[0])
+        return bases
