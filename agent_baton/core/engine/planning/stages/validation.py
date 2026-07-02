@@ -34,10 +34,13 @@ because consolidation reads ``budget_tier`` to size team estimates.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
 from dataclasses import dataclass
+from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 from agent_baton.core.engine.planning.draft import PlanDraft
@@ -544,29 +547,96 @@ class ValidationStage:
         return bases
 
 
-def validate_assembled_plan(plan: "MachinePlan") -> "MachinePlan":
-    """Apply ValidationStage defect detection and gate policy to a MachinePlan."""
+def _resolved_agents_from_plan(plan: "MachinePlan") -> list[str]:
+    agents: list[str] = []
+
+    def _append(agent_name: str) -> None:
+        if agent_name and agent_name != "team":
+            agents.append(agent_name)
+
+    def _collect_member_agents(member: object) -> None:
+        _append(str(getattr(member, "agent_name", "") or ""))
+        for nested in getattr(member, "sub_team", []) or []:
+            _collect_member_agents(nested)
+
+    for step in plan.all_steps:
+        _append(step.agent_name)
+        for member in getattr(step, "team", []) or []:
+            _collect_member_agents(member)
+
+    return list(dict.fromkeys(agents))
+
+
+def _classification_from_plan(plan: "MachinePlan") -> object | None:
+    if not plan.classification_signals:
+        return None
+    try:
+        payload = json.loads(plan.classification_signals)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    risk_level = str(payload.get("risk_level") or plan.risk_level or "LOW").upper()
+    try:
+        risk_enum = RiskLevel(risk_level)
+    except ValueError:
+        risk_enum = RiskLevel.LOW
+
+    confidence = "high" if (plan.classification_confidence or 0.0) >= 1.0 else "medium"
+    return SimpleNamespace(
+        signals_found=list(payload.get("signals") or []),
+        risk_level=risk_enum,
+        guardrail_preset=str(payload.get("guardrail_preset") or "Standard Development"),
+        explanation=str(payload.get("explanation") or ""),
+        confidence=confidence,
+    )
+
+
+def _sync_plan_validation(plan: "MachinePlan", draft: PlanDraft) -> None:
+    plan.phases = list(draft.plan_phases)
+    existing = dict(getattr(plan, "plan_diagnostics", {}) or {})
+    existing["validation_warning_count"] = max(
+        int(existing.get("validation_warning_count", 0)),
+        len(draft.score_warnings),
+    )
+    plan.plan_diagnostics = existing
+
+
+def validate_assembled_plan(
+    plan: "MachinePlan",
+    *,
+    services: PlannerServices,
+    project_root: Path | None = None,
+) -> "MachinePlan":
+    """Apply ValidationStage semantics to an already-assembled MachinePlan."""
     draft = PlanDraft.from_inputs(
         plan.task_summary,
         task_type=plan.task_type,
         complexity=plan.complexity,
+        project_root=project_root,
+        explicit_knowledge_packs=list(plan.explicit_knowledge_packs or []),
+        explicit_knowledge_docs=list(plan.explicit_knowledge_docs or []),
+        intervention_level=plan.intervention_level,
     )
     draft.task_id = plan.task_id
     draft.plan_phases = list(plan.phases)
-    draft.resolved_agents = list(getattr(plan, "all_agents", []))
+    draft.resolved_agents = _resolved_agents_from_plan(plan)
     draft.inferred_type = plan.task_type or ""
     draft.inferred_complexity = plan.complexity or "medium"
     draft.risk_level = str(plan.risk_level or "")
-    draft.review_result = None
+    draft.git_strategy = plan.git_strategy
+    draft.classification = _classification_from_plan(plan)
+    try:
+        draft.risk_level_enum = RiskLevel(draft.risk_level.upper())
+    except ValueError:
+        draft.risk_level_enum = None
 
     stage = ValidationStage()
-    defects = stage._detect_defects(draft)
-    stage._apply_quality_gate(task_id=plan.task_id, defects=defects)
-
-    existing = dict(getattr(plan, "plan_diagnostics", {}) or {})
-    existing["validation_warning_count"] = max(
-        int(existing.get("validation_warning_count", 0)),
-        sum(1 for defect in defects if defect.severity in ("critical", "warning")),
-    )
-    plan.plan_diagnostics = existing
+    try:
+        stage.run(draft, services)
+    except PlanQualityError:
+        _sync_plan_validation(plan, draft)
+        raise
+    _sync_plan_validation(plan, draft)
     return plan

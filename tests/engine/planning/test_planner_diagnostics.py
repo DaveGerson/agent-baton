@@ -53,7 +53,6 @@ def test_build_plan_diagnostics_preserves_existing_agents_and_includes_team_memb
     assert diagnostics["selected_agents"] == [
         "architect",
         "backend-engineer",
-        "team",
         "test-engineer",
         "code-reviewer",
     ]

@@ -9,6 +9,7 @@ DELETE /executions/{task_id}            — cancel a running execution
 """
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -27,6 +28,7 @@ from agent_baton.core.runtime.decisions import DecisionManager
 from agent_baton.models.execution import MachinePlan
 
 router = APIRouter()
+_log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -89,11 +91,18 @@ async def start_execution(
     try:
         first_action = engine.start(plan)
     except UnknownTeamBackendError as exc:
+        _mark_execution_failed(engine, reason=str(exc))
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     except RuntimeError as exc:
+        _mark_execution_failed(engine, reason=str(exc))
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    next_actions = _collect_next_actions(engine)
+    try:
+        next_actions = _collect_next_actions(engine)
+    except HTTPException as exc:
+        if exc.status_code >= 500:
+            _mark_execution_failed(engine, reason=str(exc.detail))
+        raise
 
     # Load state to build the response — start() saves it to disk.
     state = engine._load_state()  # noqa: SLF001
@@ -431,6 +440,25 @@ def _assert_active_task(engine: ExecutionEngine, task_id: str) -> None:
         raise HTTPException(
             status_code=404,
             detail=f"No active execution found with task_id '{task_id}'.",
+        )
+
+
+def _mark_execution_failed(engine: ExecutionEngine, *, reason: str) -> None:
+    """Best-effort failure stamp for executions that persisted before startup failed."""
+    try:
+        state = engine._load_state()  # noqa: SLF001
+    except Exception:
+        _log.warning("Could not load execution state after startup failure", exc_info=True)
+        return
+    if state is None:
+        return
+    try:
+        state.transition_to_failed(reason=reason)
+        engine._save_execution(state)  # noqa: SLF001
+    except Exception:
+        _log.warning(
+            "Could not persist failed execution state after startup failure",
+            exc_info=True,
         )
 
 

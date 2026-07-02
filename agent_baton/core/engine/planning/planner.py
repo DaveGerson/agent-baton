@@ -93,15 +93,19 @@ def build_plan_diagnostics(
 
     def _collect_member_agents(member: object, sink: list[str]) -> None:
         agent_name = getattr(member, "agent_name", "")
-        if agent_name:
+        if agent_name and agent_name != "team":
             sink.append(agent_name)
         for nested in getattr(member, "sub_team", []) or []:
             _collect_member_agents(nested, sink)
 
     existing = dict(getattr(plan, "plan_diagnostics", {}) or {})
-    selected_agent_candidates: list[str] = list(existing.get("selected_agents", []) or [])
+    selected_agent_candidates: list[str] = [
+        agent
+        for agent in list(existing.get("selected_agents", []) or [])
+        if agent != "team"
+    ]
     for step in plan.all_steps:
-        if step.agent_name:
+        if step.agent_name and step.agent_name != "team":
             selected_agent_candidates.append(step.agent_name)
         for member in getattr(step, "team", []) or []:
             _collect_member_agents(member, selected_agent_candidates)

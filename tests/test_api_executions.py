@@ -189,6 +189,10 @@ class TestStartExecution:
         assert r.status_code == 500
         assert "Unknown BATON_TEAMS_BACKEND" in r.json()["detail"]
 
+        status = client.get("/api/v1/executions/strict-team-first")
+        assert status.status_code == 200
+        assert status.json()["status"] == "failed"
+
     def test_strict_unknown_team_backend_returns_500_on_initial_batch(
         self,
         client: TestClient,
@@ -202,6 +206,10 @@ class TestStartExecution:
 
         assert r.status_code == 500
         assert "Unknown BATON_TEAMS_BACKEND" in r.json()["detail"]
+
+        status = client.get("/api/v1/executions/strict-team-start")
+        assert status.status_code == 200
+        assert status.json()["status"] == "failed"
 
     def test_inline_plan_returns_201(self, client: TestClient) -> None:
         plan = make_test_plan()
