@@ -66,11 +66,14 @@ across runs for the same input.
 """
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from agent_baton.core.engine.planning.rules.phase_roles import PHASE_IDEAL_ROLES
 from agent_baton.core.engine.planning.rules.step_types import AGENT_STEP_TYPE
 from agent_baton.models.manager import RoleCard, TeamBlueprint
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from agent_baton.core.config.manager import ManagerConfig
@@ -231,7 +234,14 @@ class TeamBlueprintBuilder:
                 continue
             used_roles = {owner_role}
             for ws in workstreams:
-                ideal_roles = PHASE_IDEAL_ROLES.get(ws.name.lower(), [])
+                lookup_key = ws.name.lower()
+                ideal_roles = PHASE_IDEAL_ROLES.get(lookup_key, [])
+                if not ideal_roles:
+                    logger.debug(
+                        "Diversification lookup miss for workstream %r: no "
+                        "PHASE_IDEAL_ROLES entry for key %r; skipping reassignment.",
+                        ws.name, lookup_key,
+                    )
                 candidate = next((r for r in ideal_roles if r not in used_roles), None)
                 if candidate:
                     result[ws.id] = candidate

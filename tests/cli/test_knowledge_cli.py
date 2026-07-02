@@ -3,32 +3,30 @@
 See docs/internal/manager-mode-pmo-plan.md Wave 1 / Task 7 and
 docs/specs/agent-baton-claude-code-middle-manager-prd-tdd.md §8.4, §12.4.
 
-Registration harness note: these tests register ``pack_cmds`` on a *fresh,
-isolated* ``argparse`` subparsers tree (mirroring the existing convention in
-``tests/knowledge/test_codebase_brief.py`` of exercising a single knowledge
-submodule's handler directly) rather than going through
+Registration harness note: most tests in this file register ``pack_cmds`` on
+a *fresh, isolated* ``argparse`` subparsers tree (mirroring the existing
+convention in ``tests/knowledge/test_codebase_brief.py`` of exercising a
+single knowledge submodule's handler directly) rather than going through
 ``agent_baton.cli.main.main()``'s full multi-module ``discover_commands()``
-registration. This sidesteps a **pre-existing, out-of-scope** defect:
-``agent_baton/cli/commands/knowledge/ab_cmd.py`` builds its own
-``p.add_subparsers(dest="knowledge_subcommand")`` directly instead of using
-the cooperative ``get_or_create_parser`` helper documented in
-``agent_baton/cli/commands/knowledge/__init__.py``. Because ``ab_cmd`` is
-discovered before every other ``knowledge`` submodule (alphabetical: ``ab_cmd``
-< ``brief`` < ``effectiveness_cmd`` < ``harvest_cmd`` < ``lifecycle_cmd`` <
-``pack_cmds`` < ``ranking_cmd``), it wins the "who creates the knowledge
-parser first" race in a real ``baton`` invocation, poisoning the shared
-sub-action's ``dest`` to ``"knowledge_subcommand"``. ``__init__.py``'s
-``dispatch()`` reads ``args.knowledge_cmd`` (never set in that case), so
-*every* non-``ab`` ``baton knowledge <verb>`` invocation -- not just this
-milestone's new ``list``/``show``/``scan``/``audit``/``propose`` verbs, but
-also the pre-existing ``brief``/``effectiveness``/``harvest``/``stale``/
-``deprecate``/``retire``/``sweep``/``usage``/``ranking`` -- silently falls
-through to the "Usage: baton knowledge SUBCOMMAND ..." message instead of
-dispatching, when run through the real CLI entry point. ``ab_cmd.py`` is
-outside this task's file-modification scope (M5 knowledge-manifest work) --
-flagged in the handoff report for a follow-up fix (swap its
-``subparsers.add_parser("knowledge", ...)`` + raw ``add_subparsers`` for
-``get_or_create_parser``/``register_handler``).
+registration.
+
+bd-b6i (fixed): ``agent_baton/cli/commands/knowledge/ab_cmd.py`` used to
+build its own ``p.add_subparsers(dest="knowledge_subcommand")`` directly
+instead of using the cooperative ``get_or_create_parser`` helper documented
+in ``agent_baton/cli/commands/knowledge/__init__.py``. Because ``ab_cmd`` is
+discovered before every other ``knowledge`` submodule (alphabetical:
+``ab_cmd`` < ``brief`` < ``effectiveness_cmd`` < ``harvest_cmd`` <
+``lifecycle_cmd`` < ``pack_cmds`` < ``ranking_cmd``), it won the "who creates
+the knowledge parser first" race in a real ``baton`` invocation, poisoning
+the shared sub-action's ``dest`` to ``"knowledge_subcommand"``.
+``__init__.py``'s ``dispatch()`` reads ``args.knowledge_cmd`` (never set in
+that case), so *every* ``baton knowledge <verb>`` invocation -- including
+``ab`` itself -- silently fell through to the "Usage: baton knowledge
+SUBCOMMAND ..." message instead of dispatching, when run through the real
+CLI entry point. ``ab_cmd.py`` now uses ``get_or_create_parser`` /
+``register_handler`` like every other submodule; see
+``test_knowledge_list_via_main`` and ``test_knowledge_ab_list_via_main``
+below for the full-entry-point regression coverage.
 """
 from __future__ import annotations
 
@@ -200,3 +198,51 @@ def test_knowledge_propose_writes_draft(
     written = list(proposals_dir.glob("*.md"))
     assert len(written) == 1
     assert written[0].name in out or str(written[0]) in out
+
+
+# ---------------------------------------------------------------------------
+# bd-b6i regression -- full ``agent_baton.cli.main.main()`` entry point.
+#
+# Prior to the fix, ``ab_cmd.py`` built its own ``knowledge`` parser directly
+# (instead of the cooperative ``get_or_create_parser`` helper) and, being
+# alphabetically first among ``knowledge`` submodules, won the "who creates
+# the shared parser first" race in a real ``baton`` invocation -- poisoning
+# the shared sub-action's ``dest`` to ``"knowledge_subcommand"``. The shared
+# ``dispatch()`` in ``__init__.py`` reads ``args.knowledge_cmd`` (never set
+# in that case), so *every* ``baton knowledge <verb>`` -- including ``ab``
+# itself -- silently printed usage and exited 0 through the real
+# ``main()``. These tests exercise ``main()`` directly (not the isolated
+# single-module harness above) to catch this class of registration-order
+# bug.
+# ---------------------------------------------------------------------------
+
+
+def test_knowledge_list_via_main(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    from agent_baton.cli.main import main
+
+    knowledge_root = tmp_path / ".claude" / "knowledge"
+    _write_pack(
+        knowledge_root,
+        "coding-conventions",
+        "name: coding-conventions\nstatus: active\nconfidence: high\n",
+    )
+
+    main(["knowledge", "list"])
+    out = capsys.readouterr().out
+
+    assert "coding-conventions" in out
+    assert "Usage: baton knowledge" not in out
+
+
+def test_knowledge_ab_list_via_main(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    from agent_baton.cli.main import main
+
+    main(["knowledge", "ab", "list"])
+    out = capsys.readouterr().out
+
+    assert "No knowledge A/B experiments found." in out
+    assert "Usage: baton knowledge" not in out

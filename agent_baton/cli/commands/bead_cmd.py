@@ -892,9 +892,14 @@ def _handle_promote(args: argparse.Namespace) -> None:
         try:
             text = knowledge_yaml.read_text(encoding="utf-8")
             if doc_name not in text:
+                # Ensure a trailing newline before ANY append below --
+                # regardless of whether "documents:" is already present --
+                # so the appended lines never get glued onto the final
+                # existing line (which would corrupt the YAML).
+                if text and not text.endswith("\n"):
+                    text += "\n"
+                    knowledge_yaml.write_text(text, encoding="utf-8")
                 if "documents:" not in text:
-                    if text and not text.endswith("\n"):
-                        text += "\n"
                     text += "documents:\n"
                     knowledge_yaml.write_text(text, encoding="utf-8")
                 with knowledge_yaml.open("a", encoding="utf-8") as f:

@@ -320,12 +320,12 @@ def audit_packs(
                 )
 
         confidence = getattr(pack, "confidence", "") or ""
-        if not confidence or not source_files:
+        if not source_files:
             issues.append(
                 KnowledgeAuditIssue(
                     pack.name,
                     "missing_metadata",
-                    f"Pack {pack.name!r} is missing confidence/source metadata "
+                    f"Pack {pack.name!r} is missing source metadata "
                     f"(confidence={confidence or '(none)'}, "
                     f"source_files={len(source_files)})",
                 )
