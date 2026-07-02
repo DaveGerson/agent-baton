@@ -81,7 +81,11 @@ class ForgeSession:
         *,
         project_root: Path | None,
     ) -> MachinePlan:
-        knowledge_registry = build_default_knowledge_registry(project_root=project_root)
+        resolver = getattr(self._planner, "_resolve_knowledge_registry", None)
+        if callable(resolver):
+            knowledge_registry = resolver(project_root)
+        else:
+            knowledge_registry = build_default_knowledge_registry(project_root=project_root)
         services = self._planner._build_services(knowledge_registry=knowledge_registry)
         validate_assembled_plan(
             plan,

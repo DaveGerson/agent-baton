@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agent_baton.core.engine.planner import IntelligentPlanner
+from agent_baton.core.orchestration.knowledge_registry import KnowledgeRegistry
 from agent_baton.core.pmo.forge import ForgeSession
 from agent_baton.core.pmo.store import PmoStore
 from agent_baton.core.runtime.headless import HeadlessClaude, HeadlessConfig
@@ -153,7 +154,7 @@ class TestCreatePlan:
         project = _project(tmp_path)
         store.register_project(project)
 
-        planner = _mock_planner()
+        planner = IntelligentPlanner()
         invalid_plan = _plan(
             task_id="headless-invalid-task",
             task_summary="Invalid headless plan",
@@ -183,6 +184,41 @@ class TestCreatePlan:
                 program="NDS",
                 project_id="nds",
             )
+
+    def test_headless_plan_uses_planner_effective_knowledge_registry(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        store = _store(tmp_path)
+        project = _project(tmp_path)
+        store.register_project(project)
+
+        registry = KnowledgeRegistry()
+        planner = IntelligentPlanner(knowledge_registry=registry)
+        seen_registries: list[object] = []
+        original_build_services = planner._build_services
+
+        def _build_services(*, knowledge_registry):
+            seen_registries.append(knowledge_registry)
+            return original_build_services(knowledge_registry=knowledge_registry)
+
+        monkeypatch.setattr(planner, "_build_services", _build_services)
+        headless_plan = _plan(task_id="headless-custom-registry")
+        forge = ForgeSession(
+            planner=planner,
+            store=store,
+            headless=_AvailableHeadless(headless_plan),
+        )
+
+        result = forge.create_plan(
+            description="Implement the login fix",
+            program="NDS",
+            project_id="nds",
+        )
+
+        assert result is headless_plan
+        assert seen_registries == [registry]
 
     def test_delegates_to_planner(self, tmp_path: Path):
         store = _store(tmp_path)
@@ -386,7 +422,7 @@ class TestRegeneratePlan:
         project = _project(tmp_path)
         store.register_project(project)
 
-        planner = _mock_planner()
+        planner = IntelligentPlanner()
         invalid_plan = _plan(
             task_id="regen-invalid-task",
             task_summary="Invalid regenerated plan",
