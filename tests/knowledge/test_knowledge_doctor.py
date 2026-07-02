@@ -155,3 +155,43 @@ def test_doctor_clean_pack_reports_ok(tmp_path: Path, monkeypatch, capsys) -> No
     assert data["ok"] is True
     assert data["issues"] == []
     assert data["summary"]["documents"] == 1
+
+
+def test_doctor_accepts_docs_stems_and_reports_missing_stems(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    _isolate_defaults(monkeypatch, tmp_path)
+    pack = tmp_path / ".claude" / "knowledge" / "harvested"
+    pack.mkdir(parents=True)
+    (pack / "knowledge.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": "harvested",
+                "description": "Harvested pack",
+                "tags": ["taxonomy"],
+                "default_delivery": "reference",
+                "docs": ["taxonomy-quick-ref", "missing-stem"],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    _write_doc(
+        pack / "taxonomy-quick-ref.md",
+        name="taxonomy-quick-ref",
+        description="Taxonomy quick reference",
+        tags=["taxonomy"],
+    )
+
+    rc = _run_cli(["knowledge", "doctor", "--json"])
+    data = json.loads(capsys.readouterr().out)
+    missing = [
+        issue
+        for issue in data["issues"]
+        if issue["code"] == "missing-declared-file"
+    ]
+
+    assert rc == 0
+    assert len(missing) == 1
+    assert "missing-stem" in missing[0]["message"]
+    assert "taxonomy-quick-ref" not in missing[0]["message"]

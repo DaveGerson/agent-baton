@@ -266,7 +266,7 @@ def validate_knowledge_roots(
             declared_paths = _declared_doc_paths(manifest)
             for rel_path in declared_paths:
                 doc_path = pack_dir / rel_path
-                if not doc_path.is_file():
+                if not _declared_doc_exists(pack_dir, rel_path):
                     issues.append(_issue(
                         code="missing-declared-file",
                         path=doc_path,
@@ -442,6 +442,15 @@ def _declared_doc_paths(manifest: dict[str, Any]) -> list[str]:
         if isinstance(candidate, str) and candidate.strip():
             paths.append(candidate.strip())
     return paths
+
+
+def _declared_doc_exists(pack_dir: Path, rel_path: str) -> bool:
+    doc_path = pack_dir / rel_path
+    if doc_path.is_file():
+        return True
+    if Path(rel_path).suffix:
+        return False
+    return doc_path.with_suffix(".md").is_file()
 
 
 def _read_doc_metadata(
