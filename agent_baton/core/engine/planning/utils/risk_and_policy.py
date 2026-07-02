@@ -26,6 +26,23 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# Keywords that imply audit coverage even when no classifier is available.
+AUDIT_COVERAGE_TERMS: frozenset[str] = frozenset({
+    "audit",
+    "auditable",
+    "compliant",
+    "compliance",
+    "dss",
+    "gdpr",
+    "hipaa",
+    "pci",
+    "regulated",
+    "regulation",
+    "regulatory",
+    "sox",
+})
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -107,6 +124,50 @@ def classify_to_preset_key(classification: "ClassificationResult | None") -> str
         "Security-Sensitive": "security",
     }
     return mapping.get(name, "standard_dev")
+
+
+def audit_coverage_requirement(
+    task_summary: str,
+    classification: "ClassificationResult | None",
+    policy_violations: object | None = None,
+) -> str | None:
+    """Return the reason a task requires audit coverage, if any."""
+    preset = str(getattr(classification, "guardrail_preset", "") or "").strip()
+    if preset.lower() == "regulated data":
+        return f"guardrail_preset={preset}"
+
+    for violation in policy_violations or []:
+        rule = getattr(violation, "rule", None)
+        if (
+            str(getattr(rule, "rule_type", "")).lower() == "require_agent"
+            and str(getattr(rule, "pattern", "")).split("--")[0] == "auditor"
+            and str(getattr(rule, "severity", "")).lower() == "block"
+        ):
+            rule_name = str(
+                getattr(rule, "name", "require_agent") or "require_agent"
+            )
+            return f"policy_violation={rule_name}"
+
+    summary = (task_summary or "").lower()
+    if any(
+        re.search(rf"\b{re.escape(term)}\b", summary)
+        for term in AUDIT_COVERAGE_TERMS
+    ):
+        return "requirement=compliance_signal"
+    return None
+
+
+def requires_audit_coverage(
+    task_summary: str,
+    classification: "ClassificationResult | None",
+    policy_violations: object | None = None,
+) -> bool:
+    """Return whether the task requires a dedicated auditor/Audit phase."""
+    return audit_coverage_requirement(
+        task_summary,
+        classification,
+        policy_violations,
+    ) is not None
 
 
 def validate_agents_against_policy(

@@ -15,7 +15,8 @@ from agent_baton.core.engine.planning.stages.decomposition import DecompositionS
 def services():
     """Build a minimal services container from a fresh IntelligentPlanner."""
     from agent_baton.core.engine.planning.planner import IntelligentPlanner
-    return IntelligentPlanner()._build_services()
+    planner = IntelligentPlanner()
+    return planner._build_services(knowledge_registry=planner.knowledge_registry)
 
 
 def _draft_for_archetype(

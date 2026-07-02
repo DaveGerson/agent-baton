@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agent_baton.core.engine.planner import IntelligentPlanner
+from agent_baton.core.govern.classifier import DataClassifier
 from agent_baton.core.orchestration.knowledge_registry import KnowledgeRegistry
 from agent_baton.core.pmo.forge import ForgeSession
 from agent_baton.core.pmo.store import PmoStore
@@ -246,6 +247,69 @@ class TestCreatePlan:
 
         assert result is headless_plan
         assert result.budget_tier == "lean"
+
+    def test_headless_validation_derives_server_side_classification(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        store = _store(tmp_path)
+        project = _project(tmp_path)
+        store.register_project(project)
+
+        planner = IntelligentPlanner(classifier=DataClassifier())
+        headless_plan = _plan(
+            task_id="headless-pii-parity",
+            task_summary=(
+                "Build a customer export containing email address and SSN fields."
+            ),
+            phases=[
+                PlanPhase(phase_id=1, name="Implement", steps=[_step()]),
+                PlanPhase(
+                    phase_id=2,
+                    name="Review",
+                    steps=[
+                        PlanStep(
+                            step_id="2.1",
+                            agent_name="code-reviewer",
+                            task_description="Review high-risk data handling.",
+                            depends_on=["1.1"],
+                        )
+                    ],
+                ),
+                PlanPhase(
+                    phase_id=3,
+                    name="Audit",
+                    steps=[
+                        PlanStep(
+                            step_id="3.1",
+                            agent_name="auditor",
+                            task_description="Audit regulated data handling.",
+                            depends_on=["2.1"],
+                        )
+                    ],
+                ),
+            ],
+        )
+        headless_plan.risk_level = "LOW"
+        headless_plan.classification_signals = None
+        forge = ForgeSession(
+            planner=planner,
+            store=store,
+            headless=_AvailableHeadless(headless_plan),
+        )
+
+        result = forge.create_plan(
+            description=headless_plan.task_summary,
+            program="NDS",
+            project_id="nds",
+        )
+
+        assert result is headless_plan
+        assert result.risk_level == "HIGH"
+        assert result.classification_signals is not None
+        signals = json.loads(result.classification_signals)
+        assert signals["guardrail_preset"] == "Regulated Data"
+        assert "pii:ssn" in signals["signals"]
 
     def test_delegates_to_planner(self, tmp_path: Path):
         store = _store(tmp_path)

@@ -33,7 +33,9 @@ from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 from agent_baton.api.deps import get_bus, get_central_store, get_forge_session, get_pmo_scanner, get_pmo_store
+from agent_baton.api.planner_errors import plan_quality_error_detail
 from agent_baton.core.events.bus import EventBus
+from agent_baton.core.engine.planning.stages.validation import PlanQualityError
 from agent_baton.api.models.requests import (
     ApproveForgeRequest,
     BatchResolveRequest,
@@ -786,6 +788,17 @@ async def forge_plan(
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except PlanQualityError as exc:
+            _publish_forge_progress(
+                queue,
+                "failed",
+                100,
+                f"Plan validation failed: {exc}",
+            )
+            raise HTTPException(
+                status_code=422,
+                detail=plan_quality_error_detail(exc),
+            ) from exc
         except Exception as exc:
             raise HTTPException(
                 status_code=500,
@@ -953,6 +966,11 @@ async def forge_regenerate(
             task_type=req.task_type,
             priority=req.priority,
         )
+    except PlanQualityError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=plan_quality_error_detail(exc),
+        ) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Regeneration failed: {exc}") from exc
 

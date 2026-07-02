@@ -50,7 +50,10 @@ from agent_baton.core.engine.planning.utils.phase_builder import (
     consolidate_team_step,
     is_team_phase,
 )
+from agent_baton.core.engine.planning.rules.risk_signals import RISK_ORDINAL
 from agent_baton.core.engine.planning.utils.risk_and_policy import (
+    audit_coverage_requirement,
+    assess_risk,
     classify_to_preset_key,
     select_budget_tier,
     validate_agents_against_policy,
@@ -69,6 +72,15 @@ logger = logging.getLogger(__name__)
 
 class PlanQualityError(RuntimeError):
     """Raised by ValidationStage when the effective quality gate blocks."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        defects: list["PlanDefect"] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.defects = list(defects or [])
 
 
 @dataclass
@@ -108,21 +120,6 @@ class ValidationStage:
         "development",
     })
     _REVIEWER_BASES = REVIEWER_AGENTS - {"auditor"}
-    _COMPLIANCE_TERMS = frozenset({
-        "audit",
-        "auditable",
-        "compliant",
-        "compliance",
-        "dss",
-        "gdpr",
-        "hipaa",
-        "pci",
-        "regulated",
-        "regulation",
-        "regulatory",
-        "sox",
-    })
-
     def run(self, draft: PlanDraft, services: PlannerServices) -> PlanDraft:
         # Step 10+11+11b — score check, budget tier, policy validation.
         # _check_scores writes score_warnings and policy_violations onto draft
@@ -174,7 +171,8 @@ class ValidationStage:
             if self._quality_gate_blocks():
                 raise PlanQualityError(
                     f"Plan {task_id} blocked by ValidationStage: "
-                    + "; ".join(str(d) for d in critical[:5])
+                    + "; ".join(str(d) for d in critical[:5]),
+                    defects=critical[:5],
                 )
 
     def _check_scores(
@@ -459,30 +457,11 @@ class ValidationStage:
     def _audit_requirement(self, draft: PlanDraft, agent_bases: set[str]) -> str | None:
         if "auditor" in agent_bases:
             return "requirement=auditor_routed"
-        preset = str(
-            getattr(getattr(draft, "classification", None), "guardrail_preset", "")
-            or ""
-        ).strip()
-        if preset.lower() == "regulated data":
-            return f"guardrail_preset={preset}"
-        for violation in getattr(draft, "policy_violations", []) or []:
-            rule = getattr(violation, "rule", None)
-            if (
-                str(getattr(rule, "rule_type", "")).lower() == "require_agent"
-                and str(getattr(rule, "pattern", "")).split("--")[0] == "auditor"
-                and str(getattr(rule, "severity", "")).lower() == "block"
-            ):
-                rule_name = str(
-                    getattr(rule, "name", "require_agent") or "require_agent"
-                )
-                return f"policy_violation={rule_name}"
-        summary = (draft.task_summary or "").lower()
-        if any(
-            re.search(rf"\b{re.escape(term)}\b", summary)
-            for term in self._COMPLIANCE_TERMS
-        ):
-            return "requirement=compliance_signal"
-        return None
+        return audit_coverage_requirement(
+            draft.task_summary,
+            getattr(draft, "classification", None),
+            getattr(draft, "policy_violations", None),
+        )
 
     def _has_review_coverage(self, draft: PlanDraft) -> bool:
         for phase in draft.plan_phases:
@@ -593,7 +572,38 @@ def _classification_from_plan(plan: "MachinePlan") -> object | None:
     )
 
 
+def _classification_payload(classification: object) -> dict[str, object]:
+    risk = getattr(classification, "risk_level", RiskLevel.LOW)
+    if isinstance(risk, RiskLevel):
+        risk_value = risk.value
+    else:
+        risk_value = str(risk or RiskLevel.LOW.value).upper()
+    return {
+        "signals": list(getattr(classification, "signals_found", []) or []),
+        "risk_level": risk_value,
+        "guardrail_preset": str(
+            getattr(classification, "guardrail_preset", "Standard Development")
+            or "Standard Development"
+        ),
+        "explanation": str(getattr(classification, "explanation", "") or ""),
+    }
+
+
+def _classification_confidence_value(classification: object) -> float:
+    return 1.0 if getattr(classification, "confidence", "") == "high" else 0.5
+
+
+def _coerce_risk_level(value: object, default: RiskLevel = RiskLevel.LOW) -> RiskLevel:
+    if isinstance(value, RiskLevel):
+        return value
+    try:
+        return RiskLevel(str(value or "").upper())
+    except ValueError:
+        return default
+
+
 def _sync_plan_validation(plan: "MachinePlan", draft: PlanDraft) -> None:
+    plan.risk_level = draft.risk_level
     plan.phases = list(draft.plan_phases)
     plan.budget_tier = draft.budget_tier
     existing = dict(getattr(plan, "plan_diagnostics", {}) or {})
@@ -628,10 +638,32 @@ def validate_assembled_plan(
     draft.risk_level = str(plan.risk_level or "")
     draft.git_strategy = plan.git_strategy
     draft.classification = _classification_from_plan(plan)
-    try:
-        draft.risk_level_enum = RiskLevel(draft.risk_level.upper())
-    except ValueError:
-        draft.risk_level_enum = None
+    if draft.classification is None and services.data_classifier is not None:
+        try:
+            draft.classification = services.data_classifier.classify(plan.task_summary)
+        except Exception:
+            draft.classification = None
+        else:
+            plan.classification_signals = json.dumps(
+                _classification_payload(draft.classification)
+            )
+            plan.classification_confidence = _classification_confidence_value(
+                draft.classification
+            )
+
+    risk_candidates = [
+        _coerce_risk_level(plan.risk_level),
+        _coerce_risk_level(assess_risk(plan.task_summary, draft.resolved_agents)),
+    ]
+    if draft.classification is not None:
+        risk_candidates.append(
+            _coerce_risk_level(getattr(draft.classification, "risk_level", None))
+        )
+    draft.risk_level_enum = max(
+        risk_candidates,
+        key=lambda risk: RISK_ORDINAL[risk],
+    )
+    draft.risk_level = draft.risk_level_enum.value
 
     stage = ValidationStage()
     try:

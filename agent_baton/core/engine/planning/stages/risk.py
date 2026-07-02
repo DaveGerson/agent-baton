@@ -25,6 +25,7 @@ from agent_baton.core.engine.planning.rules.risk_signals import RISK_ORDINAL
 from agent_baton.core.engine.planning.services import PlannerServices
 from agent_baton.core.engine.planning.utils.risk_and_policy import (
     assess_risk,
+    requires_audit_coverage,
     select_git_strategy,
 )
 from agent_baton.models.enums import RiskLevel
@@ -33,13 +34,6 @@ if TYPE_CHECKING:
     from agent_baton.core.govern.classifier import ClassificationResult
 
 logger = logging.getLogger(__name__)
-
-# Keywords that require the auditor agent regardless of complexity cap.
-_AUDIT_KEYWORDS: frozenset[str] = frozenset({
-    "compliance", "compliant", "regulated", "regulation", "audit", "auditable",
-    "gdpr", "hipaa", "sox", "pci", "dss",
-})
-
 
 class RiskStage:
     """Stage 3: knowledge setup + risk and sensitivity classification."""
@@ -213,9 +207,12 @@ class RiskStage:
         if risk is None:
             return
 
-        task_lower = draft.task_summary.lower()
         needs_reviewer = risk in (RiskLevel.HIGH, RiskLevel.CRITICAL)
-        needs_auditor = any(kw in task_lower for kw in _AUDIT_KEYWORDS)
+        needs_auditor = requires_audit_coverage(
+            draft.task_summary,
+            draft.classification,
+            getattr(draft, "policy_violations", None),
+        )
 
         # Strip stack-flavor suffixes for membership checks (e.g.
         # "backend-engineer--python" → "backend-engineer").

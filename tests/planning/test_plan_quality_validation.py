@@ -14,7 +14,7 @@ from agent_baton.core.engine.planning.stages.validation import (
     PlanQualityError,
     ValidationStage,
 )
-from agent_baton.core.govern.classifier import ClassificationResult
+from agent_baton.core.govern.classifier import ClassificationResult, DataClassifier
 from agent_baton.models.enums import RiskLevel
 from agent_baton.models.execution import PlanPhase, PlanStep
 
@@ -201,6 +201,27 @@ class TestActionableDefectMessages:
 
 
 class TestReviewAuditCoverage:
+    def test_pii_classifier_signal_staffs_audit_before_validation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("BATON_DEV_MODE", raising=False)
+        monkeypatch.delenv("BATON_PLANNER_WARN_ONLY", raising=False)
+        monkeypatch.delenv("BATON_PLANNER_HARD_GATE", raising=False)
+
+        planner = IntelligentPlanner(classifier=DataClassifier())
+
+        plan = planner.create_plan(
+            "Build a customer profile export that includes user email address "
+            "and SSN fields."
+        )
+
+        audit_phase = next(
+            phase
+            for phase in plan.phases
+            if phase.name.lower().split()[-1] == "audit"
+        )
+        assert any(step.agent_name == "auditor" for step in audit_phase.steps)
+
     def test_high_risk_plan_without_review_phase_is_critical(self) -> None:
         draft = _draft_with_phase(risk=RiskLevel.HIGH)
 

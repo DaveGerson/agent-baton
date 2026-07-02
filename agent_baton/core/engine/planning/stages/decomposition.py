@@ -375,6 +375,7 @@ class DecompositionStage:
                         "5. Document: symptoms, timeline, affected paths, reproduction steps\n\n"
                         "Output a structured investigation report with evidence."
                     ),
+                    model="opus",
                     step_type="consulting",
                 )],
                 gate=PlanGate(
