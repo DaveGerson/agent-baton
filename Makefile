@@ -1,4 +1,4 @@
-.PHONY: install test lint clean help
+.PHONY: install test lint typecheck doctor ci-local clean help
 
 PYTHON ?= python3
 VENV := .venv
@@ -18,6 +18,25 @@ test: install ## Run tests
 
 test-verbose: install ## Run tests with verbose output
 	$(VENV)/bin/python -m pytest tests/ -v --tb=short
+
+lint: install ## Run lint if ruff is installed
+	@if $(VENV)/bin/python -c "import ruff" >/dev/null 2>&1; then \
+		$(VENV)/bin/python -m ruff check .; \
+	else \
+		echo "ruff not installed; skipping lint"; \
+	fi
+
+typecheck: install ## Run type checks if mypy is installed
+	@if $(VENV)/bin/python -c "import mypy" >/dev/null 2>&1; then \
+		$(VENV)/bin/python -m mypy agent_baton; \
+	else \
+		echo "mypy not installed; skipping typecheck"; \
+	fi
+
+doctor: install ## Run Baton doctor
+	$(VENV)/bin/python -m agent_baton.cli.main doctor
+
+ci-local: lint typecheck test doctor ## Run local checks available in this repo
 
 clean: ## Remove build artifacts and venv
 	rm -rf $(VENV) build/ dist/ *.egg-info .pytest_cache
