@@ -1901,7 +1901,9 @@ class ExecutionEngine:
                     state.task_id,
                     exc_info=True,
                 )
-        return self._drive_resolver_loop(state)
+        action = self._drive_resolver_loop(state)
+        self._save_execution(state)
+        return action
 
     def next_action(self) -> ExecutionAction:
         """Determine and return the next action based on current state.
@@ -7419,20 +7421,46 @@ class ExecutionEngine:
                 leader_member_id=leader.member_id if leader else "",
             )
 
+        readiness_summary = ""
+
         # A1.a/b: invoke the configured TeamBackend's dispatch hook
         # exactly once per team step (idempotent: gated on absence of a
         # parent StepResult). Best-effort — failures never block.
         if state.get_step_result(step.step_id) is None and self._root is not None:
             try:
-                from agent_baton.core.engine.team_backends import select_team_backend
+                from agent_baton.core.engine.team_backends import (
+                    UnknownTeamBackendError,
+                    build_team_readiness_diagnostics,
+                    format_team_readiness_summary,
+                    select_team_backend,
+                    write_team_readiness_report,
+                )
                 _backend = select_team_backend()
+                _diagnostics = build_team_readiness_diagnostics(
+                    plan=state.plan,
+                    step=step,
+                    backend_name=_backend.name,
+                    team_context_root=self._root,
+                )
+                _diagnostics = write_team_readiness_report(
+                    diagnostics=_diagnostics,
+                    team_context_root=self._root,
+                )
+                readiness_summary = format_team_readiness_summary(_diagnostics)
+                _team_diagnostics = dict(
+                    state.plan.plan_diagnostics.get("team_readiness", {})
+                )
+                _team_diagnostics[step.step_id] = _diagnostics.to_dict()
+                state.plan.plan_diagnostics["team_readiness"] = _team_diagnostics
                 _backend.on_team_dispatched(
                     plan=state.plan, step=step,
                     team_context_root=self._root,
                 )
+            except UnknownTeamBackendError:
+                raise
             except Exception as _be_exc:  # noqa: BLE001
                 _log.debug(
-                    "TeamBackend.on_team_dispatched failed (non-fatal): %s",
+                    "TeamBackend readiness/dispatch hook failed (non-fatal): %s",
                     _be_exc,
                 )
 
@@ -7492,12 +7520,15 @@ class ExecutionEngine:
                 team_overview=team_overview,
                 prior_beads=_team_beads or None,
             )
+            message = (
+                f"Team member '{member.agent_name}' ({member.role}) "
+                f"for step {step.step_id}."
+            )
+            if readiness_summary:
+                message = f"{message} {readiness_summary}"
             member_actions.append(ExecutionAction(
                 action_type=ActionType.DISPATCH,
-                message=(
-                    f"Team member '{member.agent_name}' ({member.role}) "
-                    f"for step {step.step_id}."
-                ),
+                message=message,
                 agent_name=member.agent_name,
                 agent_model=member.model,
                 delegation_prompt=prompt,

@@ -14,6 +14,7 @@ from agent_baton.core.engine.team_backends import (
     TeamBackend,
     WorktreeTeamBackend,
     audit_agents_for_teammate_safety,
+    build_team_readiness_diagnostics,
     check_resumability_constraints,
     select_team_backend,
 )
@@ -21,6 +22,7 @@ from agent_baton.models.execution import (
     MachinePlan,
     PlanPhase,
     PlanStep,
+    SynthesisSpec,
     TeamMember,
 )
 
@@ -67,9 +69,18 @@ class TestSelector:
     def test_unknown_value_falls_back(
         self, monkeypatch: pytest.MonkeyPatch, caplog,
     ) -> None:
+        monkeypatch.delenv("BATON_TEAMS_BACKEND_STRICT", raising=False)
         monkeypatch.setenv("BATON_TEAMS_BACKEND", "totally-made-up")
         be = select_team_backend()
         assert isinstance(be, WorktreeTeamBackend)
+
+    def test_unknown_value_raises_in_strict_mode(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("BATON_TEAMS_BACKEND", "totally-made-up")
+        monkeypatch.setenv("BATON_TEAMS_BACKEND_STRICT", "1")
+        with pytest.raises(ValueError, match="Unknown BATON_TEAMS_BACKEND"):
+            select_team_backend()
 
     def test_explicit_arg_overrides_env(
         self, monkeypatch: pytest.MonkeyPatch,
@@ -113,6 +124,7 @@ class TestClaudeTeamsBackend:
         # Known-limitation guidance is included so the lead reads it.
         assert "skills" in text and "mcpServers" in text
         assert "No in-process resumption" in text
+        assert "fixed permissions" in text.lower()
 
     def test_hook_command_includes_member_id(self) -> None:
         be = ClaudeTeamsBackend()
@@ -170,6 +182,58 @@ class TestAgentAudit:
     def test_audit_missing_dir_returns_empty(self, tmp_path: Path) -> None:
         flagged = audit_agents_for_teammate_safety(tmp_path / "nope")
         assert flagged == {}
+
+
+class TestTeamReadinessDiagnostics:
+    def test_worktree_diagnostics_summarize_team_shape(self, tmp_path: Path) -> None:
+        plan = _plan_with_team()
+        step = plan.phases[0].steps[0]
+        step.context_files = ["README.md", "docs/engine-and-runtime.md"]
+        step.synthesis = SynthesisSpec(
+            strategy="merge_files",
+            conflict_handling="escalate",
+        )
+
+        diagnostics = build_team_readiness_diagnostics(
+            plan=plan,
+            step=step,
+            backend_name="worktree",
+            team_context_root=tmp_path,
+        ).to_dict()
+
+        assert diagnostics["backend"] == "worktree"
+        assert diagnostics["member_count"] == 2
+        assert diagnostics["nested_team_count"] == 0
+        assert diagnostics["shared_files"] == [
+            "README.md",
+            "docs/engine-and-runtime.md",
+        ]
+        assert diagnostics["shared_contracts"][0]["member_id"] == "1.1.a"
+        assert diagnostics["synthesis_strategy"] == "merge_files"
+        assert diagnostics["conflict_strategy"] == "escalate"
+        assert diagnostics["warning_count"] == 0
+
+    def test_claude_teams_diagnostics_surface_caveats(
+        self, tmp_path: Path,
+    ) -> None:
+        plan = TestSpawnPromptFidelity()._nested_plan()
+        diagnostics = build_team_readiness_diagnostics(
+            plan=plan,
+            step=plan.phases[0].steps[0],
+            backend_name="claude-teams",
+            team_context_root=tmp_path,
+        ).to_dict()
+
+        assert diagnostics["backend"] == "claude-teams"
+        assert diagnostics["member_count"] == 2
+        assert diagnostics["nested_team_count"] == 1
+        warnings = "\n".join(diagnostics["warnings"]).lower()
+        assert "no resume" in warnings or "cannot resume" in warnings
+        assert "no nesting" in warnings or "cannot nest" in warnings
+        assert "one team at a time" in warnings
+        assert "fixed permissions" in warnings
+        assert "skills/mcp" in warnings or "mcpservers" in warnings
+        assert diagnostics["warning_count"] >= 5
 
 
 class TestSpawnPromptFidelity:

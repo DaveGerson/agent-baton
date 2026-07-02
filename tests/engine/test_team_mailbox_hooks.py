@@ -6,12 +6,14 @@ A1 Claude-Teams backend will consume via its hook bridge.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
 from agent_baton.core.engine.executor import ExecutionEngine
 from agent_baton.core.engine.mailbox import TeamMailbox
+from agent_baton.core.engine.persistence import StatePersistence
 from agent_baton.models.execution import (
     MachinePlan,
     PlanPhase,
@@ -79,6 +81,47 @@ class TestMailboxOnDispatch:
         assert created.payload["agent_name"] == "backend-engineer"
         assert created.payload["role"] == "implementer"
         assert created.payload["step_id"] == "1.1"
+
+    def test_team_report_written_with_readiness_diagnostics(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("BATON_TEAMS_BACKEND", raising=False)
+        monkeypatch.delenv("BATON_TEAMS_BACKEND_STRICT", raising=False)
+
+        engine = ExecutionEngine(team_context_root=tmp_path)
+        action = engine.start(_team_plan())
+
+        report = tmp_path / "teams" / "team-1.1" / "team-report.json"
+        assert report.exists()
+        payload = json.loads(report.read_text(encoding="utf-8"))
+        assert payload["backend"] == "worktree"
+        assert payload["member_count"] == 2
+        assert payload["nested_team_count"] == 0
+        assert payload["synthesis_strategy"] == "concatenate"
+        assert payload["conflict_strategy"] == "auto_merge"
+        assert payload["warning_count"] == 0
+        assert "Team readiness: backend=worktree" in action.message
+
+        state = StatePersistence(tmp_path).load()
+        assert state is not None
+        assert (
+            state.plan.plan_diagnostics["team_readiness"]["1.1"]["backend"]
+            == "worktree"
+        )
+
+    def test_strict_unknown_backend_blocks_team_dispatch(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("BATON_TEAMS_BACKEND", "not-real")
+        monkeypatch.setenv("BATON_TEAMS_BACKEND_STRICT", "1")
+        engine = ExecutionEngine(team_context_root=tmp_path)
+
+        with pytest.raises(ValueError, match="Unknown BATON_TEAMS_BACKEND"):
+            engine.start(_team_plan())
 
 
 class TestMailboxOnMemberResult:
