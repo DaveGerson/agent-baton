@@ -4,6 +4,7 @@ audience: agents, maintainers
 see-also:
   - [orchestrator-usage.md](orchestrator-usage.md)
   - [../references/agent-routing.md](../references/agent-routing.md)
+  - [../references/agent-authoring.md](../references/agent-authoring.md)
   - [cli-reference.md](cli-reference.md#baton-agents)
 ---
 
@@ -25,7 +26,11 @@ Agents do not run on their own. They run when:
 1. The **orchestrator agent** dispatches them as part of a baton-driven plan, OR
 2. A user (or another agent) names them via Claude Code's `Agent` tool with a `subagent_type` parameter.
 
-Each agent file in `agents/` contains a YAML frontmatter block (`name`, `description`, `model`, `tools`) and a body prompt. The frontmatter is what the runtime registers; the body is what the agent reads when dispatched.
+Each agent file in `agents/` contains a YAML frontmatter block (`name`,
+`description`, `model`, `permissionMode`, `tools`) and a body prompt. The
+frontmatter is what the runtime registers; the body is what the agent reads
+when dispatched. New or updated agents should follow the generated-agent
+contract in [`references/agent-authoring.md`](../references/agent-authoring.md).
 
 ## Orchestration & routing
 
@@ -72,6 +77,10 @@ Each agent file in `agents/` contains a YAML frontmatter block (`name`, `descrip
 |-------|-------|----------|
 | `talent-builder` | opus | **Pillar 2 — compose the right team.** Researches a domain and creates a bespoke specialist agent + knowledge pack + skills, so no generalist drowns in whole-codebase context. |
 
+`talent-manager` is a compatibility alias for `talent-builder` in older docs,
+prompts, or integrations. Use `talent-builder` for new references unless a
+downstream compatibility surface explicitly requires the legacy name.
+
 ## Domain & governance
 
 | Agent | Model | Use when |
@@ -99,4 +108,4 @@ Each agent file in `agents/` contains a YAML frontmatter block (`name`, `descrip
 
 ---
 
-For the routing logic that picks among these agents, see [`references/agent-routing.md`](../references/agent-routing.md). For risk-tier guardrails, see [`references/guardrail-presets.md`](../references/guardrail-presets.md). For each agent's full prompt, read the matching file in `agents/<name>.md`.
+For the routing logic that picks among these agents, see [`references/agent-routing.md`](../references/agent-routing.md). For the generated-agent authoring contract, see [`references/agent-authoring.md`](../references/agent-authoring.md). For risk-tier guardrails, see [`references/guardrail-presets.md`](../references/guardrail-presets.md). For each agent's full prompt, read the matching file in `agents/<name>.md`.
