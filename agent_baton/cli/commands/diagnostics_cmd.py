@@ -902,31 +902,66 @@ def _select_saved_plan_for_validation(
 def _resolve_active_task_for_validation(
     context_root: Path,
 ) -> tuple[str | None, str | None]:
-    try:
-        from agent_baton.core.storage import detect_backend, get_project_storage
+    active_task_id = _read_active_task_id_from_sqlite(context_root)
+    if active_task_id:
+        return active_task_id, "sqlite"
 
-        if detect_backend(context_root) == "sqlite":
-            try:
-                storage = get_project_storage(context_root, backend="sqlite")
-                active_task_id = storage.get_active_task()
-            except Exception:
-                active_task_id = None
-            else:
-                if active_task_id:
-                    return active_task_id, "sqlite"
-    except Exception:
-        pass
-
-    try:
-        from agent_baton.core.engine.persistence import StatePersistence
-
-        active_task_id = StatePersistence.get_active_task_id(context_root)
-    except Exception:
-        return None, None
+    active_task_id = _read_active_task_id_from_file_marker(context_root)
     if active_task_id:
         return active_task_id, "file"
     return None, None
 
+
+def _read_active_task_id_from_sqlite(context_root: Path) -> str | None:
+    db_path = context_root / "baton.db"
+    if not db_path.is_file():
+        return None
+    try:
+        import sqlite3
+
+        conn = sqlite3.connect(
+            f"{db_path.resolve().as_uri()}?mode=ro",
+            uri=True,
+        )
+    except Exception:
+        return None
+
+    try:
+        has_active_task = conn.execute(
+            (
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type = 'table' AND name = 'active_task' LIMIT 1"
+            )
+        ).fetchone()
+        if not has_active_task:
+            return None
+        row = conn.execute(
+            (
+                "SELECT task_id FROM active_task "
+                "WHERE id = 1 LIMIT 1"
+            )
+        ).fetchone()
+    except Exception:
+        return None
+    finally:
+        conn.close()
+
+    if not row:
+        return None
+    active_task_id = row[0]
+    if isinstance(active_task_id, str):
+        active_task_id = active_task_id.strip()
+        return active_task_id if active_task_id else None
+    return None
+
+
+def _read_active_task_id_from_file_marker(context_root: Path) -> str | None:
+    try:
+        from agent_baton.core.engine.persistence import StatePersistence
+
+        return StatePersistence.get_active_task_id(context_root)
+    except Exception:
+        return None
 
 def _saved_plan_candidates(project_root: Path) -> list[Path]:
     context_root = project_root / ".claude" / "team-context"

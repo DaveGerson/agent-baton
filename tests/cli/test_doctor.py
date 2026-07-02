@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import yaml
@@ -343,6 +344,34 @@ def test_doctor_json_includes_planner_validation_warning_without_saved_plan(
     assert check["details"]["machine_plan_importable"] is True
 
 
+def test_doctor_build_report_does_not_create_team_context_artifacts_in_fresh_project(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from agent_baton.cli.commands import diagnostics_cmd
+
+    home = tmp_path / "home"
+    home.mkdir()
+    team_context = tmp_path / ".claude" / "team-context"
+    db_path = team_context / "baton.db"
+    wal_path = team_context / "baton.db-wal"
+    shm_path = team_context / "baton.db-shm"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("PATH", "")
+
+    payload = diagnostics_cmd.build_report(tmp_path)
+    check = _check(payload, "planner_validation")
+
+    assert check["status"] == "warning"
+    assert not (tmp_path / ".claude").exists()
+    assert not team_context.exists()
+    assert not db_path.exists()
+    assert not wal_path.exists()
+    assert not shm_path.exists()
+
+
 def test_doctor_discovers_task_scoped_saved_plan_for_planner_validation(
     tmp_path: Path,
     monkeypatch,
@@ -378,6 +407,66 @@ def test_doctor_discovers_task_scoped_saved_plan_for_planner_validation(
         str(tmp_path / "plan.json"),
         str(task_dir / "plan.json"),
     ]
+
+
+def test_doctor_reads_active_task_from_existing_sqlite_without_extra_files(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from agent_baton.cli.commands import diagnostics_cmd
+
+    home = tmp_path / "home"
+    home.mkdir()
+    team_context = tmp_path / ".claude" / "team-context"
+    team_context.mkdir(parents=True)
+    task_a_dir = team_context / "executions" / "task-a"
+    task_b_dir = team_context / "executions" / "task-b"
+    task_a_dir.mkdir(parents=True)
+    task_b_dir.mkdir(parents=True)
+    (task_a_dir / "plan.json").write_text(
+        json.dumps(_valid_saved_plan("Task A plan")),
+        encoding="utf-8",
+    )
+    (task_b_dir / "plan.json").write_text(
+        json.dumps(_valid_saved_plan("Task B plan")),
+        encoding="utf-8",
+    )
+    db_path = team_context / "baton.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE active_task (id INTEGER PRIMARY KEY, task_id TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO active_task (id, task_id) VALUES (1, 'task-b')"
+    )
+    conn.commit()
+    conn.close()
+    before_paths = sorted(
+        str(path.relative_to(tmp_path))
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("PATH", "")
+
+    payload = diagnostics_cmd.build_report(tmp_path)
+    check = _check(payload, "planner_validation")
+    after_paths = sorted(
+        str(path.relative_to(tmp_path))
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    )
+
+    assert check["status"] == "ok"
+    assert check["details"]["active_task_id"] == "task-b"
+    assert check["details"]["active_task_source"] == "sqlite"
+    assert check["details"]["plan_path"] == str(task_b_dir / "plan.json")
+    assert not (team_context / "active-task-id.txt").exists()
+    assert not (team_context / "baton.db-wal").exists()
+    assert not (team_context / "baton.db-shm").exists()
+    assert after_paths == before_paths
 
 
 def test_doctor_prefers_active_task_scoped_plan_over_sorted_or_legacy_fallbacks(
