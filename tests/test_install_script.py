@@ -28,6 +28,7 @@ import pytest
 
 _NOTES_FETCH_REFSPEC = "+refs/notes/*:refs/notes/*"
 _NOTES_PUSH_REFSPEC = "+refs/notes/*:refs/notes/*"
+_AGENT_TEMPLATE_FILES = ("base-agent.md", "flavored-agent.md", "reviewer-agent.md")
 
 
 def _has_bash() -> bool:
@@ -143,6 +144,37 @@ def _get_git_config_all(repo: Path, key: str) -> list[str]:
 
 
 class TestInstallScriptNotesReplication:
+    def test_project_install_copies_agent_starter_templates(
+        self, tmp_path: Path
+    ) -> None:
+        """install.sh copies templates/agents/*.md into .claude/templates/agents/."""
+        repo = tmp_path / "project_templates"
+        repo.mkdir()
+        _init_git_repo_with_remote(repo)
+
+        result = _run_install(
+            repo,
+            env_extra={
+                "BATON_SKIP_GIT_NOTES_SETUP": "1",
+                "BATON_SKIP_BEADS_INSTALL": "1",
+            },
+        )
+
+        assert result.returncode == 0, (
+            f"install.sh exited {result.returncode}\n"
+            f"stdout: {result.stdout}\n"
+            f"stderr: {result.stderr}"
+        )
+
+        installed_dir = repo / ".claude" / "templates" / "agents"
+        source_dir = _find_install_sh().parents[1] / "templates" / "agents"
+        for filename in _AGENT_TEMPLATE_FILES:
+            installed = installed_dir / filename
+            source = source_dir / filename
+            assert installed.read_text(encoding="utf-8") == source.read_text(
+                encoding="utf-8"
+            )
+
     def test_fetch_refspec_added_after_install(self, tmp_path: Path) -> None:
         """install.sh adds +refs/notes/*:refs/notes/* to remote.origin.fetch."""
         repo = tmp_path / "project"

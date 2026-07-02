@@ -23,6 +23,7 @@ $RootDir   = Split-Path -Parent $ScriptDir
 $AgentsDir  = Join-Path $RootDir "agents"
 $RefsDir    = Join-Path $RootDir "references"
 $SkillsSrc  = Join-Path $RootDir "templates" "skills"
+$AgentTemplatesSrc  = Join-Path $RootDir "templates" "agents"
 $ClaudeMd   = Join-Path $RootDir "templates" "CLAUDE.md"
 $SettingsJ  = Join-Path $RootDir "templates" "settings.json"
 
@@ -86,6 +87,7 @@ $RefTarget   = Join-Path $Base "references"
 $TeamCtx     = Join-Path $Base "team-context"
 $KnowledgeDir = Join-Path $Base "knowledge"
 $SkillsDir   = Join-Path $Base "skills"
+$TemplateAgentTarget = Join-Path $Base "templates\agents"
 
 # Test write permissions
 try {
@@ -123,6 +125,16 @@ Get-ChildItem "$RefsDir\*.md" | ForEach-Object {
 New-Item -ItemType Directory -Force -Path $TeamCtx | Out-Null
 New-Item -ItemType Directory -Force -Path $KnowledgeDir | Out-Null
 New-Item -ItemType Directory -Force -Path $SkillsDir | Out-Null
+New-Item -ItemType Directory -Force -Path $TemplateAgentTarget | Out-Null
+
+$templateAgentCount = 0
+if (Test-Path $AgentTemplatesSrc) {
+    Get-ChildItem "$AgentTemplatesSrc\*.md" | ForEach-Object {
+        Copy-Item $_.FullName -Destination $TemplateAgentTarget -Force
+        Write-Host "  + Agent template: $($_.Name)" -ForegroundColor Green
+        $templateAgentCount++
+    }
+}
 
 # Install skills from templates/skills/
 $skillCount = 0
@@ -136,7 +148,7 @@ if (Test-Path $SkillsSrc) {
     }
 }
 
-Write-Host "  + Dirs:      team-context/, knowledge/, skills/" -ForegroundColor Green
+Write-Host "  + Dirs:      team-context/, knowledge/, skills/, templates/agents/" -ForegroundColor Green
 
 # CLAUDE.md — skip on upgrade, but merge identity block if missing
 if ($Upgrade) {
@@ -265,7 +277,7 @@ open(sys.argv[2], 'w').write(json.dumps(dst, indent=2) + '\n')
 }
 
 Write-Host ""
-Write-Host "  Installed: $agentCount agents + $refCount references + $skillCount skills" -ForegroundColor Green
+Write-Host "  Installed: $agentCount agents + $refCount references + $skillCount skills + $templateAgentCount agent templates" -ForegroundColor Green
 
 # ── Step 3: MCP / Knowledge Infrastructure ─────────────────
 Write-Host ""

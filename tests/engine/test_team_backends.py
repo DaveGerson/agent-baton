@@ -8,6 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 
 from agent_baton.core.engine.team_backends import (
     ClaudeTeamsBackend,
@@ -162,11 +163,40 @@ class TestAgentAudit:
         assert "mcp-agent" in flagged
         assert "mcpServers" in flagged["mcp-agent"]
 
+    def test_audit_flags_inline_list_values(self, tmp_path: Path) -> None:
+        agents = tmp_path / "agents"
+        agents.mkdir()
+        (agents / "inline-list-agent.md").write_text(
+            "---\n"
+            "name: inline-list-agent\n"
+            "model: sonnet\n"
+            "skills: [github]\n"
+            "---\n",
+            encoding="utf-8",
+        )
+        flagged = audit_agents_for_teammate_safety(agents)
+        assert flagged == {"inline-list-agent": ["skills"]}
+
     def test_empty_lists_are_not_flagged(self, tmp_path: Path) -> None:
         agents = tmp_path / "agents"
         agents.mkdir()
         (agents / "empty.md").write_text(
             "---\nname: empty\nmodel: sonnet\nskills: []\nmcpServers: []\n---\n",
+            encoding="utf-8",
+        )
+        flagged = audit_agents_for_teammate_safety(agents)
+        assert flagged == {}
+
+    def test_comment_only_keys_are_not_flagged(self, tmp_path: Path) -> None:
+        agents = tmp_path / "agents"
+        agents.mkdir()
+        (agents / "comment-only.md").write_text(
+            "---\n"
+            "name: comment-only\n"
+            "model: sonnet\n"
+            "skills:  # none\n"
+            "mcpServers:  # none\n"
+            "---\n",
             encoding="utf-8",
         )
         flagged = audit_agents_for_teammate_safety(agents)
@@ -190,6 +220,30 @@ class TestAgentAudit:
         )
         flagged = audit_agents_for_teammate_safety(agents)
         assert flagged == {"block-agent": ["skills", "mcpServers"]}
+
+    def test_audit_flags_pyyaml_safe_dump_zero_indent_block_sequence(
+        self, tmp_path: Path
+    ) -> None:
+        agents = tmp_path / "agents"
+        agents.mkdir()
+        frontmatter = yaml.safe_dump(
+            {
+                "name": "safe-dump-agent",
+                "model": "sonnet",
+                "skills": ["github"],
+                "mcpServers": {"filesystem": {"command": "npx"}},
+            },
+            sort_keys=False,
+        )
+        assert "\n- github\n" in frontmatter
+        (agents / "safe-dump-agent.md").write_text(
+            f"---\n{frontmatter}---\nbody\n",
+            encoding="utf-8",
+        )
+
+        flagged = audit_agents_for_teammate_safety(agents)
+
+        assert flagged == {"safe-dump-agent": ["skills", "mcpServers"]}
 
     def test_audit_skips_non_frontmatter_files(self, tmp_path: Path) -> None:
         agents = tmp_path / "agents"

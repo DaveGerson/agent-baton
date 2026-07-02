@@ -154,7 +154,12 @@ knowledge/[domain]/
 
 Every generated agent must follow this contract. Use
 `references/agent-authoring.md` as the durable reference and
-`templates/agents/*.md` as the starter source.
+`.claude/templates/agents/*.md` as the starter source.
+
+Starter template files:
+- `.claude/templates/agents/base-agent.md`
+- `.claude/templates/agents/flavored-agent.md`
+- `.claude/templates/agents/reviewer-agent.md`
 
 Required frontmatter fields:
 - `name`

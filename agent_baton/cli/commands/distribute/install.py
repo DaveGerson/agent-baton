@@ -97,6 +97,12 @@ def _verify_install(base: Path, agents_dir: Path, refs_dir: Path, team_ctx: Path
     if not ref_files:
         issues.append("No reference .md files found in " + str(refs_dir))
 
+    # Check generated-agent starter templates
+    template_agent_dir = base / "templates" / "agents"
+    template_agent_files = list(template_agent_dir.glob("*.md"))
+    if not template_agent_files:
+        issues.append("No starter template .md files found in " + str(template_agent_dir))
+
     # Check team-context is writable
     try:
         test_file = team_ctx / ".verify-test"
@@ -207,6 +213,7 @@ def _cmd_install(args: argparse.Namespace) -> None:
 
     agents_src = source / "agents"
     refs_src = source / "references"
+    agent_templates_src = source / "templates" / "agents"
     claude_md_src = source / "templates" / "CLAUDE.md"
     settings_src = source / "templates" / "settings.json"
 
@@ -231,8 +238,16 @@ def _cmd_install(args: argparse.Namespace) -> None:
     team_ctx = base / "team-context"
     knowledge_dir = base / "knowledge"
     skills_dir = base / "skills"
+    template_agent_target = base / "templates" / "agents"
 
-    for d in (agent_target, ref_target, team_ctx, knowledge_dir, skills_dir):
+    for d in (
+        agent_target,
+        ref_target,
+        team_ctx,
+        knowledge_dir,
+        skills_dir,
+        template_agent_target,
+    ):
         d.mkdir(parents=True, exist_ok=True)
 
     # Agents + references: always overwrite on upgrade (these improve between versions)
@@ -252,6 +267,13 @@ def _cmd_install(args: argparse.Namespace) -> None:
             if _copy_file(src_file, dst_file, force=ref_force):
                 ref_count += 1
 
+    template_agent_count = 0
+    if agent_templates_src.is_dir():
+        for src_file in sorted(agent_templates_src.glob("*.md")):
+            dst_file = template_agent_target / src_file.name
+            if _copy_file(src_file, dst_file, force=force or upgrade):
+                template_agent_count += 1
+
     # Settings.json: merge on upgrade (preserve user keys, update hooks),
     # copy on fresh install
     if settings_src.is_file():
@@ -266,7 +288,10 @@ def _cmd_install(args: argparse.Namespace) -> None:
             _copy_file(claude_md_src, claude_md_dst, force=force)
 
     action = "Upgraded" if upgrade else "Installed"
-    print(f"{action}: {agent_count} agents + {ref_count} references to {scope}")
+    print(
+        f"{action}: {agent_count} agents + {ref_count} references + "
+        f"{template_agent_count} agent templates to {scope}"
+    )
 
     if args.verify:
         _verify_install(base, agent_target, ref_target, team_ctx)

@@ -49,6 +49,7 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from agent_baton.models.execution import MachinePlan, PlanStep
+from agent_baton.utils.frontmatter import parse_frontmatter
 
 _log = logging.getLogger(__name__)
 
@@ -661,10 +662,9 @@ def audit_agents_for_teammate_safety(
     YAML frontmatter declares load-bearing fields that Claude Code Agent
     Teams does NOT honor when the agent is used as a teammate.
 
-    Read the .md files in *agents_dir*, parse the YAML header (a thin
-    inline parser — no PyYAML dep so the helper stays cheap to import),
-    and flag any agent with non-empty ``skills:`` or ``mcpServers:``
-    fields.
+    Read the .md files in *agents_dir*, parse the YAML header through the
+    shared frontmatter utility, and flag any agent with non-empty
+    ``skills:`` or ``mcpServers:`` values.
     """
     flagged: dict[str, list[str]] = {}
     if not agents_dir.exists():
@@ -674,39 +674,28 @@ def audit_agents_for_teammate_safety(
             text = md.read_text(encoding="utf-8")
         except OSError:
             continue
-        # Frontmatter starts and ends with --- on its own line.
-        if not text.startswith("---"):
-            continue
-        try:
-            _, fm, _ = text.split("---", 2)
-        except ValueError:
+        metadata, _body = parse_frontmatter(text)
+        if not isinstance(metadata, dict):
             continue
         agent_name = md.stem
         problems: list[str] = []
-        lines = fm.splitlines()
         for field in ("skills", "mcpServers"):
-            # Look for "field:" at start of a line, followed by a
-            # non-empty value or a yaml list.
-            for idx, line in enumerate(lines):
-                stripped = line.strip()
-                if stripped.startswith(f"{field}:"):
-                    rhs = stripped.split(":", 1)[1].strip()
-                    if rhs and rhs not in ("[]", "{}", "null", "~"):
-                        problems.append(field)
-                    elif not rhs:
-                        for child in lines[idx + 1:]:
-                            child_stripped = child.strip()
-                            if not child_stripped or child_stripped.startswith("#"):
-                                continue
-                            if not child.startswith((" ", "\t")):
-                                break
-                            if child_stripped not in ("[]", "{}", "null", "~"):
-                                problems.append(field)
-                                break
-                    break
+            if field in metadata and _frontmatter_value_is_non_empty(metadata[field]):
+                problems.append(field)
         if problems:
             flagged[agent_name] = problems
     return flagged
+
+
+def _frontmatter_value_is_non_empty(value: object) -> bool:
+    """Return True when a parsed frontmatter value declares real content."""
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple, set, dict)):
+        return bool(value)
+    return bool(value)
 
 
 def check_resumability_constraints(plan: MachinePlan) -> list[str]:

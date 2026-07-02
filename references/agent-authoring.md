@@ -76,6 +76,6 @@ Before saving or reporting an agent:
 ## Starter Templates
 
 Use these files as copy sources:
-- `templates/agents/base-agent.md`
-- `templates/agents/flavored-agent.md`
-- `templates/agents/reviewer-agent.md`
+- `.claude/templates/agents/base-agent.md`
+- `.claude/templates/agents/flavored-agent.md`
+- `.claude/templates/agents/reviewer-agent.md`
