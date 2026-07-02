@@ -143,6 +143,11 @@ class TeamBlueprintBuilder:
             role_cards[review_role] = self._build_review_role_card(review_role)
             role_order.append(review_role)
 
+        project_review_role = self._project_review_role_name()
+        if project_review_role is not None and project_review_role not in role_cards:
+            role_cards[project_review_role] = self._build_review_role_card(project_review_role)
+            role_order.append(project_review_role)
+
         blueprint = TeamBlueprint(
             task_id=plan.task_id,
             team_name=self._team_name(plan),
@@ -339,6 +344,29 @@ class TeamBlueprintBuilder:
         project_policy = self.config.policies.project_completion.adversarial_review
         if phase_policy != "off" or project_policy == "always":
             return self.config.policies.review_agents.adversarial_review
+        return None
+
+    def _project_review_role_name(self) -> str | None:
+        """Name of the configured project-completion review role, or ``None``.
+
+        Distinct from :meth:`_review_role_name` (the phase-level
+        adversarial-review role): a project can configure a *different*
+        agent for phase reviews vs. the final project-completion review
+        (spec §9.1's default: ``code-reviewer`` for phase reviews,
+        ``auditor`` for project completion). Injected under the exact same
+        condition ``PhasePolicyApplier.apply`` uses to append the final
+        review step (``policies.project_completion.adversarial_review ==
+        "always"``, see ``phase_policy.py``) so a final review step is
+        never dispatched without a role card to resolve context from --
+        this is what makes
+        ``ManagerModePlanner``'s ``test_review_bundle_integration`` (the
+        deferred PRD M6 case: final review gets a phase handoff ref +
+        ``review-rubric``) possible. When the two roles are configured to
+        the same agent name, ``build()``'s ``role_cards`` dict de-dupes
+        naturally (the ``not in role_cards`` guard at the call site).
+        """
+        if self.config.policies.project_completion.adversarial_review == "always":
+            return self.config.policies.review_agents.project_review
         return None
 
     def _build_review_role_card(self, role: str) -> RoleCard:

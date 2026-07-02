@@ -129,16 +129,21 @@ def test_non_manager_plan_unchanged(monkeypatch: Any, tmp_path: Any) -> None:
     assert diff_keys == {"manager_mode"}
 
 
-def test_manager_mode_planner_skeleton_builds_and_writes_nothing(tmp_path: Any) -> None:
-    """Wave 0 contract: ManagerModePlanner builds nothing yet.
-
-    ``build()`` returns an empty ``ManagerArtifacts``; ``build_and_write()``
-    persists nothing to disk (write_all on an empty container is a no-op).
-    Wave 3 fills in the real composition.
+def test_manager_mode_planner_builds_full_composition_and_dry_run_writes_nothing(
+    tmp_path: Any,
+) -> None:
+    """Wave 3 contract (supersedes the Wave 0 placeholder): ``build()`` runs
+    the full composition in-memory without touching disk; a task with zero
+    phases (e.g. this test's minimal plan, mirroring what a stub planner
+    hands back in ``test_plan_cmd_flag_sets_manager_mode`` above) must not
+    crash the composition. ``build_and_write()`` is where persistence
+    actually happens -- see ``tests/manager/test_manager_mode_planner.py``
+    for the full Wave 3 composition test suite (contracts/bundles over a
+    real multi-phase plan, review-step integration, etc).
     """
     from agent_baton.core.config.manager import ManagerConfig
-    from agent_baton.core.manager.artifacts import ManagerArtifacts
     from agent_baton.core.manager.planner import ManagerModePlanner
+    from agent_baton.core.orchestration.knowledge_registry import KnowledgeRegistry
 
     plan = MachinePlan(
         task_id="task-skeleton", task_summary="Do the thing", manager_mode=True
@@ -146,15 +151,25 @@ def test_manager_mode_planner_skeleton_builds_and_writes_nothing(tmp_path: Any) 
     team_context_dir = tmp_path / ".claude" / "team-context"
 
     planner = ManagerModePlanner(
-        ManagerConfig(), project_root=tmp_path, team_context_dir=team_context_dir
+        ManagerConfig(),
+        project_root=tmp_path,
+        team_context_dir=team_context_dir,
+        knowledge_registry=KnowledgeRegistry(),
     )
 
     artifacts = planner.build(plan, plan.task_summary)
-    assert artifacts == ManagerArtifacts()
+    assert artifacts.charter is not None
+    assert artifacts.scope_map is not None
+    assert artifacts.blueprint is not None
+    assert artifacts.brief_md
+    # No phases -> no nontrivial steps -> no contracts/bundles.
+    assert artifacts.scope_contracts == {}
+    assert artifacts.context_bundles == {}
+    assert not team_context_dir.exists()
 
     written = planner.build_and_write(plan, plan.task_summary)
-    assert written == ManagerArtifacts()
-    assert not (team_context_dir / "executions" / plan.task_id).exists()
+    assert written.charter is not None
+    assert (team_context_dir / "executions" / plan.task_id / "project-charter.md").is_file()
 
 
 # ---------------------------------------------------------------------------

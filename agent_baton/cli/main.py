@@ -22,7 +22,7 @@ from agent_baton.cli import commands as commands_pkg
 
 # Command groups for organized --help output
 _COMMAND_GROUPS: dict[str, list[str]] = {
-    "Core Workflow": ["plan", "execute", "status", "report", "team"],
+    "Core Workflow": ["plan", "execute", "status", "report", "team", "config"],
     "Agents & Routing": ["agents", "route", "events", "incident", "agent-context"],
     "Observability": ["viz", "dashboard", "trace", "usage", "telemetry", "context-profile", "retro", "context", "export", "test-plan"],
     "Integrations": ["webhook"],

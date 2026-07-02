@@ -136,3 +136,48 @@ def write_all(paths: ManagerArtifactPaths, artifacts: ManagerArtifacts) -> list[
         written.append(paths.manager_brief)
 
     return written
+
+
+def preview_paths(
+    paths: ManagerArtifactPaths, artifacts: ManagerArtifacts
+) -> list[tuple[Path, str]]:
+    """Non-mutating preview of what ``write_all`` would write.
+
+    Mirrors ``write_all``'s traversal order exactly, pairing each path
+    with a short human-readable description, so ``baton plan
+    --manager-mode --dry-run`` can print an accurate artifact list without
+    touching the filesystem (see ``agent_baton.core.manager.planner``).
+    """
+    items: list[tuple[Path, str]] = []
+
+    if artifacts.charter is not None:
+        items.append((paths.charter, "Project charter"))
+
+    if artifacts.scope_map is not None:
+        n = len(artifacts.scope_map.workstreams)
+        items.append((paths.scope_map, f"Scope map ({n} workstream(s))"))
+
+    if artifacts.blueprint is not None:
+        n = len(artifacts.blueprint.roles)
+        items.append((paths.team_blueprint, f"Team blueprint ({n} role(s))"))
+
+    for role in artifacts.role_cards_md:
+        items.append((paths.role_card(role), f"Role card: {role}"))
+
+    if artifacts.knowledge_plan is not None:
+        n = len(artifacts.knowledge_plan.selected_packs)
+        items.append((paths.knowledge_plan, f"Knowledge plan ({n} pack(s) selected)"))
+
+    for step_id in artifacts.scope_contracts:
+        items.append((paths.scope_contract(step_id, ext="json"), f"Scope contract (JSON): step {step_id}"))
+
+    for step_id in artifacts.scope_contracts_md:
+        items.append((paths.scope_contract(step_id, ext="md"), f"Scope contract: step {step_id}"))
+
+    for step_id in artifacts.context_bundles:
+        items.append((paths.context_bundle(step_id), f"Context bundle: step {step_id}"))
+
+    if artifacts.brief_md:
+        items.append((paths.manager_brief, "Manager brief"))
+
+    return items
