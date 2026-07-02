@@ -1,0 +1,11 @@
+# Manager-mode config for the medium-project fixture repo.
+# See docs/internal/manager-mode-pmo-plan.md Wave 3 / Task 12 and
+# docs/specs/agent-baton-claude-code-middle-manager-prd-tdd.md §9.1.
+version: 1
+
+policies:
+  phase_completion:
+    adversarial_review: always
+    handoff_required: true
+  project_completion:
+    adversarial_review: always
