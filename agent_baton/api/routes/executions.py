@@ -88,6 +88,8 @@ async def start_execution(
     # Start the engine; returns the first action.
     try:
         first_action = engine.start(plan)
+    except UnknownTeamBackendError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 

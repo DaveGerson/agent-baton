@@ -131,6 +131,35 @@ def make_plan_with_immediate_team_wave(task_id: str = "team-immediate-task") -> 
     )
 
 
+def make_plan_starting_with_team_step(task_id: str = "team-first-task") -> MachinePlan:
+    return MachinePlan(
+        task_id=task_id,
+        task_summary="Dispatch a team step as the first action",
+        phases=[
+            PlanPhase(
+                phase_id=0,
+                name="Phase 1",
+                steps=[
+                    PlanStep(
+                        step_id="1.1",
+                        agent_name="team",
+                        task_description="Run team implementation first",
+                        team=[
+                            TeamMember(
+                                member_id="1.1.a",
+                                agent_name="backend-engineer",
+                                role="implementer",
+                                task_description="Implement the service",
+                                model="sonnet",
+                            ),
+                        ],
+                    ),
+                ],
+            ),
+        ],
+    )
+
+
 def start_execution(client: TestClient, task_id: str = "test-task") -> dict:
     """Helper: start an execution with an inline plan and return the response body."""
     plan = make_test_plan(task_id=task_id)
@@ -145,6 +174,21 @@ def start_execution(client: TestClient, task_id: str = "test-task") -> dict:
 
 
 class TestStartExecution:
+    def test_strict_unknown_team_backend_returns_500_when_first_step_is_team(
+        self,
+        app,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("BATON_TEAMS_BACKEND", "not-real")
+        monkeypatch.setenv("BATON_TEAMS_BACKEND_STRICT", "1")
+        plan = make_plan_starting_with_team_step(task_id="strict-team-first")
+        client = TestClient(app, raise_server_exceptions=False)
+
+        r = client.post("/api/v1/executions", json={"plan": plan.to_dict()})
+
+        assert r.status_code == 500
+        assert "Unknown BATON_TEAMS_BACKEND" in r.json()["detail"]
+
     def test_strict_unknown_team_backend_returns_500_on_initial_batch(
         self,
         client: TestClient,
