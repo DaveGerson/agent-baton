@@ -322,6 +322,87 @@ def test_doctor_json_includes_planner_validation_warning_without_saved_plan(
     assert check["details"]["machine_plan_importable"] is True
 
 
+def test_doctor_discovers_task_scoped_saved_plan_for_planner_validation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from agent_baton.cli.commands import diagnostics_cmd
+
+    home = tmp_path / "home"
+    home.mkdir()
+    task_dir = (
+        tmp_path
+        / ".claude"
+        / "team-context"
+        / "executions"
+        / "task-002"
+    )
+    task_dir.mkdir(parents=True)
+    (task_dir / "plan.json").write_text(
+        json.dumps(
+            {
+                "task_summary": "Review dependency versions",
+                "task_type": "documentation",
+                "complexity": "medium",
+                "risk_level": "LOW",
+                "phases": [
+                    {
+                        "name": "Review",
+                        "steps": [
+                            {
+                                "task_description": "Inspect current versions",
+                                "agent_name": "auditor",
+                                "team": [],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("PATH", "")
+
+    payload = diagnostics_cmd.build_report(tmp_path)
+    check = _check(payload, "planner_validation")
+
+    assert check["message"] != "No saved plan is available to validate"
+    assert check["details"]["plan_path"] == str(task_dir / "plan.json")
+    assert check["details"]["plan_candidates"] == [
+        str(tmp_path / ".claude" / "team-context" / "plan.json"),
+        str(tmp_path / "plan.json"),
+        str(task_dir / "plan.json"),
+    ]
+
+
+def test_doctor_reports_structured_error_for_malformed_saved_plan_json_shape(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from agent_baton.cli.commands import diagnostics_cmd
+
+    home = tmp_path / "home"
+    home.mkdir()
+    team_context = tmp_path / ".claude" / "team-context"
+    team_context.mkdir(parents=True)
+    (team_context / "plan.json").write_text('{"phases": ["bad"]}\n', encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("PATH", "")
+
+    payload = diagnostics_cmd.build_report(tmp_path)
+    check = _check(payload, "planner_validation")
+
+    assert check["status"] == "error"
+    assert check["details"]["plan_path"] == str(team_context / "plan.json")
+    assert check["details"]["validator_importable"] is True
+    assert "validation_error" in check["details"]
+
+
 def test_doctor_text_distinguishes_pack_types_and_uses_canonical_terms(
     tmp_path: Path,
     monkeypatch,

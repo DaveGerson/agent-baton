@@ -624,11 +624,9 @@ def _check_terminology() -> DoctorCheck:
 
 
 def _check_planner_validation(project_root: Path) -> DoctorCheck:
+    plan_candidates = _saved_plan_candidates(project_root)
     details: dict[str, Any] = {
-        "plan_candidates": [
-            str(project_root / ".claude" / "team-context" / "plan.json"),
-            str(project_root / "plan.json"),
-        ],
+        "plan_candidates": [str(path) for path in plan_candidates],
         "plan_path": None,
         "machine_plan_importable": False,
         "validator_importable": False,
@@ -689,7 +687,32 @@ def _check_planner_validation(project_root: Path) -> DoctorCheck:
             details=details,
         )
 
-    findings = _validate_plan(data)
+    if not isinstance(data, dict):
+        details["validation_error"] = (
+            "Saved plan JSON must be an object at the top level"
+        )
+        details["plan_data_type"] = type(data).__name__
+        return DoctorCheck(
+            id="planner_validation",
+            label="Planner validation",
+            status="error",
+            message="Saved plan JSON has invalid top-level shape",
+            details=details,
+        )
+
+    try:
+        findings = _validate_plan(data)
+    except Exception as exc:
+        details["validation_error"] = str(exc)
+        details["validation_exception_type"] = type(exc).__name__
+        return DoctorCheck(
+            id="planner_validation",
+            label="Planner validation",
+            status="error",
+            message=f"Saved plan validation could not run: {exc}",
+            details=details,
+        )
+
     error_count = sum(
         1 for finding in findings if finding.get("severity") == "error"
     )
@@ -836,11 +859,22 @@ def _validate_assurance_pack_dirs(*roots: Path) -> dict[str, Any]:
 
 
 def _find_saved_plan(project_root: Path) -> Path | None:
-    candidates = [
-        project_root / ".claude" / "team-context" / "plan.json",
-        project_root / "plan.json",
-    ]
-    for candidate in candidates:
+    for candidate in _saved_plan_candidates(project_root):
         if candidate.is_file():
             return candidate
     return None
+
+
+def _saved_plan_candidates(project_root: Path) -> list[Path]:
+    context_root = project_root / ".claude" / "team-context"
+    candidates = [
+        context_root / "plan.json",
+        project_root / "plan.json",
+    ]
+    executions_dir = context_root / "executions"
+    if executions_dir.is_dir():
+        for task_dir in sorted(
+            child for child in executions_dir.iterdir() if child.is_dir()
+        ):
+            candidates.append(task_dir / "plan.json")
+    return candidates
