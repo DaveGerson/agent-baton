@@ -62,6 +62,8 @@ def handler(args: argparse.Namespace) -> None:
         print(json.dumps(payload, indent=2))
     else:
         print(render_report(payload))
+    if not payload["ok"]:
+        raise SystemExit(1)
 
 
 def build_report(project_root: Path | None = None) -> dict[str, Any]:
@@ -691,7 +693,7 @@ def _check_git_worktree(project_root: Path) -> DoctorCheck:
 def _git(args: list[str], cwd: Path) -> dict[str, Any]:
     try:
         proc = subprocess.run(
-            ["git", "-C", str(cwd), *args],
+            ["git", "-C", str(cwd), "--no-optional-locks", *args],
             capture_output=True,
             text=True,
             timeout=3,
@@ -791,6 +793,10 @@ def _check_planner_validation(project_root: Path) -> DoctorCheck:
         "error_count": 0,
         "warning_count": 0,
     }
+    if "active_task_sqlite_probe" in active_task_state:
+        details["active_task_sqlite_probe"] = active_task_state[
+            "active_task_sqlite_probe"
+        ]
     try:
         from agent_baton.models.execution import MachinePlan
 
@@ -1034,13 +1040,18 @@ def _select_saved_plan_for_validation(
     project_root: Path,
 ) -> tuple[Path | None, dict[str, Any]]:
     context_root = project_root / ".claude" / "team-context"
-    active_task_id, active_task_source = _resolve_active_task_for_validation(
+    (
+        active_task_id,
+        active_task_source,
+        active_task_details,
+    ) = _resolve_active_task_for_validation(
         context_root
     )
     active_task_state: dict[str, Any] = {
         "active_task_id": active_task_id,
         "active_task_source": active_task_source,
         "active_plan_missing": False,
+        **active_task_details,
     }
     if active_task_id:
         active_plan_path = (
@@ -1055,58 +1066,38 @@ def _select_saved_plan_for_validation(
 
 def _resolve_active_task_for_validation(
     context_root: Path,
-) -> tuple[str | None, str | None]:
-    active_task_id = _read_active_task_id_from_sqlite(context_root)
+) -> tuple[str | None, str | None, dict[str, Any]]:
+    active_task_id = os.environ.get("BATON_TASK_ID", "").strip()
     if active_task_id:
-        return active_task_id, "sqlite"
+        return active_task_id, "env", {}
+
+    active_task_id, active_task_details = _read_active_task_id_from_sqlite(
+        context_root
+    )
+    if active_task_id:
+        return active_task_id, "sqlite", active_task_details
 
     active_task_id = _read_active_task_id_from_file_marker(context_root)
     if active_task_id:
-        return active_task_id, "file"
-    return None, None
+        return active_task_id, "file", active_task_details
+    return None, None, active_task_details
 
 
-def _read_active_task_id_from_sqlite(context_root: Path) -> str | None:
+def _read_active_task_id_from_sqlite(
+    context_root: Path,
+) -> tuple[str | None, dict[str, Any]]:
     db_path = context_root / "baton.db"
-    if not db_path.is_file():
-        return None
-    try:
-        import sqlite3
+    from agent_baton.core.storage.active_task import (
+        read_active_task_id_from_db_copy,
+    )
 
-        conn = sqlite3.connect(
-            f"{db_path.resolve().as_uri()}?mode=ro",
-            uri=True,
+    probe = read_active_task_id_from_db_copy(db_path)
+    if probe.degraded:
+        return (
+            None,
+            {"active_task_sqlite_probe": probe.degradation_details()},
         )
-    except Exception:
-        return None
-
-    try:
-        has_active_task = conn.execute(
-            (
-                "SELECT 1 FROM sqlite_master "
-                "WHERE type = 'table' AND name = 'active_task' LIMIT 1"
-            )
-        ).fetchone()
-        if not has_active_task:
-            return None
-        row = conn.execute(
-            (
-                "SELECT task_id FROM active_task "
-                "WHERE id = 1 LIMIT 1"
-            )
-        ).fetchone()
-    except Exception:
-        return None
-    finally:
-        conn.close()
-
-    if not row:
-        return None
-    active_task_id = row[0]
-    if isinstance(active_task_id, str):
-        active_task_id = active_task_id.strip()
-        return active_task_id if active_task_id else None
-    return None
+    return probe.task_id, {}
 
 
 def _read_active_task_id_from_file_marker(context_root: Path) -> str | None:

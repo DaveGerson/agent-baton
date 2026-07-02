@@ -1,10 +1,12 @@
 """Tests for the top-level ``baton doctor`` command."""
 from __future__ import annotations
 
+import argparse
 import json
 import sqlite3
 from pathlib import Path
 
+import pytest
 import yaml
 
 
@@ -112,6 +114,11 @@ def _check(payload: dict[str, object], check_id: str) -> dict[str, object]:
     raise AssertionError(f"missing doctor check: {check_id}")
 
 
+@pytest.fixture(autouse=True)
+def _clear_baton_task_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("BATON_TASK_ID", raising=False)
+
+
 def test_discovery_registers_top_level_doctor_and_knowledge_doctor_separately(
     capsys,
 ) -> None:
@@ -185,6 +192,40 @@ def test_doctor_json_reports_required_checks_and_optional_warnings(
         "templates",
         "pmo_static_assets",
     } <= set(resources["details"]["resources"])
+
+
+def test_doctor_handler_exits_nonzero_after_printing_error_payload(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+) -> None:
+    from agent_baton.cli.commands import diagnostics_cmd
+
+    payload = {
+        "schema_version": 1,
+        "ok": False,
+        "project_root": "project",
+        "summary": {"ok": 1, "warning": 0, "error": 1},
+        "checks": [
+            {
+                "id": "planner_validation",
+                "label": "Planner validation",
+                "status": "error",
+                "message": "Saved plan validation failed",
+                "details": {},
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        diagnostics_cmd,
+        "build_report",
+        lambda project_root: payload,
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        diagnostics_cmd.handler(argparse.Namespace(json=True))
+
+    assert exc_info.value.code == 1
+    assert json.loads(capsys.readouterr().out) == payload
 
 
 def test_beads_workspace_reports_ok_when_expected_files_exist(
@@ -297,6 +338,39 @@ def test_git_worktree_reports_linked_worktree_metadata_when_git_is_monkeypatched
     assert check.details["is_linked_worktree"] is True
     assert check.details["is_submodule"] is False
     assert check.details["detached_head"] is False
+
+
+def test_git_helper_passes_no_optional_locks_before_subcommand(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent_baton.cli.commands import diagnostics_cmd
+
+    calls: list[list[str]] = []
+
+    class FakeCompletedProcess:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(cmd: list[str], **_kwargs: object) -> FakeCompletedProcess:
+        calls.append(cmd)
+        return FakeCompletedProcess()
+
+    monkeypatch.setattr(diagnostics_cmd.subprocess, "run", fake_run)
+
+    diagnostics_cmd._git(["status", "--porcelain"], tmp_path)
+
+    assert calls == [
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "--no-optional-locks",
+            "status",
+            "--porcelain",
+        ]
+    ]
 
 
 def test_missing_optional_features_are_warnings_not_crashes(
@@ -590,6 +664,7 @@ def test_doctor_reads_active_task_from_existing_sqlite_without_extra_files(
     )
     db_path = team_context / "baton.db"
     conn = sqlite3.connect(db_path)
+    assert conn.execute("PRAGMA journal_mode=WAL").fetchone()[0].lower() == "wal"
     conn.execute(
         "CREATE TABLE active_task (id INTEGER PRIMARY KEY, task_id TEXT)"
     )
@@ -598,6 +673,8 @@ def test_doctor_reads_active_task_from_existing_sqlite_without_extra_files(
     )
     conn.commit()
     conn.close()
+    assert not (team_context / "baton.db-wal").exists()
+    assert not (team_context / "baton.db-shm").exists()
     before_paths = sorted(
         str(path.relative_to(tmp_path))
         for path in tmp_path.rglob("*")
@@ -624,6 +701,138 @@ def test_doctor_reads_active_task_from_existing_sqlite_without_extra_files(
     assert not (team_context / "baton.db-wal").exists()
     assert not (team_context / "baton.db-shm").exists()
     assert after_paths == before_paths
+
+
+def test_doctor_reads_active_task_from_open_wal_sidecar_without_mutating_project(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from agent_baton.cli.commands import diagnostics_cmd
+
+    home = tmp_path / "home"
+    home.mkdir()
+    team_context = tmp_path / ".claude" / "team-context"
+    team_context.mkdir(parents=True)
+    task_dir = team_context / "executions" / "task-wal"
+    task_dir.mkdir(parents=True)
+    (task_dir / "plan.json").write_text(
+        json.dumps(_valid_saved_plan("Task WAL plan")),
+        encoding="utf-8",
+    )
+    db_path = team_context / "baton.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        assert conn.execute("PRAGMA journal_mode=WAL").fetchone()[0].lower() == "wal"
+        conn.execute(
+            "CREATE TABLE active_task (id INTEGER PRIMARY KEY, task_id TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO active_task (id, task_id) VALUES (1, 'task-wal')"
+        )
+        conn.commit()
+        assert (team_context / "baton.db-wal").exists()
+        assert (team_context / "baton.db-shm").exists()
+        before_paths = sorted(
+            str(path.relative_to(tmp_path))
+            for path in tmp_path.rglob("*")
+            if path.is_file()
+        )
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("USERPROFILE", str(home))
+        monkeypatch.setenv("PATH", "")
+
+        payload = diagnostics_cmd.build_report(tmp_path)
+        check = _check(payload, "planner_validation")
+        after_paths = sorted(
+            str(path.relative_to(tmp_path))
+            for path in tmp_path.rglob("*")
+            if path.is_file()
+        )
+    finally:
+        conn.close()
+
+    assert check["status"] == "ok"
+    assert check["details"]["active_task_id"] == "task-wal"
+    assert check["details"]["active_task_source"] == "sqlite"
+    assert check["details"]["plan_path"] == str(task_dir / "plan.json")
+    assert after_paths == before_paths
+
+
+def test_doctor_records_degraded_sqlite_active_task_probe_details(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from agent_baton.cli.commands import diagnostics_cmd
+
+    home = tmp_path / "home"
+    home.mkdir()
+    team_context = tmp_path / ".claude" / "team-context"
+    team_context.mkdir(parents=True)
+    db_path = team_context / "baton.db"
+    db_path.write_text("not a sqlite database\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("PATH", "")
+
+    payload = diagnostics_cmd.build_report(tmp_path)
+    check = _check(payload, "planner_validation")
+    probe = check["details"]["active_task_sqlite_probe"]
+
+    assert check["status"] == "warning"
+    assert check["details"]["active_task_id"] is None
+    assert check["details"]["active_task_source"] is None
+    assert probe["status"] == "degraded"
+    assert probe["db_path"] == str(db_path)
+    assert probe["error"]
+    assert probe["error_type"]
+
+
+def test_doctor_prefers_baton_task_id_env_over_sqlite_active_task(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from agent_baton.cli.commands import diagnostics_cmd
+
+    home = tmp_path / "home"
+    home.mkdir()
+    team_context = tmp_path / ".claude" / "team-context"
+    env_task_dir = team_context / "executions" / "task-env"
+    sqlite_task_dir = team_context / "executions" / "task-sqlite"
+    env_task_dir.mkdir(parents=True)
+    sqlite_task_dir.mkdir(parents=True)
+    (env_task_dir / "plan.json").write_text(
+        json.dumps(_valid_saved_plan("Task env plan")),
+        encoding="utf-8",
+    )
+    (sqlite_task_dir / "plan.json").write_text(
+        json.dumps(_valid_saved_plan("Task sqlite plan")),
+        encoding="utf-8",
+    )
+    db_path = team_context / "baton.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE active_task (id INTEGER PRIMARY KEY, task_id TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO active_task (id, task_id) VALUES (1, 'task-sqlite')"
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setenv("BATON_TASK_ID", " task-env ")
+
+    payload = diagnostics_cmd.build_report(tmp_path)
+    check = _check(payload, "planner_validation")
+
+    assert check["status"] == "ok"
+    assert check["details"]["active_task_id"] == "task-env"
+    assert check["details"]["active_task_source"] == "env"
+    assert check["details"]["plan_path"] == str(env_task_dir / "plan.json")
 
 
 def test_doctor_prefers_active_task_scoped_plan_over_sorted_or_legacy_fallbacks(
