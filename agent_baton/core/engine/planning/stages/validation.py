@@ -595,6 +595,7 @@ def _classification_from_plan(plan: "MachinePlan") -> object | None:
 
 def _sync_plan_validation(plan: "MachinePlan", draft: PlanDraft) -> None:
     plan.phases = list(draft.plan_phases)
+    plan.budget_tier = draft.budget_tier
     existing = dict(getattr(plan, "plan_diagnostics", {}) or {})
     existing["validation_warning_count"] = max(
         int(existing.get("validation_warning_count", 0)),

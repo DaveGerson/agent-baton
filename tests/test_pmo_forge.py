@@ -220,6 +220,33 @@ class TestCreatePlan:
         assert result is headless_plan
         assert seen_registries == [registry]
 
+    def test_headless_validation_syncs_canonical_budget_tier(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        store = _store(tmp_path)
+        project = _project(tmp_path)
+        store.register_project(project)
+
+        planner = IntelligentPlanner()
+        headless_plan = _plan(task_id="headless-budget-tier")
+        headless_plan.task_type = "new-feature"
+        headless_plan.budget_tier = "full"
+        forge = ForgeSession(
+            planner=planner,
+            store=store,
+            headless=_AvailableHeadless(headless_plan),
+        )
+
+        result = forge.create_plan(
+            description="Implement the login fix",
+            program="NDS",
+            project_id="nds",
+        )
+
+        assert result is headless_plan
+        assert result.budget_tier == "lean"
+
     def test_delegates_to_planner(self, tmp_path: Path):
         store = _store(tmp_path)
         project = _project(tmp_path)
