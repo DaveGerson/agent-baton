@@ -293,9 +293,12 @@ def validate_knowledge_roots(
             names: dict[str, list[Path]] = {}
             for doc_path in sorted(pack_dir.glob("*.md")):
                 summary["documents"] += 1
-                doc_name, metadata, raw = _read_doc_metadata(
+                doc_metadata = _read_doc_metadata(
                     doc_path, pack_dir.name, issues
                 )
+                if doc_metadata is None:
+                    continue
+                doc_name, metadata, raw = doc_metadata
                 names.setdefault(doc_name, []).append(doc_path)
 
                 description = str(metadata.get("description") or "").strip()
@@ -392,8 +395,8 @@ def _read_manifest(
         return {}, False
 
     try:
-        parsed = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
-    except (OSError, yaml.YAMLError) as exc:
+        parsed = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
         issues.append(_issue(
             code="invalid-manifest",
             path=manifest_path,
@@ -404,6 +407,9 @@ def _read_manifest(
             ),
         ))
         return {}, False
+
+    if parsed is None:
+        return {}, True
 
     if not isinstance(parsed, dict):
         issues.append(_issue(
@@ -457,10 +463,10 @@ def _read_doc_metadata(
     doc_path: Path,
     pack_name: str,
     issues: list[DoctorIssue],
-) -> tuple[str, dict[str, Any], str]:
+) -> tuple[str, dict[str, Any], str] | None:
     try:
         raw = doc_path.read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         issues.append(_issue(
             code="unreadable-doc",
             path=doc_path,
@@ -471,9 +477,22 @@ def _read_doc_metadata(
                 f"Edit file permissions for {doc_path}."
             ),
         ))
-        return doc_path.stem, {}, ""
+        return None
 
     metadata, _body = parse_frontmatter(raw)
+    if not isinstance(metadata, dict):
+        issues.append(_issue(
+            code="invalid-doc-frontmatter",
+            path=doc_path,
+            pack=pack_name,
+            doc=doc_path.stem,
+            message=(
+                f"Document '{doc_path.stem}' frontmatter must be a mapping. "
+                f"Edit {doc_path} and use YAML key/value fields."
+            ),
+        ))
+        return None
+
     if not metadata:
         issues.append(_issue(
             code="empty-doc-metadata",

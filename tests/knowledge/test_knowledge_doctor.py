@@ -195,3 +195,113 @@ def test_doctor_accepts_docs_stems_and_reports_missing_stems(
     assert len(missing) == 1
     assert "missing-stem" in missing[0]["message"]
     assert "taxonomy-quick-ref" not in missing[0]["message"]
+
+
+def test_doctor_reports_invalid_doc_frontmatter_for_sequence_and_scalar(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    _isolate_defaults(monkeypatch, tmp_path)
+    pack = tmp_path / ".claude" / "knowledge" / "invalid-frontmatter"
+    pack.mkdir(parents=True)
+    (pack / "knowledge.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": "invalid-frontmatter",
+                "description": "Invalid frontmatter fixtures",
+                "default_delivery": "reference",
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    (pack / "sequence.md").write_text(
+        "---\n- not\n- a\n- mapping\n---\nbody\n", encoding="utf-8"
+    )
+    (pack / "scalar.md").write_text(
+        "---\njust-a-string\n---\nbody\n", encoding="utf-8"
+    )
+
+    rc = _run_cli(["knowledge", "doctor", "--json"])
+    data = json.loads(capsys.readouterr().out)
+    invalid = [
+        issue
+        for issue in data["issues"]
+        if issue["code"] == "invalid-doc-frontmatter"
+    ]
+
+    assert rc == 0
+    assert {issue["doc"] for issue in invalid} == {"sequence", "scalar"}
+    assert all("Edit " in issue["message"] for issue in invalid)
+    assert not any(
+        issue["code"] == "empty-doc-description"
+        for issue in data["issues"]
+    )
+
+
+def test_doctor_reports_non_utf8_manifest_as_invalid_manifest(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    _isolate_defaults(monkeypatch, tmp_path)
+    pack = tmp_path / ".claude" / "knowledge" / "legacy-manifest"
+    pack.mkdir(parents=True)
+    (pack / "knowledge.yaml").write_bytes(
+        b"name: legacy-\xe9\ndescription: legacy manifest\n"
+    )
+    _write_doc(
+        pack / "guide.md",
+        name="guide",
+        description="Valid guide",
+        tags=["legacy"],
+    )
+
+    rc = _run_cli(["knowledge", "doctor", "--json"])
+    data = json.loads(capsys.readouterr().out)
+    invalid_manifest = [
+        issue
+        for issue in data["issues"]
+        if issue["code"] == "invalid-manifest"
+    ]
+
+    assert rc == 0
+    assert len(invalid_manifest) == 1
+    assert invalid_manifest[0]["pack"] == "legacy-manifest"
+    assert "Edit " in invalid_manifest[0]["message"]
+
+
+def test_doctor_reports_non_utf8_doc_as_unreadable_doc(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    _isolate_defaults(monkeypatch, tmp_path)
+    pack = tmp_path / ".claude" / "knowledge" / "legacy-doc"
+    pack.mkdir(parents=True)
+    (pack / "knowledge.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": "legacy-doc",
+                "description": "Legacy encoded document",
+                "default_delivery": "reference",
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    (pack / "legacy.md").write_bytes(
+        b"---\nname: legacy\ndescription: Caf\xe9\n---\nbody\n"
+    )
+
+    rc = _run_cli(["knowledge", "doctor", "--json"])
+    data = json.loads(capsys.readouterr().out)
+    unreadable = [
+        issue
+        for issue in data["issues"]
+        if issue["code"] == "unreadable-doc"
+    ]
+
+    assert rc == 0
+    assert len(unreadable) == 1
+    assert unreadable[0]["doc"] == "legacy"
+    assert "Edit " in unreadable[0]["message"]
+    assert not any(
+        issue["code"] == "empty-doc-description"
+        for issue in data["issues"]
+    )

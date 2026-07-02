@@ -333,25 +333,34 @@ class KnowledgeRegistry:
             return 0
 
         count = 0
-        for pack_dir in sorted(directory.iterdir()):
-            if not pack_dir.is_dir():
-                continue
-            loaded = self._load_pack(pack_dir)
-            if loaded is None:
-                continue
-            pack, degraded = loaded
-            if override or pack.name not in self._packs:
-                # Remove stale TF-IDF entries for the overridden pack, if any.
-                # Simplest approach: rebuild index entries after each override.
-                self._packs[pack.name] = pack
-                if degraded:
-                    self._degraded_pack_names.add(pack.name)
-                else:
-                    self._degraded_pack_names.discard(pack.name)
-                count += 1
-
-        # Rebuild TF-IDF index from scratch whenever new packs are added.
-        self._rebuild_tfidf()
+        try:
+            for pack_dir in sorted(directory.iterdir()):
+                if not pack_dir.is_dir():
+                    continue
+                try:
+                    loaded = self._load_pack(pack_dir)
+                except Exception as exc:
+                    logger.warning(
+                        "Skipping knowledge pack %s after load failure: %s",
+                        pack_dir,
+                        exc,
+                    )
+                    continue
+                if loaded is None:
+                    continue
+                pack, degraded = loaded
+                if override or pack.name not in self._packs:
+                    # Remove stale TF-IDF entries for the overridden pack, if any.
+                    # Simplest approach: rebuild index entries after each override.
+                    self._packs[pack.name] = pack
+                    if degraded:
+                        self._degraded_pack_names.add(pack.name)
+                    else:
+                        self._degraded_pack_names.discard(pack.name)
+                    count += 1
+        finally:
+            # Rebuild TF-IDF from whatever loaded before any pack-level failure.
+            self._rebuild_tfidf()
         return count
 
     def load_default_paths(self, project_root: Path | None = None) -> int:
@@ -479,8 +488,19 @@ class KnowledgeRegistry:
         if manifest_path.is_file():
             try:
                 raw = manifest_path.read_text(encoding="utf-8")
-                manifest = yaml.safe_load(raw) or {}
-            except (OSError, yaml.YAMLError) as exc:
+                parsed = yaml.safe_load(raw)
+                if parsed is None:
+                    manifest = {}
+                elif isinstance(parsed, dict):
+                    manifest = parsed
+                else:
+                    logger.warning(
+                        "Failed to parse %s: manifest must be a mapping",
+                        manifest_path,
+                    )
+                    manifest = {}
+                    degraded = True
+            except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
                 logger.warning("Failed to parse %s: %s", manifest_path, exc)
                 manifest = {}
                 degraded = True
