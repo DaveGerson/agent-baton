@@ -24,6 +24,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from agent_baton.cli.errors import validation_error
 from agent_baton.core.engine.planner import IntelligentPlanner
 from agent_baton.core.govern.classifier import DataClassifier
 from agent_baton.core.govern.policy import PolicyEngine
@@ -193,14 +194,17 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     p.add_argument(
         "--gate-scope",
         dest="gate_scope",
-        default="focused",
+        default=None,
         choices=["focused", "full", "smoke"],
         help=(
             "How broadly gate commands run (bd-124f). "
             "'focused' (default) scopes pytest to the test files that cover "
             "changed source paths — fast, permission-policy-safe. "
             "'full' produces legacy unscoped pytest / pytest --cov (escape hatch). "
-            "'smoke' runs import-only (build gates) or collect-only (test gates)."
+            "'smoke' runs import-only (build gates) or collect-only (test gates). "
+            "Default sentinel is None (not 'focused') so the handler can "
+            "tell whether this flag was explicitly passed vs. defaulted — "
+            "see cli_gate_scope_explicit in handler()."
         ),
     )
     p.add_argument(
@@ -565,6 +569,17 @@ def handler(args: argparse.Namespace) -> None:
         bead_store=bead_store,
     )
     print("  Creating execution plan...", file=sys.stderr)
+    # M6 prep: record whether --gate-scope was explicitly passed (argparse
+    # default sentinel is None, not "focused" -- see register() above) so a
+    # later milestone (PhasePolicyApplier) can tell "user asked for X" apart
+    # from "nothing specified, use the project-configured default". Not
+    # consumed anywhere yet -- Wave 3 threads it into ManagerModePlanner.
+    # getattr (not direct attribute access) because several existing test
+    # fixtures hand-construct an argparse.Namespace without a gate_scope
+    # attribute at all; that must keep behaving like "not explicit".
+    _gate_scope_arg = getattr(args, "gate_scope", None)
+    cli_gate_scope_explicit = _gate_scope_arg is not None
+    gate_scope = _gate_scope_arg or "focused"
     plan = planner.create_plan(
         args.summary,
         task_type=args.task_type,
@@ -575,7 +590,7 @@ def handler(args: argparse.Namespace) -> None:
         explicit_knowledge_docs=args.knowledge,
         intervention_level=args.intervention,
         default_model=getattr(args, "model", None),
-        gate_scope=getattr(args, "gate_scope", "focused"),
+        gate_scope=gate_scope,
     )
     print("  Done.", file=sys.stderr)
 
@@ -616,21 +631,48 @@ def handler(args: argparse.Namespace) -> None:
         plan.max_amend_cycles = max(0, getattr(args, "max_amend_cycles", 3))
 
     # Manager-mode PMO layer (M1, see docs/internal/manager-mode-pmo-design.md).
-    # ManagerConfig is always loaded (a cheap, side-effect-free YAML parse
-    # that mirrors ProjectConfig's own always-on load elsewhere) so that
-    # `manager_mode.enabled_by_default` can turn on manager mode without
-    # --manager-mode. The heavier `agent_baton.core.manager` builder
-    # package is only imported below when manager mode is actually
-    # requested, so non-manager plans have zero core.manager import
-    # side effects and `plan.to_dict()` is unchanged apart from the
-    # `manager_mode: False` field added in this milestone.
-    from agent_baton.core.config.manager import ManagerConfig
+    # ManagerConfig is only loaded when it can matter -- --manager-mode was
+    # passed, or a project baton.yaml exists that could set
+    # manager_mode.enabled_by_default -- so a plain `baton plan` with no
+    # manager-mode footprint anywhere skips the lookup entirely. The
+    # heavier `agent_baton.core.manager` builder package is only imported
+    # further below when manager mode is actually requested, so
+    # non-manager plans have zero core.manager import side effects and
+    # `plan.to_dict()` is unchanged apart from the `manager_mode: False`
+    # field added in this milestone.
+    #
+    # ManagerConfig.load() fails early (ManagerConfigError) on malformed
+    # YAML or an invalid nested policy value -- by design, so `baton
+    # config validate` surfaces problems loudly. But a plain `baton plan`
+    # (manager mode not requested) must never crash on someone else's
+    # broken baton.yaml/~/.baton/config.yaml: downgrade to a warning and
+    # fall back to defaults in that case. Only when the user explicitly
+    # asked for manager mode (--manager-mode) do we treat a bad config as
+    # a hard, user-facing error (typed, no raw traceback).
+    from agent_baton.core.config.manager import ManagerConfig, ManagerConfigError
 
-    manager_config = ManagerConfig.load(project_root)
-    manager_requested = (
-        bool(getattr(args, "manager_mode", False))
-        or manager_config.manager_mode.enabled_by_default
-    )
+    _manager_mode_flag = bool(getattr(args, "manager_mode", False))
+    manager_config = ManagerConfig()
+    if _manager_mode_flag or ManagerConfig.find_config_file(project_root) is not None:
+        try:
+            manager_config = ManagerConfig.load(project_root)
+        except ManagerConfigError as exc:
+            if _manager_mode_flag:
+                validation_error(
+                    f"invalid manager config: {exc}",
+                    hint=(
+                        "Fix .claude/baton.yaml (or ~/.baton/config.yaml), "
+                        "or omit --manager-mode."
+                    ),
+                    docs="docs/internal/manager-mode-pmo-design.md",
+                )
+            _log.warning(
+                "Ignoring invalid manager config (non-fatal, manager mode "
+                "not requested): %s",
+                exc,
+            )
+
+    manager_requested = _manager_mode_flag or manager_config.manager_mode.enabled_by_default
     if manager_requested:
         plan.manager_mode = True
 

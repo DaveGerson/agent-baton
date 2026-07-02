@@ -169,7 +169,11 @@ class ManagerConfig(_Section):
                 where = f" ({source})" if source else ""
                 message = f"Unknown top-level key {key!r} in manager config{where}; ignoring."
                 warnings.append(message)
-                logger.warning(message)
+                # debug, not warning: this fires on every `baton plan` for
+                # any project whose existing baton.yaml carries a key this
+                # loader doesn't recognize yet. The message is still
+                # surfaced to callers via `config.warnings`.
+                logger.debug(message)
 
         try:
             config = cls(**known)
@@ -223,8 +227,13 @@ class ManagerConfig(_Section):
         Layers are deep-merged dict-wise (nested mappings merge key-by-key;
         scalars and lists from a higher-precedence layer replace the lower
         layer's value outright) and validated once against the merged
-        result, so a single :class:`ManagerConfigError` names the true
-        offending source.
+        result. If validation fails, the raised :class:`ManagerConfigError`
+        names the offending key/value/valid-options (via
+        :func:`_format_validation_error`), but its ``source`` context is
+        the *last file read* (project config when one exists, otherwise
+        the user config) — not necessarily the file that actually
+        introduced the invalid value, since both layers are merged before
+        validation runs once.
         """
         merged: dict[str, Any] = {}
         source: Path | None = None

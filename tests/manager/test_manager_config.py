@@ -212,3 +212,26 @@ def test_round_trip() -> None:
     )
 
     assert ManagerConfig.from_dict(cfg.to_dict()) == cfg
+
+
+def test_fake_home_fixture_is_effective(fake_home: Path, tmp_path: Path) -> None:
+    """Proves the autouse ``fake_home`` fixture (tests/manager/conftest.py)
+    actually redirects ``Path.home()`` -- not merely that no error occurs.
+
+    Writes a decoy ``~/.baton/config.yaml`` into the fake home and asserts
+    ``ManagerConfig.load()`` picks up its value. If the monkeypatch were
+    vacuous (or not applied), this would instead read the real host's
+    ``~/.baton/config.yaml`` (or fall back to the built-in default of
+    12000), not the decoy value of 4242.
+    """
+    user_config_dir = fake_home / ".baton"
+    user_config_dir.mkdir(parents=True)
+    (user_config_dir / "config.yaml").write_text(
+        "context:\n  default_step_token_budget: 4242\n", encoding="utf-8"
+    )
+
+    # tmp_path has no project-level baton.yaml of its own, so only the
+    # (fake) user config layer can be the source of this value.
+    config = ManagerConfig.load(tmp_path)
+
+    assert config.context.default_step_token_budget == 4242
