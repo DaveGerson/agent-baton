@@ -117,6 +117,18 @@ class TestDefaultGatePolicy:
 
         assert any("empty_plan" in warning for warning in draft.score_warnings)
 
+    def test_legacy_hard_gate_overrides_dev_mode(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("BATON_PLANNER_HARD_GATE", "1")
+        monkeypatch.setenv("BATON_DEV_MODE", "1")
+        monkeypatch.delenv("BATON_PLANNER_WARN_ONLY", raising=False)
+        stage = ValidationStage()
+        draft = _draft_with_phase()
+
+        with pytest.raises(PlanQualityError):
+            _run_stage_with_critical_defect(stage, draft)
+
 
 class TestActionableDefectMessages:
     def test_empty_plan_message_includes_context_and_remediation(self) -> None:
@@ -171,6 +183,19 @@ class TestActionableDefectMessages:
         assert "task-plan-quality" in message
         assert "source=skipped-light" in message
         assert "complexity=heavy" in message
+        assert "Remediation:" in message
+
+    def test_reviewer_critical_warning_appends_remediation_when_absent(self) -> None:
+        draft = _draft_with_phase()
+        draft.review_result = SimpleNamespace(
+            source="reviewed",
+            warnings=["[critical] Review phase missing for high-risk plan"],
+        )
+
+        defects = ValidationStage()._detect_defects(draft)
+        message = next(d.message for d in defects if d.code == "reviewer_warning")
+
+        assert message.startswith("[critical] Review phase missing")
         assert "Remediation:" in message
 
 

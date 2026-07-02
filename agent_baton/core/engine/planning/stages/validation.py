@@ -6,11 +6,11 @@ step 12c (team consolidation + plan reviewer pass).
 **Quality fix #2 — hard gate**: the legacy ``PlanReviewer`` skipped
 light-complexity plans entirely (``plan_reviewer.py:222``) and treated
 its findings as advisory.  This stage computes a list of *defects* on
-top of the reviewer result and exposes them on the draft.  Under
-``BATON_PLANNER_HARD_GATE`` the stage raises ``PlanQualityError``
-when any defect is critical; without the env var it just records and
-warns, preserving legacy behavior so the new gate can bake in
-production before flipping the default.
+top of the reviewer result and exposes them on the draft.  Critical
+defects raise ``PlanQualityError`` by default.  ``BATON_DEV_MODE=1``
+and ``BATON_PLANNER_WARN_ONLY=1`` make the gate warn-only for local
+experimentation; truthy ``BATON_PLANNER_HARD_GATE`` is the legacy
+explicit override and blocks even when dev/warn-only mode is set.
 
 Defects detected here (independent of what the reviewer surfaces):
 
@@ -82,9 +82,8 @@ class ValidationStage:
     on the new ``draft.plan_defects`` attribute (full list).
     Critical defects raise ``PlanQualityError`` by default.  Set
     ``BATON_DEV_MODE=1`` or ``BATON_PLANNER_WARN_ONLY=1`` to keep local
-    experimentation warn-only.  ``BATON_PLANNER_HARD_GATE`` remains a
-    supported legacy explicit opt-in flag, but no longer has to be set for
-    critical defects to block plan creation.
+    experimentation warn-only.  A truthy ``BATON_PLANNER_HARD_GATE`` remains
+    a supported legacy explicit opt-in flag and overrides warn-only/dev mode.
     """
 
     name = "validation"
@@ -272,7 +271,7 @@ class ValidationStage:
         return self._env_truthy(self._HARD_GATE_ENV)
 
     def _quality_gate_blocks(self) -> bool:
-        return not self._warn_only_enabled()
+        return self._hard_gate_enabled() or not self._warn_only_enabled()
 
     def _warn_only_enabled(self) -> bool:
         return (
@@ -282,6 +281,12 @@ class ValidationStage:
 
     def _env_truthy(self, name: str) -> bool:
         return os.environ.get(name, "").strip().lower() in self._TRUTHY
+
+    def _with_remediation(self, message: str, remediation: str) -> str:
+        if re.search(r"\bremediation\s*:", message, flags=re.IGNORECASE):
+            return message
+        separator = " " if message.rstrip().endswith((".", "!", "?")) else ". "
+        return f"{message.rstrip()}{separator}{remediation}"
 
     def _detect_defects(self, draft: PlanDraft) -> list[PlanDefect]:
         """Inspect the assembled draft and return the list of defects."""
@@ -311,7 +316,12 @@ class ValidationStage:
                     defects.append(PlanDefect(
                         code="reviewer_warning",
                         severity="critical",
-                        message=w,
+                        message=self._with_remediation(
+                            w,
+                            "Remediation: update the plan to address the "
+                            "reviewer warning, or add explicit Review/Audit "
+                            "coverage that resolves it before validation.",
+                        ),
                     ))
 
         # 2. empty_plan
