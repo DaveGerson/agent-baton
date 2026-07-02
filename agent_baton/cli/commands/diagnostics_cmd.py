@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -575,7 +576,11 @@ def _check_team_context(project_root: Path) -> DoctorCheck:
             label=".claude/team-context",
             status="warning",
             message=f"{path} does not exist",
-            details={"path": str(path), "writable": False},
+            details={
+                "path": str(path),
+                "writable": False,
+                "writable_check": "metadata-only",
+            },
         )
     writable, error = _probe_writable_directory(path)
     if not writable:
@@ -583,23 +588,34 @@ def _check_team_context(project_root: Path) -> DoctorCheck:
             id="team_context",
             label=".claude/team-context",
             status="warning",
-            message=f"{path} is not writable: {error}",
-            details={"path": str(path), "writable": False},
+            message=f"{path} does not appear writable: {error}",
+            details={
+                "path": str(path),
+                "writable": False,
+                "writable_check": "metadata-only",
+            },
         )
     return DoctorCheck(
         id="team_context",
         label=".claude/team-context",
         status="ok",
-        message=f"{path} is writable",
-        details={"path": str(path), "writable": True},
+        message=f"{path} appears writable",
+        details={
+            "path": str(path),
+            "writable": True,
+            "writable_check": "metadata-only",
+        },
     )
 
 
 def _probe_writable_directory(path: Path) -> tuple[bool, str]:
-    probe = path / ".baton-doctor-write-test"
     try:
-        probe.write_text("ok\n", encoding="utf-8")
-        probe.unlink(missing_ok=True)
+        if not path.exists():
+            return False, "path does not exist"
+        if not path.is_dir():
+            return False, "path is not a directory"
+        if not os.access(path, os.W_OK):
+            return False, "metadata check denied write access"
     except OSError as exc:
         return False, str(exc)
     return True, ""

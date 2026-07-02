@@ -372,6 +372,41 @@ def test_doctor_build_report_does_not_create_team_context_artifacts_in_fresh_pro
     assert not shm_path.exists()
 
 
+def test_doctor_build_report_does_not_write_probe_files_in_team_context(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from agent_baton.cli.commands import diagnostics_cmd
+
+    home = tmp_path / "home"
+    home.mkdir()
+    team_context = tmp_path / ".claude" / "team-context"
+    team_context.mkdir(parents=True)
+    sentinel = team_context / "existing-note.txt"
+    sentinel.write_text("keep\n", encoding="utf-8")
+    before_children = sorted(path.name for path in team_context.iterdir())
+    path_write_text = Path.write_text
+
+    def guarded_write_text(self: Path, *args, **kwargs):
+        if self.parent == team_context and self.name.startswith(".baton-doctor"):
+            raise AssertionError("doctor attempted a temp-file writability probe")
+        return path_write_text(self, *args, **kwargs)
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setattr(Path, "write_text", guarded_write_text)
+
+    payload = diagnostics_cmd.build_report(tmp_path)
+    check = _check(payload, "team_context")
+    after_children = sorted(path.name for path in team_context.iterdir())
+
+    assert check["status"] == "ok"
+    assert before_children == after_children
+    assert not any(name.startswith(".baton-doctor") for name in after_children)
+
+
 def test_doctor_discovers_task_scoped_saved_plan_for_planner_validation(
     tmp_path: Path,
     monkeypatch,
