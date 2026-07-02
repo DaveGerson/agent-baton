@@ -10,6 +10,7 @@ import pytest
 from agent_baton.core.pmo.forge import ForgeSession
 from agent_baton.core.pmo.store import PmoStore
 from agent_baton.core.runtime.headless import HeadlessClaude, HeadlessConfig
+from agent_baton.core.engine.planning.stages.validation import PlanQualityError
 from agent_baton.models.execution import MachinePlan, PlanPhase, PlanStep
 from agent_baton.models.pmo import InterviewAnswer, PmoProject, PmoSignal
 
@@ -97,6 +98,46 @@ class _AvailableHeadless:
 # ---------------------------------------------------------------------------
 
 class TestCreatePlan:
+    def test_headless_invalid_plan_raises_plan_quality_error(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.delenv("BATON_DEV_MODE", raising=False)
+        monkeypatch.delenv("BATON_PLANNER_WARN_ONLY", raising=False)
+        monkeypatch.delenv("BATON_PLANNER_HARD_GATE", raising=False)
+
+        store = _store(tmp_path)
+        project = _project(tmp_path)
+        store.register_project(project)
+
+        planner = _mock_planner()
+        invalid_plan = _plan(
+            task_id="headless-invalid-task",
+            task_summary="Invalid headless plan",
+            phases=[
+                PlanPhase(
+                    phase_id=0,
+                    name="Implement",
+                    steps=[
+                        PlanStep(
+                            step_id="1.1",
+                            agent_name="code-reviewer",
+                            task_description="Review code during implementation",
+                        )
+                    ],
+                )
+            ],
+        )
+        forge = ForgeSession(
+            planner=planner,
+            store=store,
+            headless=_AvailableHeadless(invalid_plan),
+        )
+
+        with pytest.raises(PlanQualityError):
+            forge.create_plan(
+                description="Implement a change with an invalid reviewer assignment",
+                program="NDS",
+                project_id="nds",
+            )
+
     def test_delegates_to_planner(self, tmp_path: Path):
         store = _store(tmp_path)
         project = _project(tmp_path)
@@ -229,6 +270,55 @@ class TestCreatePlan:
 # ---------------------------------------------------------------------------
 
 class TestRegeneratePlan:
+    def test_headless_invalid_regenerated_plan_raises_plan_quality_error(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        monkeypatch.delenv("BATON_DEV_MODE", raising=False)
+        monkeypatch.delenv("BATON_PLANNER_WARN_ONLY", raising=False)
+        monkeypatch.delenv("BATON_PLANNER_HARD_GATE", raising=False)
+
+        store = _store(tmp_path)
+        project = _project(tmp_path)
+        store.register_project(project)
+
+        planner = _mock_planner()
+        invalid_plan = _plan(
+            task_id="regen-invalid-task",
+            task_summary="Invalid regenerated plan",
+            phases=[
+                PlanPhase(
+                    phase_id=0,
+                    name="Implement",
+                    steps=[
+                        PlanStep(
+                            step_id="1.1",
+                            agent_name="code-reviewer",
+                            task_description="Review code during implementation",
+                        )
+                    ],
+                )
+            ],
+        )
+        forge = ForgeSession(
+            planner=planner,
+            store=store,
+            headless=_AvailableHeadless(invalid_plan),
+        )
+
+        with pytest.raises(PlanQualityError):
+            forge.regenerate_plan(
+                description="Refine the invalid reviewer plan",
+                project_id="nds",
+                answers=[
+                    InterviewAnswer(
+                        question_id="q-testing",
+                        answer="Add unit tests",
+                    )
+                ],
+            )
+
     def test_headless_regenerated_plan_gets_plan_diagnostics(self, tmp_path: Path):
         store = _store(tmp_path)
         project = _project(tmp_path)

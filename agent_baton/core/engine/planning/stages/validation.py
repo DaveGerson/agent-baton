@@ -138,27 +138,41 @@ class ValidationStage:
         # Compute defects from the assembled plan + reviewer result.
         defects = self._detect_defects(draft)
         draft.plan_defects = defects  # type: ignore[attr-defined]
-        for d in defects:
-            if d.severity in ("critical", "warning"):
-                draft.score_warnings.append(str(d))
-
-        critical = [d for d in defects if d.severity == "critical"]
-        if critical:
-            logger.warning(
-                "planner.validation: %d critical defect(s) on task %s: %s",
-                len(critical), draft.task_id,
-                "; ".join(d.code for d in critical),
-            )
-            if self._quality_gate_blocks():
-                raise PlanQualityError(
-                    f"Plan {draft.task_id} blocked by ValidationStage: "
-                    + "; ".join(str(d) for d in critical[:5])
-                )
+        self._apply_quality_gate(
+            task_id=draft.task_id,
+            defects=defects,
+            score_warnings=draft.score_warnings,
+        )
         return draft
 
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    def _apply_quality_gate(
+        self,
+        *,
+        task_id: str,
+        defects: list[PlanDefect],
+        score_warnings: list[str] | None = None,
+    ) -> None:
+        if score_warnings is not None:
+            for defect in defects:
+                if defect.severity in ("critical", "warning"):
+                    score_warnings.append(str(defect))
+
+        critical = [d for d in defects if d.severity == "critical"]
+        if critical:
+            logger.warning(
+                "planner.validation: %d critical defect(s) on task %s: %s",
+                len(critical), task_id,
+                "; ".join(d.code for d in critical),
+            )
+            if self._quality_gate_blocks():
+                raise PlanQualityError(
+                    f"Plan {task_id} blocked by ValidationStage: "
+                    + "; ".join(str(d) for d in critical[:5])
+                )
 
     def _check_scores(
         self,
@@ -528,3 +542,31 @@ class ValidationStage:
                 if nested_name:
                     bases.add(nested_name.split("--")[0])
         return bases
+
+
+def validate_assembled_plan(plan: "MachinePlan") -> "MachinePlan":
+    """Apply ValidationStage defect detection and gate policy to a MachinePlan."""
+    draft = PlanDraft.from_inputs(
+        plan.task_summary,
+        task_type=plan.task_type,
+        complexity=plan.complexity,
+    )
+    draft.task_id = plan.task_id
+    draft.plan_phases = list(plan.phases)
+    draft.resolved_agents = list(getattr(plan, "all_agents", []))
+    draft.inferred_type = plan.task_type or ""
+    draft.inferred_complexity = plan.complexity or "medium"
+    draft.risk_level = str(plan.risk_level or "")
+    draft.review_result = None
+
+    stage = ValidationStage()
+    defects = stage._detect_defects(draft)
+    stage._apply_quality_gate(task_id=plan.task_id, defects=defects)
+
+    existing = dict(getattr(plan, "plan_diagnostics", {}) or {})
+    existing["validation_warning_count"] = max(
+        int(existing.get("validation_warning_count", 0)),
+        sum(1 for defect in defects if defect.severity in ("critical", "warning")),
+    )
+    plan.plan_diagnostics = existing
+    return plan

@@ -91,11 +91,7 @@ async def start_execution(
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    # Gather all immediately dispatchable parallel actions.
-    try:
-        parallel_actions = engine.next_actions()
-    except Exception:
-        parallel_actions = [first_action]
+    next_actions = _collect_next_actions(engine)
 
     # Load state to build the response — start() saves it to disk.
     state = engine._load_state()  # noqa: SLF001
@@ -105,11 +101,7 @@ async def start_execution(
     pending_count = _count_pending(decision_manager)
     execution = ExecutionResponse.from_dataclass(state, pending_decisions=pending_count)
 
-    next_actions = (
-        [ActionResponse.from_dataclass(a) for a in parallel_actions]
-        if parallel_actions
-        else [ActionResponse.from_dataclass(first_action)]
-    )
+    next_actions = next_actions or [ActionResponse.from_dataclass(first_action)]
 
     return {
         "execution": execution.model_dump(),

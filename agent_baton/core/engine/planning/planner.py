@@ -90,8 +90,22 @@ def build_plan_diagnostics(
     classification_source: str | None = None,
 ) -> dict[str, object]:
     """Build the public diagnostics payload for an assembled MachinePlan."""
+
+    def _collect_member_agents(member: object, sink: list[str]) -> None:
+        agent_name = getattr(member, "agent_name", "")
+        if agent_name:
+            sink.append(agent_name)
+        for nested in getattr(member, "sub_team", []) or []:
+            _collect_member_agents(nested, sink)
+
     existing = dict(getattr(plan, "plan_diagnostics", {}) or {})
-    selected_agents = list(dict.fromkeys(step.agent_name for step in plan.all_steps))
+    selected_agent_candidates: list[str] = list(existing.get("selected_agents", []) or [])
+    for step in plan.all_steps:
+        if step.agent_name:
+            selected_agent_candidates.append(step.agent_name)
+        for member in getattr(step, "team", []) or []:
+            _collect_member_agents(member, selected_agent_candidates)
+    selected_agents = list(dict.fromkeys(selected_agent_candidates))
     knowledge_attachment_count = sum(len(step.knowledge) for step in plan.all_steps)
 
     if knowledge_registry is not None:

@@ -97,6 +97,40 @@ def make_plan_unlocking_team(task_id: str = "team-unlock-task") -> MachinePlan:
     )
 
 
+def make_plan_with_immediate_team_wave(task_id: str = "team-immediate-task") -> MachinePlan:
+    return MachinePlan(
+        task_id=task_id,
+        task_summary="Dispatch a solo step and a team step in the first wave",
+        phases=[
+            PlanPhase(
+                phase_id=0,
+                name="Phase 1",
+                steps=[
+                    PlanStep(
+                        step_id="1.1",
+                        agent_name="test-agent",
+                        task_description="Prepare inputs",
+                    ),
+                    PlanStep(
+                        step_id="1.2",
+                        agent_name="team",
+                        task_description="Run team implementation",
+                        team=[
+                            TeamMember(
+                                member_id="1.2.a",
+                                agent_name="backend-engineer",
+                                role="implementer",
+                                task_description="Implement the service",
+                                model="sonnet",
+                            ),
+                        ],
+                    ),
+                ],
+            ),
+        ],
+    )
+
+
 def start_execution(client: TestClient, task_id: str = "test-task") -> dict:
     """Helper: start an execution with an inline plan and return the response body."""
     plan = make_test_plan(task_id=task_id)
@@ -111,6 +145,20 @@ def start_execution(client: TestClient, task_id: str = "test-task") -> dict:
 
 
 class TestStartExecution:
+    def test_strict_unknown_team_backend_returns_500_on_initial_batch(
+        self,
+        client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("BATON_TEAMS_BACKEND", "not-real")
+        monkeypatch.setenv("BATON_TEAMS_BACKEND_STRICT", "1")
+        plan = make_plan_with_immediate_team_wave(task_id="strict-team-start")
+
+        r = client.post("/api/v1/executions", json={"plan": plan.to_dict()})
+
+        assert r.status_code == 500
+        assert "Unknown BATON_TEAMS_BACKEND" in r.json()["detail"]
+
     def test_inline_plan_returns_201(self, client: TestClient) -> None:
         plan = make_test_plan()
         r = client.post("/api/v1/executions", json={"plan": plan.to_dict()})

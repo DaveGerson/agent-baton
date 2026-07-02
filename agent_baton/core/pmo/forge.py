@@ -30,6 +30,7 @@ from agent_baton.core.engine.planner import (
     build_default_knowledge_registry,
     ensure_plan_diagnostics,
 )
+from agent_baton.core.engine.planning.stages.validation import validate_assembled_plan
 from agent_baton.models.execution import MachinePlan
 from agent_baton.models.pmo import InterviewQuestion, InterviewAnswer, PmoProject
 
@@ -134,6 +135,7 @@ class ForgeSession:
                 )
             if plan is not None:
                 plan.classification_source = "headless-claude"
+                validate_assembled_plan(plan)
                 ensure_plan_diagnostics(
                     plan,
                     knowledge_registry=build_default_knowledge_registry(
@@ -347,6 +349,7 @@ class ForgeSession:
                 )
             if plan is not None:
                 plan.classification_source = "headless-claude"
+                validate_assembled_plan(plan)
                 ensure_plan_diagnostics(
                     plan,
                     knowledge_registry=build_default_knowledge_registry(
