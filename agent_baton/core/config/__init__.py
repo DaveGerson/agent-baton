@@ -15,6 +15,7 @@ from agent_baton.core.config.pricing import (
     blended,
     normalise_family,
 )
+from agent_baton.core.config.manager import ManagerConfig, ManagerConfigError
 
 __all__ = [
     "ProjectConfig",
@@ -23,4 +24,6 @@ __all__ = [
     "get_pricing",
     "blended",
     "normalise_family",
+    "ManagerConfig",
+    "ManagerConfigError",
 ]
