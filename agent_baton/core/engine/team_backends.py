@@ -683,15 +683,26 @@ def audit_agents_for_teammate_safety(
             continue
         agent_name = md.stem
         problems: list[str] = []
+        lines = fm.splitlines()
         for field in ("skills", "mcpServers"):
             # Look for "field:" at start of a line, followed by a
             # non-empty value or a yaml list.
-            for line in fm.splitlines():
+            for idx, line in enumerate(lines):
                 stripped = line.strip()
                 if stripped.startswith(f"{field}:"):
                     rhs = stripped.split(":", 1)[1].strip()
                     if rhs and rhs not in ("[]", "{}", "null", "~"):
                         problems.append(field)
+                    elif not rhs:
+                        for child in lines[idx + 1:]:
+                            child_stripped = child.strip()
+                            if not child_stripped or child_stripped.startswith("#"):
+                                continue
+                            if not child.startswith((" ", "\t")):
+                                break
+                            if child_stripped not in ("[]", "{}", "null", "~"):
+                                problems.append(field)
+                                break
                     break
         if problems:
             flagged[agent_name] = problems

@@ -2009,6 +2009,9 @@ class ExecutionEngine:
         # Worktree Discipline block and uses relativized paths.
         wave_isolation = "worktree" if len(dispatchable_steps) >= 2 else ""
 
+        team_readiness_before = dict(
+            state.plan.plan_diagnostics.get("team_readiness", {})
+        )
         actions: list[ExecutionAction] = []
         for step, is_in_flight_team in dispatchable_steps:
             if step.team:
@@ -2027,6 +2030,12 @@ class ExecutionEngine:
                         step, state, isolation=wave_isolation,
                     )
                 )
+
+        if (
+            state.plan.plan_diagnostics.get("team_readiness", {})
+            != team_readiness_before
+        ):
+            self._save_execution(state)
 
         return actions
 

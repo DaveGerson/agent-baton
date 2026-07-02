@@ -26,11 +26,11 @@ Agents do not run on their own. They run when:
 1. The **orchestrator agent** dispatches them as part of a baton-driven plan, OR
 2. A user (or another agent) names them via Claude Code's `Agent` tool with a `subagent_type` parameter.
 
-Each agent file in `agents/` contains a YAML frontmatter block (`name`,
-`description`, `model`, `permissionMode`, `tools`) and a body prompt. The
+Agent files in `agents/` use a YAML frontmatter block and a body prompt. The
 frontmatter is what the runtime registers; the body is what the agent reads
-when dispatched. New or updated agents should follow the generated-agent
-contract in [`references/agent-authoring.md`](../references/agent-authoring.md).
+when dispatched. New or updated/generated agents should include `name`,
+`description`, `model`, `permissionMode`, and `tools`, and should follow the
+generated-agent contract in [`references/agent-authoring.md`](../references/agent-authoring.md).
 
 ## Orchestration & routing
 

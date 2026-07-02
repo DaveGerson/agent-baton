@@ -172,6 +172,25 @@ class TestAgentAudit:
         flagged = audit_agents_for_teammate_safety(agents)
         assert flagged == {}
 
+    def test_audit_flags_yaml_block_forms(self, tmp_path: Path) -> None:
+        agents = tmp_path / "agents"
+        agents.mkdir()
+        (agents / "block-agent.md").write_text(
+            "---\n"
+            "name: block-agent\n"
+            "model: sonnet\n"
+            "skills:\n"
+            "  - github\n"
+            "mcpServers:\n"
+            "  filesystem:\n"
+            "    command: npx\n"
+            "---\n"
+            "body\n",
+            encoding="utf-8",
+        )
+        flagged = audit_agents_for_teammate_safety(agents)
+        assert flagged == {"block-agent": ["skills", "mcpServers"]}
+
     def test_audit_skips_non_frontmatter_files(self, tmp_path: Path) -> None:
         agents = tmp_path / "agents"
         agents.mkdir()

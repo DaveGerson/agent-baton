@@ -51,6 +51,49 @@ def _team_plan() -> MachinePlan:
     )
 
 
+def _solo_then_team_plan() -> MachinePlan:
+    return MachinePlan(
+        task_id="t-next-actions-team",
+        task_summary="unlock team from next_actions",
+        phases=[
+            PlanPhase(
+                phase_id=1,
+                name="Build",
+                steps=[
+                    PlanStep(
+                        step_id="1.1",
+                        agent_name="setup-agent",
+                        task_description="prepare inputs",
+                    ),
+                    PlanStep(
+                        step_id="1.2",
+                        agent_name="team",
+                        task_description="implement and review",
+                        depends_on=["1.1"],
+                        model="sonnet",
+                        team=[
+                            TeamMember(
+                                member_id="1.2.a",
+                                agent_name="backend-engineer",
+                                role="implementer",
+                                task_description="write the service",
+                                model="sonnet",
+                            ),
+                            TeamMember(
+                                member_id="1.2.b",
+                                agent_name="code-reviewer",
+                                role="reviewer",
+                                task_description="review for security",
+                                model="sonnet",
+                            ),
+                        ],
+                    ),
+                ],
+            ),
+        ],
+    )
+
+
 def _started(tmp_path: Path) -> tuple[ExecutionEngine, MachinePlan]:
     engine = ExecutionEngine(team_context_root=tmp_path)
     plan = _team_plan()
@@ -122,6 +165,32 @@ class TestMailboxOnDispatch:
 
         with pytest.raises(ValueError, match="Unknown BATON_TEAMS_BACKEND"):
             engine.start(_team_plan())
+
+    def test_next_actions_persists_team_readiness_for_unlocked_team(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("BATON_TEAMS_BACKEND", raising=False)
+        monkeypatch.delenv("BATON_TEAMS_BACKEND_STRICT", raising=False)
+        engine = ExecutionEngine(team_context_root=tmp_path)
+        engine.start(_solo_then_team_plan())
+        engine.record_step_result(
+            step_id="1.1",
+            agent_name="setup-agent",
+            status="complete",
+            outcome="inputs ready",
+        )
+
+        actions = engine.next_actions()
+
+        assert actions
+        state = StatePersistence(tmp_path).load()
+        assert state is not None
+        assert (
+            state.plan.plan_diagnostics["team_readiness"]["1.2"]["backend"]
+            == "worktree"
+        )
 
 
 class TestMailboxOnMemberResult:

@@ -17,7 +17,13 @@ fastapi = pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from agent_baton.api.server import create_app  # noqa: E402
-from agent_baton.models.execution import MachinePlan, PlanGate, PlanPhase, PlanStep  # noqa: E402
+from agent_baton.models.execution import (  # noqa: E402
+    MachinePlan,
+    PlanGate,
+    PlanPhase,
+    PlanStep,
+    TeamMember,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -51,6 +57,41 @@ def make_test_plan(task_id: str = "test-task") -> MachinePlan:
                     ),
                 ],
                 gate=PlanGate(gate_type="test", command="pytest"),
+            ),
+        ],
+    )
+
+
+def make_plan_unlocking_team(task_id: str = "team-unlock-task") -> MachinePlan:
+    return MachinePlan(
+        task_id=task_id,
+        task_summary="Unlock a team step after a solo setup step",
+        phases=[
+            PlanPhase(
+                phase_id=0,
+                name="Phase 1",
+                steps=[
+                    PlanStep(
+                        step_id="1.1",
+                        agent_name="test-agent",
+                        task_description="Prepare inputs",
+                    ),
+                    PlanStep(
+                        step_id="1.2",
+                        agent_name="team",
+                        task_description="Run team implementation",
+                        depends_on=["1.1"],
+                        team=[
+                            TeamMember(
+                                member_id="1.2.a",
+                                agent_name="backend-engineer",
+                                role="implementer",
+                                task_description="Implement the service",
+                                model="sonnet",
+                            ),
+                        ],
+                    ),
+                ],
             ),
         ],
     )
@@ -173,6 +214,25 @@ class TestRecordStep:
             json={"step_id": "1.1", "agent": "test-agent", "status": "complete"},
         )
         assert "next_actions" in r.json()
+
+    def test_record_surfaces_strict_unknown_team_backend(
+        self,
+        client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("BATON_TEAMS_BACKEND", "not-real")
+        monkeypatch.setenv("BATON_TEAMS_BACKEND_STRICT", "1")
+        plan = make_plan_unlocking_team(task_id="strict-team")
+        r = client.post("/api/v1/executions", json={"plan": plan.to_dict()})
+        assert r.status_code == 201, r.text
+
+        r = client.post(
+            "/api/v1/executions/strict-team/record",
+            json={"step_id": "1.1", "agent": "test-agent", "status": "complete"},
+        )
+
+        assert r.status_code == 500
+        assert "Unknown BATON_TEAMS_BACKEND" in r.json()["detail"]
 
     def test_record_on_nonexistent_task_returns_404(self, client: TestClient) -> None:
         r = client.post(

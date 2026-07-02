@@ -22,6 +22,7 @@ from agent_baton.api.models.requests import (
 )
 from agent_baton.api.models.responses import ActionResponse, ExecutionResponse, RecordFeedbackResponse
 from agent_baton.core.engine.executor import ExecutionEngine
+from agent_baton.core.engine.team_backends import UnknownTeamBackendError
 from agent_baton.core.runtime.decisions import DecisionManager
 from agent_baton.models.execution import MachinePlan
 
@@ -444,7 +445,8 @@ def _collect_next_actions(engine: ExecutionEngine) -> list[ActionResponse]:
 
     Attempts ``engine.next_actions()`` first for parallel dispatch.
     Falls back to ``engine.next_action()`` (single) if the parallel
-    method fails.  Returns an empty list if both fail.
+    method fails. Returns an empty list if both fail, except for strict
+    team-backend configuration errors, which are surfaced to callers.
 
     Args:
         engine: The ``ExecutionEngine`` to query.
@@ -459,11 +461,15 @@ def _collect_next_actions(engine: ExecutionEngine) -> list[ActionResponse]:
         parallel = engine.next_actions()
         if parallel:
             return [ActionResponse.from_dataclass(a) for a in parallel]
+    except UnknownTeamBackendError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     except Exception:
         _log.warning("next_actions() failed, falling back to next_action()", exc_info=True)
     try:
         single = engine.next_action()
         return [ActionResponse.from_dataclass(single)]
+    except UnknownTeamBackendError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     except Exception:
         _log.warning("next_action() failed, returning empty actions", exc_info=True)
         return []
