@@ -14,6 +14,7 @@ from agent_baton.core.engine.planning.stages.validation import (
     PlanQualityError,
     ValidationStage,
 )
+from agent_baton.core.govern.classifier import ClassificationResult
 from agent_baton.models.enums import RiskLevel
 from agent_baton.models.execution import PlanPhase, PlanStep
 
@@ -223,6 +224,27 @@ class TestReviewAuditCoverage:
         assert any(d.code == "audit_missing" for d in defects)
         message = next(d.message for d in defects if d.code == "audit_missing")
         assert "auditor" in message
+        assert "Audit" in message
+        assert "Remediation:" in message
+
+    def test_regulated_classification_without_audit_phase_is_critical(self) -> None:
+        draft = _draft_with_phase(
+            task_summary="Update FERPA student records export workflow",
+            risk=RiskLevel.HIGH,
+            agent_name="backend-engineer",
+        )
+        draft.classification = ClassificationResult(
+            risk_level=RiskLevel.HIGH,
+            guardrail_preset="Regulated Data",
+            signals_found=["regulated:ferpa"],
+            confidence="low",
+        )
+
+        defects = ValidationStage()._detect_defects(draft)
+
+        assert any(d.code == "audit_missing" for d in defects)
+        message = next(d.message for d in defects if d.code == "audit_missing")
+        assert "Regulated Data" in message
         assert "Audit" in message
         assert "Remediation:" in message
 

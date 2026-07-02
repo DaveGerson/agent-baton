@@ -10,10 +10,12 @@ and treated all of its findings as advisory.  ValidationStage now:
   2. Detects defects independently of the reviewer:
        * empty_plan / empty_phase
        * agent_phase_mismatch (bd-0e36 / bd-1974 family)
+       * review_missing / audit_missing for missing quality coverage
        * review_skipped on non-light plans
   3. Surfaces defects on ``draft.plan_defects``.
-  4. Under ``BATON_PLANNER_HARD_GATE=1`` raises ``PlanQualityError``
-     when any defect is critical.
+  4. Raises ``PlanQualityError`` for critical defects by default; explicit
+     warn-only/dev mode downgrades to warnings unless the legacy hard-gate
+     override is truthy.
 """
 from __future__ import annotations
 
@@ -97,7 +99,7 @@ class TestDefectDetection:
         assert len(plan.phases) >= 1
 
 
-class TestHardGate:
+class TestGatePolicy:
     def teardown_method(self) -> None:
         os.environ.pop("BATON_PLANNER_HARD_GATE", None)
 
@@ -125,8 +127,7 @@ class TestHardGate:
                         stage.run(draft, services)
                     assert "empty_plan" in str(ei.value)
 
-    def test_critical_defect_only_warns_without_hard_gate(self) -> None:
-        # No env var set.
+    def test_legacy_hard_gate_env_defaults_false(self) -> None:
         stage = ValidationStage()
         assert not stage._hard_gate_enabled()
 

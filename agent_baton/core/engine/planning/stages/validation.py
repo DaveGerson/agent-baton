@@ -21,7 +21,12 @@ Defects detected here (independent of what the reviewer surfaces):
 3. **empty_phase** — at least one phase has zero steps.  Critical.
 4. **agent_phase_mismatch** — a step's agent role is in
    ``PHASE_BLOCKED_ROLES`` for the phase it landed in.  Critical.
-5. **reviewer_warning** — the reviewer surfaced any string starting
+5. **review_missing** - high-risk or reviewer-routed plans are missing
+   a Review phase with reviewer coverage.  Critical.
+6. **audit_missing** - regulated, compliance, policy-auditor, or
+   auditor-routed plans are missing an Audit phase with auditor coverage.
+   Critical.
+7. **reviewer_warning** — the reviewer surfaced any string starting
    with ``[critical]``.  Critical.
 
 Order is preserved: score check + budget tier before consolidation,
@@ -60,7 +65,7 @@ logger = logging.getLogger(__name__)
 
 
 class PlanQualityError(RuntimeError):
-    """Raised by ValidationStage in hard-gate mode when a critical defect is found."""
+    """Raised by ValidationStage when the effective quality gate blocks."""
 
 
 @dataclass
@@ -354,15 +359,14 @@ class ValidationStage:
                 ),
             ))
 
-        if (
-            self._audit_required(draft, agent_bases)
-            and not self._has_audit_coverage(draft)
-        ):
+        audit_requirement = self._audit_requirement(draft, agent_bases)
+        if audit_requirement and not self._has_audit_coverage(draft):
             defects.append(PlanDefect(
                 code="audit_missing",
                 severity="critical",
                 message=(
-                    f"task_id={draft.task_id} agents={sorted(agent_bases)}. "
+                    f"task_id={draft.task_id} agents={sorted(agent_bases)} "
+                    f"{audit_requirement}. "
                     "Compliance or auditor-routed plans require Audit coverage. "
                     "Remediation: add a terminal Audit phase with an auditor step."
                 ),
@@ -433,13 +437,35 @@ class ValidationStage:
         )
 
     def _audit_required(self, draft: PlanDraft, agent_bases: set[str]) -> bool:
+        return self._audit_requirement(draft, agent_bases) is not None
+
+    def _audit_requirement(self, draft: PlanDraft, agent_bases: set[str]) -> str | None:
         if "auditor" in agent_bases:
-            return True
+            return "requirement=auditor_routed"
+        preset = str(
+            getattr(getattr(draft, "classification", None), "guardrail_preset", "")
+            or ""
+        ).strip()
+        if preset.lower() == "regulated data":
+            return f"guardrail_preset={preset}"
+        for violation in getattr(draft, "policy_violations", []) or []:
+            rule = getattr(violation, "rule", None)
+            if (
+                str(getattr(rule, "rule_type", "")).lower() == "require_agent"
+                and str(getattr(rule, "pattern", "")).split("--")[0] == "auditor"
+                and str(getattr(rule, "severity", "")).lower() == "block"
+            ):
+                rule_name = str(
+                    getattr(rule, "name", "require_agent") or "require_agent"
+                )
+                return f"policy_violation={rule_name}"
         summary = (draft.task_summary or "").lower()
-        return any(
+        if any(
             re.search(rf"\b{re.escape(term)}\b", summary)
             for term in self._COMPLIANCE_TERMS
-        )
+        ):
+            return "requirement=compliance_signal"
+        return None
 
     def _has_review_coverage(self, draft: PlanDraft) -> bool:
         for phase in draft.plan_phases:
