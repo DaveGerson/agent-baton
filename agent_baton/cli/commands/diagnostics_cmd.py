@@ -625,7 +625,10 @@ def _check_terminology() -> DoctorCheck:
 
 def _check_planner_validation(project_root: Path) -> DoctorCheck:
     plan_candidates = _saved_plan_candidates(project_root)
+    plan_path, active_task_state = _select_saved_plan_for_validation(project_root)
     details: dict[str, Any] = {
+        "active_task_id": active_task_state["active_task_id"],
+        "active_task_source": active_task_state["active_task_source"],
         "plan_candidates": [str(path) for path in plan_candidates],
         "plan_path": None,
         "machine_plan_importable": False,
@@ -664,7 +667,6 @@ def _check_planner_validation(project_root: Path) -> DoctorCheck:
             details=details,
         )
 
-    plan_path = _find_saved_plan(project_root)
     if plan_path is None:
         return DoctorCheck(
             id="planner_validation",
@@ -675,6 +677,15 @@ def _check_planner_validation(project_root: Path) -> DoctorCheck:
         )
 
     details["plan_path"] = str(plan_path)
+    if active_task_state["active_plan_missing"]:
+        details["active_plan_missing"] = True
+        return DoctorCheck(
+            id="planner_validation",
+            label="Planner validation",
+            status="warning",
+            message=f"Active task plan is missing: {plan_path}",
+            details=details,
+        )
     try:
         data = json.loads(plan_path.read_text(encoding="utf-8"))
     except Exception as exc:
@@ -863,6 +874,58 @@ def _find_saved_plan(project_root: Path) -> Path | None:
         if candidate.is_file():
             return candidate
     return None
+
+
+def _select_saved_plan_for_validation(
+    project_root: Path,
+) -> tuple[Path | None, dict[str, Any]]:
+    context_root = project_root / ".claude" / "team-context"
+    active_task_id, active_task_source = _resolve_active_task_for_validation(
+        context_root
+    )
+    active_task_state: dict[str, Any] = {
+        "active_task_id": active_task_id,
+        "active_task_source": active_task_source,
+        "active_plan_missing": False,
+    }
+    if active_task_id:
+        active_plan_path = (
+            context_root / "executions" / active_task_id / "plan.json"
+        )
+        if active_plan_path.is_file():
+            return active_plan_path, active_task_state
+        active_task_state["active_plan_missing"] = True
+        return active_plan_path, active_task_state
+    return _find_saved_plan(project_root), active_task_state
+
+
+def _resolve_active_task_for_validation(
+    context_root: Path,
+) -> tuple[str | None, str | None]:
+    try:
+        from agent_baton.core.storage import detect_backend, get_project_storage
+
+        if detect_backend(context_root) == "sqlite":
+            try:
+                storage = get_project_storage(context_root, backend="sqlite")
+                active_task_id = storage.get_active_task()
+            except Exception:
+                active_task_id = None
+            else:
+                if active_task_id:
+                    return active_task_id, "sqlite"
+    except Exception:
+        pass
+
+    try:
+        from agent_baton.core.engine.persistence import StatePersistence
+
+        active_task_id = StatePersistence.get_active_task_id(context_root)
+    except Exception:
+        return None, None
+    if active_task_id:
+        return active_task_id, "file"
+    return None, None
 
 
 def _saved_plan_candidates(project_root: Path) -> list[Path]:

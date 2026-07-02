@@ -72,6 +72,27 @@ def _write_project_layout(root: Path) -> None:
     team_context.mkdir(parents=True)
 
 
+def _valid_saved_plan(task_summary: str) -> dict[str, object]:
+    return {
+        "task_summary": task_summary,
+        "task_type": "documentation",
+        "complexity": "medium",
+        "risk_level": "LOW",
+        "phases": [
+            {
+                "name": "Review",
+                "steps": [
+                    {
+                        "task_description": "Inspect current versions",
+                        "agent_name": "auditor",
+                        "team": [],
+                    }
+                ],
+            }
+        ],
+    }
+
+
 def _check(payload: dict[str, object], check_id: str) -> dict[str, object]:
     checks = payload["checks"]
     assert isinstance(checks, list)
@@ -339,26 +360,7 @@ def test_doctor_discovers_task_scoped_saved_plan_for_planner_validation(
     )
     task_dir.mkdir(parents=True)
     (task_dir / "plan.json").write_text(
-        json.dumps(
-            {
-                "task_summary": "Review dependency versions",
-                "task_type": "documentation",
-                "complexity": "medium",
-                "risk_level": "LOW",
-                "phases": [
-                    {
-                        "name": "Review",
-                        "steps": [
-                            {
-                                "task_description": "Inspect current versions",
-                                "agent_name": "auditor",
-                                "team": [],
-                            }
-                        ],
-                    }
-                ],
-            }
-        ),
+        json.dumps(_valid_saved_plan("Review dependency versions")),
         encoding="utf-8",
     )
     monkeypatch.chdir(tmp_path)
@@ -375,6 +377,90 @@ def test_doctor_discovers_task_scoped_saved_plan_for_planner_validation(
         str(tmp_path / ".claude" / "team-context" / "plan.json"),
         str(tmp_path / "plan.json"),
         str(task_dir / "plan.json"),
+    ]
+
+
+def test_doctor_prefers_active_task_scoped_plan_over_sorted_or_legacy_fallbacks(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from agent_baton.cli.commands import diagnostics_cmd
+
+    home = tmp_path / "home"
+    home.mkdir()
+    team_context = tmp_path / ".claude" / "team-context"
+    task_a_dir = team_context / "executions" / "task-a"
+    task_b_dir = team_context / "executions" / "task-b"
+    task_a_dir.mkdir(parents=True)
+    task_b_dir.mkdir(parents=True)
+    (team_context / "plan.json").write_text(
+        json.dumps(_valid_saved_plan("Legacy team-context plan")),
+        encoding="utf-8",
+    )
+    (task_a_dir / "plan.json").write_text(
+        json.dumps(_valid_saved_plan("Task A plan")),
+        encoding="utf-8",
+    )
+    (task_b_dir / "plan.json").write_text(
+        json.dumps(_valid_saved_plan("Task B plan")),
+        encoding="utf-8",
+    )
+    (team_context / "active-task-id.txt").write_text("task-b\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("PATH", "")
+
+    payload = diagnostics_cmd.build_report(tmp_path)
+    check = _check(payload, "planner_validation")
+
+    assert check["status"] == "ok"
+    assert check["details"]["active_task_id"] == "task-b"
+    assert check["details"]["active_task_source"] == "file"
+    assert check["details"]["plan_path"] == str(task_b_dir / "plan.json")
+    assert check["details"]["plan_candidates"] == [
+        str(team_context / "plan.json"),
+        str(tmp_path / "plan.json"),
+        str(task_a_dir / "plan.json"),
+        str(task_b_dir / "plan.json"),
+    ]
+
+
+def test_doctor_reports_missing_active_task_plan_without_validating_fallback(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from agent_baton.cli.commands import diagnostics_cmd
+
+    home = tmp_path / "home"
+    home.mkdir()
+    team_context = tmp_path / ".claude" / "team-context"
+    fallback_plan = team_context / "plan.json"
+    fallback_plan.parent.mkdir(parents=True)
+    fallback_plan.write_text(
+        json.dumps(_valid_saved_plan("Legacy fallback plan")),
+        encoding="utf-8",
+    )
+    missing_active_plan = (
+        team_context / "executions" / "task-b" / "plan.json"
+    )
+    (team_context / "active-task-id.txt").write_text("task-b\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("PATH", "")
+
+    payload = diagnostics_cmd.build_report(tmp_path)
+    check = _check(payload, "planner_validation")
+
+    assert check["status"] == "warning"
+    assert check["details"]["active_task_id"] == "task-b"
+    assert check["details"]["active_task_source"] == "file"
+    assert check["details"]["plan_path"] == str(missing_active_plan)
+    assert str(missing_active_plan) in check["message"]
+    assert check["details"]["plan_candidates"] == [
+        str(team_context / "plan.json"),
+        str(tmp_path / "plan.json"),
     ]
 
 
