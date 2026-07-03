@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from agent_baton.core.config.manager import ManagerConfig
 from agent_baton.core.manager.phase_policy import PhasePolicyApplier, PolicyDecisions
 from agent_baton.models.execution import MachinePlan, PlanGate, PlanPhase, PlanStep
@@ -396,6 +398,164 @@ def test_gate_scope_full_threads_detected_stack_into_default_gate() -> None:
     assert decisions.gate_scope_applied == "full"
 
     _round_trip(plan)
+
+
+def _plan_with_original_gate(*, detected_stack: str | None = "python") -> MachinePlan:
+    """Two phases: phase 1 carries a planner-built gate, phase 2 is gate-less."""
+    return _make_plan(
+        detected_stack=detected_stack,
+        phases=[
+            PlanPhase(
+                phase_id=1,
+                name="Implementation",
+                steps=[
+                    PlanStep(
+                        step_id="1.1",
+                        agent_name="backend-engineer",
+                        task_description="Do the work.",
+                        deliverables=["work"],
+                        allowed_paths=["app/a.py"],
+                    ),
+                ],
+                gate=PlanGate(
+                    gate_type="build",
+                    command="echo original-gate",
+                    description="original description",
+                    fail_on=["original failure"],
+                ),
+            ),
+            PlanPhase(
+                phase_id=2,
+                name="Docs",
+                steps=[
+                    PlanStep(
+                        step_id="2.1",
+                        agent_name="documentation-engineer",
+                        task_description="Write the docs.",
+                        deliverables=["docs"],
+                        allowed_paths=["docs/a.md"],
+                        depends_on=["1.1"],
+                    ),
+                ],
+            ),
+        ],
+    )
+
+
+def test_mode_focused_is_noop_even_when_gate_scope_differs() -> None:
+    """bd-6dn: ``gates.mode == "focused"`` forces the focused scope, which
+    (per the Wave-2 F1 fidelity rule) means leaving the planner's gates
+    untouched -- even when ``gates.gate_scope`` says something else."""
+    config = _no_review_config(gates={"mode": "focused", "gate_scope": "smoke"})
+    plan = _plan_with_original_gate()
+    before = plan.to_dict()
+
+    decisions = PhasePolicyApplier(config).apply(plan, cli_gate_scope_explicit=False)
+
+    assert plan.to_dict() == before
+    assert decisions.gates_mode == "focused"
+    assert decisions.gate_scope_applied is None
+    assert decisions.gates_stripped == []
+
+    _round_trip(plan)
+
+
+def test_mode_full_forces_full_scope_with_detected_stack() -> None:
+    """bd-6dn: ``gates.mode == "full"`` rescopes gates to full regardless of
+    ``gates.gate_scope``, threading ``plan.detected_stack`` into
+    ``default_gate`` (same fidelity rule as project_configured/full)."""
+    plan = _make_plan(
+        detected_stack="typescript",
+        phases=[
+            PlanPhase(
+                phase_id=1,
+                name="Test",
+                steps=[
+                    PlanStep(
+                        step_id="1.1",
+                        agent_name="test-engineer",
+                        task_description="Write tests for the widget.",
+                        deliverables=["tests"],
+                        allowed_paths=["src/widget.test.ts"],
+                    ),
+                ],
+                gate=PlanGate(
+                    gate_type="test",
+                    command="pytest tests/test_widget.py",
+                    description="original description",
+                    fail_on=["original failure"],
+                ),
+            ),
+        ],
+    )
+    config = _no_review_config(gates={"mode": "full", "gate_scope": "focused"})
+
+    decisions = PhasePolicyApplier(config).apply(plan, cli_gate_scope_explicit=False)
+
+    gate = plan.phases[0].gate
+    assert gate.command == "npm test"
+    assert decisions.gates_mode == "full"
+    assert decisions.gate_scope_applied == "full"
+    assert decisions.gates_stripped == []
+
+    _round_trip(plan)
+
+
+def test_mode_smoke_forces_smoke_scope() -> None:
+    """bd-6dn: ``gates.mode == "smoke"`` rescopes gates to smoke regardless
+    of ``gates.gate_scope``; ``gate_type`` and gate-less phases are left as
+    the planner decided them."""
+    config = _no_review_config(gates={"mode": "smoke", "gate_scope": "full"})
+    plan = _plan_with_original_gate()
+
+    decisions = PhasePolicyApplier(config).apply(plan, cli_gate_scope_explicit=False)
+
+    gate = plan.phases[0].gate
+    assert gate.command == 'python -c "import agent_baton; print(\'ok\')"'
+    assert gate.fail_on == ["import error"]
+    assert gate.gate_type == "build"
+    assert plan.phases[1].gate is None
+    assert decisions.gates_mode == "smoke"
+    assert decisions.gate_scope_applied == "smoke"
+    assert decisions.gates_stripped == []
+
+    _round_trip(plan)
+
+
+def test_mode_off_strips_all_phase_gates() -> None:
+    """bd-6dn: ``gates.mode == "off"`` removes every phase gate, records the
+    stripped phase ids, and the mutated plan still round-trips."""
+    config = _no_review_config(gates={"mode": "off"})
+    plan = _plan_with_original_gate()
+
+    decisions = PhasePolicyApplier(config).apply(plan, cli_gate_scope_explicit=False)
+
+    assert all(phase.gate is None for phase in plan.phases)
+    assert decisions.gates_mode == "off"
+    assert decisions.gates_stripped == ["1"]
+    assert decisions.gate_scope_applied is None
+
+    reloaded = _round_trip(plan)
+    assert all(phase.gate is None for phase in reloaded.phases)
+
+
+@pytest.mark.parametrize(
+    "mode", ["project_configured", "focused", "full", "smoke", "off"]
+)
+def test_cli_explicit_gate_scope_wins_for_every_mode(mode: str) -> None:
+    """bd-6dn: an explicit CLI ``--gate-scope`` beats every ``gates.mode``
+    value -- the applier must never touch gates (rescope OR strip) when
+    ``cli_gate_scope_explicit`` is set."""
+    config = _no_review_config(gates={"mode": mode, "gate_scope": "smoke"})
+    plan = _plan_with_original_gate()
+    before = plan.to_dict()
+
+    decisions = PhasePolicyApplier(config).apply(plan, cli_gate_scope_explicit=True)
+
+    assert plan.to_dict() == before
+    assert decisions.gates_mode == mode
+    assert decisions.gate_scope_applied is None
+    assert decisions.gates_stripped == []
 
 
 def test_injected_review_steps_use_reviewing_step_type() -> None:

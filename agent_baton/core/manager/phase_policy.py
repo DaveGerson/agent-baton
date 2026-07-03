@@ -6,8 +6,12 @@ This is the **only** PMO component that mutates the plan graph produced by
 ``IntelligentPlanner.create_plan()`` -- it injects adversarial-review steps
 per ``policies.phase_completion.adversarial_review`` /
 ``policies.project_completion.adversarial_review`` and (when the CLI did
-not pin an explicit ``--gate-scope``) rescales existing phase gates to
-``gates.gate_scope``. Everything else the PMO layer produces (charter,
+not pin an explicit ``--gate-scope``) enforces ``gates.mode`` (bd-6dn):
+``project_configured`` rescales existing phase gates to
+``gates.gate_scope``, ``focused``/``full``/``smoke`` force that scope
+directly (ignoring ``gates.gate_scope``), and ``off`` strips every phase
+gate. ``gates.allow_smoke_fallback`` and ``gates.missing_gate_policy``
+remain record-only (ADR-25). Everything else the PMO layer produces (charter,
 scope map, blueprint, context bundles, ...) is a sidecar artifact that
 never touches the ``MachinePlan`` itself.
 
@@ -70,6 +74,10 @@ class PolicyDecisions(BaseModel):
     injected_review_steps: list[str] = Field(default_factory=list)
     final_review_step: str | None = None
     gate_scope_applied: str | None = None
+    # Phase ids (stringified) whose gate was removed because
+    # ``gates.mode == "off"`` (bd-6dn). Empty for every other mode and
+    # whenever the CLI pinned an explicit ``--gate-scope``.
+    gates_stripped: list[str] = Field(default_factory=list)
 
 
 def _phase_review_step_id(phase_id: int) -> str:
@@ -236,10 +244,31 @@ class PhasePolicyApplier:
                     )
                 final_review_step = final_id
 
+        # gates.mode enforcement (bd-6dn). An explicit CLI --gate-scope
+        # always wins: when the operator pinned a scope on the command
+        # line, this applier never touches gates -- no rescope, no strip.
         gates_mode = config.gates.mode
         gate_scope_applied: str | None = None
-        if not cli_gate_scope_explicit and gates_mode == "project_configured":
-            gate_scope_applied = _apply_gate_scope(plan, config.gates.gate_scope)
+        gates_stripped: list[str] = []
+        if not cli_gate_scope_explicit:
+            if gates_mode == "project_configured":
+                gate_scope_applied = _apply_gate_scope(plan, config.gates.gate_scope)
+            elif gates_mode in ("focused", "full", "smoke"):
+                # The mode names a scope directly: force it exactly as if
+                # it were the project-configured gate_scope. Same fidelity
+                # rules as above -- "focused" is a no-op inside
+                # _apply_gate_scope (planner gates win), "full"/"smoke"
+                # rescope via default_gate with detected_stack threaded.
+                gate_scope_applied = _apply_gate_scope(plan, gates_mode)
+            elif gates_mode == "off":
+                # Strip every phase gate (PlanPhase.gate is Optional, so
+                # the plan stays round-trip valid). Record which phases
+                # actually lost a gate so `baton team`/`baton report` can
+                # surface the decision.
+                for phase in plan.phases:
+                    if phase.gate is not None:
+                        phase.gate = None
+                        gates_stripped.append(str(phase.phase_id))
 
         return PolicyDecisions(
             handoff_required=config.policies.phase_completion.handoff_required,
@@ -247,4 +276,5 @@ class PhasePolicyApplier:
             injected_review_steps=injected,
             final_review_step=final_review_step,
             gate_scope_applied=gate_scope_applied,
+            gates_stripped=gates_stripped,
         )
